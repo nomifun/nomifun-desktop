@@ -15,7 +15,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use dashmap::DashMap;
 use futures_util::FutureExt;
@@ -57,9 +57,6 @@ use nomifun_api_types::{
     McpServerId,
     SendMessageRequest, SideQuestionRequest, SideQuestionResponse,
     UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
-    SwitchAgentSessionPresetRequestDto, SwitchAgentSessionPresetResponseDto,
-    UpdateAgentSessionCapabilitySelectionRequestDto,
-    UpdateAgentSessionCapabilitySelectionResponseDto,
     CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
 use nomifun_common::{
@@ -316,61 +313,6 @@ impl NomiCoreProductAgentResolver {
 
 #[async_trait]
 impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
-    async fn resolve_preset(
-        &self,
-        owner_id: &str,
-        preset_id: &str,
-        requested_model: Option<&nomifun_common::ProviderWithModel>,
-        current_binding: Option<&AgentBindingValueDto>,
-    ) -> Result<ProductAgentResolution, AppError> {
-        let owner = UserId::from(owner_id.to_owned());
-        let model = requested_model.map(|model| AgentChatModelSelectionDto {
-            provider_id: model.provider_id.clone(), model: model.model.clone(),
-        });
-        let mut binding = self.control_plane.resolve_agent_session_binding_with_model(&owner, preset_id, model.as_ref())
-            .await.map_err(control_plane_error_to_app)?;
-        if let Some(current) = current_binding {
-            let (_, _, target) = self.control_plane.saved_binding_artifacts(&owner, &binding)
-                .await.map_err(control_plane_error_to_app)?;
-            // Reuse only the user's selected resource IDs. The new revision
-            // determines operations, and product authorities validate them anew.
-            let selections = current.typed_resource_bindings.iter()
-                .filter(|resource| target.content.required_resource_kinds.iter().any(|kind| kind.as_ref() == resource.resource_kind))
-                .map(|resource| AgentResourceSelectionDto { resource_kind: resource.resource_kind.clone(), resource_id: resource.resource_id.clone() })
-                .collect::<Vec<_>>();
-            binding = self.resource_bindings.resolve_for_saved_binding(&self.control_plane, &owner, binding, &selections)
-                .await.map_err(|error| AppError::UnprocessableEntity(format!("{}: {}", error.code(), error.message())))?;
-        }
-        let (binding, revision, snapshot) = self.control_plane.saved_binding_artifacts(&owner, &binding)
-            .await.map_err(control_plane_error_to_app)?;
-        let target_engine = self.official_runtime.validate_agent(&snapshot)?;
-        let editor = self.control_plane.editor(&owner, revision.reference.preset_id.as_ref(), Some(revision.reference.revision))
-            .await.map_err(control_plane_error_to_app)?;
-        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
-            .map_err(|error| AppError::Forbidden(format!("invalid Agent owner: {error}")))?;
-        let mut projected = super::agent_binding_projection::project_saved_artifacts(
-            &common_owner, binding, revision, snapshot, Some(&editor.preset.display_name),
-        )?;
-        if current_binding.is_some() {
-            let repository: Arc<dyn nomifun_db::IMcpServerRepository> = Arc::new(nomifun_db::SqliteMcpServerRepository::new(self.pool.clone()));
-            let selection = exact_session_mcp_selection(&repository, &AuthenticatedOwner(owner.clone()), &projected.binding)
-                .await.map_err(|error| AppError::Conflict(error.message))?;
-            install_runtime_mcp_selection(&mut projected.projection.request.extra, &selection)
-                .map_err(|error| AppError::Conflict(error.message))?;
-        }
-        // A next-turn preset selection rebuilds the runtime just like the
-        // explicit switch endpoint. Its exact Kernel binding must accompany
-        // the projected snapshot; the UI snapshot alone cannot open a session.
-        attach_session_metadata(&mut projected.projection.request.extra, &projected.binding, None)
-            .map_err(|error| AppError::Conflict(error.message))?;
-        projected.projection.request.extra[nomifun_api_types::RUNTIME_BUILD_BINDING_KEY] = serde_json::to_value(&target_engine)
-            .map_err(|error| AppError::Internal(error.to_string()))?;
-        self.official_runtime
-            .provider()?
-            .validate_session_extra(&projected.projection.request.extra)?;
-        Ok(ProductAgentResolution { snapshot: projected.projection.snapshot, runtime_extra: projected.projection.request.extra })
-    }
-
     async fn resolve(
         &self,
         owner_id: &str,
@@ -1171,51 +1113,168 @@ impl NomiCoreSessionOwner {
         Ok(())
     }
 
+    /// Allocate one renderer-stream segment for the assistant side of an exact
+    /// canonical Turn. The accepted user message remains the Turn root; sharing
+    /// its ID with assistant output causes the renderer to merge both text rows.
+    fn canonical_assistant_stream_message_id(
+        root_message_id: &str,
+    ) -> Result<String, AppError> {
+        super::engine_journal::canonical_assistant_message_id(root_message_id)
+    }
+
+    fn canonical_stream_wire_event(
+        session_id: &AgentSessionId,
+        root_message_id: &str,
+        assistant_message_id: &str,
+        event: &AgentStreamEvent,
+    ) -> Option<WebSocketMessage<Value>> {
+        let mut event_data = serde_json::to_value(event).ok()?;
+        normalize_keys_to_snake_case(&mut event_data);
+        Some(WebSocketMessage::new(
+            "message.stream",
+            json!({
+                "conversation_id": session_id,
+                "msg_id": assistant_message_id,
+                "turn_id": root_message_id,
+                "type": event_data.get("type").cloned().unwrap_or(json!("unknown")),
+                "data": event_data.get("data").cloned().unwrap_or_else(|| json!({})),
+                "hidden": false,
+            }),
+        ))
+    }
+
+    fn canonical_turn_completed_wire_event(
+        session_id: &AgentSessionId,
+        root_message_id: &str,
+        terminal: &AgentStreamEvent,
+    ) -> WebSocketMessage<Value> {
+        let (state, detail) = match terminal {
+            AgentStreamEvent::Error(error) => ("error", error.message.as_str()),
+            _ => ("ai_waiting_input", ""),
+        };
+        WebSocketMessage::new(
+            "turn.completed",
+            json!({
+                "conversation_id": session_id,
+                "turn_id": root_message_id,
+                "status": "finished",
+                "state": state,
+                "detail": detail,
+                "can_send_message": true,
+                "runtime": {
+                    "state": "idle",
+                    "can_send_message": true,
+                    "has_runtime": false,
+                    "runtime_status": "finished",
+                    "is_processing": false,
+                    "active_turn_id": null,
+                },
+            }),
+        )
+    }
+
+    fn canonical_turn_dispatch_failed_wire_event(
+        session_id: &AgentSessionId,
+        root_message_id: &str,
+        detail: &str,
+    ) -> WebSocketMessage<Value> {
+        WebSocketMessage::new(
+            "turn.completed",
+            json!({
+                "conversation_id": session_id,
+                "turn_id": root_message_id,
+                "status": "finished",
+                "state": "error",
+                "detail": detail,
+                "can_send_message": true,
+                "runtime": {
+                    "state": "idle",
+                    "can_send_message": true,
+                    "has_runtime": false,
+                    "runtime_status": "finished",
+                    "is_processing": false,
+                    "active_turn_id": null,
+                },
+            }),
+        )
+    }
+
+    fn canonical_turn_started_wire_event(
+        session_id: &AgentSessionId,
+        root_message_id: &str,
+    ) -> WebSocketMessage<Value> {
+        WebSocketMessage::new(
+            "turn.started",
+            json!({
+                "conversation_id": session_id,
+                "turn_id": root_message_id,
+                "status": "running",
+                "phase": "starting",
+                "state": "ai_generating",
+                "detail": "",
+                "can_send_message": false,
+                "runtime": {
+                    "state": "running",
+                    "can_send_message": false,
+                    "has_runtime": true,
+                    "runtime_status": "running",
+                    "is_processing": true,
+                    "active_turn_id": root_message_id,
+                    "processing_started_at": now_ms(),
+                },
+            }),
+        )
+    }
+
     fn spawn_canonical_stream_relay(
         &self,
         owner_id: String,
         session_id: AgentSessionId,
         root_message_id: String,
+        assistant_message_id: String,
         turn_generation: u64,
+        cancellation: tokio_util::sync::CancellationToken,
         mut events: broadcast::Receiver<AgentStreamEvent>,
     ) {
         let sink = self.user_events.clone();
         let runtimes = self.runtime_sessions.clone();
         let relay_session_id = session_id.clone();
         let task = async move {
-            while let Ok(event) = events.recv().await {
+            loop {
+                let event = tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    received = events.recv() => match received {
+                        Ok(event) => event,
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                agent_session_id = session_id.as_ref(),
+                                skipped,
+                                "canonical stream relay lagged; continuing toward the terminal frame"
+                            );
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    },
+                };
                 let terminal = matches!(
                     event,
                     AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)
                 );
-                if let Ok(mut event_data) = serde_json::to_value(&event) {
-                    normalize_keys_to_snake_case(&mut event_data);
-                    sink.send_to_user(
-                        &owner_id,
-                        WebSocketMessage::new(
-                            "message.stream",
-                            json!({
-                                "conversation_id": session_id,
-                                "msg_id": root_message_id,
-                                "type": event_data.get("type").cloned().unwrap_or(json!("unknown")),
-                                "data": event_data.get("data").cloned().unwrap_or_else(|| json!({})),
-                                "hidden": false,
-                            }),
-                        ),
-                    );
+                if let Some(message) = Self::canonical_stream_wire_event(
+                    &session_id,
+                    &root_message_id,
+                    &assistant_message_id,
+                    &event,
+                ) {
+                    sink.send_to_user(&owner_id, message);
                 }
                 if terminal {
                     sink.send_to_user(
                         &owner_id,
-                        WebSocketMessage::new(
-                            "turn.completed",
-                            json!({
-                                "conversation_id": session_id,
-                                "turn_id": root_message_id,
-                                "status": "finished",
-                                "state": "ai_waiting_input",
-                                "can_send_message": true,
-                            }),
+                        Self::canonical_turn_completed_wire_event(
+                            &session_id,
+                            &root_message_id,
+                            &event,
                         ),
                     );
                     break;
@@ -1321,6 +1380,7 @@ impl NomiCoreSessionOwner {
         }
         let (options, _) = runtime_options_from_session(owner_id, projection, None)?;
         let cancellation = tokio_util::sync::CancellationToken::new();
+        let relay_cancellation = cancellation.clone();
         let generation = receipt.cursor.seq;
         let runtime = match self
             .runtime_sessions
@@ -1340,11 +1400,19 @@ impl NomiCoreSessionOwner {
             }
         };
         let events = runtime.subscribe();
+        let assistant_message_id =
+            Self::canonical_assistant_stream_message_id(&root_message_id)?;
+        self.user_events.send_to_user(
+            owner_id,
+            Self::canonical_turn_started_wire_event(session_id, &root_message_id),
+        );
         self.spawn_canonical_stream_relay(
             owner_id.to_owned(),
             session_id.clone(),
             root_message_id.clone(),
+            assistant_message_id,
             generation,
+            relay_cancellation.clone(),
             events,
         );
         let delivery = SendMessageData {
@@ -1356,9 +1424,33 @@ impl NomiCoreSessionOwner {
             origin: request.origin,
         };
         if let Err(error) = runtime.send_message(delivery).await {
-            self.settle_dispatch_failure(session_id, &operation_id, &error.to_string())
-                .await?;
-            return Err(AppError::BadGateway(error.to_string()));
+            let detail = error.to_string();
+            // Stop the already-subscribed relay before the reusable Runtime can
+            // publish a successor Turn; otherwise a rejected dispatch may
+            // misattribute that successor's frames to this failed root.
+            relay_cancellation.cancel();
+            self.settle_dispatch_failure(session_id, &operation_id, &detail)
+                    .await?;
+            self.user_events.send_to_user(
+                owner_id,
+                Self::canonical_turn_dispatch_failed_wire_event(
+                    session_id,
+                    &root_message_id,
+                    &detail,
+                ),
+            );
+            if let Err(release_error) = self
+                .runtime_sessions
+                .release_runtime_turn(session_id.as_ref(), generation)
+                .await
+            {
+                tracing::warn!(
+                    agent_session_id = session_id.as_ref(),
+                    %release_error,
+                    "failed to release rejected canonical Runtime turn"
+                );
+            }
+            return Err(AppError::BadGateway(detail));
         }
         Ok(IdempotentMessageDelivery {
             message_id: root_message_id,
@@ -1554,11 +1646,30 @@ impl NomiCoreSessionOwner {
             .session_created_at(session_id)
             .await
             .map_err(agent_session_store_error)?;
+        let execution_link: Option<(String, String, Option<String>, Option<String>)> =
+            sqlx::query_as(
+                "SELECT link.execution_id, link.relation, link.step_id, link.attempt_id \
+                 FROM conversation_execution_links link \
+                 JOIN agent_executions execution ON execution.execution_id = link.execution_id \
+                 WHERE link.conversation_id = ? AND execution.user_id = ? \
+                   AND execution.deleted_at IS NULL \
+                 ORDER BY link.active DESC, link.updated_at DESC, link.id DESC LIMIT 1",
+            )
+            .bind(session_id.as_ref())
+            .bind(owner_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "read canonical AgentExecution Conversation link: {error}"
+                ))
+            })?;
         Ok(Some(canonical_conversation_response(
             observed,
             projected,
             workspace,
             created_at,
+            execution_link,
         )?))
     }
 
@@ -2239,7 +2350,6 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
 #[derive(Clone, Debug)]
 struct ExactSessionMcpSelection {
     ids: Vec<McpServerId>,
-    names: Vec<String>,
 }
 
 async fn exact_session_mcp_selection(
@@ -2256,7 +2366,7 @@ async fn exact_session_mcp_selection(
         return Err(NomiCoreApiError::new(StatusCode::UNPROCESSABLE_ENTITY,
             "MCP_RESOURCE_CARDINALITY_INVALID", "the AgentSession MCP server bound was exceeded"));
     }
-    let mut selection = ExactSessionMcpSelection { ids: Vec::new(), names: Vec::new() };
+    let mut selection = ExactSessionMcpSelection { ids: Vec::new() };
     let mut seen = BTreeSet::new();
     for binding in bindings {
         if !seen.insert(binding.resource_id.clone()) {
@@ -2309,7 +2419,6 @@ async fn exact_session_mcp_selection(
             )
         })?;
         selection.ids.push(server.mcp_server_id);
-        selection.names.push(server.name);
     }
     Ok(selection)
 }
@@ -2328,37 +2437,6 @@ fn install_creation_mcp_selection(
     object.insert(
         "selected_mcp_server_ids".to_owned(),
         serde_json::to_value(&selection.ids)?,
-    );
-    object.remove("selected_session_mcp_servers");
-    object.remove("session_mcp_servers");
-    Ok(())
-}
-
-fn install_runtime_mcp_selection(
-    extra: &mut Value,
-    selection: &ExactSessionMcpSelection,
-) -> Result<(), NomiCoreApiError> {
-    let object = extra.as_object_mut().ok_or_else(|| {
-        NomiCoreApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "NOMI_CORE_SESSION_EXTRA_INVALID",
-            "Nomi-core Session extra must be a JSON object",
-        )
-    })?;
-    object.insert(
-        "mcp_server_ids".to_owned(),
-        serde_json::to_value(&selection.ids)?,
-    );
-    object.insert(
-        "mcp_servers".to_owned(),
-        Value::Array(
-            selection
-                .names
-                .iter()
-                .cloned()
-                .map(Value::String)
-                .collect(),
-        ),
     );
     object.remove("selected_session_mcp_servers");
     object.remove("session_mcp_servers");
@@ -3197,36 +3275,12 @@ impl nomifun_requirement::AutoWorkSessionConfigPort for NomiCoreSessionOwner {
 
 #[async_trait]
 impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
-    async fn refresh_product_agent(&self, owner_id: &str, session_id: &str) -> Result<ConversationResponse, AppError> {
-        self.get_session(owner_id, session_id).await
-    }
     async fn get(
         &self,
         owner_id: &str,
         session_id: &str,
     ) -> Result<ConversationResponse, AppError> {
         self.get_session(owner_id, session_id).await
-    }
-
-    async fn replace_skill_snapshot(
-        &self,
-        session_id: &str,
-        skills: &[String],
-    ) -> Result<bool, AppError> {
-        let _ = (session_id, skills);
-        Ok(false)
-    }
-
-    async fn update_extra(
-        &self,
-        session_id: &str,
-        patch: serde_json::Value,
-    ) -> Result<(), AppError> {
-        let _ = (session_id, patch);
-        Err(AppError::Conflict(
-            "AgentSession runtime metadata is immutable; update the owning Companion or create a new Session"
-                .to_owned(),
-        ))
     }
 
     async fn create(
@@ -3283,43 +3337,6 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
         }
         self.canonical.complete_fenced_delete(&command, now_ms()).await?;
         Ok(())
-    }
-
-    async fn update(
-        &self,
-        owner_id: &str,
-        session_id: &str,
-        request: UpdateConversationRequest,
-    ) -> Result<ConversationResponse, AppError> {
-        if request.extra.is_some()
-            || request.model.is_some()
-            || request.delegation_policy.is_some()
-            || request.execution_model_pool.is_some()
-            || request.decision_policy.is_some()
-            || request.execution_template_id.is_some()
-        {
-            return Err(AppError::Conflict(
-                "AgentSession binding is immutable; create a new Companion Session"
-                    .to_owned(),
-            ));
-        }
-        self.canonical
-            .store()
-            .update_session_metadata(
-                &PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: owner_id.to_owned(),
-                },
-                &AgentSessionId::from(session_id.to_owned()),
-                nomifun_agent_session::UpdateAgentSessionMetadata {
-                    title: request.name,
-                    archived: None,
-                    pinned: request.pinned,
-                },
-            )
-            .await
-            .map_err(agent_session_store_error)?;
-        self.get_session(owner_id, session_id).await
     }
 
     async fn message_local_day_index(
@@ -3778,7 +3795,6 @@ fn cron_turn_message_to_request(
     message: nomifun_cron::CronTurnMessage,
 ) -> SendMessageRequest {
     SendMessageRequest {
-        preset_id: None,
         content: message.content,
         files: message.files,
         inject_skills: message.inject_skills,
@@ -3952,6 +3968,7 @@ fn canonical_conversation_response(
     projected: super::agent_binding_projection::SavedAgentBindingProjection,
     workspace: Option<String>,
     created_at: i64,
+    execution_link: Option<(String, String, Option<String>, Option<String>)>,
 ) -> Result<ConversationResponse, AppError> {
     let SessionObservation { session, head, events, .. } = observed;
     let super::agent_binding_projection::SavedAgentBindingProjection {
@@ -4021,6 +4038,14 @@ fn canonical_conversation_response(
         .clone()
         .or(request.name)
         .unwrap_or_else(|| snapshot.preset_name.clone());
+    let (linked_execution_id, execution_step_id, execution_attempt_id) =
+        execution_link.map_or((None, None, None), |(execution_id, relation, step_id, attempt_id)| {
+            if relation == "attempt" {
+                (Some(execution_id), step_id, attempt_id)
+            } else {
+                (Some(execution_id), None, None)
+            }
+        });
     Ok(ConversationResponse {
         conversation_id: session.agent_session_id.as_ref().to_owned(),
         name,
@@ -4039,9 +4064,9 @@ fn canonical_conversation_response(
         execution_model_pool: request.execution_model_pool,
         decision_policy: request.decision_policy,
         execution_template_id: request.execution_template_id,
-        linked_execution_id: None,
-        execution_step_id: None,
-        execution_attempt_id: None,
+        linked_execution_id,
+        execution_step_id,
+        execution_attempt_id,
         created_at,
         modified_at: created_at,
         extra: request.extra,
@@ -4328,11 +4353,12 @@ mod session_boundary_tests {
     use super::{
         canonical_autowork_config_snapshot, companion_archive_message,
         cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
-        frozen_workspace_root,
+        frozen_workspace_root, NomiCoreSessionOwner,
         parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
+    use nomifun_ai_agent::AgentStreamEvent;
     use nomifun_agent_contracts::{
         AgentBindingValue, AgentPresetId, AgentSessionId, DigestHex,
         PresetRevisionRef, ResolvedSnapshotId, ResolvedSnapshotRef,
@@ -4347,6 +4373,93 @@ mod session_boundary_tests {
 
     const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn canonical_stream_wire_separates_assistant_segment_from_user_turn_root() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root_message_id = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let assistant_message_id =
+            NomiCoreSessionOwner::canonical_assistant_stream_message_id(root_message_id)
+                .unwrap();
+        let parsed = uuid::Uuid::parse_str(&assistant_message_id).unwrap();
+        assert_eq!(parsed.get_version_num(), 7);
+        assert_ne!(assistant_message_id, root_message_id);
+        assert_eq!(
+            assistant_message_id,
+            NomiCoreSessionOwner::canonical_assistant_stream_message_id(root_message_id)
+                .unwrap()
+        );
+
+        let text: AgentStreamEvent = serde_json::from_value(json!({
+            "type": "content",
+            "data": { "content": "reply" },
+        }))
+        .unwrap();
+        let start = AgentStreamEvent::Start(Default::default());
+        let first = NomiCoreSessionOwner::canonical_stream_wire_event(
+            &session_id,
+            root_message_id,
+            &assistant_message_id,
+            &start,
+        )
+        .unwrap();
+        let second = NomiCoreSessionOwner::canonical_stream_wire_event(
+            &session_id,
+            root_message_id,
+            &assistant_message_id,
+            &text,
+        )
+        .unwrap();
+
+        assert_eq!(first.name, "message.stream");
+        assert_eq!(first.data["msg_id"], assistant_message_id);
+        assert_eq!(second.data["msg_id"], assistant_message_id);
+        assert_eq!(first.data["turn_id"], root_message_id);
+        assert_eq!(second.data["turn_id"], root_message_id);
+        assert_eq!(second.data["type"], "content");
+        assert_eq!(second.data["data"]["content"], "reply");
+    }
+
+    #[test]
+    fn canonical_terminal_wire_carries_explicit_idle_runtime_authority() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root_message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
+        let terminal = AgentStreamEvent::Finish(Default::default());
+        let wire = NomiCoreSessionOwner::canonical_turn_completed_wire_event(
+            &session_id,
+            root_message_id,
+            &terminal,
+        );
+
+        assert_eq!(wire.name, "turn.completed");
+        assert_eq!(wire.data["turn_id"], root_message_id);
+        assert_eq!(wire.data["status"], "finished");
+        assert_eq!(wire.data["state"], "ai_waiting_input");
+        assert_eq!(wire.data["can_send_message"], true);
+        assert_eq!(wire.data["runtime"]["state"], "idle");
+        assert_eq!(wire.data["runtime"]["can_send_message"], true);
+        assert_eq!(wire.data["runtime"]["has_runtime"], false);
+        assert_eq!(wire.data["runtime"]["runtime_status"], "finished");
+        assert_eq!(wire.data["runtime"]["is_processing"], false);
+        assert!(wire.data["runtime"]["active_turn_id"].is_null());
+    }
+
+    #[test]
+    fn canonical_started_wire_carries_processing_authority_and_exact_turn() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root_message_id = "0190f5fe-7c00-7a00-8abc-012345678913";
+        let wire = NomiCoreSessionOwner::canonical_turn_started_wire_event(
+            &session_id,
+            root_message_id,
+        );
+
+        assert_eq!(wire.name, "turn.started");
+        assert_eq!(wire.data["turn_id"], root_message_id);
+        assert_eq!(wire.data["status"], "running");
+        assert_eq!(wire.data["runtime"]["state"], "running");
+        assert_eq!(wire.data["runtime"]["is_processing"], true);
+        assert_eq!(wire.data["runtime"]["active_turn_id"], root_message_id);
+    }
 
     fn frozen_binding(workspace_root: &str, owner_id: &str) -> AgentBindingValue {
         AgentBindingValue {
@@ -5742,18 +5855,6 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
         conversation_id: &str,
         request: UpdateConversationRequest,
     ) -> Result<ConversationResponse, AppError> {
-        if request.model.is_some()
-            || request.delegation_policy.is_some()
-            || request.execution_model_pool.is_some()
-            || request.decision_policy.is_some()
-            || request.execution_template_id.is_some()
-            || request.extra.is_some()
-        {
-            return Err(AppError::Conflict(
-                "AgentSession binding is immutable; fork or create a new Session"
-                    .to_owned(),
-            ));
-        }
         let session_id = AgentSessionId::from(conversation_id.to_owned());
         self.state
             .session_owner
@@ -6134,18 +6235,6 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/slash-commands",
             get(get_nomi_core_agent_session_slash_commands),
-        )
-        .route(
-            "/api/agent-sessions/{agent_session_id}/preset",
-            put(switch_nomi_core_agent_session_preset),
-        )
-        .route(
-            "/api/agent-sessions/{agent_session_id}/capability-selection",
-            put(update_nomi_core_agent_session_capability_selection),
-        )
-        .route(
-            "/api/agent-sessions/{agent_session_id}/mcp-selection",
-            put(update_nomi_core_agent_session_mcp_selection),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/turns",
@@ -8751,17 +8840,6 @@ async fn create_nomi_core_agent_session(
     headers: HeaderMap,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
-    if request.capability_selection.as_ref().is_some_and(|selection| {
-        !selection.enabled_skills.is_empty()
-            || !selection.excluded_auto_skills.is_empty()
-            || !selection.mcp_server_ids.is_empty()
-    }) {
-        return Err(NomiCoreApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "AGENT_SESSION_SELECTION_IS_FROZEN",
-            "Session capabilities and resources must be part of the saved Agent binding",
-        ));
-    }
     let binding = state
         .control_plane
         .resolve_agent_session_binding_with_model(&owner.0, &request.preset_id, request.model.as_ref())
@@ -8821,43 +8899,6 @@ async fn create_nomi_core_agent_session(
         state: "ready".to_owned(),
         cursor: session_cursor(&opened.session.agent_session_id, opened.cursor.seq),
     })))
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SessionMcpSelectionRequest {
-    #[serde(rename = "mcp_server_ids")]
-    _mcp_server_ids: Vec<String>,
-}
-
-async fn update_nomi_core_agent_session_mcp_selection(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(agent_session_id): Path<String>,
-    Json(_request): Json<SessionMcpSelectionRequest>,
-) -> Result<Json<ApiResponse<ConversationResponse>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    state.session_owner.canonical().get(&authenticated_principal(&owner), &session_id).await?;
-    Err(NomiCoreApiError::new(
-        StatusCode::CONFLICT,
-        "AGENT_SESSION_BINDING_IMMUTABLE",
-        "MCP resources are frozen in the AgentSession binding; fork or create a new Session",
-    ))
-}
-
-async fn update_nomi_core_agent_session_capability_selection(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(agent_session_id): Path<String>,
-    Json(_request): Json<UpdateAgentSessionCapabilitySelectionRequestDto>,
-) -> Result<Json<ApiResponse<UpdateAgentSessionCapabilitySelectionResponseDto>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    state.session_owner.canonical().get(&authenticated_principal(&owner), &session_id).await?;
-    Err(NomiCoreApiError::new(
-        StatusCode::CONFLICT,
-        "AGENT_SESSION_BINDING_IMMUTABLE",
-        "Capability grants are frozen in the AgentSession binding; fork or create a new Session",
-    ))
 }
 
 async fn get_nomi_core_agent_session(
@@ -8987,7 +9028,10 @@ fn canonical_message_response(
     Ok(Some(MessageResponse {
         message_id: message_id.to_owned(),
         conversation_id: session_id.as_ref().to_owned(),
-        msg_id: None,
+        // The renderer's live stream and durable refresh share this canonical
+        // projection identity. Without it, a completed assistant row cannot
+        // replace its live counterpart after history hydration.
+        msg_id: Some(message_id.to_owned()),
         r#type: message_type,
         content,
         position: Some(position),
@@ -9710,21 +9754,6 @@ async fn get_nomi_core_agent_session_slash_commands(
         .discover_canonical_skill_commands(&owner, &session_id)
         .await?;
     Ok(Json(ApiResponse::ok(commands)))
-}
-
-async fn switch_nomi_core_agent_session_preset(
-    State(state): State<NomiCoreAgentApiState>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(agent_session_id): Path<String>,
-    Json(_request): Json<SwitchAgentSessionPresetRequestDto>,
-) -> Result<Json<ApiResponse<SwitchAgentSessionPresetResponseDto>>, NomiCoreApiError> {
-    let session_id = parse_agent_session_id(&agent_session_id)?;
-    state.session_owner.canonical().get(&authenticated_principal(&owner), &session_id).await?;
-    Err(NomiCoreApiError::new(
-        StatusCode::CONFLICT,
-        "AGENT_SESSION_BINDING_IMMUTABLE",
-        "AgentPreset is frozen for this Session; fork or create a new Session",
-    ))
 }
 
 async fn start_nomi_core_agent_session_turn(
@@ -11386,13 +11415,6 @@ fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiErr
             )
         })?;
     let mut request = nonempty_turn_content(content)?;
-    if let Some(preset_id) = object.get("preset_id") {
-        request.preset_id = serde_json::from_value(preset_id.clone())?;
-        if request.preset_id.as_deref().is_some_and(|value| value.trim().is_empty()) {
-            return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "NOMI_CORE_INVALID_REQUEST", "turn preset_id must be non-empty"));
-        }
-    }
-
     if let Some(files) = object.get("files") {
         request.files = serde_json::from_value(files.clone())?;
     }
@@ -11433,7 +11455,6 @@ fn bounded_turn_input(value: Value) -> Result<SendMessageRequest, NomiCoreApiErr
 
 fn canonical_turn_input(request: &SendMessageRequest) -> Value {
     json!({
-        "preset_id": request.preset_id,
         "content": request.content,
         "files": request.files,
         "inject_skills": request.inject_skills,
@@ -11452,7 +11473,6 @@ fn nonempty_turn_content(content: &str) -> Result<SendMessageRequest, NomiCoreAp
         ));
     }
     Ok(SendMessageRequest {
-        preset_id: None,
         content: content.to_owned(),
         files: Vec::new(),
         inject_skills: Vec::new(),

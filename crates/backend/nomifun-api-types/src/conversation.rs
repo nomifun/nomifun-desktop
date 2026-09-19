@@ -5,7 +5,6 @@ use nomifun_common::{
 use serde::{Deserialize, Serialize};
 
 use crate::McpServerId;
-use crate::webhook::double_option;
 
 /// Per-MCP snapshot status stored in `conversation.extra`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,28 +63,13 @@ pub struct CreateConversationRequest {
 
 /// Body for `PATCH /api/conversations/:id`.
 ///
-/// All fields optional — only supplied fields are applied.
-/// `extra` uses merge semantics (patch, not replace).
+/// Only mutable presentation metadata is accepted. Agent, model, resource,
+/// collaboration, and `extra` facts are frozen by AgentSession creation.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateConversationRequest {
     pub name: Option<String>,
     pub pinned: Option<bool>,
-    #[serde(
-        default,
-        deserialize_with = "crate::serde_util::deserialize_optional_provider_with_model"
-    )]
-    pub model: Option<ProviderWithModel>,
-    pub delegation_policy: Option<DelegationPolicy>,
-    #[serde(default, deserialize_with = "double_option")]
-    pub execution_model_pool: Option<Option<crate::ExecutionModelPool>>,
-    pub decision_policy: Option<DecisionPolicy>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_execution_template_patch"
-    )]
-    pub execution_template_id: Option<Option<String>>,
-    pub extra: Option<serde_json::Value>,
 }
 
 /// Body for `POST /api/conversations/clone`.
@@ -105,9 +89,6 @@ pub struct CloneConversationRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
-    /// Saved Agent preset to resolve for this next turn, without changing an active turn.
-    #[serde(default, deserialize_with = "crate::serde_util::deserialize_optional_preset_id")]
-    pub preset_id: Option<String>,
     pub content: String,
     #[serde(default)]
     pub files: Vec<String>,
@@ -385,26 +366,6 @@ pub struct MessageSearchItem {
 /// Paginated search results for messages.
 pub type MessageSearchResponse = PaginatedResult<MessageSearchItem>;
 
-fn deserialize_optional_execution_template_patch<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value: Option<Option<String>> = double_option(deserializer)?;
-    value
-        .map(|value| {
-            value
-                .map(|value| {
-                    nomifun_common::AgentExecutionTemplateId::parse(value.clone())
-                        .map(|_| value)
-                        .map_err(serde::de::Error::custom)
-                })
-                .transpose()
-        })
-        .transpose()
-}
-
 fn deserialize_optional_message_cursor<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -550,12 +511,6 @@ mod tests {
         assert!(
             serde_json::from_value::<UpdateConversationRequest>(json!({
                 "execution_template_id": null
-            }))
-            .is_ok()
-        );
-        assert!(
-            serde_json::from_value::<UpdateConversationRequest>(json!({
-                "execution_template_id": "1"
             }))
             .is_err()
         );
@@ -710,23 +665,27 @@ mod tests {
         let req: UpdateConversationRequest = serde_json::from_value(raw).unwrap();
         assert_eq!(req.name.as_deref(), Some("New Name"));
         assert!(req.pinned.is_none());
-        assert!(req.model.is_none());
-        assert!(req.extra.is_none());
     }
 
     #[test]
-    fn deserialize_update_request_all_fields() {
-        let raw = json!({
-            "name": "Updated",
-            "pinned": true,
-            "model": { "provider_id": PROVIDER_ID_2, "model": "new-model" },
-            "extra": { "workspace": "/new" }
-        });
-        let req: UpdateConversationRequest = serde_json::from_value(raw).unwrap();
-        assert_eq!(req.name.as_deref(), Some("Updated"));
-        assert_eq!(req.pinned, Some(true));
-        assert!(req.model.is_some());
-        assert_eq!(req.extra.as_ref().unwrap()["workspace"], "/new");
+    fn update_request_rejects_frozen_session_fields() {
+        for (field, value) in [
+            ("model", json!({ "provider_id": PROVIDER_ID_2, "model": "new-model" })),
+            ("extra", json!({ "workspace": "/new" })),
+            ("delegation_policy", json!("automatic")),
+            ("execution_model_pool", json!(null)),
+            ("decision_policy", json!("ask_user")),
+            ("execution_template_id", json!(null)),
+        ] {
+            let value = serde_json::Value::Object(serde_json::Map::from_iter([(
+                field.to_owned(),
+                value,
+            )]));
+            assert!(
+                serde_json::from_value::<UpdateConversationRequest>(value).is_err(),
+                "mutable AgentSession field must be rejected: {field}"
+            );
+        }
     }
 
     #[test]
@@ -735,24 +694,17 @@ mod tests {
         let req: UpdateConversationRequest = serde_json::from_value(raw).unwrap();
         assert!(req.name.is_none());
         assert!(req.pinned.is_none());
-        assert!(req.model.is_none());
-        assert!(req.extra.is_none());
     }
 
     #[test]
-    fn deserialize_update_model_pool_distinguishes_omitted_from_clear() {
-        let clear: UpdateConversationRequest =
-            serde_json::from_value(json!({ "execution_model_pool": null })).unwrap();
-        assert_eq!(clear.execution_model_pool, Some(None));
-
-        let automatic: UpdateConversationRequest = serde_json::from_value(json!({
-            "execution_model_pool": { "mode": "automatic" }
+    fn deserialize_update_request_metadata_fields() {
+        let req: UpdateConversationRequest = serde_json::from_value(json!({
+            "name": "Updated",
+            "pinned": true
         }))
         .unwrap();
-        assert_eq!(
-            automatic.execution_model_pool,
-            Some(Some(crate::ExecutionModelPool::Automatic))
-        );
+        assert_eq!(req.name.as_deref(), Some("Updated"));
+        assert_eq!(req.pinned, Some(true));
     }
 
     // ── CloneConversationRequest ────────────────────────────────────

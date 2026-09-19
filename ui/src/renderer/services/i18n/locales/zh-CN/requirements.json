@@ -103,6 +103,14 @@
     "tagRequired": "请选择一个标签以开启自动工作",
     "enabledOk": "自动工作已开启",
     "disabledOk": "自动工作已关闭",
+    "resume": "恢复执行",
+    "resumedOk": "自动工作已恢复",
+    "pausedReasons": {
+      "executionFailed": "上一次执行失败，请检查执行结果后恢复。",
+      "userInterrupted": "执行已被手动停止，恢复后会继续处理队列。",
+      "userActionRequired": "执行正在等待人工处理。",
+      "unknown": "自动工作已暂停，请检查需求与执行状态。"
+    },
     "completedCount": "已完成：{{count}}",
     "emptyTitle": "还没有可用标签",
     "emptyDescription": "标签会在创建需求后自动生成。先去需求平台添加一条带标签的需求。",
@@ -114,7 +122,8 @@
     "state": {
       "off": "未开启",
       "idle": "空闲",
-      "active": "活跃"
+      "active": "活跃",
+      "paused": "已暂停"
     }
   },
   "kanban": {

@@ -36,6 +36,7 @@ const STORAGE_GENERATION = '0190f5fe-7c00-7a00-8000-000000000001';
 const PRESET_CONVERSATION_ID =
   '0190f5fe-7c00-7a00-8000-000000000102';
 const AGENT_SESSION_ID = PRESET_CONVERSATION_ID;
+const EXECUTION_ID = '0190f5fe-7c00-7a00-8000-000000000107';
 const PRESET_ID = parseAgentPresetId(
   '0190f5fe-7c00-7a00-8000-000000000104'
 );
@@ -100,7 +101,7 @@ const conversationProjection = (conversationId: string) => ({
   },
 });
 
-test('home collaboration drafts do not mutate the frozen Session after creation', async () => {
+test('home collaboration plan creates an execution bound to the frozen Session without queueing a normal turn', async () => {
   resetBrowserStorage();
   const calls = installFetchRecorder();
   const navigations: string[] = [];
@@ -113,22 +114,171 @@ test('home collaboration drafts do not mutate the frozen Session after creation'
     delegation_policy: 'prefer_parallel', decision_policy: 'ask_user',
   };
   const hook = renderHook(() => useGuidSend({
-    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations }),
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations, files: [] }),
     collaboration,
   }));
   await act(async () => { await hook.result.current.handleSend(); });
   expect(calls.some(call => call.method === 'PATCH')).toBe(false);
-  expect(calls.at(-1)).toMatchObject({
-    method: 'GET',
-    url: `/api/agent-sessions/${PRESET_CONVERSATION_ID}/projection`,
+  expect(calls.find(call => call.url.endsWith('/create-execution'))).toMatchObject({
+    method: 'POST',
+    url: `/api/agent-execution-templates/${collaboration.execution_template_id}/create-execution`,
+    body: {
+      goal: INPUT,
+      work_dir: WORKSPACE,
+      delegation_policy: 'prefer_parallel',
+      decision_policy: 'ask_user',
+      lead_conversation_id: PRESET_CONVERSATION_ID,
+      lead_model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+    },
   });
   expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+  expect(sessionStorage.getItem(sessionStorageKey(
+    'initial-message-nomi',
+    conversationTarget(parseConversationId(PRESET_CONVERSATION_ID)),
+  ))).toBeNull();
+});
+
+test('home collaboration model range creates the canonical execution request', async () => {
+  resetBrowserStorage();
+  const calls = installFetchRecorder();
+  const navigations: string[] = [];
+  const collaboration: NonNullable<GuidSendDeps['collaboration']> = {
+    execution_model_pool: { mode: 'range', models: [
+      { provider_id: PROVIDER_ID, model: MODEL.use_model },
+      { provider_id: PROVIDER_ID, model: 'reviewer' },
+    ] },
+    execution_template_id: null,
+    delegation_policy: 'prefer_parallel',
+    decision_policy: 'ask_user',
+  };
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations, files: [] }),
+    collaboration,
+  }));
+
+  await act(async () => { await hook.result.current.handleSend(); });
+
+  expect(calls.find(call => call.url.endsWith('/api/agent-executions'))).toEqual({
+    method: 'POST',
+    url: '/api/agent-executions',
+    body: {
+      goal: INPUT,
+      work_dir: WORKSPACE,
+      model_pool: collaboration.execution_model_pool,
+      delegation_policy: 'prefer_parallel',
+      decision_policy: 'ask_user',
+      lead_conversation_id: PRESET_CONVERSATION_ID,
+      lead_model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+    },
+  });
+  expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+  expect(sessionStorage.length).toBe(0);
+});
+
+test('single-model automatic policy remains an ordinary initial conversation turn', async () => {
+  resetBrowserStorage();
+  const calls = installFetchRecorder();
+  const navigations: string[] = [];
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations, files: [] }),
+    collaboration: {
+      execution_model_pool: {
+        mode: 'single',
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+      },
+      execution_template_id: null,
+      delegation_policy: 'automatic',
+      decision_policy: 'automatic',
+    },
+  }));
+
+  await act(async () => { await hook.result.current.handleSend(); });
+
+  expect(calls.some((call) => call.url.includes('/api/agent-executions'))).toBe(false);
+  expect(calls.some((call) => call.url.endsWith('/create-execution'))).toBe(false);
   expect(readOnlyHandoff().input).toBe(INPUT);
+  expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+});
+
+test('an explicit single-model decision policy starts a real execution', async () => {
+  resetBrowserStorage();
+  const calls = installFetchRecorder();
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({
+      selection: { kind: 'preset', presetId: PRESET_ID },
+      selectedPreset: PRESET,
+      files: [],
+    }),
+    collaboration: {
+      execution_model_pool: {
+        mode: 'single',
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+      },
+      execution_template_id: null,
+      delegation_policy: 'automatic',
+      decision_policy: 'ask_user',
+    },
+  }));
+
+  await act(async () => { await hook.result.current.handleSend(); });
+
+  expect(calls.find((call) => call.url.endsWith('/api/agent-executions'))?.body)
+    .toMatchObject({ decision_policy: 'ask_user' });
+  expect(sessionStorage.length).toBe(0);
+});
+
+test('failed collaboration admission deletes the empty Session and never navigates', async () => {
+  resetBrowserStorage();
+  const calls = installFetchRecorder({ failExecution: true });
+  const navigations: string[] = [];
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations, files: [] }),
+    collaboration: {
+      execution_model_pool: { mode: 'range', models: [
+        { provider_id: PROVIDER_ID, model: MODEL.use_model },
+        { provider_id: PROVIDER_ID, model: 'reviewer' },
+      ] },
+      execution_template_id: null,
+      delegation_policy: 'prefer_parallel',
+      decision_policy: 'automatic',
+    },
+  }));
+
+  await expect(hook.result.current.handleSend()).rejects.toThrow('Execution admission failed');
+
+  expect(calls.at(-1)).toMatchObject({
+    method: 'DELETE',
+    url: `/api/agent-sessions/${PRESET_CONVERSATION_ID}`,
+  });
+  expect(navigations).toEqual([]);
+  expect(sessionStorage.length).toBe(0);
+});
+
+test('collaboration launch rejects attachments before creating a Session', async () => {
+  resetBrowserStorage();
+  const calls = installFetchRecorder();
+  const hook = renderHook(() => useGuidSend({
+    ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+    collaboration: {
+      execution_model_pool: { mode: 'range', models: [
+        { provider_id: PROVIDER_ID, model: MODEL.use_model },
+        { provider_id: PROVIDER_ID, model: 'reviewer' },
+      ] },
+      execution_template_id: null,
+      delegation_policy: 'prefer_parallel',
+      decision_policy: 'automatic',
+    },
+  }));
+
+  await expect(hook.result.current.handleSend()).rejects.toThrow(
+    'guid.collaboration.attachmentsUnsupported'
+  );
+  expect(calls).toHaveLength(0);
 });
 
 test('a failed advanced configuration step never hands off an unconfigured first message', async () => {
   resetBrowserStorage();
-  installFetchRecorder();
+  const calls = installFetchRecorder();
   const navigations: string[] = [];
   const hook = renderHook(() => useGuidSend({
     ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET, workspaceEnabled: false, navigations }),
@@ -136,11 +286,16 @@ test('a failed advanced configuration step never hands off an unconfigured first
   }));
   await expect(hook.result.current.handleSend()).rejects.toThrow();
   expect(navigations).toEqual([]);
+  expect(calls.at(-1)).toMatchObject({
+    method: 'DELETE',
+    url: `/api/agent-sessions/${PRESET_CONVERSATION_ID}`,
+  });
   expect(sessionStorage.getItem(sessionStorageKey('initial-message-nomi', conversationTarget(parseConversationId(PRESET_CONVERSATION_ID))))).toBeNull();
 });
 
-const installFetchRecorder = (): FetchCall[] => {
+const installFetchRecorder = (options: { failExecution?: boolean } = {}): FetchCall[] => {
   const calls: FetchCall[] = [];
+  let executionCommitted = false;
   globalThis.fetch = (async (
     input: string | URL | Request,
     init?: RequestInit
@@ -162,7 +317,47 @@ const installFetchRecorder = (): FetchCall[] => {
       method === 'GET' &&
       url.endsWith(`/api/agent-sessions/${PRESET_CONVERSATION_ID}/projection`)
     ) {
-      return jsonResponse(conversationProjection(PRESET_CONVERSATION_ID));
+      return jsonResponse({
+        ...conversationProjection(PRESET_CONVERSATION_ID),
+        ...(executionCommitted ? { linked_execution_id: EXECUTION_ID } : {}),
+      });
+    }
+    if (
+      method === 'POST' &&
+      (url.endsWith('/api/agent-executions') || url.includes('/api/agent-execution-templates/')) &&
+      (url.endsWith('/api/agent-executions') || url.endsWith('/create-execution'))
+    ) {
+      if (options.failExecution) {
+        return new Response(JSON.stringify({
+          success: false,
+          error: { code: 'EXECUTION_ADMISSION_FAILED', message: 'Execution admission failed' },
+        }), { status: 409, headers: { 'Content-Type': 'application/json' } });
+      }
+      executionCommitted = true;
+      return jsonResponse({
+        execution_id: EXECUTION_ID,
+        goal: INPUT,
+        lead_conversation_id: PRESET_CONVERSATION_ID,
+        work_dir: WORKSPACE,
+        delegation_policy: 'prefer_parallel',
+        adaptation_policy: 'fixed',
+        decision_policy: 'ask_user',
+        max_parallel: 2,
+        status: 'planning',
+        summary: null,
+        version: 0,
+        plan_revision: 0,
+        event_sequence: 1,
+        created_at: 1,
+        updated_at: 1,
+      });
+    }
+    if (method === 'DELETE' && url.endsWith(`/api/agent-sessions/${PRESET_CONVERSATION_ID}`)) {
+      return jsonResponse({
+        agent_session_id: PRESET_CONVERSATION_ID,
+        state: 'deleted',
+        duplicate: false,
+      });
     }
     throw new Error(`Unexpected request: ${method} ${url}`);
   }) as typeof fetch;
@@ -177,6 +372,7 @@ const createDeps = ({
   selectedPreset,
   currentModel = MODEL,
   input = INPUT,
+  files = FILES,
   loading = false,
   workspaceEnabled = true,
   resourceResolutionReady = true,
@@ -187,6 +383,7 @@ const createDeps = ({
   selectedPreset?: ExecutableAgentPreset;
   currentModel?: TProviderWithModel | null;
   input?: string;
+  files?: string[];
   loading?: boolean;
   workspaceEnabled?: boolean;
   resourceResolutionReady?: boolean;
@@ -195,7 +392,7 @@ const createDeps = ({
 }): GuidSendDeps => ({
   input,
   setInput: noopDispatch<string>(),
-  files: FILES,
+  files,
   setFiles: noopDispatch<string[]>(),
   dir: WORKSPACE,
   setDir: noopDispatch<string>(),

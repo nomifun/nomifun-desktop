@@ -13,20 +13,20 @@ const i18n = createInstance();
 await i18n.init({ lng: 'en', keySeparator: false, resources: { en: { translation: {
   'common.skills': 'Skills', 'common.close': 'Close',
   'nomi.chat.skillsScopeHint': 'Shared with this companion',
+  'nomi.chat.mcpFrozenHint': 'Frozen for this conversation',
+  'nomi.chat.mcpAgentRequired': 'MCP unavailable',
   'conversation.capabilityPicker.manageSkills': 'Manage skills',
 } } } });
 const restores: Array<() => void> = [];
 afterEach(() => { cleanup(); restores.splice(0).reverse().forEach((restore) => restore()); });
 
-test.each([true, false])('MCP uses its own shared-session update and honors Agent capability (enabled=%s)', async (enabled) => {
+test.each([true, false])('MCP is a read-only frozen Session summary (enabled=%s)', async (enabled) => {
   const id = '019b0000-0000-7000-8000-000000000003';
   const conversation = { id: '019b0000-0000-7000-8000-000000000002', extra: { mcp_server_ids: [] }, agent_snapshot: { enabled_capabilities: enabled ? [`nomi.mcp.v1.${'a'.repeat(64)}`] : [] } } as any;
   const available = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue([]);
   const auto = spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([]);
   const mcp = spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [{ mcp_server_id: id, name: 'Shared MCP', enabled: true, builtin: false, tools: [] }], enabledServers: [] } as any);
-  const save = spyOn(ipcBridge.agentPlatform.sessions.updateMcpSelection, 'invoke').mockResolvedValue({});
-  const get = spyOn(ipcBridge.conversation.get, 'invoke').mockResolvedValue(conversation);
-  for (const spy of [available, auto, mcp, save, get]) restores.push(() => spy.mockRestore());
+  for (const spy of [available, auto, mcp]) restores.push(() => spy.mockRestore());
   const patchCompanion = mock(async () => undefined);
   const view = render(<MemoryRouter><I18nextProvider i18n={i18n}>
     <SessionCapabilityComposerLayout picker={<CompanionCapabilityControls conversation={conversation} companion={{
@@ -35,10 +35,8 @@ test.each([true, false])('MCP uses its own shared-session update and honors Agen
   </I18nextProvider></MemoryRouter>);
   fireEvent.click(await view.findByRole('button', { name: 'MCP · 0' }));
   const checkbox = await view.findByRole('checkbox', { name: 'Shared MCP' });
-  expect((checkbox as HTMLInputElement).disabled).toBe(!enabled);
+  expect((checkbox as HTMLInputElement).disabled).toBe(true);
   fireEvent.click(checkbox);
-  if (enabled) await waitFor(() => expect(save).toHaveBeenCalledWith({ agent_session_id: conversation.id, mcp_server_ids: [id] }));
-  else expect(save).not.toHaveBeenCalled();
   expect(patchCompanion).not.toHaveBeenCalled();
 });
 

@@ -28,7 +28,6 @@ mod fsio;
 pub mod gamify;
 pub mod learner;
 pub mod matting_model;
-mod managed_skills;
 pub mod memory_search;
 pub mod profile;
 pub mod prompt;

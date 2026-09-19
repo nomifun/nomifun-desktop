@@ -6,24 +6,19 @@
 
 import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import type { IConversationMcpStatus, IProvider, TChatConversation, TProviderWithModel } from '@/common/config/storage';
+import type { IConversationMcpStatus, TChatConversation } from '@/common/config/storage';
 import { CronJobManager } from '@/renderer/pages/cron';
 import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
-import { Message } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
-import { saveNomiDefaultModel } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
-import { configService } from '@/common/config/configService';
-import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
-import { resolveHealModel } from '../platforms/nomi/healConversationModel';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
 import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
 import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
-import { buildConversationModelPool } from '@/renderer/components/collaboration/conversationModelPool';
 import {
   toAppliedCollaborationTemplate,
   type AppliedCollaborationTemplate,
@@ -40,17 +35,10 @@ import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRe
 import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import { isExecutableAgentPreset } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
-import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
-import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
-import type { AgentPresetId } from '@/common/types/agentPlatform';
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useCreationDraft } from '@/renderer/creation/useCreationDraft';
 import type { CreationMode } from '@/renderer/creation/types';
-import {
-  agentSwitchRequiresWebSearchModel,
-  classifyAgentSwitchError,
-} from '../utils/agentSwitch';
 import {
   filterConversationAgentPresets,
   isConversationAgentTemplate,
@@ -70,13 +58,6 @@ const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | u
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
-type AgentSwitchTarget = {
-  conversationId: NomiConversation['id'];
-  selection: GuidAgentSelection;
-  presetId: AgentPresetId;
-  name: string;
-};
-
 const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
@@ -84,6 +65,7 @@ const NomiConversationLayout: React.FC<{
   agentSelectorNode?: React.ReactNode;
   collaborationControlNode: React.ReactNode;
   presetPresetName?: string;
+  modelSelectionHint?: string;
 }> = ({
   conversation,
   chatLayoutProps,
@@ -91,6 +73,7 @@ const NomiConversationLayout: React.FC<{
   agentSelectorNode,
   collaborationControlNode,
   presetPresetName,
+  modelSelectionHint,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
@@ -113,6 +96,7 @@ const NomiConversationLayout: React.FC<{
         }
         agent_name={presetPresetName}
         collaboratorSelectorNode={collaborationControlNode}
+        modelSelectionHint={modelSelectionHint}
         isProcessing={isConversationProcessing(conversation)}
       />
     </ExecutionConversationLayout>
@@ -124,8 +108,8 @@ const NomiConversationPanel: React.FC<{
   sliderTitle: React.ReactNode;
 }> = ({ conversation, sliderTitle }) => {
   const hasPreset = Boolean(conversation.preset_id);
+  const navigate = useNavigate();
   const creation = useCreationDraft(conversation.id);
-  const [stagedPresetId, setStagedPresetId] = useState(creation.draft.presetId ?? conversation.preset_id);
   const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
   const conversationAgentPresets = useMemo(
     () => filterConversationAgentPresets(savedAgentPresets, agentLibrary?.active_bindings ?? []),
@@ -139,31 +123,14 @@ const NomiConversationPanel: React.FC<{
     () => (agentLibrary?.official_templates ?? []).filter(isConversationAgentTemplate),
     [agentLibrary?.official_templates],
   );
-  const [agentChoice, setAgentChoice] = useState<GuidAgentSelection>(() =>
-    creation.draft.selectedAgent ?? (conversation.preset_id
+  const frozenAgentSelection = useMemo<GuidAgentSelection>(() =>
+    creation.draft.presetId === conversation.preset_id && creation.draft.selectedAgent
+      ? creation.draft.selectedAgent
+      : conversation.preset_id
       ? { kind: 'preset', presetId: conversation.preset_id }
-      : { kind: 'template', templateKey: 'chat.minimal' }),
+      : { kind: 'template', templateKey: 'chat.minimal' },
+    [conversation.preset_id, creation.draft.presetId, creation.draft.selectedAgent],
   );
-  const [agentSwitching, setAgentSwitching] = useState(false);
-  const activeConversationIdRef = useRef(conversation.id);
-  const [selectedAgentLabel, setSelectedAgentLabel] = useState<string | undefined>(
-    creation.draft.agentLabel ?? (conversation.extra as { agent_name?: string } | undefined)?.agent_name
-      ?? conversation.agent_snapshot?.preset_name,
-  );
-  useEffect(() => {
-    activeConversationIdRef.current = conversation.id;
-    setAgentChoice(
-      creation.draft.selectedAgent ?? (conversation.preset_id
-        ? { kind: 'preset', presetId: conversation.preset_id }
-        : { kind: 'template', templateKey: 'chat.minimal' }),
-    );
-    setAgentSwitching(false);
-    setStagedPresetId(creation.draft.presetId ?? conversation.preset_id);
-    setSelectedAgentLabel(
-      creation.draft.agentLabel ?? (conversation.extra as { agent_name?: string } | undefined)?.agent_name
-        ?? conversation.agent_snapshot?.preset_name,
-    );
-  }, [conversation.id]);
   const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
     const pool = conversation.execution_model_pool;
     return pool?.mode === 'range' ? pool.models.slice(1) : [];
@@ -210,58 +177,14 @@ const NomiConversationPanel: React.FC<{
   );
   const activeCollaborators = collaboratorReconciliation?.active ?? [];
 
-  const persistModelPool = useCallback(
-    async (mainRef: TExecutionModelRef | null, collabs: TExecutionModelRef[]) => {
-      const execution_model_pool = buildConversationModelPool(mainRef, collabs);
-      if (!execution_model_pool) return;
-      try {
-        await ipcBridge.conversation.update.invoke({
-          conversation_id: conversation.id,
-          updates: { execution_model_pool },
-        });
-      } catch (err) {
-        console.error('[ChatConversation] Failed to persist execution model pool:', err);
-      }
-    },
-    [conversation.id],
-  );
-
   const { t } = useTranslation();
-  const onSelectModel = useCallback(
-    async (_provider: IProvider, modelName: string) => {
-      const selected = {
-        ..._provider,
-        use_model: modelName,
-      } as TProviderWithModel;
-      // Kill the running agent on model switch; it will be rebuilt with the
-      // new model on the next message.
-      await ipcBridge.conversation.stop.invoke({
-        conversation_id: conversation.id,
-      });
-      const execution_model_pool = buildConversationModelPool(
-        { provider_id: _provider.id, model: modelName },
-        activeCollaborators,
-      );
-      if (!execution_model_pool) return false;
-      const ok = await ipcBridge.conversation.update.invoke({
-        conversation_id: conversation.id,
-        // The lead model and its collaboration authority are one atomic
-        // Conversation preference update; never expose a mixed intermediate
-        // state to Gateway delegation.
-        updates: { model: selected, execution_model_pool, execution_template_id: null },
-      });
-      if (ok) {
-        setSelectedCollaborationTemplate(null);
-        void saveNomiDefaultModel(_provider.id, modelName);
-      }
-      return Boolean(ok);
-    },
-    [activeCollaborators, conversation.id],
-  );
+  const frozenSessionConfigHint = t('conversation.chat.frozenSessionConfigHint');
+  const rejectFrozenModelChange = useCallback(async () => false, []);
 
   const modelSelection = useNomiModelSelection({
     initialModel: conversation.model,
-    onSelectModel,
+    onSelectModel: rejectFrozenModelChange,
+    readOnly: true,
   });
 
   // Main model reference used by the collaboration selector.
@@ -276,240 +199,90 @@ const NomiConversationPanel: React.FC<{
     [modelSelection.current_model?.id, modelSelection.current_model?.use_model],
   );
 
-  const onCollaboratorsChange = useCallback(
-    (next: TExecutionModelRef[]) => {
-      setCollaboratorsState(next);
-      void persistModelPool(mainModelRef, next);
-    },
-    [mainModelRef, persistModelPool],
-  );
-
-  const persistCollaborationTemplate = useCallback(
-    async (next: AppliedCollaborationTemplate | null) => {
-      const previous = selectedCollaborationTemplate;
-      setSelectedCollaborationTemplate(next);
-      try {
-        await ipcBridge.conversation.update.invoke({
-          conversation_id: conversation.id,
-          updates: {
-            execution_template_id: next?.execution_template_id ?? null,
-          },
-        });
-      } catch (error) {
-        setSelectedCollaborationTemplate(previous);
-        console.error('[ChatConversation] Failed to persist collaboration template:', error);
-        Message.error(t('common.failed', { defaultValue: '保存协作方案失败' }));
-      }
-    },
-    [conversation.id, selectedCollaborationTemplate, t],
-  );
+  const rejectFrozenCollaboratorsChange = useCallback((_next: TExecutionModelRef[]) => {}, []);
+  const rejectFrozenTemplateChange = useCallback((_next: AppliedCollaborationTemplate | null) => {}, []);
+  const rejectFrozenPolicyChange = useCallback((_next: CollaborationPolicyValue) => {}, []);
 
   useEffect(() => {
     if (!collaboratorReconciliation || collaboratorReconciliation.removed.length === 0) return;
     if (sameModelRefs(collaborators, collaboratorReconciliation.retained)) return;
     setCollaboratorsState(collaboratorReconciliation.retained);
-    void persistModelPool(mainModelRef, collaboratorReconciliation.retained);
-  }, [collaboratorReconciliation, collaborators, mainModelRef, persistModelPool]);
+  }, [collaboratorReconciliation, collaborators]);
 
-  const onCollaborationPolicyChange = useCallback(
-    async (next: CollaborationPolicyValue) => {
-      setCollaborationPolicy(next);
-      try {
-        await ipcBridge.conversation.update.invoke({
-          conversation_id: conversation.id,
-          updates: {
-            delegation_policy: next.delegationPolicy,
-            decision_policy: next.decisionPolicy,
-          },
-        });
-      } catch (error) {
-        console.error('[ChatConversation] Failed to persist collaboration policy:', error);
-      }
-    },
-    [conversation.id],
+  // Existing AgentSessions retain the collaboration facts selected at launch.
+  // The unified control remains visible as a read-only summary; changing those
+  // facts requires creating a new Session from Guid.
+  const collaborationAvailable = Boolean(
+    conversation.linked_execution_id
+      || conversation.execution_template_id
+      || conversation.execution_model_pool?.mode === 'range'
+      || conversation.agent_snapshot?.enabled_capabilities.includes('agent.collaboration')
   );
-
-  // Conversation collaboration models, reusable plans, and policy share one
-  // toolbar entry. Their existing callbacks stay independent so this remains
-  // a presentation-only merge.
-  const collaborationControlNode = (
+  const collaborationControlNode = collaborationAvailable ? (
     <CollaborationComposerControl
       value={activeCollaborators}
-      onChange={onCollaboratorsChange}
+      onChange={rejectFrozenCollaboratorsChange}
       mainModel={mainModelRef}
       selectedTemplate={selectedCollaborationTemplate}
       workDir={conversation.extra?.workspace}
-      onTemplateApply={(template) => void persistCollaborationTemplate(template)}
-      onTemplateClear={() => void persistCollaborationTemplate(null)}
+      onTemplateApply={rejectFrozenTemplateChange}
+      onTemplateClear={() => rejectFrozenTemplateChange(null)}
       policy={collaborationPolicy}
-      onPolicyChange={onCollaborationPolicyChange}
+      onPolicyChange={rejectFrozenPolicyChange}
       runtimeType={conversation.type}
+      disabled
+      disabledReason={frozenSessionConfigHint}
     />
-  );
-
-  // Heal against exact enabled Chat capabilities, with no name heuristics.
-  // While capability data is unavailable/loading `chatGroups` is empty, so resolveHealModel is a
-  // no-op, so a transient error can never trigger a destructive model swap.
-  const { groups: healGroups } = useModelsForTask('chat');
-  const healPool = useMemo(
-    () => ({
-      providers: healGroups.map((group) => group.provider),
-      getAvailableModels: (p: IProvider) =>
-        healGroups.find((group) => group.provider.id === p.id)?.models ?? [],
-    }),
-    [healGroups],
-  );
-  const { providers: healProviders, getAvailableModels: healGetAvailable } = healPool;
-  useEffect(() => {
-    if (hasPreset) return;
-    if (!healProviders.length) return;
-    const saved = configService.get('nomi.defaultModel');
-    const heal = resolveHealModel(
-      conversation.model,
-      healProviders,
-      healGetAvailable,
-      saved,
-    );
-    if (!heal) return;
-    void (async () => {
-      const selected = {
-        ...heal.provider,
-        use_model: heal.use_model,
-      } as TProviderWithModel;
-      const execution_model_pool = buildConversationModelPool(
-        { provider_id: heal.provider.id, model: heal.use_model },
-        activeCollaborators,
-      );
-      if (!execution_model_pool) return;
-      const ok = await ipcBridge.conversation.update.invoke({
-        conversation_id: conversation.id,
-        updates: { model: selected, execution_model_pool, execution_template_id: null },
-      });
-      if (ok) {
-        setSelectedCollaborationTemplate(null);
-        void saveNomiDefaultModel(heal.provider.id, heal.use_model);
-        Message.info(
-          t('conversation.chat.modelHealedToDefault', {
-            model: heal.use_model,
-          }),
-        );
-      }
-    })();
-    // Re-evaluate when the conversation or provider list changes.
-  }, [
-    activeCollaborators,
-    conversation.id,
-    conversation.model?.id,
-    conversation.model?.use_model,
-    healProviders,
-    healGetAvailable,
-    hasPreset,
-    t,
-  ]);
+  ) : null;
 
   const { info: presetPresetInfo } = useAgentInfo(conversation);
-  const showAgentSwitchError = useCallback((error: unknown) => {
-    console.error('[ChatConversation] Failed to switch Agent:', error);
-    const key = classifyAgentSwitchError(error);
-    const messageKey = agentSwitchRequiresWebSearchModel(error)
-      ? 'conversation.chat.switchAgentWebSearchModelRequired'
-      : key === 'model_incompatible'
-        ? 'conversation.chat.switchAgentModelIncompatible'
-        : key === 'resources_unavailable'
-          ? 'conversation.chat.switchAgentResourcesUnavailable'
-          : key === 'capabilities_unavailable'
-            ? 'conversation.chat.switchAgentCapabilitiesUnavailable'
-            : 'conversation.chat.switchAgentFailed';
-    Message.error(t(messageKey));
-  }, [t]);
-
-  const resolveAgentSwitchTarget = useCallback(async (
-    selection: GuidAgentSelection,
-  ): Promise<AgentSwitchTarget> => {
-    if (selection.kind === 'template') {
-      const template = conversationOfficialTemplates.find(
-        (candidate) => candidate.template_key === selection.templateKey,
-      );
-      if (!template) throw new Error('Official Agent is unavailable');
-      const name = t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`);
-      const prepared = await prepareOfficialAgent(
-        template,
-        name,
-        selection.templateKey === 'creative-studio.default' ? undefined : modelSelection.current_model ?? conversation.model,
-      );
-      return {
-        conversationId: conversation.id,
-        selection,
-        presetId: prepared.preset_id,
-        name,
-      };
-    }
-
-    const preset = executableAgentPresets.find(
-      (candidate) => candidate.preset_id === selection.presetId,
-    );
-    if (!preset) throw new Error('Saved Agent is unavailable');
-    return {
-      conversationId: conversation.id,
-      selection,
-      presetId: preset.preset_id,
-      name: preset.display_name,
+  const startNewConversationWithAgent = useCallback((selection: GuidAgentSelection) => {
+    const state = {
+      resetSessionOptions: true,
+      ...(conversation.extra?.workspace ? { workspace: conversation.extra.workspace } : {}),
+      ...(selection.kind === 'preset'
+        ? { selectedAgentPresetId: selection.presetId }
+        : { selectedAgentTemplateKey: selection.templateKey }),
     };
-  }, [
-    conversation.model,
-    conversationOfficialTemplates,
-    executableAgentPresets,
-    modelSelection.current_model,
-    t,
-  ]);
+    void navigate('/guid', { state });
+  }, [conversation.extra?.workspace, navigate]);
 
-  // Menus edit only the next draft. Preparing/publishing happens on submit.
-  const selectedAgentRef = useRef(agentChoice);
-  selectedAgentRef.current = agentChoice;
-  const switchAgent = (selection: GuidAgentSelection, mode?: CreationMode) => {
-    const creative = selection.kind === 'template' && selection.templateKey === 'creative-studio.default';
-    const presetId = selection.kind === 'preset' ? selection.presetId : undefined;
-    const label = selection.kind === 'template'
-      ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
-      : executableAgentPresets.find(preset => preset.preset_id === selection.presetId)?.display_name || 'Agent';
-    setStagedPresetId(presetId);
-    setAgentChoice(selection);
-    setSelectedAgentLabel(label);
-    creation.update(draft => ({ ...draft, selectedAgent: selection, presetId, agentLabel: label, mode: creative ? mode || draft.lastMode : null, lastMode: mode || draft.lastMode }));
-  };
-  const resolvePreset = async () => {
-    // Official templates must prepare current seed capabilities on each submission.
-    if (agentChoice.kind === 'preset' && stagedPresetId) return stagedPresetId;
-    const selected = agentChoice;
-    setAgentSwitching(true);
-    try {
-      const target = await resolveAgentSwitchTarget(selected);
-      if (activeConversationIdRef.current === target.conversationId && JSON.stringify(selectedAgentRef.current) === JSON.stringify(selected)) {
-        setStagedPresetId(target.presetId);
-        creation.update(draft => ({ ...draft, presetId: target.presetId }));
-      }
-      return target.presetId;
-    } catch (error) { showAgentSwitchError(error); throw error; }
-    finally { setAgentSwitching(false); }
-  };
+  const frozenPresetId = conversation.preset_id;
+  const resolvePreset = useCallback(async () => {
+    if (!frozenPresetId) throw new Error(t('conversation.chat.frozenAgentUnavailable'));
+    return frozenPresetId;
+  }, [frozenPresetId, t]);
+  const frozenCreativeAgent = frozenAgentSelection.kind === 'template'
+    && frozenAgentSelection.templateKey === 'creative-studio.default'
+    && creation.draft.presetId === frozenPresetId;
   const selectCreationMode = (mode: CreationMode) => {
-    if (creation.draft.mode) creation.setMode(mode);
-    else switchAgent({ kind: 'template', templateKey: 'creative-studio.default' }, mode);
+    if (frozenCreativeAgent) {
+      creation.setMode(mode);
+      return;
+    }
+    void navigate(`/guid?creation=${mode}`, {
+      state: {
+        resetSessionOptions: true,
+        selectedAgentTemplateKey: 'creative-studio.default',
+        ...(conversation.extra?.workspace ? { workspace: conversation.extra.workspace } : {}),
+      },
+    });
   };
-  const exitCreation = () => switchAgent({ kind: 'template', templateKey: 'assistant.general' });
-  const currentAgentLabel = selectedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
+  const exitCreation = () => creation.setMode(null);
+  const currentAgentLabel = (
+    creation.draft.presetId === conversation.preset_id ? creation.draft.agentLabel : undefined
+  ) ?? presetPresetInfo?.name ?? conversation.agent_snapshot?.preset_name ?? 'Agent';
   const agentSelectorNode = (
     <GuidAgentSelector
-      disabled={agentSwitching}
       presets={executableAgentPresets}
       officialTemplates={conversationOfficialTemplates}
-      selection={agentChoice}
+      selection={frozenAgentSelection}
       selectedLabelOverride={currentAgentLabel}
       isLoading={agentsLoading}
       loadError={agentsError}
       onRetry={refreshAgents}
-      onSelectPreset={(presetId) => void switchAgent({ kind: 'preset', presetId })}
-      onSelectTemplate={(templateKey) => void switchAgent({ kind: 'template', templateKey })}
+      onSelectPreset={(presetId) => startNewConversationWithAgent({ kind: 'preset', presetId })}
+      onSelectTemplate={(templateKey) => startNewConversationWithAgent({ kind: 'template', templateKey })}
     />
   );
   const presetResourceKinds = new Set(
@@ -554,7 +327,7 @@ const NomiConversationPanel: React.FC<{
   };
 
   return (
-    <CreationComposerContext.Provider value={{ ...creation, presetId: stagedPresetId ?? undefined, preparing: agentSwitching, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
+    <CreationComposerContext.Provider value={{ ...creation, presetId: frozenPresetId, resolvePreset, selectMode: selectCreationMode, exit: exitCreation }}>
       <NomiConversationLayout
         conversation={conversation}
         chatLayoutProps={chatLayoutProps}
@@ -562,6 +335,7 @@ const NomiConversationPanel: React.FC<{
         agentSelectorNode={agentSelectorNode}
         collaborationControlNode={collaborationControlNode}
         presetPresetName={presetPresetInfo?.name}
+        modelSelectionHint={frozenSessionConfigHint}
       />
     </CreationComposerContext.Provider>
   );

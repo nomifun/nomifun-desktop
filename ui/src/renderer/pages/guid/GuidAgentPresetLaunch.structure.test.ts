@@ -210,6 +210,7 @@ describe('Guid workbench Agent launch behavior', () => {
     );
 
     expect(page.includes('selectedAgentPresetId?: string;')).toBe(true);
+    expect(page.includes('selectedAgentTemplateKey?: OfficialPresetKey;')).toBe(true);
     expect(
       page.includes(
         'const preselectedPresetId = navigationState?.selectedAgentPresetId;'
@@ -218,6 +219,7 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(page.includes('selectedAgentPresetId: preselectedPresetId')).toBe(
       true
     );
+    expect(page.includes('selectedAgentTemplateKey: preselectedTemplateKey')).toBe(true);
     expect(
       selection.includes(
         '(candidate) => candidate.preset_id === selectedAgentPresetId'
@@ -226,6 +228,11 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(
       selection.includes(
         "setSelection({ kind: 'preset', presetId: preset.preset_id });"
+      )
+    ).toBe(true);
+    expect(
+      selection.includes(
+        "setSelection({ kind: 'template', templateKey: template.template_key });"
       )
     ).toBe(true);
     expect(selection.includes('selectDefaultTemplate();')).toBe(true);

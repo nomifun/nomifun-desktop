@@ -82,8 +82,6 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
     for path in [
         "/api/agent-sessions",
         "/api/agent-sessions/{agent_session_id}",
-        "/api/agent-sessions/{agent_session_id}/preset",
-        "/api/agent-sessions/{agent_session_id}/capability-selection",
         "/api/agent-session-messages/search",
         "/api/agent-sessions/{agent_session_id}/creation-tasks",
         "/api/creative-studio/canvas-agent-sessions/resolve",
@@ -660,7 +658,7 @@ async fn nomi_core_accepts_exact_module_action_grants() {
     let enabled = [
         ("workspace.vcs", "workspace.vcs/status"),
         ("web.research", "web.research/search"),
-        ("agent.collaboration", "agent/delegate"),
+        ("agent.collaboration", "agent/request_user_decision"),
         ("automation.schedule", "automation.schedule/list"),
     ];
     created_value["data"]["draft"]["document"]["enabled_capabilities"] = json!(
@@ -887,7 +885,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
 }
 
 #[tokio::test]
-async fn canonical_coding_session_rejects_in_place_preset_switch_and_keeps_its_binding() {
+async fn canonical_coding_session_has_no_in_place_binding_override_routes() {
     const TRUST: &str = "next-turn-kernel-binding";
     async fn post(router: axum::Router, path: &str, body: Value) -> Value {
         let response = router.oneshot(Request::builder().method("POST").uri(path)
@@ -925,16 +923,19 @@ async fn canonical_coding_session_rejects_in_place_preset_switch_and_keeps_its_b
         "resource_selections":resources,
     })).await;
     let id = session["agent_session_id"].as_str().unwrap();
-    let switch = router.clone().oneshot(Request::builder().method("PUT")
-        .uri(format!("/api/agent-sessions/{id}/preset"))
-        .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
-        .body(Body::from(serde_json::to_vec(&json!({
+    for (suffix, body) in [
+        ("preset", json!({
             "preset_id":target["preset"]["preset_id"], "resource_selections":resources
-        })).unwrap())).unwrap()).await.unwrap();
-    assert_eq!(switch.status(), StatusCode::CONFLICT);
-    let switch: Value = serde_json::from_slice(&axum::body::to_bytes(
-        switch.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
-    assert_eq!(switch["code"], "AGENT_SESSION_BINDING_IMMUTABLE");
+        })),
+        ("capability-selection", json!({"capability_selection": {}})),
+        ("mcp-selection", json!({"mcp_server_ids": []})),
+    ] {
+        let response = router.clone().oneshot(Request::builder().method("PUT")
+            .uri(format!("/api/agent-sessions/{id}/{suffix}"))
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "retired route remained: {suffix}");
+    }
     let observed = router.clone().oneshot(Request::builder()
         .uri(format!("/api/agent-sessions/{id}"))
         .header("x-nomi-local-trust", TRUST).body(Body::empty()).unwrap()).await.unwrap();
@@ -943,6 +944,124 @@ async fn canonical_coding_session_rejects_in_place_preset_switch_and_keeps_its_b
         observed.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
     assert_eq!(observed["data"]["session"]["agent_binding"], session["agent_binding"]);
     assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn http_execution_freezes_the_lead_session_snapshot_and_projects_its_link() {
+    const TRUST: &str = "execution-lead-session";
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", uuid::Uuid::now_v7().to_string())
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap();
+        (status, value)
+    }
+
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(
+        router.clone(),
+        "POST",
+        "/api/providers",
+        json!({
+            "platform":"stepfun-plan", "name":"Execution lead regression",
+            "base_url":format!("{}/step_plan/v1", upstream.uri()),
+            "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
+            "initial_model":{"model":"step-3.7-flash", "enabled":true,
+                "capabilities":[{"task":"chat", "traits":["function_calling","reasoning","streaming"],
+                    "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}}]}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let model = json!({"provider_id":provider_id, "model":"step-3.7-flash"});
+    let (status, preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({"display_name":"Execution lead", "reuse_existing":false, "model":model}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, session) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({"preset_id":preset_id, "model":model, "title":"Execution lead"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+
+    let (status, execution) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-executions",
+        json!({
+            "goal":"Review the release",
+            "model_pool":{"mode":"single", "model":model},
+            "lead_model":model,
+            "lead_conversation_id":session_id,
+            "delegation_policy":"prefer_parallel",
+            "decision_policy":"ask_user",
+            "steps":[{"title":"Review", "spec":"Review the release and report one result"}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{execution}");
+    let execution_id = execution["data"]["execution_id"].as_str().unwrap();
+
+    let (status, detail) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-executions/{execution_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    let participants = detail["data"]["participants"].as_array().unwrap();
+    assert!(participants.iter().any(|participant| {
+        participant["agent_snapshot"]["preset_id"].as_str() == Some(preset_id)
+    }), "lead participant must retain the frozen Session snapshot: {detail}");
+
+    let (status, projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projection}");
+    assert_eq!(
+        projection["data"]["linked_execution_id"].as_str(),
+        Some(execution_id)
+    );
+    assert!(projection["data"]["execution_step_id"].is_null());
+    assert!(projection["data"]["execution_attempt_id"].is_null());
+
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }

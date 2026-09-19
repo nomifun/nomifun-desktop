@@ -267,6 +267,25 @@ impl AgentExecutionEngine {
         self.create_inner(owner_id, actor, request, None).await
     }
 
+    /// Authenticated HTTP creation entrypoint. A declared lead Conversation is
+    /// authority, not presentation metadata: resolve it through the Session
+    /// owner and freeze its exact Agent snapshot into the lead Participant.
+    /// Calling `create` directly would manufacture a snapshot-less Participant
+    /// whose first Attempt cannot open a canonical AgentSession.
+    pub async fn create_from_http(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        request: CreateAgentExecutionRequest,
+    ) -> Result<AgentExecution, AppError> {
+        let Some(conversation_id) = request.lead_conversation_id.clone() else {
+            return self.create(owner_id, actor, request).await;
+        };
+        let conversation = self.session.get(owner_id, &conversation_id).await?;
+        self.create_from_conversation(owner_id, actor, &conversation, request)
+            .await
+    }
+
     /// Create an execution from an authenticated calling Conversation.
     ///
     /// The Conversation remains the interaction boundary while its frozen
@@ -328,6 +347,32 @@ impl AgentExecutionEngine {
     ) -> Result<AgentExecution, AppError> {
         self.create_from_template_inner(owner_id, actor, template_id, request, None)
             .await
+    }
+
+    /// HTTP/template counterpart of [`Self::create_from_http`]. Templates add
+    /// reusable participants, while the authenticated lead Session still owns
+    /// the immutable caller snapshot and Conversation link.
+    pub async fn create_from_template_http(
+        &self,
+        owner_id: &str,
+        actor: &AgentExecutionActor,
+        template_id: &str,
+        request: CreateExecutionFromTemplateRequest,
+    ) -> Result<AgentExecution, AppError> {
+        let Some(conversation_id) = request.lead_conversation_id.clone() else {
+            return self
+                .create_from_template(owner_id, actor, template_id, request)
+                .await;
+        };
+        let conversation = self.session.get(owner_id, &conversation_id).await?;
+        self.create_from_template_for_conversation(
+            owner_id,
+            actor,
+            &conversation,
+            template_id,
+            request,
+        )
+        .await
     }
 
     /// Conversation-authenticated variant used by `nomi_delegate`. The

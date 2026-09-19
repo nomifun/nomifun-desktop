@@ -65,6 +65,7 @@ pub const REQUIREMENTS_MODULE_ID: &str = "requirements";
 
 pub const AGENT_DELEGATE_ACTION_ID: &str = "agent/delegate";
 pub const AGENT_FORK_ACTION_ID: &str = "agent/fork";
+pub const AGENT_REQUEST_USER_DECISION_ACTION_ID: &str = "agent/request_user_decision";
 pub const SCHEDULE_LIST_ACTION_ID: &str = "automation.schedule/list";
 pub const SCHEDULE_CREATE_ACTION_ID: &str = "automation.schedule/create";
 pub const SCHEDULE_UPDATE_ACTION_ID: &str = "automation.schedule/update";
@@ -171,6 +172,7 @@ pub enum Wave5OwnerDomain {
 pub enum Wave5CapabilityOperation {
     AgentDelegate { input: StrictJsonValue },
     AgentFork { input: StrictJsonValue },
+    AgentRequestUserDecision { input: StrictJsonValue },
     ScheduleList { input: StrictJsonValue },
     ScheduleCreate { input: StrictJsonValue },
     ScheduleUpdate { input: StrictJsonValue },
@@ -184,7 +186,9 @@ pub enum Wave5CapabilityOperation {
 impl Wave5CapabilityOperation {
     pub fn capability_id(&self) -> CapabilityId {
         CapabilityId::from(match self {
-            Self::AgentDelegate { .. } | Self::AgentFork { .. } => {
+            Self::AgentDelegate { .. }
+            | Self::AgentFork { .. }
+            | Self::AgentRequestUserDecision { .. } => {
                 AGENT_COLLABORATION_MODULE_ID
             }
             Self::ScheduleList { .. }
@@ -202,6 +206,7 @@ impl Wave5CapabilityOperation {
         ActionId::from(match self {
             Self::AgentDelegate { .. } => AGENT_DELEGATE_ACTION_ID,
             Self::AgentFork { .. } => AGENT_FORK_ACTION_ID,
+            Self::AgentRequestUserDecision { .. } => AGENT_REQUEST_USER_DECISION_ACTION_ID,
             Self::ScheduleList { .. } => SCHEDULE_LIST_ACTION_ID,
             Self::ScheduleCreate { .. } => SCHEDULE_CREATE_ACTION_ID,
             Self::ScheduleUpdate { .. } => SCHEDULE_UPDATE_ACTION_ID,
@@ -215,7 +220,9 @@ impl Wave5CapabilityOperation {
 
     pub fn owner_domain(&self) -> Wave5OwnerDomain {
         match self {
-            Self::AgentDelegate { .. } | Self::AgentFork { .. } => {
+            Self::AgentDelegate { .. }
+            | Self::AgentFork { .. }
+            | Self::AgentRequestUserDecision { .. } => {
                 Wave5OwnerDomain::AgentExecution
             }
             Self::ScheduleList { .. }
@@ -233,6 +240,7 @@ impl Wave5CapabilityOperation {
         match self {
             Self::AgentDelegate { input }
             | Self::AgentFork { input }
+            | Self::AgentRequestUserDecision { input }
             | Self::ScheduleList { input }
             | Self::ScheduleCreate { input }
             | Self::ScheduleUpdate { input }
@@ -848,7 +856,9 @@ pub fn required_action_resource_operations(
 /// Resolve an exact Action ID to its product Module.
 pub fn module_id_for_action(action_id: &str) -> Option<CapabilityId> {
     let module = match action_id {
-        AGENT_DELEGATE_ACTION_ID | AGENT_FORK_ACTION_ID => AGENT_COLLABORATION_MODULE_ID,
+        AGENT_DELEGATE_ACTION_ID
+        | AGENT_FORK_ACTION_ID
+        | AGENT_REQUEST_USER_DECISION_ACTION_ID => AGENT_COLLABORATION_MODULE_ID,
         SCHEDULE_LIST_ACTION_ID
         | SCHEDULE_CREATE_ACTION_ID
         | SCHEDULE_UPDATE_ACTION_ID
@@ -1187,6 +1197,12 @@ const AGENT_COLLABORATION_ACTIONS: &[ActionSpec] = &[
     },
     ActionSpec {
         id: AGENT_FORK_ACTION_ID,
+        effect: EffectClass::WriteDurable,
+        resource_kinds: &[],
+        requirements: &[],
+    },
+    ActionSpec {
+        id: AGENT_REQUEST_USER_DECISION_ACTION_ID,
         effect: EffectClass::WriteDurable,
         resource_kinds: &[],
         requirements: &[],
@@ -1607,6 +1623,9 @@ pub fn operation_from_input(
         (AGENT_COLLABORATION_MODULE_ID, AGENT_FORK_ACTION_ID) => {
             Wave5CapabilityOperation::AgentFork { input }
         }
+        (AGENT_COLLABORATION_MODULE_ID, AGENT_REQUEST_USER_DECISION_ACTION_ID) => {
+            Wave5CapabilityOperation::AgentRequestUserDecision { input }
+        }
         (AUTOMATION_SCHEDULE_MODULE_ID, SCHEDULE_LIST_ACTION_ID) => {
             Wave5CapabilityOperation::ScheduleList { input }
         }
@@ -1865,6 +1884,12 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
             }),
             &["goal"],
         ),
+        AGENT_REQUEST_USER_DECISION_ACTION_ID => strict_object_schema(
+            serde_json::json!({
+                "question": {"type":"string","minLength":1,"maxLength":65536}
+            }),
+            &["question"],
+        ),
         REQUIREMENTS_READ_ACTION_ID => StrictJsonValue(serde_json::json!({
             "oneOf": [
                 {
@@ -2120,6 +2145,7 @@ mod tests {
             BTreeSet::from([
                 AGENT_DELEGATE_ACTION_ID.to_owned(),
                 AGENT_FORK_ACTION_ID.to_owned(),
+                AGENT_REQUEST_USER_DECISION_ACTION_ID.to_owned(),
             ])
         );
         assert_eq!(
@@ -2170,6 +2196,11 @@ mod tests {
             (
                 AGENT_COLLABORATION_MODULE_ID,
                 AGENT_FORK_ACTION_ID,
+                Wave5OwnerDomain::AgentExecution,
+            ),
+            (
+                AGENT_COLLABORATION_MODULE_ID,
+                AGENT_REQUEST_USER_DECISION_ACTION_ID,
                 Wave5OwnerDomain::AgentExecution,
             ),
             (
@@ -2269,6 +2300,15 @@ mod tests {
                 .requirements
                 .is_empty()
         );
+        assert!(
+            action_spec(
+                AGENT_COLLABORATION_MODULE_ID,
+                AGENT_REQUEST_USER_DECISION_ACTION_ID,
+            )
+            .unwrap()
+            .requirements
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2303,6 +2343,17 @@ mod tests {
         assert_eq!(
             delete.0["required"],
             serde_json::json!(["cron_job_id"])
+        );
+    }
+
+    #[test]
+    fn decision_action_schema_accepts_only_the_question() {
+        let schema = action_input_schema_for(AGENT_REQUEST_USER_DECISION_ACTION_ID).unwrap();
+        assert_eq!(schema.0["additionalProperties"], false);
+        assert_eq!(schema.0["required"], serde_json::json!(["question"]));
+        assert_eq!(
+            schema.0["properties"].as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>(),
+            BTreeSet::from(["question".to_owned()])
         );
     }
 }

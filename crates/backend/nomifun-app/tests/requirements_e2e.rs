@@ -345,7 +345,7 @@ async fn external_claim_route_is_removed_and_public_updates_cannot_mint_authorit
 }
 
 #[tokio::test]
-async fn set_autowork_requires_tag_when_enabled() {
+async fn set_autowork_requires_a_valid_frozen_session_before_persisting_enable() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
     let conv = ConversationId::new().into_string();
@@ -365,8 +365,10 @@ async fn set_autowork_requires_tag_when_enabled() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // Canonical Store-only Session can persist and start AutoWork without a
-    // legacy conversations row.
+    // A canonical Store row whose frozen control-plane artifacts do not exist
+    // must fail before `enabled=true` is committed. Previously the route
+    // returned running=true during the spawn race and the loop exited moments
+    // later, leaving a durable enabled binding with no executor.
     let resp = app
         .clone()
         .oneshot(json_with_token(
@@ -378,10 +380,7 @@ async fn set_autowork_requires_tag_when_enabled() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let enabled = body_json(resp).await;
-    assert_eq!(enabled["data"]["enabled"], true);
-    assert_eq!(enabled["data"]["running"], true);
+    assert!(!resp.status().is_success());
     let legacy_rows: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'conversations'")
             .fetch_one(services.database.pool())
@@ -389,26 +388,7 @@ async fn set_autowork_requires_tag_when_enabled() {
             .unwrap();
     assert_eq!(legacy_rows, 0);
 
-    // disabled → 200, not running, run_state off.
-    let resp = app
-        .clone()
-        .oneshot(json_with_token(
-            "POST",
-            "/api/requirements/autowork",
-            json!({ "target_id": conv, "enabled": false }),
-            &token,
-            &csrf,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let json = body_json(resp).await;
-    assert_eq!(json["data"]["enabled"], false);
-    assert_eq!(json["data"]["running"], false);
-    assert_eq!(json["data"]["run_state"], "off");
-    assert_eq!(json["data"]["kind"], "conversation");
-
-    // GET reflects disabled (kind/target_id path form).
+    // GET proves the failed enable never changed the durable config.
     let resp = app
         .oneshot(get_with_token(
             &format!("/api/requirements/autowork/conversation/{conv}"),
@@ -417,7 +397,91 @@ async fn set_autowork_requires_tag_when_enabled() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(body_json(resp).await["data"]["enabled"], false);
+    let state = body_json(resp).await;
+    assert_eq!(state["data"]["enabled"], false);
+    assert_eq!(state["data"]["running"], false);
+    assert_eq!(state["data"]["run_state"], "off");
+    assert_eq!(state["data"]["paused"], false);
+}
+
+#[tokio::test]
+async fn autowork_get_and_resume_project_durable_paused_state() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let session_id = ConversationId::new().into_string();
+    seed_canonical_agent_session(&services, &session_id).await;
+
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    store
+        .commit_automation_config(nomifun_agent_session::CommitAgentSessionAutomationConfig {
+            agent_session_id: AgentSessionId::from(session_id.clone()),
+            owner_ref: PrincipalRef {
+                principal_kind: "user".to_owned(),
+                principal_id: services.authoritative_user_id.to_string(),
+            },
+            expected_revision: 0,
+            enabled: true,
+            tag: Some("paused-e2e".to_owned()),
+            max_requirements: None,
+            operation_id: Some("requirements-e2e-paused-enable".to_owned()),
+            recorded_at: 1,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO requirement_tags \
+         (tag, paused, paused_reason, paused_requirement_id, paused_at) \
+         VALUES ('paused-e2e', 1, 'execution_failed', NULL, 2)",
+    )
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(get_with_token(
+            &format!("/api/requirements/autowork/conversation/{session_id}"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let paused = body_json(response).await;
+    assert_eq!(paused["data"]["enabled"], true);
+    assert_eq!(paused["data"]["running"], false);
+    assert_eq!(paused["data"]["paused"], true);
+    assert_eq!(paused["data"]["paused_reason"], "execution_failed");
+    assert_eq!(paused["data"]["run_state"], "paused");
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/requirements/tags/paused-e2e/resume",
+            json!({}),
+            &token,
+            &csrf,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(get_with_token(
+            &format!("/api/requirements/autowork/conversation/{session_id}"),
+            &token,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resumed = body_json(response).await;
+    assert_eq!(resumed["data"]["paused"], false);
+    assert!(resumed["data"].get("paused_reason").is_none());
+    assert_eq!(resumed["data"]["run_state"], "idle");
 }
 
 #[tokio::test]

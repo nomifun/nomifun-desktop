@@ -313,13 +313,15 @@ impl AutoWorkTargetKind {
 
 /// The display status of an AutoWork switch — drives the UI dot/colour.
 /// `off` (not enabled) / `idle` (enabled, between or awaiting work) /
-/// `active` (enabled, a requirement is in flight).
+/// `active` (enabled, a requirement is in flight) / `paused` (enabled, but the
+/// shared tag requires an explicit human resume).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoWorkRunState {
     Off,
     Idle,
     Active,
+    Paused,
 }
 
 fn default_conversation_kind() -> AutoWorkTargetKind {
@@ -360,6 +362,12 @@ pub struct AutoWorkState {
     pub tag: Option<String>,
     pub running: bool,
     pub run_state: AutoWorkRunState,
+    /// The bound tag is durably paused. Kept separate from `running`: the
+    /// backend loop remains alive while it waits for an explicit resume.
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_reason: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::serde_util::deserialize_optional_requirement_id"
@@ -369,12 +377,20 @@ pub struct AutoWorkState {
 }
 
 impl AutoWorkState {
-    /// Compute the tri-state display status from the persisted/live flags.
-    pub fn run_state(enabled: bool, current_requirement_id: Option<&str>) -> AutoWorkRunState {
+    /// Compute the display status from the persisted/live flags. An in-flight
+    /// requirement remains `active` while its terminal receipt is settling;
+    /// the durable pause becomes visible immediately after that claim clears.
+    pub fn run_state(
+        enabled: bool,
+        paused: bool,
+        current_requirement_id: Option<&str>,
+    ) -> AutoWorkRunState {
         if !enabled {
             AutoWorkRunState::Off
         } else if current_requirement_id.is_some() {
             AutoWorkRunState::Active
+        } else if paused {
+            AutoWorkRunState::Paused
         } else {
             AutoWorkRunState::Idle
         }
@@ -559,5 +575,21 @@ mod tests {
         let req: AutoWorkConfigRequest = serde_json::from_str(body).expect("must deserialize");
         assert_eq!(req.target_id, "0190f5fe-7c00-7a00-8000-000000000042");
         assert_eq!(req.kind, AutoWorkTargetKind::Conversation);
+    }
+
+    #[test]
+    fn autowork_run_state_surfaces_durable_pause_after_active_claim_settles() {
+        assert_eq!(
+            AutoWorkState::run_state(true, true, Some("requirement")),
+            AutoWorkRunState::Active
+        );
+        assert_eq!(
+            AutoWorkState::run_state(true, true, None),
+            AutoWorkRunState::Paused
+        );
+        assert_eq!(
+            AutoWorkState::run_state(false, true, None),
+            AutoWorkRunState::Off
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use nomifun_api_types::{ConversationResponse, CreateConversationRequest, UpdateConversationRequest};
+use nomifun_api_types::{ConversationResponse, CreateConversationRequest};
 use nomifun_common::AppError;
 
 use nomifun_db::MessageDayBucket;
@@ -17,27 +17,11 @@ use crate::evolution::TranscriptSource;
 /// Narrow command/query surface used by Companion thread management.
 #[async_trait]
 pub trait CompanionSessionPort: Send + Sync {
-    /// Resolve the current product-owned Agent without creating another Session.
-    async fn refresh_product_agent(&self, owner_id: &str, session_id: &str) -> Result<ConversationResponse, AppError> {
-        self.get(owner_id, session_id).await
-    }
     async fn get(
         &self,
         owner_id: &str,
         session_id: &str,
     ) -> Result<ConversationResponse, AppError>;
-
-    async fn replace_skill_snapshot(
-        &self,
-        session_id: &str,
-        skills: &[String],
-    ) -> Result<bool, AppError>;
-
-    async fn update_extra(
-        &self,
-        session_id: &str,
-        patch: serde_json::Value,
-    ) -> Result<(), AppError>;
 
     async fn create(
         &self,
@@ -46,13 +30,6 @@ pub trait CompanionSessionPort: Send + Sync {
     ) -> Result<ConversationResponse, AppError>;
 
     async fn delete(&self, owner_id: &str, session_id: &str) -> Result<(), AppError>;
-
-    async fn update(
-        &self,
-        owner_id: &str,
-        session_id: &str,
-        request: UpdateConversationRequest,
-    ) -> Result<ConversationResponse, AppError>;
 
     async fn message_local_day_index(
         &self,

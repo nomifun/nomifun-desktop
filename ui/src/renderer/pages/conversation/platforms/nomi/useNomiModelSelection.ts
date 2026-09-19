@@ -12,6 +12,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 export type NomiModelSelection = {
   current_model?: TProviderWithModel;
   providers: IProvider[];
+  /** The current model remains visible, but this Session cannot replace it. */
+  pickerDisabled: boolean;
   getAvailableModels: (provider: IProvider) => string[];
   handleSelectModel: (provider: IProvider, modelName: string) => Promise<void>;
   getDisplayModelName: (modelName?: string) => string;
@@ -20,11 +22,13 @@ export type NomiModelSelection = {
 export type UseNomiModelSelectionOptions = {
   initialModel: TProviderWithModel | undefined;
   onSelectModel: (provider: IProvider, modelName: string) => Promise<boolean>;
+  readOnly?: boolean;
 };
 
 export const useNomiModelSelection = ({
   initialModel,
   onSelectModel,
+  readOnly = false,
 }: UseNomiModelSelectionOptions): NomiModelSelection => {
   const [current_model, setCurrentModel] = useState<TProviderWithModel | undefined>(initialModel);
 
@@ -58,6 +62,7 @@ export const useNomiModelSelection = ({
 
   const handleSelectModel = useCallback(
     async (provider: IProvider, modelName: string) => {
+      if (readOnly) return;
       const selected = {
         ...(provider as unknown as TProviderWithModel),
         use_model: modelName,
@@ -67,7 +72,7 @@ export const useNomiModelSelection = ({
         setCurrentModel(selected);
       }
     },
-    [onSelectModel]
+    [onSelectModel, readOnly]
   );
 
   const getDisplayModelName = useCallback(
@@ -83,6 +88,7 @@ export const useNomiModelSelection = ({
   return {
     current_model,
     providers,
+    pickerDisabled: readOnly,
     getAvailableModels,
     handleSelectModel,
     getDisplayModelName,

@@ -61,7 +61,6 @@ import {
 import type {
   IMcpServer,
   ISessionMcpServer,
-  TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
@@ -183,8 +182,6 @@ import type {
   SaveAgentPresetRevisionRequest,
   SaveAgentPresetRevisionResponse,
   SkillCatalogItem,
-  SwitchAgentSessionPresetRequest,
-  SwitchAgentSessionPresetResponse,
   UpdateRemoteBindingRequest,
 } from '../types/agentPlatform';
 import type {
@@ -747,21 +744,6 @@ export const agentPlatform = {
       (params) =>
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/slash-commands`
     ),
-    switchPreset: httpPut<
-      SwitchAgentSessionPresetResponse,
-      {
-        agent_session_id: string;
-        request: SwitchAgentSessionPresetRequest;
-      }
-    >(
-      (params) =>
-        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/preset`,
-      (params) => params.request
-    ),
-    updateMcpSelection: httpPut<unknown, { agent_session_id: ConversationId; mcp_server_ids: McpServerId[] }>(
-      (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/mcp-selection`,
-      (params) => ({ mcp_server_ids: params.mcp_server_ids })
-    ),
     createTurn: httpPost<
       CreateAgentSessionTurnResponse,
       {
@@ -934,23 +916,13 @@ export const conversation = {
   remove: httpDelete<void, { conversation_id: ConversationId }>(
     (p) => `/api/agent-sessions/${p.conversation_id}`
   ),
-  // updates 额外允许顶层 `pinned`：对应 AgentSession metadata；body 构造的
-  // `...rest` 原样透传该字段。
-  // 注意：不要往 body 里加任何 UpdateConversationRequest 之外的字段——该 DTO 是
-  // `deny_unknown_fields`，多一个键整条 PATCH 直接 400。`extra` 恒为合并语义
-  // 由 canonical AgentSession update seam 执行合并，无需任何开关字段。
-  //
-  // `extra` 单独放宽为 Partial：它是合并语义，调用方本就只传要改的键，而
-  // `Partial<TChatConversation>` 作用在联合类型上时仍要求 `extra` 整体符合某一
-  // 分支。此前有一个全可选的分支意外充当了逃逸口，该分支随引擎删除后消失。
+  // AgentSession PATCH accepts presentation metadata only. Agent, model,
+  // workspace/resource, capability and collaboration facts are immutable.
   update: {
     provider: () => {},
     invoke: async (p: {
       conversation_id: ConversationId;
-      updates: (Partial<TChatConversation> | { extra: Partial<TChatConversation['extra']> }) & {
-        pinned?: boolean;
-        archived?: boolean;
-      };
+      updates: { name?: string; pinned?: boolean; archived?: boolean };
     }): Promise<boolean> => {
       const updates = p.updates as Record<string, unknown>;
       const unsupported = Object.keys(updates).filter(
@@ -998,7 +970,6 @@ export const conversation = {
             content: p.input,
             files: p.files,
             inject_skills: p.inject_skills,
-            preset_id: p.preset_id,
           },
         },
         { idempotencyKey, initialOnly: p.initial_only === true }
@@ -3272,7 +3243,6 @@ interface ISendMessageParams {
   /** Automatic Guid/QuickStart handoff; never set for explicit user sends. */
   initial_only?: boolean;
   inject_skills?: string[];
-  preset_id?: AgentPresetId;
 }
 
 // Server-assigned identifier for the newly created user message. Clients must
@@ -3899,7 +3869,7 @@ export interface ITagPausedPayload {
 }
 
 export type AutoWorkTargetKind = 'conversation';
-export type AutoWorkRunState = 'off' | 'idle' | 'active';
+export type AutoWorkRunState = 'off' | 'idle' | 'active' | 'paused';
 export type SessionCapabilityTargetId = ConversationId;
 
 export interface IAutoWorkConfigParams {
@@ -3921,6 +3891,9 @@ export interface IAutoWorkState {
   tag?: string;
   running: boolean;
   run_state: AutoWorkRunState;
+  /** Durable tag-level pause. The runner stays alive but will not claim work. */
+  paused?: boolean;
+  paused_reason?: string;
   current_requirement_id?: RequirementId;
   completed_count: number;
 }

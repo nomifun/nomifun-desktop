@@ -241,27 +241,6 @@ pub(crate) async fn resolve_nomi_model(
     }
 }
 
-/// Explicit-args-only resolution (no companion / first-provider fallback): used by
-/// `nomi_update_conversation`, where a model change is an explicit owner
-/// instruction that must not be silently substituted.
-pub(crate) async fn resolve_explicit_model(
-    deps: &ProviderSupportDeps,
-    explicit_model: ProviderWithModel,
-) -> Result<ProviderWithModel, Value> {
-    let providers = load_provider_summaries(deps).await?;
-    match resolve_model_chain(Some(&explicit_model), None, &providers) {
-        Ok(r) => {
-            let model = r.model;
-            Ok(ProviderWithModel {
-                provider_id: r.provider_id,
-                model: model.clone(),
-                use_model: Some(model),
-            })
-        }
-        Err(msg) => Err(json!({"error": msg})),
-    }
-}
-
 /// The calling companion's configured profile model `(provider_id, model)`.
 async fn companion_profile_model(
     deps: &ProviderSupportDeps,

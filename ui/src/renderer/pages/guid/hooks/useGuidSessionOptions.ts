@@ -99,10 +99,13 @@ export const useGuidSessionOptions = (): GuidSessionOptions => {
               tag: aw.tag,
             }),
         };
-        report(
-          [autoWorkTask],
-          await Promise.allSettled([autoWorkTask.run()])
-        );
+        const [result] = await Promise.allSettled([autoWorkTask.run()]);
+        report([autoWorkTask], [result]);
+        // AutoWork is the launch mode itself, not an optional decoration. A
+        // failed binding must abort the Guid handoff so the caller can delete
+        // the just-created, still-empty Session instead of navigating to a
+        // conversation that will never consume its queue.
+        if (result.status === 'rejected') throw result.reason;
       }
     },
     [t]

@@ -26,6 +26,7 @@ export const AUTOWORK_STATUS_COLOR: Record<AutoWorkRunState, string> = {
   off: CAPABILITY_COLORS.off,
   idle: CAPABILITY_COLORS.idle,
   active: CAPABILITY_COLORS.active,
+  paused: CAPABILITY_COLORS.armed,
 };
 
 /**

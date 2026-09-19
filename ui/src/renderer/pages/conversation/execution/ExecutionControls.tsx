@@ -180,6 +180,11 @@ export const ExecutionControls: React.FC<{
             tabIndex={0}
             aria-label={t('agentExecution.controls.cancel')}
             aria-disabled={busy}
+            onKeyDown={(event) => {
+              if (busy || (event.key !== 'Enter' && event.key !== ' ')) return;
+              event.preventDefault();
+              event.currentTarget.click();
+            }}
             className='flex h-30px shrink-0 cursor-pointer select-none items-center gap-5px rd-8px border border-solid border-[var(--border-base)] px-10px text-12px font-500 text-t-secondary transition-all duration-150 hover:border-danger hover:text-danger'
             style={{
               opacity: busy ? 0.6 : undefined,

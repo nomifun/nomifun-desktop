@@ -54,7 +54,7 @@ import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
 import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
-import { useGuidSend } from './hooks/useGuidSend';
+import { shouldStartGuidCollaboration, useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
 import type { GuidAgentSelection } from './types';
 import styles from './index.module.css';
@@ -63,10 +63,13 @@ import { CreationComposerContext } from '@/renderer/creation/CreationComposerCon
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 import { useCompanion } from '@/renderer/pages/nomi/useNomi';
 import { parseCompanionId } from '@/common/types/ids';
+import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
+  resetSessionOptions?: boolean;
   selectedAgentPresetId?: string;
+  selectedAgentTemplateKey?: OfficialPresetKey;
   workspace?: string;
 };
 
@@ -87,11 +90,15 @@ const GuidPage: React.FC = () => {
   const navigationState = location.state as GuidNavigationState | null;
   const resetAgentRequested =
     navigationState?.resetAgentSelection === true;
+  const resetSessionOptionsRequested =
+    navigationState?.resetSessionOptions === true;
   const preselectedPresetId = navigationState?.selectedAgentPresetId;
+  const preselectedTemplateKey = navigationState?.selectedAgentTemplateKey;
 
   const agentSelection = useGuidAgentSelection({
     resetAgentSelection: resetAgentRequested,
     selectedAgentPresetId: preselectedPresetId,
+    selectedAgentTemplateKey: preselectedTemplateKey,
     locationKey: location.key,
   });
   const modelSelection = useGuidModelSelection('nomi');
@@ -137,6 +144,8 @@ const GuidPage: React.FC = () => {
         )
       )
     : presetCapabilities.actionIds;
+  const collaborationEnabled = presetResourceResolutionReady
+    && presetCapabilityIds.has('agent.collaboration');
   // Knowledge is an optional, session-scoped mount. It keeps its compact
   // KnowledgeControl interaction and is applied after the conversation exists;
   // only resources that truly gate launch belong in the large resource picker.
@@ -154,6 +163,8 @@ const GuidPage: React.FC = () => {
   const advancedControlsEnabled = !isCompanionAgent && presetResourceResolutionReady && presetCapabilityIds.size > 0;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
+  const collaborationLaunchConfigured = collaborationEnabled
+    && shouldStartGuidCollaboration(collaboration.config);
   const resourceSelectionsReady = presetResourceResolutionReady
     && selectedResourcesAvailable
     && resourceSelectionResolution.missingKinds.length === 0;
@@ -214,8 +225,9 @@ const GuidPage: React.FC = () => {
       }),
     autoWork: effectiveAutoWork,
     workspaceEnabled,
-    resourceResolutionReady: resourceSelectionsReady && (isCompanionAgent || collaboration.ready),
-    collaboration: collaboration.config,
+    resourceResolutionReady: resourceSelectionsReady
+      && (isCompanionAgent || !collaborationEnabled || collaboration.ready),
+    collaboration: collaborationEnabled ? collaboration.config : undefined,
     resourceSelections: resourceSelectionResolution.selections,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
@@ -358,6 +370,8 @@ const GuidPage: React.FC = () => {
   const handleSelectAgent = useCallback(
     (selection: GuidAgentSelection) => {
       agentSelection.setSelection(selection);
+      advancedConfig.reset();
+      collaboration.reset();
       mention.setMentionOpen(false);
       mention.setMentionQuery(null);
       mention.setMentionSelectorOpen(false);
@@ -365,6 +379,8 @@ const GuidPage: React.FC = () => {
     },
     [
       agentSelection.setSelection,
+      advancedConfig.reset,
+      collaboration.reset,
       mention.setMentionActiveIndex,
       mention.setMentionOpen,
       mention.setMentionQuery,
@@ -382,7 +398,7 @@ const GuidPage: React.FC = () => {
   useLayoutEffect(() => {
     // Returning from another page resumes the draft. Only an explicit new
     // conversation action requests a reset.
-    if (!resetAgentRequested) return;
+    if (!resetAgentRequested && !resetSessionOptionsRequested) return;
     guidInput.setInput('');
     guidInput.setFiles([]);
     guidInput.setLoading(false);
@@ -405,24 +421,31 @@ const GuidPage: React.FC = () => {
     location.key,
     navigationState?.workspace,
     resetAgentRequested,
+    resetSessionOptionsRequested,
   ]);
 
   useEffect(() => {
-    if (!resetAgentRequested && !preselectedPresetId) return;
+    if (!resetAgentRequested && !preselectedPresetId && !preselectedTemplateKey) return;
     if (
-      preselectedPresetId &&
+      (preselectedPresetId || preselectedTemplateKey) &&
       (agentSelection.isLoading || !agentSelection.isLoaded)
     ) {
       return;
     }
-    if (preselectedPresetId && agentSelection.loadError) return;
+    if ((preselectedPresetId || preselectedTemplateKey) && agentSelection.loadError) return;
     const preselectionResolved =
-      !preselectedPresetId ||
-      (agentSelection.selection.kind === 'preset' &&
-        agentSelection.selection.presetId === preselectedPresetId) ||
-      !agentSelection.presets.some(
-        (preset) => preset.preset_id === preselectedPresetId
-      );
+      (!preselectedPresetId && !preselectedTemplateKey) ||
+      (preselectedPresetId
+        ? (agentSelection.selection.kind === 'preset' &&
+            agentSelection.selection.presetId === preselectedPresetId) ||
+          !agentSelection.presets.some(
+            (preset) => preset.preset_id === preselectedPresetId
+          )
+        : (agentSelection.selection.kind === 'template' &&
+            agentSelection.selection.templateKey === preselectedTemplateKey) ||
+          !agentSelection.officialTemplates.some(
+            (template) => template.template_key === preselectedTemplateKey
+          ));
     if (!preselectionResolved) return;
     navigate(
       `${location.pathname}${location.search}${location.hash}`,
@@ -436,9 +459,11 @@ const GuidPage: React.FC = () => {
     agentSelection.isLoading,
     agentSelection.isLoaded,
     agentSelection.loadError,
+    agentSelection.officialTemplates,
     agentSelection.presets,
     agentSelection.selection,
     preselectedPresetId,
+    preselectedTemplateKey,
     resetAgentRequested,
   ]);
 
@@ -472,6 +497,7 @@ const GuidPage: React.FC = () => {
               onChange: advancedConfig.setAutoWork,
             }}
             applyNote={t('guid.advanced.applyNote')}
+            disabledReason={collaborationLaunchConfigured ? t('guid.collaboration.autoworkExclusive') : undefined}
           />
         </>
       )}
@@ -529,7 +555,7 @@ const GuidPage: React.FC = () => {
               {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
               <Composer
                 sideTools={
-                  !isCompanionAgent && <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
+                  !isCompanionAgent && collaborationEnabled && <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
                     <CollaborationComposerControl
                       value={collaboration.activeCollaborators}
                       onChange={collaboration.setCollaborators}
@@ -540,6 +566,8 @@ const GuidPage: React.FC = () => {
                       onTemplateClear={() => collaboration.setTemplate(null)}
                       policy={collaboration.policy}
                       onPolicyChange={collaboration.setPolicy}
+                      disabled={advancedConfig.autoWork.enabled}
+                      disabledReason={advancedConfig.autoWork.enabled ? t('guid.collaboration.autoworkExclusive') : undefined}
                     />
                   </ComposerToolRail>
                 }

@@ -7,7 +7,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { parseConversationId } from '@/common/types/ids';
-import type { TChatConversation } from '../config/storage';
 import { conversation } from './ipcBridge';
 
 const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000301';
@@ -35,10 +34,8 @@ function recordPatch(): Array<{ method: string; url: string; body?: string }> {
 }
 
 describe('conversation update wire contract', () => {
-  test('never sends merge_extra: UpdateConversationRequest is deny_unknown_fields', () => {
-    // The server DTO (nomifun-api-types/src/conversation.rs) has no such field,
-    // so shipping it turned every extra PATCH into a 400. `extra` is always
-    // merged server-side; there is nothing to switch on.
+  test('never exposes a legacy merge_extra mutation switch', () => {
+    // The canonical metadata DTO rejects both `merge_extra` and `extra`.
     expect(source.includes('merge_extra')).toBe(false);
   });
 
@@ -47,7 +44,7 @@ describe('conversation update wire contract', () => {
 
     await expect(conversation.update.invoke({
         conversation_id: parseConversationId(CONVERSATION_ID),
-        updates: { extra: { workspace: '/home/me/project' } as TChatConversation['extra'] },
+        updates: { extra: { workspace: '/home/me/project' } } as never,
       })).rejects.toThrow('AgentSession binding is immutable');
     expect(calls).toHaveLength(0);
   });
@@ -57,7 +54,7 @@ describe('conversation update wire contract', () => {
 
     await conversation.update.invoke({
       conversation_id: parseConversationId(CONVERSATION_ID),
-      updates: { name: 'renamed', pinned: true } as Partial<TChatConversation> & { pinned?: boolean },
+      updates: { name: 'renamed', pinned: true },
     });
 
     expect(JSON.parse(String(calls[0].body))).toEqual({ name: 'renamed', pinned: true });

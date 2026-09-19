@@ -312,10 +312,9 @@ const NomiSendBox: React.FC<{
         id = uuidv7(),
         input,
         files,
-        preset_id,
         initialOnly = false,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id' | 'preset_id'>> & {
+        Partial<Pick<ConversationCommandQueueItem, 'id'>> & {
           initialOnly?: boolean;
         },
       execution?: ConversationCommandQueueExecution,
@@ -349,7 +348,6 @@ const NomiSendBox: React.FC<{
           files,
           idempotency_key: id,
           initial_only: initialOnly,
-          preset_id,
         });
         if (execution && !execution.isCurrent()) return;
         msg_id = res.msg_id;
@@ -528,7 +526,6 @@ const NomiSendBox: React.FC<{
       } finally { creationSubmittingRef.current = false; setCreationSubmitting(false); }
       return;
     }
-    const presetId = await creation?.resolvePreset?.() ?? creation?.presetId;
     if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
@@ -540,14 +537,13 @@ const NomiSendBox: React.FC<{
         hasPendingCommands,
       })
     ) {
-      enqueue({ input: message, files: filesToSend, preset_id: presetId });
+      enqueue({ input: message, files: filesToSend });
       return;
     }
 
     await executeCommand({
       input: message,
       files: filesToSend,
-      preset_id: presetId,
     });
   };
 

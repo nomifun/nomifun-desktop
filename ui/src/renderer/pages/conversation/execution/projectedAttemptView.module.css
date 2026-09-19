@@ -86,9 +86,9 @@
   flex-shrink: 0;
 }
 
-/* A single banner action pill (rerun / steer trigger / return). Rendered as a
- * <div role="button"> per project convention (bare <button> shows a WebView2
- * focus box). The "return" variant is primary-tinted to read as the way out. */
+/* A single banner action pill (rerun / steer trigger / return). The focusable
+ * role=button wrapper has explicit Enter/Space activation because a bare
+ * button receives platform-specific WebView2 chrome. */
 .action {
   display: inline-flex;
   align-items: center;

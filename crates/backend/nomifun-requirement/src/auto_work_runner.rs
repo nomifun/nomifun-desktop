@@ -4,7 +4,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
-use nomifun_api_types::{AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus};
+use nomifun_api_types::{
+    AutoWorkRunState, AutoWorkState, AutoWorkTargetKind, Requirement, RequirementStatus,
+};
 use nomifun_common::{AppError, ConversationId};
 use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
@@ -166,6 +168,33 @@ pub enum AutoWorkStopOutcome {
     AlreadyStopped,
     Stopped,
     CleanupPending,
+}
+
+fn start_outcome_failure(
+    kind: AutoWorkTargetKind,
+    target_id: &str,
+    outcome: AutoWorkStartOutcome,
+) -> Option<AppError> {
+    match outcome {
+        AutoWorkStartOutcome::Started
+        | AutoWorkStartOutcome::Restarted
+        | AutoWorkStartOutcome::AlreadyRunning => None,
+        AutoWorkStartOutcome::CleanupPending => Some(AppError::Conflict(format!(
+            "AutoWork cleanup for {} {target_id} is still in progress",
+            kind.as_str()
+        ))),
+        AutoWorkStartOutcome::ShuttingDown => Some(AppError::Conflict(
+            "AutoWork runner is shutting down".to_owned(),
+        )),
+        AutoWorkStartOutcome::InvalidTarget => Some(AppError::BadRequest(format!(
+            "target_id is not a canonical {} ID",
+            kind.as_str()
+        ))),
+        AutoWorkStartOutcome::StalePersistedConfig => Some(AppError::Conflict(format!(
+            "AutoWork config for {} {target_id} became stale before its loop started",
+            kind.as_str()
+        ))),
+    }
 }
 
 #[derive(Default)]
@@ -344,6 +373,11 @@ impl AutoWorkRunner {
                 kind.as_str()
             )));
         }
+        if owner_id != self.deps.authoritative_user_id.as_ref() {
+            return Err(AppError::Forbidden(
+                "AutoWork may only bind an AgentSession owned by this installation".to_owned(),
+            ));
+        }
         if self.shutdown.is_cancelled() {
             return Err(AppError::Conflict(
                 "AutoWork runner is shutting down".to_owned(),
@@ -371,6 +405,24 @@ impl AutoWorkRunner {
                 "AutoWork config for {} {target_id} changed concurrently",
                 kind.as_str()
             )));
+        }
+
+        // Enabling is a product admission, not merely a config write. Resolve
+        // the exact immutable Session binding (including its owner-scoped
+        // workspace resources) before publishing `enabled=true`. The loop
+        // repeats this check at execution time as a deletion/TOCTOU fence, but
+        // a missing or malformed binding must be reported synchronously here
+        // instead of leaving a durable enabled config with no live loop.
+        if !historical_replay_candidate
+            && config.enabled
+            && !self.running_config_matches(&key, &config)
+        {
+            let validated = self
+                .deps
+                .workspace
+                .resolve_frozen_workspace(owner_id, target_id)
+                .await?;
+            drop(validated);
         }
 
         // A semantic reconfiguration must quiesce the old generation before
@@ -421,19 +473,20 @@ impl AutoWorkRunner {
         if config.enabled {
             let tag = config.enabled_tag()?.to_owned();
             if let Err(error) = self.deps.service.resume_tag_for_enable(&tag).await {
-                warn!(
-                    tag,
-                    %error,
-                    "AutoWork enable persisted, but shared tag resume failed"
+                let error = AppError::Conflict(format!(
+                    "AutoWork could not resume tag {tag}: {error}"
+                ));
+                return Err(
+                    self.rollback_failed_enable_locked(owner_id, kind, target_id, &saved, error)
+                        .await,
                 );
             }
-            if self.start_snapshot_locked(kind, target_id, saved.clone()).await
-                == AutoWorkStartOutcome::CleanupPending
-            {
-                return Err(AppError::Conflict(format!(
-                    "AutoWork cleanup for {} {target_id} is still in progress",
-                    kind.as_str()
-                )));
+            let outcome = self.start_snapshot_locked(kind, target_id, saved.clone()).await;
+            if let Some(error) = start_outcome_failure(kind, target_id, outcome) {
+                return Err(
+                    self.rollback_failed_enable_locked(owner_id, kind, target_id, &saved, error)
+                        .await,
+                );
             }
         } else if self.stop_locked(kind, target_id).await
             == AutoWorkStopOutcome::CleanupPending
@@ -445,6 +498,61 @@ impl AutoWorkRunner {
         }
 
         Ok(saved)
+    }
+
+    /// Caller holds the target transition. Compensate any post-commit startup
+    /// failure so REST never returns an error while leaving an enabled binding
+    /// that has no executor. Cleanup remains owned even when its bounded waiter
+    /// expires; the durable disabled config prevents boot from resurrecting it.
+    async fn rollback_failed_enable_locked(
+        &self,
+        owner_id: &str,
+        kind: AutoWorkTargetKind,
+        target_id: &str,
+        saved: &AutoWorkConfigSnapshot,
+        failure: AppError,
+    ) -> AppError {
+        let disabled = AutoWorkConfig::normalize(false, None, None)
+            .expect("disabled AutoWork config is canonical");
+        let rollback = self
+            .deps
+            .service
+            .save_autowork_config(
+                owner_id,
+                kind,
+                target_id,
+                disabled,
+                &saved.revision,
+                None,
+            )
+            .await;
+        let stop = self.stop_locked(kind, target_id).await;
+        match rollback {
+            Ok(_) => {
+                self.deps.service.emit_autowork_state(&AutoWorkState {
+                    kind,
+                    target_id: target_id.to_owned(),
+                    enabled: false,
+                    tag: None,
+                    running: false,
+                    run_state: AutoWorkRunState::Off,
+                    paused: false,
+                    paused_reason: None,
+                    current_requirement_id: None,
+                    completed_count: 0,
+                });
+                if stop == AutoWorkStopOutcome::CleanupPending {
+                    AppError::Conflict(format!(
+                        "{failure}; the failed AutoWork generation is still cleaning up"
+                    ))
+                } else {
+                    failure
+                }
+            }
+            Err(rollback_error) => AppError::Internal(format!(
+                "{failure}; failed to roll back enabled AutoWork config: {rollback_error}"
+            )),
+        }
     }
 
     /// Start AutoWork only when the supplied config still matches the latest
@@ -993,11 +1101,58 @@ impl AutoWorkRunner {
             );
             return false;
         }
-        matches!(
-            self.start_snapshot_locked(binding.kind, &binding.target_id, latest)
-                .await,
-            AutoWorkStartOutcome::Started | AutoWorkStartOutcome::Restarted
-        )
+        match self
+            .deps
+            .workspace
+            .resolve_frozen_workspace(&self.deps.authoritative_user_id, &binding.target_id)
+            .await
+        {
+            Ok(validated) => drop(validated),
+            Err(error) => {
+                let failure = AppError::Conflict(format!(
+                    "persisted AutoWork binding failed frozen Session validation: {error}"
+                ));
+                let settled = self
+                    .rollback_failed_enable_locked(
+                        &self.deps.authoritative_user_id,
+                        binding.kind,
+                        &binding.target_id,
+                        &latest,
+                        failure,
+                    )
+                    .await;
+                warn!(
+                    target_id = binding.target_id,
+                    ?binding.kind,
+                    error = %settled,
+                    "AutoWork boot resume disabled an invalid persisted binding"
+                );
+                return false;
+            }
+        }
+        let outcome = self
+            .start_snapshot_locked(binding.kind, &binding.target_id, latest.clone())
+            .await;
+        if let Some(failure) = start_outcome_failure(binding.kind, &binding.target_id, outcome) {
+            let settled = self
+                .rollback_failed_enable_locked(
+                    &self.deps.authoritative_user_id,
+                    binding.kind,
+                    &binding.target_id,
+                    &latest,
+                    failure,
+                )
+                .await;
+            warn!(
+                target_id = binding.target_id,
+                ?binding.kind,
+                error = %settled,
+                "AutoWork boot resume rolled back a binding whose loop could not start"
+            );
+            false
+        } else {
+            true
+        }
     }
 
     /// Quiesce process-owned coordinators, target waiters, and lease renewal
@@ -1511,7 +1666,7 @@ enum TurnResult {
 /// initial bulk load and showed a stale colour —active/green in the header but
 /// idle/orange in the sidebar for the same session. `enabled=false` is emitted
 /// when the max-requirements cap just disabled the binding so the icon drops off.
-fn emit_autowork_progress(
+async fn emit_autowork_progress(
     deps: &AutoWorkRunnerDeps,
     kind: AutoWorkTargetKind,
     target_id: &str,
@@ -1520,13 +1675,30 @@ fn emit_autowork_progress(
     enabled: bool,
 ) {
     let current_requirement_id = progress.current();
+    let (paused, paused_reason) = if enabled {
+        match deps.service.tag_pause_state(tag).await {
+            Ok(state) => state,
+            Err(error) => {
+                warn!(tag, %error, "Failed to project durable AutoWork tag pause state");
+                (false, None)
+            }
+        }
+    } else {
+        (false, None)
+    };
     deps.service.emit_autowork_state(&AutoWorkState {
         kind,
         target_id: target_id.to_string(),
         enabled,
         tag: Some(tag.to_string()),
         running: enabled,
-        run_state: AutoWorkState::run_state(enabled, current_requirement_id.as_deref()),
+        run_state: AutoWorkState::run_state(
+            enabled,
+            paused,
+            current_requirement_id.as_deref(),
+        ),
+        paused,
+        paused_reason,
         current_requirement_id,
         completed_count: progress.completed(),
     });
@@ -1616,7 +1788,7 @@ async fn run_loop(
         );
         // active: a requirement is now in flight -> broadcast so the session-list
         // icon turns active-coloured in step with the per-session control.
-        emit_autowork_progress(&deps, kind, target_id, tag, &progress, true);
+        emit_autowork_progress(&deps, kind, target_id, tag, &progress, true).await;
 
         // 2. Inject + wait for the turn to finish (per target kind).
         let result = match kind {
@@ -1925,7 +2097,7 @@ async fn run_loop(
                     );
                 }
                 // off: the cap disabled the binding -> drop the session-list icon.
-                emit_autowork_progress(&deps, kind, target_id, tag, &progress, false);
+                emit_autowork_progress(&deps, kind, target_id, tag, &progress, false).await;
                 break;
             }
         }
@@ -1933,7 +2105,7 @@ async fn run_loop(
         // idle: the turn finished and no requirement is in flight -> broadcast so
         // the session-list icon returns to the idle colour in step with the
         // per-session control (which only looks fresh because it re-GETs on open).
-        emit_autowork_progress(&deps, kind, target_id, tag, &progress, true);
+        emit_autowork_progress(&deps, kind, target_id, tag, &progress, true).await;
 
         // 4. Failure backoff: a failed or busy turn inserts a bounded, escalating
         // delay before the next claim so a deterministic failure cannot spin the
@@ -2135,4 +2307,35 @@ fn failure_backoff(consecutive: u32) -> Duration {
     let exp = consecutive.saturating_sub(1).min(5);
     let secs = (1u64 << exp).min(30);
     Duration::from_secs(secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_start_outcome_has_an_explicit_commit_policy() {
+        let target_id = ConversationId::new().into_string();
+        for success in [
+            AutoWorkStartOutcome::Started,
+            AutoWorkStartOutcome::Restarted,
+            AutoWorkStartOutcome::AlreadyRunning,
+        ] {
+            assert!(
+                start_outcome_failure(AutoWorkTargetKind::Conversation, &target_id, success)
+                    .is_none()
+            );
+        }
+        for failure in [
+            AutoWorkStartOutcome::StalePersistedConfig,
+            AutoWorkStartOutcome::CleanupPending,
+            AutoWorkStartOutcome::ShuttingDown,
+            AutoWorkStartOutcome::InvalidTarget,
+        ] {
+            assert!(
+                start_outcome_failure(AutoWorkTargetKind::Conversation, &target_id, failure)
+                    .is_some()
+            );
+        }
+    }
 }

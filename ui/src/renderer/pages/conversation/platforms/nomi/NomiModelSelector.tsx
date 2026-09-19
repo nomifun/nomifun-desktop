@@ -15,7 +15,7 @@ export default function NomiModelSelector({ selection, disabled = false, compact
   return <ChatModelSelector providers={selection?.providers ?? []} currentModel={selection?.current_model}
     getAvailableModels={provider => selection?.getAvailableModels(provider) ?? []}
     onSelectModel={async (provider, model) => { await selection?.handleSelectModel(provider, model); }}
-    disabled={disabled || !selection} compact={compact ?? isOpen} className={className}
+    disabled={disabled || !selection || selection.pickerDisabled} compact={compact ?? isOpen} className={className}
     readOnlyLabel={!selection ? t('conversation.welcome.useCliModel') : undefined}
     testId='nomi-model-selector' />;
 }

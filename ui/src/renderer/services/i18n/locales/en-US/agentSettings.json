@@ -142,7 +142,7 @@
     }
   },
   "modules": {
-    "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work or fork an authorized Agent task." },
+    "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision." },
     "automationSchedule": { "name": "Schedules", "description": "Create and manage durable schedules without exposing scheduler internals." },
     "browser": { "name": "Browser", "description": "Observe and interact with a bound managed browser or authorized Chrome. The provider never adds permissions." },
     "channelMessaging": { "name": "Channel messaging", "description": "Reply or send through a channel selected by the usage target." },
@@ -167,7 +167,7 @@
   },
   "actionLabels": {
     "search": "Search", "fetch": "Read pages", "read": "Read", "write": "Write", "autogen": "Generate knowledge",
-    "recall": "Recall", "delegate": "Delegate", "fork": "Fork", "list": "List", "create": "Create", "update": "Update", "delete": "Delete", "edit": "Edit", "launch": "Launch",
+    "recall": "Recall", "delegate": "Delegate", "fork": "Fork", "request_user_decision": "Ask the user", "list": "List", "create": "Create", "update": "Update", "delete": "Delete", "edit": "Edit", "launch": "Launch",
     "observe": "Observe", "navigate": "Navigate", "act": "Interact", "render_content": "Read page content", "download": "Download", "upload": "Upload", "evaluate": "Evaluate scripts",
     "reply": "Reply", "send": "Send", "learn": "Learn", "evolve": "Evolve", "notes_read": "Read notes", "notes_write": "Write notes", "handoff": "Hand off",
     "text": "Create text", "image": "Create images", "image_edit": "Edit images", "video": "Create video", "audio": "Create audio", "music": "Create music",

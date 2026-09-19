@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fromApiTurnCompletedEvent } from './ipcBridge';
+import { isAuthoritativeCompletionRuntimeIdle } from '@/renderer/pages/conversation/platforms/authoritativeTurnLifecyclePolicy';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
 const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000001';
@@ -106,5 +107,26 @@ describe('ipc bridge wire ID contracts', () => {
     });
 
     expect(mapped.runtime.is_processing).toBe(true);
+  });
+
+  test('accepts the canonical relay terminal only with explicit idle runtime authority', () => {
+    const mapped = fromApiTurnCompletedEvent({
+      conversation_id: CONVERSATION_ID,
+      turn_id: MESSAGE_ID,
+      status: 'finished',
+      state: 'ai_waiting_input',
+      can_send_message: true,
+      runtime: {
+        state: 'idle',
+        can_send_message: true,
+        has_runtime: false,
+        runtime_status: 'finished',
+        is_processing: false,
+        active_turn_id: null,
+      },
+    });
+
+    expect(mapped.turn_id).toBe(MESSAGE_ID);
+    expect(isAuthoritativeCompletionRuntimeIdle(mapped.runtime)).toBe(true);
   });
 });

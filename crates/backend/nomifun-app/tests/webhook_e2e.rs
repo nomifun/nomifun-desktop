@@ -11,64 +11,87 @@ use common::{
     setup_and_login,
 };
 
-async fn seed_canonical_agent_session(
-    services: &nomifun_app::compatibility::AppServices,
-    title: &str,
-) -> String {
-    use nomifun_agent_contracts::{
-        AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
-        AgentSessionMetadata, CorrelationId, DigestHex, EventProducerId, IdempotencyKey,
-        OperationId, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
-    };
+const AUTOWORK_PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8abc-012345679991";
+const AUTOWORK_MODEL: &str = "webhook-autowork-model";
 
-    let session_id = uuid::Uuid::now_v7().to_string();
-    let store = nomifun_agent_session::AgentSessionStore::from_pool(
-        services.database.pool().clone(),
+async fn seed_autowork_provider(services: &nomifun_app::compatibility::AppServices) {
+    sqlx::query(
+        "INSERT OR IGNORE INTO providers (\
+            provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, enabled, \
+            created_at, updated_at\
+         ) VALUES (?, 'openai', 'webhook-autowork-fixture', \
+            'https://example.invalid', 'bearer', ?, 1, 1, 1)",
     )
+    .bind(AUTOWORK_PROVIDER_ID)
+    .bind(common::encrypted_bearer_credentials())
+    .execute(services.database.pool())
     .await
     .unwrap();
-    let key = format!("webhook-e2e:{session_id}");
-    let created = store
-        .create_session(nomifun_agent_session::CreateSessionRequest::new(
-            AgentSessionLiveRecord {
-                agent_session_id: AgentSessionId::from(session_id.clone()),
-                owner_ref: PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: services.authoritative_user_id.to_string(),
-                },
-                metadata: AgentSessionMetadata {
-                    title: Some(title.to_owned()),
-                    archived: false,
-                    pinned: false,
-                },
-                agent_binding: AgentBindingValue {
-                    preset_revision_ref: PresetRevisionRef {
-                        preset_id: AgentPresetId::from("webhook-e2e-preset"),
-                        revision: 1,
-                        revision_digest: DigestHex::from("a".repeat(64)),
-                    },
-                    resolved_snapshot_ref: ResolvedSnapshotRef {
-                        snapshot_id: ResolvedSnapshotId::from("webhook-e2e-snapshot"),
-                        snapshot_digest: DigestHex::from("b".repeat(64)),
-                    },
-                    typed_resource_bindings: Vec::new(),
-                    binding_version: 1,
-                },
-                remote_binding_provenance: None,
-                parent_session_id: None,
-                fork_base_payload_id: None,
-                next_seq: 1,
-            },
-            1,
-            OperationId::from(format!("{key}:open")),
-            EventProducerId::from("session_api"),
-            IdempotencyKey::from(format!("{key}:open")),
-            CorrelationId::from(format!("{key}:open")),
+    common::seed_openai_chat_model(
+        services.database.pool(),
+        AUTOWORK_PROVIDER_ID,
+        AUTOWORK_MODEL,
+    )
+    .await;
+}
+
+/// Create the fixture through the same Agent configuration and Session APIs
+/// used by the product. AutoWork validates the exact saved revision and
+/// Snapshot, so a hand-written Store row is intentionally not sufficient.
+async fn create_autowork_agent_session(
+    app: &axum::Router,
+    services: &nomifun_app::compatibility::AppServices,
+    token: &str,
+    csrf: &str,
+    title: &str,
+) -> String {
+    seed_autowork_provider(services).await;
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-presets/from-template/chat.minimal",
+            json!({
+                "display_name": format!("{title} configuration"),
+                "reuse_existing": false,
+                "model": {
+                    "provider_id": AUTOWORK_PROVIDER_ID,
+                    "model": AUTOWORK_MODEL
+                }
+            }),
+            token,
+            csrf,
         ))
         .await
         .unwrap();
-    assert!(!created.duplicate);
-    session_id
+    let status = response.status();
+    let preset = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .expect("configured Agent preset id");
+
+    let response = app
+        .clone()
+        .oneshot(json_with_token(
+            "POST",
+            "/api/agent-sessions",
+            json!({
+                "preset_id": preset_id,
+                "title": title
+            }),
+            token,
+            csrf,
+        ))
+        .await
+        .unwrap();
+    let status = response.status();
+    let session = body_json(response).await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    session["data"]["agent_session_id"]
+        .as_str()
+        .expect("created AgentSession id")
+        .to_owned()
 }
 
 #[tokio::test]
@@ -419,8 +442,14 @@ async fn tag_bindings_lists_enabled_autowork_agent_sessions() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(body_json(resp).await["data"].as_array().unwrap().len(), 0);
 
-    // Seed the canonical Store directly, then enable AutoWork on that Session.
-    let session_id = seed_canonical_agent_session(&services, "AgentSession X").await;
+    let session_id = create_autowork_agent_session(
+        &app,
+        &services,
+        &token,
+        &csrf,
+        "AgentSession X",
+    )
+    .await;
 
     let resp = app
         .clone()
@@ -457,7 +486,14 @@ async fn admin_disable_of_idle_target_is_allowed() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    let session_id = seed_canonical_agent_session(&services, "AgentSession Y").await;
+    let session_id = create_autowork_agent_session(
+        &app,
+        &services,
+        &token,
+        &csrf,
+        "AgentSession Y",
+    )
+    .await;
 
     // enable then admin-disable (idle) → both OK
     for enabled in [true, false] {

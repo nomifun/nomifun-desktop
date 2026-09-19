@@ -48,6 +48,9 @@ export interface GuidCollaboratorSelectorProps {
   triggerLabel?: string;
   /** Highlights a unified trigger when collaboration is enabled. */
   triggerActive?: boolean;
+  /** Existing AgentSessions expose their frozen collaboration facts read-only. */
+  disabled?: boolean;
+  disabledReason?: string;
 }
 
 /** Case-insensitive substring match against an option's text label. */
@@ -71,6 +74,8 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   panelFooter,
   triggerLabel,
   triggerActive = false,
+  disabled = false,
+  disabledReason,
 }) => {
   const { t } = useTranslation();
   const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useExecutionModelPool();
@@ -79,6 +84,13 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const open = rail ? rail.openTool === 'collaboration' : localOpen;
   const setOpen = (visible: boolean) => {
+    if (disabled) {
+      if (!visible && rail) {
+        rail.setOpenTool((current) => current === 'collaboration' ? undefined : current);
+      }
+      else if (!visible) setLocalOpen(false);
+      return;
+    }
     if (rail) {
       rail.setOpenTool((current) => visible ? 'collaboration' : current === 'collaboration' ? undefined : current);
     } else {
@@ -143,7 +155,7 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
               mode='multiple'
               value={encodedValue}
               onChange={handleChange}
-              disabled={Boolean(selectedTemplate)}
+              disabled={disabled || Boolean(selectedTemplate)}
               placeholder={t('guid.collaboration.models.placeholder')}
               showSearch
               filterOption={filterByLabel}
@@ -227,9 +239,10 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
           ref={triggerRef}
           type='button'
           className={classNames(railStyles.railButton, open && railStyles.active)}
-          disabled={isLoading}
-          aria-label={visibleLabel}
-          title={visibleLabel}
+          disabled={isLoading || disabled}
+          aria-label={disabledReason ? `${visibleLabel}: ${disabledReason}` : visibleLabel}
+          title={disabledReason ?? visibleLabel}
+          data-readonly={disabled ? 'true' : undefined}
           aria-expanded={open}
           aria-haspopup='dialog'
           aria-pressed={triggerActive}
@@ -253,9 +266,11 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
         )}
         shape='round'
         size='small'
-        disabled={isLoading}
+        disabled={isLoading || disabled}
         data-testid='guid-collaborator-selector'
-        aria-label={visibleLabel}
+        aria-label={disabledReason ? `${visibleLabel}: ${disabledReason}` : visibleLabel}
+        title={disabledReason ?? visibleLabel}
+        data-readonly={disabled ? 'true' : undefined}
         aria-pressed={triggerLabel ? triggerActive : undefined}
       >
         <span className='flex items-center gap-6px min-w-0'>

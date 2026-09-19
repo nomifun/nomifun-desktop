@@ -6,7 +6,7 @@
 
 import { configService } from '@/common/config/configService';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
-import type { AgentPresetSummary, OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import type { AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useGuidDraftState } from './useGuidDraftState';
 import {
@@ -40,6 +40,7 @@ export type GuidAgentSelectionResult = {
 type UseGuidAgentSelectionOptions = {
   resetAgentSelection?: boolean;
   selectedAgentPresetId?: string;
+  selectedAgentTemplateKey?: OfficialPresetKey;
   locationKey?: string;
 };
 
@@ -60,6 +61,7 @@ const saveSelection = (selection: GuidAgentSelection): void => {
 export const useGuidAgentSelection = ({
   resetAgentSelection = false,
   selectedAgentPresetId,
+  selectedAgentTemplateKey,
   locationKey,
 }: UseGuidAgentSelectionOptions): GuidAgentSelectionResult => {
   const [selection, setSelectionState] = useGuidDraftState<GuidAgentSelection>('agent', () => {
@@ -140,7 +142,25 @@ export const useGuidAgentSelection = ({
       return;
     }
 
-    if (!selectedAgentPresetId || isLoading || !isLoaded) return;
+    if (isLoading || !isLoaded) return;
+
+    if (selectedAgentTemplateKey) {
+      const template = officialTemplates.find(
+        (candidate) => candidate.template_key === selectedAgentTemplateKey
+      );
+      if (!template && loadError) return;
+
+      navigationRequestHandledRef.current = true;
+      if (template) {
+        setSelection({ kind: 'template', templateKey: template.template_key });
+        return;
+      }
+
+      selectDefaultTemplate();
+      return;
+    }
+
+    if (!selectedAgentPresetId) return;
 
     const preset = presets.find(
       (candidate) => candidate.preset_id === selectedAgentPresetId
@@ -159,9 +179,11 @@ export const useGuidAgentSelection = ({
     isLoaded,
     loadError,
     presets,
+    officialTemplates,
     resetAgentSelection,
     selectDefaultTemplate,
     selectedAgentPresetId,
+    selectedAgentTemplateKey,
     setSelection,
   ]);
 
@@ -172,6 +194,7 @@ export const useGuidAgentSelection = ({
       loadError ||
       resetAgentSelection ||
       selectedAgentPresetId ||
+      selectedAgentTemplateKey ||
       selectedPreset ||
       selectedTemplate
     ) {
@@ -184,6 +207,7 @@ export const useGuidAgentSelection = ({
     loadError,
     resetAgentSelection,
     selectedAgentPresetId,
+    selectedAgentTemplateKey,
     selectedPreset,
     selectedTemplate,
     selectDefaultTemplate,

@@ -74,6 +74,70 @@ export type GuidSendResult = {
   isButtonDisabled: boolean;
 };
 
+/**
+ * A collaboration draft owns the first piece of work when it selects more than
+ * one model, a saved collaboration plan, or an explicit non-default policy. A
+ * single-model automatic policy is the ordinary chat default: it grants later
+ * delegation but must not invent an AgentExecution before the lead Agent has
+ * handled the user's message.
+ */
+export const shouldStartGuidCollaboration = (
+  collaboration: GuidCollaborationConfig | undefined
+): collaboration is GuidCollaborationConfig =>
+  Boolean(
+    collaboration &&
+      (collaboration.execution_model_pool.mode === 'range' ||
+        collaboration.execution_template_id !== null ||
+        collaboration.delegation_policy !== 'automatic' ||
+        collaboration.decision_policy !== 'automatic')
+  );
+
+const startGuidCollaboration = async (
+  conversationId: ConversationId,
+  goal: string,
+  workspace: string,
+  model: TProviderWithModel,
+  collaboration: GuidCollaborationConfig
+): Promise<void> => {
+  const shared = {
+    goal: goal.trim(),
+    ...(workspace.trim() ? { work_dir: workspace.trim() } : {}),
+    delegation_policy: collaboration.delegation_policy,
+    decision_policy: collaboration.decision_policy,
+    lead_conversation_id: conversationId,
+    lead_model: {
+      provider_id: model.id,
+      model: model.use_model,
+    },
+  };
+
+  if (collaboration.execution_template_id !== null) {
+    await ipcBridge.agentExecutionTemplate.createExecution.invoke({
+      execution_template_id: collaboration.execution_template_id,
+      request: shared,
+    });
+    return;
+  }
+
+  await ipcBridge.agentExecution.create.invoke({
+    ...shared,
+    model_pool: collaboration.execution_model_pool,
+  });
+};
+
+const discardFailedGuidSession = async (conversationId: ConversationId): Promise<void> => {
+  try {
+    await ipcBridge.agentPlatform.sessions.delete.invoke({
+      agent_session_id: conversationId,
+    });
+  } catch (cleanupError) {
+    // Preserve the admission error shown to the user. Cleanup failures remain
+    // diagnostic: the backend deletion saga is the only authority that can
+    // decide whether a late execution admission made this Session non-empty.
+    console.error('[useGuidSend] Failed to discard incomplete AgentSession:', cleanupError);
+  }
+};
+
 /** Creates a frozen AgentPreset Session from a workbench Agent selection. */
 export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const {
@@ -90,6 +154,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     current_model,
     applyAdvancedConfig,
     autoWork,
+    collaboration,
+    dir,
     resourceResolutionReady,
     resourceSelections,
     setMentionOpen,
@@ -117,6 +183,11 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     const entryPlan = planGuidEntry(input, autoWork);
     if (!current_model) throw new Error('MODEL_REQUIRED');
     if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
+    const startsCollaboration =
+      !entryPlan.autoWorkEntry && shouldStartGuidCollaboration(collaboration);
+    if (startsCollaboration && files.length > 0) {
+      throw new Error(t('guid.collaboration.attachmentsUnsupported'));
+    }
     let conversationId: ConversationId;
     let conversation;
 
@@ -151,45 +222,76 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
-    conversation = await ipcBridge.conversation.get.invoke({
-      conversation_id: conversationId,
-    });
-    if (!conversation?.id) {
-      throw new Error(
-        'AgentSession was created without a Conversation projection'
-      );
-    }
-    await applyAdvancedConfig?.(conversationId);
-    emitter.emit('chat.history.refresh');
+    try {
+      conversation = await ipcBridge.conversation.get.invoke({
+        conversation_id: conversationId,
+      });
+      if (!conversation?.id) {
+        throw new Error(
+          'AgentSession was created without a Conversation projection'
+        );
+      }
+      await applyAdvancedConfig?.(conversationId);
 
-    if (entryPlan.sendInitialMessage) {
-      sessionStorage.setItem(
-        sessionStorageKey(
-          'initial-message-nomi',
-          conversationTarget(conversationId)
-        ),
-        JSON.stringify({
-          conversation_id: conversationId,
-          initial_admission_epoch: 0,
-          input,
-          files: files.length > 0 ? files : undefined,
-          idempotency_key: uuidv7(),
-        })
-      );
-    }
-
-    // Retain template identity for the next submit; an internal official
-    // preset ID alone is indistinguishable from a personal Agent in the UI.
-    if (selection.kind === 'template' && !conversation.extra?.companion_session) {
-      try {
-        const draftKey = creationDraftStorageKey(conversationId);
-        if (sessionStorage.getItem(draftKey) === null) {
-          sessionStorage.setItem(draftKey, JSON.stringify({
-            ...emptyCreationDraft(), selectedAgent: selection, presetId: launchPreset.preset_id,
-          }));
+      if (startsCollaboration) {
+        try {
+          await startGuidCollaboration(
+            conversationId,
+            input,
+            conversation.extra?.workspace ?? dir,
+            current_model,
+            collaboration
+          );
+        } catch (error) {
+          // A lost HTTP response must not discard a Session whose Execution
+          // was already committed. Recover through the canonical link before
+          // treating admission as failed.
+          const recovered = await ipcBridge.conversation.get
+            .invoke({ conversation_id: conversationId })
+            .catch(() => null);
+          if (!recovered?.linked_execution_id) throw error;
+          conversation = recovered;
         }
-      } catch { /* A created session remains usable when browser storage is unavailable. */ }
+        const linked = await ipcBridge.conversation.get
+          .invoke({ conversation_id: conversationId })
+          .catch((error) => {
+            console.error('[useGuidSend] Collaboration started but link refresh failed:', error);
+            return null;
+          });
+        if (linked) conversation = linked;
+      } else if (entryPlan.sendInitialMessage) {
+        sessionStorage.setItem(
+          sessionStorageKey(
+            'initial-message-nomi',
+            conversationTarget(conversationId)
+          ),
+          JSON.stringify({
+            conversation_id: conversationId,
+            initial_admission_epoch: 0,
+            input,
+            files: files.length > 0 ? files : undefined,
+            idempotency_key: uuidv7(),
+          })
+        );
+      }
+
+      // Retain template identity for the next submit; an internal official
+      // preset ID alone is indistinguishable from a personal Agent in the UI.
+      if (selection.kind === 'template' && !conversation.extra?.companion_session) {
+        try {
+          const draftKey = creationDraftStorageKey(conversationId);
+          if (sessionStorage.getItem(draftKey) === null) {
+            sessionStorage.setItem(draftKey, JSON.stringify({
+              ...emptyCreationDraft(), selectedAgent: selection, presetId: launchPreset.preset_id,
+            }));
+          }
+        } catch { /* A created session remains usable when browser storage is unavailable. */ }
+      }
+    } catch (error) {
+      await discardFailedGuidSession(conversationId);
+      throw error;
     }
+    emitter.emit('chat.history.refresh');
     seedConversationCache(conversation);
     await navigate(`/conversation/${conversationId}`);
   }, [
@@ -197,6 +299,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     applyAdvancedConfig,
     autoWork,
     current_model,
+    collaboration,
+    dir,
     files,
     input,
     navigate,

@@ -10,20 +10,15 @@
 //! registers the memory tools, and (b) the main sidebar filters them out;
 //! `extra.companion_id` records the owning companion for persona/knowledge selection.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_ai_agent::CompanionMemorySink;
 use nomifun_api_types::CreateConversationRequest;
-use nomifun_common::{AppError, ProviderWithModel};
+use nomifun_common::AppError;
 
 use crate::collector::{self, SharedConfig, SharedEventStoreLock};
 use crate::events::CompanionEventEmitter;
-use crate::managed_skills::{
-    load_manifest, record_managed_entry, record_source_matches, remove_stale_managed_entries,
-    save_manifest,
-};
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
 use crate::profile::{CompanionProfileConfig, normalized_effective_skill_names};
 use crate::registry::CompanionRegistry;
@@ -228,22 +223,6 @@ pub async fn build_companion_system_prompt(
     system
 }
 
-/// reconcile 的纯决策结果。
-#[derive(Debug, PartialEq, Eq)]
-enum WorkspaceAction {
-    /// current 已是 desired，无需动。
-    Noop,
-    /// current 为空：在 desired 处新建。
-    Create(std::path::PathBuf),
-    /// 把 current 目录移动到 desired（伙伴改名后的目录跟随）。
-    Move {
-        from: std::path::PathBuf,
-        to: std::path::PathBuf,
-    },
-    /// current 是外来路径（如 temp cwd）：留置不动，勿孤立已写文件。
-    Leave,
-}
-
 /// 纯：按 profile 算出目标工作区目录：
 /// `{workspaces_dir}/{seq}_{净化名}`（净化名为空则仅 `{seq}`）。
 fn compute_desired_workspace_dir(
@@ -257,65 +236,6 @@ fn compute_desired_workspace_dir(
         format!("{}_{}", profile.seq, seg)
     };
     workspaces_dir.join(leaf)
-}
-
-/// 纯：根据 current(extra.workspace，已 trim) 与工作区树，决策动作。
-fn plan_workspace_reconcile(
-    current: &str,
-    desired: &std::path::Path,
-    workspaces_dir: &std::path::Path,
-) -> WorkspaceAction {
-    let current = current.trim();
-    if current.is_empty() {
-        return WorkspaceAction::Create(desired.to_path_buf());
-    }
-    let cur = std::path::Path::new(current);
-    if cur == desired {
-        return WorkspaceAction::Noop;
-    }
-    if cur.starts_with(workspaces_dir) {
-        WorkspaceAction::Move { from: cur.to_path_buf(), to: desired.to_path_buf() }
-    } else {
-        WorkspaceAction::Leave
-    }
-}
-
-/// 执行一个 reconcile 动作的落盘部分；返回应写入 `extra.workspace` 的新路径
-/// （None = 保留 current 不变）。尽力而为：移动失败（占用/目标非空）返回 None。
-fn apply_workspace_action(action: WorkspaceAction) -> Option<std::path::PathBuf> {
-    match action {
-        WorkspaceAction::Noop | WorkspaceAction::Leave => None,
-        WorkspaceAction::Create(dir) => {
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                tracing::warn!(error = %e, dir = %dir.display(), "create companion workspace dir failed");
-            }
-            Some(dir)
-        }
-        WorkspaceAction::Move { from, to } => {
-            if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // 目标已存在：仅当其为空目录时安全推进（删空再 rename）；非空则保留 current。
-            if to.exists() {
-                let empty = std::fs::read_dir(&to)
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(false);
-                if empty {
-                    let _ = std::fs::remove_dir(&to);
-                } else {
-                    tracing::warn!(to = %to.display(), "companion workspace target exists and is non-empty; keeping current");
-                    return None;
-                }
-            }
-            match std::fs::rename(&from, &to) {
-                Ok(()) => Some(to),
-                Err(e) => {
-                    tracing::warn!(error = %e, from = %from.display(), to = %to.display(), "move companion workspace failed; keeping current");
-                    None
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -347,115 +267,6 @@ mod workspace_path_tests {
         );
     }
 
-    #[test]
-    fn plan_empty_current_creates() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("", desired, ws),
-            WorkspaceAction::Create(desired.to_path_buf())
-        );
-    }
-
-    #[test]
-    fn plan_current_equals_desired_noop() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/ws/1_x", desired, ws),
-            WorkspaceAction::Noop
-        );
-    }
-
-    #[test]
-    fn plan_outside_tree_is_left_untouched() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/cs/id/workspace", desired, ws),
-            WorkspaceAction::Leave
-        );
-    }
-
-    #[test]
-    fn plan_renamed_within_tree_moves() {
-        let desired = Path::new("/ws/1_new");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/ws/1_old", desired, ws),
-            WorkspaceAction::Move { from: PathBuf::from("/ws/1_old"), to: desired.to_path_buf() }
-        );
-    }
-
-    #[test]
-    fn plan_foreign_temp_cwd_left_untouched() {
-        let desired = Path::new("/ws/1_x");
-        let ws = Path::new("/ws");
-        assert_eq!(
-            plan_workspace_reconcile("/data/conversations/nomi-temp-9", desired, ws),
-            WorkspaceAction::Leave
-        );
-    }
-}
-
-#[cfg(test)]
-mod workspace_apply_tests {
-    use super::*;
-
-    #[test]
-    fn create_makes_dir_and_returns_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("ws/1_x");
-        let out = apply_workspace_action(WorkspaceAction::Create(dir.clone()));
-        assert_eq!(out, Some(dir.clone()));
-        assert!(dir.is_dir());
-    }
-
-    #[test]
-    fn move_preserves_files_and_returns_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let from = tmp.path().join("cs/id/workspace");
-        std::fs::create_dir_all(&from).unwrap();
-        std::fs::write(from.join("a.txt"), "hi").unwrap();
-        let to = tmp.path().join("ws/1_毛球");
-        let out = apply_workspace_action(WorkspaceAction::Move { from: from.clone(), to: to.clone() });
-        assert_eq!(out, Some(to.clone()));
-        assert!(!from.exists());
-        assert_eq!(std::fs::read_to_string(to.join("a.txt")).unwrap(), "hi");
-    }
-
-    #[test]
-    fn move_into_existing_empty_target_succeeds() {
-        let tmp = tempfile::tempdir().unwrap();
-        let from = tmp.path().join("ws/1_old");
-        std::fs::create_dir_all(&from).unwrap();
-        std::fs::write(from.join("a.txt"), "x").unwrap();
-        let to = tmp.path().join("ws/1_new");
-        std::fs::create_dir_all(&to).unwrap(); // 预先存在且为空
-        let out = apply_workspace_action(WorkspaceAction::Move { from: from.clone(), to: to.clone() });
-        assert_eq!(out, Some(to.clone()));
-        assert_eq!(std::fs::read_to_string(to.join("a.txt")).unwrap(), "x");
-    }
-
-    #[test]
-    fn move_into_existing_nonempty_target_keeps_current() {
-        let tmp = tempfile::tempdir().unwrap();
-        let from = tmp.path().join("ws/1_old");
-        std::fs::create_dir_all(&from).unwrap();
-        let to = tmp.path().join("ws/1_new");
-        std::fs::create_dir_all(&to).unwrap();
-        std::fs::write(to.join("occupied.txt"), "keep").unwrap(); // 目标非空
-        let out = apply_workspace_action(WorkspaceAction::Move { from: from.clone(), to: to.clone() });
-        assert_eq!(out, None); // 不覆盖，保留 current
-        assert!(from.exists());
-        assert_eq!(std::fs::read_to_string(to.join("occupied.txt")).unwrap(), "keep");
-    }
-
-    #[test]
-    fn noop_and_leave_return_none() {
-        assert_eq!(apply_workspace_action(WorkspaceAction::Noop), None);
-        assert_eq!(apply_workspace_action(WorkspaceAction::Leave), None);
-    }
 }
 
 /// Thread management over the real conversation domain. Every method is
@@ -520,86 +331,6 @@ pub(crate) async fn effective_skill_names(
     Ok(names)
 }
 
-/// Materialize + link `skill_names` into `workspace/.nomi/skills` under
-/// manifest ownership (`managed-companion-skills.json`): entries the manifest
-/// owns but that are no longer desired are removed (only when ownership is
-/// proven — user-created skills are never touched), missing desired skills are
-/// linked and recorded. Best-effort: failures log and degrade. Used by
-/// companion threads. Returns the resolved desired skill names.
-pub(crate) async fn sync_managed_workspace_skills(
-    skill_paths: &nomifun_skill_library::SkillPaths,
-    conversation_id: &str,
-    workspace: &Path,
-    skill_names: &[String],
-) -> Vec<String> {
-    let nomi_dir = workspace.join(".nomi");
-    let skills_dir = nomi_dir.join("skills");
-    // Cleanup fast-path: nothing desired and nothing managed → leave the
-    // workspace untouched when it has no managed entries.
-    if skill_names.is_empty() && load_manifest(&nomi_dir).managed.is_empty() {
-        return Vec::new();
-    }
-    let resolved = match nomifun_skill_library::materialize_skills_for_agent(
-        skill_paths,
-        conversation_id,
-        skill_names,
-    )
-    .await
-    {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            tracing::warn!(error = %error, conversation_id, "resolve companion workspace skills failed");
-            return Vec::new();
-        }
-    };
-
-    let old_manifest = load_manifest(&nomi_dir);
-    let desired: std::collections::HashSet<&str> = resolved
-        .iter()
-        .filter(|skill| {
-            old_manifest
-                .managed
-                .get(&skill.name)
-                .is_none_or(|record| record_source_matches(record, &skill.source_path))
-        })
-        .map(|skill| skill.name.as_str())
-        .collect();
-    let mut manifest = remove_stale_managed_entries(&skills_dir, &old_manifest, &desired);
-    let to_link: Vec<_> = resolved
-        .iter()
-        .filter(|skill| !skills_dir.join(&skill.name).exists())
-        .cloned()
-        .collect();
-    if let Err(error) = nomifun_skill_library::link_workspace_skills(
-        workspace,
-        &[".nomi/skills"],
-        &to_link,
-    )
-    .await
-    {
-        tracing::warn!(error = %error, conversation_id, "link companion workspace skills failed");
-    }
-    for skill in &to_link {
-        let target = skills_dir.join(&skill.name);
-        match record_managed_entry(&target, &skill.source_path) {
-            Ok(Some(record)) => {
-                manifest.managed.insert(skill.name.clone(), record);
-            }
-            Ok(None) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                error = %error,
-                target = %target.display(),
-                "record managed companion skill failed"
-            ),
-        }
-    }
-    if let Err(error) = save_manifest(&nomi_dir, &manifest) {
-        tracing::warn!(error = %error, manifest = %nomi_dir.display(), "save companion skill manifest failed");
-    }
-    resolved.into_iter().map(|skill| skill.name).collect()
-}
-
 impl CompanionThreads {
     async fn builtin_auto_skill_names(&self) -> Vec<String> {
         match nomifun_skill_library::list_builtin_auto_skills(&self.skill_paths).await {
@@ -608,65 +339,6 @@ impl CompanionThreads {
                 tracing::warn!(error = %error, "list builtin auto skills for companion failed");
                 Vec::new()
             }
-        }
-    }
-
-    async fn sync_workspace_skills(
-        &self,
-        conversation_id: &str,
-        workspace: &Path,
-        skill_names: &[String],
-    ) {
-        sync_managed_workspace_skills(&self.skill_paths, conversation_id, workspace, skill_names)
-            .await;
-    }
-
-    /// Reconcile the workspace links and immutable conversation skill snapshot
-    /// for one existing companion thread. All failures are best-effort at this
-    /// boundary; a profile patch must not become unusable because a stale
-    /// workspace or runtime is temporarily unavailable. Resolver failures abort
-    /// the whole reconciliation before anything destructive: an error-empty
-    /// skill set must never masquerade as an authoritative configuration.
-    pub(crate) async fn reconcile_profile_skills(
-        &self,
-        profile: &CompanionProfileConfig,
-        conversation_id: &str,
-    ) {
-        let Ok(response) = self
-            .sessions
-            .get(self.authoritative_user_id.as_ref(), conversation_id)
-            .await
-        else {
-            return;
-        };
-        let effective = match effective_skill_names(&self.skill_paths, profile).await {
-            Ok(effective) => effective,
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    companion_id = %profile.companion_id,
-                    conversation_id,
-                    "resolve companion skills failed; skipping skill reconciliation"
-                );
-                return;
-            }
-        };
-        if let Some(workspace) = response
-            .extra
-            .get("workspace")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|workspace| !workspace.is_empty())
-        {
-            self.sync_workspace_skills(conversation_id, Path::new(workspace), &effective)
-                .await;
-        }
-        if let Err(error) = self
-            .sessions
-            .replace_skill_snapshot(conversation_id, &effective)
-            .await
-        {
-            tracing::warn!(error = %error, conversation_id, "reconcile companion skill snapshot failed");
         }
     }
 
@@ -679,43 +351,6 @@ impl CompanionThreads {
             )));
         }
         Ok(())
-    }
-
-    /// 把某线程落盘工作区收敛到伙伴目标（seq+name）目录：统管首次创建和改名跟随。
-    /// 幂等 + 尽力而为，绝不让调用方失败；被占用则保留当前路径下次再试。
-    pub(crate) async fn reconcile_thread_workspace(&self, profile: &CompanionProfileConfig, conversation_id: &str) {
-        let resp = match self
-            .sessions
-            .get(self.authoritative_user_id.as_ref(), conversation_id)
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, conversation_id, "fetch companion thread for workspace reconcile failed");
-                return;
-            }
-        };
-        let current = resp
-            .extra
-            .get("workspace")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        let workspaces_dir = self.registry.workspaces_dir();
-        let desired = compute_desired_workspace_dir(&workspaces_dir, profile);
-        let action = plan_workspace_reconcile(&current, &desired, &workspaces_dir);
-        if let Some(new_path) = apply_workspace_action(action) {
-            let new_str = new_path.to_string_lossy().into_owned();
-            if new_str != current
-                && let Err(e) = self
-                    .sessions
-                    .update_extra(conversation_id, serde_json::json!({ "workspace": new_str }))
-                    .await
-            {
-                tracing::warn!(error = %e, conversation_id, "update companion workspace extra failed");
-            }
-        }
     }
 
     /// 该线程落盘工作区——仅当它位于 pretty 工作区树（解耦树）之下时返回。外来/temp/
@@ -754,12 +389,6 @@ impl CompanionThreads {
         // Single-session ensure: list (which prunes threads whose backing
         // conversation was deleted out-of-band) and reuse the survivor.
         if let Some(existing) = self.list(companion_id).await?.into_iter().next() {
-            self.sessions.refresh_product_agent(self.authoritative_user_id.as_ref(), &existing.conversation_id).await?;
-            // 收敛工作区：首次补建 / 改名跟随（best-effort）。
-            // 外来 temp cwd 仍留置不动（见 plan_workspace_reconcile 的 Leave 分支：
-            // 移动 live cwd 会孤立已写文件）。新伙伴走下面的 create 分支直接落 pretty 名。
-            self.reconcile_thread_workspace(&profile, &existing.conversation_id).await;
-            self.reconcile_profile_skills(&profile, &existing.conversation_id).await;
             let _ = set_active_thread_ptr(&self.store, companion_id, Some(&existing.conversation_id)).await;
             return Ok(existing);
         }
@@ -852,7 +481,6 @@ impl CompanionThreads {
                 return Err(e);
             }
         };
-        self.reconcile_profile_skills(&profile, &created_id).await;
         let _ = set_active_thread_ptr(&self.store, companion_id, Some(&created_id)).await;
         Ok(thread)
     }
@@ -925,41 +553,6 @@ impl CompanionThreads {
             }
         }
         Ok(())
-    }
-
-    /// Propagate the companion's model (唯一事实源 = profile.model) onto its single
-    /// companion conversation ROW so the next turn uses the new model. The
-    /// conversation row `model` was only a create-time snapshot; this keeps it
-    /// in sync after a `PATCH /api/companion/companions/{id}` model change. Idempotent and
-    /// best-effort at the call site. `companion_id` must own the thread.
-    pub async fn set_model(
-        &self,
-        companion_id: &str,
-        conversation_id: &str,
-        model: &ProviderWithModel,
-    ) -> Result<(), AppError> {
-        self.assert_owned(companion_id, conversation_id).await?;
-        self.sessions
-            .update(
-                self.authoritative_user_id.as_ref(),
-                conversation_id,
-                nomifun_api_types::UpdateConversationRequest {
-                    name: None,
-                    pinned: None,
-                    model: Some(ProviderWithModel {
-                        provider_id: model.provider_id.clone(),
-                        model: model.model.clone(),
-                        use_model: model.use_model.clone(),
-                    }),
-                    delegation_policy: None,
-                    execution_model_pool: None,
-                    decision_policy: None,
-                    execution_template_id: None,
-                    extra: None,
-                },
-            )
-            .await
-            .map(|_| ())
     }
 
 }
@@ -1132,6 +725,7 @@ impl CompanionMemorySink for CompanionStoreSink {
 mod skill_resolution_tests {
     use super::*;
     use crate::profile::CompanionSkillConfig;
+    use std::path::Path;
 
     fn skill_paths(root: &Path) -> nomifun_skill_library::SkillPaths {
         // A present builtin corpus dir is the baseline healthy state: its
