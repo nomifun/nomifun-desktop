@@ -6,6 +6,7 @@ const sourceConfigSource = readFileSync(new URL('./CreateStudio/SourceConfig.tsx
 const teachingCardSource = readFileSync(new URL('./CreateStudio/TeachingCard.tsx', import.meta.url), 'utf8');
 const tagPickerSource = readFileSync(new URL('./CreateStudio/TagPicker.tsx', import.meta.url), 'utf8');
 const studioStyles = readFileSync(new URL('./CreateStudio/CreateStudio.module.css', import.meta.url), 'utf8');
+const modalContractStyles = readFileSync(new URL('../../styles/modal-contract.css', import.meta.url), 'utf8');
 
 describe('CreateStudio form visual design', () => {
   test('uses a modern card-based form surface with soft focusable controls', () => {
@@ -21,12 +22,14 @@ describe('CreateStudio form visual design', () => {
     expect(studioSource.includes('className={styles.modal}')).toBe(true);
     // Compact padding is expressed through the shared modal contract now,
     // not a literal value duplicated per modal.
-    expect(studioStyles.includes('var(--nomi-modal-block-padding)')).toBe(true);
-    expect(studioStyles.includes('var(--nomi-modal-inline-padding)')).toBe(true);
+    expect(modalContractStyles.includes('padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding);')).toBe(true);
+    expect(studioStyles.includes('var(--nomi-modal-block-padding)')).toBe(false);
+    expect(studioStyles.includes('var(--nomi-modal-inline-padding)')).toBe(false);
     expect(studioSource.includes('knowledge-studio-config-panel min-h-0 flex-1 overflow-y-auto bg-[var(--color-fill-1)] p-16px')).toBe(true);
     expect(studioSource.includes('knowledge-studio-basic-card mb-12px')).toBe(true);
     expect(studioSource.includes("'knowledge-studio-field rounded-14px bg-[var(--color-bg-2)] p-10px")).toBe(true);
-    expect(studioSource.includes('px-20px py-10px')).toBe(true);
+    expect(modalContractStyles.includes('padding: var(--nomi-modal-block-padding) var(--nomi-modal-inline-padding) 10px;')).toBe(true);
+    expect(studioSource.includes('px-20px py-10px')).toBe(false);
   });
 
   test('turns AI description helpers into real action controls instead of plain text links', () => {

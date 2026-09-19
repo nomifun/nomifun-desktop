@@ -51,16 +51,17 @@ describe('Creative Template workspace page', () => {
     expect(html.includes('Private')).toBe(false);
   });
 
-  test('keeps the focused template surface on a fixed light stone palette', () => {
+  test('keeps the page palette local while dialogs use the shared centered shell', () => {
     expect(css.includes('--color-bg-1: #f4f2ed')).toBe(true);
     expect(css.includes('--dialog-fill-0: #f4f2ed')).toBe(true);
     expect(css.includes('--nomi-modal-control-bg: #ffffff')).toBe(true);
     expect(css.includes('--primary-6: 87, 83, 78')).toBe(true);
     expect(css.includes('color-scheme: light')).toBe(true);
     expect(css.includes('.editorModal')).toBe(true);
-    expect(css.includes('--app-sider-width')).toBe(true);
-    expect(css.includes('max-height: calc(100vh - 24px)')).toBe(true);
-    expect(css.includes('max-height: calc(100vh - 144px)')).toBe(true);
+    expect(css.startsWith('.page {')).toBe(true);
+    expect(css.includes('--app-sider-width')).toBe(false);
+    expect(css.includes('max-height: calc(100vh - 24px)')).toBe(false);
+    expect(css.includes('max-height: calc(100vh - 144px)')).toBe(false);
     expect(css.includes('.runModal')).toBe(true);
     expect(css.includes('.reviewModal')).toBe(true);
   });

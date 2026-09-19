@@ -222,7 +222,6 @@ describe('CreativeAssetLibrary', () => {
         total: 14,
         onPageChange: () => undefined,
       },
-      onRenameCollection: () => undefined,
     });
 
     expect(html.includes('data-asset-appearance="source-page"')).toBe(true);
@@ -244,7 +243,7 @@ describe('CreativeAssetLibrary', () => {
     expect(footer.includes('2.0 KB')).toBe(true);
     expect(footer.includes('image/example')).toBe(true);
     expect(footer.includes('aria-haspopup="menu"')).toBe(true);
-    expect(html.includes('重命名合集')).toBe(true);
+    expect(html.includes('重命名合集')).toBe(false);
     expect(html.includes('图片和视频，单文件最大 64 MB')).toBe(true);
     expect(html.includes('aria-label="素材分页"')).toBe(true);
     expect(html.includes('10 条/页')).toBe(true);

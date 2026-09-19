@@ -32,7 +32,7 @@ describe('CreativeAssetLibraryPage', () => {
     expect(html.includes('单文件最大 64 MB')).toBe(true);
     expect(html.includes('暂不支持手动上传音频')).toBe(true);
     expect(html.includes('accept="image/*,video/*"')).toBe(true);
-    expect(html.includes('重命名合集')).toBe(true);
+    expect(html.includes('重命名合集')).toBe(false);
     expect(html.includes('data-asset-upload-limits')).toBe(false);
     expect(html.includes('10 条/页')).toBe(true);
   });

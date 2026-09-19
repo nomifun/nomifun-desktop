@@ -1,36 +1,4 @@
-.modal {
-  --color-bg-1: #f4f2ed;
-  --color-bg-2: #fbfaf7;
-  --color-bg-3: #eeeae4;
-  --color-bg-4: #dedbd2;
-  --color-fill-1: rgba(68, 64, 60, 0.04);
-  --color-fill-2: rgba(68, 64, 60, 0.08);
-  --color-fill-3: rgba(68, 64, 60, 0.12);
-  --color-fill-4: rgba(68, 64, 60, 0.18);
-  --color-text-1: #292524;
-  --color-text-2: #57534e;
-  --color-text-3: #8a8479;
-  --color-text-4: #b7b1a7;
-  --color-border-1: #ece9e2;
-  --color-border-2: #dedbd2;
-  --color-border-3: #d6d3ca;
-  --color-border-4: #a8a29e;
-  --primary-1: 250, 250, 249;
-  --primary-2: 245, 245, 244;
-  --primary-3: 231, 229, 228;
-  --primary-4: 214, 211, 209;
-  --primary-5: 120, 113, 108;
-  --primary-6: 87, 83, 78;
-  --primary-7: 68, 64, 60;
-  --danger-6: 185, 28, 28;
-  color-scheme: light;
-}
-
-.modal :global(.arco-modal-content),
-.modal :global(.arco-modal-header) {
-  background: var(--color-bg-1) !important;
-  color: var(--color-text-1) !important;
-}
+.modal { width: 880px; }
 
 .layout {
   display: grid;
@@ -59,7 +27,7 @@
 }
 
 .form :global(.arco-textarea) {
-  background: #fff;
+  background: var(--nomi-modal-control-bg);
   color: var(--color-text-1);
 }
 
@@ -119,8 +87,8 @@
   margin: 0;
   padding: 12px;
   border-radius: 10px;
-  background: #292524;
-  color: #fafaf9;
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
   font: 12px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;

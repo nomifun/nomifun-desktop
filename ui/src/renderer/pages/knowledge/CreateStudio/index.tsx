@@ -15,7 +15,6 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Message, Modal, Popconfirm, Tooltip } from '@arco-design/web-react';
-import { Close } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
@@ -296,9 +295,9 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
 
   // ─── Modal dimensions ─────────────────────────────────────────────────────
 
-  const modalStyle: React.CSSProperties = { width: 1000, maxWidth: '92vw', borderRadius: 16 };
+  const modalStyle: React.CSSProperties = { width: 920 };
 
-  const studioViewportHeight = 'min(760px, calc(100vh - 80px))';
+  const studioViewportHeight = '620px';
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -306,9 +305,38 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
     <Modal
       visible={visible}
       onCancel={onClose}
-      footer={null}
-      title={null}
-      closable={false}
+      footer={
+        <div className={styles.footer}>
+          {/* Left hint */}
+          <div className='flex items-center gap-7px text-12px text-[var(--color-text-3)]'>
+            <span className='rounded-6px bg-[var(--color-success-light-1)] px-7px py-2px text-10px font-600 text-success-6'>
+              {t('knowledge.studio.lowBarrier', { defaultValue: '低门槛' })}
+            </span>
+            <span>{t('knowledge.studio.footerHint', { defaultValue: '只有「名称」必填，来源等都能创建后再调整' })}</span>
+          </div>
+
+          {/* Actions */}
+          <div className='flex gap-10px'>
+            <Button
+              size='default'
+              className='knowledge-studio-footer-action'
+              onClick={onClose}
+            >
+              {t('knowledge.studio.cancel', { defaultValue: '取消' })}
+            </Button>
+            <Button
+              type='primary'
+              size='default'
+              className='knowledge-studio-footer-action'
+              loading={submitting}
+              onClick={() => void handleSubmit()}
+            >
+              {t('knowledge.studio.submit', { defaultValue: '创建知识库' })}
+            </Button>
+          </div>
+        </div>
+      }
+      title={t('knowledge.studio.title', { defaultValue: '新建知识库' })}
       autoFocus={false}
       mountOnEnter
       unmountOnExit
@@ -318,25 +346,9 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
     >
       <div
         className='flex min-h-0 flex-col overflow-hidden'
-        style={{ height: studioViewportHeight, maxHeight: studioViewportHeight }}
+        style={{ height: studioViewportHeight, maxHeight: '100%' }}
       >
-        {/* ─── Header ──────────────────────────────────────────────────────── */}
-        <div className='flex shrink-0 items-start justify-between gap-14px border-b border-b-solid border-b-[var(--color-border)] px-20px pb-12px pt-16px'>
-          <div>
-            <h2 className='m-0 text-19px font-700 text-[var(--color-text-1)]'>
-              {t('knowledge.studio.title', { defaultValue: '新建知识库' })}
-            </h2>
-            <p className='m-0 mt-4px text-13px text-[var(--color-text-3)]'>
-              {t('knowledge.studio.subtitle', { defaultValue: '选择左侧的类型，右侧只显示该类型需要的配置 · 仅「名称」必填' })}
-            </p>
-          </div>
-          <div
-            onClick={onClose}
-            className='flex size-30px flex-none cursor-pointer items-center justify-center rounded-8px border border-solid border-[var(--color-border)] bg-[var(--color-fill-1)] text-[var(--color-text-3)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]'
-          >
-            <span className='leading-none'><Close theme="outline" size="14" /></span>
-          </div>
-        </div>
+        <p className={styles.subtitle}>{t('knowledge.studio.subtitle', { defaultValue: '选择左侧的类型，右侧只显示该类型需要的配置 · 仅「名称」必填' })}</p>
 
         {/* ─── Body: Rail + Config ─────────────────────────────────────────── */}
         <div
@@ -477,37 +489,6 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
             {/* ─── Source Config (per type) ─────────────────────────────────── */}
             <SourceConfig sourceType={sourceType} value={sourceConfigValue} onChange={handleSourceChange} />
             <TeachingCard sourceType={sourceType} />
-          </div>
-        </div>
-
-        {/* ─── Footer ──────────────────────────────────────────────────────── */}
-        <div className='flex shrink-0 items-center justify-between gap-10px border-t border-t-solid border-t-[var(--color-border)] bg-[var(--color-bg-1)] px-20px py-10px'>
-          {/* Left hint */}
-          <div className='flex items-center gap-7px text-12px text-[var(--color-text-3)]'>
-            <span className='rounded-6px bg-[var(--color-success-light-1)] px-7px py-2px text-10px font-600 text-success-6'>
-              {t('knowledge.studio.lowBarrier', { defaultValue: '低门槛' })}
-            </span>
-            <span>{t('knowledge.studio.footerHint', { defaultValue: '只有「名称」必填，来源等都能创建后再调整' })}</span>
-          </div>
-
-          {/* Actions */}
-          <div className='flex gap-10px'>
-            <Button
-              size='default'
-              className='knowledge-studio-footer-action !rounded-10px !border-transparent !bg-[var(--color-fill-1)] !px-16px !text-[var(--color-text-2)] hover:!bg-[var(--color-fill-2)] hover:!text-[var(--color-text-1)]'
-              onClick={onClose}
-            >
-              {t('knowledge.studio.cancel', { defaultValue: '取消' })}
-            </Button>
-            <Button
-              type='primary'
-              size='default'
-              className='knowledge-studio-footer-action !rounded-10px !border-transparent !px-18px !shadow-[0_8px_20px_rgba(var(--primary-6),0.18)] hover:!shadow-[0_10px_24px_rgba(var(--primary-6),0.22)]'
-              loading={submitting}
-              onClick={() => void handleSubmit()}
-            >
-              {t('knowledge.studio.submit', { defaultValue: '创建知识库' })}
-            </Button>
           </div>
         </div>
       </div>

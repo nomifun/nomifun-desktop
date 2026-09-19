@@ -74,7 +74,6 @@ export interface CreativeAssetLibraryProps {
   onSelectionChange: (selectedIds: ReadonlySet<string>) => void;
   onUploadFiles?: (files: readonly File[]) => void;
   onCreateText?: () => void;
-  onRenameCollection?: () => void;
   onOpenAsset?: CreativeAssetAction;
   onEditAsset?: CreativeAssetAction;
   onDownloadAsset?: CreativeAssetAction;
@@ -258,7 +257,6 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
   onSelectionChange,
   onUploadFiles,
   onCreateText,
-  onRenameCollection,
   onOpenAsset,
   onEditAsset,
   onDownloadAsset,
@@ -496,9 +494,6 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         </div>
         {sourceAppearance ? (
           <div className={styles.sourceActions}>
-            {onRenameCollection ? (
-              <button type='button' disabled={busy} onClick={onRenameCollection}>{labels.renameCollection}</button>
-            ) : null}
             {onUploadFiles ? (
               <button
                 type='button'

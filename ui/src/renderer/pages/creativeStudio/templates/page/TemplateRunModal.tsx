@@ -369,7 +369,6 @@ const TemplateRunModal: React.FC<TemplateRunModalProps> = ({
   return (
     <Modal
       visible
-      alignCenter={false}
       className={styles.runModal}
       title={
         template.metadata.name ||
@@ -380,9 +379,7 @@ const TemplateRunModal: React.FC<TemplateRunModalProps> = ({
       footer={null}
       autoFocus={false}
       unmountOnExit
-      getPopupContainer={() =>
-        document.getElementById('resource-page-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={onClose}
     >
       <div className={styles.runGrid} data-template-runner>
