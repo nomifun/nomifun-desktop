@@ -261,6 +261,13 @@ function browserEvidenceFromOutput(output) {
         error_present: tool.error_present === true,
         result_error: typeof tool.result_error === 'boolean' ? tool.result_error : null,
         error_codes: Array.isArray(tool.error_codes) ? tool.error_codes.filter(code => ['INVALID_PAYLOAD', 'CAPABILITY_NOT_SELECTED', 'BROWSER_STALE_OBSERVATION', 'BROWSER_STALE_TARGET', 'BROWSER_NOT_ACTIONABLE', 'BROWSER_NATIVE_COMMAND_FAILED', 'BROWSER_UNSUPPORTED_ACTION', 'TOOL_NOT_FOUND', 'PERMISSION_DENIED'].includes(code)).slice(0, 9) : [],
+        error_hints: Array.isArray(tool.error_hints) ? tool.error_hints.filter(hint => ['one_of', 'required', 'additional_property', 'element', 'target', 'observation_generation', 'ref_id', 'operation', 'action'].includes(hint)).slice(0, 9) : [],
+      })) : [],
+      tool_shapes: Array.isArray(data.tool_shapes) ? data.tool_shapes.slice(0, 32).map(shape => ({
+        class: choice(shape.class, ['non_object', 'legacy_operation', 'missing_action_wrapper', 'nested_action_wrapper', 'private_attached', 'legacy_reference', 'raw_reference', 'canonical_element', 'partial_observed_element', 'other_element_object', 'scalar_element', 'other_canonical_variant', 'missing_reference'], 'other'),
+        tag: choice(shape.tag, ['click', 'hover', 'type', 'press', 'select', 'scroll', 'drag', 'dialog']),
+        outer_unknown_keys: smallNumber(shape.outer_unknown_keys),
+        action_unknown_keys: smallNumber(shape.action_unknown_keys),
       })) : [],
     };
   } catch { return null; }
@@ -270,7 +277,7 @@ function browserProofFromOutput(output) {
   const line = output.split(/\r?\n/).find(line => line.startsWith(prefix) && line.length < 16000);
   try {
     const proof = JSON.parse(line?.slice(prefix.length) ?? 'null');
-    return proof?.scope === 'live-agent-only' && proof.native_fixture_profile_cleanup === true && proof.agent?.real_provider === true && proof.agent?.reproduced_bug_with_trusted_click === true && proof.agent?.workspace_code_changed_and_reloaded === true && proof.agent?.terminal_before_unlock === true && JSON.stringify(proof.agent?.trusted_retest_values) === '[1,2,3]';
+    return proof?.scope === 'live-agent-only' && proof.native_fixture_profile_cleanup === true && proof.agent?.real_provider === true && proof.agent?.native_auto_open === true && proof.agent?.trusted_click_value === 2 && proof.agent?.canonical_action_shape === true && proof.agent?.evidence_driven_cancel === true && proof.agent?.terminal_before_unlock === true;
   } catch { return false; }
 }
 function typedFailureFromOutput(output) {
@@ -609,7 +616,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      console.log('browser_live_frontend_status=pass native_click=true workspace_fix=true retest=1,2,3 terminal_unlock=true');
+      console.log('browser_live_frontend_status=pass native_click=true observed_value=2 canonical_action_shape=true evidence_cancel=true terminal_unlock=true');
       console.log('live_smoke_status=pass code=OK status=200');
       process.exitCode = 0;
       return;
@@ -679,8 +686,8 @@ async function main() {
 }
 
 function runSelfTest() {
-  const proof = 'BROWSER_WORKSPACE_SMOKE_PASS ' + JSON.stringify({ scope: 'live-agent-only', native_fixture_profile_cleanup: true, agent: { real_provider: true, reproduced_bug_with_trusted_click: true, workspace_code_changed_and_reloaded: true, terminal_before_unlock: true, trusted_retest_values: [1,2,3] } });
-  if (!browserProofFromOutput(proof) || browserProofFromOutput('') || browserProofFromOutput(proof.replace('[1,2,3]', '[2,4,6]'))) throw new Error('browser proof parsing failed');
+  const proof = 'BROWSER_WORKSPACE_SMOKE_PASS ' + JSON.stringify({ scope: 'live-agent-only', native_fixture_profile_cleanup: true, agent: { real_provider: true, native_auto_open: true, trusted_click_value: 2, canonical_action_shape: true, evidence_driven_cancel: true, terminal_before_unlock: true } });
+  if (!browserProofFromOutput(proof) || browserProofFromOutput('') || browserProofFromOutput(proof.replace('"trusted_click_value":2', '"trusted_click_value":4'))) throw new Error('browser proof parsing failed');
   const evidence = browserEvidenceFromOutput('NOMIFUN_BROWSER_LIVE_EVIDENCE ' + JSON.stringify({ count: 3, secret: 'DO_NOT_EMIT', tools: [{ name: 'DO_NOT_EMIT', args: 'DO_NOT_EMIT' }] }));
   if (evidence?.count !== 3 || JSON.stringify(evidence).includes('DO_NOT_EMIT')) throw new Error('browser evidence redaction failed');
   const selfTestRoot = mkdtempSync(resolve(ROOT, '.git', 'before-tool-runner-self-test-'));

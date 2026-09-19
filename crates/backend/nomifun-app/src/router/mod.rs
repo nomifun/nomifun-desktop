@@ -40,6 +40,8 @@ mod engine_plugin_product_tools;
 mod engine_plugin_middleware;
 mod engine_tool_discovery;
 mod engine_robot_tools;
+#[cfg(feature = "browser-use")]
+mod engine_browser_tools;
 mod workspace_file_read;
 mod engine_workspace_media;
 mod engine_mcp_media;

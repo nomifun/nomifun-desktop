@@ -48,6 +48,7 @@ pub struct AdmittedEngineSession {
     revision: AgentPresetRevision,
     snapshot: ResolvedSnapshotEnvelope,
     principal: PrincipalRef,
+    workspace: String,
 }
 
 /// Canonical accepted root from the existing delivery owner. Read-only facts,
@@ -104,6 +105,9 @@ impl AdmittedEngineSession {
     }
     pub fn principal(&self) -> &PrincipalRef {
         &self.principal
+    }
+    pub fn workspace(&self) -> &str {
+        &self.workspace
     }
     pub fn execution_constraints(&self) -> Result<nomifun_api_types::ExecutionConstraints, AppError> {
         nomifun_api_types::ExecutionConstraints::from_extra(&self.response.extra)
@@ -573,6 +577,30 @@ impl EngineSessionHost {
             ));
         }
         provider.validate_snapshot(&snapshot)?;
+        let workspace = std::path::PathBuf::from(&options.workspace);
+        if !workspace.is_absolute() {
+            return Err(conflict("runtime workspace is not an absolute host path"));
+        }
+        let workspace = dunce::canonicalize(&workspace)
+            .map_err(|_| conflict("runtime workspace is unavailable"))?;
+        if let Some(persisted_workspace) = response
+            .extra
+            .get("workspace")
+            .and_then(serde_json::Value::as_str)
+            .filter(|workspace| !workspace.trim().is_empty())
+        {
+            let persisted_workspace = dunce::canonicalize(persisted_workspace)
+                .map_err(|_| conflict("persisted workspace is unavailable"))?;
+            if persisted_workspace != workspace {
+                return Err(conflict(
+                    "runtime workspace differs from the canonical Session projection",
+                ));
+            }
+        }
+        let workspace = workspace
+            .to_str()
+            .ok_or_else(|| conflict("runtime workspace is not UTF-8"))?
+            .to_owned();
         Ok(AdmittedEngineSession {
             source: self.source.clone(),
             response,
@@ -581,6 +609,7 @@ impl EngineSessionHost {
             revision,
             snapshot,
             principal,
+            workspace,
         })
     }
 }

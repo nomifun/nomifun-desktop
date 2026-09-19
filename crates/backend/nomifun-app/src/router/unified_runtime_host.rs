@@ -166,6 +166,16 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_plugin_middleware.rs"),
                     include_str!("engine_tool_discovery.rs"),
                     include_str!("engine_robot_tools.rs"),
+                    include_str!("engine_browser_tools.rs"),
+                    include_str!("../browser_workspace_provider.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/product.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/bound_resource.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/workspace.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/run_guard.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/runtime.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/downloads.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/uploads.rs"),
+                    include_str!("../../../nomifun-browser-platform/src/attached_browser.rs"),
                     include_str!("nomi_core_robot.rs"),
                     include_str!("../../../nomifun-robot/src/tool_registry.rs"),
                     include_str!("../../../nomifun-robot/src/vision.rs"),
@@ -230,9 +240,13 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
 pub(crate) fn factory(
     session_host: Arc<super::engine_session_host::EngineSessionHost>,
     plugin_schemas: Arc<dyn nomifun_ai_agent::NomiPluginToolSchemaResolver>,
+    platform_builtin_schemas: Arc<
+        dyn nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver,
+    >,
 ) -> OfficialRuntimeFactory {
     Arc::new(move |options, binding| {
         let plugin_schemas = plugin_schemas.clone();
+        let platform_builtin_schemas = platform_builtin_schemas.clone();
         let session_host = session_host.clone();
         Box::pin(async move {
             let admitted = session_host.resolve(&options, &binding).await?;
@@ -253,7 +267,14 @@ pub(crate) fn factory(
             // mutate the Kernel active set or expose inactive tools to a model.
             let preview = active.snapshot().map_err(error)?;
             let registry = resources.registry_snapshot()?;
-            let full_plan = super::agent_tool_surface::compile(&compiled, &preview, &registry, plugin_schemas.as_ref()).await?;
+            let full_plan = super::agent_tool_surface::compile(
+                &compiled,
+                &preview,
+                &registry,
+                plugin_schemas.as_ref(),
+                platform_builtin_schemas.as_ref(),
+            )
+            .await?;
             let full_plan = resources.compile_tool_plan(full_plan.model_definitions().into_iter().map(|definition| {
                 let binding = full_plan.binding(&definition.name).expect("compiled definition has a binding");
                 nomifun_engine_core::EngineToolExposure {

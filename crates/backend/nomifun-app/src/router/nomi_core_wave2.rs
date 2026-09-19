@@ -75,6 +75,14 @@ pub(crate) fn tool_capability_ids() -> BTreeSet<CapabilityId> {
         ));
         capabilities
     };
+    #[cfg(feature = "browser-use")]
+    let capabilities = {
+        let mut capabilities = capabilities;
+        capabilities.insert(CapabilityId::from(
+            nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+        ));
+        capabilities
+    };
     capabilities
 }
 
@@ -984,6 +992,14 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: nomifun_common::generate_id(),
         }
+    }
+
+    #[cfg(feature = "browser-use")]
+    #[test]
+    fn desktop_browser_module_is_an_official_kernel_tool_target() {
+        assert!(tool_capability_ids().contains(&CapabilityId::from(
+            nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+        )));
     }
 
     fn authority(principal: &PrincipalRef) -> TypedResourceBinding {

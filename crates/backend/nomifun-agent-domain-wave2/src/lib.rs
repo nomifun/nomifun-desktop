@@ -1434,23 +1434,18 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
             }),
             &["url"],
         ),
-        "browser/act" => strict_object_schema(
-            serde_json::json!({
-                "action":{"type":"object","minProperties":1}
-            }),
-            &["action"],
-        ),
+        "browser/act" => browser_act_input_schema(),
         "browser/render_content" => strict_object_schema(
             serde_json::json!({"url":{"type":"string","minLength":1,"maxLength":8192,"pattern":"^https?://"}}),
             &["url"],
         ),
         "browser/download" => strict_object_schema(
-            serde_json::json!({"element":{"type":"object","minProperties":1}}),
+            serde_json::json!({"element":browser_observed_element_schema()}),
             &["element"],
         ),
         "browser/upload" => strict_object_schema(
             serde_json::json!({
-                "element":{"type":"object","minProperties":1},
+                "element":browser_observed_element_schema(),
                 "files":{
                     "type":"array",
                     "items":{"type":"string","minLength":1,"maxLength":4096},
@@ -1461,11 +1456,172 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
             &["element", "files"],
         ),
         "browser/evaluate" => strict_object_schema(
-            serde_json::json!({"request":{"type":"object","minProperties":1}}),
+            serde_json::json!({"request":strict_object_schema_value(
+                serde_json::json!({
+                    "target":browser_tab_target_schema(),
+                    "expression":{"type":"string","minLength":1,"maxLength":65536}
+                }),
+                &["target","expression"],
+            )}),
             &["request"],
         ),
         _ => open_object_schema(),
     }
+}
+
+fn browser_tab_target_schema() -> serde_json::Value {
+    strict_object_schema_value(
+        serde_json::json!({
+            "tab_id":{
+                "type":"string",
+                "minLength":1,
+                "maxLength":512,
+                "description":"Opaque tab_id returned by browser/observe."
+            },
+            "runtime_generation":{"type":"integer","minimum":0},
+            "document_generation":{"type":"integer","minimum":0}
+        }),
+        &["tab_id", "runtime_generation", "document_generation"],
+    )
+}
+
+fn browser_element_reference_schema() -> serde_json::Value {
+    let mut schema = strict_object_schema_value(
+        serde_json::json!({
+            "target":browser_tab_target_schema(),
+            "observation_generation":{"type":"integer","minimum":0},
+            "ref_id":{"type":"string","minLength":1,"maxLength":512}
+        }),
+        &["target", "observation_generation", "ref_id"],
+    );
+    schema["description"] = serde_json::json!(
+        "Copy the complete reference object from an element in the latest browser/observe result."
+    );
+    schema
+}
+
+fn browser_observed_element_schema() -> serde_json::Value {
+    let mut schema = strict_object_schema_value(
+        serde_json::json!({
+            "reference":browser_element_reference_schema(),
+            "role":{"type":"string","maxLength":512},
+            "name":{"type":"string","maxLength":4096},
+            "focused":{"type":"boolean"}
+        }),
+        &["reference", "role", "name", "focused"],
+    );
+    schema["description"] = serde_json::json!(
+        "Copy the complete element object unchanged from the latest browser/observe result."
+    );
+    schema
+}
+
+fn browser_act_input_schema() -> StrictJsonValue {
+    let element = browser_observed_element_schema();
+    let target = browser_tab_target_schema();
+    let managed = [
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"click"},
+                "element":element.clone(),
+                "button":{"type":"string","enum":["left","right","middle"]},
+                "click_count":{"type":"integer","minimum":1,"maximum":2}
+            }),
+            &["action", "element"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({"action":{"const":"hover"},"element":element.clone()}),
+            &["action", "element"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"type"},
+                "element":element.clone(),
+                "text":{"type":"string","maxLength":65536}
+            }),
+            &["action", "element", "text"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"press"},
+                "element":element.clone(),
+                "keys":{"type":"string","minLength":1,"maxLength":256}
+            }),
+            &["action", "element", "keys"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"select"},
+                "element":element.clone(),
+                "labels":{"type":"array","items":{"type":"string","maxLength":512},"maxItems":512}
+            }),
+            &["action", "element", "labels"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"scroll"},
+                "element":element.clone(),
+                "delta_x":{"type":"number","minimum":-10000,"maximum":10000},
+                "delta_y":{"type":"number","minimum":-10000,"maximum":10000}
+            }),
+            &["action", "element", "delta_x", "delta_y"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"drag"},
+                "from":element.clone(),
+                "to":element.clone()
+            }),
+            &["action", "from", "to"],
+        ),
+        strict_object_schema_value(
+            serde_json::json!({
+                "action":{"const":"dialog"},
+                "target":target.clone(),
+                "request_id":{"type":"string","minLength":1,"maxLength":512},
+                "accept":{"type":"boolean"},
+                "text":{"type":["string","null"],"maxLength":4096}
+            }),
+            &["action", "target", "request_id", "accept"],
+        ),
+    ];
+    let action_schema = serde_json::json!({
+        "type":"object",
+        "additionalProperties":false,
+        "description":"Choose one action variant. For click, hover, type, press, select, and scroll, copy the complete element object unchanged from the latest browser/observe result into `element`.",
+        "properties":{
+            "action":{"type":"string","enum":["click","hover","type","press","select","scroll","drag","dialog"]},
+            "element":element.clone(),
+            "from":element.clone(),
+            "to":element,
+            "button":{"type":"string","enum":["left","right","middle"]},
+            "click_count":{"type":"integer","minimum":1,"maximum":2},
+            "text":{"type":["string","null"],"maxLength":65536},
+            "keys":{"type":"string","minLength":1,"maxLength":256},
+            "labels":{"type":"array","items":{"type":"string","maxLength":512},"maxItems":512},
+            "delta_x":{"type":"number","minimum":-10000,"maximum":10000},
+            "delta_y":{"type":"number","minimum":-10000,"maximum":10000},
+            "target":target,
+            "request_id":{"type":"string","minLength":1,"maxLength":512},
+            "accept":{"type":"boolean"}
+        },
+        "required":["action"],
+        "oneOf":managed,
+        "examples":[{
+            "action":"click",
+            "element":{
+                "reference":{
+                    "target":{"tab_id":"copy from observe","runtime_generation":1,"document_generation":1},
+                    "observation_generation":1,
+                    "ref_id":"copy from observe"
+                },
+                "role":"button",
+                "name":"Increment",
+                "focused":false
+            }
+        }]
+    });
+    StrictJsonValue(action_schema)
 }
 
 fn computer_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
@@ -1637,12 +1793,19 @@ fn strict_object_schema(
     properties: serde_json::Value,
     required: &[&str],
 ) -> StrictJsonValue {
-    StrictJsonValue(serde_json::json!({
+    StrictJsonValue(strict_object_schema_value(properties, required))
+}
+
+fn strict_object_schema_value(
+    properties: serde_json::Value,
+    required: &[&str],
+) -> serde_json::Value {
+    serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "properties": properties,
         "required": required,
-    }))
+    })
 }
 
 pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
@@ -1680,20 +1843,17 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                     action_id: context.action_id,
                 });
             }
-            if self.capability_id.as_ref().starts_with("workspace.")
-                || self.capability_id.as_ref() == COMPUTER_MODULE_ID
-            {
-                // These actions publish strict schemas; every Kernel host must
-                // enforce them before dispatch, not only the Nomi wrapper.
-                validate_module_action_input(
-                    self.capability_id.as_ref(),
-                    context.action_id.as_ref(),
-                    &input,
-                )
-                .map_err(|reason| {
-                    KernelError::capability_execution_failed(INVALID_PAYLOAD, reason)
-                })?;
-            }
+            // Every Wave 2 Action publishes a strict canonical schema. Enforce
+            // it at the Kernel boundary as well as in the physical owner so a
+            // non-model caller cannot bypass the compiled Tool validator.
+            validate_module_action_input(
+                self.capability_id.as_ref(),
+                context.action_id.as_ref(),
+                &input,
+            )
+            .map_err(|reason| {
+                KernelError::capability_execution_failed(INVALID_PAYLOAD, reason)
+            })?;
             if !input.0.is_object() {
                 return Err(KernelError::CapabilityExecution {
                     reason: format!(
@@ -2423,6 +2583,88 @@ fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_action_schemas_publish_one_provider_neutral_reference_shape() {
+        let schema = super::action_input_schema("browser/act");
+        assert_eq!(
+            schema.0.pointer("/type"),
+            Some(&serde_json::json!("object"))
+        );
+        assert!(
+            schema
+                .0
+                .pointer("/properties/element/properties/reference/properties/target")
+                .is_some(),
+            "providers must receive discoverable canonical reference fields, not only an opaque oneOf"
+        );
+        let target = serde_json::json!({
+            "tab_id":"tab-1",
+            "runtime_generation":1,
+            "document_generation":2
+        });
+        let reference = serde_json::json!({
+            "target":target.clone(),
+            "observation_generation":3,
+            "ref_id":"element-4"
+        });
+        let element = serde_json::json!({
+            "reference":reference.clone(),
+            "role":"button",
+            "name":"Increment",
+            "focused":false
+        });
+        for action in [
+            serde_json::json!({"action":"click","element":element.clone()}),
+            serde_json::json!({"action":"type","element":element.clone(),"text":"hello"}),
+            serde_json::json!({"action":"dialog","target":target.clone(),"request_id":"dialog-1","accept":true,"text":null}),
+        ] {
+            assert!(
+                super::validate_module_action_input(
+                    super::BROWSER_MODULE_ID,
+                    "browser/act",
+                    &super::StrictJsonValue(action),
+                )
+                .is_ok()
+            );
+        }
+        for invalid in [
+            serde_json::json!({"action":"click"}),
+            serde_json::json!({"action":"click","element":element.clone(),"principal_id":"forged"}),
+            serde_json::json!({"action":"click","tab_id":"attached-tab","observation_id":"observation-1","ref_id":"ref-1"}),
+            serde_json::json!({"action":"script","expression":"document.click()"}),
+            serde_json::json!({"operation":"act","action":"click","element":element.clone()}),
+            serde_json::json!({"action":{"action":"click","element":element.clone()}}),
+            serde_json::json!({"action":"click","element":reference}),
+        ] {
+            assert!(
+                super::validate_module_action_input(
+                    super::BROWSER_MODULE_ID,
+                    "browser/act",
+                    &super::StrictJsonValue(invalid),
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            super::validate_module_action_input(
+                super::BROWSER_MODULE_ID,
+                "browser/download",
+                &super::StrictJsonValue(serde_json::json!({"element":element.clone()})),
+            )
+            .is_ok()
+        );
+        assert!(
+            super::validate_module_action_input(
+                super::BROWSER_MODULE_ID,
+                "browser/evaluate",
+                &super::StrictJsonValue(serde_json::json!({
+                    "request":{"target":target,"expression":"document.title"}
+                })),
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn rendered_content_contract_has_only_url_input_and_bounded_html_output() {
         let valid=super::StrictJsonValue(serde_json::json!({"url":"https://example.com/"}));

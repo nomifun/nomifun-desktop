@@ -108,6 +108,8 @@ nomifun-agent-kernel.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-ai-agent.workspace = true
 image.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
 
 # Tests build a real NTFS junction inside the fake legacy tree to prove the
 # data relocation skips links instead of failing.

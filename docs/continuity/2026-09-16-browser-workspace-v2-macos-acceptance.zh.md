@@ -184,7 +184,7 @@ $cases = @(
   '--frame-input-only', '--frame-drag-only', '--popup-only', '--managed-popup-only',
   '--dialog-probe-only', '--dialog-close-only', '--permissions-only',
   '--permission-timeout-only', '--picker-only', '--upload-frames-only',
-  '--user-files-only', '--user-downloads-only', '--agent-downloads-only',
+  '--user-files-only', '--user-downloads-only',
   '--user-download-cancel-active-only', '--site-data-probe-only',
   '--crash-only', '--close-all-only'
 )
@@ -193,6 +193,9 @@ foreach ($case in $cases) {
   if ($LASTEXITCODE -ne 0) { throw "Native Browser smoke failed: $case" }
 }
 ```
+
+`--agent-only` 现通过统一 Runtime 的 exact Browser Actions 覆盖真实 WebView2 导航、观察、可信输入、
+workspace upload、`target=_blank` download 发布与 cleanup；已删除的旧 Tool facade 参数不得恢复。
 
 另在真实 UI 核对浏览器聚焦时的停止按钮。真实模型通过正式配置执行，
 与 `--agent-only` 脚本模型证据分开。Windows/macOS 两端都完成这些门槛后，才能签署跨平台通过。

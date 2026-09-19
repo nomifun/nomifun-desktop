@@ -31,19 +31,6 @@ mod presentation;
 #[cfg(windows)]
 #[path = "support/browser_resource_fixture.rs"]
 mod browser_resource_fixture;
-// Compile the production tool and turn owner against the real native host.
-// These are test-only modules, not a public runtime-construction API.
-#[cfg(windows)]
-#[path = "../../../crates/backend/nomifun-ai-agent/src/manager/nomi/browser_lifecycle.rs"]
-mod browser_lifecycle;
-#[cfg(all(windows, test))]
-use nomifun_ai_agent::AgentRuntimeState;
-#[cfg(windows)]
-#[path = "../../../crates/backend/nomifun-ai-agent/src/manager/nomi/browser_tool.rs"]
-mod browser_tool;
-#[cfg(windows)]
-#[path = "support/browser_tool_roundtrip.rs"]
-mod tool_roundtrip;
 #[cfg(windows)]
 #[path = "support/browser_agent_turn.rs"]
 mod agent_turn;
@@ -74,9 +61,6 @@ mod user_files;
 #[cfg(windows)]
 #[path = "support/browser_user_downloads.rs"]
 mod user_downloads;
-#[cfg(windows)]
-#[path = "support/browser_agent_downloads.rs"]
-mod agent_downloads;
 #[cfg(windows)]
 #[path = "support/browser_external.rs"]
 mod external_browser;
@@ -282,7 +266,6 @@ fn main() {
     let managed_popup_only = std::env::args().any(|arg| arg == "--managed-popup-only");
     let presentation_only = std::env::args().any(|arg| arg == "--presentation-only");
     let frame_drag_only = std::env::args().any(|arg| arg == "--frame-drag-only");
-    let tool_only = std::env::args().any(|arg| arg == "--tool-only");
     let crash_only = std::env::args().any(|arg| arg == "--crash-only");
     let permissions_only = std::env::args().any(|arg| arg == "--permissions-only");
     let permission_timeout_only = std::env::args().any(|arg| arg == "--permission-timeout-only");
@@ -297,7 +280,6 @@ fn main() {
     let picker_selection_only = std::env::args().any(|arg| arg == "--picker-selection-only");
     let save_picker_selection_only = std::env::args().any(|arg| arg == "--save-picker-selection-only");
     let user_downloads_only = std::env::args().any(|arg| arg == "--user-downloads-only");
-    let agent_downloads_only = std::env::args().any(|arg| arg == "--agent-downloads-only");
     let external_browser_only = std::env::args().any(|arg| arg == "--external-browser-only");
     let downloads_folder_only = std::env::args().any(|arg| arg == "--downloads-folder-only");
     let evaluation_only = std::env::args().any(|arg| arg == "--evaluate-only");
@@ -416,10 +398,6 @@ fn main() {
                                 let result=site_data_probe::verify(&handle,&format!("http://{address}/"),&site_data_root).await?;
                                 return Ok(serde_json::json!({"scope":"site-data-probe-only","site_data":result}));
                             }
-                            if agent_downloads_only {
-                                let downloads=agent_downloads::verify(&handle,&format!("http://{address}/user-downloads")).await?;
-                                return Ok(serde_json::json!({"scope":"agent-downloads","downloads":downloads}));
-                            }
                             if user_downloads_only || user_download_selection_only || user_download_cancel_active_only {
                                 view.hide().map_err(|e|e.to_string())?;
                                 let check=if user_download_cancel_active_only {user_downloads::Check::ActiveCancel} else if user_download_selection_only {user_downloads::Check::Save} else {user_downloads::Check::Lifecycle};
@@ -476,11 +454,6 @@ fn main() {
                                 view.hide().map_err(|error|error.to_string())?;
                                 let permissions=permission_checks::verify(&handle,&format!("http://{address}/popup-source"),permission_timeout_only).await?;
                                 return Ok(serde_json::json!({"scope":"permissions","permissions":permissions}));
-                            }
-                            if tool_only {
-                                view.hide().map_err(|error|error.to_string())?;
-                                let tool=tool_roundtrip::verify(&handle,&format!("http://{address}/popup-source")).await?;
-                                return Ok(serde_json::json!({"scope":"tool-only","tool":tool}));
                             }
                             if crash_only {
                                 view.hide().map_err(|error|error.to_string())?;
