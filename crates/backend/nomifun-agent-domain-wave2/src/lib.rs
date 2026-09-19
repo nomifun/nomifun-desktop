@@ -2562,6 +2562,10 @@ fn capability_display(capability_id: &str) -> (&str, &str) {
             "Workspace Artifacts",
             "Publish immutable workspace outputs and read them through bounded receipts.",
         ),
+        BROWSER_MODULE_ID => (
+            "Browser",
+            "Use exact Browser actions on the bound native browser. For a browser/act click, the top-level object contains only `action`, `element`, and optional `button` or `click_count`. Copy the complete element object `{reference, role, name, focused}` from the latest observation into `element`. Top-level `reference`, `role`, `name`, `focused`, or `target` fields are invalid; never JSON-stringify a nested object.",
+        ),
         _ => (capability_id, "Bundled Wave 2 coding-extension capability."),
     }
 }
@@ -2585,6 +2589,11 @@ fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
 mod tests {
     #[test]
     fn browser_action_schemas_publish_one_provider_neutral_reference_shape() {
+        let (_, description) = super::capability_display(super::BROWSER_MODULE_ID);
+        assert!(description.contains("complete element object"));
+        assert!(description.contains("contains only `action`, `element`"));
+        assert!(description.contains("Top-level `reference`"));
+        assert!(description.contains("never JSON-stringify"));
         let schema = super::action_input_schema("browser/act");
         assert_eq!(
             schema.0.pointer("/type"),

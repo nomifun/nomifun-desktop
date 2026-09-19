@@ -931,7 +931,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let prepared = async {
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
-        let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":["function_calling","streaming"],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
+        let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":["function_calling","reasoning","streaming"],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
         let display_name = if computer_denied {
             "Computer 权限拒绝验收"
@@ -943,6 +943,10 @@ async fn main() -> anyhow::Result<()> {
         let editor = api(&app,"/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":display_name,"model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
         let preset = editor["preset"]["preset_id"].as_str().ok_or_else(|| anyhow::anyhow!("preset missing"))?.to_owned();
         let mut draft=editor["draft"].clone();
+        if live_mode {
+            draft["document"]["persona"] = json!("You are a precise local Browser repair acceptance agent.");
+            draft["document"]["instructions"] = json!("Use only the selected real Browser and Workspace Actions. For browser/act click, send exactly {\"action\":\"click\",\"element\":ELEMENT}, where ELEMENT is the complete {reference, role, name, focused} object copied unchanged from the latest browser/observe result. Do not add top-level reference, role, name, focused, or target fields, and do not stringify nested objects. Use the selected Workspace read and patch Actions for source changes inside the bound workspace; do not try to edit source through the page.");
+        }
         draft["document"]["enabled_capabilities"] = if computer_denied {
             json!([{
                 "capability":{"id":"computer","version":"1.0.0"},
@@ -953,6 +957,14 @@ async fn main() -> anyhow::Result<()> {
                 "capability":{"id":"computer","version":"1.0.0"},
                 "action_allowlist":["computer/a11y.observe","computer/input","computer/launch"]
             }])
+        } else if live_mode {
+            json!([{
+                "capability":{"id":"browser","version":"1.0.0"},
+                "action_allowlist":["browser/observe","browser/navigate","browser/act"]
+            },{
+                "capability":{"id":"workspace.files","version":"1.0.0"},
+                "action_allowlist":["workspace.files/read","workspace.files/patch"]
+            }])
         } else {
             json!([{
                 "capability":{"id":"browser","version":"1.0.0"},
@@ -961,9 +973,15 @@ async fn main() -> anyhow::Result<()> {
         };
         let revision_path=format!("/api/agent-presets/{preset}/revisions");
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
-        anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==1),"Browser fixture revision missing selected Module");
+        let expected_capabilities=if live_mode {2}else{1};
+        anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
         let resources = if computer_denied || computer_input {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
+        } else if live_mode {
+            json!([
+                {"resource_kind":"browser","resource_id":"managed-browser"},
+                {"resource_kind":"workspace","resource_id":"default-workspace"}
+            ])
         } else {
             json!([{"resource_kind":"browser","resource_id":"managed-browser"}])
         };
