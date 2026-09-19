@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0.0",
   "inventory_kind": "uarc-baseline-inventory",
-  "updated_on": "2026-09-17",
+  "updated_on": "2026-09-19",
   "source": {
     "branch": "rf/agent-capability-platform-v2",
     "source_commit": "877b1a751536e40a3185c31790e6e63e86c6fa32",
@@ -179,18 +179,22 @@
     },
     {
       "id": "automation.autowork_parallel_receipts",
-      "description": "AutoWork still owns Conversation receipt polling, attempts and recovery instead of AgentExecution receipts.",
+      "description": "AutoWork still owns a private Session delivery/retry state machine instead of using AgentExecution and canonical Agent receipts.",
       "owner_tasks": ["UARC-033", "UARC-051"],
       "completion_requirement": "zero_production_references",
       "matcher": {
         "kind": "regex",
-        "pattern": "AutoWorkSessionPort|conversation_delivery_receipts|owner_conversation_id|attempt_count",
+        "pattern": "AutoWork(?:Session|Conversation)Port|AutoWorkTurn(?:DeliveryState|Request)|conversation_delivery_receipts|MAX_ATTEMPTS|attempt_count\\s*(?:<|>)",
         "flags": "",
         "include_paths": [
           "crates/backend/nomifun-requirement/src/",
           "crates/backend/nomifun-db/migrations/"
         ]
       },
+      "retained_facts": [
+        "requirements.owner_conversation_id is the same canonical AgentSession UUID exposed through retained user-facing Conversation terminology; it is not a second Session or receipt authority",
+        "requirements.attempt_count is queue-claim history only; no production retry, recovery or receipt decision may branch on it"
+      ],
       "baseline": { "match_count": 202, "file_count": 24, "files_digest": "f7d3932a1098cf68922b55d4e5554a8ed0aebd2931ab1df5a428320c32b7bb19" }
     },
     {
@@ -255,10 +259,11 @@
     {
       "id": "windows.process_runtime.parallel_test_hang",
       "owner_task": "UARC-021",
-      "state": "open",
+      "state": "closed",
       "command": "cargo test -p nomi-process-runtime --lib",
       "observed": "The default parallel run completed compilation and most tests, then emitted five ConPTY serial-group over-60-second warnings and made no further progress; it was interrupted after more than 210 seconds.",
-      "control": "The panic/quarantine case passed alone, and all 119 library tests passed with --test-threads=1 in 3.30 seconds after compilation.",
+      "control": "The panic/quarantine case passed alone, all 217 current Windows tests passed with --test-threads=1 during UARC-064, all 240 macOS tests passed with the same serial control during UARC-062, and the UARC-070 workspace all-target gate passed under the codified serial test policy.",
+      "resolution": "UARC Process gates are explicitly serial on both platforms because the crate intentionally exercises shared console, process-group and cleanup resources; the single-Cargo lease plus --test-threads=1 is the maintained gate and product/native cleanup smokes independently prove termination behavior.",
       "completion_requirement": "Make the default parallel library gate deterministic or explicitly codify a justified serial crate gate without masking a product cleanup failure."
     },
     {

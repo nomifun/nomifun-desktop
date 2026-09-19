@@ -299,7 +299,7 @@ NSIS 14-check install smoke 均通过。候选安装、启动、`/health` 200、
 - 880×600 和宽窗口 UI/VoiceOver 检查；
 - arm64 `.app`/DMG 的资源、架构、启动、退出和签名结构；Developer ID/notarization 仅在凭据 available 时运行。
 
-## 12. macOS 完成状态与下一恢复点
+## 12. macOS 完成状态与最终收口
 
 当前 Apple M4 arm64 主机上的 UARC-061、UARC-062、UARC-063 核心范围已经闭合，详细证据见三份
 `UARC-06x-MACOS-IMPLEMENTATION.zh.md`。用户明确决定 Keychain 持久化、attached Chrome Remote Debugging、
@@ -310,5 +310,7 @@ arm64 App/DMG 的权威报告为 `build.noindex/uarc063-delivery/uarc-macos-repo
 App/DMG Developer ID、Apple notarization/staple、release lock、挂载同一性、fresh-root startup 和 cleanup 均
 通过。主机 Gatekeeper assessment 全局关闭，因此该交互检查单独为 `not_run`。
 
-下一恢复点是 Windows Integration：执行 UARC-064 的受影响 crates/UI、WebView2、Process/Computer 和
-`bun run check` 回归。UARC-064 完成前不得开始或标记 UARC-070 完成。
+Windows Integration 已在 `2a426e7af3367ba47101fa3e676a71c89bc57af6` 完成 UARC-064：受影响
+crates/UI、WebView2、Process/Computer、商业 StepFun、`bun run check`、production renderer 与 NSIS candidate
+全部通过。UARC-070 随后完成 requirements-to-evidence、production reachability、write-set、dependency 和
+platform-state 审计；最终结论见 `UARC-070-COMPLETION-AUDIT.zh.md`。当前无下一 handoff 或未归属平台工作。

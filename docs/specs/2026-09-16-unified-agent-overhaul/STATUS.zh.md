@@ -2,7 +2,7 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-19
-> 当前阶段：Wave 8 macOS / UARC-061、UARC-062、UARC-063 integrated / macOS verified
+> 当前阶段：Wave 9 / UARC-070 cross-platform completion audit complete
 > 当前 Mac artifact source：`6ab013f68bfcdae46ffaeecf471bd4933ed34a67`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -22,8 +22,10 @@
 > UARC-061 实现提交：`a39e2bfee807ec1fe1cea0cea957663a66c03558`
 > UARC-062 实现提交：`1c37ddd8059e2b1ae1c0419b2c37fd3908cbce23`
 > UARC-063 arm64 artifact barrier：`6ab013f68bfcdae46ffaeecf471bd4933ed34a67`
-> 当前主机：macOS 26.3 (25D125) / Apple M4 arm64
-> Initiative 状态：`active / macOS core complete；UARC-064 Windows regression pending`
+> UARC-064 Windows regression source：`2a426e7af3367ba47101fa3e676a71c89bc57af6`
+> UARC-070 audit start：`93aad2c42a32900b8cc8eeadc696b4e8bf56f37e`
+> 当前审计主机：Windows NT 10.0.26200.0 / x64；Mac evidence host：macOS 26.3 / Apple M4 arm64
+> Initiative 状态：`complete / Windows verified / macOS verified`
 
 ## 1. 当前事实
 
@@ -91,35 +93,35 @@
 
 | Task | 状态 | Owner | Windows | macOS | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| `UARC-000` | windows_verified | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
-| `UARC-001` | integrated | Integration | verified | pending | 机器 inventory/self-test/timing/platform gap 已完成；Mac gaps 保持 pending |
-| `UARC-010` | integrated | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
-| `UARC-011` | integrated | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
-| `UARC-012` | integrated | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
-| `UARC-013` | integrated | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
-| `UARC-014` | integrated | Integration | verified | n/a | Runtime selector 删除、通用 Compiler/projection、136-ID retirement 已闭合 |
-| `UARC-020` | integrated | Integration | verified | pending | 自适应单 Runtime、长程 Coding、exact restart proof |
-| `UARC-021` | integrated | Integration | verified | pending | 四个 Workspace Module、owner effects、Artifact/VCS hardening |
-| `UARC-022` | integrated | Integration | verified | pending | Skill locks、per-tool MCP、Plugin contributions；无 broad Runtime/proxy |
-| `UARC-030` | integrated | Integration | verified | pending | Web、Knowledge、Memory Module 与 sensitive Action authority |
-| `UARC-031` | integrated | Integration | verified | pending | scene-derived Context；Channel/Companion/Customer Actions |
-| `UARC-032` | integrated | Integration | verified | pending | Creation/Workshop/Office/Plugin Modules 与 Creative UI |
-| `UARC-033` | integrated | Integration | verified | pending | AutoWork 复用 AgentExecution；Agent-path IDMM 已删除 |
-| `UARC-034` | integrated | Integration | verified | pending | Schedule/Notification/Remote/SSH exact Actions 与 typed ingress |
-| `UARC-040` | integrated | Integration | verified | pending | Browser Module、Resource 与 provider-neutral contract |
-| `UARC-041` | integrated | Integration | verified | n/a | Windows WebView2 Browser capability UI；无 Browser-only Session |
-| `UARC-042` | integrated | Integration | verified | pending | Computer/Robot 单 Module、slash Actions 与真实 availability |
-| `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
-| `UARC-051` | integrated | Integration | verified | pending | generation 5 Store/API/projection 与领域入口完成切换 |
-| `UARC-052` | integrated | Integration | verified | pending | 唯一官方 Runtime；旧 Runtime/selector/compatibility 已物理删除 |
-| `UARC-053` | integrated | Integration | verified | pending | 旧 capability/store/IDMM/Browser entry 与 obsolete assets 已物理删除 |
-| `UARC-054` | integrated | Integration | verified | pending | canonical schema baseline 已压缩并验证 |
-| `UARC-060` | integrated | Windows Integration | verified | pending | Windows candidate 与 shared-source barrier 已冻结 |
-| `UARC-061` | integrated | Mac Integration | n/a | verified | managed CEF、34/34 native（含 renderer crash）、正式 Agent/Kernel/CEF、真实 StepFun workflow 与 Command-Q cleanup 已过；Keychain 持久化/attached Chrome 实连 `not_run` |
-| `UARC-062` | integrated | Mac Integration | n/a | verified | Process/PTY、Accessibility/physical input、Terminal focus/Unicode/resize、Command-Q 已过；Screen Recording granted/真实 IME `not_run` |
-| `UARC-063` | integrated | Mac Integration | n/a | verified | signed/notarized arm64 App/DMG、CEF bundle、release lock、mounted identity、startup/cleanup 全部通过 |
-| `UARC-064` | planned | unassigned | pending | n/a | 仅在 Mac 合入后回到 Windows 执行 |
-| `UARC-070` | planned | unassigned | pending | pending | 仅在 UARC-064 后执行跨平台完成审计 |
+| `UARC-000` | complete | Integration | verified | n/a | barrier `2147863da`；26/26 文件归属，基线 gate 通过 |
+| `UARC-001` | complete | Integration | verified | verified | inventory/self-test/timing 与三类 Mac gap 全部闭合 |
+| `UARC-010` | complete | Integration | verified | n/a | Module 多 contribution、authoring policy、exact Action grant 已闭合 |
+| `UARC-011` | complete | Integration | verified | n/a | generation 5 Store、main migration、effect ledger、reset gate 已闭合 |
+| `UARC-012` | complete | Integration | verified | n/a | 单一 AgentSession owner、完整生命周期 API 与 exact receipt 已闭合 |
+| `UARC-013` | complete | Integration | verified | n/a | 单一官方 provider/factory、Driver lifecycle 与 typed host ports 已闭合 |
+| `UARC-014` | complete | Integration | verified | n/a | Runtime selector 删除、通用 Compiler/projection、136-ID retirement 已闭合 |
+| `UARC-020` | complete | Integration | verified | verified | 自适应单 Runtime、long-horizon/restart 与 packaged Mac Agent turns |
+| `UARC-021` | complete | Integration | verified | verified | 四个 Workspace Module；Mac Workspace/Process/PTY owner evidence |
+| `UARC-022` | complete | Integration | verified | verified | Skill/MCP/Plugin contributions；arm64 product compile/lifecycle |
+| `UARC-030` | complete | Integration | verified | verified | Web、Knowledge、Memory shared semantics 与 arm64 product compile |
+| `UARC-031` | complete | Integration | verified | verified | scene Context、Channel/Companion/Customer shared semantics |
+| `UARC-032` | complete | Integration | verified | verified | Creation/Workshop/Office/Plugin Modules 与 production renderer/App |
+| `UARC-033` | complete | Integration | verified | verified | AutoWork 复用 AgentExecution；Agent-path IDMM 已删除 |
+| `UARC-034` | complete | Integration | verified | verified | Schedule/Notification/Remote/SSH typed boundary 与 Mac lifecycle |
+| `UARC-040` | complete | Integration | verified | verified | Browser Module/Resource；正式 Mac AgentSession→CEF 链路 |
+| `UARC-041` | complete | Integration | verified | n/a | Windows WebView2 Browser capability UI；无 Browser-only Session |
+| `UARC-042` | complete | Integration | verified | verified | Computer/Robot Module；Mac TCC/Accessibility/physical input |
+| `UARC-050` | complete | Integration | verified | verified | Workbench、880×600、production renderer 与 native focus evidence |
+| `UARC-051` | complete | Integration | verified | verified | generation 5 Store/API；Mac canonical turns + fresh-root starts |
+| `UARC-052` | complete | Integration | verified | verified | 唯一 Runtime；两平台 production path 无旧 compatibility |
+| `UARC-053` | complete | Integration | verified | verified | 13 个 legacy group 生产可达性全部为 0 |
+| `UARC-054` | complete | Integration | verified | verified | canonical baseline；Mac absent/empty root startup 通过 |
+| `UARC-060` | complete | Windows Integration | verified | n/a | Windows candidate 与 shared-source barrier 已冻结 |
+| `UARC-061` | complete | Mac Integration | n/a | verified | CEF 34/34、正式 Agent/Kernel、真实 StepFun、Command-Q；明确 `not_run` 保留 |
+| `UARC-062` | complete | Mac Integration | n/a | verified | Process/PTY、Accessibility/input、Terminal、Command-Q；明确 `not_run` 保留 |
+| `UARC-063` | complete | Mac Integration | n/a | verified | signed/notarized/stapled arm64 App/DMG 与 lifecycle 全部通过 |
+| `UARC-064` | complete | Windows Integration | verified | n/a | post-Mac WebView2/system/UI/model/NSIS regression 通过 |
+| `UARC-070` | complete | Integration | verified | verified | requirements/evidence、dependency、ownership、reachability 全部闭合 |
 
 ## 4. 当前 dirty worktree 归属
 
@@ -148,7 +150,7 @@
 | UARC boundary scanner/self-test | passed，3,029 files / 13 groups / 4,094 matches | UARC-001 machine-readable baseline |
 | Wave 1 targeted Rust baseline | 198 passed（contracts/kernel/session/engine-core） | Windows shared foundation baseline |
 | Browser/Process/Terminal targeted baseline | 303 passed with Process serial control | Windows platform timing baseline |
-| Process Runtime default parallel sample | interrupted after >210 s | open anomaly owned by `UARC-021`; serial 119/119 passed |
+| Process Runtime default parallel sample | historical interruption；closed | maintained serial gate；Windows 217、macOS 240 与最终 workspace gate 通过 |
 | UARC-010 Contracts/API/Kernel | 103 + 533 + 60 passed | Module/Action/authoring/Snapshot authority gate |
 | UARC-010 Session/Engine/Plugin consumers | 25 + 14 + 40 passed | shared consumer regression |
 | UARC-010 contract generator/rustfmt/boundary | passed | generated schema and reachability consistent |
@@ -207,10 +209,12 @@
 | UARC-052 Runtime/AI/Conversation | Runtime 40 + AI 452 + Plugin consumer 23 + Conversation 335 passed | 单一 Runtime loop、固定 factory、提取 adapters 与无 private transcript |
 | UARC-052 App/process | App lib 511 + route-gap 29 + Process architecture 16 passed | single-factory boot、canonical Session dispatch 与单 process owner |
 | UARC-052 UI/build/boundary | focused UI 7；typecheck、production build、880×600、Browser/Process/UARC scanners passed | Runtime selector/compatibility reachability为 0；migration 099 的 2 个 immutable 文本归 UARC-054 |
-| Windows UARC full gate | UARC-060 historical pass；UARC-064 not run | Mac 完成后必须回到 Windows 重跑 |
+| Windows UARC full gate | UARC-064 verified | post-Mac WebView2/system/UI/model/package regression complete |
 | macOS UARC artifact source | production renderer 7,677 modules；targeted Browser/Process/Terminal/Computer suites inherited from exact runtime source | packaging-only closeout 未重复运行无关全量套件 |
 | macOS native Browser/Computer/Process | Browser 34/34 + renderer crash + product CEF + real model + Command-Q；Process/PTY；Computer a11y/physical input；Terminal UI passed | excluded Screen Recording granted、IME 与 attached Chrome 均为 `not_run` |
 | macOS arm64 App/DMG | App/CEF/helper arm64；DMG Developer ID + notarization + staple；release lock/mount/startup/cleanup passed | Gatekeeper interactive assessment 因主机全局关闭记为 `not_run` |
+| UARC-070 workspace all-target/doctest | passed / passed | current-source Rust completion gate |
+| UARC-070 completion scanner | 13 legacy groups=0；open anomaly=0；Mac gap=0 | task/platform/dependency closure machine-enforced |
 
 ## 6. Test Lease
 
@@ -224,17 +228,12 @@
 
 ## 7. Blockers
 
-- macOS UARC-061/062/063 核心实施无 blocker；用户排除项与 Gatekeeper 主机状态均以 `not_run` 记录。
-- Windows UARC-064 尚未执行；UARC-070 必须继续等待 UARC-064。
-- `UARC-051/052` Windows/shared cutover 已收口；产品入口均使用 generation 5 Store 与唯一官方 Runtime，
-  旧 Conversation projection、旧 Runtime 实现、multi-Runtime selector 与 private transcript 不再可达。
-- 历史 Agent schema/migrations、旧 capability projection、obsolete product smoke/IDMM/Browser-entry leftovers 与
-  Fresh-v4 root aliases 仅为接下来的 `UARC-053/054` 物理删除输入。
+- 无剩余 UARC blocker。
+- 用户移出本轮必要门槛的 Mac 项继续按 `not_run` 留档，不回写为 pass。
 
 ## 8. Next ready tasks
 
-1. `UARC-064`：在 Windows 执行受影响 crates/UI、WebView2、Process/Computer 与 `bun run check` 回归。
-2. `UARC-070`：只在 UARC-064 完成后执行最终 requirements-to-evidence 与 production reachability 审计。
+- 无；UARC initiative 已完成。后续若改变 Browser provider、原生权限或打包源，按对应平台重新打开验证。
 
 ## 9. 状态更新模板
 
@@ -1151,3 +1150,31 @@
 - Tests: pending full workspace/all-target/doctest gate, requirements-to-evidence matrix, dependency/status consistency,
   write-set coverage, final UARC scanner and clean-tree audit.
 - Remaining/blocker: none yet; missing evidence discovered by this audit will be reported by exact task and platform.
+
+### 2026-09-19 UARC-070 complete
+
+- Barrier/source: audit start `93aad2c42a32900b8cc8eeadc696b4e8bf56f37e`; current production implementation
+  remains Windows-verified at `2a426e7af3367ba47101fa3e676a71c89bc57af6` and Mac-artifact-equivalent to
+  `6ab013f68bfcdae46ffaeecf471bd4933ed34a67`（后续 `apps/crates/ui` 差异仅为 maintainable example fixture）。
+- Owner/write set: Integration only. Initial source → audit worktree 1,225 changed paths、Mac 41 paths、post-Mac 8
+  paths all have manifest owners；unowned=0。
+- Changed: added the 29-task requirements-to-evidence matrix and made completion machine-enforced for initiative/task
+  status、required platform states、dependency closure、legacy reachability、Mac gaps and baseline anomalies。
+- Scanner audit: the first strict completion run correctly surfaced 86 broad AutoWork matches. Call-graph review proved
+  they were retained Requirement queue claim owner/count facts, while the old Session port、delivery receipt table、
+  `MAX_ATTEMPTS` and retry branch were absent. The matcher now rejects the retired authority behavior without rejecting
+  the same canonical AgentSession UUID's retained Conversation product projection；all 13 groups are 0。
+- Deleted: no remaining temporary compatibility、handoff-only production code or ownerless wrapper was found. Existing
+  native/package fixtures are retained as maintainable regression gates。
+- Tests: `cargo test --workspace --all-targets -- --test-threads=1` passed；
+  `cargo test --workspace --doc -- --test-threads=1` passed；final `bun run check` passed with 1,916 renderer sources，
+  13 legacy groups=0、open anomaly=0、Mac gap=0；JSON parse、write-set audit and completion scanner passed。
+- Windows: verified, including UARC-064 WebView2/system/UI/commercial-model/NSIS evidence. Candidate installer SHA-256
+  `8f7b0fdc3d33b8cbd69f78de6cdbd2be2ec0c9e89ce6fcf06eb341801ca83a57`。
+- macOS: verified from tracked UARC-061/062/063 evidence. App host SHA-256
+  `39d021de265b79ad51540fbe5e868a49f3912d3e102c79fbb096f2cf12d9ae53`；DMG SHA-256
+  `25059e0e0d6199d8727ab5734f2bd608a698c2a1dc5020d32cec8617c5e52565`。
+- Not run: Keychain persistence、attached Chrome live connection、Screen Recording granted/Retina screenshot、真实
+  IME composition 与 Gatekeeper interactive assessment remain explicit `not_run`; none is relabeled pass。
+- Remaining/blocker: none。29/29 tasks complete；all platform states are `verified` or `not_applicable`。
+- Next ready tasks: none；UARC initiative complete。
