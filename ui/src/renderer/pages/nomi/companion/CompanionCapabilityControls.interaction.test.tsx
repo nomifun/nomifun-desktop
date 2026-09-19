@@ -47,8 +47,7 @@ test('uses the shared popup and saves companion skill intent without session ove
   const available = spyOn(ipcBridge.fs.listAvailableSkills, 'invoke').mockResolvedValue(skills);
   const auto = spyOn(ipcBridge.fs.listBuiltinAutoSkills, 'invoke').mockResolvedValue([skills[0]]);
   const mcp = spyOn(mcpCatalog, 'ensureBackendMcpCatalog').mockResolvedValue({ allServers: [], enabledServers: [] } as any);
-  const session = spyOn(ipcBridge.agentPlatform.sessions.updateCapabilitySelection, 'invoke');
-  for (const spy of [available, auto, mcp, session]) restores.push(() => spy.mockRestore());
+  for (const spy of [available, auto, mcp]) restores.push(() => spy.mockRestore());
   const patches: unknown[] = [];
   function View() {
     const [profile, setProfile] = useState({ companion_id: 'companion-rail', skills: { enabled: ['uninstalled-skill'], disabled_auto: [] as string[] } });
@@ -67,7 +66,6 @@ test('uses the shared popup and saves companion skill intent without session ove
   expect(view.getByTestId('session-mcp-trigger')).toBeTruthy();
   fireEvent.click(view.getByRole('checkbox', { name: 'auto-skill' }));
   await waitFor(() => expect(patches).toEqual([{ skills: { enabled: ['uninstalled-skill'], disabled_auto: ['auto-skill'] } }]));
-  expect(session).not.toHaveBeenCalled();
   fireEvent.click(view.getByRole('button', { name: 'Close' }));
   await waitFor(() => expect(view.queryByRole('dialog')).toBeNull());
   fireEvent.click(view.getByRole('button', { name: 'Skills · 0' }));

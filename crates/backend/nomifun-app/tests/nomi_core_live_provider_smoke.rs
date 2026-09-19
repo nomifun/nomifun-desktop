@@ -752,11 +752,6 @@ async fn create_session(
             "preset_id": preset_id,
             "title": "Live Step Plan session",
             "resource_selections": resource_selections,
-            "capability_selection": {
-                "enabled_skills": [],
-                "excluded_auto_skills": [],
-                "mcp_server_ids": []
-            },
             "model": {
                 "provider_id": provider_id,
                 "model": model
