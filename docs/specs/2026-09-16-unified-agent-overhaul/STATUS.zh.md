@@ -918,3 +918,36 @@
   handoff without claiming CEF, TCC, native input, DMG or signing verification.
 - Remaining/blocker: none for Windows acceptance. An external Mac host remains the expected Wave 8 prerequisite.
 - Next ready tasks: none until UARC-060 records a green Windows candidate and shared-source macOS barrier.
+
+### 2026-09-19 UARC-060 integrated
+
+- Barrier/source: UARC-054 closeout `d14af94e611de1cef986287f72cb027cf770e4ef`; implementation candidate
+  `b09c680bbedd939a3dd9c5a05d9432a6ae79bdee`.
+- Owner/write set: Windows Integration only. All 37 changed paths are inside the expanded manifest write set; no Feature
+  worker, overlapping Cargo/full-UI/native task or parallel package build ran during serial acceptance.
+- Changed: Browser is now an official Wave 2 Platform module owned by the unified Runtime with exact
+  principal/Session/Turn/Snapshot/Provider/Resource/Action authority, frozen BrowserSessionAuthority, generic compiler
+  output, managed and attached-Chrome adapters, durable effect settlement and canonical lifecycle cancellation.
+  Desktop/Web startup use the canonical data root; host workspace admission is normalized before entering the Runtime.
+- Deleted: `browser_agent_downloads.rs` and `browser_tool_roundtrip.rs`. Their useful coverage moved into the production
+  AgentSession → compiler → Kernel → Browser owner → WebView2 smoke; no parallel Browser Runtime or permanent
+  compatibility wrapper remains.
+- Retained + reason: Windows WebView2, macOS independent CEF child NSView, shared Browser Resource/Action contracts and
+  the maintainable Windows candidate harness remain. WKWebView was not introduced.
+- Tests: Wave 2 18/18; App browser-use 488/488; Desktop 144 passed/3 ignored; Browser Platform 55/55; Gateway
+  107 + production bypass audit; AI Agent Browser 449 passed/1 ignored; native stability 8/8; real read-only Computer
+  suites 6/6; UI 3538/3538; full workspace crates/doctests, production UI build, `bun run check`, rustfmt and diff check
+  passed. The single first-run `rustc` `STATUS_ACCESS_VIOLATION` in third-party `aws-sdk-bedrock` disappeared on the exact
+  full rerun and is recorded as a toolchain transient, not an omitted gate.
+- Commercial-model evidence: Credential Manager-isolated StepFun Coding Plan `step-3.7-flash` passed selected-model and
+  live Browser gates through canonical AgentSession/Runtime/WebView2. Native click produced observed value 2; canonical
+  action shape, evidence-driven cancellation and terminal-before-unlock all passed. No credential entered argv, build
+  environments, repository files or logs.
+- Candidate: clean source produced unsigned local-test `NomiFun_0.7.6_x64-setup.exe`, 64,089,439 bytes, SHA-256
+  `ab572e619fb85b511488e25a94c76cf62f4ba7eace4c13751c43b1a6b6bb6dda`. The 14-check install smoke passed x64 PE,
+  isolated install, launch, backend health 200, WebView2 CDP, process-tree cleanup, uninstall and absence verification.
+- Windows: verified. macOS: pending; no CEF production injection, TCC, Retina/IME, arm64 app, DMG or signing claim was
+  made from Windows.
+- Remaining/blocker: Windows acceptance has no remaining blocker. UARC-061/062 require an external Mac host; UARC-063
+  follows only after both are integrated, then UARC-064 Windows regression and UARC-070 final audit remain mandatory.
+- Next ready tasks: `UARC-061` and `UARC-062`, on a real Mac and under their disjoint manifest write sets.
