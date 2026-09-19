@@ -73,7 +73,7 @@ import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
 import CreationControls, { CreationModelSelector } from '@/renderer/creation/CreationControls';
-import { ComposerSceneHeader, SceneDiscoveryHint } from '@/renderer/creation/ComposerSceneSelector';
+import { ComposerSceneHeader } from '@/renderer/creation/ComposerSceneSelector';
 import { useCreationComposer } from '@/renderer/creation/CreationComposerContext';
 import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
@@ -1034,7 +1034,6 @@ const NomiSendBox: React.FC<{
         onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading={!isCreating}
       />
-      <SceneDiscoveryHint />
     </div>
   );
 };

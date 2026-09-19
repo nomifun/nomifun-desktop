@@ -144,9 +144,7 @@ const TemplateRunReviewModal: React.FC<{
       okButtonProps={{ disabled: !valid }}
       autoFocus={false}
       unmountOnExit
-      getPopupContainer={() =>
-        document.getElementById('resource-page-portal-root') ?? document.body
-      }
+      getPopupContainer={() => document.body}
       onCancel={onClose}
       onOk={() => {
         if (valid) onApprove(drafts);

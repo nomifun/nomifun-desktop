@@ -1,4 +1,4 @@
-.header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; min-height: 36px; margin-bottom: 6px; }
+.header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; min-height: 32px; margin-bottom: 1px; }
 .agent { display: flex; align-items: center; min-width: 0; max-width: 100%; }
 .agent + .scenes { margin-left: 2px; }
 .scenes { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
@@ -10,10 +10,5 @@
 .sceneIcon svg { display: block; }
 .sceneLabel { max-width: 0; margin-left: 0; opacity: 0; overflow: hidden; white-space: nowrap; font-weight: 500; transition: max-width 180ms ease, margin-left 180ms ease, opacity 140ms ease; }
 .sceneButton[aria-pressed='true'] .sceneLabel, .sceneButton:hover:not(:disabled) .sceneLabel, .sceneButton:focus-visible .sceneLabel { max-width: 12em; margin-left: 6px; opacity: 1; }
-.sceneButton:focus-visible, .hint button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
-.hintSlot { min-height: 32px; }
-.hint { display: flex; align-items: center; gap: 6px; padding: 7px 12px 0; font-size: 12px; line-height: 20px; color: var(--text-secondary); }
-.hint > :first-child { color: rgb(var(--primary-6)); }
-.hint button { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); cursor: pointer; }
-.hint button:hover { background: var(--color-fill-2); }
+.sceneButton:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .sceneButton, .sceneLabel { transition: none; } }

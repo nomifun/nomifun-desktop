@@ -1,5 +1,6 @@
 .content {
   display: grid;
+  container-type: inline-size;
   gap: 18px;
   min-width: 0;
 }
@@ -11,7 +12,7 @@
 }
 
 .detailsGrid[data-has-cover='true'] {
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: minmax(180px, .65fr) minmax(0, 1fr);
 }
 
 .previewColumn,
@@ -28,7 +29,7 @@
   aspect-ratio: 4 / 3;
   border-radius: 9px;
   background: var(--color-fill-2);
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .preview {
@@ -97,9 +98,7 @@
 }
 
 .prompt {
-  max-height: min(52vh, 520px);
-  overflow: auto;
-  padding: 16px;
+  padding: 12px;
   margin: 0;
   border: 1px solid var(--color-border-2);
   border-radius: 12px;
@@ -137,10 +136,16 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 12px;
   padding-top: 2px;
+}
+
+@container (max-width: 640px) {
+  .detailsGrid[data-has-cover='true'] { grid-template-columns: minmax(0, 1fr); }
+  .cover { max-height: 180px; }
 }
 
 .copyFeedback {

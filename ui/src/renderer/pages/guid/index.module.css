@@ -6,19 +6,28 @@
   margin: 0 auto;
 }
 
+.guidComposerGroup {
+  min-width: 0;
+}
+
 .workspaceFootnote {
   display: flex;
+  box-sizing: border-box;
   align-items: center;
   gap: 8px;
-  padding: 6px 6px 10px 14px;
-  background: transparent;
+  min-width: 0;
+  min-height: 38px;
+  margin: 0 14px -12px;
+  padding: 7px 12px 19px;
+  border-radius: 14px 14px 0 0;
+  background: var(--color-fill-2);
 }
 
 .workspaceEmptyBtn {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-text-3);
   background: transparent;
@@ -46,14 +55,15 @@
   border: none;
   border-radius: 6px;
   overflow: hidden;
-  max-width: 460px;
+  min-width: 0;
+  max-width: min(100%, 460px);
 }
 
 .workspacePillMain {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   color: var(--color-text-2);
   background: transparent;
@@ -64,6 +74,7 @@
   transition:
     background 0.12s,
     color 0.12s;
+  min-width: 0;
   max-width: 400px;
   overflow: hidden;
   white-space: nowrap;
