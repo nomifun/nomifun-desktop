@@ -2,10 +2,9 @@
 # ============================================================================
 # 打 macOS 桌面端安装包(.dmg),并汇总到 dist/desktop/。仅能在 macOS 上运行。
 #
-#   bun run build:mac                 # 默认只打 Universal 一个 DMG(不签名)
-#   bun run build:mac --signed        # 默认 Universal,带 Developer ID 签名 + 公证
-#   bun run build:mac arm intel       # 显式指定架构(可多选,空格分隔)
-#   bun run build:mac --signed intel  # 只打 Intel,且签名+公证
+#   bun run build:mac                 # 默认打 Apple Silicon arm64 DMG(不签名)
+#   bun run build:mac --signed        # arm64 + Developer ID 签名 + 公证
+#   bun run build:mac arm             # 显式选择 Apple Silicon
 #   Engine 随主程序源码编译打包；不导入外部 Runtime 二进制。
 #   bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
 #                                     # 未知 --xxx 选项会原样透传给 tauri build
@@ -42,6 +41,7 @@ CONF="apps/desktop/tauri.conf.json"
 MAC_CONF="apps/desktop/tauri.macos.conf.json"
 DIST="$ROOT/dist/desktop"
 RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
+CEF_STAGE_TOOL="$ROOT/scripts/validation/stage-macos-cef-bundle.mjs"
 CHECK_ONLY=0
 
 # ── 解析参数:架构选择/开关归本脚本,未知 --xxx 起原样透传给 tauri build ─────
@@ -77,12 +77,16 @@ require_tool() {
   }
 }
 
-for tool in bun git rustup lipo; do
+for tool in bun cargo git rustup lipo hdiutil ditto codesign; do
   require_tool "$tool"
 done
 
 [[ -f "$RELEASE_LOCK_TOOL" ]] || {
   echo "❌ missing release-lock tool: $RELEASE_LOCK_TOOL" >&2
+  exit 1
+}
+[[ -f "$CEF_STAGE_TOOL" ]] || {
+  echo "❌ missing CEF staging tool: $CEF_STAGE_TOOL" >&2
   exit 1
 }
 [[ -f "$ROOT/$MAC_CONF" ]] || {
@@ -103,14 +107,21 @@ resolve_triple() {
 
 TRIPLES=()
 if [[ "${#SELECT[@]}" -eq 0 ]]; then
-  # 默认只打 Universal 一个胖包:原生通吃 Intel + Apple Silicon,体验与单架构包无异,
-  # 只多占下载/磁盘体积,却省掉多轮编译与 Apple 公证等待。需要单架构包时显式指定。
-  TRIPLES=(universal-apple-darwin)
+  # Managed Browser 使用固定的 macOS arm64 CEF runtime；不得生成缺少
+  # Browser framework/helper 的伪 Universal/Intel 包。
+  TRIPLES=(aarch64-apple-darwin)
 else
   for s in "${SELECT[@]}"; do
     TRIPLES+=("$(resolve_triple "$s")")
   done
 fi
+
+for t in "${TRIPLES[@]}"; do
+  if [[ "$t" != "aarch64-apple-darwin" ]]; then
+    echo "❌ 当前固定 CEF runtime 仅支持 Apple Silicon arm64；不能生成不完整的 $t 包。" >&2
+    exit 1
+  fi
+done
 
 # ── 确保所需 Rust target 已安装(universal 需要底层两个 target 都在) ──────────
 ensure_target() {
@@ -169,6 +180,98 @@ verify_macos_app() {
   if [[ -n "$retired_artifact" ]]; then
     echo "❌ app 包含已退役 Codex Runtime 资源: $retired_artifact" >&2
     exit 1
+  fi
+
+  local cef_framework="$app/Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework"
+  local cef_runtime="$app/Contents/Resources/browser-cef/runtime.json"
+  [[ -f "$cef_framework" && -f "$cef_runtime" ]] || {
+    echo "❌ app 缺少固定 CEF framework/runtime metadata: $app" >&2
+    exit 1
+  }
+  local helper_name
+  for helper_name in \
+    "NomiFun Helper" \
+    "NomiFun Helper (GPU)" \
+    "NomiFun Helper (Renderer)" \
+    "NomiFun Helper (Plugin)" \
+    "NomiFun Helper (Alerts)"; do
+    [[ -x "$app/Contents/Frameworks/$helper_name.app/Contents/MacOS/$helper_name" ]] || {
+      echo "❌ app 缺少可执行 CEF helper: $helper_name" >&2
+      exit 1
+    }
+  done
+}
+
+find_cef_runtime() {
+  local target="$1"
+  local build_root="$ROOT/build.noindex/$target/release/build"
+  local newest=""
+  local newest_mtime=0
+  local archive mtime
+  while IFS= read -r -d '' archive; do
+    mtime="$(stat -f '%m' "$archive")"
+    if [[ -z "$newest" || "$mtime" -gt "$newest_mtime" ]]; then
+      newest="$archive"
+      newest_mtime="$mtime"
+    fi
+  done < <(find "$build_root" -path '*/out/cef_macos_aarch64/archive.json' -type f -print0 2>/dev/null)
+  [[ -n "$newest" ]] || {
+    echo "❌ cargo 未生成固定的 macOS arm64 CEF runtime。" >&2
+    exit 1
+  }
+  dirname "$newest"
+}
+
+stage_macos_cef() {
+  local app="$1"
+  local target="$2"
+  local identity="-"
+  if [[ "$SIGNED" -eq 1 ]]; then
+    identity="${APPLE_SIGNING_IDENTITY:-}"
+    [[ -n "$identity" ]] || {
+      echo "❌ CEF nested signing requires APPLE_SIGNING_IDENTITY。" >&2
+      exit 1
+    }
+  fi
+
+  echo "▶ 构建固定 CEF helper: $target"
+  cargo build --locked -p nomifun-browser-macos --bin nomifun-browser-cef-helper \
+    --release --target "$target"
+  local helper="$ROOT/target/$target/release/nomifun-browser-cef-helper"
+  local runtime
+  runtime="$(find_cef_runtime "$target")"
+  echo "▶ 装配并签名固定 CEF runtime/helper"
+  bun "$CEF_STAGE_TOOL" --app "$app" --helper "$helper" --runtime "$runtime" --identity "$identity"
+}
+
+create_dmg_from_staged_app() {
+  local app="$1"
+  local target="$2"
+  local dmg_dir="$3"
+  local version
+  version="$(bun -e 'console.log(require("./package.json").version)')"
+  local output="$dmg_dir/NomiFun_${version}_aarch64.dmg"
+  local temporary
+  temporary="$(mktemp -d "${TMPDIR:-/tmp}/nomifun-arm64-dmg.XXXXXX")"
+  local staging="$temporary/root"
+  mkdir -p "$staging" "$dmg_dir"
+  if ! ditto --noqtn "$app" "$staging/NomiFun.app"; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  ln -s /Applications "$staging/Applications"
+  echo "▶ 从已装配 CEF 的 App 生成 DMG: $output"
+  if ! hdiutil create -quiet -ov -fs HFS+ -format UDZO \
+    -volname NomiFun -srcfolder "$staging" "$temporary/NomiFun.dmg"; then
+    rm -rf "$temporary"
+    return 1
+  fi
+  mv -f "$temporary/NomiFun.dmg" "$output"
+  rm -rf "$temporary"
+  if [[ "$SIGNED" -eq 1 ]]; then
+    echo "▶ 签名 DMG: $output"
+    codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$output"
+    codesign --verify --strict --verbose=2 "$output"
   fi
 }
 
@@ -237,15 +340,17 @@ COLLECTED_LOCKS=()
 for t in "${TRIPLES[@]}"; do
   echo ""
   echo "▶▶▶ 构建 $t ..."
-  # 共享配置包含各平台目标；这里显式选择 macOS app+dmg。
+  # 先只生成 App；CEF 必须在创建 DMG 前装入并完成 nested signing。
   CI=true bun x tauri build --config "$CONF" --config "$MAC_CONF" \
-    --config '{"bundle":{"targets":["app","dmg"]}}' \
+    --config '{"bundle":{"targets":["app"]}}' \
     --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 
   # tauri 把 DMG 放在 target/<triple>/release/bundle/dmg/*.dmg
   dmg_dir="$ROOT/target/$t/release/bundle/dmg"
   app="$ROOT/target/$t/release/bundle/macos/NomiFun.app"
+  stage_macos_cef "$app" "$t"
   verify_macos_app "$app" "$t"
+  create_dmg_from_staged_app "$app" "$t" "$dmg_dir"
 
   # 先公证(staple 会原地改写 DMG),再拷贝到汇总目录,保证收的是带票据的包
   notarize_dmg_dir "$dmg_dir"
