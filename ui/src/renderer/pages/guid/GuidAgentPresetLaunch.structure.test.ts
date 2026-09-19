@@ -195,6 +195,7 @@ describe('Guid workbench Agent launch behavior', () => {
       'revision',
       'credential',
       'base_url',
+      'capability_selection',
       'skill',
       'typed_resource_bindings',
     ]) {

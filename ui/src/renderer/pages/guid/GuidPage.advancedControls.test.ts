@@ -27,6 +27,9 @@ describe('GuidPage advanced controls', () => {
     expect(send.includes("launch('browser')")).toBe(false);
     expect(send.includes('initial-browser-open')).toBe(false);
     expect(send.includes("'message' | 'browser'")).toBe(false);
+    expect(source.includes('<SessionCapabilityPicker')).toBe(false);
+    expect(source.includes('useSessionCapabilityCatalog')).toBe(false);
+    expect(send.includes('capability_selection')).toBe(false);
   });
 
   test('keeps the remaining draft API focused on session behavior', () => {

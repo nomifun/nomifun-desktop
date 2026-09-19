@@ -31,7 +31,7 @@ type SessionCapabilityPickerProps = {
   children?: React.ReactNode;
 };
 
-export { SessionCapabilityComposerLayout } from './ComposerLayout';
+export { ComposerToolRail, SessionCapabilityComposerLayout } from './ComposerLayout';
 
 const mcpStatus = (server: IMcpServer) => {
   if (!server.enabled) return 'disabled';
@@ -314,12 +314,6 @@ const SessionCapabilityPicker: React.FC<SessionCapabilityPickerProps> = ({
   );
 };
 
-export {
-  buildSessionCapabilitySelection,
-  defaultSessionCapabilityDraft,
-  draftFromSessionCapabilitySelection,
-  sessionCapabilitySelectionKey,
-} from './model';
 export type { SessionCapabilityCatalog, SessionCapabilityDraft } from './model';
 export { useSessionCapabilityCatalog } from './useSessionCapabilityCatalog';
 export default SessionCapabilityPicker;

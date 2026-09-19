@@ -30,7 +30,6 @@ import type {
 import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { AgentResourceSelection } from '@/common/types/agentPlatform';
-import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 import type { GuidCollaborationConfig } from './useGuidCollaboration';
@@ -58,7 +57,6 @@ export type GuidSendDeps = {
   resourceResolutionReady: boolean;
   /** Product-selected resources. The backend derives ownership and operations. */
   resourceSelections: AgentResourceSelection[];
-  capabilitySelection?: AgentSessionCapabilitySelection;
   collaboration?: GuidCollaborationConfig;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
@@ -94,7 +92,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     autoWork,
     resourceResolutionReady,
     resourceSelections,
-    capabilitySelection,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -152,7 +149,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model: current_model.use_model,
       },
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
-      ...(capabilitySelection ? { capability_selection: capabilitySelection } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
     conversation = await ipcBridge.conversation.get.invoke({
@@ -209,7 +205,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedTemplate,
     resourceResolutionReady,
     resourceSelections,
-    capabilitySelection,
     t,
   ]);
 

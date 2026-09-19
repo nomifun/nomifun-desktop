@@ -25,7 +25,6 @@ import { creationDraftStorageKey, emptyCreationDraft, useCreationDraft } from '@
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import type {
   AgentResourceSelection,
-  AgentSessionCapabilitySelection,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 import {
@@ -182,7 +181,6 @@ const createDeps = ({
   workspaceEnabled = true,
   resourceResolutionReady = true,
   resourceSelections = [],
-  capabilitySelection,
   navigations = [],
 }: {
   selection: GuidAgentSelection;
@@ -193,7 +191,6 @@ const createDeps = ({
   workspaceEnabled?: boolean;
   resourceResolutionReady?: boolean;
   resourceSelections?: AgentResourceSelection[];
-  capabilitySelection?: AgentSessionCapabilitySelection;
   navigations?: string[];
 }): GuidSendDeps => ({
   input,
@@ -210,7 +207,6 @@ const createDeps = ({
   workspaceEnabled,
   resourceResolutionReady,
   resourceSelections,
-  capabilitySelection,
   autoWork: { enabled: false },
   setMentionOpen: noopDispatch<boolean>(),
   setMentionQuery: noopDispatch<string | null>(),
@@ -416,24 +412,21 @@ describe('useGuidSend HTTP behavior', () => {
     expect(Object.keys((calls[0].body as { resource_selections: object[] }).resource_selections[0])).toEqual(['resource_kind', 'resource_id']);
   });
 
-  test('freezes the selected Skills and MCP servers into the new session request', async () => {
+  test('minimal Agent creation relies on the saved binding without a session capability overlay', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
-    const capabilitySelection = {
-      enabled_skills: ['pdf'],
-      excluded_auto_skills: ['cron'],
-      mcp_server_ids: ['0190f5fe-7c00-7a00-8000-000000000202'],
-    };
-    const hook = renderHook(() => useGuidSend(createDeps({
-      selection: { kind: 'preset', presetId: PRESET_ID },
-      selectedPreset: PRESET,
-      workspaceEnabled: false,
-      capabilitySelection,
-    })));
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({
+        selection: { kind: 'template', templateKey: 'chat.minimal' },
+        workspaceEnabled: false,
+      }),
+      selectedTemplate: TEMPLATE,
+    }));
 
     await act(async () => { await hook.result.current.handleSend(); });
 
-    expect(calls[0].body).toMatchObject({ capability_selection: capabilitySelection });
+    expect(calls[1]).toMatchObject({ method: 'POST', url: '/api/agent-sessions' });
+    expect(calls[1].body).not.toHaveProperty('capability_selection');
   });
 
   test('preset mode does not submit a workspace that the selected capabilities do not allow', async () => {
