@@ -1,8 +1,8 @@
 # UARC 状态台账
 
 > 唯一状态 owner：Integration
-> 更新时间：2026-09-19
-> 当前阶段：Wave 9 / UARC-070 active；late shared renderer merge 等待 current-source Mac 增量复验
+> 更新时间：2026-09-20
+> 当前阶段：Wave 9 / UARC-070 active；Windows 产品逻辑修复已验证，等待 current-source Mac 产品/制品复验
 > 当前 Mac artifact source：`6ab013f68bfcdae46ffaeecf471bd4933ed34a67`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
@@ -24,6 +24,7 @@
 > UARC-063 arm64 artifact barrier：`6ab013f68bfcdae46ffaeecf471bd4933ed34a67`
 > UARC-064 Windows regression source：`2a426e7af3367ba47101fa3e676a71c89bc57af6`
 > UARC-070 audit start：`93aad2c42a32900b8cc8eeadc696b4e8bf56f37e`
+> 产品逻辑修复提交：`4f249fd50a1036d560fcb244f67b98826eeebc6b`
 > 当前审计主机：Windows NT 10.0.26200.0 / x64；Mac evidence host：macOS 26.3 / Apple M4 arm64
 > Initiative 状态：`active / Windows verified / macOS implemented_unverified`
 
@@ -70,8 +71,9 @@
 - UARC-063 已生成包含固定 CEF 与五个 helper 的 Developer ID arm64 `.app`；DMG 独立签名、Apple 公证与
   staple 均通过，release lock、挂载 App/CEF 同一性、两种新数据目录启动和进程清理均为 pass；详见
   [UARC-063 macOS 制品证据](UARC-063-MACOS-IMPLEMENTATION.zh.md)。
-- Late shared renderer commit `daef16c9b` 晚于该 artifact source；其 Windows merge `f08acea45` 已验证，
-  但 current-source Mac UI/App/DMG 尚待增量复验，因此旧制品哈希不再作为当前分支最终候选哈希。
+- 产品逻辑修复提交 `4f249fd50` 晚于 Mac artifact source，且同时修改 canonical AgentSession 消息/终态、
+  immutable Agent 选择、AgentExecution 协作、AutoWork、Companion 控件与 shared renderer。Windows 当前源码已
+  全量验证；旧 Mac 制品哈希不再代表当前产品源码，必须在真实 Mac 重建并复验产品流程与 App/DMG。
 
 ## 2. 已确认产品决定
 
@@ -108,20 +110,20 @@
 | `UARC-030` | complete | Integration | verified | verified | Web、Knowledge、Memory shared semantics 与 arm64 product compile |
 | `UARC-031` | complete | Integration | verified | verified | scene Context、Channel/Companion/Customer shared semantics |
 | `UARC-032` | complete | Integration | verified | verified | Creation/Workshop/Office/Plugin Modules 与 production renderer/App |
-| `UARC-033` | complete | Integration | verified | verified | AutoWork 复用 AgentExecution；Agent-path IDMM 已删除 |
+| `UARC-033` | integrated | Integration | verified | implemented_unverified | Windows AutoWork/AgentExecution 已复验；current-source Mac 产品流程待复验 |
 | `UARC-034` | complete | Integration | verified | verified | Schedule/Notification/Remote/SSH typed boundary 与 Mac lifecycle |
 | `UARC-040` | complete | Integration | verified | verified | Browser Module/Resource；正式 Mac AgentSession→CEF 链路 |
 | `UARC-041` | complete | Integration | verified | n/a | Windows WebView2 Browser capability UI；无 Browser-only Session |
 | `UARC-042` | integrated | Integration | verified | implemented_unverified | native evidence 保留；late Computer 设置入口待 Mac UI 复验 |
 | `UARC-050` | integrated | Integration | verified | implemented_unverified | late Agent selector/catalog 待 Mac 880×600/宽窗口复验 |
-| `UARC-051` | complete | Integration | verified | verified | generation 5 Store/API；Mac canonical turns + fresh-root starts |
+| `UARC-051` | integrated | Integration | verified | implemented_unverified | canonical Store/API 与消息终态已修复；current-source Mac turn 流待复验 |
 | `UARC-052` | complete | Integration | verified | verified | 唯一 Runtime；两平台 production path 无旧 compatibility |
 | `UARC-053` | integrated | Integration | verified | implemented_unverified | 13 个 legacy group=0；late replacement UI 待 current Mac artifact |
 | `UARC-054` | complete | Integration | verified | verified | canonical baseline；Mac absent/empty root startup 通过 |
 | `UARC-060` | complete | Windows Integration | verified | n/a | Windows candidate 与 shared-source barrier 已冻结 |
 | `UARC-061` | complete | Mac Integration | n/a | verified | CEF 34/34、正式 Agent/Kernel、真实 StepFun、Command-Q；明确 `not_run` 保留 |
 | `UARC-062` | complete | Mac Integration | n/a | verified | Process/PTY、Accessibility/input、Terminal、Command-Q；明确 `not_run` 保留 |
-| `UARC-063` | integrated | Mac Integration | n/a | implemented_unverified | 旧制品通过但不含 late renderer；current App/DMG 待重建复验 |
+| `UARC-063` | integrated | Mac Integration | n/a | implemented_unverified | 旧制品早于 shared product-flow repair；current 产品流/App/DMG 待复验 |
 | `UARC-064` | complete | Windows Integration | verified | n/a | post-Mac WebView2/system/UI/model/NSIS regression 通过 |
 | `UARC-070` | active | Integration | verified | implemented_unverified | completion scanner fail closed；等待唯一 external Mac gate |
 
@@ -219,6 +221,9 @@
 | UARC-070 completion scanner | 13 legacy groups=0；open anomaly=0；Mac gap=1 | current-source Mac artifact 补齐前 completion 按设计失败 |
 | Late shared UI merge | focused 31 + full UI 3,541；check 1,918 sources；build 7,562 modules | Windows verified at `f08acea45` |
 | Late shared UI visual | 880×600 + 1440×900；客服空态、完整列表、Escape focus return、无 overflow | Windows passed；Mac pending |
+| Product-flow repair | full UI 3,545；workspace all-target + doctest；check 1,917 sources；build 7,559 modules | Windows verified at `4f249fd50` |
+| Product-flow commercial smoke | StepFun `step-3.7-flash`；message → terminal、new frozen Session、collaboration、AutoWork | passed；Credential Manager 隔离注入 |
+| Product-flow visual | 880×600；Agent menu、collaboration actions、Escape focus、horizontal overflow=0 | Windows passed；Mac current-source pending |
 
 ## 6. Test Lease
 
@@ -228,20 +233,21 @@
 | Windows Full UI | none | free |
 | Windows Native Desktop | none | free |
 | Windows Packaging | none | free |
-| macOS Cargo/UI/Native/Packaging | none | lease free；current-source UI/package revalidation pending |
+| macOS Cargo/UI/Native/Packaging | none | lease free；current-source product/native/package revalidation pending |
 
 ## 7. Blockers
 
-- 唯一 blocker 是外部 Mac current-source 增量验收：`daef16c9b` 的 11 个 shared renderer 文件晚于
-  `6ab013f68` signed/notarized artifact，必须重建当前 arm64 App/DMG 并复验 Agent selector 与 Computer 设置入口。
-- 既有 CEF/Process/PTY/Computer physical/TCC/StepFun 证据未受源码变化影响，可复用；无需重复整套原生矩阵。
+- 唯一 blocker 是外部 Mac current-source 验收：`4f249fd50` 晚于 `6ab013f68` signed/notarized artifact，
+  必须重建当前 arm64 App/DMG，并复验消息发送到终态、新 Agent Session、协作、AutoWork、880×600/wide UI、
+  CEF/TCC 与应用退出清理。未改动的底层原生证据可保留，但不能替代当前源码的产品组合与制品证据。
 - 用户移出本轮必要门槛的 Mac 项继续按 `not_run` 留档，不回写为 pass。
 
 ## 8. Next ready tasks
 
-1. 在真实 Apple Silicon Mac 从包含 `f08acea45` 的最新分支执行 `MACOS-HANDOFF.zh.md` §12 增量清单。
-2. 若无生产修复，只提交 current App/DMG + UI 证据并关闭 UARC-042/050/053/063/070；若有代码修复，返回
-   Windows 重跑 affected UI、`bun run check` 和 production renderer build。
+1. 在真实 Apple Silicon Mac 从包含 `4f249fd50a1036d560fcb244f67b98826eeebc6b` 的最新原重构分支执行
+   `MACOS-HANDOFF.zh.md` §12 current-source 清单。
+2. 若无生产修复，提交 current App/DMG + 产品流程/原生证据并关闭 UARC-033/042/050/051/053/063/070；
+   若有代码修复，必须返回 Windows 执行 UARC-064 受影响回归后再做 UARC-070。
 
 ## 9. 状态更新模板
 
@@ -1207,3 +1213,39 @@
 - Remaining/blocker: external Apple Silicon Mac rebuild、880×600/wide shared UI check and current App/DMG validator。
   Exact incremental steps are in `MACOS-HANDOFF.zh.md` §12。
 - Next ready task: Mac Integration only；no Windows work remains unless Mac produces a code fix。
+
+### 2026-09-20 product-flow repair integrated and Windows gate complete
+
+- Barrier/source: `4f249fd50a1036d560fcb244f67b98826eeebc6b` on the unchanged
+  `rf/agent-capability-platform-v2` branch；the branch also contains the remote repair merge `c2833594b`。No branch
+  switch、history rewrite or force push。
+- Changed: canonical message streaming now separates user Turn and assistant message identities, carries exact Turn
+  correlation and explicit terminal Runtime state, and survives relay lag/failure without attributing old frames to a
+  successor. Existing AgentSession bindings are immutable；Agent/model/resource/collaboration changes create a new
+  Session through Guid instead of mutating history。
+- Changed: explicit collaboration creates a real AgentExecution frozen from the lead Session, projects its canonical
+  link, supports model-requested user decisions with server-derived execution identity, and exposes keyboard-operable
+  actions only to Agents granted `agent.collaboration`。
+- Changed: AutoWork validates the exact frozen Session before enabling, rolls back failed start/resume, persists a
+  truthful paused state/reason and resumes through the same canonical runner. The HTTP regression fixture now creates
+  a real Agent configuration and Session rather than forging revision/Snapshot rows。
+- Deleted: per-turn Agent override DTOs/routes, in-place MCP/capability mutation paths, the orphan Agent-switch helper,
+  dead Companion workspace/Skill reconciliation and `managed_skills.rs`。No permanent compatibility layer was kept。
+- UI: Agent switching, temporary workspace, Companion summaries, collaboration and AutoWork now follow immutable
+  Session semantics. At exactly 880×600 the root no longer creates a six-pixel horizontal overflow；Agent menu、Escape
+  focus return and the three collaboration actions were visually inspected with no console errors。
+- Commercial product smoke: Credential Manager-isolated StepFun Coding Plan `step-3.7-flash` passed ordinary
+  message send → streamed assistant → durable projection → ready terminal, a distinct newly frozen Agent Session,
+  explicit collaboration execution/link, one-requirement AutoWork completion and credential-artifact audit。No free
+  model、fallback、printed key or repository secret was used。
+- Gates: UI 3,545/3,545；`bun run check` passed with 1,917 renderer sources and 13 legacy groups=0/open anomaly=0/Mac
+  gap=1；production renderer 7,559 modules；workspace all-target serial gate passed with zero failures；workspace
+  doctest passed；rustfmt、generated target inventory、Agent v2 contract and diff checks passed。
+- Windows: UARC-012 is complete/verified；UARC-033/050/051/053 and UARC-070 are Windows verified；UARC-064 remains
+  complete. Existing WebView2/Process/Computer native evidence is retained because this repair did not change those
+  platform owners。
+- macOS: shared Runtime/API/UI source changed after artifact `6ab013f68`。UARC-033/042/050/051/053/063/070 remain
+  `implemented_unverified`; old packaged product-flow evidence cannot represent this source。
+- Remaining/blocker: a real Apple Silicon Mac must build and validate `4f249fd50` (or its later descendant), rerun the
+  current product flows and native CEF/TCC/lifecycle matrix, and produce a current arm64 App/DMG evidence set. Exact
+  continuation instructions are in `MACOS-HANDOFF.zh.md` §12。
