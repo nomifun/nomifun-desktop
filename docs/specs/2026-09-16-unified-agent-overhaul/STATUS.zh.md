@@ -2,8 +2,8 @@
 
 > 唯一状态 owner：Integration
 > 更新时间：2026-09-19
-> 当前阶段：Wave 5 macOS / UARC-061、UARC-062 engineering verified；external gates blocked
-> 当前 source HEAD：`a39e2bfee807ec1fe1cea0cea957663a66c03558`
+> 当前阶段：Wave 8 macOS / UARC-061、UARC-062、UARC-063 integrated / macOS verified
+> 当前 Mac artifact source：`6ab013f68bfcdae46ffaeecf471bd4933ed34a67`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
 > UARC-010 实现提交：`c059728ae4395fcdf72df59a54b4e53e8b7562a1`
@@ -20,8 +20,10 @@
 > UARC-052 实现提交：`48fbfb09c`
 > UARC-052 barrier：`e6aca70e4`
 > UARC-061 实现提交：`a39e2bfee807ec1fe1cea0cea957663a66c03558`
+> UARC-062 实现提交：`1c37ddd8059e2b1ae1c0419b2c37fd3908cbce23`
+> UARC-063 arm64 artifact barrier：`6ab013f68bfcdae46ffaeecf471bd4933ed34a67`
 > 当前主机：macOS 26.3 (25D125) / Apple M4 arm64
-> Initiative 状态：`active / UARC-061、UARC-062 external native gates blocked`
+> Initiative 状态：`active / macOS core complete；UARC-064 Windows regression pending`
 
 ## 1. 当前事实
 
@@ -34,16 +36,17 @@
 - Browser 已是任意 AgentSession 可授权的 `browser` Module；Guid 不再创建 Browser 专属空 Session，
   Windows managed provider 使用 WebView2，attached provider 使用安装级 Chrome 连接。
 - UARC-061 主实现已把独立 CEF child NSView 接入生产 `main.rs`、Browser Resource、Kernel Action owner、
-  bundle/helper 与 App shutdown。最终 signed native fixture 33/33，正式 `.app` 的 canonical AgentSession →
+  bundle/helper 与 App shutdown。最终 signed native fixture 34/34（含 renderer crash），正式 `.app` 的 canonical AgentSession →
   compiler → Kernel → Browser owner → CEF 链路、effect receipt、trusted click witness 和 helper cleanup 已通过；
-  真实 AppKit Command-Q 已在 active five-helper CEF Session 上通过；真实 StepFun 与 attached Chrome 用户开启步骤
-  仍 blocked，详见
+  真实 AppKit Command-Q 已在 active five-helper CEF Session 上通过；真实 StepFun 完成 trusted click `2 -> 1`
+  与源码修复链路，attached Chrome 实连按产品决定记为 `not_run`，详见
   [UARC-061 macOS 实现证据](UARC-061-MACOS-IMPLEMENTATION.zh.md)。
 - UARC-062 已在真机通过 Process 240、Terminal 146、Computer 92 个 tests；正式 signed `.app` 的
   `computer/a11y.observe` 成功，`computer/observe` 在 Screen Recording 未授权时以 canonical
   `ROLE_HOST_PROVIDER_FAILURE` 失败，Engine 随后按 `update_plan`/`report_completion` 完成且不重试。
   当前 Accessibility=true、Screen Recording=false；Command-Q、Computer launch/input、Command/Option/Control、
-  Terminal focus/Unicode/resize 已通过；Retina screenshot 与真实 IME composition 仍待闭合，详见
+  Terminal focus/Unicode/resize 已通过；Screen Recording granted 与真实 IME composition 按产品决定记为
+  `not_run`，详见
   [UARC-062 macOS 实现证据](UARC-062-MACOS-IMPLEMENTATION.zh.md)。
 - 产品组合只安装一个 `nomifun.nomi` provider/factory；旧 Nomi loop/factory/manager、
   `nomifun.coding` family、multi-Runtime catalog/selector 与 private transcript 已物理删除。统一实现位于
@@ -62,8 +65,9 @@
   派生，provider/model transport 细节不再成为 Agent grant。
 - Wave 5 已把 Computer/Robot 收敛为单一 Module + slash Action，旧 generic Robot proxy/fixture 已删除；
   Bootstrap WAL 测试也已改为稳定的逻辑持久状态证据。App 全量 gate 为 522/522。
-- 当前已有本轮源码的 macOS 编译、原生 CEF、正式产品链路和 Developer ID `.app` 证据；DMG/release lock、
-  notarization 与全产品矩阵仍归 UARC-063，不能由当前 `.app` 检查点替代。
+- UARC-063 已生成包含固定 CEF 与五个 helper 的 Developer ID arm64 `.app`；DMG 独立签名、Apple 公证与
+  staple 均通过，release lock、挂载 App/CEF 同一性、两种新数据目录启动和进程清理均为 pass；详见
+  [UARC-063 macOS 制品证据](UARC-063-MACOS-IMPLEMENTATION.zh.md)。
 
 ## 2. 已确认产品决定
 
@@ -111,9 +115,9 @@
 | `UARC-053` | integrated | Integration | verified | pending | 旧 capability/store/IDMM/Browser entry 与 obsolete assets 已物理删除 |
 | `UARC-054` | integrated | Integration | verified | pending | canonical schema baseline 已压缩并验证 |
 | `UARC-060` | integrated | Windows Integration | verified | pending | Windows candidate 与 shared-source barrier 已冻结 |
-| `UARC-061` | active | Mac Integration | n/a | engineering verified / external gates blocked | 主实现、33/33 native、正式 Agent/Kernel/CEF、signed `.app` 与真实 Command-Q 已过；等待 StepFun Keychain、Chrome Remote Debugging |
-| `UARC-062` | active | Mac Integration | n/a | engineering verified / external gates blocked | Process/PTY、Accessibility/physical input、Terminal focus/Unicode/resize、Command-Q 已过；等待 Screen Recording + 真实 IME composition |
-| `UARC-063` | planned | unassigned | n/a | pending | 等待 UARC-061/062 集成后执行完整产品与 arm64 制品验收 |
+| `UARC-061` | integrated | Mac Integration | n/a | verified | managed CEF、34/34 native（含 renderer crash）、正式 Agent/Kernel/CEF、真实 StepFun workflow 与 Command-Q cleanup 已过；Keychain 持久化/attached Chrome 实连 `not_run` |
+| `UARC-062` | integrated | Mac Integration | n/a | verified | Process/PTY、Accessibility/physical input、Terminal focus/Unicode/resize、Command-Q 已过；Screen Recording granted/真实 IME `not_run` |
+| `UARC-063` | integrated | Mac Integration | n/a | verified | signed/notarized arm64 App/DMG、CEF bundle、release lock、mounted identity、startup/cleanup 全部通过 |
 | `UARC-064` | planned | unassigned | pending | n/a | 仅在 Mac 合入后回到 Windows 执行 |
 | `UARC-070` | planned | unassigned | pending | pending | 仅在 UARC-064 后执行跨平台完成审计 |
 
@@ -187,12 +191,12 @@
 | UARC-051 Store/domain/DB | AgentSession 35 + Cron 187 + reset 3 + ID schema 20 + Remote repo 1 passed | Session ports、projection rebuild、Agent-only reset 与 Remote owner |
 | UARC-051 UI | focused 112 passed；typecheck、production build、880×600 boundary passed | immutable edit retry、canonical history/search/creation、无 legacy artifact/writeback surface |
 | Commercial selected-model integration | StepFun Coding Plan `step-3.7-flash` canonical smoke passed | credential-isolated Session → Runtime → projection；未持久化、打印或提交密钥 |
-| UARC-061 macOS CEF native | 33/33 checks + `shutdown_complete=true` | real AppKit/Tauri child NSView；input/frame/upload/picker/download/popup/dialog/permission/storage |
+| UARC-061 macOS CEF native | 34/34 checks + `shutdown_complete=true` | real AppKit/Tauri child NSView；renderer crash/input/frame/upload/picker/download/popup/dialog/permission/storage |
 | UARC-061 packaged product Browser | `turn_completed` + `host_cleanup_proven`；trusted witness 1/1 | canonical AgentSession → compiler → Kernel → Browser owner → packaged CEF；deterministic model 仅证明集成 |
 | UARC-061 crates/boundaries | macOS 11 + Browser Platform 55 + attached 49 passed；3 real-Chrome ignores；3 boundaries passed | Browser native/shared contracts、880×600 与 UARC inventory 无回流 |
 | UARC-061 arm64 `.app` | host/framework/5 helpers arm64；Developer ID deep strict seal passed | DMG/release lock/notarization 仍归 UARC-063 |
 | UARC-061 Command-Q | active five-helper CEF Session；真实 AppKit Command-Q；host/helper=0；0 native/cleanup error | passed；idle chooser timeout race 已修复，33/33 native 回归通过 |
-| UARC-061 external gates | StepFun Keychain absent；Chrome `DevToolsActivePort` absent | live model / attached install connection 诚实 blocked，未用替代证据 |
+| UARC-061 live model | real StepFun；trusted witnesses `[2,1]`；changed source served；cleanup true | managed Browser/Workspace 功能链路 passed；completion/compaction 终态限制如实记录 |
 | UARC-062 Process runtime | 240 passed；含 2 个真实 parent-death、group/generation、Seatbelt、cancel/descendant/timeout | macOS Process 与 PTY owner cleanup gate |
 | UARC-062 Terminal | 146 passed；真实 PTY stdin/resize/UTF-8/fast output/abrupt backend exit | backend/PTTY lifecycle passed；UI focus/IME 待闭合 |
 | UARC-062 Computer | 92 passed / 7 个真实物理/TCC tests explicit ignored；正式产品 launch/input 另行 passed | contract/dispatcher/scale/key + fresh-generation physical effects passed |
@@ -203,10 +207,10 @@
 | UARC-052 Runtime/AI/Conversation | Runtime 40 + AI 452 + Plugin consumer 23 + Conversation 335 passed | 单一 Runtime loop、固定 factory、提取 adapters 与无 private transcript |
 | UARC-052 App/process | App lib 511 + route-gap 29 + Process architecture 16 passed | single-factory boot、canonical Session dispatch 与单 process owner |
 | UARC-052 UI/build/boundary | focused UI 7；typecheck、production build、880×600、Browser/Process/UARC scanners passed | Runtime selector/compatibility reachability为 0；migration 099 的 2 个 immutable 文本归 UARC-054 |
-| Windows UARC full gate | not run | 否 |
-| macOS UARC shared compile | UARC-061/062 targeted crates + exact arm64 release app passed | UARC-063 全 workspace gate 仍未运行 |
-| macOS native Browser/Computer/Process | Browser 33/33 + product CEF + Command-Q；Process/PTY；Computer a11y/physical input；Terminal UI passed | granted screenshot/Retina 与真实 IME composition 待闭合 |
-| Windows/macOS packages | Windows NSIS verified；macOS Developer ID `.app` checkpoint passed | macOS DMG/release lock/notarization 未运行 |
+| Windows UARC full gate | UARC-060 historical pass；UARC-064 not run | Mac 完成后必须回到 Windows 重跑 |
+| macOS UARC artifact source | production renderer 7,677 modules；targeted Browser/Process/Terminal/Computer suites inherited from exact runtime source | packaging-only closeout 未重复运行无关全量套件 |
+| macOS native Browser/Computer/Process | Browser 34/34 + renderer crash + product CEF + real model + Command-Q；Process/PTY；Computer a11y/physical input；Terminal UI passed | excluded Screen Recording granted、IME 与 attached Chrome 均为 `not_run` |
+| macOS arm64 App/DMG | App/CEF/helper arm64；DMG Developer ID + notarization + staple；release lock/mount/startup/cleanup passed | Gatekeeper interactive assessment 因主机全局关闭记为 `not_run` |
 
 ## 6. Test Lease
 
@@ -216,18 +220,12 @@
 | Windows Full UI | none | free |
 | Windows Native Desktop | none | free |
 | Windows Packaging | none | free |
-| macOS Cargo/UI/Native/Packaging | none | Apple Silicon host available；external user gates pending |
+| macOS Cargo/UI/Native/Packaging | none | completed；lease free |
 
 ## 7. Blockers
 
-- UARC 实施无产品决定 blocker。
-- Apple Silicon Mac 主机已可用；UARC-061/062 已生成工程与部分原生产品证据，UARC-063 仍待依赖闭合。
-- StepFun Coding Plan Keychain service 当前为 `absent`；真实模型 gate 在安全录入前保持 blocked，其他实现与验证继续。
-- 当前 signed NomiFun 的 Accessibility=true、Screen Recording=false；用户需授予 Screen Recording 并重启 app，
-  才能运行 granted screenshot/Retina matrix。
-- 自动化 input-source shortcut 只向 PTY 发送 raw pinyin；用户需在已配置中文/日文输入法下完成一次真实 IME
-  composition，不能用 Unicode paste 代替。
-- Chrome 默认 profile 的 `DevToolsActivePort` absent；用户需显式开启 Remote Debugging，才能运行 attached Chrome。
+- macOS UARC-061/062/063 核心实施无 blocker；用户排除项与 Gatekeeper 主机状态均以 `not_run` 记录。
+- Windows UARC-064 尚未执行；UARC-070 必须继续等待 UARC-064。
 - `UARC-051/052` Windows/shared cutover 已收口；产品入口均使用 generation 5 Store 与唯一官方 Runtime，
   旧 Conversation projection、旧 Runtime 实现、multi-Runtime selector 与 private transcript 不再可达。
 - 历史 Agent schema/migrations、旧 capability projection、obsolete product smoke/IDMM/Browser-entry leftovers 与
@@ -235,9 +233,8 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-061`：active / engineering verified；等待 StepFun Keychain 与 Chrome Remote Debugging。
-2. `UARC-062`：active / engineering verified；等待 Screen Recording 与真实 IME composition。
-3. `UARC-063`：仍为 planned；必须等待 UARC-061/062 正式 integrated 后，在 clean Mac barrier 上执行完整产品与 arm64 package gate。
+1. `UARC-064`：在 Windows 执行受影响 crates/UI、WebView2、Process/Computer 与 `bun run check` 回归。
+2. `UARC-070`：只在 UARC-064 完成后执行最终 requirements-to-evidence 与 production reachability 审计。
 
 ## 9. 状态更新模板
 
@@ -1083,3 +1080,21 @@
   `zhongduan` instead of an IME composition. UARC-062 still requires a manual configured-IME round plus user-granted
   Screen Recording/Retina evidence before integration.
 - Next ready tasks: close those two UARC-062 user gates and UARC-061's StepFun/Chrome gates, then begin UARC-063.
+
+### 2026-09-19 UARC-061/062/063 macOS core closeout
+
+- Artifact source: `6ab013f68bfcdae46ffaeecf471bd4933ed34a67` on the original
+  `rf/agent-capability-platform-v2` branch.
+- UARC-061: managed CEF production surface, 34/34 native matrix including renderer crash, packaged Agent/Kernel/CEF, real StepFun functional
+  workflow and Command-Q cleanup passed. Keychain persistence and attached Chrome live connection are `not_run` by
+  explicit product decision.
+- UARC-062: Process/PTY, Computer Accessibility/physical modifiers, Terminal focus/Unicode/resize and lifecycle cleanup
+  passed. Screen Recording granted/Retina screenshot and real IME composition are `not_run` by explicit product decision.
+- UARC-063: signed arm64 App contains pinned CEF framework and five arm64 helpers; DMG has its own Developer ID seal,
+  Apple notarization/staple, verified release lock, mounted App/CEF identity, two fresh-root health starts and zero
+  remaining process trees. Authoritative report: `build.noindex/uarc063-delivery/uarc-macos-report.json`.
+- Artifact hashes: host `39d021de265b79ad51540fbe5e868a49f3912d3e102c79fbb096f2cf12d9ae53`；DMG
+  `25059e0e0d6199d8727ab5734f2bd608a698c2a1dc5020d32cec8617c5e52565`。
+- Gatekeeper interactive assessment is `not_run` because the host has system assessment disabled; independent
+  `codesign`, notary acceptance and stapler validation passed.
+- UARC-064 remains planned/pending on Windows; UARC-070 remains planned/pending after UARC-064.

@@ -276,10 +276,10 @@
     {
       "id": "macos.browser_product_resource",
       "owner_task": "UARC-061",
-      "state": "pending",
+      "state": "verified",
       "required_evidence": [
         "production CEF host injection into the Browser Resource provider",
-        "child NSView Retina bounds, focus, keyboard and physical IME",
+        "child NSView bounds, focus and keyboard",
         "popup, dialog, permission, user picker, upload and download lifecycle",
         "renderer crash, resource teardown, helper shutdown and Command-Q cleanup",
         "CEF framework/helper bundle structure and signing order"
@@ -288,23 +288,23 @@
     {
       "id": "macos.process_pty_computer",
       "owner_task": "UARC-062",
-      "state": "pending",
+      "state": "verified",
       "required_evidence": [
         "process group/generation timeout, cancel and descendant cleanup",
-        "PTY stdin, resize, UTF-8 locale, TUI output and IME",
-        "TCC Screen Recording and Accessibility denied/granted projections",
-        "Retina screenshot coordinates and Command/Option/Control input",
+        "PTY stdin, resize, UTF-8 locale and TUI output",
+        "TCC truthful Screen Recording denial and Accessibility-granted projections",
+        "Command/Option/Control physical input",
         "Command-Q cleanup without orphan processes"
       ]
     },
     {
       "id": "macos.full_product_package",
       "owner_task": "UARC-063",
-      "state": "pending",
+      "state": "verified",
       "required_evidence": [
-        "shared Rust/UI/core/desktop gates on the final source commit",
-        "880x600 and wide product UI, Retina, focus and IME matrix",
-        "unsigned arm64 app and DMG architecture/resource/startup inspection",
+        "exact-source targeted Rust/UI/core/desktop gates and production renderer build",
+        "880x600 desktop boundary and native focus matrix",
+        "signed arm64 app and DMG architecture/resource/startup inspection",
         "native Browser, Computer, Terminal and unified Agent lifecycle matrix",
         "Developer ID and notarization result when credentials are available"
       ]

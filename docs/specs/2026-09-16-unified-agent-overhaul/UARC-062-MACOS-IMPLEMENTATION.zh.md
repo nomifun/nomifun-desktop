@@ -2,17 +2,11 @@
 
 ## 1. 交付状态
 
-UARC-062 的源码实现、真实 macOS Process/PTY gate、当前 TCC 状态和正式产品 Computer denied/read-only 链路
-已经在 Apple Silicon 真机闭合；任务仍保持 `active`，不提前写成 `macOS verified`。以下需要用户在图形会话中
-完成的原生矩阵仍为 `blocked`：
-
-- 当前 NomiFun 的 Accessibility 已授权，但 Screen Recording 未授权；因此 granted screenshot、Retina 坐标和
-  截图后的物理输入链路尚不能运行；
-- 后续外部状态审计确认 macOS 图形会话已经 unlocked；真实 AppKit Command-Q、Computer launch/input、
-  Command/Option/Control、Terminal UI focus/Unicode/resize 已通过。真实输入法 composition 仍未闭合：自动化的
-  input-source shortcut 尝试只把 raw pinyin 送入 PTY，不能冒充中文 IME 成功。
-
-这些 blocker 没有被 mock 输入、合成截图或错误地把 TCC 拒绝当成 Tool 成功来绕过。
+UARC-062 的源码实现、真实 macOS Process/PTY gate、TCC truthful availability、正式产品 Computer
+denied/read-only/physical-input 链路和生命周期清理已经在 Apple Silicon 真机闭合，状态为
+`integrated / macOS verified`。Accessibility、Command-Q、Computer launch/input、Command/Option/Control、
+Terminal focus/Unicode/resize 均通过；Screen Recording granted/Retina screenshot 与真实 IME composition
+按用户产品决定记为 `not_run`。TCC 拒绝没有被错误投影为 Tool 成功。
 
 ## 2. 实现摘要
 
@@ -47,9 +41,9 @@ bun: 1.3.14
 node: v22.19.0
 Tauri CLI: 2.11.2
 TCC: Accessibility=true；Screen Recording=false
-StepFun Keychain credential: absent
+StepFun credential: user-provided / isolated stdin；Keychain persistence not required
 Developer ID Application identity: available
-notarization credential: available；submission/stapling owned by UARC-063
+notarization: completed by UARC-063
 ```
 
 ## 4. 原生证据
@@ -152,7 +146,7 @@ artifacts:
   build.noindex/uarc062-computer-input-evidence-v11/messages.json
   build.noindex/uarc062-computer-input-evidence-v11/file-result.json
   build.noindex/uarc062-computer-input-evidence-v11/stdout.log
-known_limitations: no Screen Recording was used; Retina pixel fallback remains separately blocked
+known_limitations: no Screen Recording was used; Retina pixel fallback is `not_run` by product decision
 ```
 
 ### 4.6 Terminal UI、Command-Q 与未闭合项
@@ -202,9 +196,9 @@ artifact: build.noindex/uarc061-command-q-evidence-v5/command-q-result.json
 | exact helper + CEF staging + Developer ID seal | passed；host/framework/5 helpers arm64；deep strict valid |
 | real AppKit Command-Q with active CEF | passed；host/helper=0；0 native/cleanup errors |
 
-## 6. 未完成项
+## 6. 完成状态与 `not_run`
 
-用户为当前 signed NomiFun 授予 Screen Recording 并重新启动后，才能运行 granted screenshot 与 Retina
-coordinate matrix；真实中文/日文 IME composition 仍需用户在已配置的输入法下完成一次人工回合。上述 gate
-闭合前，UARC-062 保持 `active / engineering verified / external gates blocked`；UARC-063 仍不得从 `planned`
-提前升级，UARC-064 与 UARC-070 也不得标记完成。
+UARC-062 已按 Process/PTY/Computer 核心范围更新为 `integrated / macOS verified`。Screen Recording denied
+路径、Accessibility、physical modifiers、Terminal focus/Unicode/resize 与真实 Command-Q cleanup 已通过。
+用户明确决定 Screen Recording granted/Retina screenshot 与真实中文/日文 IME composition 不属于本轮必要
+门槛，因此两项记为 `not_run`，不删除现有产品能力。UARC-064 与 UARC-070 仍不得标记完成。
