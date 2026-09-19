@@ -8,9 +8,9 @@ UARC-062 的源码实现、真实 macOS Process/PTY gate、当前 TCC 状态和�
 
 - 当前 NomiFun 的 Accessibility 已授权，但 Screen Recording 未授权；因此 granted screenshot、Retina 坐标和
   截图后的物理输入链路尚不能运行；
-- 后续外部状态审计确认 macOS 图形会话已经 unlocked；真实 AppKit Command-Q 已在 active CEF Session 上通过。
-  Command/Option/Control、Computer input/launch 和 Terminal UI focus/IME 继续作为独立物理矩阵闭合，不能由
-  backend tests 替代。
+- 后续外部状态审计确认 macOS 图形会话已经 unlocked；真实 AppKit Command-Q、Computer launch/input、
+  Command/Option/Control、Terminal UI focus/Unicode/resize 已通过。真实输入法 composition 仍未闭合：自动化的
+  input-source shortcut 尝试只把 raw pinyin 送入 PTY，不能冒充中文 IME 成功。
 
 这些 blocker 没有被 mock 输入、合成截图或错误地把 TCC 拒绝当成 Tool 成功来绕过。
 
@@ -26,6 +26,10 @@ UARC-062 的源码实现、真实 macOS Process/PTY gate、当前 TCC 状态和�
   Computer Resource/Action owner 执行 `computer/a11y.observe` 与 `computer/observe`。fixture 校验 model-safe
   `ROLE_HOST_PROVIDER_FAILURE`，并按正式 Engine 的 `update_plan`、requirements、`report_completion` 协议收口，
   不重试被 TCC 拒绝的 screenshot。
+- 同一 fixture 的 `--computer-input` 模式只操作 disposable TextEdit 文件：launch 后等待 owned filename 成为
+  foreground Accessibility window，每次 input 后重新 observe 并传入新的 Role Host `expected_generation`；
+  `cmd+right`、`option+left`、`ctrl+e` 与两次 type 最终生成 `alpha XbetaY`，`cmd+s` 后用最新 observation
+  证明保存状态，再由 harness 关闭 TextEdit。
 - 现有 Process/PTY 实现无需平台分叉：真实 macOS suites 已证明 process group/generation、timeout/cancel、
   descendant/parent-death cleanup、Seatbelt roots、PTY stdin/resize/UTF-8/fast output 和 Terminal shutdown。
 
@@ -102,7 +106,7 @@ artifacts:
   build.noindex/uarc062-computer-denied-evidence-v6/stdout.log
   build.noindex/uarc062-computer-denied-evidence-v6/stderr.log
   build.noindex/uarc062-computer-denied-evidence-v6/shutdown.txt
-known_limitations: deterministic model proves product integration only; physical input and granted screenshot remain blocked
+known_limitations: deterministic model proves product integration only; granted screenshot remains blocked
 ```
 
 ### 4.4 exact-source arm64 app
@@ -126,14 +130,51 @@ logs:
 known_limitations: DMG/release lock/notarization remain UARC-063 gates
 ```
 
-### 4.5 granted Computer、Terminal UI 与 Command-Q
+### 4.5 正式产品 Computer launch/input 与 modifiers
 
 ```text
 task_id: UARC-062
-scenario: Screen Recording granted + Retina screenshot/input + modifiers + Terminal focus/IME
+scenario: signed product AgentSession -> Kernel -> Computer launch/input with fresh observation generations
+steps: prepare a disposable TextEdit file; execute guarded computer/launch; update_plan; observe until the exact owned
+       filename is foreground; set value; before every physical input call a11y.observe and pass the returned
+       expected_generation; press cmd+right, option+left and ctrl+e with typed X/Y; verify alpha XbetaY; cmd+s;
+       observe the saved state; report_completion; close TextEdit from the harness
+expected: exact launch/input Actions succeed without stale authority; final text and file are alpha XbetaY;
+          turn_completed + host_cleanup_proven; no TextEdit process remains
+observed: model_calls=22; input_verified=true; all input observations usable at their exact workspace epoch;
+          turn/completed; host_cleanup_proven=true; TextEdit AX value and saved file both alpha XbetaY;
+          file sha256=84b9e548cc6792754abda7090c9f75538275f686e53fd0a59776eace8000eb19;
+          harness TextEdit process count=0
+result: pass
+artifacts:
+  build.noindex/uarc062-computer-input-evidence-v11/fixture-status.json
+  build.noindex/uarc062-computer-input-evidence-v11/events.json
+  build.noindex/uarc062-computer-input-evidence-v11/messages.json
+  build.noindex/uarc062-computer-input-evidence-v11/file-result.json
+  build.noindex/uarc062-computer-input-evidence-v11/stdout.log
+known_limitations: no Screen Recording was used; Retina pixel fallback remains separately blocked
+```
+
+### 4.6 Terminal UI、Command-Q 与未闭合项
+
+```text
+task_id: UARC-062
+scenario: real Terminal renderer focus, Unicode PTY round trip, resize and Command-Q cleanup
+steps: use the signed product UI to create a $SHELL Terminal; focus its native Terminal input; paste and execute
+       printf of 终端中文-日本語-✓; verify persisted raw PTY scrollback; enter full screen and return; invoke
+       Command-Q with the PTY active; verify terminal rows/scrollback and process owner cleanup
+expected: focus retained; exact UTF-8 output; PTY dimensions track UI; app quit deletes owned Terminal state/process
+observed: focus=true; Unicode bytes present; dimensions 99x35 -> 191x48 -> 99x35; App quit;
+          terminal cleanup deleted=1; host=0; terminal row=0; scrollback row=0; cleanup errors=0
+result: pass for focus, Unicode, resize and Command-Q cleanup
+artifact: build.noindex/uarc062-terminal-ui-evidence-v2/terminal-ui-result.json
+known_limitations: native Unicode paste passed, but a synthetic input-source shortcut emitted raw pinyin; real IME
+                   composition is not verified
+
+task_id: UARC-062
+scenario: Screen Recording granted + Retina screenshot/input
 result: blocked
-reason: Screen Recording=false；granted screenshot/Retina requires user grant + app relaunch；the now-unlocked
-        modifier/input/Terminal focus/IME subset continues independently
+reason: Screen Recording=false；granted screenshot/Retina requires user grant + app relaunch
 
 task_id: UARC-062
 scenario: Command-Q process-tree cleanup
@@ -155,6 +196,8 @@ artifact: build.noindex/uarc061-command-q-evidence-v5/command-q-result.json
 | `cargo fmt --all -- --check` | passed |
 | Computer permission API | Accessibility=true；Screen Recording=false |
 | packaged Computer Agent/Kernel smoke | `turn/completed` + `host_cleanup_proven`；canonical denial，无重试 |
+| packaged Computer launch/input/modifiers | `turn/completed` + `host_cleanup_proven`；22 model steps；saved `alpha XbetaY` |
+| Terminal product UI | focus + UTF-8 round trip + 99x35→191x48→99x35 resize + active-PTY Command-Q passed；IME composition not verified |
 | production UI + exact arm64 `.app` build | passed；7,677 modules；17m22s cold release build |
 | exact helper + CEF staging + Developer ID seal | passed；host/framework/5 helpers arm64；deep strict valid |
 | real AppKit Command-Q with active CEF | passed；host/helper=0；0 native/cleanup errors |
@@ -162,6 +205,6 @@ artifact: build.noindex/uarc061-command-q-evidence-v5/command-q-result.json
 ## 6. 未完成项
 
 用户为当前 signed NomiFun 授予 Screen Recording 并重新启动后，才能运行 granted screenshot 与 Retina
-coordinate matrix。Command/Option/Control、Computer launch/input 和 Terminal focus/IME 在当前 unlocked Session
-继续闭合。上述 gate 闭合前，UARC-062 保持 `active / engineering verified / external gates blocked`；UARC-063
-仍不得从 `planned` 提前升级，UARC-064 与 UARC-070 也不得标记完成。
+coordinate matrix；真实中文/日文 IME composition 仍需用户在已配置的输入法下完成一次人工回合。上述 gate
+闭合前，UARC-062 保持 `active / engineering verified / external gates blocked`；UARC-063 仍不得从 `planned`
+提前升级，UARC-064 与 UARC-070 也不得标记完成。
