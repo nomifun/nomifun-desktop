@@ -10,7 +10,7 @@
  *
  * Usage:
  *   bun scripts/validation/check-macos-arm64-native.mjs \
- *     --release-lock /abs/release-lock.json
+ *     --release-lock /abs/release-lock.json [--require-notarization]
  *
  * Optional Nomi-core live checks:
  *   --host-binary /abs/nomicore --run-startup
@@ -27,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -45,6 +46,18 @@ import {
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 export const TARGET_ID = 'macos_desktop_arm64';
 export const EXPECTED_TARGET = 'aarch64-apple-darwin';
+export const EXPECTED_CEF = Object.freeze({
+  cef: '152.0.6',
+  chromium: '152.0.7977.83',
+  architecture: 'arm64',
+});
+export const CEF_HELPER_NAMES = Object.freeze([
+  'NomiFun Helper',
+  'NomiFun Helper (GPU)',
+  'NomiFun Helper (Renderer)',
+  'NomiFun Helper (Plugin)',
+  'NomiFun Helper (Alerts)',
+]);
 export const CANONICAL_CAPABILITY_INVENTORY_RELATIVE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/generated/first-party-agent-modules.envelope.json';
 
@@ -81,6 +94,7 @@ export function parseArgs(argv) {
     logs: [],
     runStartup: false,
     runLifecycle: false,
+    requireNotarization: false,
     selfTest: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -99,6 +113,10 @@ export function parseArgs(argv) {
     }
     if (token === '--run-lifecycle') {
       options.runLifecycle = true;
+      continue;
+    }
+    if (token === '--require-notarization') {
+      options.requireNotarization = true;
       continue;
     }
     const match = token.match(/^--([^=]+)(?:=(.*))?$/);
@@ -349,6 +367,201 @@ function checkOptionalArtifactOverride(report, id, override, lockedPath) {
   });
 }
 
+function exactArm64MachO(path, runCommand) {
+  const result = runCommand('lipo', ['-archs', path]);
+  const architectures = result.stdout.trim().split(/\s+/).filter(Boolean).sort();
+  return {
+    status: result.status === 0 && architectures.length === 1 && architectures[0] === 'arm64'
+      ? 'pass'
+      : 'fail',
+    path,
+    architectures,
+    exit_code: result.status,
+    stderr_tail: result.stderr.slice(-2_000),
+  };
+}
+
+export function inspectCefBundle(
+  appPath,
+  runCommand = command,
+  inspectPath = validatePathShape,
+) {
+  const frameworkApp = join(
+    appPath,
+    'Contents/Frameworks/Chromium Embedded Framework.framework',
+  );
+  const frameworkBinary = join(frameworkApp, 'Chromium Embedded Framework');
+  const runtimeMetadata = join(appPath, 'Contents/Resources/browser-cef/runtime.json');
+  const credits = join(appPath, 'Contents/Resources/browser-cef/CREDITS.html');
+  const metadataShape = inspectPath(runtimeMetadata);
+  const creditsShape = inspectPath(credits);
+  let metadata = null;
+  let metadataError = null;
+  if (metadataShape.status === 'pass') {
+    try {
+      metadata = readJson(runtimeMetadata);
+    } catch (error) {
+      metadataError = error.message;
+    }
+  }
+  const metadataValid = metadataShape.status === 'pass'
+    && metadata?.cef === EXPECTED_CEF.cef
+    && metadata?.chromium === EXPECTED_CEF.chromium
+    && metadata?.architecture === EXPECTED_CEF.architecture
+    && typeof metadata?.archive === 'string'
+    && metadata.archive.includes('macosarm64')
+    && typeof metadata?.archive_sha1 === 'string'
+    && /^[0-9a-f]{40}$/i.test(metadata.archive_sha1);
+
+  const frameworkShape = inspectPath(frameworkBinary, { requireExecutable: true });
+  const frameworkArchitecture = frameworkShape.status === 'pass'
+    ? exactArm64MachO(frameworkBinary, runCommand)
+    : { status: 'fail', path: frameworkBinary, reason: frameworkShape.reason || 'missing' };
+  const helpers = CEF_HELPER_NAMES.map((name) => {
+    const app = join(appPath, 'Contents/Frameworks', `${name}.app`);
+    const binary = join(app, 'Contents/MacOS', name);
+    const appShape = inspectPath(app, { kind: 'directory' });
+    const binaryShape = inspectPath(binary, { requireExecutable: true });
+    const architecture = binaryShape.status === 'pass'
+      ? exactArm64MachO(binary, runCommand)
+      : { status: 'fail', path: binary, reason: binaryShape.reason || 'missing' };
+    const signature = runCommand(
+      'codesign',
+      ['--verify', '--strict', '--verbose=2', app],
+      120_000,
+    );
+    return {
+      name,
+      app,
+      binary,
+      app_shape: appShape.status,
+      binary_shape: binaryShape.status,
+      architecture: architecture.architectures || [],
+      architecture_status: architecture.status,
+      signature_status: signature.status === 0 ? 'pass' : 'fail',
+      signature_stderr_tail: signature.stderr.slice(-2_000),
+    };
+  });
+  const frameworkSignature = runCommand(
+    'codesign',
+    ['--verify', '--strict', '--verbose=2', frameworkApp],
+    120_000,
+  );
+  const status = metadataValid
+    && creditsShape.status === 'pass'
+    && frameworkShape.status === 'pass'
+    && frameworkArchitecture.status === 'pass'
+    && frameworkSignature.status === 0
+    && helpers.every((helper) => helper.app_shape === 'pass'
+      && helper.binary_shape === 'pass'
+      && helper.architecture_status === 'pass'
+      && helper.signature_status === 'pass')
+    ? 'pass'
+    : 'fail';
+  return {
+    status,
+    metadata: {
+      status: metadataValid ? 'pass' : 'fail',
+      path: runtimeMetadata,
+      value: metadata,
+      error: metadataError,
+    },
+    credits: { status: creditsShape.status, path: credits },
+    framework: {
+      path: frameworkBinary,
+      shape: frameworkShape.status,
+      architecture: frameworkArchitecture.architectures || [],
+      architecture_status: frameworkArchitecture.status,
+      signature_status: frameworkSignature.status === 0 ? 'pass' : 'fail',
+      signature_stderr_tail: frameworkSignature.stderr.slice(-2_000),
+    },
+    helpers,
+  };
+}
+
+function bundleFingerprints(appPath) {
+  const paths = {
+    host: join(appPath, 'Contents/MacOS/nomifun-desktop'),
+    runtime: join(appPath, 'Contents/Resources/browser-cef/runtime.json'),
+    framework: join(
+      appPath,
+      'Contents/Frameworks/Chromium Embedded Framework.framework/Chromium Embedded Framework',
+    ),
+  };
+  for (const name of CEF_HELPER_NAMES) {
+    paths[`helper:${name}`] = join(
+      appPath,
+      'Contents/Frameworks',
+      `${name}.app/Contents/MacOS`,
+      name,
+    );
+  }
+  return Object.fromEntries(
+    Object.entries(paths).map(([name, path]) => [name, { path, sha256: sha256File(path) }]),
+  );
+}
+
+function inspectMountedDmg(dmgPath, sourceAppPath, runCommand, inspectPath) {
+  const temporary = mkdtempSync(join(tmpdir(), 'nomifun-dmg-inspect-'));
+  const mountpoint = join(temporary, 'mounted');
+  mkdirSync(mountpoint);
+  let attached = false;
+  try {
+    const attach = runCommand(
+      'hdiutil',
+      ['attach', '-readonly', '-nobrowse', '-noverify', '-mountpoint', mountpoint, dmgPath],
+      120_000,
+    );
+    if (attach.status !== 0) {
+      return {
+        status: 'fail',
+        reason: 'attach_failed',
+        exit_code: attach.status,
+        stderr_tail: attach.stderr.slice(-2_000),
+      };
+    }
+    attached = true;
+    const mountedApp = join(mountpoint, 'NomiFun.app');
+    const appShape = inspectPath(mountedApp, { kind: 'directory' });
+    const applicationsLink = join(mountpoint, 'Applications');
+    let applicationLinkStatus = 'fail';
+    try {
+      const metadata = lstatSync(applicationsLink);
+      applicationLinkStatus = metadata.isSymbolicLink() && readlinkSync(applicationsLink) === '/Applications'
+        ? 'pass'
+        : 'fail';
+    } catch {
+      applicationLinkStatus = 'fail';
+    }
+    if (appShape.status !== 'pass') {
+      return { status: 'fail', reason: 'mounted_app_missing', mounted_app: mountedApp };
+    }
+    const cef = inspectCefBundle(mountedApp, runCommand, inspectPath);
+    let identical = false;
+    let fingerprintError = null;
+    try {
+      const source = bundleFingerprints(sourceAppPath);
+      const mounted = bundleFingerprints(mountedApp);
+      identical = Object.keys(source).every((key) => source[key].sha256 === mounted[key]?.sha256);
+    } catch (error) {
+      fingerprintError = error.message;
+    }
+    return {
+      status: cef.status === 'pass' && identical && applicationLinkStatus === 'pass'
+        ? 'pass'
+        : 'fail',
+      mounted_app: mountedApp,
+      applications_link: applicationLinkStatus,
+      app_matches_staged_source: identical,
+      fingerprint_error: fingerprintError,
+      cef,
+    };
+  } finally {
+    if (attached) runCommand('hdiutil', ['detach', mountpoint], 120_000);
+    rmSync(temporary, { recursive: true, force: true });
+  }
+}
+
 function logReference(report, path) {
   const absolute = resolve(path);
   const shape = validatePathShape(absolute);
@@ -371,6 +584,32 @@ async function waitForHttp(url, timeoutMs = 30_000) {
     }
   }
   throw new Error(`timed out waiting for ${url}: ${lastError?.message || 'no response'}`);
+}
+
+async function waitForDesktopPort(root, child, timeoutMs = 30_000) {
+  const path = join(root, 'port.json');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) {
+      throw new Error(`desktop exited before port announcement (${child.exitCode})`);
+    }
+    try {
+      const value = readJson(path);
+      if (value?.host === '127.0.0.1'
+          && Number.isInteger(value?.port)
+          && value.port > 0
+          && value.port <= 65535
+          && value?.pid === child.pid) {
+        return value.port;
+      }
+      lastError = new Error('invalid or stale port announcement');
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 250));
+  }
+  throw new Error(`timed out waiting for ${path}: ${lastError?.message || 'no announcement'}`);
 }
 
 function descendantsOf(pid) {
@@ -429,26 +668,60 @@ async function stopChild(child) {
 }
 
 async function startupSmoke(binary, root, report, label, canonicalInventory) {
-  const port = 28000 + Math.floor(Math.random() * 1000);
+  const packagedDesktop = appFromHostBinary(binary) !== null;
+  const port = packagedDesktop ? null : 28000 + Math.floor(Math.random() * 1000);
   const child = spawn(
     binary,
-    ['--data-dir', root, '--work-dir', root, '--port', String(port), '--local', '--log-level', 'error'],
-    { cwd: REPO_ROOT, stdio: ['ignore', 'pipe', 'pipe'] },
+    packagedDesktop
+      ? []
+      : ['--data-dir', root, '--work-dir', root, '--port', String(port), '--local', '--log-level', 'error'],
+    {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: packagedDesktop
+        ? {
+            ...process.env,
+            NOMIFUN_DATA_DIR: root,
+            NOMIFUN_WORK_DIR: root,
+            NO_PROXY: '127.0.0.1,localhost',
+            no_proxy: '127.0.0.1,localhost',
+          }
+        : process.env,
+    },
   );
+  let stdout = '';
   let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += String(chunk);
+  });
   child.stderr.on('data', (chunk) => {
     stderr += String(chunk);
   });
   try {
-    const health = await waitForHttp(`http://127.0.0.1:${port}/health`);
+    const actualPort = packagedDesktop ? await waitForDesktopPort(root, child) : port;
+    const health = await waitForHttp(`http://127.0.0.1:${actualPort}/health`);
     if (health.response.status !== 200) {
       check(report, label, 'fail', { reason: 'health_status', status_code: health.response.status });
       return;
     }
-    const capabilities = await fetch(`http://127.0.0.1:${port}/api/capabilities`);
+    check(report, `${label}:health`, 'pass', { status_code: health.response.status });
+    if (packagedDesktop) {
+      const protectedCatalog = await fetch(`http://127.0.0.1:${actualPort}/api/capabilities`);
+      check(
+        report,
+        `${label}:external-capability-api-denied`,
+        protectedCatalog.status === 403 ? 'pass' : 'fail',
+        { expected_status: 403, observed_status: protectedCatalog.status },
+      );
+      check(report, `${label}:capability_inventory`, 'not_required', {
+        reason: 'packaged Desktop capability API requires its per-boot WebView local-trust secret; external startup probes must remain denied',
+        canonical_source: canonicalInventory?.path || null,
+      });
+      return;
+    }
+    const capabilities = await fetch(`http://127.0.0.1:${actualPort}/api/capabilities`);
     const body = await capabilities.json().catch(() => null);
     const inventory = compareCapabilityInventory(body, canonicalInventory);
-    check(report, `${label}:health`, 'pass', { status_code: health.response.status });
     check(
       report,
       `${label}:capability_inventory`,
@@ -469,7 +742,11 @@ async function startupSmoke(binary, root, report, label, canonicalInventory) {
       },
     );
   } catch (error) {
-    check(report, label, 'fail', { reason: error.message, stderr_tail: stderr.slice(-2_000) });
+    check(report, label, 'fail', {
+      reason: error.message,
+      stdout_tail: stdout.slice(-2_000),
+      stderr_tail: stderr.slice(-2_000),
+    });
   } finally {
     const before = descendantsOf(child.pid);
     await stopChild(child);
@@ -757,6 +1034,9 @@ export async function runValidation(
         stdout_tail: signature.stdout.slice(-2_000),
         stderr_tail: signature.stderr.slice(-2_000),
       });
+      const cef = inspectCefBundle(appPath, runCommand, inspectPath);
+      check(report, 'macos-app:cef-runtime-framework-helpers', cef.status, cef);
+      report.artifacts.cef_runtime = cef.metadata.path;
     }
   } else {
     check(report, 'macos-app:artifact', 'blocked', {
@@ -778,6 +1058,55 @@ export async function runValidation(
       stdout_tail: verify.stdout.slice(-2_000),
       stderr_tail: verify.stderr.slice(-2_000),
     });
+    if (verify.status === 0 && appPath) {
+      const inspectDmg = execution.inspectDmg || inspectMountedDmg;
+      const mounted = await inspectDmg(dmgPath, appPath, runCommand, inspectPath);
+      check(report, 'macos-package:mounted-app-cef-identity', mounted.status, mounted);
+    }
+    if (options.requireNotarization) {
+      const packageSignature = runCommand(
+        'codesign',
+        ['--verify', '--strict', '--verbose=2', dmgPath],
+        120_000,
+      );
+      check(report, 'macos-package:codesign', packageSignature.status === 0 ? 'pass' : 'fail', {
+        exit_code: packageSignature.status,
+        stdout_tail: packageSignature.stdout.slice(-2_000),
+        stderr_tail: packageSignature.stderr.slice(-2_000),
+      });
+      const ticket = runCommand('xcrun', ['stapler', 'validate', dmgPath], 120_000);
+      check(report, 'macos-package:notarization-ticket', ticket.status === 0 ? 'pass' : 'fail', {
+        exit_code: ticket.status,
+        stdout_tail: ticket.stdout.slice(-2_000),
+        stderr_tail: ticket.stderr.slice(-2_000),
+      });
+      const assessment = runCommand('spctl', ['--assess', '--type', 'install', '--verbose=2', dmgPath], 120_000);
+      const assessmentText = `${assessment.stdout}\n${assessment.stderr}`;
+      const gatekeeperDisabled = assessmentText.includes('override=security disabled');
+      const assessmentStatus = gatekeeperDisabled
+        ? 'not_run'
+        : assessment.status === 0
+          && !assessmentText.includes('source=no usable signature')
+          && /source=(?:Notarized )?Developer ID/.test(assessmentText)
+          ? 'pass'
+          : 'fail';
+      check(report, 'macos-package:gatekeeper-assessment', assessmentStatus, {
+        reason: gatekeeperDisabled ? 'host Gatekeeper assessment is disabled' : null,
+        exit_code: assessment.status,
+        stdout_tail: assessment.stdout.slice(-2_000),
+        stderr_tail: assessment.stderr.slice(-2_000),
+      });
+    } else {
+      check(report, 'macos-package:codesign', 'not_required', {
+        reason: 'Developer ID signing was not required by this engineering invocation',
+      });
+      check(report, 'macos-package:notarization-ticket', 'not_required', {
+        reason: 'notarization was not required by this engineering invocation',
+      });
+      check(report, 'macos-package:gatekeeper-assessment', 'not_required', {
+        reason: 'notarization was not required by this engineering invocation',
+      });
+    }
   }
 
 

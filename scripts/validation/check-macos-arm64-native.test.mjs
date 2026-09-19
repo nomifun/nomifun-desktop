@@ -15,6 +15,7 @@ import {
 } from '../release/release-lock.mjs';
 
 import {
+  CEF_HELPER_NAMES,
   EXPECTED_TARGET,
   TARGET_ID,
   assertSelfTest,
@@ -54,7 +55,7 @@ describe('macOS arm64 host validation helper', () => {
 
     expect(inventory.packageCount).toBeGreaterThan(0);
     expect(inventory.capabilityIds).toEqual(ids);
-    expect(ids.has('browser.render_content')).toBe(true);
+    expect(ids.has('browser')).toBe(true);
   });
 
   test('compares the live catalog by exact canonical ID set', () => {
@@ -132,6 +133,28 @@ describe('macOS arm64 host validation helper', () => {
       mkdirSync(join(root, 'NomiFun.app', 'Contents', 'MacOS'), { recursive: true });
       writeFileSync(host, 'host fixture');
       chmodSync(host, 0o555);
+      const frameworks = join(root, 'NomiFun.app', 'Contents', 'Frameworks');
+      const cefFramework = join(frameworks, 'Chromium Embedded Framework.framework');
+      mkdirSync(cefFramework, { recursive: true });
+      const cefBinary = join(cefFramework, 'Chromium Embedded Framework');
+      writeFileSync(cefBinary, 'cef fixture');
+      chmodSync(cefBinary, 0o555);
+      for (const name of CEF_HELPER_NAMES) {
+        const helper = join(frameworks, `${name}.app`, 'Contents', 'MacOS', name);
+        mkdirSync(join(frameworks, `${name}.app`, 'Contents', 'MacOS'), { recursive: true });
+        writeFileSync(helper, `${name} fixture`);
+        chmodSync(helper, 0o555);
+      }
+      const cefResources = join(root, 'NomiFun.app', 'Contents', 'Resources', 'browser-cef');
+      mkdirSync(cefResources, { recursive: true });
+      writeFileSync(join(cefResources, 'CREDITS.html'), 'credits');
+      writeFileSync(join(cefResources, 'runtime.json'), JSON.stringify({
+        cef: '152.0.6',
+        chromium: '152.0.7977.83',
+        architecture: 'arm64',
+        archive: 'cef_binary_fixture_macosarm64_minimal.tar.bz2',
+        archive_sha1: 'a'.repeat(40),
+      }));
       writeFileSync(packagePath, 'package fixture');
       const lock = createReleaseLock({
         root,
@@ -176,12 +199,19 @@ describe('macOS arm64 host validation helper', () => {
           logs: [],
           runStartup: false,
           runLifecycle: false,
+          requireNotarization: false,
         },
         {
           platform: 'darwin',
           arch: 'arm64',
           command,
           validatePathShape: (path) => ({ status: 'pass', path, mode: '100555' }),
+          inspectDmg: () => ({
+            status: 'pass',
+            applications_link: 'pass',
+            app_matches_staged_source: true,
+            cef: { status: 'pass' },
+          }),
         },
       );
 
@@ -190,7 +220,11 @@ describe('macOS arm64 host validation helper', () => {
           expect.objectContaining({ id: 'native-host', status: 'pass' }),
           expect.objectContaining({ id: 'release-lock:real-artifacts', status: 'pass' }),
           expect.objectContaining({ id: 'macos-app:architectures', status: 'pass' }),
+          expect.objectContaining({ id: 'macos-app:cef-runtime-framework-helpers', status: 'pass' }),
           expect.objectContaining({ id: 'macos-package:hdiutil-verify', status: 'pass' }),
+          expect.objectContaining({ id: 'macos-package:mounted-app-cef-identity', status: 'pass' }),
+          expect.objectContaining({ id: 'macos-package:codesign', status: 'not_required' }),
+          expect.objectContaining({ id: 'macos-package:notarization-ticket', status: 'not_required' }),
           expect.objectContaining({ id: 'canonical-capability-inventory', status: 'pass' }),
           expect.objectContaining({ id: 'startup:absent-root', status: 'not_required' }),
           expect.objectContaining({

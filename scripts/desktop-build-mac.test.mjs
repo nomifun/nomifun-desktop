@@ -35,4 +35,20 @@ describe('macOS Desktop build contract', () => {
     );
     expect(JSON.parse(overlay).bundle).toEqual({});
   });
+
+  test('stages the pinned arm64 CEF bundle before creating the DMG', () => {
+    expect(source.includes('stage-macos-cef-bundle.mjs')).toBe(true);
+    expect(source.includes('nomifun-browser-cef-helper')).toBe(true);
+    expect(source.includes('cef_macos_aarch64/archive.json')).toBe(true);
+    const stage = source.indexOf('stage_macos_cef "$app" "$t"');
+    const dmg = source.indexOf('create_dmg_from_staged_app "$app" "$t" "$dmg_dir"');
+    const dmgImage = source.indexOf('hdiutil create');
+    const dmgSign = source.indexOf('codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$output"');
+    const notarize = source.indexOf('notarize_dmg_dir "$dmg_dir"');
+    expect(stage).toBeGreaterThan(0);
+    expect(dmg).toBeGreaterThan(stage);
+    expect(dmgSign).toBeGreaterThan(dmgImage);
+    expect(notarize).toBeGreaterThan(dmg);
+    expect(source.includes('TRIPLES=(aarch64-apple-darwin)')).toBe(true);
+  });
 });
