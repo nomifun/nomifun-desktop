@@ -202,18 +202,17 @@ describe('Agent resource picker', () => {
     await waitFor(() => expect(states.at(-1)).toBe(false));
   });
 
-  test('shows real Computer permission readiness for the automatic local desktop resource', async () => {
-    const permissions = spyOn(ipcBridge.computerPermissions.get, 'invoke').mockResolvedValue({
-      accessibility: null, screen_recording: null, platform: 'windows', app_label: 'NomiFun',
-    });
+  test('keeps automatic Computer configuration in Settings instead of the Conversation picker', async () => {
+    const permissions = spyOn(ipcBridge.computerPermissions.get, 'invoke');
     restores.push(() => permissions.mockRestore());
     const states: boolean[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
       requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe']}
       value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
     /></MemoryRouter></I18nextProvider>);
-    expect(await screen.findByText(en.resources.computerReady)).toBeTruthy();
     await waitFor(() => expect(states.at(-1)).toBe(true));
+    expect(permissions).not.toHaveBeenCalled();
+    expect(screen.container.querySelector('section')).toBeNull();
   });
 
   test('filters dependent resources by the selected product owner', () => {

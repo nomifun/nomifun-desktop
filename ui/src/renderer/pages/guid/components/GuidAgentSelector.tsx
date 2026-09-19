@@ -7,12 +7,13 @@
 import type { AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import type { AgentPresetId } from '@/common/types/ids';
 import { autoUpdate, flip, FloatingFocusManager, FloatingPortal, offset, shift, size, useClick, useDismiss, useFloating, useInteractions, useRole } from '@floating-ui/react';
-import { Check, Code, Customer, Down, Edit, Magic, MessageOne, Right, Robot, Search, User } from '@icon-park/react';
+import { Check, Code, Down, Edit, Magic, MessageOne, Right, Robot, Search, User } from '@icon-park/react';
 import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate } from 'react-router-dom';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
+import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
 import styles from './GuidAgentSelector.module.css';
 
 export type GuidAgentSelectorProps = {
@@ -32,9 +33,8 @@ export type GuidAgentSelectorProps = {
 const templateIcon = (key: OfficialPresetKey) => {
   const Icon = key === 'coding.codex' ? Code
     : key === 'chat.minimal' ? MessageOne
-      : key === 'customer-service.default' ? Customer
-        : key === 'creative-studio.default' ? Magic
-          : User;
+      : key === 'creative-studio.default' ? Magic
+        : User;
   return <Icon theme='outline' size={20} fill='currentColor' />;
 };
 
@@ -101,11 +101,13 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
     `${name} ${description}`.toLocaleLowerCase().includes(normalizedQuery);
   const savedMatches = presets.filter((preset) => matches(preset.display_name, preset.description));
   const draftMatches = draftPresets.filter((preset) => matches(preset.display_name, preset.description));
-  const templates = useMemo(() => officialTemplates.map((template) => ({
-    ...template,
-    name: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`),
-    description: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.description`),
-  })), [officialTemplates, t]);
+  const templates = useMemo(() => officialTemplates
+    .filter(isConversationAgentTemplate)
+    .map((template) => ({
+      ...template,
+      name: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`),
+      description: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.description`),
+    })), [officialTemplates, t]);
   const templateMatches = templates.filter((template) => matches(template.name, template.description));
   const visibleTemplates = normalizedQuery || allTemplates ? templateMatches : templateMatches.slice(0, 2);
   const hasMine = savedMatches.length > 0 || draftMatches.length > 0;

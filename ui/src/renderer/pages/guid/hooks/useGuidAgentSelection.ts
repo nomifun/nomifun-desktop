@@ -18,6 +18,10 @@ import type {
   ExecutableAgentPreset,
   GuidAgentSelection,
 } from '../types';
+import {
+  filterConversationAgentPresets,
+  isConversationAgentTemplate,
+} from '@/renderer/components/agent/conversationAgentCatalog';
 
 export type GuidAgentSelectionResult = {
   selection: GuidAgentSelection;
@@ -74,18 +78,27 @@ export const useGuidAgentSelection = ({
     refresh: refreshPresets,
   } = useAgentPresets();
   const isLoaded = library !== undefined;
+  const conversationPresets = useMemo(
+    () => filterConversationAgentPresets(savedPresets, library?.active_bindings ?? []),
+    [library?.active_bindings, savedPresets],
+  );
   const presets = useMemo(
-    () => savedPresets.filter(isExecutableAgentPreset),
-    [savedPresets]
+    () => conversationPresets.filter(isExecutableAgentPreset),
+    [conversationPresets]
   );
   const draftPresets = useMemo(
-    () => savedPresets.filter((preset) => !isExecutableAgentPreset(preset)),
-    [savedPresets]
+    () => conversationPresets.filter((preset) => !isExecutableAgentPreset(preset)),
+    [conversationPresets]
+  );
+  const officialTemplates = useMemo(
+    () => (library?.official_templates ?? []).filter(isConversationAgentTemplate),
+    [library?.official_templates],
   );
 
   const setSelection = useCallback((nextSelection: GuidAgentSelection) => {
-    setSelectionState(nextSelection);
-    saveSelection(nextSelection);
+    const normalized = normalizeGuidAgentSelection(nextSelection);
+    setSelectionState(normalized);
+    saveSelection(normalized);
   }, [setSelectionState]);
 
   const selectDefaultTemplate = useCallback(() => {
@@ -106,7 +119,7 @@ export const useGuidAgentSelection = ({
       ? DEFAULT_GUID_AGENT_SELECTION
       : selection;
   const selectedTemplate = effectiveSelection.kind === 'template'
-    ? library?.official_templates.find(
+    ? officialTemplates.find(
         (template) => template.template_key === effectiveSelection.templateKey
       )
     : undefined;
@@ -182,7 +195,7 @@ export const useGuidAgentSelection = ({
     selectedTemplate,
     presets,
     draftPresets,
-    officialTemplates: library?.official_templates ?? [],
+    officialTemplates,
     isLoading,
     isLoaded,
     loadError,

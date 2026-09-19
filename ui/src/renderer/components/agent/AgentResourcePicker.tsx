@@ -1,5 +1,5 @@
 import { ipcBridge } from '@/common';
-import type { ComputerPermissionStatus, IApiRobotPermissions, IApiRobotPhase } from '@/common/adapter/ipcBridge';
+import type { IApiRobotPermissions, IApiRobotPhase } from '@/common/adapter/ipcBridge';
 import { creativeStudioCanvasApi } from '@/renderer/pages/creativeStudio/services/canvasApi';
 import { Button, Select, Spin } from '@arco-design/web-react';
 import { LinkOne } from '@icon-park/react';
@@ -219,32 +219,8 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const required = useMemo(() => new Set(requiredKey ? requiredKey.split('\u0000') : []), [requiredKey]);
   const capabilities = useMemo(() => new Set(capabilityKey ? capabilityKey.split('\u0000') : []), [capabilityKey]);
   const actions = useMemo(() => new Set(actionKey ? actionKey.split('\u0000') : []), [actionKey]);
-  const computerRequired = required.has('computer');
-  const [computerPermissions, setComputerPermissions] = useState<ComputerPermissionStatus | null>(null);
-  const [computerLoading, setComputerLoading] = useState(computerRequired);
-  const [computerLoadFailed, setComputerLoadFailed] = useState(false);
   const multipleMcp = companionBindings || allowsMultipleMcpServers(capabilities);
   const [rosterRevision, setRosterRevision] = useState(0);
-  useEffect(() => {
-    if (!computerRequired) {
-      setComputerPermissions(null);
-      setComputerLoading(false);
-      setComputerLoadFailed(false);
-      return;
-    }
-    let cancelled = false;
-    const refresh = () => {
-      setComputerLoading(true);
-      void ipcBridge.computerPermissions.get.invoke().then((status) => {
-        if (!cancelled) { setComputerPermissions(status); setComputerLoadFailed(false); }
-      }).catch(() => {
-        if (!cancelled) { setComputerPermissions(null); setComputerLoadFailed(true); }
-      }).finally(() => { if (!cancelled) setComputerLoading(false); });
-    };
-    refresh();
-    window.addEventListener('focus', refresh);
-    return () => { cancelled = true; window.removeEventListener('focus', refresh); };
-  }, [computerRequired]);
   useEffect(() => {
     if (!required.has('companion') && !required.has('companion_memory')) return;
     const refresh = () => setRosterRevision((previous) => previous + 1);
@@ -335,25 +311,15 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     requiredFields.includes(kind)
       || (kind === 'mcp_server' ? selectedMcpResourceIds(value).length > 0 : Boolean(value[kind]))
   );
-  const needsScreenRecording = actions.has('computer/observe');
-  const needsAccessibility = actions.has('computer/a11y.observe') || actions.has('computer/input');
-  const computerAvailable = !computerRequired || Boolean(computerPermissions && (
-    computerPermissions.platform === 'windows'
-      || computerPermissions.platform === 'macos'
-        && (!needsScreenRecording || computerPermissions.screen_recording === true)
-        && (!needsAccessibility || computerPermissions.accessibility === true)
-  ));
-  const liveResourcesReady = !pendingBlocksLaunch && !computerLoading && !computerLoadFailed
-    && computerAvailable && selectedResourcesAvailable;
+  const liveResourcesReady = !pendingBlocksLaunch && selectedResourcesAvailable;
   const displayedMissingCount = missingChoiceCount
-    + (!computerLoading && !computerAvailable ? 1 : 0)
     + (value.robot && !selectedResourcesAvailable ? 1 : 0);
   useEffect(() => {
     onAvailabilityChange?.(liveResourcesReady);
     return () => onAvailabilityChange?.(false);
   }, [liveResourcesReady, onAvailabilityChange]);
 
-  if (!fields.length && !computerRequired) return null;
+  if (!fields.length) return null;
   const kindName = (kind: string) => t(`agentSettings.resources.kinds.${kind === 'mcp_server' ? 'mcpConnection' : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())}`);
   const permissionName = (permission: keyof IApiRobotPermissions) =>
     t(`agentSettings.resources.robotPermissions.${permission}`);
@@ -382,21 +348,6 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     <div className={styles.header}><div className={styles.headerCopy}><strong>{t('agentSettings.resources.pickerTitle')}</strong><span>{t(companionBindings ? 'agentSettings.resources.companionBindingHint' : 'agentSettings.resources.pickerHint')}</span></div>
       <span className={`${styles.status} ${!resolution.missingKinds.length && liveResourcesReady ? styles.statusReady : ''}`}>{t(resolution.missingKinds.length || !liveResourcesReady ? 'agentSettings.resources.missingCount' : 'agentSettings.resources.ready', { count: displayedMissingCount })}</span>
     </div>
-    {computerRequired && <div className={styles.automaticStatus} role='status'>
-      <div><strong>{kindName('computer')}</strong><span>{t(
-        computerLoading
-          ? 'agentSettings.resources.computerChecking'
-          : computerLoadFailed
-            ? 'agentSettings.resources.computerCheckFailed'
-            : computerAvailable
-              ? 'agentSettings.resources.computerReady'
-              : 'agentSettings.resources.computerPermissionNeeded'
-      )}</span></div>
-      {!computerLoading && !computerAvailable && <Button size='mini' type='text' onClick={() => {
-        if (onNavigateToResource) onNavigateToResource('/settings/computer-use');
-        else void navigate('/settings/computer-use');
-      }}>{t('agentSettings.resources.configure')}</Button>}
-    </div>}
     <div className={styles.fields}>{fields.map((kind) => {
       const options = fieldOptions(kind);
       const loading = pending.has(kind);

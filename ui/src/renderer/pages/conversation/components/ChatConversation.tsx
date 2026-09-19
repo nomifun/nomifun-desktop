@@ -51,6 +51,10 @@ import {
   agentSwitchRequiresWebSearchModel,
   classifyAgentSwitchError,
 } from '../utils/agentSwitch';
+import {
+  filterConversationAgentPresets,
+  isConversationAgentTemplate,
+} from '@/renderer/components/agent/conversationAgentCatalog';
 
 /** Check whether a specific skill is mounted on the conversation. */
 const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {
@@ -123,9 +127,17 @@ const NomiConversationPanel: React.FC<{
   const creation = useCreationDraft(conversation.id);
   const [stagedPresetId, setStagedPresetId] = useState(creation.draft.presetId ?? conversation.preset_id);
   const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
+  const conversationAgentPresets = useMemo(
+    () => filterConversationAgentPresets(savedAgentPresets, agentLibrary?.active_bindings ?? []),
+    [agentLibrary?.active_bindings, savedAgentPresets],
+  );
   const executableAgentPresets = useMemo(
-    () => savedAgentPresets.filter(isExecutableAgentPreset),
-    [savedAgentPresets],
+    () => conversationAgentPresets.filter(isExecutableAgentPreset),
+    [conversationAgentPresets],
+  );
+  const conversationOfficialTemplates = useMemo(
+    () => (agentLibrary?.official_templates ?? []).filter(isConversationAgentTemplate),
+    [agentLibrary?.official_templates],
   );
   const [agentChoice, setAgentChoice] = useState<GuidAgentSelection>(() =>
     creation.draft.selectedAgent ?? (conversation.preset_id
@@ -415,7 +427,7 @@ const NomiConversationPanel: React.FC<{
     selection: GuidAgentSelection,
   ): Promise<AgentSwitchTarget> => {
     if (selection.kind === 'template') {
-      const template = agentLibrary?.official_templates.find(
+      const template = conversationOfficialTemplates.find(
         (candidate) => candidate.template_key === selection.templateKey,
       );
       if (!template) throw new Error('Official Agent is unavailable');
@@ -444,8 +456,8 @@ const NomiConversationPanel: React.FC<{
       name: preset.display_name,
     };
   }, [
-    agentLibrary?.official_templates,
     conversation.model,
+    conversationOfficialTemplates,
     executableAgentPresets,
     modelSelection.current_model,
     t,
@@ -490,7 +502,7 @@ const NomiConversationPanel: React.FC<{
     <GuidAgentSelector
       disabled={agentSwitching}
       presets={executableAgentPresets}
-      officialTemplates={agentLibrary?.official_templates ?? []}
+      officialTemplates={conversationOfficialTemplates}
       selection={agentChoice}
       selectedLabelOverride={currentAgentLabel}
       isLoading={agentsLoading}
