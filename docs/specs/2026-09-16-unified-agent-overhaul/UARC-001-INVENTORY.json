@@ -305,14 +305,15 @@
     {
       "id": "macos.full_product_package",
       "owner_task": "UARC-063",
-      "state": "verified",
+      "state": "implemented_unverified",
       "required_evidence": [
         "exact-source targeted Rust/UI/core/desktop gates and production renderer build",
         "880x600 desktop boundary and native focus matrix",
         "signed arm64 app and DMG architecture/resource/startup inspection",
         "native Browser, Computer, Terminal and unified Agent lifecycle matrix",
         "Developer ID and notarization result when credentials are available"
-      ]
+      ],
+      "current_blocker": "Late shared renderer commit daef16c9b was merged after the signed/notarized artifact source 6ab013f68; rebuild the current arm64 App/DMG and rerun the affected 880x600/wide Agent-selection and Computer-setup UI matrix on a real Mac. Existing CEF/Process/Computer native evidence remains reusable because those sources and contracts did not change."
     }
   ]
 }
