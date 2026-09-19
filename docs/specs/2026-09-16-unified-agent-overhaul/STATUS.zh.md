@@ -1136,3 +1136,18 @@
   rerun passed release build, NSIS and candidate smoke. No gate was waived.
 - Windows: verified. macOS: previously verified evidence retained without relabeling explicit `not_run` items.
 - Remaining/blocker: none for UARC-064. Next ready task is UARC-070 final cross-platform completion audit.
+
+### 2026-09-19 UARC-070 started
+
+- Barrier/source: UARC-064 closeout `4d2a8dcf99e364a34714218900f79e4431a0104b`.
+- Owner/write set: Integration only; final writes are limited to the UARC documentation registry and, only if audit
+  coverage itself is incomplete, `scripts/check-uarc-boundary.mjs`. No Feature worker or parallel full gate is active.
+- Audit scope: every confirmed decision, all 29 task completion gates, platform states, dependency closure,
+  write/delete/retained ownership, production reachability, native evidence and remaining temporary code.
+- Current evidence: Windows post-Mac regression is verified at `2a426e7af`; Mac CEF/Process/Computer/App/DMG evidence is
+  integrated at `5fd6c6f06`. Explicit Mac `not_run` items remain visible and are not treated as pass.
+- Open audit question: 17 shared tasks still carry macOS `pending`. Existing Mac evidence must be mapped to each task's
+  actual completion gate; platform states will not be bulk-promoted from the UARC-063 label alone.
+- Tests: pending full workspace/all-target/doctest gate, requirements-to-evidence matrix, dependency/status consistency,
+  write-set coverage, final UARC scanner and clean-tree audit.
+- Remaining/blocker: none yet; missing evidence discovered by this audit will be reported by exact task and platform.
