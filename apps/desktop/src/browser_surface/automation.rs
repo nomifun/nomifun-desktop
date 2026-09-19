@@ -36,7 +36,7 @@ enum AgentFocus {
     Active,
 }
 
-pub(super) struct TabAutomation {
+pub(crate) struct TabAutomation {
     frames: Option<native::frames::FrameSessions>,
     semantic: semantic_frames::SemanticFrames,
     observation: u64,

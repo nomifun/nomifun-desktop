@@ -32,6 +32,14 @@ pub(super) async fn verify(view: &View, url: &str) -> Result<Value, String> {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         native::set_user_input_enabled(view,false).await?;
+        // Root input locking does not itself acknowledge policy installation
+        // in an already-attached OOPIF. Synchronize the owned frame routes and
+        // their chooser interception before the first click; this remains
+        // before any semantic observation or element-reference creation.
+        driver.configure_file_choosers(view,true).await.map_err(|error|error.to_string())?;
+        // Let AppKit/CEF commit the resumed child view's first geometry pass;
+        // frameReady is a DOM signal and can precede the native hit-test update.
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         let mut early=native::file_chooser::FileChooser::listen(view).await.map_err(|error|error.to_string())?;
         early.arm();
         let point=evaluate(view,"(()=>{const frame=document.getElementById('cross');const r=frame.getBoundingClientRect();const p=framePickPoints.Cross;return {x:r.x+frame.clientLeft+p.x,y:r.y+frame.clientTop+p.y}})()").await?;

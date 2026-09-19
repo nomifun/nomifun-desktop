@@ -91,7 +91,14 @@ impl AttachedBrowser {
             Self::connect_port_file(&local_data.join("Google/Chrome/User Data/DevToolsActivePort"))
                 .await
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        {
+            let home = dirs::home_dir()
+                .filter(|path| path.is_absolute())
+                .ok_or(AttachError::NotReady)?;
+            Self::connect_port_file(&macos_chrome_port_file(&home)).await
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         {
             Err(AttachError::UnsupportedPlatform)
         }
@@ -243,6 +250,11 @@ impl AttachedBrowser {
         };
         retirement.await
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_chrome_port_file(home: &Path) -> std::path::PathBuf {
+    home.join("Library/Application Support/Google/Chrome/DevToolsActivePort")
 }
 
 impl Drop for AttachedBrowser {

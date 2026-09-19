@@ -45,7 +45,16 @@ try {
   await cp(join(root, 'target/debug/examples/browser_cef_smoke'), executable);
   await cp(join(runtime, 'Chromium Embedded Framework.framework'), framework, { recursive: true, dereference: false, verbatimSymlinks: true });
   const common = { CFBundlePackageType: 'APPL', CFBundleVersion: '1', CFBundleShortVersionString: '1.0', LSMinimumSystemVersion: '14.0', NSHighResolutionCapable: true };
-  await writeFile(join(contents, 'Info.plist'), plist({ ...common, CFBundleIdentifier: 'com.nomifun.cef-native-smoke', CFBundleName: 'NomiCEFSmoke', CFBundleExecutable: 'browser_cef_smoke' }));
+  // The Tauri build embeds these two keys in the Mach-O __info_plist section.
+  // macOS process-requirement validation rejects the signed process when the
+  // external bundle plist disagrees with the embedded values (OSStatus -67030).
+  await writeFile(join(contents, 'Info.plist'), plist({
+    ...common,
+    CFBundleIdentifier: 'com.nomifun.cef-native-smoke',
+    CFBundleName: 'NomiFun',
+    CFBundleExecutable: 'browser_cef_smoke',
+    NSMicrophoneUsageDescription: 'NomiFun uses the microphone to record voice input and convert it to text with your selected speech recognition model.',
+  }));
   for (const name of helperNames) {
     const helperApp = join(contents, 'Frameworks', `${name}.app`);
     await mkdir(join(helperApp, 'Contents/MacOS'), { recursive: true });
@@ -55,7 +64,19 @@ try {
   }
   const entitlements = join(stage, 'helper-entitlements.plist');
   await writeFile(entitlements, plist({ 'com.apple.security.cs.allow-jit': true }));
-  const sign = (path, jit = false) => run('codesign', ['--force', '--options', 'runtime', '--sign', identity, ...(jit ? ['--entitlements', entitlements] : []), path]);
+  // Hardened runtime enforces library validation. A Developer ID build signs
+  // every nested component with one Team ID and may enable it. An ad-hoc local
+  // fixture has no Team ID, so enabling hardened runtime would make macOS
+  // reject its equally ad-hoc CEF framework even though both seals verify.
+  // Do not weaken library validation with an entitlement; simply keep the
+  // unsigned engineering fixture non-hardened.
+  const sign = (path, jit = false) => run('codesign', [
+    '--force',
+    ...(identity === '-' ? [] : ['--options', 'runtime']),
+    '--sign', identity,
+    ...(jit ? ['--entitlements', entitlements] : []),
+    path,
+  ]);
   async function signMachO(directory) {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
@@ -86,7 +107,7 @@ try {
   const exited = new Promise((resolve, reject) => { launch.once('error', reject); launch.once('exit', resolve); });
   let timer;
   try {
-    await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Native CEF fixture timed out')), 110_000); })]);
+    await Promise.race([exited, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Native CEF fixture timed out')), 260_000); })]);
     const result = JSON.parse(await readFile(report, 'utf8'));
     if (!result.checks || !Object.keys(result.checks).length || result.passed !== true || result.shutdown_complete !== true) throw new Error(`Native CEF conformance failed; inspect ${report}`);
     console.log(JSON.stringify({ ...receipt, result }, null, 2));

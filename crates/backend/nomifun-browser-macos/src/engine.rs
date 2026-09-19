@@ -1,7 +1,7 @@
 //! CEF lifetime and main-thread scheduling. This module never owns the Tauri UI.
 use cef::*;
 use std::{collections::BTreeMap, path::PathBuf, sync::{Arc, Mutex, OnceLock, Weak, atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}}, time::{Duration, Instant}};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use crate::protocol::Protocol;
 #[path = "callbacks.rs"]
 mod callbacks;
@@ -236,27 +236,7 @@ impl Engine {
     pub async fn create_page(self: &Arc<Self>, parent: Arc<ParentView>, context: Arc<Context>) -> Result<Arc<Page>, String> {
         self.wait_ready().await?;
         let (created, wait) = oneshot::channel();
-        let (closed, _) = watch::channel(false);
-        let page = Arc::new_cyclic(|weak: &Weak<Page>| {
-            let weak = weak.clone();
-            let engine = self.clone();
-            let protocol = Protocol::new(Box::new(move |message| {
-                let weak = weak.clone();
-                engine.post(Box::new(move || {
-                    if let Some(page) = weak.upgrade() {
-                        if message.guard.as_ref().is_some_and(|guard| !guard()) { page.protocol.reject(message.id); return; }
-                        let browser = page.browser.lock().unwrap().clone();
-                        if let Some(browser) = browser {
-                            if let Some(host) = browser.host() {
-                                if host.send_dev_tools_message(Some(&message.bytes)) == 1 { return; }
-                            }
-                        }
-                        page.protocol.close();
-                    }
-                }))
-            }));
-            Page { metadata: watch::channel(PageSnapshot::default()).0, change_listener: Mutex::new(None), dialog: Mutex::new(None), dialog_draining: AtomicBool::new(true), id: uuid::Uuid::now_v7(), engine: self.clone(), protocol, browser: Mutex::new(None), registration: Mutex::new(None), created: Mutex::new(Some(created)), closed, view: AtomicUsize::new(0), parent: AtomicUsize::new(0), input_locked: AtomicBool::new(true), blocked_inputs: AtomicUsize::new(0), visible: AtomicBool::new(false), close_requested: AtomicBool::new(false), _context: context.clone() }
-        });
+        let page = self.allocate_page(context.clone(), created);
         self.pages.lock().unwrap().insert(page.id, Arc::downgrade(&page));
         let pending = page.clone();
         self.post(Box::new(move || {
@@ -278,6 +258,34 @@ impl Engine {
         // retained by CEF until its create/abort callback; app shutdown owns it.
         wait.await.map_err(|_| "CEF page creation was interrupted")??;
         Ok(page)
+    }
+
+    fn allocate_page(
+        self: &Arc<Self>,
+        context: Arc<Context>,
+        created: oneshot::Sender<Result<(), String>>,
+    ) -> Arc<Page> {
+        let (closed, _) = watch::channel(false);
+        Arc::new_cyclic(|weak: &Weak<Page>| {
+            let weak = weak.clone();
+            let engine = self.clone();
+            let protocol = Protocol::new(Box::new(move |message| {
+                let weak = weak.clone();
+                engine.post(Box::new(move || {
+                    if let Some(page) = weak.upgrade() {
+                        if message.guard.as_ref().is_some_and(|guard| !guard()) { page.protocol.reject(message.id); return; }
+                        let browser = page.browser.lock().unwrap().clone();
+                        if let Some(browser) = browser {
+                            if let Some(host) = browser.host() {
+                                if host.send_dev_tools_message(Some(&message.bytes)) == 1 { return; }
+                            }
+                        }
+                        page.protocol.close();
+                    }
+                }))
+            }));
+            Page { metadata: watch::channel(PageSnapshot::default()).0, change_listener: Mutex::new(None), dialog: Mutex::new(None), permissions: Mutex::new(BTreeMap::new()), popup_sender: Mutex::new(None), download: Mutex::new(None), user_downloads: Mutex::new(Default::default()), dialog_draining: AtomicBool::new(true), id: uuid::Uuid::now_v7(), engine: self.clone(), protocol, browser: Mutex::new(None), registration: Mutex::new(None), created: Mutex::new(Some(created)), closed, view: AtomicUsize::new(0), parent: AtomicUsize::new(0), input_locked: AtomicBool::new(true), blocked_inputs: AtomicUsize::new(0), visible: AtomicBool::new(false), close_requested: AtomicBool::new(false), _context: context.clone() }
+        })
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
@@ -314,10 +322,20 @@ pub struct Context {
     pub profile: Option<PathBuf>,
 }
 
+pub struct PopupCandidate {
+    pub page: Arc<Page>,
+    pub target_url: String,
+    pub ready: oneshot::Receiver<Result<(), String>>,
+}
+
 pub struct Page {
     metadata: watch::Sender<PageSnapshot>,
     change_listener: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     dialog: Mutex<Option<callbacks::DeferredDialog>>,
+    permissions: Mutex<BTreeMap<String, callbacks::DeferredPermission>>,
+    popup_sender: Mutex<Option<mpsc::Sender<PopupCandidate>>>,
+    pub(crate) download: Mutex<Option<Weak<crate::downloads::AgentDownloadRequest>>>,
+    pub(crate) user_downloads: Mutex<crate::downloads::UserDownloads>,
     dialog_draining: AtomicBool,
     id: uuid::Uuid,
     engine: Arc<Engine>,
@@ -331,13 +349,82 @@ pub struct Page {
     input_locked: AtomicBool,
     blocked_inputs: AtomicUsize,
     visible: AtomicBool,
-    close_requested: AtomicBool,
+    pub(crate) close_requested: AtomicBool,
     _context: Arc<Context>,
 }
 
 impl Page {
     pub fn id(&self) -> uuid::Uuid { self.id }
     pub fn closed(&self) -> watch::Receiver<bool> { self.closed.subscribe() }
+    pub fn listen_popups(&self) -> Result<mpsc::Receiver<PopupCandidate>, String> {
+        let mut sender = self.popup_sender.lock().unwrap();
+        if sender.is_some() {
+            return Err("CEF popup listener is already installed".into());
+        }
+        let (output, receiver) = mpsc::channel(8);
+        *sender = Some(output);
+        Ok(receiver)
+    }
+
+    fn prepare_popup(
+        self: &Arc<Self>,
+        target_url: Option<&CefString>,
+        target_disposition: WindowOpenDisposition,
+        user_gesture: i32,
+        window_info: Option<&mut WindowInfo>,
+        client: Option<&mut Option<Client>>,
+        no_javascript_access: Option<&mut i32>,
+    ) -> bool {
+        let target_url = target_url.map(ToString::to_string).unwrap_or_default();
+        if user_gesture == 0
+            || !navigation_allowed(&target_url)
+            || !matches!(
+                target_disposition,
+                WindowOpenDisposition::NEW_FOREGROUND_TAB
+                    | WindowOpenDisposition::NEW_BACKGROUND_TAB
+                    | WindowOpenDisposition::NEW_POPUP
+                    | WindowOpenDisposition::NEW_WINDOW
+            )
+            || self.close_requested.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        let Some(output) = self.popup_sender.lock().unwrap().as_ref().cloned() else {
+            return false;
+        };
+        let (Some(window_info), Some(client)) = (window_info, client) else {
+            return false;
+        };
+        let parent = self.parent.load(Ordering::Acquire) as *mut objc2_app_kit::NSView;
+        let Some(parent) = (unsafe { objc2::rc::Retained::retain(parent) }) else {
+            return false;
+        };
+        let (created, ready) = oneshot::channel();
+        let page = self.engine.allocate_page(self._context.clone(), created);
+        page.dialog_draining.store(
+            self.dialog_draining.load(Ordering::Acquire),
+            Ordering::Release,
+        );
+        let parent = objc2::rc::Retained::into_raw(parent);
+        page.parent.store(parent as usize, Ordering::Release);
+        self.engine.pages.lock().unwrap().insert(page.id, Arc::downgrade(&page));
+        *window_info = WindowInfo {
+            parent_view: parent.cast(),
+            bounds: Rect { x: 0, y: 0, width: 880, height: 600 },
+            hidden: 1,
+            runtime_style: RuntimeStyle::ALLOY,
+            ..Default::default()
+        };
+        *client = Some(PageClient::new(page.clone()));
+        if let Some(no_javascript_access) = no_javascript_access {
+            *no_javascript_access = 0;
+        }
+        if output.try_send(PopupCandidate { page: page.clone(), target_url, ready }).is_err() {
+            page.creation_failed();
+            return false;
+        }
+        true
+    }
     /// Native browser zoom, independent of backing scale and CSS transforms.
     pub async fn set_zoom_factor(self: &Arc<Self>, factor: f64) -> Result<(), String> {
         if !factor.is_finite() || !(0.25..=5.0).contains(&factor) { return Err("CEF zoom factor is outside its range".into()); }
@@ -358,6 +445,8 @@ impl Page {
         let page = self.clone();
         let (tx, rx) = oneshot::channel();
         self.engine.post(Box::new(move || {
+            page.clear_permissions(true);
+            page.cancel_surface_downloads();
             if let Some(view) = unsafe { (page.view.load(Ordering::Acquire) as *const objc2_app_kit::NSView).as_ref() } {
                 view.setHidden(true);
             }
@@ -382,12 +471,14 @@ impl Page {
     /// Used after explicit discard/clear confirmation or application shutdown.
     pub async fn force_close(self: &Arc<Self>) -> Result<(), String> {
         self.close_requested.store(true, Ordering::Release);
+        self.cancel_surface_downloads();
         let mut closed = self.closed.subscribe();
         if *closed.borrow() { return Ok(()); }
         let page = self.clone();
         self.engine.post(Box::new(move || {
             page.dialog_draining.store(true, Ordering::Release);
             page.clear_dialog(true);
+            page.clear_permissions(true);
             let browser = page.browser.lock().unwrap().clone();
             if let Some(host) = browser.and_then(|browser| browser.host()) { host.close_browser(1); }
         }))?;
@@ -406,6 +497,10 @@ impl Page {
                 let view = unsafe { (view as *const objc2_app_kit::NSView).as_ref() }.ok_or("CEF page is closed")?;
                 let parent = unsafe { view.superview() }.ok_or("CEF page is detached")?;
                 let y = if parent.isFlipped() { bounds.y } else { parent.bounds().size.height - bounds.y - bounds.height };
+                if !visible {
+                    page.clear_permissions(true);
+                    page.cancel_surface_downloads();
+                }
                 view.setFrame(objc2_foundation::NSRect::new(objc2_foundation::NSPoint::new(bounds.x, y), objc2_foundation::NSSize::new(bounds.width, bounds.height)));
                 view.setHidden(!visible);
                 page.visible.store(visible, Ordering::Release);
@@ -417,6 +512,7 @@ impl Page {
     }
 
     pub fn input_locked(&self) -> bool { self.input_locked.load(Ordering::Acquire) }
+    pub(crate) fn is_visible(&self) -> bool { self.visible.load(Ordering::Acquire) }
     pub fn blocked_input_count(&self) -> usize { self.blocked_inputs.load(Ordering::Acquire) }
 
     pub async fn set_input_locked(self: &Arc<Self>, locked: bool) -> Result<(), String> {
@@ -427,6 +523,7 @@ impl Page {
                 else {
                     let browser = page.browser.lock().unwrap().clone();
                     if let Some(host) = browser.and_then(|browser| browser.host()) {
+                        if locked { page.clear_permissions(true); }
                         page.input_locked.store(locked, Ordering::Release);
                         host.set_accessibility_state(if locked { State::DISABLED } else { State::ENABLED });
                         Ok(())
@@ -460,7 +557,7 @@ wrap_browser_process_handler! { struct ProcessHandler { engine: Arc<Engine>, } i
 } }
 wrap_client! { struct PageClient { page: Arc<Page>, } impl Client {
     fn dialog_handler(&self) -> Option<DialogHandler> { Some(callbacks::FileDialogs::new()) }
-    fn download_handler(&self) -> Option<DownloadHandler> { Some(callbacks::Downloads::new()) }
+    fn download_handler(&self) -> Option<DownloadHandler> { Some(callbacks::Downloads::new(self.page.clone())) }
     fn context_menu_handler(&self) -> Option<ContextMenuHandler> { Some(callbacks::Menus::new(self.page.clone())) }
     fn jsdialog_handler(&self) -> Option<JsdialogHandler> { Some(callbacks::Dialogs::new(self.page.clone())) }
     fn load_handler(&self) -> Option<LoadHandler> { Some(callbacks::Loading::new(self.page.clone())) }
@@ -471,10 +568,10 @@ wrap_client! { struct PageClient { page: Arc<Page>, } impl Client {
     fn request_handler(&self) -> Option<RequestHandler> { Some(RequestPolicy::new(self.page.clone())) }
 } }
 wrap_life_span_handler! { struct Lifetime { page: Arc<Page>, } impl LifeSpanHandler {
-    fn on_before_popup(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _popup_id: i32, _target_url: Option<&CefString>, _target_frame_name: Option<&CefString>, _target_disposition: WindowOpenDisposition, _user_gesture: i32, _popup_features: Option<&PopupFeatures>, _window_info: Option<&mut WindowInfo>, _client: Option<&mut Option<Client>>, _settings: Option<&mut BrowserSettings>, _extra_info: Option<&mut Option<DictionaryValue>>, _no_javascript_access: Option<&mut i32>) -> i32 {
-        // Admission must eventually supply an owned child NSView and PageClient.
-        // Never let CEF create an unmanaged window while that owner is absent.
-        1
+    fn on_before_popup(&self, _browser: Option<&mut Browser>, _frame: Option<&mut Frame>, _popup_id: i32, target_url: Option<&CefString>, _target_frame_name: Option<&CefString>, target_disposition: WindowOpenDisposition, user_gesture: i32, _popup_features: Option<&PopupFeatures>, window_info: Option<&mut WindowInfo>, client: Option<&mut Option<Client>>, _settings: Option<&mut BrowserSettings>, _extra_info: Option<&mut Option<DictionaryValue>>, no_javascript_access: Option<&mut i32>) -> i32 {
+        // Return 0 only after an owned child PageClient, hidden child NSView,
+        // inherited request context and bounded runtime queue are installed.
+        i32::from(!self.page.prepare_popup(target_url, target_disposition, user_gesture, window_info, client, no_javascript_access))
     }
     fn on_after_created(&self, browser: Option<&mut Browser>) {
         let Some(browser) = browser else { self.page.creation_failed(); return; };
@@ -506,6 +603,8 @@ wrap_life_span_handler! { struct Lifetime { page: Arc<Page>, } impl LifeSpanHand
     }
     fn on_before_close(&self, _browser: Option<&mut Browser>) {
         self.page.clear_dialog(false);
+        self.page.clear_permissions(false);
+        self.page.popup_sender.lock().unwrap().take();
         self.page.protocol.close();
         let registration = self.page.registration.lock().unwrap().take();
         let browser = self.page.browser.lock().unwrap().take();

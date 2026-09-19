@@ -1,9 +1,9 @@
 # UARC 状态台账
 
 > 唯一状态 owner：Integration
-> 更新时间：2026-09-18
-> 当前阶段：Wave 6 / UARC-053 active
-> 当前 source HEAD：`877b1a751536e40a3185c31790e6e63e86c6fa32`
+> 更新时间：2026-09-19
+> 当前阶段：Wave 5 macOS / UARC-061 active
+> 当前 source HEAD：`a8dbaae766fab4f1d99680701659ee3df03c4696`
 > UARC-000 冻结提交：`2147863da396835240296ec0a9b865200050b438`
 > Wave 0 inventory 提交：`440626d91dc800af0c5b2c81cf13f63eac9abfaf`
 > UARC-010 实现提交：`c059728ae4395fcdf72df59a54b4e53e8b7562a1`
@@ -19,8 +19,8 @@
 > UARC-051 实现提交：`ab94f33f2b6201c2850803fefbfe72430ef89234`
 > UARC-052 实现提交：`48fbfb09c`
 > UARC-052 barrier：`e6aca70e4`
-> 当前主机：Windows
-> Initiative 状态：`active / UARC-053 physical legacy removal`
+> 当前主机：macOS 26.3 (25D125) / Apple M4 arm64
+> Initiative 状态：`active / UARC-061 engineering verified; external native gates blocked`
 
 ## 1. 当前事实
 
@@ -32,8 +32,11 @@
   selector 与兼容路由已物理删除。
 - Browser 已是任意 AgentSession 可授权的 `browser` Module；Guid 不再创建 Browser 专属空 Session，
   Windows managed provider 使用 WebView2，attached provider 使用安装级 Chrome 连接。
-- 当前源码已经包含 macOS 独立 CEF host、原生 fixture 与部分底层验证；生产注入、产品会话闭环和
-  UARC 新 Browser Resource 模型适配仍未完成。UARC-061 必须复用这套基线，不得回退到 WKWebView。
+- UARC-061 主实现已把独立 CEF child NSView 接入生产 `main.rs`、Browser Resource、Kernel Action owner、
+  bundle/helper 与 App shutdown。最终 signed native fixture 33/33，正式 `.app` 的 canonical AgentSession →
+  compiler → Kernel → Browser owner → CEF 链路、effect receipt、trusted click witness 和 helper cleanup 已通过；
+  真实 StepFun、Command-Q 与 attached Chrome 用户开启步骤仍 blocked，详见
+  [UARC-061 macOS 实现证据](UARC-061-MACOS-IMPLEMENTATION.zh.md)。
 - 产品组合只安装一个 `nomifun.nomi` provider/factory；旧 Nomi loop/factory/manager、
   `nomifun.coding` family、multi-Runtime catalog/selector 与 private transcript 已物理删除。统一实现位于
   `nomifun-agent-runtime`，诊断 API 为 singular `/api/agent-runtime`。
@@ -51,7 +54,8 @@
   派生，provider/model transport 细节不再成为 Agent grant。
 - Wave 5 已把 Computer/Robot 收敛为单一 Module + slash Action，旧 generic Robot proxy/fixture 已删除；
   Bootstrap WAL 测试也已改为稳定的逻辑持久状态证据。App 全量 gate 为 522/522。
-- 当前没有本轮源码重构的 macOS 编译、原生或打包证据。
+- 当前已有本轮源码的 macOS 编译、原生 CEF、正式产品链路和 Developer ID `.app` 证据；DMG/release lock、
+  notarization 与全产品矩阵仍归 UARC-063，不能由当前 `.app` 检查点替代。
 
 ## 2. 已确认产品决定
 
@@ -96,8 +100,14 @@
 | `UARC-050` | integrated | Integration | verified | pending | Official Agents、Workbench 与单 Nomi Runtime 诊断 UI |
 | `UARC-051` | integrated | Integration | verified | pending | generation 5 Store/API/projection 与领域入口完成切换 |
 | `UARC-052` | integrated | Integration | verified | pending | 唯一官方 Runtime；旧 Runtime/selector/compatibility 已物理删除 |
-| `UARC-053` | active | Integration | pending | pending | 删除旧 capability/store/IDMM/Browser entry 与 obsolete assets |
-| 其余任务 | planned | unassigned | pending | pending/not applicable | 按 manifest 依赖释放 |
+| `UARC-053` | integrated | Integration | verified | pending | 旧 capability/store/IDMM/Browser entry 与 obsolete assets 已物理删除 |
+| `UARC-054` | integrated | Integration | verified | pending | canonical schema baseline 已压缩并验证 |
+| `UARC-060` | integrated | Windows Integration | verified | pending | Windows candidate 与 shared-source barrier 已冻结 |
+| `UARC-061` | active | Mac Integration | n/a | engineering verified / external gates blocked | 主实现、33/33 native、正式 Agent/Kernel/CEF 与 signed `.app` 已过；等待 StepFun Keychain、解锁 Command-Q、Chrome Remote Debugging |
+| `UARC-062` | ready | unassigned | n/a | pending | macOS Process/PTY/Computer 与生命周期闭环 |
+| `UARC-063` | planned | unassigned | n/a | pending | 等待 UARC-061/062 集成后执行完整产品与 arm64 制品验收 |
+| `UARC-064` | planned | unassigned | pending | n/a | 仅在 Mac 合入后回到 Windows 执行 |
+| `UARC-070` | planned | unassigned | pending | pending | 仅在 UARC-064 后执行跨平台完成审计 |
 
 ## 4. 当前 dirty worktree 归属
 
@@ -169,6 +179,11 @@
 | UARC-051 Store/domain/DB | AgentSession 35 + Cron 187 + reset 3 + ID schema 20 + Remote repo 1 passed | Session ports、projection rebuild、Agent-only reset 与 Remote owner |
 | UARC-051 UI | focused 112 passed；typecheck、production build、880×600 boundary passed | immutable edit retry、canonical history/search/creation、无 legacy artifact/writeback surface |
 | Commercial selected-model integration | StepFun Coding Plan `step-3.7-flash` canonical smoke passed | credential-isolated Session → Runtime → projection；未持久化、打印或提交密钥 |
+| UARC-061 macOS CEF native | 33/33 checks + `shutdown_complete=true` | real AppKit/Tauri child NSView；input/frame/upload/picker/download/popup/dialog/permission/storage |
+| UARC-061 packaged product Browser | `turn_completed` + `host_cleanup_proven`；trusted witness 1/1 | canonical AgentSession → compiler → Kernel → Browser owner → packaged CEF；deterministic model 仅证明集成 |
+| UARC-061 crates/boundaries | macOS 11 + Browser Platform 55 + attached 49 passed；3 real-Chrome ignores；3 boundaries passed | Browser native/shared contracts、880×600 与 UARC inventory 无回流 |
+| UARC-061 arm64 `.app` | host/framework/5 helpers arm64；Developer ID deep strict seal passed | DMG/release lock/notarization 仍归 UARC-063 |
+| UARC-061 external gates | StepFun Keychain absent；Mac locked；Chrome `DevToolsActivePort` absent | live model / Command-Q / attached install connection 均诚实 blocked，未用替代证据 |
 | UARC-052 Runtime/AI/Conversation | Runtime 40 + AI 452 + Plugin consumer 23 + Conversation 335 passed | 单一 Runtime loop、固定 factory、提取 adapters 与无 private transcript |
 | UARC-052 App/process | App lib 511 + route-gap 29 + Process architecture 16 passed | single-factory boot、canonical Session dispatch 与单 process owner |
 | UARC-052 UI/build/boundary | focused UI 7；typecheck、production build、880×600、Browser/Process/UARC scanners passed | Runtime selector/compatibility reachability为 0；migration 099 的 2 个 immutable 文本归 UARC-054 |
@@ -190,7 +205,9 @@
 ## 7. Blockers
 
 - UARC 实施无产品决定 blocker。
-- macOS 任务需要可用 Mac 主机；在主机可用前状态保持 `pending`，不能标完成。
+- Apple Silicon Mac 主机已可用；UARC-061/062/063 的真机证据必须在本主机重新生成。
+- StepFun Coding Plan Keychain service 当前为 `absent`；真实模型 gate 在安全录入前保持 blocked，其他实现与验证继续。
+- TCC Screen Recording/Accessibility 的 granted 矩阵可能需要用户在系统设置中确认；在实际请求出现前不提前声明 blocker。
 - `UARC-051/052` Windows/shared cutover 已收口；产品入口均使用 generation 5 Store 与唯一官方 Runtime，
   旧 Conversation projection、旧 Runtime 实现、multi-Runtime selector 与 private transcript 不再可达。
 - 历史 Agent schema/migrations、旧 capability projection、obsolete product smoke/IDMM/Browser-entry leftovers 与
@@ -198,8 +215,9 @@
 
 ## 8. Next ready tasks
 
-1. `UARC-053`：active；串行删除旧 capability/store/IDMM/Browser entry 及无 owner 的测试、脚本、文案与样式。
-2. `UARC-061/062`：依赖外部 Mac 真机，在 Windows 串行主线完成且 handoff 就绪后执行。
+1. `UARC-061`：active；将现有独立 CEF child NSView 接入生产 Browser owner、App 生命周期与原生验收。
+2. `UARC-062`：ready；在 UARC-061 形成独立实现提交后串行实施 Process/PTY/Computer 真机闭环。
+3. `UARC-063`：等待 UARC-061/062 集成后，在 clean Mac barrier 上执行完整产品与 arm64 package gate。
 
 ## 9. 状态更新模板
 
@@ -966,3 +984,17 @@
 - Scope: the frozen Windows installer remains the UARC-060 candidate built from `b09c680bb`; this UI-only branch sync does
   not replace its package hash or claim new native evidence. Mac must fetch the original refactor branch and verify both
   `71fd47fbb` and `a19b0be82` as ancestors before starting UARC-061/062.
+
+### 2026-09-19 UARC-061 started on Apple Silicon macOS
+
+- Barrier/source: `a8dbaae766fab4f1d99680701659ee3df03c4696`; clean original `rf/agent-capability-platform-v2`; required `71fd47fbb`, `a19b0be82` and `d27bf4a71` ancestry checks all exited 0.
+- Owner/write set: Mac Integration; UARC-061 CEF/native Browser paths, the exact production composition seam `apps/desktop/src/main.rs`, and the Browser factory/service lifecycle methods needed to make native-engine shutdown part of the existing resource owner. Root configuration, generated outputs and final integration remain single-owner.
+- Environment: macOS 26.3 (25D125), Mac mini Mac16,10, Apple M4 arm64, 32 GB; Xcode 26.5 (17F42); rustc/cargo 1.96.0; Bun 1.3.14; Node 22.19.0; Tauri 2.11.2; CEF 152.3.0+152.0.6 / Chromium 152.0.7977.83.
+- Changed: task claimed after all required plan, manifest, status, handoff, implementation and design/platform sources were read. No Browser implementation change is recorded yet.
+- Deleted: pending macOS unavailable production branch and any obsolete experiment proven unreachable; WKWebView Browser remains prohibited.
+- Retained + reason: independent CEF engine/native fixture and shared Browser Resource/Action semantics are the implementation substrate, not acceptance evidence.
+- Tests: initial desktop compile first exposed missing Ninja; local Ninja 1.13.2 prerequisite was installed. The exact rerun compiled CEF and reached the desktop binary, then found one stale macOS-only `resolve_nomi_core_data_root` call removed from the current bootstrap API; this is an integration input, not a passing gate.
+- Windows: unchanged; frozen UARC-060 evidence remains at `b09c680bb` and must not be relabeled.
+- macOS: implementation active. StepFun Keychain item absent; code-signing identity available. No CEF product, TCC, App/DMG or signing completion claim yet.
+- Remaining/blocker: production CEF initialization/injection/shutdown, managed Resource lifecycle, native actions and product/package gates remain. The credential absence blocks only the eventual real-model gate; TCC user action is assessed when the native matrix reaches it.
+- Next ready tasks: continue UARC-061; UARC-062 remains ready but is not concurrently active.

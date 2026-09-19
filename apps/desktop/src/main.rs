@@ -2259,7 +2259,7 @@ fn complete_main_thread_setup(
     let loopback_port = server.loopback_port();
     #[cfg(target_os = "macos")]
     {
-        let channel_default = nomifun_app::bootstrap::resolve_nomi_core_data_root(
+        let channel_default = nomifun_app::bootstrap::resolve_startup_data_root(
             nomifun_app::cli::default_data_dir(),
         );
         let store = macos_webview_data_store(
@@ -2852,6 +2852,15 @@ fn main() -> std::process::ExitCode {
 
     let tauri_context = generated_tauri_context();
 
+    #[cfg(target_os = "macos")]
+    let cef_engine = Arc::new(std::sync::OnceLock::<
+        Result<Arc<nomifun_browser_macos::engine::Engine>, String>,
+    >::new());
+    #[cfg(target_os = "macos")]
+    let setup_cef_engine = cef_engine.clone();
+    #[cfg(target_os = "macos")]
+    let cef_data_dir = data_dir.clone();
+
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
     let builder = builder.menu(macos_menu_with_verified_quit).on_menu_event(|app, event| {
@@ -2893,11 +2902,34 @@ fn main() -> std::process::ExitCode {
                     )?,
                 ),
             ));
-            #[cfg(not(windows))]
+            #[cfg(target_os = "macos")]
+            let browser_resources = match setup_cef_engine
+                .get()
+                .expect("macOS CEF availability is resolved before app setup")
+            {
+                Ok(engine) => Some(Arc::new(
+                    nomifun_browser_platform::workspace::BrowserResourceService::new(Arc::new(
+                        browser_surface::macos::host::DesktopBrowserHost::new(
+                            app_handle.clone(),
+                            engine.clone(),
+                        ),
+                    ))
+                    .with_profile_store(
+                        nomifun_browser_platform::runtime::BrowserProfileStore::new(
+                            data_dir.clone(),
+                        )?,
+                    ),
+                )),
+                Err(error) => {
+                    tracing::warn!(%error, "managed macOS Browser Provider is unavailable");
+                    None
+                }
+            };
+            #[cfg(not(any(windows, target_os = "macos")))]
             let browser_resources = None;
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             let attached_chrome = Some(nomifun_app::AttachedChromeProviderService::new());
-            #[cfg(not(windows))]
+            #[cfg(not(any(windows, target_os = "macos")))]
             let attached_chrome = None;
             app.manage(browser_resources.clone());
             #[cfg(target_os = "macos")]
@@ -3008,13 +3040,17 @@ fn main() -> std::process::ExitCode {
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || -> anyhow::Result<()> {
                             runtime.block_on(async move {
-                                let mut host_services=nomifun_app::DesktopHostServices {
+                                let host_services=nomifun_app::DesktopHostServices {
                                     browser_resources,
                                     attached_chrome,
                                     ..Default::default()
                                 };
                                 #[cfg(windows)]
-                                headless_browser_runtime::prepare(&mut host_services).await;
+                                let host_services = {
+                                    let mut host_services = host_services;
+                                    headless_browser_runtime::prepare(&mut host_services).await;
+                                    host_services
+                                };
                                 let (server, keep_alive) = match DesktopServer::start_with_outcome(
                                     &cli,
                                     &merged_path,
@@ -3273,6 +3309,17 @@ fn main() -> std::process::ExitCode {
         })
         .build(tauri_context)
         .expect("error while building tauri application");
+
+    #[cfg(target_os = "macos")]
+    {
+        let initialized = browser_surface::macos::lifecycle::initialize(&cef_data_dir);
+        if let Err(error) = &initialized {
+            eprintln!("managed macOS Browser Provider unavailable: {error}");
+        }
+        cef_engine
+            .set(initialized)
+            .unwrap_or_else(|_| panic!("macOS CEF availability resolved more than once"));
+    }
 
     // `Builder::run(context)` installs an empty app-level event callback. Build
     // manually so a Dock click after close-to-tray can surface the hidden main window.

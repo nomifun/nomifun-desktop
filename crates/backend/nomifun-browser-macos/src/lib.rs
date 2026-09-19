@@ -6,3 +6,4 @@ pub mod engine;
 mod application;
 mod text;
 mod profile;
+mod downloads;

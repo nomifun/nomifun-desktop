@@ -80,27 +80,99 @@ fn last_tool(body: &Value) -> anyhow::Result<Value> {
     Ok(value)
 }
 
-fn native_operation(fixture: &Fixture, body: &Value, step: usize) -> anyhow::Result<Option<Value>> {
-    anyhow::ensure!(body["tools"].as_array().is_some_and(|tools| tools.iter().any(|tool| tool["function"]["name"] == "Browser")), "Selected Browser tool missing from model request");
-    if step > 0 { last_tool(body)?; }
+fn browser_tool(body: &Value, action: &str) -> anyhow::Result<String> {
+    let tools = body["tools"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("model request has no Tool surface"))?;
+    let marker = format!("Action: {action}.");
+    tools
+        .iter()
+        .find(|tool| {
+            tool["function"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains(&marker))
+        })
+        .and_then(|tool| tool["function"]["name"].as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            let available = tools
+                .iter()
+                .filter_map(|tool| tool["function"]["description"].as_str())
+                .filter(|description| description.contains("Browser"))
+                .collect::<Vec<_>>();
+            anyhow::anyhow!("Selected Browser action {action} missing from model request: {available:?}")
+        })
+}
+
+fn native_operation(
+    fixture: &Fixture,
+    body: &Value,
+    step: usize,
+) -> anyhow::Result<Option<(String, Value)>> {
     let reference = |name: &str| -> anyhow::Result<Value> {
         let observation = last_tool(body)?;
         observation["elements"].as_array()
             .and_then(|elements| elements.iter().find(|element| element["name"] == name))
-            .map(|element| element["reference"].clone())
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Fresh observed reference missing: {name}"))
     };
-    Ok(Some(match step {
-        0 => json!({"operation":"navigate","url":fixture.native_url}),
-        1 | 3 | 5 => json!({"operation":"observe"}),
-        2 => json!({"operation":"act","action":{"action":"type","element":reference("备注")?,"text":"Agent 主界面真实输入"}}),
-        4 => json!({"operation":"act","action":{"action":"click","element":reference("增加计数")?}}),
-        6 => {
+    let (action, operation) = match step {
+        // The first effect attempt activates the engine-owned task ledger. It
+        // must fail closed before update_plan is exposed, then replan.
+        0 => ("browser/navigate", json!({"url":fixture.native_url})),
+        1 => return Ok(Some(("update_plan".into(), json!({
+            "explanation":"The guarded first effect activated the task ledger; retry through the exact Browser actions.",
+            "requirements":[{
+                "id":"req-native-browser",
+                "description":"Verify the packaged native Browser surface.",
+                "source":{"input":0,"quote":"Verify the packaged native Browser surface."}
+            }],
+            "plan":[
+                {"step":"Verify packaged native Browser navigation and input","status":"in_progress"},
+                {"step":"Verify packaged native Browser page result","status":"pending"}
+            ]
+        })))),
+        2 => ("browser/navigate", json!({"url":fixture.native_url})),
+        3 | 5 | 7 => {
+            last_tool(body)?;
+            ("browser/observe", json!({}))
+        }
+        4 => ("browser/act", json!({"action":"type","element":reference("备注")?,"text":"Agent 主界面真实输入"})),
+        6 => ("browser/act", json!({"action":"click","element":reference("增加计数")?})),
+        8 => {
             anyhow::ensure!(last_tool(body)?.to_string().contains("已收到真实点击"), "Post-click observation omitted the real page result");
+            return Ok(Some(("update_plan".into(), json!({
+                "explanation":"The packaged native page reflects the exact typed text and trusted click result.",
+                "plan":[
+                {"step":"Verify packaged native Browser navigation and input","status":"completed"},
+                {"step":"Verify packaged native Browser page result","status":"completed"}
+            ]}))));
+        }
+        9 => return Ok(Some(("report_completion".into(), json!({
+            "summary":"The packaged native Browser navigated, typed Unicode text and delivered a trusted click witness.",
+            "criteria":[
+                {
+                    "step":"Verify packaged native Browser navigation and input",
+                    "disposition":"supported",
+                    "evidence_call_ids":["gui-native-7"],
+                    "rationale":"The final observation reflects the native type action result after all effects settled.",
+                    "requirement_ids":[]
+                },
+                {
+                    "step":"Verify packaged native Browser page result",
+                    "disposition":"supported",
+                    "evidence_call_ids":["gui-native-7"],
+                    "rationale":"The final observation contains the trusted click result.",
+                    "requirement_ids":["req-native-browser"]
+                }
+            ]
+        })))),
+        10 => {
             return Ok(None);
         }
         _ => anyhow::bail!("Unexpected model request {step}"),
-    }))
+    };
+    Ok(Some((browser_tool(body, action)?, operation)))
 }
 
 async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderMap, Json(mut body): Json<Value>) -> axum::response::Response {
@@ -146,8 +218,8 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             }
         }
     } else { None };
-    let (delta, reason) = if let Some(operation) = operation {
-        (json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("gui-native-{step}"),"type":"function","function":{"name":"Browser","arguments":operation.to_string()}}]}), "tool_calls")
+    let (delta, reason) = if let Some((tool, operation)) = operation {
+        (json!({"role":"assistant","tool_calls":[{"index":0,"id":format!("gui-native-{step}"),"type":"function","function":{"name":tool,"arguments":operation.to_string()}}]}), "tool_calls")
     } else {
         tokio::select! {
             _=fixture.stop.cancelled()=>{},

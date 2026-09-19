@@ -8,6 +8,16 @@ use std::{
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_install_connection_uses_chromes_documented_user_data_root() {
+    assert_eq!(
+        macos_chrome_port_file(Path::new("/Users/alice")),
+        Path::new("/Users/alice")
+            .join("Library/Application Support/Google/Chrome/DevToolsActivePort")
+    );
+}
+
 #[test]
 fn endpoint_is_loopback_only_and_never_treated_as_a_url() {
     assert_eq!(
