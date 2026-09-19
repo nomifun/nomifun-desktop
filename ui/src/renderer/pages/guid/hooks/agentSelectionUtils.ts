@@ -4,14 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  OFFICIAL_PRESET_KEYS,
-  type AgentPresetSummary,
-  type OfficialPresetKey,
-} from '@/common/types/agentPlatform';
+import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import type { AgentPresetId, ProviderId } from '@/common/types/ids';
 import { configService } from '@/common/config/configService';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
+import { isConversationAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
 
 export const DEFAULT_GUID_AGENT_SELECTION: GuidAgentSelection = {
   kind: 'template',
@@ -35,11 +32,11 @@ export const normalizeGuidAgentSelection = (
   if (
     candidate.kind === 'template' &&
     typeof candidate.templateKey === 'string' &&
-    OFFICIAL_PRESET_KEYS.includes(candidate.templateKey as OfficialPresetKey)
+    isConversationAgentTemplateKey(candidate.templateKey)
   ) {
     return {
       kind: 'template',
-      templateKey: candidate.templateKey as OfficialPresetKey,
+      templateKey: candidate.templateKey,
     };
   }
   return DEFAULT_GUID_AGENT_SELECTION;

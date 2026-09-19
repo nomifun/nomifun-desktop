@@ -23,7 +23,7 @@ const saved = {
   current_stable_revision: { preset_id: '0190f5fe-7c00-7a00-8000-000000000101', revision: 1, revision_digest: 'a'.repeat(64) },
 } as ExecutableAgentPreset;
 const draft = { ...saved, preset_id: '0190f5fe-7c00-7a00-8000-000000000102' as typeof saved.preset_id, display_name: 'New researcher', current_stable_revision: undefined };
-const templates = ['chat.minimal', 'assistant.general', 'coding.codex'].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
+const templates = ['chat.minimal', 'assistant.general', 'coding.codex', 'customer-service.default'].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
 const LocationProbe = () => {
   const location = useLocation();
   return <output data-testid='location'>{location.pathname}{location.search}</output>;
@@ -85,6 +85,16 @@ describe('Guid Agent selector', () => {
     expect(page.getByRole('button', { name: /Release reviewer/ })).not.toBeNull();
     await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.coding.codex.name } }); });
     expect(page.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
+  });
+
+  test('never exposes the dedicated Customer Service Agent in Conversation search', async () => {
+    const { page, open, selections } = renderSelector();
+    await open();
+    const search = page.getByRole('searchbox');
+    await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.customerService.default.name } }); });
+    expect(page.queryByRole('button', { name: agentSettings.template.customerService.default.name })).toBeNull();
+    expect(within(page.getByRole('dialog')).getByRole('status').textContent).toBe(guid.agentEntries.empty);
+    expect(selections).toEqual([]);
   });
 
   test('Enter chooses a filtered result but does not submit during IME composition', async () => {
