@@ -6,7 +6,8 @@
  * The normal gate allows an inventoried legacy surface to shrink in place, but
  * rejects count growth, same-size movement into other files, missing ownership,
  * stale task IDs, or a malformed platform/timing inventory. `--completion` additionally requires
- * all legacy groups and platform gaps to be closed.
+ * all legacy groups, anomalies and platform gaps to be closed, plus a complete dependency-closed
+ * task manifest with no unresolved required platform.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -391,8 +392,50 @@ function validateInventorySchema(inventory, manifest) {
   }
 }
 
+function validateManifestSchema(manifest) {
+  invariant(manifest.schema_version === '1.0.0', 'manifest schema_version must be 1.0.0');
+  invariant(manifest.manifest_kind === 'uarc-task-manifest', 'unexpected manifest_kind');
+  invariant(Array.isArray(manifest.states) && manifest.states.includes('complete'),
+    'manifest states must include complete');
+  invariant(Array.isArray(manifest.platform_states), 'manifest platform_states must be an array');
+  invariant(Array.isArray(manifest.tasks) && manifest.tasks.length > 0, 'manifest tasks are required');
+
+  const taskById = new Map();
+  for (const task of manifest.tasks) {
+    invariant(task.id && !taskById.has(task.id), `duplicate or missing task id: ${task.id}`);
+    taskById.set(task.id, task);
+    invariant(manifest.states.includes(task.status), `${task.id}: unknown status ${task.status}`);
+    invariant(Array.isArray(task.depends_on), `${task.id}: depends_on must be an array`);
+    invariant(task.platforms && typeof task.platforms === 'object', `${task.id}: platforms are required`);
+    for (const platform of ['windows', 'macos']) {
+      invariant(manifest.platform_states.includes(task.platforms[platform]),
+        `${task.id}: invalid ${platform} state ${task.platforms[platform]}`);
+    }
+  }
+
+  for (const task of manifest.tasks) {
+    for (const dependency of task.depends_on) {
+      invariant(taskById.has(dependency), `${task.id}: unknown dependency ${dependency}`);
+      invariant(dependency !== task.id, `${task.id}: self dependency is forbidden`);
+    }
+  }
+
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = (taskId) => {
+    if (visited.has(taskId)) return;
+    invariant(!visiting.has(taskId), `task dependency cycle includes ${taskId}`);
+    visiting.add(taskId);
+    for (const dependency of taskById.get(taskId).depends_on) visit(dependency);
+    visiting.delete(taskId);
+    visited.add(taskId);
+  };
+  for (const taskId of taskById.keys()) visit(taskId);
+}
+
 function collectReport(inventory) {
   const manifest = readJson(MANIFEST_PATH);
+  validateManifestSchema(manifest);
   validateInventorySchema(inventory, manifest);
   execFileSync('git', ['cat-file', '-e', `${inventory.source.barrier_commit}^{commit}`], { cwd: ROOT });
   const allPaths = workspacePaths();
@@ -443,7 +486,7 @@ function validateBaseline(report) {
   return errors;
 }
 
-function validateCompletion(report) {
+function validateCompletion(report, manifest = readJson(MANIFEST_PATH)) {
   const errors = report.groups
     .filter((group) => group.actual.match_count !== 0)
     .map((group) => `${group.id}: ${group.actual.match_count} production reference(s) remain`);
@@ -452,6 +495,22 @@ function validateCompletion(report) {
   }
   for (const anomaly of report.baseline_anomalies) {
     if (anomaly.state !== 'closed') errors.push(`${anomaly.id}: baseline anomaly is ${anomaly.state}`);
+  }
+  if (manifest.status !== 'complete') errors.push(`initiative status is ${manifest.status}`);
+  const taskById = new Map(manifest.tasks.map((task) => [task.id, task]));
+  for (const task of manifest.tasks) {
+    if (task.status !== 'complete') errors.push(`${task.id}: task status is ${task.status}`);
+    for (const platform of ['windows', 'macos']) {
+      const state = task.platforms[platform];
+      if (!['verified', 'not_applicable'].includes(state)) {
+        errors.push(`${task.id}: ${platform} state is ${state}`);
+      }
+    }
+    for (const dependency of task.depends_on) {
+      if (taskById.get(dependency)?.status !== 'complete') {
+        errors.push(`${task.id}: dependency ${dependency} is not complete`);
+      }
+    }
   }
   return errors;
 }
@@ -487,6 +546,19 @@ export function assertSelfTest() {
   shrinkReport.groups[0].actual.match_count = 2;
   shrinkReport.groups[0].actual.files_digest = digestValues(['crates/y/src/lib.rs']);
   invariant(validateBaseline(shrinkReport).length === 1, 'baseline must reject same-size legacy movement');
+  const completionManifest = {
+    status: 'complete',
+    tasks: [{
+      id: 'UARC-TEST', status: 'complete', depends_on: [],
+      platforms: { windows: 'verified', macos: 'not_applicable' },
+    }],
+  };
+  const completionReport = { groups: [], macos_gaps: [], baseline_anomalies: [] };
+  invariant(validateCompletion(completionReport, completionManifest).length === 0,
+    'completion manifest self-test rejected a closed manifest');
+  completionManifest.tasks[0].platforms.macos = 'pending';
+  invariant(validateCompletion(completionReport, completionManifest).length === 1,
+    'completion manifest self-test admitted an unresolved platform');
   return { status: 'self-test-pass' };
 }
 
@@ -501,11 +573,14 @@ function printHuman(report) {
 
 function main(argv = process.argv.slice(2)) {
   const inventory = readJson(INVENTORY_PATH);
+  const manifest = readJson(MANIFEST_PATH);
   assertSelfTest();
   const report = collectReport(inventory);
   const collectOnly = argv.includes('--collect');
   const errors = collectOnly ? [] : validateBaseline(report);
-  if (argv.includes('--completion')) errors.push(...validateCompletion(report));
+  if (!collectOnly && (argv.includes('--completion') || manifest.status === 'complete')) {
+    errors.push(...validateCompletion(report, manifest));
+  }
   if (argv.includes('--baseline-json')) {
     console.log(JSON.stringify(Object.fromEntries(report.groups.map((group) => [group.id, {
       match_count: group.actual.match_count,
