@@ -10,6 +10,7 @@ use std::sync::atomic::AtomicUsize;
 #[derive(Default)]
 struct Factory {
     creates: AtomicUsize,
+    shutdowns: AtomicUsize,
     initial_locked: AtomicBool,
     fail_close_once: Arc<AtomicBool>,
     clear: Option<Arc<DelayedClear>>,
@@ -52,6 +53,11 @@ impl BrowserRuntimeFactory for Factory {
             fail_close_once: self.fail_close_once.clone(),
             clear: self.clear.clone(),
         }))
+    }
+
+    async fn shutdown(&self) -> Result<(), WorkspaceError> {
+        self.shutdowns.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -630,6 +636,25 @@ async fn failed_native_close_retains_resource_until_exact_retry() {
         .await
         .unwrap();
     assert!(!Arc::ptr_eq(&resource, &replacement));
+}
+
+#[tokio::test]
+async fn service_shutdown_closes_runtimes_before_process_wide_factory() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory.clone(), &["managed"]);
+    let resource = service
+        .ensure(
+            authority("alice", "shutdown", "managed", all_actions()),
+            BrowserProfile::Ephemeral,
+        )
+        .await
+        .unwrap();
+    resource.user_command(create()).await.unwrap();
+
+    service.shutdown().await.unwrap();
+
+    assert!(resource.native_close_proven().await);
+    assert_eq!(factory.shutdowns.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(start_paused = true)]

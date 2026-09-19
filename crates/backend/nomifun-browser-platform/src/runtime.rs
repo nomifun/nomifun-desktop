@@ -610,6 +610,16 @@ pub trait BrowserRuntimeFactory: Send + Sync {
         &self,
         request: CreateBrowserRuntime,
     ) -> Result<Arc<dyn BrowserRuntime>, WorkspaceError>;
+
+    /// Stop process-wide native browser infrastructure after every runtime
+    /// created by this factory has acknowledged destruction.
+    ///
+    /// Most hosts do not need a separate process-wide shutdown phase. macOS
+    /// CEF does: `cef_shutdown` must run on the application event thread after
+    /// the last child NSView has closed and before the desktop process exits.
+    async fn shutdown(&self) -> Result<(), WorkspaceError> {
+        Ok(())
+    }
 }
 
 #[async_trait]

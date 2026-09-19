@@ -33,7 +33,10 @@ impl Page {
                     _ => context.close_all_connections(Some(&mut callback)),
                 }
             }))?;
-            rx.await.map_err(|_| "CEF site-data completion acknowledgement was lost")??;
+            tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+                .await
+                .map_err(|_| "CEF site-data native completion timed out")?
+                .map_err(|_| "CEF site-data completion acknowledgement was lost")??;
         }
         Ok(())
     }

@@ -39,6 +39,22 @@ fn main() {
                 let Ok(count) = stream.read(&mut request) else { return; };
                 let request = String::from_utf8_lossy(&request[..count]);
                 let path = request.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/");
+                if path == "/download-file" {
+                    let body = "Native CEF download 中文\n";
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Disposition: attachment; filename=cef-download.txt\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    return;
+                }
+                if path == "/download-slow-file" {
+                    const TOTAL: usize = 32 * 1024 * 1024;
+                    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=cef-cancel.bin\r\nContent-Length: {TOTAL}\r\nConnection: close\r\n\r\n");
+                    let block = [0x5au8; 64 * 1024];
+                    for _ in 0..TOTAL / block.len() {
+                        if stream.write_all(&block).is_err() { break; }
+                        let _ = stream.flush();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    return;
+                }
                 let body = if path == "/upload-frames" {
                     include_str!("fixtures/browser_upload_frames.html").replace("__PORT__", &address.port().to_string())
                 } else if matches!(path,"/upload-child-cross" | "/upload-child-same") {
@@ -53,6 +69,16 @@ fn main() {
                         _ => ("Same-process", String::new()),
                     };
                     include_str!("fixtures/browser_frame_content.html").replace("__LEVEL__",level).replace("__NESTED__", &nested)
+                } else if path == "/popup-source" {
+                    include_str!("fixtures/browser_popup.html").to_owned()
+                } else if path == "/popup-child" {
+                    include_str!("fixtures/browser_popup_child.html").to_owned()
+                } else if path == "/download-source" {
+                    "<!doctype html><meta charset=utf-8><title>CEF download</title><a href='/download-file'>Download local fixture</a>".to_owned()
+                } else if path == "/user-downloads" {
+                    "<!doctype html><meta charset=utf-8><title>CEF user downloads</title><a id='download' href='/download-file'>Download complete</a><br><a id='cancel' href='/download-slow-file'>Download cancel</a>".to_owned()
+                } else if path == "/user-files" {
+                    include_str!("fixtures/browser_user_files.html").replace("__PORT__", &address.port().to_string())
                 } else { include_str!("fixtures/browser_workspace.html")
                     .replace("<div id=\"scroller\">", "<div id=\"scroller\" role=\"region\" aria-label=\"滚动区域\">")
                     .replace("<div id=\"drag\">", "<div id=\"drag\" role=\"button\" aria-label=\"拖拽区域\">") };
@@ -80,7 +106,12 @@ fn main() {
         });
         let watchdog = handle.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+            // The storage matrix intentionally permits a 30-second bounded
+            // CEF clear operation after the input/frame/runtime suites. A
+            // 90-second whole-process watchdog became shorter than the valid
+            // aggregate on current macOS/CEF builds and killed owned helpers
+            // while the final proof still held cleanup authority.
+            tokio::time::sleep(std::time::Duration::from_secs(180)).await;
             eprintln!("CEF_SMOKE_FAIL native operation or shutdown timed out");
             watchdog.exit(2);
         });
@@ -152,16 +183,22 @@ fn main() {
                 checks["user_input_restored"] = (evaluate(&page, "smoke.clicks").await? == 2).into();
                 verify_dialogs(&page, &mut checks).await?;
                 page.force_close().await?;
+                eprintln!("CEF_SMOKE_PHASE primary_page_closed");
                 let frames = engine.create_page(parent.clone(), context.clone()).await?;
                 frames.set_surface(BrowserSurfaceBounds { x:20., y:60., width:1060., height:620. }, true, Default::default()).await?;
                 browser_frame_input::verify_frame_input(&native::View::new(frames.clone()), &format!("http://{address}/frame-sessions")).await?;
                 checks["native_frame_input_and_geometry"] = true.into();
                 frames.force_close().await?;
+                eprintln!("CEF_SMOKE_PHASE frame_input_settled");
                 let uploads = engine.create_page(parent.clone(), context).await?;
                 uploads.set_surface(BrowserSurfaceBounds { x:20., y:60., width:1060., height:620. }, true, Default::default()).await?;
                 browser_upload_frames::verify(&native::View::new(uploads.clone()), &format!("http://{address}/upload-frames")).await?;
                 checks["native_frame_uploads_and_stale_chooser"] = true.into();
                 uploads.force_close().await?;
+                eprintln!("CEF_SMOKE_PHASE frame_uploads_settled");
+                verify_user_file_picker(&engine, &handle, parent.clone(), &data, &format!("http://{address}/user-files"), &mut checks).await?;
+                verify_user_downloads(&engine, &handle, parent.clone(), &format!("http://{address}/user-downloads"), &mut checks).await?;
+                verify_permissions(&engine, &handle, parent.clone(), &format!("http://{address}/popup-source"), &mut checks).await?;
                 verify_runtime(&engine, &handle, &format!("http://{address}"), &mut checks).await?;
                 verify_storage(&engine, parent, &data, &format!("http://{address}"), &mut checks).await?;
                 Ok::<_, String>(serde_json::json!({"checks":checks,"page":state,"passed":checks.as_object().unwrap().values().all(|v|v==true)}))
@@ -261,6 +298,175 @@ async fn verify_dialogs(page: &std::sync::Arc<nomifun_browser_macos::engine::Pag
 }
 
 #[cfg(target_os = "macos")]
+async fn verify_user_file_picker(
+    engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>,
+    app: &tauri::AppHandle,
+    parent: std::sync::Arc<nomifun_browser_macos::engine::ParentView>,
+    initial_directory: &std::path::Path,
+    url: &str,
+    checks: &mut serde_json::Value,
+) -> Result<(), String> {
+    use std::sync::{Arc, atomic::AtomicBool};
+    let context = engine.create_context(None).await?;
+    let page = engine.create_page(parent, context).await?;
+    page.set_surface(
+        nomifun_browser_platform::runtime::BrowserSurfaceBounds {
+            x: 20., y: 60., width: 1060., height: 620.,
+        },
+        true,
+        Default::default(),
+    ).await?;
+    let view = native::View::new(page.clone());
+    let automation = Arc::new(tokio::sync::Mutex::new(automation::TabAutomation::default()));
+    let locked = Arc::new(AtomicBool::new(false));
+    let chooser = macos::user_file_chooser::UserFileChooser::install(
+        app.clone(), view, automation, locked, initial_directory.to_path_buf(),
+    ).await?;
+    page.set_input_locked(false).await?;
+    chooser.set_visible(true);
+    navigate_fixture(&page, url).await?;
+    for _ in 0..100 {
+        if evaluate(&page, "window.userFileFixtureReady===true").await? == true { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let file = point(&page, "file").await?;
+    queue_user_click(app, file).await?;
+    chooser.wait_for_panel().await?;
+    chooser.set_visible(false);
+    chooser.wait_for_idle().await?;
+    checks["native_user_file_picker_cancel_on_hide"] =
+        (evaluate(&page, "userFiles.length").await? == 0).into();
+    chooser.close().await?;
+    page.force_close().await?;
+    eprintln!("CEF_SMOKE_PHASE user_file_picker_cancel_settled");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_user_downloads(
+    engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>,
+    app: &tauri::AppHandle,
+    parent: std::sync::Arc<nomifun_browser_macos::engine::ParentView>,
+    url: &str,
+    checks: &mut serde_json::Value,
+) -> Result<(), String> {
+    use nomifun_browser_platform::runtime::{BrowserDownloadState, BrowserSurfaceBounds};
+    let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let context = engine.create_context(None).await?;
+    let page = engine.create_page(parent, context).await?;
+    page.configure_user_downloads(directory.path().to_path_buf())?;
+    page.set_surface(
+        BrowserSurfaceBounds { x: 20., y: 60., width: 1060., height: 620. },
+        true,
+        Default::default(),
+    ).await?;
+    page.set_input_locked(false).await?;
+    navigate_fixture(&page, url).await?;
+
+    let mut changes = page.subscribe();
+    queue_user_click(app, point(&page, "download").await?).await?;
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(download) = page.user_download_snapshot().into_iter()
+                .find(|download| download.state == BrowserDownloadState::Completed)
+            {
+                return Ok::<_, String>(download);
+            }
+            changes.changed().await.map_err(|_| "CEF user download state closed".to_owned())?;
+        }
+    }).await.map_err(|_| "CEF user download did not complete".to_owned())??;
+    let completed_bytes = std::fs::read(directory.path().join(&completed.filename))
+        .map_err(|error| error.to_string())?;
+    checks["native_user_download"] =
+        (completed_bytes == "Native CEF download 中文\n".as_bytes()).into();
+
+    queue_user_click(app, point(&page, "cancel").await?).await?;
+    let cancellable = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(download) = page.user_download_snapshot().into_iter()
+                .find(|download| download.state == BrowserDownloadState::InProgress && download.can_cancel)
+            {
+                return Ok::<_, String>(download);
+            }
+            changes.changed().await.map_err(|_| "CEF cancellable download state closed".to_owned())?;
+        }
+    }).await.map_err(|_| "CEF user download was never cancellable".to_owned())??;
+    page.cancel_user_download(&cancellable.id)?;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if page.user_download_snapshot().iter().any(|download|
+                download.id == cancellable.id && download.state == BrowserDownloadState::Cancelled)
+            {
+                return Ok::<_, String>(());
+            }
+            changes.changed().await.map_err(|_| "CEF cancelled download state closed".to_owned())?;
+        }
+    }).await.map_err(|_| "CEF user download cancellation did not settle".to_owned())??;
+    let files = std::fs::read_dir(directory.path())
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .count();
+    checks["native_user_download_cancel"] = (files == 1).into();
+    page.force_close().await?;
+    eprintln!("CEF_SMOKE_PHASE user_downloads_settled");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_permissions(
+    engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>,
+    app: &tauri::AppHandle,
+    parent: std::sync::Arc<nomifun_browser_macos::engine::ParentView>,
+    url: &str,
+    checks: &mut serde_json::Value,
+) -> Result<(), String> {
+    let context = engine.create_context(None).await?;
+    let page = engine.create_page(parent, context).await?;
+    page.set_surface(
+        nomifun_browser_platform::runtime::BrowserSurfaceBounds {
+            x: 20., y: 60., width: 1060., height: 620.,
+        },
+        true,
+        Default::default(),
+    ).await?;
+    page.protocol.call(None, "Page.enable", serde_json::json!({})).await?;
+    navigate_fixture(&page, url).await?;
+    page.set_input_locked(false).await?;
+    let geo = point(&page, "geo").await?;
+    queue_user_click(app, geo).await?;
+    let mut changes = page.subscribe();
+    let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let snapshot = changes.borrow_and_update().clone();
+            if let Some(request) = snapshot.permission_requests.first().cloned() {
+                return Ok::<_, String>((snapshot.document_generation, request));
+            }
+            changes.changed().await.map_err(|_| "CEF permission state closed".to_owned())?;
+        }
+    }).await.map_err(|_| "CEF user permission request was not projected".to_owned())??;
+    page.reply_permission(request.1.request_id, request.0, false).await?;
+    for _ in 0..100 {
+        if evaluate(&page, "String(window.geoResult||'')").await?.as_str().is_some_and(|value| value.starts_with("denied-")) { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    checks["native_user_permission_denial"] =
+        (evaluate(&page, "String(window.geoResult||'')").await?.as_str().is_some_and(|value| value.starts_with("denied-"))
+            && page.snapshot().permission_requests.is_empty()).into();
+
+    page.set_input_locked(true).await?;
+    let denied = async_evaluate(
+        &page,
+        "new Promise(resolve=>navigator.geolocation.getCurrentPosition(()=>resolve('allowed'),()=>resolve('denied')))",
+    ).await?;
+    checks["native_agent_permission_fail_closed"] =
+        (denied == "denied" && page.snapshot().permission_requests.is_empty()
+            && page.snapshot().blocked_permissions.iter().any(|kind|kind=="geolocation")).into();
+    page.force_close().await?;
+    eprintln!("CEF_SMOKE_PHASE permissions_settled");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 async fn navigate_fixture(page: &nomifun_browser_macos::engine::Page, url: &str) -> Result<(), String> {
     let previous = page.snapshot().document_generation;
     page.protocol.call(None, "Page.enable", serde_json::json!({})).await?;
@@ -273,6 +479,29 @@ async fn navigate_fixture(page: &nomifun_browser_macos::engine::Page, url: &str)
             changes.changed().await.map_err(|_| "Storage fixture navigation closed".to_owned())?;
         }
     }).await.map_err(|_| "Storage fixture navigation timed out".to_owned())?
+}
+
+#[cfg(target_os = "macos")]
+async fn navigate_storage_fixture(
+    page: &std::sync::Arc<nomifun_browser_macos::engine::Page>,
+    url: &str,
+) -> Result<(), String> {
+    use nomifun_browser_platform::runtime::BrowserSurfaceBounds;
+    page.set_surface(
+        BrowserSurfaceBounds {
+            x: 20.,
+            y: 60.,
+            width: 1060.,
+            height: 620.,
+        },
+        true,
+        Default::default(),
+    )
+    .await?;
+    let navigation = navigate_fixture(page, url).await;
+    let hidden = page.hide().await;
+    navigation?;
+    hidden
 }
 #[cfg(target_os = "macos")]
 async fn async_evaluate(page: &nomifun_browser_macos::engine::Page, expression: &str) -> Result<serde_json::Value, String> {
@@ -287,35 +516,49 @@ async fn verify_storage(engine: &std::sync::Arc<nomifun_browser_macos::engine::E
     let a = engine.create_context(Some(root.join("conversation-a"))).await?;
     let b = engine.create_context(Some(root.join("conversation-b"))).await?;
     let page_a = engine.create_page(parent.clone(), a.clone()).await?;
+    navigate_storage_fixture(&page_a, url)
+        .await
+        .map_err(|error| format!("storage context A navigation failed: {error}"))?;
+    // Do not overlap bootstrap navigation for two fresh persistent request
+    // contexts. CEF can allocate both renderer hosts before either DevTools
+    // observer has received its first navigation reply; serial creation keeps
+    // the same two-context isolation contract with deterministic ownership.
     let page_b = engine.create_page(parent.clone(), b.clone()).await?;
-    navigate_fixture(&page_a, url).await?;
-    navigate_fixture(&page_b, url).await?;
+    navigate_storage_fixture(&page_b, url)
+        .await
+        .map_err(|error| format!("storage context B navigation failed: {error}"))?;
+    eprintln!("CEF_SMOKE_PHASE storage_contexts_navigated");
     async_evaluate(&page_a, WRITE).await?;
     let isolated = async_evaluate(&page_b, READ).await?;
     checks["conversation_storage_isolation"] = (isolated["local"].is_null() && isolated["cookie"] == "" && isolated["databases"] == serde_json::json!([]) && isolated["caches"] == serde_json::json!([])).into();
     async_evaluate(&page_b, WRITE).await?;
+    eprintln!("CEF_SMOKE_PHASE storage_contexts_written");
     page_a.force_close().await?;
     let recreated = engine.create_page(parent.clone(), a.clone()).await?;
-    navigate_fixture(&recreated, url).await?;
+    navigate_storage_fixture(&recreated, url).await?;
     let persisted = async_evaluate(&recreated, READ).await?;
     checks["conversation_survives_tab_recreation"] = (persisted["local"] == "owned" && persisted["cookie"] == "nomi=owned" && persisted["databases"] == serde_json::json!(["nomi-fixture"]) && persisted["caches"] == serde_json::json!(["nomi-fixture"])).into();
+    eprintln!("CEF_SMOKE_PHASE storage_tab_recreated");
     // Same context at a second origin, to prove that clearing is not restricted
     // to the most recently visible site's origin.
     let second = url.replace("127.0.0.1", "localhost");
-    navigate_fixture(&recreated, &second).await?;
+    navigate_storage_fixture(&recreated, &second).await?;
     async_evaluate(&recreated, WRITE).await?;
     let maintenance = engine.create_page(parent.clone(), a.clone()).await?;
     maintenance.protocol.call(None, "Page.enable", serde_json::json!({})).await?;
     checks["clear_rejects_live_sibling"] = maintenance.clear_site_data(Default::default()).await.is_err().into();
+    eprintln!("CEF_SMOKE_PHASE storage_live_sibling_rejected");
     recreated.force_close().await?;
     let cancelled = tokio_util::sync::CancellationToken::new(); cancelled.cancel();
     checks["clear_rejects_cancelled_request"] = maintenance.clear_site_data(cancelled).await.is_err().into();
+    eprintln!("CEF_SMOKE_PHASE storage_cancel_rejected");
     maintenance.clear_site_data(Default::default()).await?;
+    eprintln!("CEF_SMOKE_PHASE storage_clear_completed");
     maintenance.force_close().await?;
     let cleared = engine.create_page(parent.clone(), a).await?;
     let mut all_cleared = true;
     for origin in [url, &second] {
-        navigate_fixture(&cleared, origin).await?;
+        navigate_storage_fixture(&cleared, origin).await?;
         let value = async_evaluate(&cleared, READ).await?;
         all_cleared &= value["local"].is_null() && value["cookie"] == "" && value["databases"] == serde_json::json!([]) && value["caches"] == serde_json::json!([]);
     }
@@ -357,6 +600,61 @@ async fn verify_runtime(engine: &std::sync::Arc<nomifun_browser_macos::engine::E
     coordinator.finish(&run).await.map_err(|e|e.to_string())?;
     let stopped = coordinator.snapshot().await;
     checks["runtime_stop_settles_before_unlock"] = (stopped.input_state == BrowserInputState::UserReady && !stopped.input_gate_failed && runtime.snapshot().await.map_err(|e|e.to_string())?.tabs.iter().all(|tab|tab.script_dialog.is_none())).into();
+
+    let popup_url = format!("{url}/popup-source");
+    runtime.execute(BrowserTabCommand::Navigate { target: target.clone(), url: popup_url.clone() }, Default::default()).await.map_err(|error|error.to_string())?;
+    let popup_source = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let snapshot = runtime.snapshot().await.map_err(|error|error.to_string())?;
+            if let Some(tab) = snapshot.tabs.iter().find(|tab|tab.url.ends_with("/popup-source") && tab.lifecycle==BrowserTabLifecycle::Ready) {
+                return Ok::<_,String>(tab.target.clone());
+            }
+            changes.changed().await.map_err(|_|"Runtime popup source subscription closed".to_owned())?;
+        }
+    }).await.map_err(|_|"Runtime popup source timed out".to_owned())??;
+    let popup_run = coordinator.begin().await.map_err(|error|error.to_string())?;
+    popup_run.require_explicit_finish();
+    let observed = { let runtime=runtime.clone(); coordinator.agent_operation(&popup_run,move |cancel|async move {Ok(runtime.automation().unwrap().observe(None,cancel).await)}).await.map_err(|error|error.to_string())?.map_err(|error|error.to_string())? };
+    let open = observed.elements.iter().find(|element|element.name=="Open real popup").ok_or("Native CEF popup trigger is missing")?.reference.clone();
+    { let runtime=runtime.clone(); coordinator.agent_operation(&popup_run,move |cancel|async move {Ok(runtime.automation().unwrap().act(BrowserAction::click(open),cancel).await)}).await.map_err(|error|error.to_string())?.map_err(|error|error.to_string())?; }
+    let popup = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let snapshot=runtime.snapshot().await.map_err(|error|error.to_string())?;
+            if let Some(tab)=snapshot.tabs.iter().find(|tab|tab.target.tab_id!=popup_source.tab_id && tab.url.ends_with("/popup-child") && tab.lifecycle==BrowserTabLifecycle::Ready) {
+                return Ok::<_,String>(tab.target.clone());
+            }
+            changes.changed().await.map_err(|_|"Runtime popup subscription closed".to_owned())?;
+        }
+    }).await.map_err(|_|"Native CEF popup admission timed out".to_owned())??;
+    let proof = { let runtime=runtime.clone(); let popup=popup.clone(); coordinator.agent_operation(&popup_run,move |cancel|async move {Ok(runtime.automation().unwrap().evaluate(BrowserEvaluation {target:popup,expression:"({hasOpener:!!opener,cookie:document.cookie,ownTop:top===window})".into()},cancel).await)}).await.map_err(|error|error.to_string())?.map_err(|error|error.to_string())? };
+    checks["runtime_native_popup_opener_and_profile"] = matches!(proof.outcome,BrowserEvaluationOutcome::Completed { value } if value["hasOpener"]==true && value["ownTop"]==true && value["cookie"].as_str().is_some_and(|cookie|cookie.contains("nomi_popup=shared-profile"))).into();
+    coordinator.finish(&popup_run).await.map_err(|error|error.to_string())?;
+    eprintln!("CEF_SMOKE_PHASE runtime_popup_settled");
+
+    runtime.execute(BrowserTabCommand::Activate { target: popup_source.clone() }, Default::default()).await.map_err(|error|error.to_string())?;
+    runtime.execute(BrowserTabCommand::Navigate { target: popup_source.clone(), url: format!("{url}/download-source") }, Default::default()).await.map_err(|error|error.to_string())?;
+    let download_source = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let snapshot=runtime.snapshot().await.map_err(|error|error.to_string())?;
+            if let Some(tab)=snapshot.tabs.iter().find(|tab|tab.target.tab_id==popup_source.tab_id && tab.url.ends_with("/download-source") && tab.lifecycle==BrowserTabLifecycle::Ready) {
+                return Ok::<_,String>(tab.target.clone());
+            }
+            changes.changed().await.map_err(|_|"Runtime download source subscription closed".to_owned())?;
+        }
+    }).await.map_err(|_|"Runtime download source timed out".to_owned())??;
+    let download_root=tempfile::tempdir().map_err(|error|error.to_string())?;
+    let download_scope=std::sync::Arc::new(nomifun_browser_platform::downloads::BrowserDownloadScope::open(download_root.path()).map_err(|error|error.to_string())?);
+    let prepared=download_scope.prepare().map_err(|error|error.to_string())?;
+    let download_run=coordinator.begin().await.map_err(|error|error.to_string())?;
+    download_run.require_explicit_finish();
+    let observed={let runtime=runtime.clone();let id=download_source.tab_id.clone();coordinator.agent_operation(&download_run,move |cancel|async move {Ok(runtime.automation().unwrap().observe(Some(id),cancel).await)}).await.map_err(|error|error.to_string())?.map_err(|error|error.to_string())?};
+    let link=observed.elements.iter().find(|element|element.name=="Download local fixture").ok_or("Native CEF download trigger is missing")?.reference.clone();
+    let downloaded={let runtime=runtime.clone();let prepared=prepared.clone();coordinator.agent_operation(&download_run,move |cancel|async move {Ok(runtime.automation().unwrap().download(link,prepared,cancel).await)}).await.map_err(|error|error.to_string())?.map_err(|error|error.to_string())?};
+    let artifact=downloaded.download.ok_or("Native CEF download artifact is missing")?;
+    let bytes=std::fs::read(download_root.path().join(&artifact.path)).map_err(|error|error.to_string())?;
+    checks["runtime_native_download_publication"]=(bytes=="Native CEF download 中文\n".as_bytes() && artifact.bytes==bytes.len() as u64).into();
+    coordinator.finish(&download_run).await.map_err(|error|error.to_string())?;
+    eprintln!("CEF_SMOKE_PHASE runtime_download_settled");
     runtime.close().await.map_err(|e|e.to_string())?;
     eprintln!("CEF_SMOKE_PHASE runtime_guard_stop_settled");
     Ok(())

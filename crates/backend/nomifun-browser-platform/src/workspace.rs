@@ -736,7 +736,10 @@ impl BrowserResourceService {
                 failure = Some(error);
             }
         }
-        failure.map_or(Ok(()), Err)
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        self.factory.shutdown().await
     }
 }
 

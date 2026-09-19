@@ -268,15 +268,15 @@ known limitations
 | --- | --- |
 | UARC-060 shared-source barrier | ready: `71fd47fbb0a49073b8e736ee6d279f331c34f9e3` |
 | 原重构分支 UI integration | verified: `a19b0be82912e2612fe73fe07db8e3da5c894a28` |
-| 当前 UARC source 在 Mac 编译 | pending real-Mac evidence |
-| Browser managed Provider | shared owner implemented; CEF production binding pending |
-| Attached Chrome Provider | Windows verified; macOS pending investigation/implementation |
+| 当前 UARC source 在 Mac 编译 | UARC-061 arm64 debug/release/app checks passed |
+| Browser managed Provider | production CEF binding implemented；native 33/33 + packaged Agent/Kernel/CEF passed |
+| Attached Chrome Provider | macOS default profile discovery implemented；Chrome installed，Remote Debugging 未开启，真实连接 blocked |
 | Process/PTY | existing code, UARC revalidation pending |
 | Computer/TCC | existing code, UARC revalidation pending |
 | Agent Workbench visual | pending |
 | New Agent Store clean cut | pending |
-| `.app`/DMG | pending |
-| Developer ID/notarization | credential-dependent, not run |
+| `.app`/DMG | Developer ID arm64 `.app` checkpoint passed；DMG/release lock 归 UARC-063 pending |
+| Developer ID/notarization | Developer ID + notarization credential available；nested seal passed，submission/stapling pending UARC-063 |
 
 ## 11. Windows 移交证据
 
@@ -297,8 +297,12 @@ NSIS 14-check install smoke 均通过。候选安装、启动、`/health` 200、
 
 ## 12. 当前 blocker 与恢复点
 
-UARC-061、UARC-062 已 ready，但当前 Windows 主机无法生成上述 Mac 真机证据。唯一当前外部 blocker 是可用的
-Apple Silicon Mac host（以及真实输入步骤所需 TCC 用户授权；签名/notarization credential 可合法记为 absent）。
-拿到 Mac host 后从第 0 节 barrier 恢复，不重跑规划、不跳过 UARC-061/062，也不提前执行 UARC-064/070。
+当前主机已经是 Apple M4 arm64 真机。UARC-061 主实现与工程 gate 已闭合，详细证据见
+`UARC-061-MACOS-IMPLEMENTATION.zh.md`；仍有三个需要用户动作的外部 blocker：
 
-在这些项闭合前，任何 UARC 总结必须明确写“Windows implemented; macOS pending”，不能写“跨平台完成”。
+1. Keychain service `NomiFun/StepFun/LiveProvider` absent：用户需用安全方式录入商业 StepFun credential；
+2. macOS 会话 locked：用户需手动解锁后重跑 Command-Q 和后续 UARC-062 TCC/物理输入矩阵；
+3. Chrome `DevToolsActivePort` absent：用户需在 `chrome://inspect/#remote-debugging` 显式开启 Remote Debugging。
+
+UARC-062 可继续进行不依赖用户授权的源码与 denied/read-only gate；UARC-063 仍必须等待 UARC-061/062 正式
+integrated。上述 blocker 闭合前不得把 UARC-061 写成 `macOS verified`，也不得提前执行 UARC-064/070。
