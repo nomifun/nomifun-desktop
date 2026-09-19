@@ -10,17 +10,10 @@ import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import contentStyles from '../../components/ConversationContentColumn.module.css';
-import SessionCapabilityPicker, {
-  buildSessionCapabilitySelection,
-  draftFromSessionCapabilitySelection,
-  sessionCapabilitySelectionKey,
-  useSessionCapabilityCatalog,
-  type SessionCapabilityDraft,
-} from '@/renderer/components/chat/SessionCapabilityPicker';
+import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPicker';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
-import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useSendBoxFiles';
@@ -63,7 +56,7 @@ import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
 import { Message, Tooltip } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
@@ -129,7 +122,7 @@ const NomiSendBox: React.FC<{
   agentSelectorNode?: React.ReactNode;
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
-  /** Product-owned controls replace session capability editing, not the toolbar. */
+  /** Product-owned controls may occupy the rail; the Agent binding stays frozen. */
   capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
@@ -153,104 +146,9 @@ const NomiSendBox: React.FC<{
   extraRightTools,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
-  const conversationContext = useConversationContextSafe();
-  const loadedSkills = conversationContext?.loadedSkills ?? [];
-  const loadedMcpStatuses = conversationContext?.loadedMcpStatuses ?? [];
-  const capabilityCatalog = useSessionCapabilityCatalog();
-  const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
-    skillNames: [],
-    mcpServerIds: [],
-  });
-  const initializedCapabilityConversation = useRef<string | undefined>(undefined);
-  const serverCapabilitySnapshot = useRef<{ conversationId: string; key: string } | undefined>(undefined);
-  const appliedCapabilityKey = useRef<string | undefined>(undefined);
-  const lastAppliedCapabilityKey = useRef<string | undefined>(undefined);
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
-
-  useEffect(() => {
-    if (capabilityCatalog.loading || capabilityCatalog.error) return;
-    const availableSkillNames = new Set(capabilityCatalog.catalog.skills.map((skill) => skill.name));
-    const selectableMcpIds = new Set(
-      capabilityCatalog.catalog.mcpServers
-        .filter((server) => server.enabled)
-        .map((server) => server.mcp_server_id)
-    );
-    const serverDraft = {
-      skillNames: Array.from(new Set(loadedSkills.filter((name) => availableSkillNames.has(name)))),
-      mcpServerIds: Array.from(new Set(
-        loadedMcpStatuses
-          .map((item) => item.mcp_server_id)
-          .filter((id) => selectableMcpIds.has(id))
-      )),
-    };
-    const serverKey = sessionCapabilitySelectionKey(
-      buildSessionCapabilitySelection(serverDraft, capabilityCatalog.catalog.autoSkillNames)
-    );
-    const previousServer = serverCapabilitySnapshot.current;
-    if (previousServer?.conversationId === conversation_id && previousServer.key === serverKey) {
-      if (lastAppliedCapabilityKey.current === serverKey) {
-        lastAppliedCapabilityKey.current = undefined;
-      }
-      return;
-    }
-    serverCapabilitySnapshot.current = { conversationId: conversation_id, key: serverKey };
-    appliedCapabilityKey.current = serverKey;
-    initializedCapabilityConversation.current = conversation_id;
-
-    const currentKey = sessionCapabilitySelectionKey(
-      buildSessionCapabilitySelection(capabilityDraft, capabilityCatalog.catalog.autoSkillNames)
-    );
-    if (lastAppliedCapabilityKey.current === serverKey && currentKey !== serverKey) {
-      // The server refresh acknowledges the just-sent message. Preserve edits
-      // the user made for the following message while that send was in flight.
-      lastAppliedCapabilityKey.current = undefined;
-      return;
-    }
-    lastAppliedCapabilityKey.current = undefined;
-    setCapabilityDraft(serverDraft);
-  }, [
-    capabilityCatalog.catalog,
-    capabilityCatalog.error,
-    capabilityCatalog.loading,
-    conversation_id,
-    capabilityDraft,
-    loadedMcpStatuses,
-    loadedSkills,
-  ]);
-
-  const capabilitySelectionReady =
-    capabilityControls === undefined &&
-    initializedCapabilityConversation.current === conversation_id &&
-    !capabilityCatalog.loading &&
-    !capabilityCatalog.error;
-  const currentCapabilitySelection = useMemo(
-    () => capabilitySelectionReady
-      ? buildSessionCapabilitySelection(
-          capabilityDraft,
-          capabilityCatalog.catalog.autoSkillNames
-        )
-      : undefined,
-    [
-      capabilityCatalog.catalog.autoSkillNames,
-      capabilityDraft,
-      capabilitySelectionReady,
-    ]
-  );
-  const applyCapabilitySelection = useCallback(async (
-    selection: NonNullable<typeof currentCapabilitySelection>
-  ) => {
-    const selectionKey = sessionCapabilitySelectionKey(selection);
-    if (appliedCapabilityKey.current === selectionKey) return;
-    await ipcBridge.agentPlatform.sessions.updateCapabilitySelection.invoke({
-      agent_session_id: conversation_id,
-      request: { capability_selection: selection },
-    });
-    appliedCapabilityKey.current = selectionKey;
-    lastAppliedCapabilityKey.current = selectionKey;
-    emitter.emit('chat.history.refresh');
-  }, [conversation_id]);
 
   const {
     data: providerGraph,
@@ -414,11 +312,10 @@ const NomiSendBox: React.FC<{
         id = uuidv7(),
         input,
         files,
-        capability_selection,
         preset_id,
         initialOnly = false,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id' | 'capability_selection' | 'preset_id'>> & {
+        Partial<Pick<ConversationCommandQueueItem, 'id' | 'preset_id'>> & {
           initialOnly?: boolean;
         },
       execution?: ConversationCommandQueueExecution,
@@ -439,9 +336,6 @@ const NomiSendBox: React.FC<{
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
       let msg_id: MessageId | null = null;
       try {
-        if (capability_selection) {
-          await applyCapabilitySelection(capability_selection);
-        }
         if (!deferLocalTurnUntilFresh) {
           void checkAndUpdateTitle(conversation_id, input);
         }
@@ -501,7 +395,6 @@ const NomiSendBox: React.FC<{
     },
     [
       addOrUpdateMessage,
-      applyCapabilitySelection,
       checkAndUpdateTitle,
       canSendFiles,
       conversation_id,
@@ -647,14 +540,13 @@ const NomiSendBox: React.FC<{
         hasPendingCommands,
       })
     ) {
-      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection, preset_id: presetId });
+      enqueue({ input: message, files: filesToSend, preset_id: presetId });
       return;
     }
 
     await executeCommand({
       input: message,
       files: filesToSend,
-      capability_selection: currentCapabilitySelection,
       preset_id: presetId,
     });
   };
@@ -669,9 +561,6 @@ const NomiSendBox: React.FC<{
       setWaitingResponse(true);
       const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
       try {
-        if (currentCapabilitySelection) {
-          await applyCapabilitySelection(currentCapabilitySelection);
-        }
         const res = await ipcBridge.conversation.sendMessage.invoke({
           conversation_id,
           input: displayMessage,
@@ -710,12 +599,10 @@ const NomiSendBox: React.FC<{
     },
     [
       atPath,
-      applyCapabilitySelection,
       conversation_id,
       uploadFile,
       workspacePath,
       clearFiles,
-      currentCapabilitySelection,
       markTurnAccepted,
       canSendFiles,
       reconcilePublicDeliveryReplay,
@@ -804,7 +691,6 @@ const NomiSendBox: React.FC<{
         {
           input: message,
           files: filesToSend,
-          capability_selection: currentCapabilitySelection,
         },
         executeSteer,
         enqueue
@@ -820,17 +706,9 @@ const NomiSendBox: React.FC<{
       setContent(item.input);
       setUploadFile(Array.from(new Set(item.files)));
       setAtPath([]);
-      if (item.capability_selection) {
-        setCapabilityDraft(
-          draftFromSessionCapabilitySelection(
-            item.capability_selection,
-            capabilityCatalog.catalog.autoSkillNames
-          )
-        );
-      }
       emitter.emit('nomi.selected.file.clear');
     },
-    [capabilityCatalog.catalog.autoSkillNames, remove, setAtPath, setContent, setUploadFile]
+    [remove, setAtPath, setContent, setUploadFile]
   );
 
   const appendSelectedFiles = useCallback(
@@ -936,19 +814,13 @@ const NomiSendBox: React.FC<{
       <SendBox
         key={conversation_id}
         sideTools={
-          capabilityControls !== undefined ? capabilityControls : (
-            <SessionCapabilityPicker
-              catalog={capabilityCatalog.catalog}
-              draft={capabilityDraft}
-              onChange={setCapabilityDraft}
-              loading={capabilityCatalog.loading}
-              loadFailed={Boolean(capabilityCatalog.error)}
-              onRetry={capabilityCatalog.retry}
-              applyMode='next-send'
-            >
-              {collaboratorSelectorNode}
-            </SessionCapabilityPicker>
-          )
+          capabilityControls !== undefined
+            ? capabilityControls
+            : collaboratorSelectorNode
+              ? <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
+                  {collaboratorSelectorNode}
+                </ComposerToolRail>
+              : undefined
         }
         prefix={<ComposerSceneHeader agent={agentSelectorNode} />}
         data-testid='nomi-sendbox'

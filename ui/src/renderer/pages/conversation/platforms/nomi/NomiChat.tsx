@@ -36,7 +36,7 @@ const NomiChat: React.FC<{
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
   isProcessing?: boolean;
-  /** Override session-owned capability editing with product-owned controls. */
+  /** Product-owned controls may occupy the rail; the Agent binding stays frozen. */
   capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;

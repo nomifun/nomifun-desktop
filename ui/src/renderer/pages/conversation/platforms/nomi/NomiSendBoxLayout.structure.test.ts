@@ -131,6 +131,8 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('modelLocked')).toBe(false);
     expect(sendBoxSource.includes('<NomiModelSelector')).toBe(true);
     expect(sendBoxSource.includes('{collaboratorSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes('<SessionCapabilityPicker')).toBe(false);
+    expect(sendBoxSource.includes('updateCapabilitySelection')).toBe(false);
     expect(selectorSource.includes('if (disabled) return trigger;')).toBe(true);
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
   });

@@ -15,12 +15,7 @@ import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
-import SessionCapabilityPicker, {
-  buildSessionCapabilitySelection,
-  defaultSessionCapabilityDraft,
-  useSessionCapabilityCatalog,
-  type SessionCapabilityDraft,
-} from '@/renderer/components/chat/SessionCapabilityPicker';
+import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPicker';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
@@ -28,8 +23,6 @@ import { usePendingConversation } from '@/renderer/pages/conversation/components
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   resolveAgentResourceSelections,
-  selectedMcpResourceIds,
-  hasFrozenMcpTools,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
 import { Alert, Button, ConfigProvider } from '@arco-design/web-react';
@@ -37,7 +30,6 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -87,11 +79,6 @@ const GuidPage: React.FC = () => {
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const [selectedResourcesAvailable, setSelectedResourcesAvailable] = useState(false);
-  const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
-    skillNames: [],
-    mcpServerIds: [],
-  });
-  const capabilityCatalog = useSessionCapabilityCatalog();
 
   useEffect(() => {
     void import('@renderer/pages/conversation');
@@ -187,55 +174,6 @@ const GuidPage: React.FC = () => {
   const selectedAgentResourceKey = agentSelection.selection.kind === 'template'
     ? `template:${agentSelection.selection.templateKey}`
     : `preset:${agentSelection.selection.presetId}`;
-  const presetSkillNames = agentSelection.selectedTemplate
-    ? new Set(agentSelection.selectedTemplate.seed.skill_bindings.map((skill) => skill.id))
-    : presetCapabilities.skillNames;
-  const presetSkillNamesKey = Array.from(presetSkillNames).sort().join('\u0000');
-  const requiresMcpResource = presetResourceKinds.has('mcp_server');
-  const frozenMcpTools = hasFrozenMcpTools(presetCapabilityIds);
-  const requiredMcpServerIds = useMemo(() => requiresMcpResource
-    ? selectedMcpResourceIds(resourceSelectionValue) : [],
-  [requiresMcpResource, resourceSelectionValue]);
-  const effectiveCapabilityDraft = useMemo<SessionCapabilityDraft>(() => ({
-    skillNames: capabilityDraft.skillNames,
-    mcpServerIds: frozenMcpTools ? requiredMcpServerIds
-      : Array.from(new Set([...capabilityDraft.mcpServerIds, ...requiredMcpServerIds])),
-  }), [capabilityDraft, frozenMcpTools, requiredMcpServerIds]);
-  const lockedMcpServerIds = useMemo(
-    () => new Set(requiredMcpServerIds),
-    [requiredMcpServerIds]
-  );
-  const displayedCapabilityCatalog = useMemo(() => frozenMcpTools ? {
-    ...capabilityCatalog.catalog,
-    mcpServers: capabilityCatalog.catalog.mcpServers.filter((server) => lockedMcpServerIds.has(server.mcp_server_id)),
-  } : capabilityCatalog.catalog, [capabilityCatalog.catalog, frozenMcpTools, lockedMcpServerIds]);
-  const handleCapabilityDraftChange = useCallback((next: SessionCapabilityDraft) => {
-    setCapabilityDraft({
-      skillNames: next.skillNames,
-      mcpServerIds: frozenMcpTools ? [] : next.mcpServerIds.filter((id) => !lockedMcpServerIds.has(id)),
-    });
-  }, [frozenMcpTools, lockedMcpServerIds]);
-
-  useEffect(() => {
-    if (capabilityCatalog.loading || capabilityCatalog.error) return;
-    setCapabilityDraft(
-      defaultSessionCapabilityDraft(capabilityCatalog.catalog, presetSkillNames, advancedControlsEnabled)
-    );
-  }, [
-    capabilityCatalog.catalog,
-    capabilityCatalog.error,
-    capabilityCatalog.loading,
-    presetSkillNamesKey,
-    advancedControlsEnabled,
-    selectedAgentResourceKey,
-  ]);
-
-  const capabilitySelection = buildSessionCapabilitySelection(
-    effectiveCapabilityDraft,
-    capabilityCatalog.catalog.autoSkillNames
-  );
-  const capabilitySelectionReady = !capabilityCatalog.loading && !capabilityCatalog.error;
-
   useEffect(() => {
     setResourceSelectionValue({});
     advancedConfig.setKnowledge({
@@ -279,7 +217,6 @@ const GuidPage: React.FC = () => {
     resourceResolutionReady: resourceSelectionsReady && (isCompanionAgent || collaboration.ready),
     collaboration: collaboration.config,
     resourceSelections: resourceSelectionResolution.selections,
-    capabilitySelection: capabilitySelectionReady ? capabilitySelection : undefined,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
@@ -592,17 +529,7 @@ const GuidPage: React.FC = () => {
               {workspaceEnabled && <GuidWorkspaceFootnote workspaceDir={guidInput.dir} onSelectWorkspace={guidInput.setDir} onClearWorkspace={() => guidInput.setDir('')} />}
               <Composer
                 sideTools={
-                  !isCompanionAgent && <SessionCapabilityPicker
-                    catalog={displayedCapabilityCatalog}
-                    draft={effectiveCapabilityDraft}
-                    onChange={handleCapabilityDraftChange}
-                    loading={capabilityCatalog.loading}
-                    loadFailed={Boolean(capabilityCatalog.error)}
-                    onRetry={capabilityCatalog.retry}
-                    applyMode='create'
-                    disabled={guidInput.loading}
-                    lockedMcpServerIds={lockedMcpServerIds}
-                  >
+                  !isCompanionAgent && <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
                     <CollaborationComposerControl
                       value={collaboration.activeCollaborators}
                       onChange={collaboration.setCollaborators}
@@ -614,7 +541,7 @@ const GuidPage: React.FC = () => {
                       policy={collaboration.policy}
                       onPolicyChange={collaboration.setPolicy}
                     />
-                  </SessionCapabilityPicker>
+                  </ComposerToolRail>
                 }
                 isFileDragging={guidInput.isFileDragging}
                 dragHandlers={guidInput.dragHandlers}
