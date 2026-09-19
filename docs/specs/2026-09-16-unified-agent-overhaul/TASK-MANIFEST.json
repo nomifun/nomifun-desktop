@@ -515,7 +515,7 @@
       "status": "active",
       "depends_on": ["UARC-063"],
       "lane": "integration-windows",
-      "write_set": ["docs/specs/2026-09-16-unified-agent-overhaul/**"],
+      "write_set": ["scripts/check-process-runtime-boundary.mjs", "docs/specs/2026-09-16-unified-agent-overhaul/**"],
       "delete_set": [],
       "retained_set": ["Merged shared platform implementation"],
       "ui_surface": ["Platform-shared surfaces affected by Mac changes"],

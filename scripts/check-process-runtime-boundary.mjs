@@ -32,6 +32,7 @@ const REVIEWED_EXTERNAL_OWNERSHIP = new Map([
   ],
 ]);
 const HAND_OFF_ALLOWLIST = new Set([
+  'apps/desktop/src/browser_surface/macos/native/external_browser.rs',
   'crates/agent/nomi-browser-engine/src/backend/cdp.rs',
   'crates/agent/nomi-computer/src/launch.rs',
   'crates/backend/nomifun-shell/src/opener.rs',
@@ -822,6 +823,14 @@ function selfTest() {
     }),
     'hand-off-allowlist',
     'failed to reject open::that_detached in an arbitrary new path',
+  );
+  assertNoViolation(
+    base.concat({
+      path: 'apps/desktop/src/browser_surface/macos/native/external_browser.rs',
+      source:
+        'fn user_handoff() { open::that_detached("https://example.com"); }\n',
+    }),
+    'reviewed macOS Browser user hand-off path was not exact-allowlisted',
   );
   assertNoViolation(
     base.concat({
