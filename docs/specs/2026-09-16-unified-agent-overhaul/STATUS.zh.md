@@ -1098,3 +1098,20 @@
 - Gatekeeper interactive assessment is `not_run` because the host has system assessment disabled; independent
   `codesign`, notary acceptance and stapler validation passed.
 - UARC-064 remains planned/pending on Windows; UARC-070 remains planned/pending after UARC-064.
+
+### 2026-09-19 UARC-064 started
+
+- Barrier/source: macOS closeout `5fd6c6f0643206283aec17be83b8de8d5853f10e`; artifact source
+  `6ab013f68bfcdae46ffaeecf471bd4933ed34a67`; original `rf/agent-capability-platform-v2` is clean and matches origin.
+- Mac intake: UARC-061/062/063 implementation records, native matrices, signed/notarized App/DMG hashes and lifecycle
+  evidence were reviewed. Declared `not_run` items remain explicit and are not relabeled as pass.
+- Ownership reconciliation: the exact shared Browser description file required by the live model walkthrough is now in
+  UARC-061's write set; the two maintainable macOS packaging-validator test files are now in UARC-063's write set. No
+  production behavior was changed by this bookkeeping correction.
+- Owner/write set: Windows Integration only. UARC-064 begins as a serial regression gate; no Feature worker or competing
+  Cargo, full-UI, native or package task is active.
+- Tests: pending affected shared Rust crates, Desktop/App, Windows WebView2 Browser, Process/Computer, complete UI,
+  `bun run check`, production build and a current-source Windows candidate package/install smoke.
+- Windows: regression active. macOS: frozen verified evidence is retained at the Mac closeout commits; Windows will not
+  reinterpret or replace native CEF/TCC/App/DMG results.
+- Remaining/blocker: none. UARC-070 remains dependency-locked until UARC-064 is integrated and Windows verified.
