@@ -364,6 +364,7 @@ fn wave2_effect_owner_domain(
         | nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
         | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID => Ok("workspace"),
         nomifun_agent_domain_wave2::SSH_MODULE_ID => Ok("ssh"),
+        nomifun_agent_domain_wave2::BROWSER_MODULE_ID => Ok("browser"),
         nomifun_agent_domain_wave2::COMPUTER_MODULE_ID => Ok("computer"),
         other => Err(Wave2HostPortError::invalid_payload(format!(
             "Wave 2 effect owner domain is undefined for Module {other}"
@@ -3150,6 +3151,10 @@ mod tests {
         }
         context.capability_id = CapabilityId::from("ssh");
         assert_eq!(wave2_effect_owner_domain(&context).unwrap(), "ssh");
+        context.capability_id = CapabilityId::from("browser");
+        assert_eq!(wave2_effect_owner_domain(&context).unwrap(), "browser");
+        context.capability_id = CapabilityId::from("computer");
+        assert_eq!(wave2_effect_owner_domain(&context).unwrap(), "computer");
         context.capability_id = CapabilityId::from("unknown");
         assert!(wave2_effect_owner_domain(&context).is_err());
     }

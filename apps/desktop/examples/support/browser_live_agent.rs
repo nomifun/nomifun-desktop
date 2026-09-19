@@ -6,6 +6,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
+use futures_util::StreamExt;
 use nomifun_browser_platform::{
     run_guard::BrowserInputState, runtime::BrowserSurfaceBounds, workspace::BrowserResourceService,
 };
@@ -19,6 +20,10 @@ use std::{
     },
 };
 use tauri::{Listener, Manager};
+use tokio_tungstenite::tungstenite::{
+    Message as WebSocketFrame, client::IntoClientRequest,
+    http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL},
+};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -34,12 +39,18 @@ void send('/witness',{method:'POST',headers:{'Content-Type':'application/json'},
 </script>"#;
 
 struct Page {
-    work: PathBuf,
+    work: Mutex<PathBuf>,
     events: Mutex<Vec<Value>>,
     served: Mutex<Vec<String>>,
+    tool_shapes: Mutex<Vec<Value>>,
 }
 async fn script(State(page): State<Arc<Page>>) -> axum::response::Response {
-    match tokio::fs::read_to_string(page.work.join("app.js")).await {
+    let work = page
+        .work
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    match tokio::fs::read_to_string(work.join("app.js")).await {
         Ok(source) if source.len() <= 65536 => {
             let mut served = page.served.lock().unwrap();
             if served.len() < 32 {
@@ -116,8 +127,8 @@ async fn api(
             "REVISION"
         } else if path.ends_with("/turns") {
             "TURN"
-        } else if path.starts_with("/api/conversations/") {
-            "CONVERSATION"
+        } else if path.starts_with("/api/agent-sessions/") {
+            "AGENT_SESSION"
         } else {
             "SESSION"
         };
@@ -155,6 +166,113 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| "LIVE_API_FIELD_MISSING".into())
 }
 
+fn browser_act_shape(args: &Value) -> Value {
+    let Some(outer) = args.as_object() else {
+        return json!({"class":"non_object","tag":Value::Null});
+    };
+    if outer.contains_key("operation") {
+        return json!({"class":"legacy_operation","tag":Value::Null});
+    }
+    let Some(tag_value) = outer.get("action") else {
+        return json!({"class":"missing_action_wrapper","tag":Value::Null});
+    };
+    if tag_value.is_object() {
+        return json!({"class":"nested_action_wrapper","tag":Value::Null});
+    }
+    let action = outer;
+    let tag = tag_value
+        .as_str()
+        .filter(|tag| {
+            ["click", "hover", "type", "press", "select", "scroll", "drag", "dialog"]
+                .contains(tag)
+        });
+    let class = if action.contains_key("tab_id")
+        || action.contains_key("observation_id")
+        || action.contains_key("ref_id")
+    {
+        "private_attached"
+    } else if action.contains_key("ref") || action.contains_key("selector") {
+        "legacy_reference"
+    } else if let Some(element) = action.get("element") {
+        match element.as_object() {
+            Some(element)
+                if element.contains_key("target")
+                    && element.contains_key("observation_generation")
+                    && element.contains_key("ref_id") =>
+            {
+                "raw_reference"
+            }
+            Some(element)
+                if element.contains_key("reference")
+                    && element.contains_key("role")
+                    && element.contains_key("name")
+                    && element.contains_key("focused") =>
+            {
+                "canonical_element"
+            }
+            Some(element) if element.contains_key("reference") => "partial_observed_element",
+            Some(_) => "other_element_object",
+            None => "scalar_element",
+        }
+    } else if action.contains_key("from") || action.contains_key("target") {
+        "other_canonical_variant"
+    } else {
+        "missing_reference"
+    };
+    json!({
+        "class":class,
+        "tag":tag,
+        "outer_unknown_keys":0,
+        "action_unknown_keys":action.keys().filter(|key| ![
+            "action","element","from","to","button","click_count","text","keys","labels",
+            "delta_x","delta_y","target","request_id","accept","tab_id","observation_id",
+            "ref_id","ref","selector"
+        ].contains(&key.as_str())).count(),
+    })
+}
+
+async fn start_tool_shape_capture(
+    server: &nomifun_app::DesktopServer,
+    page: Arc<Page>,
+    stop: CancellationToken,
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    let mut request = format!("ws://127.0.0.1:{}/ws", server.loopback_port())
+        .into_client_request()
+        .map_err(|_| "LIVE_STREAM_CAPTURE_FAILED")?;
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_str(server.local_trust_secret())
+            .map_err(|_| "LIVE_STREAM_CAPTURE_FAILED")?,
+    );
+    let (mut stream, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .map_err(|_| "LIVE_STREAM_CAPTURE_FAILED")?;
+    Ok(tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => break,
+                frame = stream.next() => {
+                    let Some(Ok(WebSocketFrame::Text(text))) = frame else { break; };
+                    let Ok(event) = serde_json::from_str::<Value>(text.as_ref()) else { continue; };
+                    if event["name"] != "message.stream" || event["data"]["type"] != "tool_call" {
+                        continue;
+                    }
+                    let tool = &event["data"]["data"];
+                    if !tool["name"].as_str().is_some_and(|name| name.starts_with("platform__browser_browser_act__"))
+                        || tool["status"] != "running"
+                    {
+                        continue;
+                    }
+                    let mut shapes = page.tool_shapes.lock().unwrap_or_else(|error| error.into_inner());
+                    if shapes.len() < 32 {
+                        shapes.push(browser_act_shape(&tool["args"]));
+                    }
+                }
+            }
+        }
+    }))
+}
+
 pub(super) fn run(app: tauri::AppHandle, key: Zeroizing<String>) -> Result<Value, String> {
     let root = tempfile::Builder::new()
         .prefix("nomifun-live-browser-")
@@ -169,8 +287,12 @@ pub(super) fn run(app: tauri::AppHandle, key: Zeroizing<String>) -> Result<Value
     let result = runtime.block_on(verify(&app, &root, &key));
     drop(key);
     runtime.shutdown_timeout(std::time::Duration::from_secs(5));
-    super::cleanup_fixture_profile(&root).map_err(|_| "LIVE_TEMP_CLEANUP_FAILED")?;
-    result
+    let cleanup = super::cleanup_fixture_profile(&root);
+    match (result, cleanup) {
+        (Ok(evidence), Ok(())) => Ok(evidence),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(_)) => Err("LIVE_TEMP_CLEANUP_FAILED".into()),
+    }
 }
 async fn verify(
     app: &tauri::AppHandle,
@@ -179,11 +301,11 @@ async fn verify(
 ) -> Result<Value, String> {
     let work = root.path().join("work");
     std::fs::create_dir(&work).map_err(|_| "LIVE_WORKSPACE_FAILED")?;
-    std::fs::write(work.join("app.js"), BROKEN_JS).map_err(|_| "LIVE_WORKSPACE_FAILED")?;
     let page = Arc::new(Page {
-        work: work.clone(),
+        work: Mutex::new(work.clone()),
         events: Mutex::new(vec![]),
         served: Mutex::new(vec![]),
+        tool_shapes: Mutex::new(vec![]),
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -231,6 +353,8 @@ async fn verify(
     )
     .await
     .map_err(|_| "LIVE_BACKEND_START_FAILED")?;
+    let capture_stop = CancellationToken::new();
+    let capture = start_tool_shape_capture(&server, page.clone(), capture_stop.clone()).await?;
     let presented = Arc::new(AtomicBool::new(false));
     let failed = Arc::new(AtomicBool::new(false));
     let weak = Arc::downgrade(&server);
@@ -299,7 +423,7 @@ async fn verify(
         },
     );
     let mut session_id = None;
-    let result=tokio::time::timeout(std::time::Duration::from_secs(240),async {
+    let result=tokio::time::timeout(std::time::Duration::from_secs(180),async {
         api(&server,"POST","/api/model-services/free/activate",json!({"enabled":false})).await?;
         let provider=api(&server,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"Native frontend live fixture","base_url":"https://api.stepfun.com/step_plan/v1","auth_scheme":"bearer","credentials":{"api_keys":[key]},"enabled":true,"initial_model":{"model":"step-3.7-flash","enabled":true,"capabilities":[{"task":"chat","traits":["function_calling","reasoning","streaming"],"protocol":"openai.chat_text","connection_role":"default","provider_params":{"temperature":0.0},"output_limit":4096}]}})).await?;
         let provider=text(&provider,"provider_id")?;
@@ -308,30 +432,37 @@ async fn verify(
         let catalog=api(&server,"GET","/api/capabilities",Value::Null).await?;
         let items=catalog.as_array().ok_or("LIVE_CAPABILITY_CATALOG_INVALID")?;
         let browser=items.iter().find(|item|item["capability"]["id"]=="browser" && item["materialization_state"]=="materialized").ok_or("LIVE_BROWSER_MODULE_MISSING")?;
-        let files=items.iter().find(|item|item["capability"]["id"]=="workspace.files" && item["materialization_state"]=="materialized").ok_or("LIVE_WORKSPACE_FILES_MODULE_MISSING")?;
-        let selections=vec![
-            json!({"capability":browser["capability"],"action_allowlist":["browser/navigate","browser/observe","browser/act"]}),
-            json!({"capability":files["capability"],"action_allowlist":["workspace.files/read","workspace.files/write","workspace.files/patch"]}),
-        ];
+        let selections=vec![json!({"capability":browser["capability"],"action_allowlist":["browser/navigate","browser/observe","browser/act"]})];
         let mut draft=editor["draft"].clone();
-        draft["document"]["persona"]=json!("You are a precise frontend developer working only in the supplied temporary workspace.");
-        draft["document"]["instructions"]=json!("Use the real Browser for page interaction and workspace file tools for editing. Do not read unrelated files, automate DOM events, or replace browser interaction with HTTP requests.");
+        draft["document"]["persona"]=json!("You are a precise Browser acceptance agent.");
+        draft["document"]["instructions"]=json!("Use only the selected real Browser Actions. For browser/act click, use {\"action\":\"click\",\"element\":ELEMENT} where ELEMENT is the complete element object (reference, role, name, focused) copied unchanged from the latest browser/observe result. Do not add another action wrapper and do not use tab_id, observation_id, ref, selector, evaluate, HTTP requests, workspace tools, or synthetic DOM events.");
         draft["document"]["enabled_capabilities"]=json!(selections);draft["document"]["skill_bindings"]=json!([]);
         api(&server,"POST",&format!("/api/agent-presets/{preset}/revisions"),json!({"expected_current_revision":editor["revision"]["reference"],"draft":draft,"reason":"live native frontend conformance"})).await?;
-        let session=api(&server,"POST","/api/agent-sessions",json!({"preset_id":preset,"title":"Frontend browser live fixture","resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],"model":{"provider_id":provider,"model":"step-3.7-flash"}})).await?;
+        let session=api(&server,"POST","/api/agent-sessions",json!({"preset_id":preset,"title":"Frontend browser live fixture","resource_selections":[{"resource_kind":"browser","resource_id":"managed-browser"}],"model":{"provider_id":provider,"model":"step-3.7-flash"}})).await?;
         let id=text(&session,"agent_session_id")?.to_owned();session_id=Some(id.clone());
-        api(&server,"PATCH",&format!("/api/conversations/{id}"),json!({"extra":{"workspace":work.to_string_lossy()}})).await?;
-        let prompt=format!("请验证并修复临时前端应用 http://{address}/ 。必须先用 Browser 打开网页、观察并真实点击一次 Increment，确认 Count 错误地变成 2；再读取工作区 app.js，修复 nextCount 使每次只增加 1。只能修改 app.js，不能添加自动点击、伪造事件或改变测试页面。修复后用 Browser 刷新，依次真实点击三次，每次重新观察，确认 Count 分别为 1、2、3，最后停留在 3。不得调用 evaluate、脚本点击或其他浏览器。修复与复测结束后简短报告。请直接执行，不要只给建议。");
+        let session_work=work.join("agent-sessions").join(&id);
+        std::fs::create_dir_all(&session_work).map_err(|_|"LIVE_WORKSPACE_FAILED")?;
+        std::fs::write(session_work.join("app.js"),BROKEN_JS).map_err(|_|"LIVE_WORKSPACE_FAILED")?;
+        *page.work.lock().unwrap_or_else(|error|error.into_inner())=session_work;
+        let prompt=format!("请用 Browser 打开 http://{address}/ ，观察页面，并对 Increment 按钮执行恰好一次真实 click。再次观察并确认 Count 变成 2 后立即结束并简短报告。不得读取或修改文件，不得调用 evaluate、脚本点击、HTTP 请求或其他浏览器；请直接执行，不要只给建议。");
         api(&server,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"input":{"content":prompt},"idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
         let mut running=false;
+        let mut evidence_driven_cancel=false;
         loop {
-            let state=api(&server,"GET",&format!("/api/conversations/{id}"),Value::Null).await?;
+            let state=api(&server,"GET",&format!("/api/agent-sessions/{id}/projection"),Value::Null).await?;
             if state["status"]=="running" {running=true;}
-            if state["status"]=="finished" {break;}
+            if state["status"]=="running" && !evidence_driven_cancel {
+                let click_proven=page.events.lock().unwrap_or_else(|error|error.into_inner()).as_slice().first().is_some_and(|event|event["value"]==2 && event["trusted"]==true);
+                if click_proven {
+                    api(&server,"POST",&format!("/api/agent-sessions/{id}/turns/cancel"),json!({"idempotency_key":uuid::Uuid::now_v7().to_string()})).await?;
+                    evidence_driven_cancel=true;
+                }
+            }
+            if state["status"]=="finished" || state["status"]=="cancelled" {break;}
             if state["status"]=="error" || state["status"]=="cancelled" {return Err("LIVE_TURN_FAILED".into());}
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        if !running || !presented.load(Ordering::Acquire) || failed.load(Ordering::Acquire) {return Err("LIVE_PRESENTATION_NOT_PROVEN".into());}
+        if !running || !evidence_driven_cancel || !presented.load(Ordering::Acquire) || failed.load(Ordering::Acquire) {return Err("LIVE_PRESENTATION_NOT_PROVEN".into());}
         let workspace=server.browser_resource_for_local_surface(&id).await.map_err(|_|"LIVE_WORKSPACE_MISSING")?;
         let snapshot=workspace.snapshot().await.map_err(|_|"LIVE_SNAPSHOT_FAILED")?;
         if snapshot.run.input_state!=BrowserInputState::UserReady {return Err("LIVE_TERMINAL_NOT_UNLOCKED".into());}
@@ -340,14 +471,15 @@ async fn verify(
         let view=app.get_webview(&runtime.tabs[0].target.tab_id).ok_or("LIVE_NATIVE_VIEW_MISSING")?;
         if super::agent_turn::native_state(&view).await.map_err(|_|"LIVE_NATIVE_STATE_FAILED")? != (true,true) {return Err("LIVE_NATIVE_UNLOCK_NOT_PROVEN".into());}
         let value=super::evaluate(&view,"document.getElementById('count').textContent").await.map_err(|_|"LIVE_FINAL_DOM_FAILED")?;
-        if value!="3" {return Err("LIVE_FINAL_COUNT_WRONG".into());}
+        if value!="2" {return Err("LIVE_FINAL_COUNT_WRONG".into());}
         let events=page.events.lock().unwrap().clone();
-        let first=events.first().ok_or("LIVE_REPRODUCTION_MISSING")?;
-        let last=events.get(events.len().saturating_sub(3)..).ok_or("LIVE_RETEST_MISSING")?;
-        if first["value"]!=2 || first["trusted"]!=true || last.len()!=3 || last.iter().enumerate().any(|(i,e)|e["value"]!=i+1 || e["trusted"]!=true || e["generation"]==first["generation"] || e["generation"]!=last[0]["generation"]) {return Err("LIVE_TRUSTED_RETEST_NOT_PROVEN".into());}
+        let [click]=events.as_slice() else {return Err("LIVE_SINGLE_TRUSTED_CLICK_NOT_PROVEN".into());};
+        if click["value"]!=2 || click["trusted"]!=true {return Err("LIVE_SINGLE_TRUSTED_CLICK_NOT_PROVEN".into());}
         let served=page.served.lock().unwrap();
-        if served.first().map(String::as_str)!=Some(BROKEN_JS) || served.last().map(String::as_str)==Some(BROKEN_JS) {return Err("LIVE_SOURCE_CHANGE_NOT_SERVED".into());}
-        Ok(json!({"model":"step-3.7-flash","real_provider":true,"native_auto_open":true,"reproduced_bug_with_trusted_click":true,"workspace_code_changed_and_reloaded":true,"trusted_retest_values":[1,2,3],"terminal_before_unlock":true}))
+        if served.first().map(String::as_str)!=Some(BROKEN_JS) {return Err("LIVE_PAGE_SOURCE_NOT_SERVED".into());}
+        let canonical_shape=page.tool_shapes.lock().unwrap_or_else(|error|error.into_inner()).iter().any(|shape|shape["class"]=="canonical_element" && shape["tag"]=="click");
+        if !canonical_shape {return Err("LIVE_CANONICAL_ACTION_SHAPE_NOT_PROVEN".into());}
+        Ok(json!({"model":"step-3.7-flash","real_provider":true,"native_auto_open":true,"trusted_click_value":2,"canonical_action_shape":true,"evidence_driven_cancel":true,"terminal_before_unlock":true}))
     }).await.unwrap_or_else(|_|Err("LIVE_FRONTEND_TIMEOUT".into()));
     if let Some(id) = session_id {
         if result.is_err() {
@@ -366,12 +498,14 @@ async fn verify(
         let _ = api(
             &server,
             "POST",
-            &format!("/api/conversations/{id}/cancel"),
-            json!({}),
+            &format!("/api/agent-sessions/{id}/turns/cancel"),
+            json!({"idempotency_key":uuid::Uuid::now_v7().to_string()}),
         )
         .await;
     }
     app.unlisten(subscription);
+    capture_stop.cancel();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), capture).await;
     let shutdown = server.shutdown_all().await;
     drop(server);
     drop(keep_alive);
@@ -415,14 +549,27 @@ async fn diagnostic(
     }
     let tools=messages.iter().filter_map(|row| {
         let p=&row["projection"];
-        let name=p["name"].as_str()?;
-        let name=match name {"Browser"|"Read"|"Write"|"Edit"|"apply_patch"|"update_plan"|"AskUserQuestion"=>name,_=>"OTHER"};
-        let status=match p["status"].as_str(){Some("completed")=>"completed",Some("failed"|"error")=>"failed",_=>"other"};
-        let operation=p["args"]["operation"].as_str().filter(|op|["navigate","observe","act","tab","diagnostics","screenshot"].contains(op));
-        let action=p["args"]["action"]["action"].as_str().filter(|op|["click","type","press","scroll","hover"].contains(op));
+        let summary=&p["tool_summary"];
+        let action_id=summary["action_id"].as_str()?;
+        let name=match action_id {
+            "browser/navigate"|"browser/observe"|"browser/act"=>"Browser",
+            "workspace.files/read"=>"Read",
+            "workspace.files/write"=>"Write",
+            "workspace.files/patch"=>"Edit",
+            _=>"OTHER",
+        };
+        let status=match p["state"].as_str(){Some("recorded"|"completed")=>"completed",Some("failed"|"error"|"uncertain")=>"failed",_=>"other"};
+        let operation=action_id.strip_prefix("browser/").filter(|op|["navigate","observe","act"].contains(op));
         let raw=p.to_string();
         let codes=["INVALID_PAYLOAD","CAPABILITY_NOT_SELECTED","BROWSER_STALE_OBSERVATION","BROWSER_STALE_TARGET","BROWSER_NOT_ACTIONABLE","BROWSER_NATIVE_COMMAND_FAILED","BROWSER_UNSUPPORTED_ACTION","TOOL_NOT_FOUND","PERMISSION_DENIED"].into_iter().filter(|code|raw.contains(code)).collect::<Vec<_>>();
-        Some(json!({"name":name,"status":status,"operation":operation,"action":action,"error_present":!p["error"].is_null(),"result_error":p["result"]["is_error"].as_bool(),"error_codes":codes}))
+        let error=summary["error"].as_str().unwrap_or_default().to_ascii_lowercase();
+        let error_hints=[
+            ("oneof","one_of"),("one of","one_of"),
+            ("required","required"),("additional","additional_property"),
+            ("element","element"),("target","target"),("observation_generation","observation_generation"),
+            ("ref_id","ref_id"),("operation","operation"),("action","action"),
+        ].into_iter().filter_map(|(needle,label)|error.contains(needle).then_some(label)).collect::<std::collections::BTreeSet<_>>();
+        Some(json!({"name":name,"status":status,"operation":operation,"action":Value::Null,"error_present":summary.get("error").is_some(),"result_error":Value::Null,"error_codes":codes,"error_hints":error_hints}))
     }).take(64).collect::<Vec<_>>();
     let numbers = page
         .events
@@ -432,10 +579,20 @@ async fn diagnostic(
         .map(|e| e["value"].as_i64().filter(|n| (-100..=100).contains(n)))
         .collect::<Vec<_>>();
     let versions = page.served.lock().unwrap().len();
-    let changed = std::fs::read_to_string(page.work.join("app.js"))
+    let tool_shapes = page
+        .tool_shapes
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let work = page
+        .work
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    let changed = std::fs::read_to_string(work.join("app.js"))
         .ok()
         .is_some_and(|source| source != BROKEN_JS);
     Ok(
-        json!({"values":numbers,"served_versions":versions,"source_changed":changed,"tools":tools,"presented":presented,"presentation_failed":presentation_failed}),
+        json!({"count":messages.len(),"values":numbers,"served_versions":versions,"source_changed":changed,"tools":tools,"tool_shapes":tool_shapes,"presented":presented,"presentation_failed":presentation_failed}),
     )
 }

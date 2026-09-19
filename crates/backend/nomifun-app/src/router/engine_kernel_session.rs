@@ -8,6 +8,8 @@ use futures_util::{
     future::{BoxFuture, Shared},
 };
 use nomifun_agent_contracts::{AgentSessionId, ScopeKey};
+#[cfg(feature = "browser-use")]
+use nomifun_agent_contracts::OperationId;
 use nomifun_agent_kernel::{
     CompiledSnapshot, CompilerEnvironment, KernelRegistry, MaterializedRegistry,
     SessionCapabilityState,
@@ -65,6 +67,8 @@ pub(crate) struct EngineKernelAssembly {
     pub kernel: Arc<KernelRegistry>,
     pub environment: CompilerEnvironment,
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    #[cfg(feature = "browser-use")]
+    pub browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     pub plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
     pub robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
 }
@@ -135,6 +139,8 @@ pub struct EngineKernelSession {
     active: Arc<SessionCapabilityState>,
     kernel: Arc<KernelRegistry>,
     wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    #[cfg(feature = "browser-use")]
+    browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
     plugin_product_plan: tokio::sync::OnceCell<EngineToolPlan>,
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
@@ -157,14 +163,10 @@ impl EngineKernelSession {
         let snapshot = session.snapshot();
         let session_id = AgentSessionId::from(session.session().conversation_id.clone());
         let principal = session.principal();
-        // Use the owner-rebased response, never caller options or model JSON.
-        let workspace = session
-            .session()
-            .extra
-            .get("workspace")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        // EngineSessionHost already validated this host-resolved path against
+        // the canonical Session projection (or its canonical fallback). It is
+        // never read from model JSON.
+        let workspace = session.workspace().to_owned();
         let selected = || {
             snapshot
                 .content
@@ -290,6 +292,8 @@ impl EngineKernelSession {
             compiled,
             kernel: assembly.kernel.clone(),
             wave2: assembly.wave2.clone(),
+            #[cfg(feature = "browser-use")]
+            browser: assembly.browser.clone(),
             git_root,
             plugin_product: assembly.plugin_product.clone(),
             plugin_product_plan: tokio::sync::OnceCell::new(),
@@ -306,13 +310,7 @@ impl EngineKernelSession {
             && ExecutionConstraints::from_extra(&session.session().extra).ok()
                 == Some(self.constraints)
             && self.compiled.snapshot_ref() == &session.snapshot().snapshot_ref
-            && self.workspace
-                == session
-                    .session()
-                    .extra
-                    .get("workspace")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
+            && self.workspace == session.workspace()
     }
     pub fn compiled(&self) -> &Arc<CompiledSnapshot> {
         &self.compiled
@@ -802,6 +800,14 @@ impl EngineKernelSession {
             cleanup: None,
             resource_operations: Default::default(),
         });
+        #[cfg(feature = "browser-use")]
+        self.browser.open_turn(
+            &self.principal,
+            &self.session_id,
+            &OperationId::from(receipt.operation_id()),
+            &self.workspace,
+            &self.compiled,
+        )?;
         if self.process_selected {
             self.wave2.open_runtime_turn(
                 &self.principal.principal_id,
@@ -824,6 +830,23 @@ impl EngineKernelSession {
 
     async fn settle_owned(&self, tools: &EngineToolHost) -> Result<(), AppError> {
         let admission = tools.close_turn();
+        #[cfg(feature = "browser-use")]
+        let browser_turn = self
+            .state
+            .lock()
+            .map_err(|_| failure("resource state poisoned"))?
+            .turn
+            .as_ref()
+            .map(|turn| turn.operation.clone());
+        #[cfg(feature = "browser-use")]
+        let browser_cancel = match browser_turn.as_deref() {
+            Some(turn_id) => self.browser.cancel_turn(
+                &self.principal.principal_id,
+                self.session_id.as_ref(),
+                turn_id,
+            ),
+            None => Ok(()),
+        };
         // Catch each owner separately: the outer retained task alone would
         // preserve failure, but an unwind would skip all subsequent owners.
         let processes = guard_effect_settlement(|| {
@@ -832,6 +855,22 @@ impl EngineKernelSession {
         })
         .await;
         let tasks = guard_effect_settlement(|| tools.join()).await;
+        #[cfg(feature = "browser-use")]
+        let browser = guard_effect_settlement(|| async {
+            match browser_turn.as_deref() {
+                Some(turn_id) => {
+                    self.browser
+                        .settle_turn(
+                            &self.principal.principal_id,
+                            self.session_id.as_ref(),
+                            turn_id,
+                        )
+                        .await
+                }
+                None => Ok(()),
+            }
+        })
+        .await;
         let resource_tasks = guard_effect_settlement(|| self.resource_tasks.join()).await;
         let git = guard_effect_settlement(|| async {
             match &self.git_root {
@@ -847,8 +886,12 @@ impl EngineKernelSession {
         .await;
         let hosted = guard_effect_settlement(|| self.ensure_hosted_effects_settled()).await;
         admission?;
+        #[cfg(feature = "browser-use")]
+        browser_cancel?;
         processes?;
         tasks?;
+        #[cfg(feature = "browser-use")]
+        browser?;
         resource_tasks?;
         if self.resource_settlement_failed.load(std::sync::atomic::Ordering::Acquire) {
             return Err(failure("resource settlement journal is unproven"));

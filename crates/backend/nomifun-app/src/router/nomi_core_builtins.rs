@@ -31,6 +31,8 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     pub wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    #[cfg(feature = "browser-use")]
+    pub browser_owner: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     pub robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
 }
 
@@ -68,6 +70,20 @@ pub(crate) async fn build(
     let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store.clone());
     let wave2_ports =
         nomifun_agent_domain_wave2::Wave2RoleHostPorts::with_actions(wave2_owner.clone());
+    #[cfg(feature = "browser-use")]
+    let browser_owner = super::engine_browser_tools::BrowserRoleOwner::new(
+        services.browser_resources.clone(),
+        services.attached_chrome.clone(),
+        services.data_dir.clone(),
+        services.headless_render.clone(),
+        effect_store.clone(),
+    );
+    #[cfg(feature = "browser-use")]
+    let wave2_ports = {
+        let mut wave2_ports = wave2_ports;
+        wave2_ports.browser_actions = browser_owner.clone();
+        wave2_ports
+    };
     #[cfg(feature = "computer-use")]
     let wave2_ports = {
         let mut wave2_ports = wave2_ports;
@@ -265,6 +281,8 @@ pub(crate) async fn build(
         wave4_owners: wave4,
         wave5_owner,
         wave2_owner,
+        #[cfg(feature = "browser-use")]
+        browser_owner,
         robot_owner,
     })
 }

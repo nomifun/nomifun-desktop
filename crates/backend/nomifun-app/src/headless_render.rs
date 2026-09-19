@@ -1,5 +1,7 @@
-//! Anonymous, bounded render operations owned by the application, never a Hub
-//! lane or a Conversation browser. Kernel dispatch is composed separately.
+//! Anonymous, bounded render operations owned by the application. This runtime
+//! grants no Agent authority: Knowledge and the Browser Module owner call it
+//! only after their own routing/Action admission. It is never a Hub lane or an
+//! interactive Browser Resource.
 use futures_util::FutureExt;
 use nomi_browser_engine::headless_page::{self, HeadlessPageError, RenderedContent};
 use std::{

@@ -480,6 +480,8 @@ async fn build_nomi_core_agent_api_state(
     let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
     let wave5_owner = Arc::clone(&builtin_plan.wave5_owner);
     let robot_owner = builtin_plan.robot_owner.clone();
+    #[cfg(feature = "browser-use")]
+    let browser_owner = Arc::clone(&builtin_plan.browser_owner);
     wave4_owners
         .reclaim_orphaned_receipts()
         .await
@@ -691,6 +693,8 @@ async fn build_nomi_core_agent_api_state(
         &conversation_owner, Arc::clone(&control_plane), &services.official_runtime, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
+            #[cfg(feature = "browser-use")]
+            browser: browser_owner,
             plugin_product: super::engine_plugin_product_tools::PluginProductOwner {
                 application: Arc::clone(&services.plugin_runtime),
                 receipts: super::hosted_effect_receipts::HostedEffectReceipts::new(services.database.pool().clone()),
@@ -704,6 +708,7 @@ async fn build_nomi_core_agent_api_state(
         .install(super::unified_runtime_host::factory(
             engine_sessions,
             Arc::clone(&plugin.schema_resolver),
+            Arc::clone(&builtin_plan.schema_resolver),
         ))?;
     conversation_owner.install_official_runtime(Arc::clone(&services.official_runtime), Arc::downgrade(&control_plane))?;
     let plugin_tool_sessions = Arc::new(NomiCorePluginToolSessionProvider::new(

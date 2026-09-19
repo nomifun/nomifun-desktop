@@ -300,16 +300,15 @@ fn generated_tauri_context<R: tauri::Runtime>() -> tauri::Context<R> {
 ///    `nomifun_app::cli::default_data_dir()`: stable builds use `NomiFun`,
 ///    non-stable builds a sibling such as `NomiFun-dev`.
 ///
-/// The desktop currently runs the original in-process Nomi core.  A previous
-/// Fresh-v4 experiment may have left a ready root beside the channel default;
-/// the Nomi-core resolver selects an isolated sibling in that case instead of
-/// opening or mutating the experimental database.
+/// The desktop and web hosts share the canonical startup-root resolver. It
+/// rejects ambiguous legacy layouts instead of silently selecting another
+/// architecture-specific sibling.
 fn default_data_dir() -> PathBuf {
     let requested = std::env::var_os("NOMIFUN_DATA_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(nomifun_app::cli::default_data_dir);
-    nomifun_app::bootstrap::resolve_nomi_core_data_root(requested)
+    nomifun_app::bootstrap::resolve_startup_data_root(requested)
 }
 
 #[cfg(target_os = "macos")]

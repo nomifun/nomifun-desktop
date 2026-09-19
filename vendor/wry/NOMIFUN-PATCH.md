@@ -23,6 +23,7 @@ event emulation. Keep this patch until an upstream host-owned close callback
 provides equivalent ownership; never re-enable eager child destruction without
 running the native popup/download/close conformance fixtures.
 
-Validation: `browser_workspace_smoke --agent-downloads-only` includes a real
-target=_blank HTTP attachment and verifies exact bytes, publication, and cleanup.
+Validation: `browser_workspace_smoke --agent-only` drives the unified Runtime's
+exact Browser download Action through a real target=_blank HTTP attachment and
+verifies exact bytes, publication, popup retirement, and cleanup.
 The other browser lifecycle fixtures continue to exercise explicit close.

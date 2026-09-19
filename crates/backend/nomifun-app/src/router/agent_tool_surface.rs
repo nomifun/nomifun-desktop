@@ -4,7 +4,9 @@ use nomifun_agent_contracts::{
     ActionId, CapabilityId, CapabilityManifest, ContributionSourceKind, ToolPresentationKind,
 };
 use nomifun_agent_kernel::{ActiveCapabilitySetSnapshot, CompiledSnapshot, MaterializedRegistry};
-use nomifun_ai_agent::NomiPluginToolSchemaResolver;
+use nomifun_ai_agent::{
+    NomiPlatformBuiltinToolSchemaResolver, NomiPluginToolSchemaResolver,
+};
 use nomifun_chat_model_broker::ChatToolDefinition;
 use nomifun_agent_runtime::{
     AgentToolExposure, AgentToolPlan, compile_agent_tool_plan, standard_agent_tool_exposures,
@@ -21,6 +23,7 @@ pub(super) async fn compile(
     active: &ActiveCapabilitySetSnapshot,
     registry: &MaterializedRegistry,
     plugin_schemas: &dyn NomiPluginToolSchemaResolver,
+    platform_builtin_schemas: &dyn NomiPlatformBuiltinToolSchemaResolver,
 ) -> Result<AgentToolPlan, AppError> {
     if snapshot.registry_generation != registry.generation
         || snapshot.registry_digest != registry.registry_digest
@@ -78,6 +81,73 @@ pub(super) async fn compile(
             )));
         }
         exposure.definition.input_schema = schema;
+    }
+    let mut exact_actions = exposures
+        .iter()
+        .map(|exposure| (exposure.capability_id.clone(), exposure.action_id.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    for selected in snapshot
+        .content()
+        .enabled_capabilities
+        .iter()
+        .filter(|selected| {
+            active.active.contains(&selected.capability.id)
+                && selected.contribution_lock.source_kind
+                    == ContributionSourceKind::PlatformBuiltin
+        })
+    {
+        let capability = registry
+            .capability(&selected.capability.id)
+            .ok_or_else(|| error("selected PlatformBuiltin capability is unavailable"))?;
+        let allowed = allowed_platform_actions
+            .get(&selected.capability.id)
+            .ok_or_else(|| error("selected PlatformBuiltin has no compiled Action policy"))?;
+        for action in capability
+            .manifest
+            .contributions
+            .actions
+            .iter()
+            .filter(|action| {
+                action.presentation == ToolPresentationKind::FunctionTool
+                    && allowed.contains(&action.action_id)
+            })
+        {
+            if !exact_actions.insert((
+                selected.capability.id.clone(),
+                action.action_id.clone(),
+            )) {
+                continue;
+            }
+            let schema = platform_builtin_schemas
+                .resolve(selected, &action.input_schema)
+                .await
+                .map_err(error)?;
+            if !concrete_object_schema(&schema.0, true) {
+                return Err(error(format!(
+                    "{} action {} has no strict canonical tool schema",
+                    selected.capability.id.as_ref(),
+                    action.action_id.as_ref(),
+                )));
+            }
+            exposures.push(AgentToolExposure {
+                definition: ChatToolDefinition {
+                    name: platform_tool_name(
+                        selected.capability.id.as_ref(),
+                        action.action_id.as_ref(),
+                    ),
+                    description: format!(
+                        "{}: {} Action: {}.",
+                        capability.manifest.display.name,
+                        capability.manifest.display.description,
+                        action.action_id.as_ref(),
+                    ),
+                    input_schema: schema,
+                    deferred: false,
+                },
+                capability_id: selected.capability.id.clone(),
+                action_id: action.action_id.clone(),
+            });
+        }
     }
     for selected in snapshot
         .content()
@@ -171,6 +241,33 @@ pub(super) async fn compile(
     compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
 }
 
+fn platform_tool_name(capability_id: &str, action_id: &str) -> String {
+    const PREFIX: &str = "platform__";
+    const HASH_BYTES: usize = 20;
+    let identity = format!("{capability_id}\0{action_id}");
+    let hash = format!("{:x}", Sha256::digest(identity.as_bytes()));
+    let mut slug = format!("{capability_id}_{action_id}")
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() {
+                byte.to_ascii_lowercase()
+            } else {
+                b'_'
+            }
+        })
+        .collect::<Vec<_>>();
+    let available = 64usize
+        .saturating_sub(PREFIX.len())
+        .saturating_sub(2)
+        .saturating_sub(HASH_BYTES);
+    slug.truncate(available);
+    while slug.last() == Some(&b'_') {
+        slug.pop();
+    }
+    let slug = String::from_utf8(slug).expect("platform Tool slug is ASCII");
+    format!("{PREFIX}{slug}__{}", &hash[..HASH_BYTES])
+}
+
 fn admitted_plugin_actions<'a>(
     manifest: &'a CapabilityManifest,
     allowed_actions: &'a std::collections::BTreeSet<ActionId>,
@@ -239,6 +336,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn generated_platform_tool_names_are_stable_bounded_and_action_specific() {
+        let navigate = platform_tool_name("browser", "browser/navigate");
+        assert_eq!(navigate, platform_tool_name("browser", "browser/navigate"));
+        assert_ne!(navigate, platform_tool_name("browser", "browser/observe"));
+        assert!(navigate.starts_with("platform__browser_browser_navigate__"));
+        assert!(navigate.len() <= 64);
+        assert!(
+            navigate
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
+    }
 
     #[test]
     fn partial_module_grant_exposes_only_the_exact_allowed_action() {
