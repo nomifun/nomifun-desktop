@@ -12,20 +12,21 @@ UARC-061 implementation:       a39e2bfee807ec1fe1cea0cea957663a66c03558
 UARC-062 implementation:       1c37ddd8059e2b1ae1c0419b2c37fd3908cbce23
 live model contract fix:       6c093d900521eed5db061a270c7fb7c86c679912
 UARC-063 artifact barrier:     6ab013f68bfcdae46ffaeecf471bd4933ed34a67
+current product-flow source:   4f249fd50a1036d560fcb244f67b98826eeebc6b
 Windows candidate SHA-256:     ab572e619fb85b511488e25a94c76cf62f4ba7eace4c13751c43b1a6b6bb6dda
 ```
 
-`a19b0be82912e2612fe73fe07db8e3da5c894a28` preserves the UARC handoff history and merges the three concurrent UI
-commits already published on the original refactor branch. Its conflict resolution keeps the canonical Agent/Resource
-launch path while accepting the compact Composer, shared modal contract and Creative Asset changes. Mac implementation
-must fetch the original `rf/agent-capability-platform-v2` branch and verify that its checkout contains both the exact
-acceptance barrier and this validated integration commit. Before work:
+`a19b0be82912e2612fe73fe07db8e3da5c894a28` preserves the original UI integration history；the current authoritative
+product-flow source is `4f249fd50a1036d560fcb244f67b98826eeebc6b`。Mac Integration must fetch the original
+`rf/agent-capability-platform-v2` branch, remain on that branch, and verify that its checkout contains the acceptance
+barrier, the validated integration and the current product-flow commit. Before work:
 
 ```bash
 git fetch origin rf/agent-capability-platform-v2
 git rev-parse HEAD
 git merge-base --is-ancestor 71fd47fbb0a49073b8e736ee6d279f331c34f9e3 HEAD
 git merge-base --is-ancestor a19b0be82912e2612fe73fe07db8e3da5c894a28 HEAD
+git merge-base --is-ancestor 4f249fd50a1036d560fcb244f67b98826eeebc6b HEAD
 git status --short
 ```
 
@@ -299,53 +300,94 @@ NSIS 14-check install smoke 均通过。候选安装、启动、`/health` 200、
 - 880×600 和宽窗口 UI/VoiceOver 检查；
 - arm64 `.app`/DMG 的资源、架构、启动、退出和签名结构；Developer ID/notarization 仅在凭据 available 时运行。
 
-## 12. macOS 完成状态与最终收口
+## 12. current-source macOS 续接 Prompt（2026-09-20）
 
-当前 Apple M4 arm64 主机上的 UARC-061、UARC-062、UARC-063 核心范围已经闭合，详细证据见三份
-`UARC-06x-MACOS-IMPLEMENTATION.zh.md`。用户明确决定 Keychain 持久化、attached Chrome Remote Debugging、
-Screen Recording granted/Retina screenshot 与真实 IME composition 不属于本轮必要门槛；这些项目均为
-`not_run`，不删除已有产品能力，也不伪造 pass。
+把下面整段作为 Mac 续接任务的初始 prompt。它替代此前“只补 late renderer”的增量说明：
 
-arm64 App/DMG 的权威报告为 `build.noindex/uarc063-delivery/uarc-macos-report.json`：固定 CEF 与五个 helper、
-App/DMG Developer ID、Apple notarization/staple、release lock、挂载同一性、fresh-root startup 和 cleanup 均
-通过。主机 Gatekeeper assessment 全局关闭，因此该交互检查单独为 `not_run`。
+```text
+在原分支 rf/agent-capability-platform-v2 上继续 UARC 最终 macOS 验收，不切分支，不重新规划，不恢复
+WKWebView。Windows Browser 仍为 WebView2；macOS Browser 必须继续使用现有独立 CEF child NSView。
 
-Windows Integration 已在 `2a426e7af3367ba47101fa3e676a71c89bc57af6` 完成原 UARC-064。其后远端新增
-shared renderer commit `daef16c9b41ba24604cc778e2450e3f22515fa62`，并由 Windows merge
-`f08acea45d07a56e67a2f8afd1f359b9ec6aafd5` 接入。该 commit 只改变 Conversation Agent catalog/selector
-和 Computer 配置入口；Windows focused 31/31、full UI 3541/3541、`bun run check`、7,562-module production
-renderer、880×600/宽窗口视觉与键盘焦点均通过。Rust/native/package source 未变化。
+必须包含的产品实现提交：
+4f249fd50a1036d560fcb244f67b98826eeebc6b
 
-但是既有 signed/notarized App/DMG 不包含这批 renderer，因此 UARC-042/050/053/063/070 的 macOS 状态重新
-标为 `implemented_unverified`。Mac 只需执行以下增量收口，不重复未受影响的 CEF 34/34、Process 240、
-Terminal 146、Computer physical/TCC 或真实 StepFun gate：
+旧 signed/notarized Mac artifact source：
+6ab013f68bfcdae46ffaeecf471bd4933ed34a67
 
-```bash
+旧制品早于当前共享 Runtime/API/UI 修复，只能保留未改动的低层 CEF/Process/PTY/Computer native 证据；
+不得把旧 App/DMG、旧 packaged Agent flow 或旧真实模型结果声明为 current-source 完成证据。
+
+开始前依次完整阅读：AGENTS.md、UARC README.zh.md、TASK-MANIFEST.json、STATUS.zh.md、
+CONCURRENCY-MERGE-VALIDATION.zh.md、MACOS-HANDOFF.zh.md、UARC-070-COMPLETION-AUDIT.zh.md，以及 manifest 的
+design_sources/platform_sources。以 manifest 的 depends_on/write_set/delete_set/retained_set/completion_gate 为合同。
+
+先执行：
+git branch --show-current
 git fetch origin rf/agent-capability-platform-v2
-git checkout rf/agent-capability-platform-v2
 git pull --ff-only origin rf/agent-capability-platform-v2
-git merge-base --is-ancestor f08acea45d07a56e67a2f8afd1f359b9ec6aafd5 HEAD
+git merge-base --is-ancestor 4f249fd50a1036d560fcb244f67b98826eeebc6b HEAD
+git rev-parse HEAD
 git status --short
 
-bun run typecheck
-bun test --cwd ui \
-  src/renderer/components/agent/AgentResourcePicker.interaction.test.tsx \
-  src/renderer/components/agent/conversationAgentCatalog.test.ts \
-  src/renderer/pages/guid/components/GuidAgentSelector.interaction.test.tsx \
-  src/renderer/pages/guid/hooks/agentPresetSelection.test.ts
+ancestor 检查必须为 0，工作树必须干净。记录 macOS/build、Apple Silicon 型号、arch、Xcode/CLT、rustc/cargo/
+bun/node、Tauri/CEF 固定版本、TCC 状态、Developer ID/notarization availability 和 StepFun credential
+availability；只记 available/absent，不记录 secret。
+
+保持一个 Integration owner；不要并发运行多个 Cargo、全量 UI、native 或 packaging gate。先运行：
+cargo fmt --all -- --check
+cargo run -p nomifun-agent-domain-wave2 --example target_inventory -- check
+cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check
+cargo test --workspace --all-targets --no-fail-fast -- --test-threads=1
+cargo test --workspace --doc --no-fail-fast -- --test-threads=1
 bun test --cwd ui
 bun run check
 bun run build:ui
 bun run build:mac --check arm
 bun run build:mac arm
+
+然后在真实 production .app 中完成并留证以下用户流程：
+1. 普通消息：发送唯一 marker，观察 turn.started、stream 中精确 turn_id、assistant/user 两个不同 UUIDv7，
+   durable assistant projection 替换 live assistant，不并入 user bubble；最终 turn.completed + idle/ready，刷新后消息仍正确。
+2. Agent 切换：已存在 Session 的 Agent/model/resources/collaboration 不可原地改变；选择另一个官方或个人
+   Agent 必须进入 Guid 并创建一个新冻结 Session，旧 Session binding 和历史保持不变。Creative 与临时
+   workspace 也必须创建新 Session。
+3. Agent collaboration：仅有 agent.collaboration grant 的 Agent 显示控制；显式 range/template/delegation
+   创建真实 AgentExecution，lead Session snapshot 冻结且 projection link 可恢复；执行一次真实模型 marker、
+   user-decision action、取消/终态和键盘 Enter/Space。无 grant 时不显示；带附件的 collaboration 在创建
+   Session 前明确拒绝；不得与 AutoWork 同时开启。
+4. AutoWork：用有效冻结 Session 创建 tag Requirement，enable 后完成一项真实工作；验证 max=1、Done、marker、
+   disable。再模拟 start/execution failure，确认 durable paused/paused_reason、重连后仍可见、Resume 清除原因并
+   恢复；无效/伪造 binding 必须在 enabled=true 持久化前失败。
+5. Companion：当前 Session 的 MCP/Skill/model 只读，编辑文案明确只影响未来 Session，不存在旧 snapshot
+   reconcile 或 in-place mutation。
+6. UI：880×600 和宽窗口；无横向 overflow；Agent menu 完整；协作三类 action 完整；loading/empty/error/
+   unavailable/paused 状态完整；Escape 返回触发器焦点，键盘可达，VoiceOver 基本语义正确。
+
+真实模型固定使用商业 StepFun Coding Plan / step-3.7-flash，禁止免费模型、mock 或 fallback 代替。凭据只从
+macOS Keychain（建议 service NomiFun/StepFun/LiveProvider）或同等级本机 secret store 读取，由
+scripts/validation/run-nomi-core-live-provider-smoke.mjs 的隔离协议只向测试进程 stdin 注入；不得写入 argv、
+仓库、fixture、报告或日志。至少运行 --model-smoke；它必须覆盖 ordinary message、新 Session、
+collaboration 和 AutoWork。若凭据 absent，标 blocked，不得改写为 pass。
+
+原生/生命周期必须在当前 production app 上补证：CEF child NSView 的 bounds/Retina/focus/keyboard、popup/
+dialog/permission/user picker/upload/download、renderer crash、hide/show/resize/close；当前 TCC 状态对应的
+truthful availability；Process/PTY/Computer；active Session 下 Command-Q 后 host/helper/child=0。已明确排除的
+attached Chrome、Screen Recording granted、真实 IME 或 Gatekeeper 项若环境仍不可用，继续精确记 not_run，
+不要伪造通过，也不要删除产品能力。
+
+生成当前 arm64 App/DMG 和 release lock 后运行：
+bun scripts/validation/check-macos-arm64-native.mjs \
+  --release-lock /absolute/path/release-lock.json \
+  --app /absolute/path/NomiFun.app \
+  --dmg /absolute/path/NomiFun.dmg \
+  --report /absolute/path/uarc-macos-report.json
+
+验证 host、CEF framework、全部 helper 均 arm64，资源/签名顺序、Developer ID deep/strict、mounted identity、
+fresh-root startup、cleanup；凭据 available 时完成当前 DMG notarization/staple，otherwise 标 not_run。
+
+仅在任务开始、集成完成、Gate 完成或 blocker 变化时更新 STATUS.zh.md。提交精确命令、source commit、结果、
+artifact hash/notary id 与不含 secret 的报告。若没有生产代码变化，把 UARC-033/042/050/051/053/063/070 的
+macOS 状态恢复 verified，运行 bun scripts/check-uarc-boundary.mjs --completion 并完成 UARC-070。若 Mac
+产生任何代码修复，先提交并推送原分支，然后回到 Windows 执行 UARC-064 affected Rust/UI、bun run check、
+production build 与必要 native 回归；Windows 再绿后才能完成 UARC-070。
 ```
-
-在真实 `.app` 上检查 880×600 与宽窗口：普通 Conversation 只列出适用的官方/个人 Agent，Customer Service
-template 和 customer-bound Preset 不可见，Companion personal Preset 仍可见；搜索空态、展开/收起、Enter/
-方向键/Escape 焦点返回完整；Computer 不在 Conversation Resource picker 重复显示权限配置，Settings 的
-Computer 页面仍真实反映 TCC 状态。随后对 current App/DMG 重跑 `check-macos-arm64-native.mjs` 的架构、签名、
-挂载同一性、fresh-root startup 与 cleanup，并在凭据 available 时完成当前 DMG 的 notarization/staple/release
-lock。任何真实模型步骤仍必须使用商业 StepFun Coding Plan `step-3.7-flash` 并隔离注入。
-
-若 Mac 仅产生新证据/制品而不改生产代码，可直接恢复 UARC-042/050/053/063/070 的 Mac `verified` 并完成
-UARC-070；若发现并提交 UI 修复，则必须再次回到 Windows 跑受影响 UI、`bun run check` 和 production build。

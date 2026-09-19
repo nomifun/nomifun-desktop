@@ -313,7 +313,7 @@
         "native Browser, Computer, Terminal and unified Agent lifecycle matrix",
         "Developer ID and notarization result when credentials are available"
       ],
-      "current_blocker": "Late shared renderer commit daef16c9b was merged after the signed/notarized artifact source 6ab013f68; rebuild the current arm64 App/DMG and rerun the affected 880x600/wide Agent-selection and Computer-setup UI matrix on a real Mac. Existing CEF/Process/Computer native evidence remains reusable because those sources and contracts did not change."
+      "current_blocker": "Shared product-flow repair commit 4f249fd50a1036d560fcb244f67b98826eeebc6b was created after the signed/notarized artifact source 6ab013f68. It changes canonical AgentSession message/turn projection, immutable Agent selection, AgentExecution collaboration, AutoWork lifecycle, Companion controls and shared renderer layout. A real Apple Silicon Mac must validate this exact source with targeted/full Rust and UI gates, a production arm64 App/DMG, ordinary send-to-terminal flow, new-Agent switching, explicit collaboration, AutoWork pause/resume/completion, 880x600/wide UI, CEF/TCC and application lifecycle evidence. Unchanged low-level native evidence may be retained, but the old packaged product-flow and artifact evidence cannot represent the current source."
     }
   ]
 }

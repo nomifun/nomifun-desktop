@@ -99,3 +99,15 @@ Mac 核心阶段完成后，仍必须回到 Windows 执行 UARC-064；只有其�
 回归，但上述 signed/notarized App/DMG 不包含这 11 个 renderer 文件。因此 UARC-063 的当前平台状态重新为
 `implemented_unverified`，只待 `MACOS-HANDOFF.zh.md` §12 定义的 current-source shared UI 与 App/DMG 增量复验。
 CEF、Process/PTY、Computer physical/TCC 和 StepFun 原生证据未受影响，不被改写为未通过。
+
+## 9. Product-flow repair supersession
+
+`4f249fd50a1036d560fcb244f67b98826eeebc6b` 又在上述 artifact source 之后修改了 shared Runtime/API/UI：
+AgentSession message/Turn identity and terminal projection、immutable Agent Session creation、AgentExecution
+collaboration、AutoWork preflight/pause/resume/rollback、Companion controls 与 880×600 layout。Windows 已完成
+workspace all-target/doctest、UI 3,545、static/build、视觉和真实商业 StepFun 产品流复验。
+
+因此本文的低层 CEF/Process/PTY/Computer native 事实仍可作为未改动 owner 的历史证据，但 packaged Agent
+flow、App/DMG 与 UARC-063 current-source 结论再次失效。Mac 必须按 `MACOS-HANDOFF.zh.md` §12 在当前源码
+重建并验证；在此之前 UARC-033/042/050/051/053/063/070 的 macOS 状态保持
+`implemented_unverified`。

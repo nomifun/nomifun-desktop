@@ -105,3 +105,21 @@ UARC-070 推送前发现远端在 Mac closeout 之后新增 `daef16c9b41ba24604c
 
 Windows 对该 late merge 为 verified。由于 signed/notarized Mac App/DMG 不包含这批 renderer，Mac full-product
 gap 已重新标为 `implemented_unverified`；该外部 Mac 增量 gate 由 UARC-070 继续持有。
+
+## 2026-09-20 product-flow repair 回归
+
+当前 Windows shared-source barrier 更新为 `4f249fd50a1036d560fcb244f67b98826eeebc6b`。该提交修复消息
+send/stream/terminal identity、immutable Agent Session 切换、AgentExecution collaboration、AutoWork
+preflight/pause/resume/rollback、Companion 只读配置与 880×600 overflow；未修改 WebView2、Process、Computer
+native owner 或 installer 实现。
+
+- `cargo test --workspace --all-targets --no-fail-fast -- --test-threads=1`：pass，0 failure；
+- workspace doctest：pass；rustfmt、target inventory、Agent v2 contract、diff check：pass；
+- UI：3,545/3,545；`bun run check`：1,917 renderer sources，13 legacy groups=0，open anomaly=0，Mac gap=1；
+- production renderer：7,559 modules，pass；
+- 880×600：Agent menu、collaboration actions、Escape focus、horizontal overflow=0；
+- real commercial smoke：StepFun Coding Plan `step-3.7-flash` 通过 message terminal、新冻结 Session、显式
+  collaboration、AutoWork completion 和 credential audit。
+
+UARC-064 Windows completion gate 继续为 verified。因为 shared Runtime/API/UI 已晚于旧 Mac artifact，Mac
+current-source 状态按合同保持 `implemented_unverified`，不以本节 Windows 结果替代。
