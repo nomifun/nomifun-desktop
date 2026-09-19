@@ -90,3 +90,12 @@ Release lock:
 
 Mac 核心阶段完成后，仍必须回到 Windows 执行 UARC-064；只有其完成后才能执行 UARC-070。本文不声明
 整个跨平台 UARC 完成。
+
+## 8. Late renderer supersession
+
+本文的 App/DMG 证据对 artifact source `6ab013f68` 仍然有效。其后同分支新增 shared renderer commit
+`daef16c9b41ba24604cc778e2450e3f22515fa62`，改变 Conversation Agent catalog/selector 与 Computer 设置
+入口；Windows 已在 merge `f08acea45d07a56e67a2f8afd1f359b9ec6aafd5` 完成 UI/静态/production build
+回归，但上述 signed/notarized App/DMG 不包含这 11 个 renderer 文件。因此 UARC-063 的当前平台状态重新为
+`implemented_unverified`，只待 `MACOS-HANDOFF.zh.md` §12 定义的 current-source shared UI 与 App/DMG 增量复验。
+CEF、Process/PTY、Computer physical/TCC 和 StepFun 原生证据未受影响，不被改写为未通过。

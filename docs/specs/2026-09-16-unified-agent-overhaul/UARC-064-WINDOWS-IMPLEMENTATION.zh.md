@@ -89,3 +89,19 @@ Windows rustc toolchain 瞬态，不豁免任何产品 gate。
 - macOS：UARC-061/062/063 的 verified evidence 保持在 Mac closeout；本任务不把其显式 `not_run` 项改写为 pass。
 - 下一步：UARC-070 requirements-to-evidence、production reachability、write/delete/retained ownership 和临时代码
   最终审计。
+
+## Late shared renderer merge 回归
+
+UARC-070 推送前发现远端在 Mac closeout 之后新增 `daef16c9b41ba24604cc778e2450e3f22515fa62`，Windows
+以 merge `f08acea45d07a56e67a2f8afd1f359b9ec6aafd5` 接入。变更只涉及 Conversation Agent catalog/selector
+和 Computer 设置入口；Rust、WebView2、CEF、Process、Computer native 与 packaging source 均未变化。
+
+- affected UI：31/31 passed；
+- full UI：3,541/3,541 passed；
+- `bun run check`：passed，1,918 renderer sources / minimum 880×600；13 legacy groups=0，open anomaly=0；
+- production renderer：7,562 modules，passed；
+- 真实 880×600 与 1440×900 preview：完整官方 Agent 展开、Customer Service 搜索空态、Escape focus return、
+  无溢出，passed。
+
+Windows 对该 late merge 为 verified。由于 signed/notarized Mac App/DMG 不包含这批 renderer，Mac full-product
+gap 已重新标为 `implemented_unverified`；该外部 Mac 增量 gate 由 UARC-070 继续持有。

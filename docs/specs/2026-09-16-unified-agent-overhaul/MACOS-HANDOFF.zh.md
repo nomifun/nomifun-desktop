@@ -310,7 +310,42 @@ arm64 App/DMG 的权威报告为 `build.noindex/uarc063-delivery/uarc-macos-repo
 App/DMG Developer ID、Apple notarization/staple、release lock、挂载同一性、fresh-root startup 和 cleanup 均
 通过。主机 Gatekeeper assessment 全局关闭，因此该交互检查单独为 `not_run`。
 
-Windows Integration 已在 `2a426e7af3367ba47101fa3e676a71c89bc57af6` 完成 UARC-064：受影响
-crates/UI、WebView2、Process/Computer、商业 StepFun、`bun run check`、production renderer 与 NSIS candidate
-全部通过。UARC-070 随后完成 requirements-to-evidence、production reachability、write-set、dependency 和
-platform-state 审计；最终结论见 `UARC-070-COMPLETION-AUDIT.zh.md`。当前无下一 handoff 或未归属平台工作。
+Windows Integration 已在 `2a426e7af3367ba47101fa3e676a71c89bc57af6` 完成原 UARC-064。其后远端新增
+shared renderer commit `daef16c9b41ba24604cc778e2450e3f22515fa62`，并由 Windows merge
+`f08acea45d07a56e67a2f8afd1f359b9ec6aafd5` 接入。该 commit 只改变 Conversation Agent catalog/selector
+和 Computer 配置入口；Windows focused 31/31、full UI 3541/3541、`bun run check`、7,562-module production
+renderer、880×600/宽窗口视觉与键盘焦点均通过。Rust/native/package source 未变化。
+
+但是既有 signed/notarized App/DMG 不包含这批 renderer，因此 UARC-042/050/053/063/070 的 macOS 状态重新
+标为 `implemented_unverified`。Mac 只需执行以下增量收口，不重复未受影响的 CEF 34/34、Process 240、
+Terminal 146、Computer physical/TCC 或真实 StepFun gate：
+
+```bash
+git fetch origin rf/agent-capability-platform-v2
+git checkout rf/agent-capability-platform-v2
+git pull --ff-only origin rf/agent-capability-platform-v2
+git merge-base --is-ancestor f08acea45d07a56e67a2f8afd1f359b9ec6aafd5 HEAD
+git status --short
+
+bun run typecheck
+bun test --cwd ui \
+  src/renderer/components/agent/AgentResourcePicker.interaction.test.tsx \
+  src/renderer/components/agent/conversationAgentCatalog.test.ts \
+  src/renderer/pages/guid/components/GuidAgentSelector.interaction.test.tsx \
+  src/renderer/pages/guid/hooks/agentPresetSelection.test.ts
+bun test --cwd ui
+bun run check
+bun run build:ui
+bun run build:mac --check arm
+bun run build:mac arm
+```
+
+在真实 `.app` 上检查 880×600 与宽窗口：普通 Conversation 只列出适用的官方/个人 Agent，Customer Service
+template 和 customer-bound Preset 不可见，Companion personal Preset 仍可见；搜索空态、展开/收起、Enter/
+方向键/Escape 焦点返回完整；Computer 不在 Conversation Resource picker 重复显示权限配置，Settings 的
+Computer 页面仍真实反映 TCC 状态。随后对 current App/DMG 重跑 `check-macos-arm64-native.mjs` 的架构、签名、
+挂载同一性、fresh-root startup 与 cleanup，并在凭据 available 时完成当前 DMG 的 notarization/staple/release
+lock。任何真实模型步骤仍必须使用商业 StepFun Coding Plan `step-3.7-flash` 并隔离注入。
+
+若 Mac 仅产生新证据/制品而不改生产代码，可直接恢复 UARC-042/050/053/063/070 的 Mac `verified` 并完成
+UARC-070；若发现并提交 UI 修复，则必须再次回到 Windows 跑受影响 UI、`bun run check` 和 production build。
