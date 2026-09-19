@@ -42,8 +42,9 @@
 - UARC-062 已在真机通过 Process 240、Terminal 146、Computer 92 个 tests；正式 signed `.app` 的
   `computer/a11y.observe` 成功，`computer/observe` 在 Screen Recording 未授权时以 canonical
   `ROLE_HOST_PROVIDER_FAILURE` 失败，Engine 随后按 `update_plan`/`report_completion` 完成且不重试。
-  当前 Accessibility=true、Screen Recording=false；Command-Q 已通过，物理输入、Retina 与 Terminal IME
-  仍待闭合，详见 [UARC-062 macOS 实现证据](UARC-062-MACOS-IMPLEMENTATION.zh.md)。
+  当前 Accessibility=true、Screen Recording=false；Command-Q、Computer launch/input、Command/Option/Control、
+  Terminal focus/Unicode/resize 已通过；Retina screenshot 与真实 IME composition 仍待闭合，详见
+  [UARC-062 macOS 实现证据](UARC-062-MACOS-IMPLEMENTATION.zh.md)。
 - 产品组合只安装一个 `nomifun.nomi` provider/factory；旧 Nomi loop/factory/manager、
   `nomifun.coding` family、multi-Runtime catalog/selector 与 private transcript 已物理删除。统一实现位于
   `nomifun-agent-runtime`，诊断 API 为 singular `/api/agent-runtime`。
@@ -111,7 +112,7 @@
 | `UARC-054` | integrated | Integration | verified | pending | canonical schema baseline 已压缩并验证 |
 | `UARC-060` | integrated | Windows Integration | verified | pending | Windows candidate 与 shared-source barrier 已冻结 |
 | `UARC-061` | active | Mac Integration | n/a | engineering verified / external gates blocked | 主实现、33/33 native、正式 Agent/Kernel/CEF、signed `.app` 与真实 Command-Q 已过；等待 StepFun Keychain、Chrome Remote Debugging |
-| `UARC-062` | active | Mac Integration | n/a | engineering verified / external gates blocked | Process/PTY、Accessibility granted、Screen denied、exact-source signed `.app` 与 Command-Q 已过；等待 Screen Recording，物理输入/IME 待闭合 |
+| `UARC-062` | active | Mac Integration | n/a | engineering verified / external gates blocked | Process/PTY、Accessibility/physical input、Terminal focus/Unicode/resize、Command-Q 已过；等待 Screen Recording + 真实 IME composition |
 | `UARC-063` | planned | unassigned | n/a | pending | 等待 UARC-061/062 集成后执行完整产品与 arm64 制品验收 |
 | `UARC-064` | planned | unassigned | pending | n/a | 仅在 Mac 合入后回到 Windows 执行 |
 | `UARC-070` | planned | unassigned | pending | pending | 仅在 UARC-064 后执行跨平台完成审计 |
@@ -194,15 +195,17 @@
 | UARC-061 external gates | StepFun Keychain absent；Chrome `DevToolsActivePort` absent | live model / attached install connection 诚实 blocked，未用替代证据 |
 | UARC-062 Process runtime | 240 passed；含 2 个真实 parent-death、group/generation、Seatbelt、cancel/descendant/timeout | macOS Process 与 PTY owner cleanup gate |
 | UARC-062 Terminal | 146 passed；真实 PTY stdin/resize/UTF-8/fast output/abrupt backend exit | backend/PTTY lifecycle passed；UI focus/IME 待闭合 |
-| UARC-062 Computer | 92 passed / 7 个真实物理/TCC tests explicit ignored | contract/dispatcher/scale/key semantics passed；真实 granted physical gate 未冒充 |
+| UARC-062 Computer | 92 passed / 7 个真实物理/TCC tests explicit ignored；正式产品 launch/input 另行 passed | contract/dispatcher/scale/key + fresh-generation physical effects passed |
 | UARC-062 packaged Computer | Accessibility=true；Screen Recording=false；`turn/completed` + `host_cleanup_proven` | canonical granted a11y + denied screenshot 产品证据；无重试，退出无残留 |
+| UARC-062 packaged physical input | 22 model steps；Command/Option/Control；saved `alpha XbetaY`；`turn/completed` + `host_cleanup_proven` | canonical launch/input 与每次 effect 后 fresh observation passed |
+| UARC-062 Terminal UI | focused PTY；UTF-8 `终端中文-日本語-✓`；99x35→191x48→99x35；active-PTY Command-Q deleted=1 | focus/Unicode/resize/cleanup passed；IME composition not verified |
 | UARC-062 exact-source arm64 `.app` | 7,677-module renderer + 17m22s cold release；host/framework/5 helpers arm64；Developer ID deep strict valid | 当前源码 checkpoint；DMG/release lock/notarization 仍归 UARC-063 |
 | UARC-052 Runtime/AI/Conversation | Runtime 40 + AI 452 + Plugin consumer 23 + Conversation 335 passed | 单一 Runtime loop、固定 factory、提取 adapters 与无 private transcript |
 | UARC-052 App/process | App lib 511 + route-gap 29 + Process architecture 16 passed | single-factory boot、canonical Session dispatch 与单 process owner |
 | UARC-052 UI/build/boundary | focused UI 7；typecheck、production build、880×600、Browser/Process/UARC scanners passed | Runtime selector/compatibility reachability为 0；migration 099 的 2 个 immutable 文本归 UARC-054 |
 | Windows UARC full gate | not run | 否 |
 | macOS UARC shared compile | UARC-061/062 targeted crates + exact arm64 release app passed | UARC-063 全 workspace gate 仍未运行 |
-| macOS native Browser/Computer/Process | Browser 33/33 + product CEF + Command-Q passed；Process/PTY passed；Computer granted-a11y/denied-screen passed | granted screenshot 与 remaining input/IME 待闭合 |
+| macOS native Browser/Computer/Process | Browser 33/33 + product CEF + Command-Q；Process/PTY；Computer a11y/physical input；Terminal UI passed | granted screenshot/Retina 与真实 IME composition 待闭合 |
 | Windows/macOS packages | Windows NSIS verified；macOS Developer ID `.app` checkpoint passed | macOS DMG/release lock/notarization 未运行 |
 
 ## 6. Test Lease
@@ -221,7 +224,9 @@
 - Apple Silicon Mac 主机已可用；UARC-061/062 已生成工程与部分原生产品证据，UARC-063 仍待依赖闭合。
 - StepFun Coding Plan Keychain service 当前为 `absent`；真实模型 gate 在安全录入前保持 blocked，其他实现与验证继续。
 - 当前 signed NomiFun 的 Accessibility=true、Screen Recording=false；用户需授予 Screen Recording 并重启 app，
-  才能运行 granted screenshot/Retina/input matrix。
+  才能运行 granted screenshot/Retina matrix。
+- 自动化 input-source shortcut 只向 PTY 发送 raw pinyin；用户需在已配置中文/日文输入法下完成一次真实 IME
+  composition，不能用 Unicode paste 代替。
 - Chrome 默认 profile 的 `DevToolsActivePort` absent；用户需显式开启 Remote Debugging，才能运行 attached Chrome。
 - `UARC-051/052` Windows/shared cutover 已收口；产品入口均使用 generation 5 Store 与唯一官方 Runtime，
   旧 Conversation projection、旧 Runtime 实现、multi-Runtime selector 与 private transcript 不再可达。
@@ -231,7 +236,7 @@
 ## 8. Next ready tasks
 
 1. `UARC-061`：active / engineering verified；等待 StepFun Keychain 与 Chrome Remote Debugging。
-2. `UARC-062`：active / engineering verified；等待 Screen Recording；物理输入/IME 在当前 unlocked Session 继续闭合。
+2. `UARC-062`：active / engineering verified；等待 Screen Recording 与真实 IME composition。
 3. `UARC-063`：仍为 planned；必须等待 UARC-061/062 正式 integrated 后，在 clean Mac barrier 上执行完整产品与 arm64 package gate。
 
 ## 9. 状态更新模板
@@ -1033,9 +1038,9 @@
   Agent performed `update_plan`/`report_completion` without retry, reached `turn/completed` and
   `host_cleanup_proven`, then app/helper process count reached zero.
 - macOS: engineering verified for Process/PTY, Accessibility-granted and Screen-denied paths. Windows unchanged.
-- Not run/blocked: Screen Recording granted screenshot/Retina remains blocked on user grant；Command/Option/Control、
-  Computer input/launch 与 Terminal renderer focus/IME 继续在当前 unlocked Session 闭合。真实 Command-Q 已通过，
-  且没有用 SIGTERM 或 abrupt parent-death 冒充。
+- Not run/blocked: Screen Recording granted screenshot/Retina remains blocked on user grant；真实 IME composition
+  仍需人工输入法回合。Command/Option/Control、Computer input/launch、Terminal focus/Unicode/resize 与真实
+  Command-Q 已通过，且没有用 SIGTERM 或 abrupt parent-death 冒充。
 - Remaining/blocker: user grants Screen Recording and relaunches the signed app. UARC-061 also still needs StepFun
   Keychain and Chrome Remote Debugging；therefore UARC-063 remains planned.
 - Next ready tasks: close the UARC-061/062 external gates, then begin UARC-063 from a clean integrated Mac barrier.
@@ -1055,4 +1060,26 @@
 - Artifacts: `build.noindex/uarc061-command-q-evidence-v5/**` and
   `build.noindex/uarc061-cef-commandq-fix-v2/run-oAyKhT/{native-result.json,artifact.json}`.
 - Remaining/blocker: UARC-061 now waits only for StepFun Keychain credential and Chrome Remote Debugging. UARC-062
-  still waits for Screen Recording and its remaining physical input/IME matrix; UARC-063 remains planned.
+  still waits for Screen Recording and real IME composition; UARC-063 remains planned.
+
+### 2026-09-19 UARC-062 physical input and Terminal UI verified
+
+- Barrier/source: UARC-061 Command-Q fix `686735489`; signed Apple Silicon product artifact with
+  Accessibility=true and Screen Recording=false.
+- Changed: the disposable product fixture gained a bounded `--computer-input` mode. It launches one owned TextEdit
+  file, waits for the exact filename to become the foreground Accessibility window, and supplies a fresh Role Host
+  `expected_generation` after every input effect. No pixel fallback or Screen Recording authority is inferred.
+- Product evidence: canonical launch、`set_element_value`、`cmd+right`、`option+left`、type X、`ctrl+e`、type Y、
+  `cmd+s` produced and saved exact `alpha XbetaY`；model_calls=22、`turn/completed`、`host_cleanup_proven=true`；
+  harness closed TextEdit and observed zero remaining process. Saved file SHA-256 is
+  `84b9e548cc6792754abda7090c9f75538275f686e53fd0a59776eace8000eb19`.
+- Terminal UI evidence: product UI created a real `$SHELL` PTY and retained native input focus；Unicode paste/output
+  round-tripped `终端中文-日本語-✓`；full-screen resize propagated 99×35 → 191×48 → 99×35；real Command-Q with the
+  PTY active logged `deleted=1`, then terminal session/scrollback rows and host processes were zero.
+- Tests/artifacts: `build.noindex/uarc062-computer-input-evidence-v11/**` and
+  `build.noindex/uarc062-terminal-ui-evidence-v2/terminal-ui-result.json`；fixture feature-complete compile and rustfmt
+  passed.
+- Honest limitation: the native Unicode paste path passed, but the synthetic input-source shortcut delivered raw
+  `zhongduan` instead of an IME composition. UARC-062 still requires a manual configured-IME round plus user-granted
+  Screen Recording/Retina evidence before integration.
+- Next ready tasks: close those two UARC-062 user gates and UARC-061's StepFun/Chrome gates, then begin UARC-063.

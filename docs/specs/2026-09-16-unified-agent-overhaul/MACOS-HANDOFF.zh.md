@@ -273,7 +273,7 @@ known limitations
 | Browser managed Provider | production CEF binding implemented；native 33/33 + packaged Agent/Kernel/CEF + real Command-Q passed |
 | Attached Chrome Provider | macOS default profile discovery implemented；Chrome installed，Remote Debugging 未开启，真实连接 blocked |
 | Process/PTY | UARC-062 real Mac gates passed：Process 240/240；Terminal 146/146；parent-death/group + real Command-Q cleanup passed |
-| Computer/TCC | Accessibility=true + real Agent a11y observe passed；Screen Recording=false + canonical denied path passed；granted physical matrix blocked |
+| Computer/TCC | Accessibility=true；Agent a11y + launch/input + Command/Option/Control passed；Screen Recording=false denied path passed；granted screenshot/Retina + real IME blocked |
 | Agent Workbench visual | pending |
 | New Agent Store clean cut | pending |
 | `.app`/DMG | UARC-062 exact-source Developer ID arm64 `.app` checkpoint passed；DMG/release lock 归 UARC-063 pending |
@@ -305,7 +305,9 @@ NSIS 14-check install smoke 均通过。候选安装、启动、`/health` 200、
 1. Keychain service `NomiFun/StepFun/LiveProvider` absent：用户需用安全方式录入商业 StepFun credential；
 2. Chrome `DevToolsActivePort` absent：用户需在 `chrome://inspect/#remote-debugging` 显式开启 Remote Debugging。
 3. signed NomiFun 当前 Screen Recording=false：用户需在系统设置中授权并重新启动 app，才能执行 granted
-   screenshot 与 Retina 坐标矩阵；物理 input/modifier 和 Terminal focus/IME 在当前 unlocked Session 继续闭合。
+   screenshot 与 Retina 坐标矩阵。
+4. Terminal focus、Unicode paste/output、resize 与 active-PTY Command-Q 已通过，但自动化 input-source shortcut
+   只送出 raw pinyin；需要用户在已配置中文/日文输入法下完成一次真实 IME composition。
 
 UARC-061/062 均保持 `active / engineering verified / external gates blocked`；UARC-063 仍必须等待二者正式
 integrated。上述 blocker 闭合前不得把任何一个任务写成 `macOS verified`，也不得提前执行 UARC-064/070。

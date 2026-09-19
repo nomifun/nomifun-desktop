@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-input]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -44,8 +44,11 @@ struct Fixture {
     calls: AtomicUsize,
     native_url: Option<String>,
     computer_denied: bool,
+    computer_input: bool,
+    computer_file: Option<PathBuf>,
     a11y_observed: AtomicBool,
     screen_denied: AtomicBool,
+    input_verified: AtomicBool,
     witnesses: Mutex<Vec<Value>>,
     failure: Mutex<Option<String>>,
     finish: Semaphore,
@@ -275,6 +278,417 @@ fn computer_operation(
     )))
 }
 
+fn computer_tool_result<'a>(body: &'a Value, call_id: &str) -> Option<&'a Value> {
+    body["messages"].as_array().and_then(|messages| {
+        messages.iter().find(|message| {
+            message["role"] == "tool" && message["tool_call_id"].as_str() == Some(call_id)
+        })
+    })
+}
+
+fn computer_result_text<'a>(body: &'a Value, call_id: &str) -> anyhow::Result<&'a str> {
+    computer_tool_result(body, call_id)
+        .and_then(|message| message["content"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("Computer result missing for {call_id}"))
+}
+
+fn accessibility_snapshot_text(content: &str) -> anyhow::Result<String> {
+    if let Ok(value) = serde_json::from_str::<Value>(content)
+        && let Some(text) = value["result"]["text"].as_str()
+    {
+        return Ok(text.to_owned());
+    }
+    anyhow::ensure!(
+        content.contains("Accessibility snapshot"),
+        "Accessibility snapshot text missing"
+    );
+    Ok(content.to_owned())
+}
+
+fn computer_result_generation(content: &str) -> anyhow::Result<u64> {
+    let value: Value = serde_json::from_str(content)?;
+    value["generation"]
+        .as_u64()
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| anyhow::anyhow!("Computer observation generation missing"))
+}
+
+fn require_computer_success(body: &Value, call_id: &str) -> anyhow::Result<()> {
+    let result = computer_result_text(body, call_id)?;
+    anyhow::ensure!(
+        !result.contains("Capability Kernel rejected")
+            && !result.contains("plan needs reconsideration")
+            && !result.contains("[tool error]"),
+        "Computer action {call_id} failed"
+    );
+    Ok(())
+}
+
+fn computer_input_call(
+    body: &Value,
+    call_id: &str,
+    observation_call_id: &str,
+    action: &str,
+    parameters: Value,
+) -> anyhow::Result<(String, String, Value)> {
+    let generation = computer_result_generation(computer_result_text(
+        body,
+        observation_call_id,
+    )?)?;
+    let mut parameters = parameters
+        .as_object()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Computer input parameters must be an object"))?;
+    parameters.insert("action".into(), Value::String(action.to_owned()));
+    parameters.insert("expected_generation".into(), json!(generation));
+    Ok((
+        call_id.to_owned(),
+        browser_tool(body, "computer/input")?,
+        Value::Object(parameters),
+    ))
+}
+
+fn text_editor_ref(content: &str) -> anyhow::Result<u32> {
+    let text = accessibility_snapshot_text(content)?;
+    anyhow::ensure!(
+        text.contains("computer-input.txt"),
+        "Disposable TextEdit fixture is not the foreground accessibility window"
+    );
+    text.lines()
+        .find_map(|line| {
+            let lower = line.to_ascii_lowercase();
+            let is_editor = [
+                "text area",
+                "text entry",
+                "textarea",
+                "textfield",
+                "text field",
+            ]
+            .iter()
+            .any(|role| lower.contains(role));
+            if !is_editor {
+                return None;
+            }
+            line.trim_start()
+                .strip_prefix('[')?
+                .split_once(']')?
+                .0
+                .parse()
+                .ok()
+        })
+        .ok_or_else(|| anyhow::anyhow!("TextEdit accessibility text area ref missing"))
+}
+
+fn computer_input_operation(
+    fixture: &Fixture,
+    body: &Value,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    let file = fixture
+        .computer_file
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Computer input fixture file missing"))?;
+    let call = |id| computer_tool_result(body, id).is_some();
+    if call("gui-computer-input-report") {
+        return Ok(None);
+    }
+    if call("gui-computer-input-plan-finish") {
+        return Ok(Some((
+            "gui-computer-input-report".into(),
+            "report_completion".into(),
+            json!({
+                "summary":"The disposable TextEdit fixture was launched, edited with Command, Option and Control modifiers, and saved.",
+                "criteria":[
+                    {
+                        "step":"Launch the disposable TextEdit fixture",
+                        "disposition":"supported",
+                        "evidence_call_ids":["gui-computer-input-observe-after-save"],
+                        "rationale":"The latest post-save Accessibility observation proves the disposable TextEdit document is the active target.",
+                        "requirement_ids":[]
+                    },
+                    {
+                        "step":"Verify Command, Option and Control input",
+                        "disposition":"supported",
+                        "evidence_call_ids":["gui-computer-input-observe-after-save"],
+                        "rationale":"The same latest observation contains the expected modifier-derived value and no edited-state marker.",
+                        "requirement_ids":["req-computer-input"]
+                    }
+                ]
+            }),
+        )));
+    }
+    if call("gui-computer-input-observe-after-save") {
+        let snapshot = accessibility_snapshot_text(computer_result_text(
+            body,
+            "gui-computer-input-observe-after-save",
+        )?)?;
+        anyhow::ensure!(
+            snapshot.contains("alpha XbetaY") && !snapshot.contains("已编辑"),
+            "Post-save TextEdit observation did not prove the saved modifier-derived value"
+        );
+        return Ok(Some((
+            "gui-computer-input-plan-finish".into(),
+            "update_plan".into(),
+            json!({
+                "explanation":"The disposable editor reflected the expected modifier-derived value and its post-save state.",
+                "plan":[
+                    {"step":"Launch the disposable TextEdit fixture","status":"completed"},
+                    {"step":"Verify Command, Option and Control input","status":"completed"}
+                ]
+            }),
+        )));
+    }
+    if call("gui-computer-input-save") {
+        require_computer_success(body, "gui-computer-input-save")?;
+        return Ok(Some((
+            "gui-computer-input-observe-after-save".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-verify") {
+        let snapshot = accessibility_snapshot_text(computer_result_text(
+            body,
+            "gui-computer-input-verify",
+        )?)?;
+        anyhow::ensure!(
+            snapshot.contains("alpha XbetaY"),
+            "Modifier-derived TextEdit value missing from final Accessibility snapshot"
+        );
+        fixture.input_verified.store(true, Ordering::SeqCst);
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-save",
+            "gui-computer-input-verify",
+            "key",
+            json!({"key":"cmd+s"}),
+        )?));
+    }
+    if call("gui-computer-input-type-y") {
+        require_computer_success(body, "gui-computer-input-type-y")?;
+        return Ok(Some((
+            "gui-computer-input-verify".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe-after-control") {
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-type-y",
+            "gui-computer-input-observe-after-control",
+            "type",
+            json!({"text":"Y"}),
+        )?));
+    }
+    if call("gui-computer-input-control") {
+        require_computer_success(body, "gui-computer-input-control")?;
+        return Ok(Some((
+            "gui-computer-input-observe-after-control".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe-after-x") {
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-control",
+            "gui-computer-input-observe-after-x",
+            "key",
+            json!({"key":"ctrl+e"}),
+        )?));
+    }
+    if call("gui-computer-input-type-x") {
+        require_computer_success(body, "gui-computer-input-type-x")?;
+        return Ok(Some((
+            "gui-computer-input-observe-after-x".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe-after-option") {
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-type-x",
+            "gui-computer-input-observe-after-option",
+            "type",
+            json!({"text":"X"}),
+        )?));
+    }
+    if call("gui-computer-input-option") {
+        require_computer_success(body, "gui-computer-input-option")?;
+        return Ok(Some((
+            "gui-computer-input-observe-after-option".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe-after-command") {
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-option",
+            "gui-computer-input-observe-after-command",
+            "key",
+            json!({"key":"option+left"}),
+        )?));
+    }
+    if call("gui-computer-input-command") {
+        require_computer_success(body, "gui-computer-input-command")?;
+        return Ok(Some((
+            "gui-computer-input-observe-after-command".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe-after-set") {
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-command",
+            "gui-computer-input-observe-after-set",
+            "key",
+            json!({"key":"cmd+right"}),
+        )?));
+    }
+    if call("gui-computer-input-set") {
+        require_computer_success(body, "gui-computer-input-set")?;
+        return Ok(Some((
+            "gui-computer-input-observe-after-set".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe-4") {
+        let reference = text_editor_ref(computer_result_text(
+            body,
+            "gui-computer-input-observe-4",
+        )?)?;
+        fixture.a11y_observed.store(true, Ordering::SeqCst);
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-set",
+            "gui-computer-input-observe-4",
+            "set_element_value",
+            json!({"ref":reference,"text":"alpha beta"}),
+        )?));
+    }
+    if call("gui-computer-input-observe-3") {
+        let result = computer_result_text(body, "gui-computer-input-observe-3")?;
+        if accessibility_snapshot_text(result)
+            .ok()
+            .is_none_or(|text| !text.contains("computer-input.txt"))
+        {
+            std::thread::sleep(Duration::from_millis(250));
+            return Ok(Some((
+                "gui-computer-input-observe-4".into(),
+                browser_tool(body, "computer/a11y.observe")?,
+                json!({"action":"observe"}),
+            )));
+        }
+        let reference = text_editor_ref(computer_result_text(
+            body,
+            "gui-computer-input-observe-3",
+        )?)?;
+        fixture.a11y_observed.store(true, Ordering::SeqCst);
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-set",
+            "gui-computer-input-observe-3",
+            "set_element_value",
+            json!({"ref":reference,"text":"alpha beta"}),
+        )?));
+    }
+    if call("gui-computer-input-observe-2") {
+        let result = computer_result_text(body, "gui-computer-input-observe-2")?;
+        if accessibility_snapshot_text(result)
+            .ok()
+            .is_some_and(|text| text.contains("computer-input.txt"))
+        {
+            let reference = text_editor_ref(result)?;
+            fixture.a11y_observed.store(true, Ordering::SeqCst);
+            return Ok(Some(computer_input_call(
+                body,
+                "gui-computer-input-set",
+                "gui-computer-input-observe-2",
+                "set_element_value",
+                json!({"ref":reference,"text":"alpha beta"}),
+            )?));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+        return Ok(Some((
+            "gui-computer-input-observe-3".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-observe") {
+        let result = computer_result_text(body, "gui-computer-input-observe")?;
+        if accessibility_snapshot_text(result)
+            .ok()
+            .is_none_or(|text| !text.contains("computer-input.txt"))
+        {
+            std::thread::sleep(Duration::from_millis(250));
+            return Ok(Some((
+                "gui-computer-input-observe-2".into(),
+                browser_tool(body, "computer/a11y.observe")?,
+                json!({"action":"observe"}),
+            )));
+        }
+        let reference = text_editor_ref(computer_result_text(
+            body,
+            "gui-computer-input-observe",
+        )?)?;
+        fixture.a11y_observed.store(true, Ordering::SeqCst);
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-input-set",
+            "gui-computer-input-observe",
+            "set_element_value",
+            json!({"ref":reference,"text":"alpha beta"}),
+        )?));
+    }
+    if call("gui-computer-input-launch") {
+        return Ok(Some((
+            "gui-computer-input-observe".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-input-plan-start") {
+        return Ok(Some((
+            "gui-computer-input-launch".into(),
+            browser_tool(body, "computer/launch")?,
+            json!({"action":"launch","target":file,"app":"TextEdit"}),
+        )));
+    }
+    if call("gui-computer-input-launch-guard") {
+        anyhow::ensure!(
+            computer_result_text(body, "gui-computer-input-launch-guard")?
+                .contains("update_plan"),
+            "Computer launch did not activate the Engine plan gate"
+        );
+        return Ok(Some((
+            "gui-computer-input-plan-start".into(),
+            "update_plan".into(),
+            json!({
+                "explanation":"Record the exact disposable desktop-control task before retrying the guarded launch effect.",
+                "requirements":[{
+                    "id":"req-computer-input",
+                    "description":"Launch the disposable TextEdit fixture and verify Command, Option and Control modifiers.",
+                    "source":{"input":0,"quote":"verify Command, Option and Control modifiers"}
+                }],
+                "plan":[
+                    {"step":"Launch the disposable TextEdit fixture","status":"in_progress"},
+                    {"step":"Verify Command, Option and Control input","status":"pending"}
+                ]
+            }),
+        )));
+    }
+    Ok(Some((
+        "gui-computer-input-launch-guard".into(),
+        browser_tool(body, "computer/launch")?,
+        json!({"action":"launch","target":file,"app":"TextEdit"}),
+    )))
+}
+
 async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderMap, Json(mut body): Json<Value>) -> axum::response::Response {
     if let Some(live) = &fixture.live {
         if headers.get("authorization").and_then(|value|value.to_str().ok()) != Some(live.local_token.as_str()) {
@@ -327,11 +741,19 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
                 return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
             }
         }
+    } else if fixture.computer_input {
+        match computer_input_operation(&fixture, &body) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
     } else { None };
     let (delta, reason) = if let Some((call_id, tool, operation)) = operation {
         (json!({"role":"assistant","tool_calls":[{"index":0,"id":call_id,"type":"function","function":{"name":tool,"arguments":operation.to_string()}}]}), "tool_calls")
     } else {
-        if !fixture.computer_denied {
+        if !fixture.computer_denied && !fixture.computer_input {
             tokio::select! {
                 _=fixture.stop.cancelled()=>{},
                 permit=fixture.finish.acquire()=>{ if let Ok(permit)=permit { permit.forget(); } },
@@ -339,6 +761,8 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
         }
         let content = if fixture.computer_denied {
             "Accessibility 已授权；Screen Recording 被 macOS 拒绝（ROLE_HOST_PROVIDER_FAILURE）。"
+        } else if fixture.computer_input {
+            "已通过正式 Computer Actions 验证 TextEdit 启动、Command/Option/Control 输入与保存。"
         } else {
             "本机测试模型已结束。"
         };
@@ -405,14 +829,28 @@ async fn main() -> anyhow::Result<()> {
     let mode = std::env::args().nth(2);
     let native_actions = mode.as_deref() == Some("--native-actions");
     let computer_denied = mode.as_deref() == Some("--computer-denied");
-    anyhow::ensure!(mode.is_none() || live_mode || native_actions || computer_denied, "unsupported fixture mode");
+    let computer_input = mode.as_deref() == Some("--computer-input");
+    anyhow::ensure!(
+        mode.is_none() || live_mode || native_actions || computer_denied || computer_input,
+        "unsupported fixture mode"
+    );
+    let computer_file = if computer_input {
+        let path = root.join("computer-input.txt");
+        std::fs::write(&path, "seed")?;
+        Some(path)
+    } else {
+        None
+    };
     let fixture = Arc::new(Fixture {
         live,
         calls: AtomicUsize::new(0),
         native_url: native_actions.then(|| format!("http://{address}/")),
         computer_denied,
+        computer_input,
+        computer_file,
         a11y_observed: AtomicBool::new(false),
         screen_denied: AtomicBool::new(false),
+        input_verified: AtomicBool::new(false),
         witnesses: Mutex::new(Vec::new()),
         failure: Mutex::new(None),
         finish: Semaphore::new(0),
@@ -441,7 +879,7 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_input":f.computer_input,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
             }),
         )
         .route(
@@ -495,7 +933,13 @@ async fn main() -> anyhow::Result<()> {
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
         let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":["function_calling","streaming"],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
-        let display_name = if computer_denied { "Computer 权限拒绝验收" } else { "浏览器主界面验收" };
+        let display_name = if computer_denied {
+            "Computer 权限拒绝验收"
+        } else if computer_input {
+            "Computer 物理输入验收"
+        } else {
+            "浏览器主界面验收"
+        };
         let editor = api(&app,"/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":display_name,"model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
         let preset = editor["preset"]["preset_id"].as_str().ok_or_else(|| anyhow::anyhow!("preset missing"))?.to_owned();
         let mut draft=editor["draft"].clone();
@@ -503,6 +947,11 @@ async fn main() -> anyhow::Result<()> {
             json!([{
                 "capability":{"id":"computer","version":"1.0.0"},
                 "action_allowlist":["computer/observe","computer/a11y.observe"]
+            }])
+        } else if computer_input {
+            json!([{
+                "capability":{"id":"computer","version":"1.0.0"},
+                "action_allowlist":["computer/a11y.observe","computer/input","computer/launch"]
             }])
         } else {
             json!([{
@@ -513,7 +962,7 @@ async fn main() -> anyhow::Result<()> {
         let revision_path=format!("/api/agent-presets/{preset}/revisions");
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==1),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied {
+        let resources = if computer_denied || computer_input {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else {
             json!([{"resource_kind":"browser","resource_id":"managed-browser"}])
@@ -532,7 +981,7 @@ async fn main() -> anyhow::Result<()> {
     let session = prepared?;
     println!(
         "BROWSER_GUI_FIXTURE_READY {}",
-        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
+        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_input":computer_input,"computer_file":fixture.computer_file.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
     );
     // Keep only the model/page server alive; the real desktop now owns the DB.
     fixture.stop.cancelled().await;
