@@ -1,8 +1,7 @@
 # In-App Terminals
 
 Nomi ships a real terminal inside the app. Each terminal is a backend-managed
-PTY session you can drive interactively from your browser/desktop window — and
-that AutoWork can drive on your behalf when you bind it to a tag.
+PTY session you can drive interactively from your browser/desktop window.
 
 > Need the automation guide? See [AutoWork & Requirements](./autowork-requirements.md).
 > Need to run an agent on a schedule? See [Scheduled Tasks](./scheduled-tasks.md).
@@ -109,49 +108,14 @@ Client-to-server input goes the other direction over a small REST endpoint
 (base64-encoded bytes). The backend writes those bytes straight to the PTY's
 stdin.
 
-## Terminals as automation targets
+## Automation boundary
 
-The same in-memory PTY map that powers the UI is shared with the **AutoWork
-execution loop** in `nomifun-requirement` via the `TerminalDriver` trait. That
-trait lets AutoWork:
-
-- Subscribe to a copy of the terminal's live output (it watches for completion
-  markers and detects quiescence — see the AutoWork guide for the contract).
-- Write input bytes to the PTY (it injects the requirement prompt wrapped in
-  bracketed-paste so a multi-line instruction lands as a single paste).
-- Check liveness, read the row's metadata (user, backend, mode), and read or
-  write a per-terminal `autowork` config blob.
-
-In other words: **a terminal you create here is automatable by AutoWork**.
-Bind a tag from the AutoWork toolbar in the session header, and the
-AutoWork loop will start claiming requirements and feeding them to the CLI
-running in this terminal. Only agent-CLI terminals (`claude`, `codex`,
-`gemini`) are eligible — a plain shell can be driven manually but is not an
-AutoWork target. The AutoWork loop also recommends Full Auto mode, because a
-turn that hits an interactive approval prompt will block until it times out.
-
-If the workspace has knowledge bases mounted (`{cwd}/.nomi/knowledge/`
-exists), AutoWork- and cron-driven prompts are automatically prefixed with a
-one-line hint pointing the CLI at the mounted `README.md` before it starts
-working.
-
-If the PTY exits while AutoWork is still bound, the loop does not stop — it
-idles and waits for you to re-launch the terminal, then resumes claiming
-where it left off. If you delete the row, the loop stops for good.
-
-## IDMM (decision-stall supervision)
-
-Long-running CLI sessions sometimes stall: the provider drops, the model
-spins on a tool call, the CLI prints a confirmation prompt nobody answers.
-The IDMM (Intelligent Decision-Making Mode) supervisor watches a session and
-intervenes — first with rule-based nudges (no LLM), then by calling a sidecar
-backup model — so the turn reaches a terminal state instead of hanging until
-the AutoWork timeout fires.
-
-You can enable IDMM per-terminal from the same session header (the **IDMM**
-control next to AutoWork). It works whether or not AutoWork is also bound;
-when both are on, AutoWork ensures IDMM is supervising for the duration of
-each turn.
+Terminal AutoWork and the cross-session IDMM supervisor have been retired.
+AutoWork now binds only canonical AgentSessions and delegates execution,
+retry, attention, cancellation and receipt recovery to AgentExecution. Use a
+saved Agent from the conversation/Home entry when you need a Requirements
+queue. Terminal sessions remain interactive tools and can still be launched by
+an authorized Agent through the Process/Terminal capability.
 
 ## Routes & API
 
@@ -173,9 +137,6 @@ each turn.
   `gemini` directly — they must be on the `PATH` of whatever account is
   running the backend. Either install the CLI globally or edit the launch
   command to use an absolute path before launching.
-- **AutoWork bind is greyed out.** Only `claude`/`codex` terminals are
-  AutoWork targets today. A plain shell preset cannot be bound, and Gemini
-  terminal AutoWork is not wired into the backend completion contract yet.
 - **Re-launch keeps reusing the same env / cwd.** That is intentional — the
   session row stores them. To change them, create a new terminal with the
   desired settings.

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Button, Message, Popover, Select, Spin, Switch, Tooltip } from '@arco-design/web-react';
@@ -73,38 +73,63 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
   const tagSelectRef = useRef<SelectHandle>(null);
   const [state, setState] = useState<IAutoWorkState | null>(null);
   const [persistedTag, setPersistedTag] = useState<string | undefined>();
+  const persistedTagRef = useRef<string | undefined>(undefined);
+  const stateRequestRef = useRef(0);
+  const resumePendingRef = useRef(false);
+  const [resuming, setResuming] = useState(false);
+  const draftMode = draft != null;
   const kind = target?.kind;
   const id = target?.id;
   const tag = draft ? draft.value.tag : persistedTag;
   const setTag = (next: string | undefined) => {
     if (draft) draft.onChange({ ...draft.value, tag: next });
-    else setPersistedTag(next);
+    else {
+      persistedTagRef.current = next;
+      setPersistedTag(next);
+    }
   };
 
-  useEffect(() => {
-    if (draft || !kind || !id) return;
-    void ipcBridge.requirements.getAutoWork
-      .invoke({ kind, target_id: id })
-      .then((s) => {
-        setState(s);
-        setPersistedTag(s.tag);
-      })
-      .catch(() => {});
-    // `draft` identity changes every render; only its presence matters here.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, id, !!draft]);
+  const applyState = useCallback((next: IAutoWorkState) => {
+    persistedTagRef.current = next.tag;
+    setState(next);
+    setPersistedTag(next.tag);
+  }, []);
+
+  const loadState = useCallback(async () => {
+    if (draftMode || !kind || !id) return;
+    const request = ++stateRequestRef.current;
+    try {
+      const next = await ipcBridge.requirements.getAutoWork.invoke({ kind, target_id: id });
+      if (request === stateRequestRef.current) applyState(next);
+    } catch {
+      // Keep the last visible snapshot. Reconnect and explicit actions retry
+      // this authoritative read; a transport failure must not manufacture off.
+    }
+  }, [applyState, draftMode, id, kind]);
 
   useEffect(() => {
-    if (draft || !kind || !id) return;
-    const unsub = ipcBridge.requirements.onAutoWork.on((s) => {
-      if (isLiveEventForTarget(s.kind, s.target_id, kind, id)) {
-        setState(s);
-        setPersistedTag(s.tag);
-      }
-    });
-    return () => unsub();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, id, !!draft]);
+    if (draftMode || !kind || !id) return;
+    void loadState();
+    return () => {
+      stateRequestRef.current += 1;
+    };
+  }, [draftMode, id, kind, loadState]);
+
+  useEffect(() => {
+    if (draftMode || !kind || !id) return;
+    const unsubs = [
+      ipcBridge.requirements.onAutoWork.on((next) => {
+        if (!isLiveEventForTarget(next.kind, next.target_id, kind, id)) return;
+        stateRequestRef.current += 1;
+        applyState(next);
+      }),
+      ipcBridge.requirements.onTagPaused.on((event) => {
+        if (event.tag === persistedTagRef.current) void loadState();
+      }),
+      ipcBridge.conversation.reconnected.on(() => void loadState()),
+    ];
+    return () => unsubs.forEach((unsubscribe) => unsubscribe());
+  }, [applyState, draftMode, id, kind, loadState]);
 
   const enabled = draft ? draft.value.enabled : (state?.enabled ?? false);
   const running = state?.running ?? false;
@@ -207,6 +232,36 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
       </div>
     ) : null;
 
+  const pausedReason = (() => {
+    switch (state?.paused_reason) {
+      case 'execution_failed':
+        return t('requirements.autowork.pausedReasons.executionFailed');
+      case 'user_interrupted':
+        return t('requirements.autowork.pausedReasons.userInterrupted');
+      case 'user_action_required':
+        return t('requirements.autowork.pausedReasons.userActionRequired');
+      default:
+        return state?.paused_reason ?? t('requirements.autowork.pausedReasons.unknown');
+    }
+  })();
+
+  const resume = async () => {
+    if (!tag || resumePendingRef.current) return;
+    resumePendingRef.current = true;
+    setResuming(true);
+    try {
+      await ipcBridge.requirements.resumeTag.invoke({ tag, requeue_failed: true });
+      await loadState();
+      Message.success(t('requirements.autowork.resumedOk'));
+    } catch (error) {
+      Message.error(String(error));
+      await loadState();
+    } finally {
+      resumePendingRef.current = false;
+      setResuming(false);
+    }
+  };
+
   const toggle = async (next: boolean) => {
     if (next && !tag) {
       Message.warning(t('requirements.autowork.tagRequired'));
@@ -220,10 +275,11 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
     if (!kind || !id) return;
     try {
       const s = await ipcBridge.requirements.setAutoWork.invoke({ kind, target_id: id, enabled: next, tag });
-      setState(s);
+      applyState(s);
       Message.success(next ? t('requirements.autowork.enabledOk') : t('requirements.autowork.disabledOk'));
     } catch (e) {
       Message.error(String(e));
+      await loadState();
     }
   };
 
@@ -259,6 +315,16 @@ const AutoWorkControl: React.FC<AutoWorkControlProps> = ({ target, draft, disabl
           onChange={toggle}
         />
       </div>
+      {state?.paused && tag ? (
+        <div className='flex items-center justify-between gap-8px rounded-6px bg-warning-1 px-8px py-6px'>
+          <span className='min-w-0 text-11px leading-15px text-warning-7' role='status'>
+            {pausedReason}
+          </span>
+          <Button size='mini' type='primary' loading={resuming} onClick={() => void resume()}>
+            {t('requirements.autowork.resume')}
+          </Button>
+        </div>
+      ) : null}
       {running && state?.completed_count != null ? (
         <div className='text-t-tertiary text-11px'>
           {t('requirements.autowork.completedCount', { count: state.completed_count })}

@@ -454,7 +454,6 @@ impl AppRobotBackend {
             }
             let key = robot_turn_idempotency_key(request);
             let message = SendMessageRequest {
-                preset_id: None,
                 content: request.text.clone(), files: vec![], inject_skills: vec![],
                 hidden: false, origin: Some("robot".to_owned()), channel_platform: Some("robot".to_owned()),
             };

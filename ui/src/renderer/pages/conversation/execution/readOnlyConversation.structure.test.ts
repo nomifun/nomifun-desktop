@@ -32,7 +32,6 @@ describe('execution transcript capability boundary', () => {
       messageSource.indexOf('const startLegacyPostProcess')
     );
     expect(postProcessGuard.slice(0, 400).includes('readOnly')).toBe(true);
-    expect(messageSource.includes('if (!readOnly) {')).toBe(true);
-    expect(messageSource.includes('ipcBridge.conversation.update.invoke')).toBe(true);
+    expect(messageSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
   });
 });

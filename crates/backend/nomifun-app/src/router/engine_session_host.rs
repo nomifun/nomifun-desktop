@@ -400,7 +400,7 @@ impl EngineSessionHost {
             owner.canonical().store().clone(),
             receipt,
             cancellation,
-        );
+        )?;
         journals.insert(key, journal.downgrade());
         Ok(journal)
     }

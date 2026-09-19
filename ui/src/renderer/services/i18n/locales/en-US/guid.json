@@ -22,6 +22,8 @@
   "modelRequired": "Select a model first",
   "agentPresetRequired": "Select a saved Agent from Agent Workbench to start.",
   "collaboration": {
+    "attachmentsUnsupported": "Agent collaboration cannot start with attachments yet. Remove the files and retry; the message and collaboration setup will be kept.",
+    "autoworkExclusive": "AutoWork and an immediate collaboration launch are separate modes. Turn off AutoWork or clear the collaboration setup first.",
     "models": {
       "title": "Collaborator models",
       "label": "Collaborators",

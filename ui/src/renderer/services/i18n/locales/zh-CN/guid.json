@@ -22,6 +22,8 @@
   "modelRequired": "请先选择模型",
   "agentPresetRequired": "请先从 Agent 工作台选择一个已保存的 Agent。",
   "collaboration": {
+    "attachmentsUnsupported": "Agent 集群暂不支持在启动时携带附件。请移除文件后重试；当前消息与协作配置会保留。",
+    "autoworkExclusive": "AutoWork 与立即启动 Agent 集群是两种独立模式。请先关闭 AutoWork，或清除协作配置。",
     "models": {
       "title": "协作模型",
       "label": "协作模型",

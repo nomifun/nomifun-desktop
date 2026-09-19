@@ -19,17 +19,6 @@ pub struct ProductAgentResolution {
 
 #[async_trait]
 pub trait ProductAgentSnapshotResolver: Send + Sync {
-    async fn resolve_preset(
-        &self,
-        owner_id: &str,
-        preset_id: &str,
-        requested_model: Option<&ProviderWithModel>,
-        current_binding: Option<&nomifun_api_types::AgentBindingValueDto>,
-    ) -> Result<ProductAgentResolution, AppError> {
-        let _ = (owner_id, preset_id, requested_model, current_binding);
-        Err(AppError::BadRequest("Preset resolution is unavailable".into()))
-    }
-
     async fn resolve(
         &self,
         owner_id: &str,

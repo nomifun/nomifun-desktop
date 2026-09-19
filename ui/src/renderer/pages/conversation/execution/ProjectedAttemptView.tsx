@@ -349,6 +349,16 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
     }
   };
 
+  const activateOnKeyboard = (
+    event: React.KeyboardEvent<HTMLElement>,
+    action: () => void,
+    disabled = false,
+  ) => {
+    if (disabled || (event.key !== 'Enter' && event.key !== ' ')) return;
+    event.preventDefault();
+    action();
+  };
+
   return (
     <div className={styles.root}>
       {messageContext}
@@ -367,7 +377,12 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
         <div className={styles.bannerActions}>
           {canConfigure && assignableParticipants.length > 1 && (
             <Dropdown trigger='click' position='br' droplist={participantMenu}>
-              <div role='button' tabIndex={0} className={styles.action}>
+              <div
+                role='button'
+                tabIndex={0}
+                className={styles.action}
+                onKeyDown={(event) => activateOnKeyboard(event, () => event.currentTarget.click())}
+              >
                 <Brain theme='outline' size='13' />
                 <span className='max-w-[140px] truncate'>
                   {participantShortLabel(currentParticipant) ??
@@ -386,6 +401,7 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
               aria-disabled={adopting}
               className={`${styles.action} ${styles.actionAdopt}`}
               onClick={adopting ? undefined : () => void adopt()}
+              onKeyDown={(event) => activateOnKeyboard(event, () => void adopt(), adopting)}
             >
               <CheckOne theme='outline' size='13' />
               {t('agentExecution.adopt.button', {
@@ -400,12 +416,19 @@ const ProjectedAttemptView: React.FC<ProjectedAttemptViewProps> = ({ payload }) 
               aria-disabled={retrying}
               className={styles.action}
               onClick={retrying ? undefined : () => void retry()}
+              onKeyDown={(event) => activateOnKeyboard(event, () => void retry(), retrying)}
             >
               <Redo theme='outline' size='13' />
               {t('agentExecution.retry.button', { defaultValue: '重试' })}
             </div>
           )}
-          <div role='button' tabIndex={0} className={`${styles.action} ${styles.actionPrimary}`} onClick={returnToMain}>
+          <div
+            role='button'
+            tabIndex={0}
+            className={`${styles.action} ${styles.actionPrimary}`}
+            onClick={returnToMain}
+            onKeyDown={(event) => activateOnKeyboard(event, returnToMain)}
+          >
             <Left theme='outline' size='13' />
             {t('agentExecution.projection.return', {
               defaultValue: '返回主对话',

@@ -12,9 +12,15 @@
 
 html,
 body,
-#root,
+#root {
+  min-width: 0;
+}
+
+/* The native shell owns the 880px minimum window contract. Capping the CSS
+ * minimum at the actual content box avoids a horizontal scrollbar when a
+ * vertical scrollbar consumes a few pixels at exactly 880px. */
 .app-shell {
-  min-width: var(--app-min-width);
+  min-width: min(100%, var(--app-min-width));
 }
 
 .layout,

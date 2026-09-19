@@ -14,6 +14,7 @@ import {
   applyAutoWorkStateToSessionCapabilities,
   capabilityKey,
   getSessionCapabilitySnapshot,
+  replaceAutoWorkSessionCapabilities,
   resetSessionCapabilitiesForTest,
 } from './useSessionCapabilities';
 
@@ -49,11 +50,34 @@ describe('SessionList capability snapshot', () => {
     expect(snapshot.autowork.has(capabilityKey('conversation', conversationId))).toBe(false);
   });
 
+  test('reconnect snapshot authoritatively removes stale bindings and restores paused state', () => {
+    resetSessionCapabilitiesForTest();
+    applyAutoWorkStateToSessionCapabilities(autoWorkState());
+    const replacementId = parseConversationId(
+      '0190f5fe-7c00-7a00-8000-000000000008'
+    );
+
+    replaceAutoWorkSessionCapabilities([{
+      tag: 'release',
+      bindings: [{
+        kind: 'conversation',
+        target_id: replacementId,
+        name: 'Paused release',
+        run_state: 'paused',
+      }],
+    }]);
+
+    const snapshot = getSessionCapabilitySnapshot();
+    expect(snapshot.autowork.has(capabilityKey('conversation', conversationId))).toBe(false);
+    expect(snapshot.autowork.get(capabilityKey('conversation', replacementId))).toBe('paused');
+  });
+
   test('does not subscribe to the retired independent decision layer', () => {
     const hook = readFileSync(new URL('./useSessionCapabilities.ts', import.meta.url), 'utf8');
     const projection = readFileSync(new URL('../utils/sessionCapabilityItems.tsx', import.meta.url), 'utf8');
 
     expect(hook.includes('ipcBridge.idmm')).toBe(false);
+    expect(hook.includes('ipcBridge.conversation.reconnected.on(')).toBe(true);
     expect(projection.includes('idmmState')).toBe(false);
   });
 });

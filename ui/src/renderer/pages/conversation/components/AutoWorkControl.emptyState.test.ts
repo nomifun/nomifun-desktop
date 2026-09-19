@@ -78,10 +78,10 @@ describe('AutoWork tag picker empty state', () => {
     expect(source.includes('handleTagPickerActionKeyDown(event, retryTags)')).toBe(true);
   });
 
-  test('announces both loading and error feedback as polite atomic status regions', () => {
+  test('announces loading, error, and durable pause status accessibly', () => {
     const source = readSource(new URL('./AutoWorkControl.tsx', import.meta.url));
 
-    expect(source.split("role='status'").length - 1).toBe(2);
+    expect(source.split("role='status'").length - 1).toBe(3);
     expect(source.split("aria-live='polite'").length - 1).toBe(2);
     expect(source.split("aria-atomic='true'").length - 1).toBe(2);
   });

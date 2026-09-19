@@ -75,7 +75,8 @@ describe('Guid Agent selection contract', () => {
     expect(selection.includes('useAgentPresets()')).toBe(true);
     expect(/\.filter\(\s*isExecutableAgentPreset\s*\)/.test(selection)).toBe(true);
     expect(selection.includes('const isLoaded = library !== undefined;')).toBe(true);
-    expect(selection.includes('!selectedAgentPresetId || isLoading || !isLoaded')).toBe(true);
+    expect(selection.includes('if (isLoading || !isLoaded) return;')).toBe(true);
+    expect(selection.includes('if (selectedAgentTemplateKey)')).toBe(true);
   });
 
   test('exposes library errors while retaining cached rows and unresolved workbench preselection', () => {
@@ -103,7 +104,7 @@ describe('Guid Agent selection contract', () => {
 
     expect(
       page.includes(
-        'if (preselectedPresetId && agentSelection.loadError) return;'
+        'if ((preselectedPresetId || preselectedTemplateKey) && agentSelection.loadError) return;'
       )
     ).toBe(true);
     expect(

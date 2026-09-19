@@ -1,11 +1,11 @@
 # AutoWork & Requirements
 
 AutoWork is Nomi's flagship automation: a **requirements board** plus a
-**per-target execution loop** that drives an AI agent (or an agent CLI in a terminal) to
-work through those requirements one at a time, without you holding its hand.
+**per-AgentSession execution loop** that drives the Session's frozen Agent
+through those requirements one at a time, without you holding its hand.
 
-You file requirements, group them by tag, bind a tag to a session
-(conversation or terminal), and the AutoWork loop claims, executes, and
+You file requirements, group them by tag, bind a tag to an AgentSession, and
+the AutoWork loop claims, executes, and
 finalises them in order. When a requirement reaches a terminal state it can
 fire a **completion notifier** (Lark/飞书 webhook) so your team hears about
 it the moment it lands.
@@ -23,21 +23,20 @@ boot and runs whether or not you have the UI open.
 | **Tag**               | A free-form string used to group requirements into a queue. Bindings, kanban columns, and webhook routing all key off the tag.                               |
 | **Status**            | `pending` → `in_progress` → `done` (or `failed` / `cancelled`). The kanban view has one column per status.                                                   |
 | **Claim & lease**     | The AutoWork loop atomically transitions the lowest-`order_key` `pending` requirement in a tag to `in_progress` and writes a lease that expires.              |
-| **Lease sweeper**     | A background task (every 60 s) that re-pends `in_progress` rows whose lease expired and whose owning session is no longer live — so a crash never orphans work. |
+| **Lease sweeper**     | A background task (every 60 s) that parks expired, ownerless `in_progress` rows in `needs_review`; expiry alone never proves that effects are safe to replay. |
 | **AutoWork loop**     | The per-target loop that claims → injects → waits → finalises → repeats. One loop per bound session. Persistent: it idles when the queue drains, it does not exit. |
-| **Target**            | The thing executing the work. Two kinds: a **conversation** (an AI agent), or a **terminal** (a real CLI agent over a PTY).                                  |
-| **Turn completion** | How a turn signals "done." For agent targets, the agent ends its turn (or calls a Nomi-only tool); for terminal targets, the terminal simply goes quiescent — a clean end-of-turn.       |
+| **Target**            | A canonical AgentSession with one immutable Agent binding and resolved model. Terminal AutoWork has been retired. |
+| **Execution receipt** | AgentExecution owns the Attempt, AgentSession turn and canonical terminal receipt. AutoWork advances the queue only from that durable result. |
 | **Completion notifier** | A Lark/飞书 webhook fired when a requirement reaches `done`/`failed`/`cancelled`. Bound per tag.                                                            |
-| **IDMM**              | Intelligent Decision-Making Mode — a session supervisor that keeps targets alive through provider faults and decision stalls. Stacks on AutoWork.            |
 
 ## Lifecycle of one requirement
 
 ```
-pending  ──claim_next()──▶  in_progress (lease)  ──injection──▶  agent / CLI runs
+pending  ──claim_next()──▶  in_progress (lease)  ──admission──▶  AgentExecution runs
                                   │                                   │
                                   ▼                                   ▼
-                       sweeper re-pends if lease         Finish event / quiescence
-                       expires & loop is gone                        │
+                       sweeper parks ambiguous           AgentExecution receipt
+                       expiry in needs_review                        │
                                                                      ▼
                                                             done | failed | cancelled
                                                                      │
@@ -54,8 +53,7 @@ It exits only when:
 - you disable AutoWork on that target,
 - the binding hits its `max_requirements` cap (which is then persisted as
   disabled, so the cap survives a restart), or
-- a terminal target's row is deleted (a terminal whose PTY merely exited
-  idles and waits for re-launch — it does not stop).
+- its AgentSession is deleted.
 
 ## Three views
 
@@ -82,7 +80,7 @@ live.
 ### Tag sessions — `需求平台 → 扩展能力 → 自动执行`
 
 The AutoWork admin (`/requirements/extensions?tab=autowork`). Lists every
-tag, every binding (which conversations and terminals are bound to which
+tag, every binding (which AgentSessions are bound to which
 tag), and the live run-state for each binding (`Idle`, `Active` while a
 turn is in flight). The per-tag completion webhook now lives one tab over,
 in **通知** (see [Completion notifications](#completion-notifications--lark--http--slack)).
@@ -101,7 +99,7 @@ Press **New requirement** from the list page (or navigate to
 - **Title** — short label.
 - **Tag** — pick an existing tag or type a new one. Tags are created on
   first use.
-- **Content** — the actual instructions the agent / CLI will be handed.
+- **Content** — the actual instructions the bound Agent will be handed.
   Write it like you would write a ticket: enough context that the agent can
   start without asking back, plus a clear definition of done.
 - **Order key** — a string used for queue order. Lexicographic, so common
@@ -113,12 +111,9 @@ Submit and the row is queued. If a session is already bound to that tag, it
 is woken up immediately and starts on this requirement (assuming nothing
 else is in flight ahead of it).
 
-## Binding a session: agent vs terminal
+## Binding an AgentSession
 
-A binding is `(target_kind, target_id, tag, max_requirements?)`. There are
-exactly two target kinds.
-
-### Agent target (a conversation)
+A binding is `(conversation, agent_session_id, tag, max_requirements?)`.
 
 Open any conversation. The header has an **AutoWork** control. Pick a tag,
 optionally set a completion cap, and enable.
@@ -126,65 +121,26 @@ optionally set a completion cap, and enable.
 What happens per turn:
 
 1. The AutoWork loop claims the next `pending` requirement in that tag.
-2. It builds an injection prompt that names the requirement and tells the
-   agent how to signal completion. On a conversation target, the agent has the
-   `requirement_complete` / `requirement_update_status` tools registered and the
-   prompt asks the model to call them. (Terminal targets use a different,
-   tool-free contract — see below.)
-3. The injected message is hidden from the user-visible transcript.
-4. The AutoWork loop subscribes to the agent's stream and waits for a
-   `Finish` (clean) or `Error`/timeout (re-pend or fail). It also captures
-   the agent's prose into a tail-bounded **completion note** that is stored
-   on the requirement.
-5. When the turn ends cleanly, `finalize_if_needed` records the row as
-   `done` and fires the notifier.
-
-### Terminal target (an agent CLI over a PTY)
-
-Open a terminal whose preset is `claude` or `codex` (a plain shell is not
-eligible). Gemini terminals can be run manually, but the backend does not
-accept them as terminal AutoWork targets yet because the turn lifecycle and
-completion contract are not wired into the AutoWork loop. The header has the
-same **AutoWork** control for eligible terminals. Bind a tag and enable.
-
-What happens per turn:
-
-1. The AutoWork loop subscribes to the terminal's live output stream
-   **before** injecting (so nothing is missed).
-2. It writes the requirement prompt into the PTY wrapped in bracketed-paste
-   markers (`ESC [200~ … ESC [201~`) followed by `CR`, so the multi-line
-   text lands as a single paste in the CLI's editor and Enter actually
-   submits.
-3. The prompt just asks the agent to do the work and **end its turn** — there
-   is no marker to print. Scraping a protocol string out of an interactive TUI
-   proved unreliable (cursor-painted output, no clean newlines, the model
-   mis-copying a code), so completion is detected from the turn itself.
-4. When the output goes **quiescent** (silent for ≥ 10 s after a 3 s minimum,
-   with the PTY still alive) the agent has finished and gone idle — the turn is
-   recorded as `done` — a clean finish is the completion signal, since a CLI in a
-   PTY has no requirement tools to call.
-5. If the agent cannot complete the requirement it is asked to say so in plain
-   text (e.g. a final `Requirement failed:` line); such turns still finish as
-   `done` at the platform level, so review the conversation when in doubt.
-6. PTY death mid-turn → re-pend. Hard turn timeout is 1 hour.
-
-> **Full Auto recommended.** A turn that hits an interactive approval
-> prompt will block until the timeout. Each agent CLI has a non-interactive
-> flag the terminal's "Full Auto" mode adds for you (see
-> [Terminals → Creating a terminal](./terminal.md#creating-a-terminal)).
-
-A terminal that has been bound but whose PTY has exited keeps its loop
-alive in idle: the moment you re-launch the terminal, AutoWork resumes
-where it left off — no need to toggle the bind off and on.
+2. It submits one idempotent execution generation to AgentExecution, using the
+   exact Agent snapshot and resource bindings frozen into the selected Session.
+3. AgentExecution owns the Attempt Session, retry/adaptation state,
+   user-action state, cancellation and canonical turn receipt. The bound
+   conversation displays the linked execution and receives its terminal report.
+4. A successful receipt marks the Requirement `done`. Failure, ambiguous
+   effects, or an unsafe cancellation parks it as `failed`/`needs_review` and
+   pauses the tag instead of replaying effects.
+5. A paused control is shown explicitly in the conversation header. Review the
+   linked execution, then choose **Resume**; failed rows are requeued by that
+   explicit user action.
 
 ## Boot resume — it runs without you
 
 The AutoWork loop's active set is in-memory, but every binding's `enabled`,
-`tag`, and `max_requirements` are persisted (in conversation `extra.autowork`
-or the terminal's `autowork` column). On process start the backend lists
-every user, walks every tag binding, and **spawns the loops itself**. You do
-not need to open the session page for AutoWork to work; the UI just shows
-you what is already running.
+`tag`, and `max_requirements` is stored as an append-only canonical
+AgentSession automation fact. On process start the backend enumerates the
+installation owner's enabled Session bindings and **spawns the loops itself**.
+You do not need to open the session page for AutoWork to work; the UI just
+shows you what is already running.
 
 This is why "AutoWork only worked while I had the tab open" is a bug, not a
 feature. If you observe it, check the AutoWork loop logs for resume failures
@@ -233,30 +189,6 @@ clearing the binding to mute notifications for that tag.
 
 ![Per-tag webhook routing](../images/autowork-05-webhook-binding.png)
 
-## IDMM — keeping turns alive through stalls
-
-IDMM is a separate, optional supervisor (`nomifun-idmm`). It watches a
-session and intervenes when a stall is detected:
-
-- **Rule tier (no LLM)** — provider error, repeated retries, model spinning
-  on a tool call, etc. — handled with a deterministic policy.
-- **Sidecar tier** — a lightweight backup model is asked to make the next
-  decision so the session does not hang.
-
-When AutoWork starts a turn, it asks IDMM (if wired) to **ensure
-supervision** of the target for the duration of that turn. The two
-features compose: AutoWork drives forward progress, IDMM keeps each turn
-from getting stuck so it actually reaches a terminal state instead of
-timing out. Toggle IDMM from the same place as AutoWork (the session
-header).
-
-See `crates/backend/nomifun-idmm/` for the per-tier policy detail and the
-intervention log API.
-
-> For the full picture — the rule tier, the sidecar model, session keep-alive
-> and when to turn it on — see the dedicated
-> [Intelligent Decision (IDMM)](intelligent-decision.md) guide.
-
 ## Routes & API
 
 | What                              | Where                                                            |
@@ -274,26 +206,23 @@ intervention log API.
 | Tag bindings (admin)              | `GET /api/requirements/tag-bindings`                             |
 | Per-tag board                     | `GET /api/requirements/board?tag=…`                              |
 | Get / update / delete             | `GET|PUT|DELETE /api/requirements/:id`                           |
-| Status / complete / claim         | `POST /api/requirements/:id/status`, `…/complete`, `…/claim`     |
+| Status / completion               | `POST /api/requirements/:id/status`, `…/complete` (claim authority is internal) |
 | AutoWork toggle / state           | `POST /api/requirements/autowork`, `GET …/autowork/:kind/:tid`   |
 | Webhooks                          | `GET|POST /api/webhooks`, `…/{id}`, `…/{id}/test`                 |
 | Per-tag webhook                   | `GET|PUT /api/tags/:tag/settings`                                |
 
 ## Implementation notes (for the curious)
 
-- `requirements.conversation_id` intentionally has **no foreign key** to the
-  conversations table. A requirement is created and rotates through
-  conversations as it gets re-pended; tying it to a single conversation
-  with referential integrity made cleanups awkward and added no real
-  safety. Treat the column as advisory.
+- A live claim records a typed AgentSession owner, a monotonic generation and
+  an opaque capability. Public status routes cannot mint or replace that
+  authority.
 - The AutoWork loop's `wake` Notify is shared with `RequirementService`;
   every state transition that re-pends or creates work fires it, and the
   loop is armed-then-awaited around each `claim_next()` call so a wake
   arriving between "claim returned None" and "await" is never lost.
-- The terminal injection wraps the prompt in bracketed-paste markers so the
-  multi-line text lands as one paste, and submits with a separate `CR` written
-  a beat later (a CR in the same write would be swallowed by the paste-burst
-  detection modern agent TUIs use).
-- The completion note for tool-free engines is bounded (`MAX_NOTE_CHARS =
-  4000`) and **tail-biased** — agents tend to summarise at the end, so the
-  tail is what we keep when truncation is needed.
+- The claim generation and capability are hashed into the idempotent
+  AgentExecution source operation. The opaque capability is never written to
+  the execution aggregate or exposed to the model.
+- Completed, failed, partially failed, cancelled and outcome-unknown receipts
+  each have an explicit Requirement projection. Ambiguous effects always stop
+  automatic replay and require review.

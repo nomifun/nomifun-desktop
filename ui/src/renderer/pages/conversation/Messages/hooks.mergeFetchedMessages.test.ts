@@ -60,6 +60,11 @@ const baseMessage = (overrides: MessageOverrides): TMessage =>
     ...(overrides.msg_id == null ? {} : { msg_id: messageId(overrides.msg_id) }),
   }) as TMessage;
 
+const textContent = (message: TMessage): string => {
+  const value = (message.content as { content?: unknown }).content;
+  return typeof value === 'string' ? value : '';
+};
+
 describe('mergeFetchedMessagesForConversation', () => {
   test('hydrates distinct thinking and agent-status rows into one owning turn disclosure', () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
@@ -527,9 +532,73 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged).toHaveLength(2);
     expect(merged.map((message) => (message as any).content.call_id)).toEqual(['call-1', 'call-2']);
   });
+
+  test('replaces the canonical live assistant row with its durable projection', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const user = baseMessage({
+      id: 'user-root', msg_id: 'user-root', message_id: messageId('user-root'),
+      conversation_id: conversationId, position: 'right', content: { content: 'hello' },
+    });
+    const liveAssistant = baseMessage({
+      id: 'live-assistant', msg_id: 'assistant-segment', turn_id: messageId('user-root'),
+      conversation_id: conversationId, position: 'left', status: 'work',
+      content: { content: 'world' }, created_at: 1001,
+    });
+    const durableAssistant = baseMessage({
+      id: 'durable-assistant', msg_id: 'assistant-segment',
+      message_id: messageId('assistant-segment'), conversation_id: conversationId,
+      position: 'left', status: 'finish', content: { content: 'world' }, created_at: 1002,
+    });
+
+    const merged = mergeFetchedMessagesForConversation(
+      [user, liveAssistant],
+      fetchedMessages([user, durableAssistant]),
+      conversationId,
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged.map((message) => message.id)).toEqual(['user-root', 'durable-assistant']);
+    expect(merged.map((message) => [message.position, textContent(message)])).toEqual([
+      ['right', 'hello'], ['left', 'world'],
+    ]);
+  });
 });
 
 describe('composeMessageForTest', () => {
+  test('keeps a canonical assistant stream separate from its user turn root', () => {
+    const rootTurnId = messageId('canonical-user-root');
+    const assistantMessageId = messageId('canonical-assistant-stream');
+    const user = baseMessage({
+      id: 'optimistic-user',
+      msg_id: 'canonical-user-root',
+      type: 'text',
+      position: 'right',
+      created_at: 1000,
+      content: { content: 'hello' },
+    });
+    const assistant = baseMessage({
+      id: 'live-assistant',
+      msg_id: 'canonical-assistant-stream',
+      turn_id: rootTurnId,
+      type: 'text',
+      position: 'left',
+      created_at: 1001,
+      content: { content: 'world' },
+    });
+
+    const merged = composeMessageForTest(assistant, [user]);
+
+    expect(user.msg_id).toBe(rootTurnId);
+    expect(assistant.msg_id).toBe(assistantMessageId);
+    expect(assistant.msg_id).not.toBe(rootTurnId);
+    expect(merged).toHaveLength(2);
+    expect(merged.map((message) => [message.position, textContent(message)])).toEqual([
+      ['right', 'hello'],
+      ['left', 'world'],
+    ]);
+    expect(merged[1].turn_id).toBe(rootTurnId);
+  });
+
   test('keeps the first tool envelope stable when a terminal frame arrives late', () => {
     const turnId = messageId('stable-turn');
     const running = baseMessage({

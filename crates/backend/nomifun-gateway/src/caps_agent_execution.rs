@@ -148,6 +148,13 @@ struct ExecutionGetParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum ExecutionUpdateParams {
+    /// Ask the user one question from the calling active Attempt. Execution,
+    /// Step, and Attempt identity are derived from the authenticated
+    /// ConversationExecutionLink and are intentionally absent from this wire.
+    RequestUserDecision {
+        #[schemars(length(min = 1, max = 65536))]
+        question: String,
+    },
     Replan {
         #[schemars(schema_with = "crate::id_schema::canonical_uuid_v7_schema")]
         execution_id: AgentExecutionId,
@@ -262,7 +269,7 @@ enum ExecutionUpdateParams {
 }
 
 impl ExecutionUpdateParams {
-    fn execution_id(&self) -> &AgentExecutionId {
+    fn aggregate_execution_id(&self) -> Option<&AgentExecutionId> {
         match self {
             Self::Replan { execution_id, .. }
             | Self::Adjust { execution_id, .. }
@@ -275,13 +282,18 @@ impl ExecutionUpdateParams {
             | Self::Retry { execution_id, .. }
             | Self::Pause { execution_id, .. }
             | Self::Resume { execution_id, .. }
-            | Self::Cancel { execution_id, .. } => execution_id,
+            | Self::Cancel { execution_id, .. } => Some(execution_id),
+            Self::RequestUserDecision { .. } => None,
         }
     }
 }
 
 fn attempt_actor_allows_update(actor: &AgentExecutionActor) -> bool {
     actor.attempt_id().is_none()
+}
+
+fn attempt_actor_allows_decision_request(actor: &AgentExecutionActor) -> bool {
+    actor.attempt_id().is_some()
 }
 
 struct CreateContext {
@@ -812,7 +824,41 @@ async fn execution_update(
     params: ExecutionUpdateParams,
 ) -> Value {
     let owner_id = ctx.user_id.as_str().to_owned();
-    let actor = authorize_execution_caller(&deps, &ctx, params.execution_id()).await;
+    let params = match params {
+        ExecutionUpdateParams::RequestUserDecision { question } => {
+            let conversation_id = match caller_conversation_id(&ctx) {
+                Ok(value) => value,
+                Err(error) => return json!({"error":error}),
+            };
+            let actor = match deps
+                .engine
+                .agent_caller_for_delegation(&owner_id, &conversation_id)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return json!({"error":error.to_string()}),
+            };
+            if !attempt_actor_allows_decision_request(&actor) {
+                return json!({
+                    "error": "request_user_decision is available only to the calling active execution Attempt"
+                });
+            }
+            return match deps
+                .engine
+                .request_user_decision(&owner_id, &actor, &conversation_id, question)
+                .await
+                .and_then(to_value)
+            {
+                Ok(value) => ok(value),
+                Err(error) => json!({"error":error.to_string()}),
+            };
+        }
+        aggregate => aggregate,
+    };
+    let execution_id = params
+        .aggregate_execution_id()
+        .expect("non-decision execution update must declare execution_id");
+    let actor = authorize_execution_caller(&deps, &ctx, execution_id).await;
     let actor = match actor {
         Ok(value) => value,
         Err(error) => return json!({"error":error.to_string()}),
@@ -823,6 +869,9 @@ async fn execution_update(
         });
     }
     let result: Result<Value, nomifun_common::AppError> = match params {
+        ExecutionUpdateParams::RequestUserDecision { .. } => {
+            unreachable!("request_user_decision returns before aggregate authorization")
+        }
         ExecutionUpdateParams::Replan {
             execution_id,
             expected_version,
@@ -1135,7 +1184,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_execution_update",
             "agent_execution",
-            "Apply exactly one typed execution command to an Agent Execution directly owned by or linked to the caller, with optimistic versions. Active Attempts append work through nomi_delegate and cannot issue aggregate lifecycle commands. User/top-level lead callers may replan, adjust, add, rename, update_step, reassign, configure, steer, retry, pause, resume, or cancel. Selected commands execute directly after typed ownership validation.",
+            "Apply exactly one typed execution command. An active Attempt may only send request_user_decision with a question; execution, step, attempt, and actor identity are derived from its authenticated Conversation link and must not be supplied. Attempts append work through nomi_delegate and cannot issue aggregate lifecycle commands. User/top-level lead callers may replan, adjust, add, rename, update_step, reassign, configure, steer, retry, pause, resume, or cancel with explicit optimistic versions, but cannot issue request_user_decision. Selected commands execute directly after typed ownership validation.",
             EffectClass::Write,
         ),
         adapt(execution_update),
@@ -1261,6 +1310,59 @@ mod tests {
             !validator.is_valid(&mixed_variant),
             "variant-level unknown-field rejection must remain intact"
         );
+    }
+
+    #[test]
+    fn decision_request_wire_derives_every_execution_identity_from_the_caller() {
+        let parsed = serde_json::from_value::<ExecutionUpdateParams>(json!({
+            "operation": "request_user_decision",
+            "question": "Which release channel should I use?"
+        }))
+        .expect("request_user_decision must accept only its question");
+        assert!(matches!(
+            parsed,
+            ExecutionUpdateParams::RequestUserDecision { question }
+                if question == "Which release channel should I use?"
+        ));
+
+        for forged_field in ["execution_id", "step_id", "attempt_id", "expected_version"] {
+            let mut payload = json!({
+                "operation": "request_user_decision",
+                "question": "Choose one"
+            });
+            payload[forged_field] = json!(EXECUTION_ID);
+            assert!(
+                serde_json::from_value::<ExecutionUpdateParams>(payload).is_err(),
+                "request_user_decision must reject forged {forged_field}"
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_decision_request_schema_rejects_forgeable_identity_fields() {
+        let spec = Registry::global()
+            .tool_specs_for_caller(Surface::Desktop, Some(&["agent_execution"]), true)
+            .into_iter()
+            .find(|spec| spec.name == "nomi_execution_update")
+            .expect("nomi_execution_update must be advertised to the owner");
+        let schema = Value::Object(spec.input_schema);
+        let validator = jsonschema::options()
+            .build(&schema)
+            .expect("advertised nomi_execution_update schema must compile");
+        let valid = json!({
+            "operation": "request_user_decision",
+            "question": "Should I publish the candidate?"
+        });
+        assert!(validator.is_valid(&valid));
+
+        for forged_field in ["execution_id", "step_id", "attempt_id"] {
+            let mut forged = valid.clone();
+            forged[forged_field] = json!(EXECUTION_ID);
+            assert!(
+                !validator.is_valid(&forged),
+                "advertised schema must reject forged {forged_field}"
+            );
+        }
     }
 
     #[test]
@@ -1439,12 +1541,13 @@ mod tests {
     }
 
     #[test]
-    fn attempt_actor_cannot_bypass_delegate_with_generic_graph_commands() {
-        let actor = AgentExecutionActor::agent(CONVERSATION_ID, Some(ATTEMPT_ID.to_owned()));
-        assert!(!attempt_actor_allows_update(&actor));
-        assert!(attempt_actor_allows_update(&AgentExecutionActor::agent(
-            CONVERSATION_ID,
-            None
-        )));
+    fn attempt_actor_has_only_the_context_derived_decision_update() {
+        let attempt = AgentExecutionActor::agent(CONVERSATION_ID, Some(ATTEMPT_ID.to_owned()));
+        let top_level = AgentExecutionActor::agent(CONVERSATION_ID, None);
+
+        assert!(!attempt_actor_allows_update(&attempt));
+        assert!(attempt_actor_allows_decision_request(&attempt));
+        assert!(attempt_actor_allows_update(&top_level));
+        assert!(!attempt_actor_allows_decision_request(&top_level));
     }
 }

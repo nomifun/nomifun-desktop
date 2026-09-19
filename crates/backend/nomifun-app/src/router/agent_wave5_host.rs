@@ -130,6 +130,41 @@ impl NomiCoreWave5Host {
                 )
                 .await
             }
+            Wave5CapabilityOperation::AgentRequestUserDecision { input } => {
+                let input: CollaborationDecisionInput = decode(input)?;
+                self.run_effect(
+                    &context,
+                    &StrictJsonValue(json!({"question": input.question})),
+                    None,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect,
+                    async {
+                        let engine = self.execution()?;
+                        let conversation_id = context.agent_session_id.as_ref();
+                        let actor = engine
+                            .agent_caller_for_delegation(
+                                &context.principal.principal_id,
+                                conversation_id,
+                            )
+                            .await
+                            .map_err(app_error)?;
+                        let detail = engine
+                            .request_user_decision(
+                                &context.principal.principal_id,
+                                &actor,
+                                conversation_id,
+                                input.question,
+                            )
+                            .await
+                            .map_err(app_error)?;
+                        encode(json!({
+                            "execution_id": detail.execution.execution_id,
+                            "status": detail.execution.status,
+                            "waiting_for_user": true,
+                        }))
+                    },
+                )
+                .await
+            }
             Wave5CapabilityOperation::ScheduleList { input } => {
                 let input: nomifun_cron::ScheduleListInput = decode(input)?;
                 let (authority, binding) = schedule_authority(&context)?;
@@ -399,6 +434,12 @@ impl Wave5HostPort for NomiCoreWave5Host {
 #[serde(deny_unknown_fields)]
 struct CollaborationInput {
     goal: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollaborationDecisionInput {
+    question: String,
 }
 
 #[derive(Deserialize)]
@@ -837,6 +878,20 @@ mod tests {
             error.code,
             nomifun_agent_contracts::RESOURCE_OWNER_MISMATCH
         );
+    }
+
+    #[test]
+    fn collaboration_decision_input_contains_no_model_supplied_identity() {
+        let parsed: CollaborationDecisionInput = decode(StrictJsonValue(json!({
+            "question": "Which release channel should I use?"
+        })))
+        .unwrap();
+        assert_eq!(parsed.question, "Which release channel should I use?");
+        for field in ["execution_id", "step_id", "attempt_id"] {
+            let mut value = json!({"question":"Choose one"});
+            value[field] = json!("0190f5fe-7c00-7a00-8000-000000000010");
+            assert!(decode::<CollaborationDecisionInput>(StrictJsonValue(value)).is_err());
+        }
     }
 
     #[test]

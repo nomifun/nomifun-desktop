@@ -12,10 +12,6 @@ import SessionCapabilityPicker, { useSessionCapabilityCatalog, type SessionCapab
 import { toggleCompanionSkill } from '../workspace/tabs/SkillsTab/companionSkillConfig';
 import type { useCompanion } from '../useNomi';
 import type { TChatConversation } from '@/common/config/storage';
-import { ipcBridge } from '@/common';
-import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
-import { parseMcpServerId } from '@/common/types/ids';
-import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { allowsMultipleMcpServers } from '@/renderer/hooks/agent/agentResourceSelection';
 
 /** Same composer rail and interaction as work sessions; writes companion intent. */
@@ -46,23 +42,15 @@ const CompanionCapabilityControls: React.FC<{ companion: ReturnType<typeof useCo
         skills = toggleCompanionSkill(skills, catalog.autoSkillNames, name, checked);
       }
     }
-    const mcpChanged = [...draft.mcpServerIds].sort().join(',') !== [...next.mcpServerIds].sort().join(',');
-    if (mcpChanged && !mcpEnabled) return;
-    if (skills === profile.skills && !mcpChanged) return;
+    // MCP resource bindings are immutable Session facts. This control edits
+    // companion skill intent only; the bound MCP list is a read-only summary.
+    if (skills === profile.skills) return;
     savingRef.current = true;
     setSaving(true);
     try {
-      if (mcpChanged) {
-        await ipcBridge.agentPlatform.sessions.updateMcpSelection.invoke({
-          agent_session_id: conversation.id,
-          mcp_server_ids: next.mcpServerIds.map(parseMcpServerId),
-        });
-        await refreshConversationCache(conversation.id);
-      } else {
-        await patchCompanion({ skills });
-      }
-    } catch (error) {
-      Message.error(t(mcpChanged && isBackendHttpError(error) && error.status === 409 ? 'nomi.chat.mcpBusy' : 'common.saveFailed'));
+      await patchCompanion({ skills });
+    } catch {
+      Message.error(t('common.saveFailed'));
     } finally {
       savingRef.current = false;
       setSaving(false);
@@ -77,9 +65,9 @@ const CompanionCapabilityControls: React.FC<{ companion: ReturnType<typeof useCo
     loadFailed={Boolean(error)}
     onRetry={retry}
     disabled={!profile || saving}
-    readOnlyKinds={mcpEnabled ? [] : ['mcp']}
+    readOnlyKinds={['mcp']}
     applyMode='next-send'
-    applyNote={(kind) => kind === 'skills' ? t('nomi.chat.skillsScopeHint') : t(mcpEnabled ? 'nomi.chat.mcpScopeHint' : 'nomi.chat.mcpAgentRequired')}
+    applyNote={(kind) => kind === 'skills' ? t('nomi.chat.skillsScopeHint') : t(mcpEnabled ? 'nomi.chat.mcpFrozenHint' : 'nomi.chat.mcpAgentRequired')}
     onManage={(kind) => { if (kind === 'mcp') navigate('/mcp'); else if (profile) navigate(`/nomi?companion=${profile.companion_id}&tab=skills`); }}
   />;
 };

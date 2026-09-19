@@ -142,7 +142,7 @@
     }
   },
   "modules": {
-    "agentCollaboration": { "name": "Agent 协作", "description": "委派有边界的工作，或派生已授权的 Agent 任务。" },
+    "agentCollaboration": { "name": "Agent 协作", "description": "委派有边界的工作、派生已授权的 Agent 任务，或请求用户决策。" },
     "automationSchedule": { "name": "定时任务", "description": "创建和管理持久计划，不暴露调度器内部机制。" },
     "browser": { "name": "浏览器", "description": "观察和操作已绑定的内置浏览器或已授权 Chrome；Provider 不会扩大权限。" },
     "channelMessaging": { "name": "渠道消息", "description": "通过使用目标选择的渠道回复或发送消息。" },
@@ -167,7 +167,7 @@
   },
   "actionLabels": {
     "search": "搜索", "fetch": "读取网页", "read": "读取", "write": "写入", "autogen": "生成知识",
-    "recall": "回忆", "delegate": "委派", "fork": "派生", "list": "查看列表", "create": "创建", "update": "更新", "delete": "删除", "edit": "编辑", "launch": "启动应用",
+    "recall": "回忆", "delegate": "委派", "fork": "派生", "request_user_decision": "询问用户", "list": "查看列表", "create": "创建", "update": "更新", "delete": "删除", "edit": "编辑", "launch": "启动应用",
     "observe": "观察", "navigate": "导航", "act": "交互", "render_content": "读取页面内容", "download": "下载", "upload": "上传", "evaluate": "执行脚本",
     "reply": "回复", "send": "发送", "learn": "学习", "evolve": "演进", "notes_read": "读取备注", "notes_write": "写入备注", "handoff": "转交人工",
     "text": "创作文本", "image": "生成图片", "image_edit": "编辑图片", "video": "生成视频", "audio": "生成音频", "music": "创作音乐",

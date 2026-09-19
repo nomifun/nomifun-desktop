@@ -1,7 +1,7 @@
 //! Conversation-domain capabilities (registry form): list / status / send /
 //! create / update / delete. Creation is companion-only on this Agent-facing
 //! surface. All self-protection guards from the legacy tool are preserved (no
-//! self-injection, no self-model-change, no self-deletion), and nomi sessions
+//! self-injection and no self-deletion), and nomi sessions
 //! still get a model at creation via the shared resolution chain so downstream
 //! consumers never see a model-less nomi conversation.
 
@@ -99,9 +99,6 @@ struct UpdateConversationParams {
     /// Pin (true) or unpin (false) the conversation in the sidebar.
     #[serde(default)]
     pinned: Option<bool>,
-    /// Exact replacement provider/model pair (nomi conversations only).
-    #[serde(default)]
-    model: Option<ModelRefParam>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -355,7 +352,6 @@ async fn send(
         }
     }
     let req = SendMessageRequest {
-        preset_id: None,
         content: p.content,
         files: vec![],
         inject_skills: vec![],
@@ -469,31 +465,12 @@ async fn update(
 ) -> Value {
     let user_id = ctx.user_id.as_str().to_owned();
     let id = p.conversation_id.into_string();
-    if p.name.is_none() && p.pinned.is_none() && p.model.is_none() {
-        return json!({ "error": "nothing to update: provide at least one of name / pinned / model" });
+    if p.name.is_none() && p.pinned.is_none() {
+        return json!({ "error": "nothing to update: provide name and/or pinned" });
     }
-    let mut model = None;
-    if let Some(requested_model) = p.model.map(ProviderWithModel::from) {
-        if ctx.conversation_id.as_ref().is_some_and(|caller| id == caller.as_str()) {
-            return json!({
-                "error": "self_model_change_forbidden: changing your own conversation's model would terminate your current turn; the owner can change it from the desktop UI"
-            });
-        }
-        match provider_support::resolve_explicit_model(&deps.provider_support, requested_model).await {
-            Ok(m) => model = Some(m),
-            Err(e) => return e,
-        }
-    }
-    let model_changed = model.is_some();
     let req = UpdateConversationRequest {
         name: p.name,
         pinned: p.pinned,
-        model,
-        delegation_policy: None,
-        execution_model_pool: None,
-        decision_policy: None,
-        execution_template_id: None,
-        extra: None,
     };
     match deps.conversation.update(&user_id, &id, req).await {
         Ok(resp) => ok(json!({
@@ -501,9 +478,6 @@ async fn update(
             "name": resp.name,
             "pinned": resp.pinned,
             "model": resp.model,
-            "note": model_changed.then_some(
-                "model changed: any running task in that conversation was terminated; it restarts with the new model on the next message"
-            ),
         })),
         Err(e) => error_value(e),
     }
@@ -641,7 +615,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         CapabilityMeta::new(
             "nomi_update_conversation",
             "conversation",
-            "Rename / pin / change model of a conversation (not your own model).",
+            "Rename, pin, or unpin a conversation. Agent, model, resources, and collaboration remain frozen; create a new conversation to change them.",
             EffectClass::Write,
         ),
         adapt(update),
@@ -901,6 +875,17 @@ mod tests {
                 }
             }))
             .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UpdateConversationParams>(json!({
+                "conversation_id": "0190f5fe-7c00-7a00-8abc-012345678901",
+                "model": {
+                    "provider_id": "0190f5fe-7c00-7a00-8abc-012345678904",
+                    "model": "model-a"
+                }
+            }))
+            .is_err(),
+            "an existing AgentSession cannot accept a model override"
         );
     }
 

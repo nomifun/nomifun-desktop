@@ -68,12 +68,11 @@ async function mountTranscript(readOnly: boolean) {
 
 describe('read-only execution transcript side effects', () => {
   for (const readOnly of [false, true]) {
-    test('readOnly=' + readOnly + ': live metrics render but only writable transcripts persist', async () => {
+    test('readOnly=' + readOnly + ': live metrics render without mutating frozen Session extra', async () => {
       const { hook, emit, persist } = await mountTranscript(readOnly);
       await emit({ type: 'turn_metrics', data: { input_tokens: 3, output_tokens: 5 } });
       expect(hook.result.current.tokenUsage?.total_tokens).toBe(8);
-      expect(persist).toHaveBeenCalledTimes(readOnly ? 0 : 1);
-      if (!readOnly) expect(persist.mock.calls[0]?.[0].conversation_id).toBe(conversationId);
+      expect(persist).not.toHaveBeenCalled();
     });
 
     test('readOnly=' + readOnly + ': text buffering and legacy post-process respect mode', async () => {

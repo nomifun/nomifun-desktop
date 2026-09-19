@@ -910,14 +910,6 @@ export const useNomiMessage = (
                 context_window: validTokenCount(metrics.context_window),
               };
               setTokenUsage(newTokenUsage);
-              if (!readOnly) {
-                void ipcBridge.conversation.update.invoke({
-                  conversation_id: conversation_id,
-                  updates: {
-                    extra: { last_token_usage: newTokenUsage } as TChatConversation['extra'],
-                  },
-                });
-              }
             }
           }
           break;

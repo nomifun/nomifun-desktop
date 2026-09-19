@@ -66,11 +66,12 @@ describe('Nomi sendbox control layout', () => {
     const sharedControl = readSource(new URL('../../../../components/collaboration/CollaborationComposerControl.tsx', import.meta.url));
     const homeSource = readSource(new URL('../../../guid/GuidPage.tsx', import.meta.url));
     expect(homeSource.includes('<CollaborationComposerControl')).toBe(true);
-    expect(homeSource.includes('collaboration: collaboration.config')).toBe(true);
-    expect(collaborationBlock.includes('onChange={onCollaboratorsChange}')).toBe(true);
+    expect(homeSource.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
+    expect(collaborationBlock.includes('onChange={rejectFrozenCollaboratorsChange}')).toBe(true);
     expect(sharedControl.includes('panelFooter={')).toBe(true);
     expect(sharedControl.includes('<CollaborationPolicyControl')).toBe(true);
-    expect(collaborationBlock.includes('onPolicyChange={onCollaborationPolicyChange}')).toBe(true);
+    expect(collaborationBlock.includes('onPolicyChange={rejectFrozenPolicyChange}')).toBe(true);
+    expect(collaborationBlock.includes('disabledReason={frozenSessionConfigHint}')).toBe(true);
     expect(sharedControl.includes('embedded')).toBe(true);
     expect(sharedControl.includes("triggerLabel={t('collaboration.policy.button'")).toBe(true);
     expect(sharedControl.includes("className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'")).toBe(true);
@@ -88,19 +89,17 @@ describe('Nomi sendbox control layout', () => {
     expect(collaboratorIndex).toBeLessThan(rightToolsIndex);
   });
 
-  test('reconciles conversation collaborators before rendering or persisting executable ranges', () => {
+  test('reconciles frozen conversation collaborators for display without persisting a replacement range', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
 
     expect(chatSource.includes('import { reconcileModelRefs, sameModelRefs }')).toBe(true);
     expect(chatSource.includes('const activeCollaborators = collaboratorReconciliation?.active ?? []')).toBe(true);
     expect(chatSource.includes('value={activeCollaborators}')).toBe(true);
-    expect(
-      /buildConversationModelPool\(\s*\{ provider_id: _provider\.id, model: modelName \},\s*activeCollaborators,\s*\)/.test(
-        chatSource,
-      ),
-    ).toBe(true);
+    expect(chatSource.includes('buildConversationModelPool')).toBe(false);
     expect(chatSource.includes('collaboratorReconciliation.removed.length === 0')).toBe(true);
     expect(chatSource.includes('sameModelRefs(collaborators, collaboratorReconciliation.retained)')).toBe(true);
+    expect(chatSource.includes('setCollaboratorsState(collaboratorReconciliation.retained)')).toBe(true);
+    expect(chatSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
   });
 
   test('supports embedding the policy panel behind the unified collaboration trigger', () => {
@@ -114,7 +113,7 @@ describe('Nomi sendbox control layout', () => {
     expect(source.includes('return <div className={styles.embedded}>{content}</div>')).toBe(true);
   });
 
-  test('allows session model selection while keeping preset resource restrictions', () => {
+  test('shows the frozen session model while keeping preset resource restrictions', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
@@ -124,6 +123,7 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('const hasPreset = Boolean(conversation.preset_id);')).toBe(true);
     expect(chatSource.includes('useAgentCapabilityResourceKinds')).toBe(false);
     expect(chatSource.includes('required_resource_kinds')).toBe(true);
+    expect(chatSource.includes('readOnly: true')).toBe(true);
 
     expect(nomiChatSource.includes('modelLocked')).toBe(false);
     expect(sendBoxSource.includes('hideAdvancedControls || modelLocked')).toBe(false);
@@ -142,16 +142,18 @@ describe('Nomi sendbox control layout', () => {
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const agentSwitchBlock = chatSource.slice(
-      chatSource.indexOf('const switchAgent'),
-      chatSource.indexOf('const currentAgentLabel'),
+      chatSource.indexOf('const startNewConversationWithAgent'),
+      chatSource.indexOf('const frozenPresetId'),
     );
 
     expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
     expect(chatSource.includes('useAgentPresets()')).toBe(true);
     expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(false);
-    expect(agentSwitchBlock.includes('const resolvePreset')).toBe(true);
-    expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(true);
-    expect(sendBoxSource.includes('preset_id: presetId')).toBe(true);
+    expect(agentSwitchBlock.includes("navigate('/guid', { state })")).toBe(true);
+    expect(agentSwitchBlock.includes('selectedAgentPresetId: selection.presetId')).toBe(true);
+    expect(agentSwitchBlock.includes('selectedAgentTemplateKey: selection.templateKey')).toBe(true);
+    expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(false);
+    expect(sendBoxSource.includes('preset_id: presetId')).toBe(false);
     expect(agentSwitchBlock.includes('conversation.stop.invoke')).toBe(false);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('prefix={<ComposerSceneHeader agent={agentSelectorNode} />}')).toBe(true);
@@ -169,15 +171,14 @@ describe('Nomi sendbox control layout', () => {
     expect(initialMessageBlock.includes('initialOnly: true')).toBe(true);
   });
 
-  test('only personal Agent selections may reuse the staged preset without preparing the current official template', () => {
+  test('ordinary turns cannot override the frozen Agent while creation reuses only that binding', () => {
     const source = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
-    const admission = source.slice(source.indexOf('const resolvePreset = async () =>'), source.indexOf('const selectCreationMode ='));
-    expect(admission.includes("if (agentChoice.kind === 'preset' && stagedPresetId) return stagedPresetId;")).toBe(true);
-    expect(admission.includes('if (stagedPresetId) return stagedPresetId;')).toBe(false);
-    expect(admission.includes('await resolveAgentSwitchTarget(selected)')).toBe(true);
-    const resolution = source.slice(source.indexOf('const resolveAgentSwitchTarget ='), source.indexOf('// Menus edit only the next draft.'));
-    expect(resolution.includes("if (selection.kind === 'template')")).toBe(true);
-    expect(resolution.includes('await prepareOfficialAgent(')).toBe(true);
+    const sendBox = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const admission = source.slice(source.indexOf('const frozenPresetId'), source.indexOf('const selectCreationMode ='));
+    expect(admission.includes('return frozenPresetId;')).toBe(true);
+    expect(admission.includes('prepareOfficialAgent')).toBe(false);
+    expect(sendBox.includes('creation.resolvePreset?.() ?? creation.presetId')).toBe(true);
+    expect(sendBox.includes('preset_id: presetId')).toBe(false);
   });
 
   test('collapses text pills to icons and expands their labels inline on desktop hover', () => {

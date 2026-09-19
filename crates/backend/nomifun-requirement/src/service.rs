@@ -1304,6 +1304,20 @@ impl RequirementService {
         Ok(self.repo.is_tag_paused(tag).await?)
     }
 
+    /// Read the durable pause projection used by both REST snapshots and live
+    /// AutoWork status events. A missing tag-state row is the canonical active
+    /// state; stale reasons are never exposed after resume.
+    pub async fn tag_pause_state(&self, tag: &str) -> Result<(bool, Option<String>), AppError> {
+        let Some(state) = self.repo.get_tag_state(tag).await? else {
+            return Ok((false, None));
+        };
+        if state.is_paused() {
+            Ok((true, state.paused_reason))
+        } else {
+            Ok((false, None))
+        }
+    }
+
     /// Resume a paused tag. Optionally re-queue specific failed requirements back
     /// to `pending` (clearing their consumed attempts) so they retry from
     /// scratch. Wakes idle AutoWork loops so the tag's work resumes immediately.
@@ -1762,5 +1776,24 @@ mod tests {
         let final_requirement = service.get(&requirement.requirement_id).await.unwrap();
         assert_eq!(final_requirement.status, RequirementStatus::Failed);
         assert_eq!(final_requirement.attempt_count, 1);
+    }
+
+    #[tokio::test]
+    async fn tag_pause_projection_clears_reason_after_resume() {
+        let (service, _) = service_with_session().await;
+        assert_eq!(service.tag_pause_state("release").await.unwrap(), (false, None));
+
+        service
+            .repo()
+            .pause_tag("release", "execution_failed", None, now_ms())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.tag_pause_state("release").await.unwrap(),
+            (true, Some("execution_failed".to_owned()))
+        );
+
+        service.resume_tag("release", &[]).await.unwrap();
+        assert_eq!(service.tag_pause_state("release").await.unwrap(), (false, None));
     }
 }

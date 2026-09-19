@@ -206,7 +206,7 @@
                 "id": "browser",
                 "version": "1.0.0"
               },
-              "capability_manifest_digest": "d4dafd8f47e2b44f32ef57ee9e21b41101578c6039db1d7dd82fb031942b78f3",
+              "capability_manifest_digest": "726e720a44e00b3cc2898d6a43f9533da1a6a11d318f39884aef6cafd087cc62",
               "requirement": "required"
             }
           ],
@@ -220,7 +220,7 @@
               "role_id": "system.browser_use",
               "contract_version": "2.0.0"
             },
-            "contract_digest": "b6cfef1c913d4885cadeb97cfab8015eef34e33b6ce0d027e9d911c38934073c"
+            "contract_digest": "1a7c61259276061c62db34228d0766641800e8d8148765e95870b1ffe34ac74b"
           },
           "display": {
             "name": "Browser Use",

@@ -624,28 +624,19 @@ impl CompanionService {
             .ok_or_else(|| AppError::NotFound(format!("companion '{id}' not found")))
     }
 
-    /// RFC 7396 partial update of one companion's profile. When the patch changes the
-    /// model into a new configured value, the new model (唯一事实源 =
-    /// profile.model) is propagated to the companion's single companion conversation
-    /// row so the next turn uses it — the conversation row `model` was only a
-    /// create-time snapshot. If the companion had no session yet but the model just
-    /// became configured, the session is auto-ensured (idempotent). All of the
-    /// companion-side work is best-effort: it never fails the patch.
+    /// RFC 7396 partial update of one companion's profile. Profile model changes
+    /// apply to future AgentSessions and remote-channel reconstruction; an
+    /// existing local AgentSession retains its frozen model.
     pub async fn patch_companion(&self, id: &str, patch: serde_json::Value) -> Result<CompanionProfileConfig, AppError> {
         // Snapshot the pre-patch model so we can tell whether this patch
         // actually changed it (RFC 7396 patches need not mention `model`).
         let prev = self.registry.get(id).await;
         let prev_model = prev.as_ref().and_then(|p| p.model.clone());
-        let prev_name = prev.as_ref().map(|p| p.name.clone());
-        let prev_skills = prev.as_ref().map(|p| p.skills.clone());
         let profile = self.registry.patch(id, patch).await?;
         self.emitter.emit_companion_updated(&profile.companion_id, &profile);
 
         let model_changed = prev_model.as_ref() != profile.model.as_ref();
         if model_changed {
-            if profile.model.is_some() {
-                self.propagate_model_to_companion(&profile).await;
-            }
             // 通知宿主：模型已切换（唯一事实源）。当前用于清理该伙伴绑定的
             // IM 渠道会话，使其下轮重建拾取新模型（或正确地因未配置而拒绝）。
             // best-effort，不阻断 patch。
@@ -659,74 +650,9 @@ impl CompanionService {
                 }
             }
         }
-        // 改名跟随：名字变了就把已存在的伙伴会话工作区目录迁到新 pretty 名
-        // （best-effort，不为改名新建会话；agent 运行中占用则保留旧名下次再迁）。
-        if prev_name.as_deref() != Some(profile.name.as_str()) {
-            self.reconcile_companion_workspace(&profile).await;
-        }
-        if prev_skills.as_ref() != Some(&profile.skills) {
-            self.reconcile_companion_skills(&profile).await;
-        }
+        // Existing AgentSessions retain their frozen workspace and Skill
+        // snapshot. Name/Skill profile changes apply to a future Session.
         Ok(profile)
-    }
-
-    /// Best-effort：把伙伴「已存在」会话的工作区目录收敛到当前名字。无会话则跳过
-    /// （下次 create() 自然用新名）；companion 未接线（测试）则跳过。绝不阻断 patch。
-    async fn reconcile_companion_workspace(&self, profile: &CompanionProfileConfig) {
-        let Ok(companion) = self.companion() else { return };
-        let threads = match companion.list(&profile.companion_id).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, companion_id = %profile.companion_id, "list threads for workspace reconcile failed");
-                return;
-            }
-        };
-        if let Some(thread) = threads.into_iter().next() {
-            companion.reconcile_thread_workspace(profile, &thread.conversation_id).await;
-        }
-    }
-
-    /// Best-effort: apply the profile's catalog Skill configuration to the
-    /// existing companion conversation. A new conversation is handled by
-    /// `CompanionThreads::create`; there is nothing to reconcile when no thread
-    /// exists yet.
-    async fn reconcile_companion_skills(&self, profile: &CompanionProfileConfig) {
-        let Ok(companion) = self.companion() else { return };
-        let threads = match companion.list(&profile.companion_id).await {
-            Ok(threads) => threads,
-            Err(error) => {
-                tracing::warn!(error = %error, companion_id = %profile.companion_id, "list threads for skill reconcile failed");
-                return;
-            }
-        };
-        if let Some(thread) = threads.into_iter().next() {
-            companion
-                .reconcile_profile_skills(profile, &thread.conversation_id)
-                .await;
-        }
-    }
-
-    /// Best-effort: push the companion's configured model onto its single companion
-    /// conversation row, auto-ensuring the session first if the model just
-    /// became configured (so setting a model immediately gives the partner a
-    /// usable session). Swallows every error (companion may be unwired in
-    /// tests); a failure here must not fail the patch that triggered it.
-    async fn propagate_model_to_companion(&self, profile: &CompanionProfileConfig) {
-        let Some(model) = profile.model.as_ref() else { return };
-        let Ok(companion) = self.companion() else { return };
-        // Idempotent ensure: returns the existing session, or mints one now
-        // that the model is configured. This also yields the conversation id
-        // to retarget.
-        let conversation_id = match companion.create(&profile.companion_id, None).await {
-            Ok(thread) => thread.conversation_id,
-            Err(e) => {
-                tracing::warn!(error = %e, companion_id = %profile.companion_id, "ensure companion session for model propagation failed");
-                return;
-            }
-        };
-        if let Err(e) = companion.set_model(&profile.companion_id, &conversation_id, model).await {
-            tracing::warn!(error = %e, companion_id = %profile.companion_id, "propagate model to companion conversation failed");
-        }
     }
 
     /// Delete a companion: cascade-delete its companion conversations, clear its

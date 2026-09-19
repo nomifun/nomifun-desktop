@@ -142,6 +142,7 @@ const AutoWorkPanel: React.FC = () => {
       case 'active':
         return 'rgb(var(--success-6))';
       case 'idle':
+      case 'paused':
         return 'rgb(var(--warning-6))';
       default:
         return 'rgb(var(--gray-4))';
@@ -154,6 +155,10 @@ const AutoWorkPanel: React.FC = () => {
         return t('autowork.tagSessions.pausedReasons.requirementFailed');
       case 'user_interrupted':
         return t('autowork.tagSessions.pausedReasons.userInterrupted');
+      case 'execution_failed':
+        return t('autowork.tagSessions.pausedReasons.executionFailed');
+      case 'user_action_required':
+        return t('autowork.tagSessions.pausedReasons.userActionRequired');
       default:
         return reason ?? '';
     }
@@ -238,7 +243,7 @@ const AutoWorkPanel: React.FC = () => {
                 </span>
               </div>
               {/* Run state text */}
-              <Tag size='small' color={isActive ? 'green' : binding.run_state === 'idle' ? 'orange' : 'gray'}>
+              <Tag size='small' color={isActive ? 'green' : binding.run_state === 'idle' || binding.run_state === 'paused' ? 'orange' : 'gray'}>
                 {t(`autowork.runState.${binding.run_state}`)}
               </Tag>
               {/* Unbind button */}

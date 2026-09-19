@@ -84,6 +84,28 @@ fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Engine journal: {message}"))
 }
 
+/// Derive the one assistant message identity owned by a canonical Turn.  The
+/// HTTP/WS relay and durable journal must agree before either side publishes a
+/// frame; otherwise terminal history refresh leaves a duplicate live row.
+pub(super) fn canonical_assistant_message_id(
+    root_message_id: &str,
+) -> Result<String, AppError> {
+    let root = Uuid::parse_str(root_message_id)
+        .map_err(|error| failure(format!("turn root is not a UUID: {error}")))?;
+    if root.get_version_num() != 7 {
+        return Err(failure("turn root is not UUIDv7"));
+    }
+    let mut bytes = *root.as_bytes();
+    // Preserve version/variant/time ordering while selecting a deterministic,
+    // distinct point in the UUIDv7 random suffix.
+    bytes[15] ^= 1;
+    let assistant = Uuid::from_bytes(bytes);
+    if assistant == root || assistant.get_version_num() != 7 {
+        return Err(failure("assistant message identity derivation failed"));
+    }
+    Ok(assistant.to_string())
+}
+
 fn canonical_event_payload(
     session_id: &AgentSessionId,
     value: Value,
@@ -201,8 +223,9 @@ impl EngineTurnJournal {
         store: AgentSessionStore,
         receipt: &EngineTurnReceipt,
         cancellation: CancellationToken,
-    ) -> Self {
-        Self(Arc::new(Journal {
+    ) -> Result<Self, AppError> {
+        let assistant_message_id = canonical_assistant_message_id(receipt.root_message_id())?;
+        Ok(Self(Arc::new(Journal {
             store,
             user: receipt.session().principal().principal_id.clone(),
             session: AgentSessionId::from(
@@ -220,11 +243,14 @@ impl EngineTurnJournal {
                 .chat_route_identity
                 .clone(),
             cancellation,
-            cursor: Mutex::new(Cursor::default()),
+            cursor: Mutex::new(Cursor {
+                assistant_message_id: Some(assistant_message_id),
+                ..Cursor::default()
+            }),
             sequence: AtomicU64::new(0),
             pending: Arc::new(Semaphore::new(64)),
             pending_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
-        }))
+        })))
     }
 
     pub fn sequence(&self) -> u64 {

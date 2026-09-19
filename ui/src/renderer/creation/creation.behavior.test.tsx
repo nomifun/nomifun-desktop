@@ -159,9 +159,14 @@ describe('conversation creation admission and draft behavior', () => {
     expect(() => validateCreationTasks([{ ...task, owner: { ...task.owner, conversation_id: 'foreign' } }], conversationId)).toThrow('does not belong');
   });
 
-  test('queued ordinary messages retain their admitted Agent selection through storage normalization', () => {
-    const item = createQueuedCommandItem({ input: 'Continue', files: [], preset_id: presetId });
-    expect(normalizeQueueState({ items: [item], isPaused: false }).items[0].preset_id).toBe(presetId);
+  test('queued ordinary messages cannot carry a per-turn Agent override', () => {
+    const item = createQueuedCommandItem({ input: 'Continue', files: [] });
+    const restored = normalizeQueueState({
+      items: [{ ...item, preset_id: presetId }],
+      isPaused: false,
+    }).items[0] as unknown as Record<string, unknown>;
+    expect(restored.input).toBe('Continue');
+    expect(restored).not.toHaveProperty('preset_id');
   });
 
   test('protocol policies do not submit OpenAI video duration or quality values to incompatible models', () => {

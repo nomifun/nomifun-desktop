@@ -8,15 +8,15 @@ import { ipcBridge } from '@/common';
 import type {
   AutoWorkRunState,
   IAutoWorkState,
+  ITagBindings,
   SessionCapabilityTargetId,
 } from '@/common/adapter/ipcBridge';
 import { useEffect, useState } from 'react';
 
 type CapabilityTargetKind = 'conversation';
 
-// Composite string key for the capability maps: the numeric session id is
-// namespaced by kind, so a number id is fine to interpolate here (the map key
-// stays a string by design — it is not an id comparison).
+// Composite string key for the capability maps. The business UUID is
+// namespaced by kind so future target domains cannot collide.
 export const capabilityKey = (kind: CapabilityTargetKind, id: SessionCapabilityTargetId) => `${kind}:${id}`;
 
 export type SessionCapabilitySnapshot = {
@@ -31,6 +31,7 @@ export type SessionCapabilitySnapshot = {
 const autoworkMap = new Map<string, AutoWorkRunState>();
 const listeners = new Set<() => void>();
 let started = false;
+let refreshRequest = 0;
 
 const notify = () => listeners.forEach((listener) => listener());
 
@@ -41,9 +42,27 @@ export const getSessionCapabilitySnapshot = (): SessionCapabilitySnapshot => ({
 export const applyAutoWorkStateToSessionCapabilities = (
   state: Pick<IAutoWorkState, 'kind' | 'target_id' | 'enabled' | 'run_state'>
 ) => {
+  // A live event is newer than any bulk request already in flight.
+  refreshRequest += 1;
   const key = capabilityKey(state.kind, state.target_id);
   if (state.enabled) autoworkMap.set(key, state.run_state);
   else autoworkMap.delete(key);
+  notify();
+};
+
+/** Replace, rather than merge, the durable bulk projection. This is the
+ * reconnect path: events have no replay, so entries removed while the socket
+ * was down must disappear from the module-lifetime cache as well. */
+export const replaceAutoWorkSessionCapabilities = (groups: ITagBindings[]) => {
+  autoworkMap.clear();
+  for (const group of groups) {
+    for (const binding of group.bindings) {
+      autoworkMap.set(
+        capabilityKey(binding.kind, binding.target_id),
+        binding.run_state
+      );
+    }
+  }
   notify();
 };
 
@@ -51,31 +70,34 @@ export const resetSessionCapabilitiesForTest = () => {
   autoworkMap.clear();
   listeners.clear();
   started = false;
+  refreshRequest += 1;
 };
 
 const ensureStarted = () => {
   if (started) return;
   started = true;
 
-  void ipcBridge.requirements.tagBindings
-    .invoke()
-    .then((tags) => {
-      let changed = false;
-      for (const tag of tags ?? []) {
-        for (const binding of tag.bindings) {
-          autoworkMap.set(capabilityKey(binding.kind, binding.target_id), binding.run_state);
-          changed = true;
+  const refresh = () => {
+    const request = ++refreshRequest;
+    return ipcBridge.requirements.tagBindings
+      .invoke()
+      .then((groups) => {
+        if (request === refreshRequest) {
+          replaceAutoWorkSessionCapabilities(groups ?? []);
         }
-      }
-      if (changed) notify();
-    })
-    .catch(() => {
-      /* best-effort initial snapshot — events still correct the map */
-    });
+      })
+      .catch(() => {
+        /* best-effort authoritative snapshot — live events still correct the map */
+      });
+  };
+  void refresh();
 
   // App-lifetime module subscriptions (deliberately never unsubscribed).
   ipcBridge.requirements.onAutoWork.on((state) => {
     applyAutoWorkStateToSessionCapabilities(state);
+  });
+  ipcBridge.conversation.reconnected.on(() => {
+    void refresh();
   });
 };
 

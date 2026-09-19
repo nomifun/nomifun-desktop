@@ -40,6 +40,15 @@ describe('GuidPage advanced controls', () => {
     expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
   });
 
+  test('shows collaboration only when the selected Agent grants its Module', () => {
+    const source = readSource(new URL('./GuidPage.tsx', import.meta.url));
+
+    expect(source.includes("presetCapabilityIds.has('agent.collaboration')")).toBe(true);
+    expect(source.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
+    expect(source.includes('!isCompanionAgent && collaborationEnabled && <ComposerToolRail')).toBe(true);
+    expect(source.includes('disabled={advancedConfig.autoWork.enabled}')).toBe(true);
+  });
+
   test('exposes target resource controls from the capability contract while preserving explicit project context', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const capabilityHook = readSource(

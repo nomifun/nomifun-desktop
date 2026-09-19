@@ -1,6 +1,5 @@
 import { ipcBridge } from '@/common';
 import type { ConversationId } from '@/common/types/ids';
-import type { AgentPresetId } from '@/common/types/agentPlatform';
 import { conversationTarget } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils';
@@ -33,7 +32,6 @@ export type ConversationCommandQueueItem = {
   input: string;
   files: string[];
   created_at: number;
-  preset_id?: AgentPresetId;
   /** Unconfirmed steering is retained as a draft, never an automatic new turn. */
   requires_review?: boolean;
 };
@@ -138,7 +136,6 @@ const normalizeQueueItem = (item: unknown): ConversationCommandQueueItem | null 
     input: candidate.input,
     files: uniqueFiles(candidate.files),
     created_at: candidate.created_at,
-    ...(typeof candidate.preset_id === 'string' ? { preset_id: candidate.preset_id as AgentPresetId } : {}),
     ...(candidate.requires_review === true ? { requires_review: true } : {}),
   };
 
@@ -187,17 +184,15 @@ export const normalizeQueueState = (state: unknown): ConversationCommandQueueSta
 export const createQueuedCommandItem = ({
   input,
   files,
-  preset_id,
   requires_review,
 }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-  Partial<Pick<ConversationCommandQueueItem, 'preset_id' | 'requires_review'>>): ConversationCommandQueueItem => ({
+  Partial<Pick<ConversationCommandQueueItem, 'requires_review'>>): ConversationCommandQueueItem => ({
   // This identifier is also the durable HTTP idempotency key. It must survive
   // dequeue restoration, remounts, and accepted-response loss unchanged.
   id: uuidv7(),
   input,
   files: uniqueFiles(files),
   created_at: Date.now(),
-  ...(preset_id ? { preset_id } : {}),
   ...(requires_review ? { requires_review: true } : {}),
 });
 
@@ -372,7 +367,7 @@ export type ConversationCommandQueueExecution = {
 };
 
 type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-  Partial<Pick<ConversationCommandQueueItem, 'preset_id' | 'requires_review'>>;
+  Partial<Pick<ConversationCommandQueueItem, 'requires_review'>>;
 type UpdateCommandInput = Pick<ConversationCommandQueueItem, 'input'>;
 
 const getQueueValidationMessage = (

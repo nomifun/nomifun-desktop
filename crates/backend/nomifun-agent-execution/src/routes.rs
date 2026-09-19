@@ -119,7 +119,7 @@ async fn create_execution(
 ) -> Result<(StatusCode, Json<ApiResponse<AgentExecution>>), AppError> {
     let Json(request) = json_body(body)?;
     let actor = user_actor(&user);
-    let execution = engine.create(&user.id, &actor, request).await?;
+    let execution = engine.create_from_http(&user.id, &actor, request).await?;
     Ok((StatusCode::CREATED, Json(ApiResponse::ok(execution))))
 }
 

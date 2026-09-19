@@ -38,6 +38,9 @@ const TURN_RESULT_DEADLINE: Duration = Duration::from_secs(120);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SELECTED_MODEL_MARKER: &str = "NOMIFUN_SELECTED_MODEL_LIVE_OK";
+const COLLABORATION_MODEL_MARKER: &str = "NOMIFUN_AGENT_COLLABORATION_LIVE_OK";
+const AUTOWORK_MODEL_MARKER: &str = "NOMIFUN_AUTOWORK_LIVE_OK";
+const AUTOWORK_TAG: &str = "live-commercial-model-smoke";
 const CREDENTIAL_AUDIT_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const CREDENTIAL_AUDIT_ATTEMPTS: usize = 5;
 const CREDENTIAL_AUDIT_REQUIRED_CLEAN_SCANS: usize = 2;
@@ -573,7 +576,11 @@ async fn create_agent_preset(
                 .get("required_resource_kinds")
                 .and_then(Value::as_array)
                 .is_some_and(|kinds| {
-                    kinds.len() == 1 && kinds[0] == required_resource_kind
+                    if required_resource_kind.is_empty() {
+                        kinds.is_empty()
+                    } else {
+                        kinds.len() == 1 && kinds[0] == required_resource_kind
+                    }
                 })
         {
             return Err(SmokeFailure::new(
@@ -1287,6 +1294,322 @@ async fn wait_for_session_marker(
     }
 }
 
+async fn assert_distinct_turn_message_identities(
+    router: &Router,
+    session_id: &str,
+    after_seq: u64,
+) -> Result<(), SmokeFailure> {
+    let (messages, _) = session_messages_after(
+        router,
+        "model.message_identity",
+        session_id,
+        after_seq,
+    )
+    .await?;
+    let user_id = messages.iter().find_map(|message| {
+        let projection = message.get("projection")?;
+        (message.get("presentation_intent").and_then(Value::as_str) == Some("message")
+            && projection.get("state").and_then(Value::as_str) == Some("accepted"))
+        .then(|| projection.get("correlation_id").and_then(Value::as_str))
+        .flatten()
+    });
+    let assistant_id = messages.iter().find_map(|message| {
+        assistant_text_projection(message)?
+            .get("correlation_id")
+            .and_then(Value::as_str)
+    });
+    let valid = user_id.zip(assistant_id).is_some_and(|(user, assistant)| {
+        user != assistant
+            && [user, assistant].iter().all(|value| {
+                uuid::Uuid::parse_str(value)
+                    .is_ok_and(|parsed| parsed.get_version_num() == 7)
+            })
+    });
+    if !valid {
+        return Err(SmokeFailure::new(
+            "model.message_identity",
+            "USER_ASSISTANT_MESSAGE_IDENTITY_COLLISION",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    Ok(())
+}
+
+async fn assert_session_preset(
+    router: &Router,
+    phase: &'static str,
+    session_id: &str,
+    preset_id: &str,
+) -> Result<(), SmokeFailure> {
+    let response = successful_json(
+        router,
+        phase,
+        Method::GET,
+        format!("/api/agent-sessions/{session_id}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let observation = envelope_data(phase, response)?;
+    if observation
+        .pointer("/session/agent_binding/preset_revision_ref/preset_id")
+        .and_then(Value::as_str)
+        != Some(preset_id)
+    {
+        return Err(SmokeFailure::new(
+            phase,
+            "SESSION_FROZEN_PRESET_CHANGED",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_for_execution_marker(
+    router: &Router,
+    execution_id: &str,
+    marker: &str,
+    duration: Duration,
+) -> Result<(), SmokeFailure> {
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        let response = successful_json(
+            router,
+            "cluster.execution",
+            Method::GET,
+            format!("/api/agent-executions/{execution_id}"),
+            None,
+            LOCAL_API_DEADLINE,
+            &[StatusCode::OK],
+        )
+        .await?;
+        let detail = envelope_data("cluster.execution", response)?;
+        let status = detail
+            .pointer("/execution/status")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if status == "completed" {
+            let exact = detail
+                .get("attempts")
+                .and_then(Value::as_array)
+                .is_some_and(|attempts| {
+                    attempts.iter().any(|attempt| {
+                        attempt.get("output_summary").and_then(Value::as_str)
+                            .is_some_and(|output| output.trim() == marker)
+                    })
+                });
+            if exact {
+                return Ok(());
+            }
+            return Err(SmokeFailure::new(
+                "cluster.execution",
+                "CLUSTER_EXACT_MARKER_MISSING",
+                StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+            ));
+        }
+        if matches!(status, "completed_with_failures" | "failed" | "cancelled") {
+            return Err(SmokeFailure::new(
+                "cluster.execution",
+                format!("CLUSTER_TERMINAL_{status}"),
+                StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(SmokeFailure::new(
+                "cluster.execution",
+                "CLUSTER_RESULT_DEADLINE_EXCEEDED",
+                StatusCode::REQUEST_TIMEOUT.as_u16(),
+            ));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn run_live_agent_collaboration(
+    router: &Router,
+    session_id: &str,
+    provider_id: &str,
+    model: &str,
+) -> Result<(), SmokeFailure> {
+    let cursor = session_message_cursor(router, "cluster.cursor_before", session_id).await?;
+    let created = successful_json(
+        router,
+        "cluster.create",
+        Method::POST,
+        "/api/agent-executions",
+        Some(json!({
+            "goal": "Run the commercial-model Agent collaboration acceptance step",
+            "model_pool": {
+                "mode": "single",
+                "model": {"provider_id": provider_id, "model": model}
+            },
+            "lead_model": {"provider_id": provider_id, "model": model},
+            "lead_conversation_id": session_id,
+            "delegation_policy": "automatic",
+            "adaptation_policy": "fixed",
+            "decision_policy": "ask_user",
+            "max_parallel": 1,
+            "steps": [{
+                "title": "Commercial model cluster step",
+                "spec": format!(
+                    "Do not call tools and do not ask a question. Reply with exactly {COLLABORATION_MODEL_MARKER} and no other text."
+                )
+            }]
+        })),
+        LOCAL_API_DEADLINE,
+        &[StatusCode::CREATED],
+    )
+    .await?;
+    let execution = envelope_data("cluster.create", created)?;
+    let execution_id = required_string(
+        "cluster.create",
+        &execution,
+        "/execution_id",
+        "CLUSTER_EXECUTION_ID_MISSING",
+    )?;
+    wait_for_execution_marker(
+        router,
+        &execution_id,
+        COLLABORATION_MODEL_MARKER,
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
+    wait_for_session_marker(
+        router,
+        "cluster.lead_reply",
+        session_id,
+        cursor,
+        COLLABORATION_MODEL_MARKER,
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
+    let projection = successful_json(
+        router,
+        "cluster.link",
+        Method::GET,
+        format!("/api/agent-sessions/{session_id}/projection"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let projection = envelope_data("cluster.link", projection)?;
+    if projection.get("linked_execution_id").and_then(Value::as_str)
+        != Some(execution_id.as_str())
+    {
+        return Err(SmokeFailure::new(
+            "cluster.link",
+            "CLUSTER_LEAD_LINK_MISSING",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    Ok(())
+}
+
+async fn run_live_autowork(
+    router: &Router,
+    session_id: &str,
+) -> Result<(), SmokeFailure> {
+    let created = successful_json(
+        router,
+        "autowork.requirement",
+        Method::POST,
+        "/api/requirements",
+        Some(json!({
+            "title": "Commercial model AutoWork acceptance",
+            "content": format!(
+                "Do not call tools and do not ask a question. Reply with exactly {AUTOWORK_MODEL_MARKER} and no other text."
+            ),
+            "tag": AUTOWORK_TAG,
+            "created_by": "user"
+        })),
+        LOCAL_API_DEADLINE,
+        &[StatusCode::CREATED],
+    )
+    .await?;
+    let requirement = envelope_data("autowork.requirement", created)?;
+    let requirement_id = required_string(
+        "autowork.requirement",
+        &requirement,
+        "/requirement_id",
+        "AUTOWORK_REQUIREMENT_ID_MISSING",
+    )?;
+    let enabled = successful_json(
+        router,
+        "autowork.enable",
+        Method::POST,
+        "/api/requirements/autowork",
+        Some(json!({
+            "kind": "conversation",
+            "target_id": session_id,
+            "enabled": true,
+            "tag": AUTOWORK_TAG,
+            "max_requirements": 1
+        })),
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let state = envelope_data("autowork.enable", enabled)?;
+    if state.get("enabled").and_then(Value::as_bool) != Some(true)
+        || state.get("running").and_then(Value::as_bool) != Some(true)
+    {
+        return Err(SmokeFailure::new(
+            "autowork.enable",
+            "AUTOWORK_LOOP_NOT_RUNNING",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + TURN_RESULT_DEADLINE;
+    loop {
+        let response = successful_json(
+            router,
+            "autowork.requirement_status",
+            Method::GET,
+            format!("/api/requirements/{requirement_id}"),
+            None,
+            LOCAL_API_DEADLINE,
+            &[StatusCode::OK],
+        )
+        .await?;
+        let requirement = envelope_data("autowork.requirement_status", response)?;
+        match requirement.get("status").and_then(Value::as_str) {
+            Some("done") => {
+                if !requirement
+                    .get("completion_note")
+                    .and_then(Value::as_str)
+                    .is_some_and(|note| note.contains(AUTOWORK_MODEL_MARKER))
+                {
+                    return Err(SmokeFailure::new(
+                        "autowork.requirement_status",
+                        "AUTOWORK_COMPLETION_MARKER_MISSING",
+                        StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                    ));
+                }
+                return Ok(());
+            }
+            Some("failed" | "cancelled" | "needs_review") => {
+                return Err(SmokeFailure::new(
+                    "autowork.requirement_status",
+                    "AUTOWORK_REQUIREMENT_NOT_DONE",
+                    StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
+                ));
+            }
+            _ => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(SmokeFailure::new(
+                "autowork.requirement_status",
+                "AUTOWORK_RESULT_DEADLINE_EXCEEDED",
+                StatusCode::REQUEST_TIMEOUT.as_u16(),
+            ));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 fn value_contains(value: &Value, marker: &str) -> bool {
     match value {
         Value::String(text) => text.contains(marker),
@@ -1447,7 +1770,59 @@ async fn run_selected_model_chain(
         TURN_RESULT_DEADLINE,
     )
     .await?;
+    assert_distinct_turn_message_identities(router, &session_id, cursor).await?;
     assert_session_runtime(router, &session_id).await?;
+
+    // Switching Agent configuration creates another frozen Session; the first
+    // Session must retain its exact original Preset binding.
+    let collaboration_actions: &[&str] = &[
+        "agent/delegate",
+        "agent/request_user_decision",
+    ];
+    let (collaboration_preset_id, _) = create_agent_preset(
+        router,
+        &provider_id,
+        model,
+        &[("agent.collaboration", collaboration_actions, "")],
+    )
+    .await?;
+    let (collaboration_session_id, _) = create_session(
+        router,
+        &collaboration_preset_id,
+        &provider_id,
+        model,
+        json!([]),
+    )
+    .await?;
+    if collaboration_session_id == session_id || collaboration_preset_id == preset_id {
+        return Err(SmokeFailure::new(
+            "agent_switch.new_session",
+            "AGENT_SWITCH_REUSED_FROZEN_IDENTITY",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    assert_session_preset(
+        router,
+        "agent_switch.original_binding",
+        &session_id,
+        &preset_id,
+    )
+    .await?;
+    assert_session_preset(
+        router,
+        "agent_switch.new_binding",
+        &collaboration_session_id,
+        &collaboration_preset_id,
+    )
+    .await?;
+    run_live_agent_collaboration(
+        router,
+        &collaboration_session_id,
+        &provider_id,
+        model,
+    )
+    .await?;
+    run_live_autowork(router, &collaboration_session_id).await?;
     Ok(())
 }
 

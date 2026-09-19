@@ -126,7 +126,7 @@ async fn list_tags(
 /// optional. Returns the refreshed tag summary.
 async fn resume_tag(
     State(state): State<RequirementRouterState>,
-    Extension(_user): Extension<CurrentUser>,
+    Extension(user): Extension<CurrentUser>,
     Path(tag): Path<String>,
     body: Option<Json<ResumeTagRequest>>,
 ) -> Result<Json<ApiResponse<TagSummary>>, AppError> {
@@ -141,6 +141,36 @@ async fn resume_tag(
         .requirement_service
         .resume_tag(&tag, &requeue_requirement_ids)
         .await?;
+    // Resume is a durable AutoWork state transition as well as a queue write.
+    // Publish fresh per-session snapshots so open conversation controls and the
+    // sidebar leave `paused` without waiting for another claim.
+    match state.requirement_service.tag_bindings(&user.id).await {
+        Ok(groups) => {
+            for binding in groups
+                .into_iter()
+                .filter(|group| group.tag == tag)
+                .flat_map(|group| group.bindings)
+            {
+                match build_autowork_state(
+                    &state,
+                    &user.id,
+                    binding.kind,
+                    &binding.target_id,
+                )
+                .await
+                {
+                    Ok(snapshot) => state.requirement_service.emit_autowork_state(&snapshot),
+                    Err(error) => tracing::warn!(
+                        tag,
+                        target_id = binding.target_id,
+                        %error,
+                        "Failed to publish resumed AutoWork state"
+                    ),
+                }
+            }
+        }
+        Err(error) => tracing::warn!(tag, %error, "Failed to enumerate resumed AutoWork bindings"),
+    }
     let summary = state
         .requirement_service
         .tags()
@@ -164,9 +194,16 @@ async fn list_tag_bindings(
 ) -> Result<Json<ApiResponse<Vec<TagBindings>>>, AppError> {
     let mut groups = state.requirement_service.tag_bindings(&user.id).await?;
     for group in &mut groups {
+        let paused = state
+            .requirement_service
+            .tag_pause_state(&group.tag)
+            .await?
+            .0;
         for binding in &mut group.bindings {
             if matches!(state.auto_work_runner.live_progress(binding.kind, &binding.target_id), Some((Some(_), _))) {
                 binding.run_state = AutoWorkRunState::Active;
+            } else if paused {
+                binding.run_state = AutoWorkRunState::Paused;
             }
         }
     }
@@ -311,7 +348,19 @@ async fn build_autowork_state(
     let live_tag = state.auto_work_runner.running_tag(kind, target_id).or(tag);
     let (current_requirement_id, completed_count) =
         state.auto_work_runner.live_progress(kind, target_id).unwrap_or((None, 0));
-    let run_state = AutoWorkState::run_state(enabled, current_requirement_id.as_deref());
+    let (paused, paused_reason) = if enabled {
+        match live_tag.as_deref() {
+            Some(tag) => state.requirement_service.tag_pause_state(tag).await?,
+            None => (false, None),
+        }
+    } else {
+        (false, None)
+    };
+    let run_state = AutoWorkState::run_state(
+        enabled,
+        paused,
+        current_requirement_id.as_deref(),
+    );
     Ok(AutoWorkState {
         kind,
         target_id: target_id.to_string(),
@@ -319,6 +368,8 @@ async fn build_autowork_state(
         tag: live_tag,
         running,
         run_state,
+        paused,
+        paused_reason,
         current_requirement_id,
         completed_count,
     })
