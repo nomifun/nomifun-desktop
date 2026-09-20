@@ -328,6 +328,23 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   };
 
   const selectedCount = selectedKeys.size;
+  const categoryCounts = useMemo(() => Object.fromEntries(
+    MODULE_CATEGORIES.map((value) => {
+      const categoryEntries = entries.filter((entry) =>
+        moduleCategory(referenceOf(entry)) === value
+      );
+      return [value, {
+        enabled: categoryEntries.filter((entry) =>
+          selectedKeys.has(capabilityReferenceKey(referenceOf(entry)))
+        ).length,
+        total: categoryEntries.length,
+      }];
+    })
+  ) as Record<ModuleCategory, { enabled: number; total: number }>, [entries, selectedKeys]);
+  const categoryCountLabel = (enabled: number, total: number): string => t(
+    'agentSettings.workbench.moduleCategoryCount',
+    { enabled, total }
+  );
   const attentionCount = entries.filter(needsAttention).length;
   const resourceModuleCount = entries.filter((entry) => {
     const key = capabilityReferenceKey(referenceOf(entry));
@@ -391,20 +408,29 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
           <button type='button' aria-pressed={category === 'all'} onClick={() => setCategory('all')}>
             <Connection theme='outline' size={15} />
             <span>{t('agentSettings.workbench.allCategories')}</span>
-            <small>{entries.length}</small>
+            <small
+              aria-label={categoryCountLabel(selectedCount, entries.length)}
+              title={categoryCountLabel(selectedCount, entries.length)}
+            >{selectedCount} / {entries.length}</small>
           </button>
-          {MODULE_CATEGORIES.map((value) => (
-            <button
-              type='button'
-              key={value}
-              aria-pressed={category === value}
-              onClick={() => setCategory(value)}
-            >
-              <ModuleCategoryIcon category={value} size={15} />
-              <span>{t(`agentSettings.workbench.categories.${value}`)}</span>
-              <small>{entries.filter((entry) => moduleCategory(referenceOf(entry)) === value).length}</small>
-            </button>
-          ))}
+          {MODULE_CATEGORIES.map((value) => {
+            const count = categoryCounts[value];
+            return (
+              <button
+                type='button'
+                key={value}
+                aria-pressed={category === value}
+                onClick={() => setCategory(value)}
+              >
+                <ModuleCategoryIcon category={value} size={15} />
+                <span>{t(`agentSettings.workbench.categories.${value}`)}</span>
+                <small
+                  aria-label={categoryCountLabel(count.enabled, count.total)}
+                  title={categoryCountLabel(count.enabled, count.total)}
+                >{count.enabled} / {count.total}</small>
+              </button>
+            );
+          })}
         </nav>
 
         <section className={styles.moduleResults} aria-label={t('agentSettings.workbench.moduleCatalog')}>
