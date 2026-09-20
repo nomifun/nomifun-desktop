@@ -1571,6 +1571,7 @@ export type I18nKey =
   | 'creativeStudio.assets.picker.selected'
   | 'creativeStudio.assets.picker.selectedCount'
   | 'creativeStudio.assets.picker.title'
+  | 'creativeStudio.assets.picker.unavailableForSelection'
   | 'creativeStudio.assets.preview.close'
   | 'creativeStudio.assets.preview.collection'
   | 'creativeStudio.assets.preview.createdAt'
