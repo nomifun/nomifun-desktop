@@ -206,7 +206,12 @@ fn verified_provider_profile(
             "stepaudio-2.5-chat" => Some((vec![Chat], vec![ModelTrait::AudioInput])),
             "step-3.7-flash" => Some((
                 vec![Chat],
-                vec![ModelTrait::VisionInput, ModelTrait::VideoInput],
+                vec![
+                    ModelTrait::VisionInput,
+                    ModelTrait::VideoInput,
+                    ModelTrait::FunctionCalling,
+                    ModelTrait::Streaming,
+                ],
             )),
             "step-image-edit-2" => Some((vec![ImageGeneration, ImageEdit], vec![])),
             _ => None,
@@ -574,6 +579,8 @@ mod tests {
         let (_, traits) = infer_catalog_tasks_and_traits("stepfun-plan", "step-3.7-flash");
         assert!(traits.contains(&ModelTrait::VisionInput));
         assert!(traits.contains(&ModelTrait::VideoInput));
+        assert!(traits.contains(&ModelTrait::FunctionCalling));
+        assert!(traits.contains(&ModelTrait::Streaming));
     }
 
     #[test]

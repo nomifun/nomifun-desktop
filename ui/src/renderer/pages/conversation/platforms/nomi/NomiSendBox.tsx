@@ -230,6 +230,7 @@ const NomiSendBox: React.FC<{
   );
 
   const [agentWarmed, setAgentWarmed] = useState(false);
+  const [initialDeliveryReady, setInitialDeliveryReady] = useState(false);
   useEffect(() => {
     void getConversationOrNull(conversation_id).then((res) => {
       if (!res?.extra?.workspace) return;
@@ -241,11 +242,17 @@ const NomiSendBox: React.FC<{
     if (!conversation_id || isCreating) return;
     let cancelled = false;
     setAgentWarmed(false);
+    setInitialDeliveryReady(false);
     void warmupConversationForPassiveMount(conversation_id)
       .then((warmed) => {
         // Finished sessions hydrate without creating a runtime. Do not query
         // runtime-only slash commands merely because hydration completed.
-        if (!cancelled) setAgentWarmed(warmed);
+        if (!cancelled) {
+          setAgentWarmed(warmed);
+          // `false` means an already-Ready canonical Session needed no passive
+          // warmup, not that its guarded initial handoff must stay blocked.
+          setInitialDeliveryReady(true);
+        }
       })
       .catch((error) => {
         if (!cancelled) Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
@@ -432,7 +439,7 @@ const NomiSendBox: React.FC<{
   // Handle the Guid handoff only after passive warmup has settled.
   // This sequences the UI requests; runtime admission remains backend-owned.
   useEffect(() => {
-    if (!conversation_id || !current_model?.use_model || !agentWarmed) return;
+    if (!conversation_id || !current_model?.use_model || !initialDeliveryReady) return;
 
     const target = conversationTarget(conversation_id);
     const draftStorageKey = sessionStorageKey('draft', target);
@@ -451,7 +458,6 @@ const NomiSendBox: React.FC<{
           console.error('[NomiSendBox] Failed to fill draft message:', error);
           sessionStorage.removeItem(draftProcessedKey);
         }
-        return;
       }
     }
 
@@ -494,7 +500,7 @@ const NomiSendBox: React.FC<{
     };
 
     void processInitialMessage();
-  }, [agentWarmed, conversation_id, current_model?.use_model, executeCommand, setContent]);
+  }, [conversation_id, current_model?.use_model, executeCommand, initialDeliveryReady, setContent]);
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);

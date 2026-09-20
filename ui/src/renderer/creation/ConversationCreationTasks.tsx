@@ -20,9 +20,9 @@ function useTasks(id: ConversationId, enabled: boolean) {
   });
 }
 const TaskContext = createContext<ReturnType<typeof useTasks> | null>(null);
-export function ConversationCreationTasksProvider({ conversationId, children }: { conversationId: ConversationId; children: ReactNode }) {
+export function ConversationCreationTasksProvider({ conversationId, enabled, children }: { conversationId: ConversationId; enabled: boolean; children: ReactNode }) {
   const creation = useCreationComposer();
-  const tasks = useTasks(conversationId, Boolean(creation));
+  const tasks = useTasks(conversationId, enabled && Boolean(creation));
   return <TaskContext.Provider value={tasks}>{children}{tasks.error && <Alert type='warning' content={<span>生成任务状态读取失败。<button type='button' onClick={() => void tasks.mutate()}>重试</button></span>} />}</TaskContext.Provider>;
 }
 

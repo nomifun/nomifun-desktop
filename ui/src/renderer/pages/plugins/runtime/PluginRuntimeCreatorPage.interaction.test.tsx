@@ -26,7 +26,7 @@ const success = { plugin: { plugin_id: 'published-check' } } as PluginRuntimeWor
 afterEach(() => { cleanup(); mock.restore(); });
 
 async function mount(value = draft) {
-  spyOn(modelSelection, 'useGuidModelSelection').mockReturnValue({ current_model: undefined, modelList: [], getAvailableModels: () => [],
+  spyOn(modelSelection, 'useGuidModelSelection').mockReturnValue({ current_model: undefined, currentModelTraits: [], modelList: [], getAvailableModels: () => [],
     setCurrentModel: async () => {}, formatGeminiModelLabel: (_provider, name) => name ?? '' });
   spyOn(preview, 'default').mockImplementation(({ onStatus }) => {
     useEffect(() => { let active = true; void Promise.resolve().then(() => { if (active) onStatus?.(null); });

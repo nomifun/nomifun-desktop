@@ -144,6 +144,12 @@ const GuidPage: React.FC = () => {
         )
       )
     : presetCapabilities.actionIds;
+  const selectedAgentRequiresToolCalls = presetActionIds.size > 0;
+  const selectedModelSupportsToolCalls = modelSelection.currentModelTraits.includes('function_calling');
+  const selectedAgentModelCompatible =
+    !selectedAgentRequiresToolCalls || selectedModelSupportsToolCalls;
+  const selectedAgentModelIncompatible =
+    Boolean(modelSelection.current_model) && !selectedAgentModelCompatible;
   const collaborationEnabled = presetResourceResolutionReady
     && presetCapabilityIds.has('agent.collaboration');
   // Knowledge is an optional, session-scoped mount. It keeps its compact
@@ -181,7 +187,9 @@ const GuidPage: React.FC = () => {
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
-  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(modelSelection.current_model);
+  const hasLaunchTarget = hasAgentLaunchTarget
+    && Boolean(modelSelection.current_model)
+    && selectedAgentModelCompatible;
   const selectedAgentResourceKey = agentSelection.selection.kind === 'template'
     ? `template:${agentSelection.selection.templateKey}`
     : `preset:${agentSelection.selection.presetId}`;
@@ -225,7 +233,8 @@ const GuidPage: React.FC = () => {
       }),
     autoWork: effectiveAutoWork,
     workspaceEnabled,
-    resourceResolutionReady: resourceSelectionsReady
+    resourceResolutionReady: selectedAgentModelCompatible
+      && resourceSelectionsReady
       && (isCompanionAgent || !collaborationEnabled || collaboration.ready),
     collaboration: collaborationEnabled ? collaboration.config : undefined,
     resourceSelections: resourceSelectionResolution.selections,
@@ -547,6 +556,16 @@ const GuidPage: React.FC = () => {
                 showIcon
                 title={t('common.error')}
                 content={t('agentSettings.errors.presetCapabilitiesLoadFailed')}
+                className={styles.guidPresetCapabilityError}
+              />
+            )}
+
+            {selectedAgentModelIncompatible && (
+              <Alert
+                type='warning'
+                showIcon
+                title={t('guid.agentEntries.modelToolsRequiredTitle')}
+                content={t('guid.agentEntries.modelToolsRequired')}
                 className={styles.guidPresetCapabilityError}
               />
             )}

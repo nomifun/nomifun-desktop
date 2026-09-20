@@ -1249,3 +1249,34 @@
 - Remaining/blocker: a real Apple Silicon Mac must build and validate `4f249fd50` (or its later descendant), rerun the
   current product flows and native CEF/TCC/lifecycle matrix, and produce a current arm64 App/DMG evidence set. Exact
   continuation instructions are in `MACOS-HANDOFF.zh.md` §12。
+
+### 2026-09-20 Windows real-user product-flow follow-up complete
+
+- Barrier/source: `6342cdd201431d1308313908d2e82a3d0e259f33` on the unchanged
+  `rf/agent-capability-platform-v2` branch；remote ancestry was fetched and remained exactly synchronized before
+  integration。No branch switch、history rewrite or force push。
+- Root causes fixed: ordinary Sessions no longer poll the `creation.media`-gated generation-task endpoint；Guid draft
+  consumption no longer strands the initial message；an already-Ready canonical Session can deliver its creation handoff
+  without a redundant warmup POST。The backend now enforces that handoff atomically at generation zero and admits only
+  exact idempotent replays。
+- Model contract: the verified StepFun Coding Plan `step-3.7-flash` profile now records tool calling and streaming in
+  addition to vision/video。Guid blocks a tool-using Agent before Session creation when the selected chat model lacks
+  `function_calling`, with localized actionable feedback instead of a doomed Runtime turn。
+- Real-user Windows evidence: desktop/WebUI UI paths used only the configured commercial `step-3.7-flash` model。
+  Minimal Agent initial delivery returned `自动首条消息端到端通过`；General Agent returned `通用Agent现已可用`；
+  AutoWork claimed one `uarc-smoke` Requirement and persisted Requirement/Execution/Step terminal completion；an explicit
+  `prefer_parallel` collaboration created a canonical AgentExecution/child Session and completed `Agent集群流程通过。`。
+  The temporary WebUI credential was logged out and restored to its original empty local-only state；no API key was
+  printed、written to the repository or committed。The unbound smoke-test Agent was retired after the run while its
+  immutable Session/Execution evidence was retained。
+- Startup reliability: `run-dev` now creates only its generated Windows development data root before launching Tauri；
+  caller-owned explicit roots and non-Windows selection remain untouched。
+- Gates: focused UI 66/66；run-dev 11 passed/2 platform skips；AgentSession atomic-initial test 1/1；Conversation 21/21；
+  App strict-header test 1/1；StepFun API/System catalog tests 2/2；rustfmt、typecheck、desktop 880×600 boundary、i18n、
+  Agent vocabulary and complete `bun run check` passed。UARC scanner reports 13 retired families=0、open anomaly=0、
+  Mac gap=1。
+- Windows: repaired flows and current source are verified；the desktop development service remains running。macOS:
+  native CEF/TCC/App/DMG evidence remains historically valid for its tested source, but this newer shared Session/API/UI
+  source is not relabeled current-source verified。
+- Remaining/blocker: current-source cross-platform completion still requires an external Apple Silicon Mac incremental
+  build plus the affected message/Agent/AutoWork/collaboration product-flow rerun；no additional Windows blocker remains。

@@ -219,20 +219,54 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         input: Value,
     ) -> Result<AgentTurnReceipt, AppError> {
+        self.start_turn_with_admission(owner, session_id, idempotency_key, input, false)
+            .await
+    }
+
+    pub async fn start_initial_turn(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        input: Value,
+    ) -> Result<AgentTurnReceipt, AppError> {
+        self.start_turn_with_admission(owner, session_id, idempotency_key, input, true)
+            .await
+    }
+
+    async fn start_turn_with_admission(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        idempotency_key: &str,
+        input: Value,
+        initial_only: bool,
+    ) -> Result<AgentTurnReceipt, AppError> {
         self.require_owner(owner, session_id).await?;
         let key = scoped_key(owner, idempotency_key, session_id.as_ref())?;
         let operation_id = OperationId::from(format!("turn:{key}"));
-        let (_, turn_result) = self
-            .store
-            .start_turn(
-                session_id,
-                EventProducerId::from("session_api"),
-                IdempotencyKey::from(key),
-                operation_id.clone(),
-                StrictJsonValue(input),
-            )
-            .await
-            .map_err(store_error)?;
+        let (_, turn_result) = if initial_only {
+            self.store
+                .start_initial_turn(
+                    session_id,
+                    EventProducerId::from("session_api"),
+                    IdempotencyKey::from(key),
+                    operation_id.clone(),
+                    StrictJsonValue(input),
+                )
+                .await
+        } else {
+            self.store
+                .start_turn(
+                    session_id,
+                    EventProducerId::from("session_api"),
+                    IdempotencyKey::from(key),
+                    operation_id.clone(),
+                    StrictJsonValue(input),
+                )
+                .await
+        }
+        .map_err(store_error)?;
         Ok(AgentTurnReceipt {
             operation_id,
             cursor: turn_result.cursor,

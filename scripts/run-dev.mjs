@@ -9,7 +9,7 @@
  * pass it only to the Tauri child. Other platforms retain the original path.
  */
 
-import { existsSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -362,6 +362,34 @@ export function developmentEnvironment(environment, platform = process.platform)
   return result;
 }
 
+/**
+ * Materialize only the generated Windows development root. Explicit roots are
+ * still owned by their caller, matching the clean-start contract above.
+ */
+export function ensureGeneratedDevelopmentDataDirectory(
+  environment,
+  sourceEnvironment = process.env,
+  platform = process.platform,
+  createDirectory = mkdirSync,
+) {
+  if (platform !== 'win32') return null;
+  const explicitKey = Object.keys(sourceEnvironment).find(
+    (key) => key.toUpperCase() === 'NOMIFUN_DATA_DIR',
+  );
+  if (explicitKey) return null;
+
+  const localAppData = getEnvironmentValue(sourceEnvironment, 'LOCALAPPDATA');
+  const target = getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR');
+  const expected = localAppData
+    ? join(localAppData, 'NomiFun-dev-plugin-v1')
+    : '';
+  if (!target || target !== expected) {
+    throw new Error('generated Windows development data directory does not match LOCALAPPDATA');
+  }
+  createDirectory(target, { recursive: true });
+  return target;
+}
+
 // A per-run socket ties the macOS dev app to this runner without signalling
 // unrelated processes or trusting stale PIDs. Sending a stop byte requests
 // the app's ordinary ExitCoordinator shutdown; its connection closes only when
@@ -427,6 +455,7 @@ async function main() {
   let environment;
   try {
     environment = developmentEnvironment(loadWindowsToolchainEnvironment(process.env));
+    ensureGeneratedDevelopmentDataDirectory(environment, process.env);
   } catch (error) {
     console.error(`[dev] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

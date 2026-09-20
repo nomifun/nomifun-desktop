@@ -11,6 +11,8 @@
     "loading": "Loading Agents…",
     "loadFailed": "Couldn't load the Agent list",
     "modelNeeded": "No default chat model is currently available. Configure or enable one in Model Management, then retry. Your message and Agent selection have been kept.",
+    "modelToolsRequiredTitle": "This model cannot run the selected Agent",
+    "modelToolsRequired": "This Agent needs model tool-calling support. Choose a tool-capable model or add that Chat capability in Model Management; your message and Agent selection have been kept.",
     "capabilitiesNeeded": "Some capabilities required by this official Agent are not implemented in this build. Your message and selection have been kept. Choose another Agent or adjust capabilities in Manage Agents.",
     "launchFailed": "This official Agent could not start. Check the service and retry. Your message and selection have been kept."
   },

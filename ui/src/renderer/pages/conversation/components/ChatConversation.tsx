@@ -98,6 +98,7 @@ const NomiConversationLayout: React.FC<{
         collaboratorSelectorNode={collaborationControlNode}
         modelSelectionHint={modelSelectionHint}
         isProcessing={isConversationProcessing(conversation)}
+        creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
       />
     </ExecutionConversationLayout>
   );

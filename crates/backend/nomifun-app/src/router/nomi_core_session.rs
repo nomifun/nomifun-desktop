@@ -1305,22 +1305,24 @@ impl NomiCoreSessionOwner {
         session_id: &AgentSessionId,
         idempotency_key: &str,
         request: SendMessageRequest,
+        initial_only: bool,
     ) -> Result<IdempotentMessageDelivery, AppError> {
         let input = self
             .canonical_turn_input_with_admission(owner_id, session_id, &request)
             .await?;
-        let receipt = self
-            .canonical
-            .start_turn(
-                &PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: owner_id.to_owned(),
-                },
-                session_id,
-                idempotency_key,
-                input,
-            )
-            .await?;
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: owner_id.to_owned(),
+        };
+        let receipt = if initial_only {
+            self.canonical
+                .start_initial_turn(&principal, session_id, idempotency_key, input)
+                .await?
+        } else {
+            self.canonical
+                .start_turn(&principal, session_id, idempotency_key, input)
+                .await?
+        };
         let operation_id = receipt.operation_id.clone();
         let state = self
             .canonical_delivery_state_for_operation(
@@ -1687,6 +1689,7 @@ impl NomiCoreSessionOwner {
             &AgentSessionId::from(session_id.to_owned()),
             idempotency_key,
             request,
+            false,
         )
         .await
     }
@@ -4353,9 +4356,10 @@ mod session_boundary_tests {
     use super::{
         canonical_autowork_config_snapshot, companion_archive_message,
         cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
-        frozen_workspace_root, NomiCoreSessionOwner,
+        frozen_workspace_root, initial_delivery_requested, NomiCoreSessionOwner,
         parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
     };
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use std::collections::{BTreeMap, BTreeSet};
 
     use nomifun_ai_agent::AgentStreamEvent;
@@ -4534,6 +4538,40 @@ mod session_boundary_tests {
         assert!(source.contains(".canonical()"));
         let retired_marker = ["unsupported", "_session_events"].concat();
         assert!(!source.contains(&retired_marker));
+    }
+
+    #[test]
+    fn initial_delivery_header_is_explicit_and_strict() {
+        let headers = HeaderMap::new();
+        assert!(!initial_delivery_requested(&headers).unwrap());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-nomifun-initial-delivery",
+            HeaderValue::from_static("1"),
+        );
+        assert!(initial_delivery_requested(&headers).unwrap());
+
+        headers.insert(
+            "x-nomifun-initial-delivery",
+            HeaderValue::from_static("true"),
+        );
+        let invalid = initial_delivery_requested(&headers).unwrap_err();
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid.code, "INVALID_REQUEST");
+
+        headers.insert(
+            "x-nomifun-initial-delivery",
+            HeaderValue::from_static("1"),
+        );
+        headers.append(
+            "x-nomifun-initial-delivery",
+            HeaderValue::from_static("1"),
+        );
+        assert_eq!(
+            initial_delivery_requested(&headers).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -9760,10 +9798,34 @@ async fn start_nomi_core_agent_session_turn(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
     Path(agent_session_id): Path<String>,
+    headers: HeaderMap,
     Json(request): Json<CreateAgentSessionTurnRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionTurnResponseDto>>, NomiCoreApiError> {
-    let result = start_owned_session_turn(&state.session_owner, &owner, &agent_session_id, request).await?;
+    let initial_only = initial_delivery_requested(&headers)?;
+    let result = start_owned_session_turn(
+        &state.session_owner,
+        &owner,
+        &agent_session_id,
+        request,
+        initial_only,
+    )
+    .await?;
     Ok(Json(ApiResponse::ok(result)))
+}
+
+fn initial_delivery_requested(headers: &HeaderMap) -> Result<bool, NomiCoreApiError> {
+    let mut values = headers.get_all("x-nomifun-initial-delivery").iter();
+    let Some(value) = values.next() else {
+        return Ok(false);
+    };
+    if values.next().is_some() || value.as_bytes() != b"1" {
+        return Err(NomiCoreApiError::new(
+            StatusCode::BAD_REQUEST,
+            "INVALID_REQUEST",
+            "X-Nomifun-Initial-Delivery must appear exactly once with value 1",
+        ));
+    }
+    Ok(true)
 }
 
 async fn steer_nomi_core_agent_session_turn(
@@ -9884,12 +9946,19 @@ async fn start_owned_session_turn(
     owner: &AuthenticatedOwner,
     agent_session_id: &str,
     request: CreateAgentSessionTurnRequestDto,
+    initial_only: bool,
 ) -> Result<CreateAgentSessionTurnResponseDto, NomiCoreApiError> {
     let session_id = parse_agent_session_id(agent_session_id)?;
     let input = bounded_turn_input(request.input)?;
     let idempotency_key = canonical_nonempty(&request.idempotency_key, "idempotency_key")?;
     let delivery = session_owner
-        .dispatch_canonical_turn(owner.as_ref(), &session_id, &idempotency_key, input)
+        .dispatch_canonical_turn(
+            owner.as_ref(),
+            &session_id,
+            &idempotency_key,
+            input,
+            initial_only,
+        )
         .await?;
     let operation_id = NomiCoreSessionOwner::turn_operation_id(
         owner.as_ref(),
