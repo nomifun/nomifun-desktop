@@ -14,6 +14,7 @@ import styles from './CanvasSurface.module.css';
 
 export type CanvasBackgroundMode = 'dots' | 'lines' | 'blank';
 export type CanvasInteractionTool = 'select' | 'pan';
+export const DEFAULT_CANVAS_GRID_STEP = 32;
 
 export interface CanvasSurfaceViewport {
   x: number;
@@ -86,7 +87,7 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
       onBackgroundChange,
       tool = 'select',
       isPanning = false,
-      gridStep = 48,
+      gridStep = DEFAULT_CANVAS_GRID_STEP,
       ariaLabel,
       edgeLayer,
       nodeLayer,
@@ -111,7 +112,7 @@ const CanvasSurface = React.forwardRef<HTMLDivElement, CanvasSurfaceProps>(
     const safeZoom = Math.max(0.001, finiteOr(viewport.zoom, 1));
     const safeX = finiteOr(viewport.x, 0);
     const safeY = finiteOr(viewport.y, 0);
-    const safeGridStep = Math.max(4, finiteOr(gridStep, 48));
+    const safeGridStep = Math.max(4, finiteOr(gridStep, DEFAULT_CANVAS_GRID_STEP));
     const screenGridSize = safeGridStep * safeZoom;
     const gridStyle: CanvasSurfaceStyle = {
       '--creative-canvas-grid-size': `${screenGridSize}px`,

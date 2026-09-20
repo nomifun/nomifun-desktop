@@ -1,6 +1,9 @@
 export { default as CanvasMiniMapFrame } from './CanvasMiniMapFrame';
 export type { CanvasMiniMapFrameProps } from './CanvasMiniMapFrame';
-export { default as CanvasSurface } from './CanvasSurface';
+export {
+  default as CanvasSurface,
+  DEFAULT_CANVAS_GRID_STEP,
+} from './CanvasSurface';
 export type {
   CanvasBackgroundMode,
   CanvasInteractionTool,

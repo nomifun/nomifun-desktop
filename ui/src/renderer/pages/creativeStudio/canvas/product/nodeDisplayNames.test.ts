@@ -19,7 +19,7 @@ test('all empty user nodes start square; imported image and video nodes fit thei
   const state = createInitialCanvasState();
   for (const kind of ['text', 'image', 'video', 'audio', 'panorama', 'group'] as const) {
     expect(createCreativeCanvasProductNode(kind, state, { width: 1000, height: 800 }).size)
-      .toEqual({ width: 320, height: 320 });
+      .toEqual({ width: 288, height: 288 });
   }
   for (const kind of ['image', 'video'] as const) {
     const asset = { id: 'asset', kind, title: 'portrait', width: 600, height: 900 } as CreativeAsset;

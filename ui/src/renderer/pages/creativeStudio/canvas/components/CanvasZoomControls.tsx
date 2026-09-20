@@ -59,7 +59,7 @@ const iconProps = {
   theme: 'outline' as const,
   size: 16,
   fill: 'currentColor',
-  strokeWidth: 3,
+  strokeWidth: 3.5,
 };
 
 /**
@@ -164,10 +164,10 @@ const CanvasZoomControls: React.FC<CanvasZoomControlsProps> = ({
               setZoomMenuOpen(false);
             }}
           >
+            <span>{t(`creativeStudio.canvas.backgrounds.${background}`)}</span>
             <span className={styles.selectionIndicator} aria-hidden='true'>
               {background === selectedBackground ? <CheckOne {...iconProps} /> : null}
             </span>
-            <span>{t(`creativeStudio.canvas.backgrounds.${background}`)}</span>
           </button>
         ))}
       </div>

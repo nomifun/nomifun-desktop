@@ -19,6 +19,7 @@ export type CreativeCanvasChromeTool = CanvasInteractionTool;
 export type CreativeCanvasChromeSaveStatus = CanvasCasSaveStatus;
 
 export type CreativeCanvasLeftView = 'canvas' | 'assets' | 'prompts' | 'templates';
+export type CreativeCanvasResourceView = Exclude<CreativeCanvasLeftView, 'canvas'>;
 export type CreativeCanvasRightView = 'assistant' | 'properties';
 export type CreativeCanvasBottomView = 'history';
 
@@ -44,6 +45,8 @@ export interface CreativeCanvasChromeProps {
   canRedo: boolean;
   leftOpen: boolean;
   leftView: CreativeCanvasLeftView;
+  /** Resource libraries use one shared modal instead of occupying the canvas rail. */
+  resourceView: CreativeCanvasResourceView | null;
   rightView: CreativeCanvasRightView | null;
   /** Current persisted width of the right panel, in CSS pixels. */
   rightPanelWidth?: number;
@@ -65,6 +68,7 @@ export interface CreativeCanvasChromeProps {
   onRedo(): void;
   onLeftPanelOpenChange(open: boolean): void;
   onLeftViewChange(view: CreativeCanvasLeftView): void;
+  onResourceViewChange(view: CreativeCanvasResourceView | null): void;
   onRightViewChange(view: CreativeCanvasRightView | null): void;
   /** Persist a user-adjusted right panel width, in CSS pixels. */
   onRightPanelWidthChange?(width: number): void;

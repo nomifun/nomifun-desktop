@@ -62,7 +62,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes("'grid'" )).toBe(false);
   });
 
-  test('keeps source-order node creation directly on the toolbar', () => {
+  test('keeps source-order node creation directly on the side rail', () => {
     expect(
       types.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS')
     ).toBe(true);
@@ -83,7 +83,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       '.rightPanel > .panelBody > *',
       'width: 100%',
       'grid-column: 2',
-      'overflow-x: auto',
+      'overflow-y: auto',
       'position: absolute',
       'data-left-open',
       "data-compact='true'",
@@ -94,33 +94,39 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       expect(css.includes(token)).toBe(true);
     }
     expect(
-      /\.leftPanel\s*\{[\s\S]*?width:\s*min\(320px,\s*calc\(100% - 28px\)\);/.test(
+      /\.leftPanel\s*\{[\s\S]*?width:\s*48px;/.test(
         css
       )
     ).toBe(true);
-    expect(/\.leftTabs\s*\{[\s\S]*?width:\s*50px;/.test(css)).toBe(true);
+    expect(/\.leftTabs\s*\{[\s\S]*?width:\s*46px;/.test(css)).toBe(true);
     expect(
-      /\.leftTabs button\s*\{[\s\S]*?width:\s*38px;/.test(css)
+      /\.leftTabs button\s*\{[\s\S]*?width:\s*36px;/.test(css)
     ).toBe(true);
     expect(css.includes('box-shadow: inset 3px 0 0 rgb(var(--primary-6));')).toBe(
       false
     );
     expect(
-      /\.leftPanel\[data-left-open='false'\]\s*\{[\s\S]*?width:\s*50px;/.test(
+      /\.leftPanel\[data-left-open='true'\]\s*\{[\s\S]*?width:\s*min\(320px,\s*calc\(100% - 28px\)\);/.test(
         css
       )
     ).toBe(true);
     expect(
-      /\.leftPanel\[data-left-open='false'\] \.leftTabs button\s*\{[\s\S]*?width:\s*40px;/.test(
+      /\.leftPanel\[data-left-open='false'\] \.leftTabs button\s*\{[\s\S]*?width:\s*36px;/.test(
         css
       )
     ).toBe(true);
+    expect(component.includes("aria-haspopup='dialog'")).toBe(true);
+    expect(component.includes('<CreativeCanvasResourceDialog')).toBe(true);
+    expect(css.includes('.resourceDialogContent')).toBe(true);
   });
 
-  test('keeps the left resource bubble above the top tool dock', () => {
+  test('layers the compact top actions and side rail above the canvas', () => {
     expect(/\.leftPanel\s*\{[\s\S]*?z-index:\s*60;/.test(css)).toBe(true);
-    expect(/\.toolbarPositioner\s*\{[\s\S]*?z-index:\s*50;/.test(css)).toBe(
+    expect(/\.topBar\s*\{[\s\S]*?z-index:\s*70;/.test(css)).toBe(
       true
     );
+    expect(/\.topPrimaryActions,[\s\S]*?\.topActions\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
+    expect(/\.leftPanel\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
+    expect(/\.bottomPanel\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
   });
 });

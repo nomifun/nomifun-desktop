@@ -14,7 +14,7 @@ import type {
 import type { PromptLibrarySelection } from '../../prompts';
 import { createInitialCanvasState } from '../core';
 import {
-  CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
+  CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES,
   CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
   CreativeCanvasNodeFactoryError,
   createCreativeCanvasProductNode,
@@ -147,7 +147,7 @@ describe('createCreativeCanvasProductNode', () => {
       expect(node.groupId).toBeNull();
       expect(node.locked).toBe(false);
       expect(node.zIndex).toBe(0);
-      expect(node.size).toEqual(CREATIVE_CANVAS_PRODUCT_NODE_SIZES[node.type]);
+      expect(node.size).toEqual(CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES[node.type]);
     }
 
     const firstConfig = nodes.find((node) => node.type === 'config');
@@ -167,10 +167,10 @@ describe('createCreativeCanvasProductNode', () => {
     const oneClientSlot = createCreativeCanvasProductNode('text', empty, VIEWPORT_SIZE, {
       cascadeIndex: 1,
     });
-    expect(centered.position).toEqual({ x: 190, y: 40 });
+    expect(centered.position).toEqual({ x: 206, y: 56 });
     expect(oneClientSlot.position).toEqual({
-      x: 190 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
-      y: 40 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      x: 206 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
+      y: 56 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP / 2,
     });
 
     const high = createCreativeCanvasProductNode('image', empty, VIEWPORT_SIZE, {
@@ -188,8 +188,8 @@ describe('createCreativeCanvasProductNode', () => {
     const cascaded = createCreativeCanvasProductNode('text', populated, VIEWPORT_SIZE);
 
     expect(cascaded.position).toEqual({
-      x: 190 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
-      y: 40 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      x: 206 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
+      y: 56 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
     });
     expect(cascaded.zIndex).toBe(8);
 
@@ -222,7 +222,7 @@ describe('createCreativeCanvasProductNode', () => {
       createCreativeCanvasProductNode('text', centeredState, VIEWPORT_SIZE, {
         cascadeIndex: 0,
       }).position
-    ).toEqual({ x: -160, y: -160 });
+    ).toEqual({ x: -144, y: -144 });
 
     const userPanned = createInitialCanvasState({
       viewport: { x: 12, y: -8, zoom: 1 },

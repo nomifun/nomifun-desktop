@@ -83,7 +83,10 @@ import {
 } from '../../templates/page';
 import { useCreativeTemplateRuntime } from '../../templates/runtime';
 import { creativeTemplateRepository } from '../../templates/services';
-import { CreativeCanvasChrome } from '../chrome';
+import {
+  CreativeCanvasChrome,
+  type CreativeCanvasResourceView,
+} from '../chrome';
 import type { CanvasInteractionTool } from '../components';
 import {
   canRedoCanvas,
@@ -221,6 +224,7 @@ import {
 import { orphanCanvasVideoComposeTask } from './canvasVideoComposerRuntime';
 import {
   createCreativeCanvasProductNode,
+  CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES,
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
   creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
@@ -372,9 +376,9 @@ interface AgentDocumentState {
 
 const iconProps = {
   theme: 'outline' as const,
-  size: 17,
+  size: 18,
   fill: 'currentColor',
-  strokeWidth: 3,
+  strokeWidth: 3.5,
 };
 
 function measuredSize(element: HTMLElement | null): CreativeSize {
@@ -624,7 +628,7 @@ const centeredNodePosition = (
   kind: CreativeCanvasUserNodeKind,
   worldPosition: CanvasPoint
 ): CanvasPoint => {
-  const size = CREATIVE_CANVAS_PRODUCT_NODE_SIZES[kind];
+  const size = CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES[kind];
   return {
     x: worldPosition.x - size.width / 2,
     y: worldPosition.y - size.height / 2,
@@ -947,6 +951,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const [panels, setPanels] = useState<CreativeStudioPanelState>(() =>
     restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS)
   );
+  const [resourceDialogView, setResourceDialogView] =
+    useState<CreativeCanvasResourceView | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState('');
@@ -1267,6 +1273,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     const defaultPanels = restoreCreativeCanvasSessionPanels(DEFAULT_CREATIVE_STUDIO_PANELS);
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
+    setResourceDialogView(null);
     hydratedPanelsRef.current = null;
     canvasStateRef.current = null;
     setCanvasState(null);
@@ -1399,11 +1406,26 @@ const CreativeCanvasProductRoute: React.FC = () => {
     editorRef.current?.setPanels(nextPanels);
   }, []);
 
-  const handleLeftViewChange = useCallback(
-    (view: CreativeStudioPanelState['left']['activeView']) => {
-      persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+  const handleResourceViewChange = useCallback(
+    (view: CreativeCanvasResourceView | null) => {
+      setResourceDialogView(view);
+      if (view !== null && panelsRef.current.left.open) {
+        persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, false));
+      }
     },
     [persistPanels]
+  );
+
+  const handleLeftViewChange = useCallback(
+    (view: CreativeStudioPanelState['left']['activeView']) => {
+      if (view !== 'canvas') {
+        handleResourceViewChange(view);
+        return;
+      }
+      setResourceDialogView(null);
+      persistPanels(withCreativeCanvasLeftView(panelsRef.current, view));
+    },
+    [handleResourceViewChange, persistPanels]
   );
 
   const handleLeftPanelOpenChange = useCallback(
@@ -1541,8 +1563,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const openPromptLibrary = useCallback(() => {
-    handleLeftViewChange('prompts');
-  }, [handleLeftViewChange]);
+    handleResourceViewChange('prompts');
+  }, [handleResourceViewChange]);
 
   const prepareCenteredInsertion = useCallback(() => {
     const editor = editorRef.current;
@@ -4742,8 +4764,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
         tool={tool}
         canUndo={Boolean(canvasState && canUndoCanvas(canvasState))}
         canRedo={Boolean(canvasState && canRedoCanvas(canvasState))}
-        leftOpen={panels.left.open}
+        leftOpen={panels.left.open && panelViews.left === 'canvas'}
         leftView={panelViews.left}
+        resourceView={resourceDialogView}
         rightView={panelViews.right}
         rightPanelWidth={panels.right.width}
         bottomView={panelViews.bottom}
@@ -4756,6 +4779,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onRedo={() => dispatch(canvasCommands.redo())}
         onLeftPanelOpenChange={handleLeftPanelOpenChange}
         onLeftViewChange={handleLeftViewChange}
+        onResourceViewChange={handleResourceViewChange}
         onRightViewChange={handleRightViewChange}
         onRightPanelWidthChange={handleRightPanelWidthChange}
         onBottomViewChange={handleBottomViewChange}

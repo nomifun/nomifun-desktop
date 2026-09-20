@@ -34,6 +34,17 @@ export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
   group: { width: 320, height: 320 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
 
+/** Empty authoring nodes start slightly smaller; populated media keeps its 320px baseline. */
+export const CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES = {
+  text: { width: 288, height: 288 },
+  image: { width: 288, height: 288 },
+  panorama: { width: 288, height: 288 },
+  video: { width: 288, height: 288 },
+  audio: { width: 288, height: 288 },
+  config: CREATIVE_CANVAS_PRODUCT_NODE_SIZES.config,
+  group: { width: 288, height: 288 },
+} as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
+
 /** Repeated insertions move by this many client pixels, independent of zoom. */
 export const CREATIVE_CANVAS_PRODUCT_CASCADE_STEP = 28;
 export const CREATIVE_CANVAS_PRODUCT_CASCADE_SLOTS = 8;
@@ -260,7 +271,9 @@ export function createCreativeCanvasProductNode<K extends CreativeCanvasNodeKind
     defaultDataFor(kind),
     state,
     viewportSize,
-    overrides
+    overrides.size
+      ? overrides
+      : { ...overrides, size: CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES[kind] }
   );
 }
 

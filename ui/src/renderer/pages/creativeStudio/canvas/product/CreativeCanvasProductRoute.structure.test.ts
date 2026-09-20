@@ -244,23 +244,26 @@ describe('Creative Canvas product route composition', () => {
     expect(style.includes('--creative-canvas-grid-line: color-mix(')).toBe(true);
   });
 
-  test('keeps the compact icon toolbar centered at the top of the canvas', () => {
+  test('splits compact controls between the top actions and side rail', () => {
     expect(
-      /\.toolbarPositioner\s*\{[\s\S]*?padding:\s*16px 16px 0;[\s\S]*?grid-row:\s*2;[\s\S]*?align-self:\s*start;[\s\S]*?justify-content:\s*center;/.test(
+      /\.topBar\s*\{[\s\S]*?grid-row:\s*1;[\s\S]*?align-self:\s*start;[\s\S]*?pointer-events:\s*none;/.test(
         chromeStyle
       )
     ).toBe(true);
-    expect(/\.toolDock\s*\{[\s\S]*?height:\s*42px;/.test(chromeStyle)).toBe(
+    expect(/\.topPrimaryActions,[\s\S]*?\.topActions\s*\{[\s\S]*?height:\s*42px;/.test(chromeStyle)).toBe(
       true
     );
+    expect(chromeSource.includes("data-node-kind={kind}")).toBe(true);
+    expect(chromeSource.includes("aria-haspopup='dialog'")).toBe(true);
+    expect(chromeSource.includes('styles.toolbarPositioner')).toBe(false);
     expect(style.includes('transform: translateY(-4px)')).toBe(false);
     expect(style.includes('translate(clamp(0px, 10vw, 142px), -4px)')).toBe(false);
     expect(/\.toolbarButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(style)).toBe(true);
     expect(/\.iconButton > button\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*100%;[\s\S]*?place-items:\s*center;/.test(chromeStyle)).toBe(true);
-    expect(/\.toolbarButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*17px;[\s\S]*?height:\s*17px;[\s\S]*?line-height:\s*0;/.test(style)).toBe(true);
-    expect(/\.iconButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*17px;[\s\S]*?height:\s*17px;[\s\S]*?line-height:\s*0;/.test(chromeStyle)).toBe(true);
-    expect(source.includes('strokeWidth: 3')).toBe(true);
-    expect(chromeSource.includes('strokeWidth: 3')).toBe(true);
+    expect(/\.toolbarButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*18px;[\s\S]*?height:\s*18px;[\s\S]*?line-height:\s*0;/.test(style)).toBe(true);
+    expect(/\.iconButton :global\(\.i-icon\)\s*\{[\s\S]*?width:\s*18px;[\s\S]*?height:\s*18px;[\s\S]*?line-height:\s*0;/.test(chromeStyle)).toBe(true);
+    expect(source.includes('strokeWidth: 3.5')).toBe(true);
+    expect(chromeSource.includes('strokeWidth: 3.5')).toBe(true);
     expect(style.includes('opacity: 0.52')).toBe(true);
     expect(chromeStyle.includes('opacity: 0.52')).toBe(true);
   });

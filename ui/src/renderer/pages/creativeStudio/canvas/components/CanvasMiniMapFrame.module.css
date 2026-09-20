@@ -5,7 +5,7 @@
   width: clamp(210px, 17vw, 248px);
   height: clamp(148px, 15vw, 184px);
   min-height: 148px;
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) 38px;
   overflow: visible;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
   border-radius: 12px;
@@ -25,10 +25,11 @@
 .footer {
   display: flex;
   box-sizing: border-box;
+  height: 38px;
   min-width: 0;
-  min-height: 44px;
+  min-height: 38px;
   align-items: center;
-  padding: 4px 6px;
+  padding: 0 6px;
   border-top: 1px solid color-mix(in srgb, var(--color-border-2) 82%, transparent);
   background: color-mix(in srgb, var(--color-bg-2) 98%, transparent);
   border-radius: 0 0 11px 11px;
