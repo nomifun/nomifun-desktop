@@ -14,6 +14,7 @@ import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
+import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 import { Alert, Button, Collapse, Form, Message, Modal, Switch, Tooltip } from '@arco-design/web-react';
 import { FolderSearch } from '@icon-park/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -102,21 +103,46 @@ const SystemModalContent: React.FC = () => {
     [startOnBoot, t]
   );
 
-  const handleNotificationEnabledChange = useCallback((checked: boolean) => {
+  const ensureNotificationPermission = useCallback(async (): Promise<boolean> => {
+    if (!isDesktopShell()) return true;
+    try {
+      let state = await ipcBridge.notification.permissionState.invoke();
+      if (state !== 'granted') state = await ipcBridge.notification.requestPermission.invoke();
+      if (state === 'granted') return true;
+    } catch {
+      // The permission page provides the durable recovery path below.
+    }
+    Message.error({
+      duration: 6000,
+      content: (
+        <span className='inline-flex items-center gap-8px'>
+          <span>{t('settings.notificationPermissionDenied')}</span>
+          <a className='font-600 text-primary-6 no-underline' href={capabilityPermissionsHref('notifications')}>
+            {t('settings.notificationPermissionManage')}
+          </a>
+        </span>
+      ),
+    });
+    return false;
+  }, [t]);
+
+  const handleNotificationEnabledChange = useCallback(async (checked: boolean) => {
+    if (checked && !(await ensureNotificationPermission())) return;
     setNotificationEnabled(checked);
     configService.set('system.notificationEnabled', checked).catch(() => {
       setNotificationEnabled(!checked);
       configService.setLocal('system.notificationEnabled', !checked);
     });
-  }, []);
+  }, [ensureNotificationPermission]);
 
-  const handleCronNotificationEnabledChange = useCallback((checked: boolean) => {
+  const handleCronNotificationEnabledChange = useCallback(async (checked: boolean) => {
+    if (checked && !(await ensureNotificationPermission())) return;
     setCronNotificationEnabled(checked);
     configService.set('system.cronNotificationEnabled', checked).catch(() => {
       setCronNotificationEnabled(!checked);
       configService.setLocal('system.cronNotificationEnabled', !checked);
     });
-  }, []);
+  }, [ensureNotificationPermission]);
 
   const handleSaveUploadToWorkspaceChange = useCallback((checked: boolean) => {
     setSaveUploadToWorkspace(checked);

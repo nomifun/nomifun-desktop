@@ -282,6 +282,8 @@
     "computerCheckFailed": "Computer availability could not be verified. Retry after checking system settings.",
     "computerReady": "The required Computer actions are available on this desktop.",
     "computerPermissionNeeded": "Grant the required screen or accessibility permission before starting.",
+    "computerPermissionScope": "This Agent needs: {{permissions}}. OS access does not expand the Agent's capability boundary.",
+    "computerPermissionNotRequired": "This Agent only launches apps or URLs and needs neither Screen Recording nor Accessibility.",
     "configure": "Configure",
     "bindingPolicyTitle": "Choose actual resources when using the Agent",
     "bindingPolicyBody": "An Agent only declares its capability boundary and required resource kinds. Each conversation, companion, or automation target selects and manages its own knowledge bases, workspace, and connections.",

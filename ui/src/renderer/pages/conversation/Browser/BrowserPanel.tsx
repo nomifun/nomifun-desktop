@@ -10,6 +10,7 @@ import { localBrowserLink } from './localBrowserLink';
 import WebsiteDialog from './WebsiteDialog';
 import { copyText } from '@/renderer/utils/ui/clipboard';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 
 type Props = { agentSessionId: string; onClose: () => void; client?: BrowserClient; linkRequest?: BrowserLinkRequest; onLinkConsumed?: (id: number, handled: boolean) => void; onLinkAvailabilityChange?: (available: boolean) => void; hostSurfaceAvailable?: boolean; panelId?: string };
 type BrowserFailureKind = 'capability' | 'provider' | 'host' | 'request' | 'clear';
@@ -64,6 +65,12 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
   const downloads = snapshot?.runtime?.downloads ?? [];
   const active = tabs.find(tab => tab.target.tab_id === snapshot?.runtime?.active_tab_id);
   const permission = active?.permission_requests?.[0];
+  const hasSystemPermissionBlock = Boolean(active?.blocked_permissions?.some((kind) =>
+    ['camera', 'microphone', 'camera_microphone', 'geolocation', 'notifications'].includes(kind)
+  ));
+  const permissionMayNeedSystemAccess = Boolean(permission &&
+    ['camera', 'microphone', 'camera_microphone', 'geolocation', 'notifications'].includes(permission.kind)
+  );
   const dialog = active?.script_dialog;
   const locked = snapshot?.run.input_state === 'agent_running';
   const attachedProvider = snapshot?.provider_kind === 'attached_chrome';
@@ -483,11 +490,13 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     {notice && <div className={styles.notice} role='status'><span>{notice}</span><button type='button' className={styles.icon} aria-label={t('browserWorkspace.dismissNotice')} onClick={() => setNotice('')}><Close size={12} /></button></div>}
     {!permission && active && Boolean(active.blocked_permissions?.length) && !locked && !draftTab && !failure && <div className={styles.permission} role='status'>
       <span>{t('browserWorkspace.permissionRetryHint')}</span>
+      {hasSystemPermissionBlock && <a className={styles.permissionLink} href={capabilityPermissionsHref('browser-use')}>{t('browserWorkspace.permissionSettings')}</a>}
       <button type='button' disabled={!canNavigate} onClick={() => void run({ command: 'reload', target: active.target })}>{t('browserWorkspace.reload')}</button>
     </div>}
     {permission && active && !locked && !draftTab && !failure && <div className={styles.permission} role='group' aria-live='polite' aria-label={t('browserWorkspace.permissionTitle')}>
       <span>{t('browserWorkspace.permissionRequest', { origin: permission.origin, permission: t(`browserWorkspace.permissionKinds.${permission.kind}`, { defaultValue: permission.kind }) })}</span>
-      <div><button type='button' disabled={!canAct} onClick={() => void run({ command: 'permission', target: active.target, request_id: permission.request_id, allow: false })}>{t('browserWorkspace.permissionDeny')}</button>
+      <div>{permissionMayNeedSystemAccess && <a className={styles.permissionLink} href={capabilityPermissionsHref('browser-use')}>{t('browserWorkspace.permissionGuide')}</a>}
+      <button type='button' disabled={!canAct} onClick={() => void run({ command: 'permission', target: active.target, request_id: permission.request_id, allow: false })}>{t('browserWorkspace.permissionDeny')}</button>
       <button type='button' disabled={!canAct} onClick={() => void run({ command: 'permission', target: active.target, request_id: permission.request_id, allow: true })}>{t('browserWorkspace.permissionAllow')}</button></div>
     </div>}
     <div ref={slot} className={styles.surface} data-browser-surface data-provider={snapshot?.provider_kind} aria-busy={!snapshot && !failure}>

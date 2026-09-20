@@ -19,8 +19,12 @@ import guidStyles from '../src/renderer/pages/guid/index.module.css';
 const { ipcBridge } = await import('../src/common');
 ipcBridge.companion.onCompanionCreated.on = () => () => {};
 ipcBridge.companion.onCompanionDeleted.on = () => () => {};
-ipcBridge.computerPermissions.get.invoke = async () => ({
-  accessibility: null, screen_recording: null, platform: 'windows', app_label: 'NomiFun',
+ipcBridge.systemPermissions.get.invoke = async () => ({
+  platform: 'windows', app_label: 'NomiFun', permissions: [
+    { kind: 'microphone', state: 'unknown', can_request: false, can_open_settings: false, requires_restart_after_grant: false, capabilities: ['voice_input'] },
+    { kind: 'accessibility', state: 'not_required', can_request: false, can_open_settings: false, requires_restart_after_grant: false, capabilities: ['computer_use'] },
+    { kind: 'screen_recording', state: 'not_required', can_request: false, can_open_settings: false, requires_restart_after_grant: false, capabilities: ['computer_use'] },
+  ],
 });
 const { default: AgentResourcePicker } = await import('../src/renderer/components/agent/AgentResourcePicker');
 const loadInventory: AgentResourceInventoryLoader = async () => ({ options: {

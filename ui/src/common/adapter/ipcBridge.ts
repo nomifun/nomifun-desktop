@@ -26,7 +26,9 @@ import {
   tauriGetZoom,
   tauriIsAutostartEnabled,
   tauriOpenDialog,
+  tauriNotificationPermissionState,
   tauriRelaunch,
+  tauriRequestNotificationPermission,
   tauriSendNotification,
   tauriSetAutostart,
   tauriSetKeepAwake,
@@ -49,6 +51,7 @@ import {
   tauriWindowToggleMaximize,
   tauriWindowUnmaximize,
   type ShellOpenDialogOptions,
+  type TauriNotificationPermissionState,
 } from './tauriShell';
 import {
   autoUpdateStatusEmitter,
@@ -2641,6 +2644,50 @@ export const computerPermissions = {
   openSettings: httpPost<void, { kind: ComputerPermissionKind }>('/api/computer/permissions/open-settings'),
 };
 
+export type SystemPermissionKind =
+  | 'microphone'
+  | 'accessibility'
+  | 'screen_recording'
+  | 'camera'
+  | 'location'
+  | 'local_network'
+  | 'notifications'
+  | 'full_disk_access';
+
+export type SystemPermissionState =
+  | 'granted'
+  | 'denied'
+  | 'not_determined'
+  | 'restricted'
+  | 'not_required'
+  | 'unknown';
+
+export interface SystemPermissionEntry {
+  kind: Extract<SystemPermissionKind, 'microphone' | 'accessibility' | 'screen_recording'>;
+  state: SystemPermissionState;
+  can_request: boolean;
+  can_open_settings: boolean;
+  requires_restart_after_grant: boolean;
+  capabilities: Array<'voice_input' | 'computer_use'>;
+}
+
+export interface SystemPermissionStatus {
+  platform: 'macos' | 'windows' | 'linux' | 'other';
+  app_label: string;
+  permissions: SystemPermissionEntry[];
+}
+
+/** Canonical host permission inventory used by Settings and feature gates. */
+export const systemPermissions = {
+  get: httpGet<SystemPermissionStatus, void>('/api/system/permissions'),
+  request: httpPost<SystemPermissionStatus, { kind: SystemPermissionKind }>(
+    '/api/system/permissions/request'
+  ),
+  openSettings: httpPost<void, { kind: SystemPermissionKind }>(
+    '/api/system/permissions/open-settings'
+  ),
+};
+
 // ---------------------------------------------------------------------------
 // System events — global WS broadcasts owned by the backend
 // ---------------------------------------------------------------------------
@@ -2661,6 +2708,14 @@ export type INotificationOptions = {
 };
 
 export const notification = {
+  permissionState: shellProvider<TauriNotificationPermissionState, void>(
+    () => tauriNotificationPermissionState(),
+    'unavailable'
+  ),
+  requestPermission: shellProvider<TauriNotificationPermissionState, void>(
+    () => tauriRequestNotificationPermission(),
+    'unavailable'
+  ),
   show: shellProvider<void, INotificationOptions>(
     (opts) =>
       tauriSendNotification({

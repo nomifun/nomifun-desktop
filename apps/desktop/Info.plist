@@ -3,6 +3,12 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>NomiFun uses the microphone to record voice input and convert it to text with your selected speech recognition model.</string>
+  <string>NomiFun uses the microphone for voice input and for websites that you explicitly allow in Browser Use.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>NomiFun lets websites use the camera only after you explicitly allow the request in Browser Use.</string>
+  <key>NSLocationUsageDescription</key>
+  <string>NomiFun shares your location with a website only after you explicitly allow the request in Browser Use.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>NomiFun connects to local websites, SSH hosts, companion devices, and services only when you ask it to.</string>
 </dict>
 </plist>

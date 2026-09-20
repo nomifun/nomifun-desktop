@@ -332,20 +332,95 @@
   "saveUploadToWorkspace": "上传文件保存到项目文件夹",
   "autoPreviewOfficeFiles": "自动预览新建 Office 文件",
   "autoPreviewOfficeFilesDesc": "自动打开当前项目中新创建的 Word、Excel 和 PowerPoint 文件，并忽略 Office 临时锁定文件。",
-  "computerUse": "桌面控制（computer use）",
-  "computerUseDesc": "允许智能体观察并操作桌面（截屏、读取窗口控件、点击、输入、滚动、可靠启动应用/网址）。关闭后智能体仅能使用终端等工具。",
-  "computerUseNav": "Computer Use",
-  "computerUseSection": "桌面能力",
-  "computerUsePermSection": "系统权限（macOS）",
-  "computerUsePermRefresh": "重新检测",
-  "computerUsePermGranted": "已生效",
-  "computerUsePermNotInEffect": "未生效",
-  "computerUseOpenSettings": "打开系统设置",
-  "computerUseAccessibility": "辅助功能",
-  "computerUseAccessibilityDesc": "用于读取无障碍树以及合成鼠标/键盘输入。",
-  "computerUseScreenRecording": "屏幕录制",
-  "computerUseScreenRecordingDesc": "用于截图与 Set-of-Marks 标记覆盖层。",
-  "computerUseRestartHint": "若权限显示“未生效”：请在系统设置里授权给 {{app}}（不是终端/编辑器），然后**彻底退出并重新打开 {{app}}**——macOS 不会对已在运行的进程热加载这些权限。若开关明明已开仍未生效，多为旧签名身份残留：先在列表中移除 {{app}} 再重新添加授权。",
+  "capabilityPermissions": {
+    "nav": "能力与权限",
+    "title": "能力与系统权限",
+    "subtitle": "查看每项能力真正依赖的系统授权。系统权限只开放设备能力，不会替 Agent 增加工具权限，也不会让网页自行获得访问权。",
+    "refresh": "重新检测",
+    "desktopOnly": "这里显示的是运行 NomiFun 的电脑权限。当前 WebUI 可以测试本浏览器的麦克风，但宿主权限请在桌面客户端中管理。",
+    "loadFailed": "无法读取最新系统权限，请回到桌面客户端后重试。",
+    "restartAfterGrant": "授权后需彻底退出并重新打开 NomiFun 才会生效。",
+    "requestAccess": "请求授权",
+    "openSystemSettings": "打开系统设置",
+    "tabs": {
+      "overview": "总览",
+      "voice": "语音输入",
+      "computer": "Computer Use",
+      "browser": "Browser Use",
+      "notifications": "通知"
+    },
+    "states": {
+      "granted": "已授权",
+      "denied": "已拒绝",
+      "not_determined": "待授权",
+      "restricted": "受系统限制",
+      "not_required": "无需授权",
+      "unknown": "使用时检测"
+    },
+    "summaryStates": {
+      "ready": "已就绪",
+      "attention": "需要处理",
+      "onDemand": "按需询问"
+    },
+    "voice": {
+      "title": "语音输入（ASR）",
+      "summary": "使用麦克风录音，再交给已选择的语音识别模型转写。",
+      "description": "麦克风只在你点击语音按钮或这里的测试按钮后启用；录音结束会立即释放设备。",
+      "configureModel": "配置 ASR 模型",
+      "test": "测试麦克风",
+      "testPassed": "麦克风可用，测试音频未被保存或上传。",
+      "testFailed": "麦克风不可用，请检查设备与系统隐私设置。",
+      "privacy": "测试只取得并立即释放音频流，不会保存或提交录音。正常语音输入仅把你主动录制的片段发送给所选 ASR 服务。"
+    },
+    "computer": {
+      "title": "Computer Use",
+      "summary": "观察并操作整个桌面，需要屏幕录制与辅助功能权限。",
+      "description": "权限必须授予正在运行的 NomiFun，而不是终端或编辑器。只有显式包含 Computer 能力的 Agent 才能调用这些动作。",
+      "ready": "当前平台所需的 Computer Use 系统权限已经就绪。",
+      "blocked": "Computer Use 尚未就绪。请授权给 {{app}}；若系统开关已开启但仍未生效，请移除旧条目后重新授权。"
+    },
+    "browser": {
+      "title": "Browser Use",
+      "summary": "基础网页导航和交互无需桌面控制权限；网站媒体能力逐站点询问。",
+      "baseReady": "Browser Use 的导航、页面观察、点击和输入不依赖辅助功能或屏幕录制权限。",
+      "websiteTitle": "网站按需权限",
+      "websiteDescription": "网站必须先在可见 Browser 面板中提出请求，并由你决定是否仅本次允许；系统仍可能追加一次 macOS 授权。",
+      "siteKinds": {
+        "camera": "仅在网站主动请求且你在 Browser 面板确认后使用摄像头。",
+        "microphone": "仅在网站主动请求且你在 Browser 面板确认后使用麦克风；与 ASR 授权相互独立。",
+        "location": "仅向当前提出请求的网站提供定位。",
+        "notifications": "网站通知按站点批准，不等同于 NomiFun 的任务完成通知。"
+      },
+      "agentBoundary": "Agent 运行并持有页面输入时，新的网站权限默认不会被静默批准。停止本轮后，由你在可见页面中处理请求。"
+    },
+    "notifications": {
+      "title": "系统通知",
+      "summary": "用于任务完成、定时任务等本机通知。",
+      "description": "产品内的通知开关和操作系统授权是两层设置；两者都开启时 NomiFun 才能投递通知。",
+      "preferenceHint": "可在“设置 → 系统”中选择是否启用普通通知和定时任务完成通知。"
+    },
+    "localNetwork": {
+      "title": "本地网络连接",
+      "description": "Browser 打开局域网页面、连接局域网 SSH/MCP 服务或伙伴设备时，macOS 15 及以上版本会按需询问。WebUI 仅监听入站连接本身不需要这项授权。",
+      "browserDescription": "这不是网站自行申请的权限；当你导航到局域网地址时，macOS 15 及以上版本可能直接显示系统级“本地网络”提示。"
+    },
+    "files": {
+      "title": "文件与受保护目录",
+      "description": "文件能力只使用你选择的工作区、上传文件或系统文件选择器结果。默认不要求“完全磁盘访问”；仅在你确实需要访问受保护目录且系统拒绝时，再由你决定是否在 macOS 中额外开放。"
+    },
+    "permissions": {
+      "microphone": "麦克风",
+      "microphoneDesc": "供语音输入使用。macOS 授权对象应为 {{app}}。",
+      "accessibility": "辅助功能",
+      "accessibilityDesc": "读取无障碍树，并合成鼠标、键盘与滚动输入。",
+      "screenRecording": "屏幕录制",
+      "screenRecordingDesc": "截取桌面画面并生成 Set-of-Marks 标记；不用于 Browser Use 的原生网页画面。",
+      "camera": "摄像头",
+      "location": "定位",
+      "notifications": "通知",
+      "notificationsDesc": "允许 NomiFun 在任务完成或需要你处理时发送系统通知。"
+    }
+  },
   "startOnBoot": "开机启动",
   "startOnBootDesc": "登录 macOS 或 Windows 后自动启动 Nomi。",
   "startOnBootUnsupported": "仅在打包后的 macOS 和 Windows 客户端中可用。",
@@ -357,10 +432,13 @@
   "sendKeyModEnter": "Ctrl/⌘+Enter 发送",
   "keepAwakeDesc": "开启后，开盖状态下 Nomi 会保持电脑唤醒，确保定时任务按时执行；显示器仍可正常熄屏（省电护屏，熄屏不影响任务运行）。注意：合盖仍会休眠、定时任务会暂停——除非插电并同时连接外接显示器和外接键鼠（clamshell 模式）。",
   "notification": "通知",
+  "notificationPermissionDenied": "系统通知权限尚未开启，产品内开关不会绕过系统设置。",
+  "notificationPermissionManage": "管理权限",
   "cronNotificationEnabled": "定时任务完成通知",
   "promptTimeout": "LLM 请求超时时间（秒）",
   "promptTimeoutDesc": "单次模型请求等待的最长时间，超出后中止本次请求。",
   "groupApp": "应用",
+  "groupCapabilities": "能力",
   "groupRuntimes": "运行环境",
   "groupAbout": "其他",
   "agentParameters": "执行引擎参数",

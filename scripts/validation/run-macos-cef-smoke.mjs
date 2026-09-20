@@ -44,7 +44,17 @@ try {
   // Copy into a fresh bundle. Do not sign hard-linked build-cache executables.
   await cp(join(root, 'target/debug/examples/browser_cef_smoke'), executable);
   await cp(join(runtime, 'Chromium Embedded Framework.framework'), framework, { recursive: true, dereference: false, verbatimSymlinks: true });
-  const common = { CFBundlePackageType: 'APPL', CFBundleVersion: '1', CFBundleShortVersionString: '1.0', LSMinimumSystemVersion: '14.0', NSHighResolutionCapable: true };
+  const common = {
+    CFBundlePackageType: 'APPL',
+    CFBundleVersion: '1',
+    CFBundleShortVersionString: '1.0',
+    LSMinimumSystemVersion: '14.0',
+    NSHighResolutionCapable: true,
+    NSMicrophoneUsageDescription: 'NomiFun lets websites use the microphone only after you explicitly allow the request in Browser Use.',
+    NSCameraUsageDescription: 'NomiFun lets websites use the camera only after you explicitly allow the request in Browser Use.',
+    NSLocationUsageDescription: 'NomiFun shares your location with a website only after you explicitly allow the request in Browser Use.',
+    NSLocalNetworkUsageDescription: 'NomiFun connects to local websites and services only when you ask it to.',
+  };
   // The Tauri build embeds these two keys in the Mach-O __info_plist section.
   // macOS process-requirement validation rejects the signed process when the
   // external bundle plist disagrees with the embedded values (OSStatus -67030).
@@ -53,7 +63,6 @@ try {
     CFBundleIdentifier: 'com.nomifun.cef-native-smoke',
     CFBundleName: 'NomiFun',
     CFBundleExecutable: 'browser_cef_smoke',
-    NSMicrophoneUsageDescription: 'NomiFun uses the microphone to record voice input and convert it to text with your selected speech recognition model.',
   }));
   for (const name of helperNames) {
     const helperApp = join(contents, 'Frameworks', `${name}.app`);

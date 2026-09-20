@@ -226,6 +226,18 @@ export async function tauriSetAutostart(enabled: boolean): Promise<void> {
 }
 
 /** Native OS notification (tauri-plugin-notification). */
+export type TauriNotificationPermissionState = 'default' | 'denied' | 'granted' | 'unavailable';
+
+export async function tauriNotificationPermissionState(): Promise<TauriNotificationPermissionState> {
+  if (typeof window === 'undefined' || typeof window.Notification === 'undefined') return 'unavailable';
+  return window.Notification.permission;
+}
+
+export async function tauriRequestNotificationPermission(): Promise<TauriNotificationPermissionState> {
+  const mod = await import('@tauri-apps/plugin-notification');
+  return mod.requestPermission();
+}
+
 export async function tauriSendNotification(opts: { title: string; body: string; icon?: string }): Promise<void> {
   const mod = await import('@tauri-apps/plugin-notification');
   let granted = await mod.isPermissionGranted();

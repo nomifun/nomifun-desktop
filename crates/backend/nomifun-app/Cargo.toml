@@ -257,6 +257,20 @@ if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
 percent-encoding = "2"
 
+# The in-process macOS desktop backend is the only authority that can report
+# whether the running NomiFun code identity may use the microphone.  Keep the
+# binding target-scoped so Linux/Windows and server-only builds do not link
+# AVFoundation.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "AVCaptureDevice",
+    "AVMediaFormat",
+] }
+
 # Computer Role implementation. Optional; only the `computer-use` feature pulls
 # the native screen/input/UI-Automation stack, so web/headless builds stay lean.
 nomi-computer = { workspace = true, optional = true }

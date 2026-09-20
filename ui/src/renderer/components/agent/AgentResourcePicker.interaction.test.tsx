@@ -8,6 +8,7 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
+import settings from '../../services/i18n/locales/en-US/settings.json';
 import AgentResourcePicker, {
   loadAgentResourceInventory,
   optionsForAgentResourceField,
@@ -16,7 +17,7 @@ import AgentResourcePicker, {
 import type { AgentResourceSelectionValue } from '@/renderer/hooks/agent/agentResourceSelection';
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en, common } } }, interpolation: { escapeValue: false } });
+await i18n.use(initReactI18next).init({ lng: 'en-US', fallbackLng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en, common, settings } } }, interpolation: { escapeValue: false } });
 
 const inventory: AgentResourceInventory = {
   options: {
@@ -202,17 +203,39 @@ describe('Agent resource picker', () => {
     await waitFor(() => expect(states.at(-1)).toBe(false));
   });
 
-  test('keeps automatic Computer configuration in Settings instead of the Conversation picker', async () => {
-    const permissions = spyOn(ipcBridge.computerPermissions.get, 'invoke');
+  test('checks automatic Computer permissions before allowing launch and links to Settings', async () => {
+    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
+      platform: 'macos', app_label: 'NomiFun', permissions: [
+        { kind: 'microphone', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] },
+        { kind: 'accessibility', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
+        { kind: 'screen_recording', state: 'not_determined', can_request: true, can_open_settings: true, requires_restart_after_grant: true, capabilities: ['computer_use'] },
+      ],
+    });
+    restores.push(() => permissions.mockRestore());
+    const states: boolean[] = [];
+    const Location = () => <span data-testid='location'>{useLocation().pathname}{useLocation().search}</span>;
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><AgentResourcePicker
+      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe']}
+      value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
+    /><Location /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(states.at(-1)).toBe(false));
+    expect(permissions).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(en.resources.computerPermissionNeeded)).toBeTruthy();
+    fireEvent.click(screen.getByText(en.resources.configure));
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/permissions?tab=computer-use'));
+  });
+
+  test('does not probe or block a launch-only Computer capability', async () => {
+    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke');
     restores.push(() => permissions.mockRestore());
     const states: boolean[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe']}
+      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/launch']}
       value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
     expect(permissions).not.toHaveBeenCalled();
-    expect(screen.container.querySelector('section')).toBeNull();
+    expect(screen.getByText(en.resources.computerPermissionNotRequired)).toBeTruthy();
   });
 
   test('filters dependent resources by the selected product owner', () => {
