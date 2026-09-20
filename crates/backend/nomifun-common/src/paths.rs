@@ -27,6 +27,57 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::error::AppError;
+
+/// Which boundary is checking a user-selected workspace directory.
+///
+/// Creation errors tell callers to choose another directory; runtime errors
+/// explain that a previously valid frozen directory disappeared after the
+/// Session or automation was created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceDirectoryCheck {
+    Create,
+    Runtime,
+}
+
+/// Validate and canonicalize a workspace that must already exist.
+///
+/// This is deliberately different from the installation work-root flow, which
+/// may create a new directory. Conversation, scheduled-task, and terminal
+/// project selectors point at an existing user directory and must fail before
+/// persisting an executable aggregate when that directory has disappeared.
+pub fn canonical_existing_workspace_directory(
+    path: &Path,
+    check: WorkspaceDirectoryCheck,
+) -> Result<PathBuf, AppError> {
+    let display = path.display().to_string();
+    let unavailable = || match check {
+        WorkspaceDirectoryCheck::Create => AppError::WorkspaceDirectoryUnavailable(display.clone()),
+        WorkspaceDirectoryCheck::Runtime => {
+            AppError::WorkspaceDirectoryRuntimeUnavailable(display.clone())
+        }
+    };
+
+    if display.is_empty() || display.trim() != display || !path.is_absolute() {
+        return Err(unavailable());
+    }
+    if crate::error::workspace_path_has_edge_whitespace_segment(path) {
+        return Err(match check {
+            WorkspaceDirectoryCheck::Create => AppError::WorkspacePathEdgeWhitespace(display),
+            WorkspaceDirectoryCheck::Runtime => {
+                AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(display)
+            }
+        });
+    }
+
+    let canonical = canonicalize_simplified(path).map_err(|_| unavailable())?;
+    let metadata = std::fs::metadata(&canonical).map_err(|_| unavailable())?;
+    if !metadata.is_dir() {
+        return Err(unavailable());
+    }
+    Ok(canonical)
+}
+
 /// Canonicalize `path` and strip the Windows verbatim prefix from the result
 /// when it is losslessly representable without it. Use this instead of
 /// `std::fs::canonicalize` for any value that is persisted, exported through
@@ -106,6 +157,44 @@ mod tests {
             PathBuf::from("/home/example/.local/share/NomiFun")
         };
         assert_eq!(simplified(&plain), plain);
+    }
+
+    #[test]
+    fn existing_workspace_directory_is_canonicalized() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            canonical_existing_workspace_directory(
+                directory.path(),
+                WorkspaceDirectoryCheck::Create,
+            )
+            .unwrap(),
+            canonicalize_simplified(directory.path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn missing_workspace_has_distinct_create_and_runtime_errors() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("missing-project");
+        assert!(matches!(
+            canonical_existing_workspace_directory(&missing, WorkspaceDirectoryCheck::Create),
+            Err(AppError::WorkspaceDirectoryUnavailable(path)) if path == missing.display().to_string()
+        ));
+        assert!(matches!(
+            canonical_existing_workspace_directory(&missing, WorkspaceDirectoryCheck::Runtime),
+            Err(AppError::WorkspaceDirectoryRuntimeUnavailable(path)) if path == missing.display().to_string()
+        ));
+    }
+
+    #[test]
+    fn workspace_file_is_not_accepted_as_a_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("project.txt");
+        std::fs::write(&file, b"not a directory").unwrap();
+        assert!(matches!(
+            canonical_existing_workspace_directory(&file, WorkspaceDirectoryCheck::Create),
+            Err(AppError::WorkspaceDirectoryUnavailable(_))
+        ));
     }
 
     #[cfg(windows)]

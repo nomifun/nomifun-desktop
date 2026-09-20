@@ -58,12 +58,20 @@ function fixture() {
   const bases = spyOn(ipcBridge.knowledge.listBases, 'invoke').mockResolvedValue([]);
   const error = spyOn(Message, 'error').mockImplementation(() => () => {});
   const warning = spyOn(Message, 'warning').mockImplementation(() => () => {});
+  const metadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockImplementation(async ({ path }) => ({
+    name: path.split(/[\\/]/).pop() || path,
+    path,
+    size: 0,
+    type: 'inode/directory',
+    lastModified: 1,
+    isDirectory: true,
+  }));
   const panel = spyOn(extendedPanel, 'default').mockImplementation(props => h('button', {
     onClick: () => {
       props.onKbIdsChange(['knowledge-fixture']);
     },
   }, 'enable fixture options'));
-  for (const spy of [create, bases, error, warning, panel]) restore.push(() => spy.mockRestore());
+  for (const spy of [create, bases, error, warning, metadata, panel]) restore.push(() => spy.mockRestore());
   const storage = { getItem: mock((_key: string) => null), setItem: mock((_key: string, _value: string) => {}) };
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: storage });
@@ -86,8 +94,13 @@ function fixture() {
     h(Route, { path: '*', element: h('div', null, 'destination') }),
   ))));
   return {
-    view, created, create, error, warning, refreshed, storage,
-    launch: () => act(() => { fireEvent.click(view.getByRole('button', { name: 'terminal.create.launch' })); }),
+    view, created, create, error, warning, metadata, refreshed, storage,
+    launch: (count = 1) => act(async () => {
+      for (let index = 0; index < count; index += 1) {
+        fireEvent.click(view.getByRole('button', { name: 'terminal.create.launch' }));
+      }
+      await Promise.resolve();
+    }),
     cancel: () => act(() => { fireEvent.click(view.getByRole('button', { name: 'common.cancel' })); }),
     command: (value: string) => act(() => { fireEvent.input(view.getByPlaceholderText('$SHELL'), { target: { value } }); }),
     options: () => act(() => { fireEvent.click(view.getByText('enable fixture options')); }),
@@ -100,14 +113,12 @@ test('same-render clicks issue one create; failure keeps the draft and unlocks r
   const f = fixture();
   f.command('claude --fixture');
   f.create.mockRejectedValueOnce(new Error('offline'));
-  f.launch();
-  f.launch();
+  await f.launch(2);
   const count = f.create.mock.calls.length;
-  await act(async () => {});
   expect(count).toBe(1);
   expect(f.error).toHaveBeenCalledWith('offline');
   expect((f.view.getByPlaceholderText('$SHELL') as HTMLInputElement).value).toBe('claude --fixture');
-  f.launch();
+  await f.launch();
   await act(async () => { f.created.resolve(session); });
   expect(f.create).toHaveBeenCalledTimes(2);
   expect(f.path()).toBe('/terminal/' + session.terminal_id);
@@ -117,7 +128,7 @@ test('leaving during create prevents stale continuation, warnings and navigation
   const f = fixture();
   f.command('claude --fixture');
   f.options();
-  f.launch();
+  await f.launch();
   f.cancel();
   expect(f.path()).toBe('/origin');
   await act(async () => { f.created.resolve(session); });
@@ -130,7 +141,7 @@ test('leaving during create prevents stale continuation, warnings and navigation
 
 test('a create rejection after leaving is silent', async () => {
   const f = fixture();
-  f.launch();
+  await f.launch();
   f.cancel();
   await act(async () => { f.created.reject(null); });
   expect(f.error).not.toHaveBeenCalled();
@@ -139,12 +150,12 @@ test('a create rejection after leaving is silent', async () => {
 
 test('same-route navigation resets the default cwd and invalidates the former launch', async () => {
   const f = fixture();
-  f.launch();
+  await f.launch();
   f.revisit();
   expect((f.view.getByPlaceholderText('terminal.create.workspacePlaceholder') as HTMLInputElement).value).toBe('');
   const current = deferred<ITerminalSession>();
   f.create.mockImplementation(() => current.promise);
-  f.launch();
+  await f.launch();
   expect(f.create).toHaveBeenCalledTimes(2);
   expect(f.create.mock.calls[1]![0].cwd).toBe('');
   await act(async () => { f.created.resolve(session); });
@@ -159,7 +170,7 @@ test('creation payload captures the Knowledge mount and reaches the created term
   const f = fixture();
   f.command('claude --fixture');
   f.options();
-  f.launch();
+  await f.launch();
   expect(f.create).toHaveBeenCalledWith({ cwd: '/first', command: 'claude', args: ['--fixture'],
     backend: undefined, mode: undefined, defer_spawn: true, knowledge_base_ids: ['knowledge-fixture'] });
   f.command('changed draft');
@@ -171,14 +182,24 @@ test('creation payload captures the Knowledge mount and reaches the created term
   expect(f.path()).toBe('/terminal/' + session.terminal_id);
 });
 
+test('a removed working directory is rejected before a terminal row is created', async () => {
+  const f = fixture();
+  f.metadata.mockRejectedValueOnce(new Error('directory not found'));
+
+  await f.launch();
+
+  expect(f.create).not.toHaveBeenCalled();
+  expect(f.error).toHaveBeenCalledWith('terminal.create.workspaceUnavailable');
+});
+
 test('blank input retains the default shell contract; an explicitly empty program is rejected', async () => {
   const f = fixture();
   f.command('""');
-  f.launch();
+  await f.launch();
   expect(f.create).not.toHaveBeenCalled();
   expect(f.warning).toHaveBeenCalledWith('terminal.create.commandRequired');
   f.command('   ');
-  f.launch();
+  await f.launch();
   expect(f.create.mock.calls[0]![0].command).toBe('$SHELL');
   await act(async () => { f.created.resolve(session); });
   expect(f.path()).toBe('/terminal/' + session.terminal_id);

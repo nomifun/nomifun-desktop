@@ -24,6 +24,7 @@ import { filterCronJobsByQuery, filterCronJobsByStatus, type CronJobStatusFilter
 import { parseScheduledConversationId } from './scheduledConversationId';
 import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
 import ScheduledTaskActions from './ScheduledTaskActions';
+import { getConversationCreateErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
 
 const DEFAULT_PAGE_SIZE = 20;
 
@@ -121,7 +122,7 @@ const ScheduledTasksPage: React.FC = () => {
           Message.success(t('cron.resumeSuccess'));
         }
       } catch (err) {
-        Message.error(String(err));
+        Message.error(getConversationCreateErrorMessage(err, t));
       }
     },
     [pauseJob, resumeJob, t]

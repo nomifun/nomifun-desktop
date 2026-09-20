@@ -56,13 +56,16 @@ use nomifun_api_types::{
     AgentChatModelSelectionDto, AgentResolvedSnapshot, SessionCursorDto,
     McpServerId,
     SendMessageRequest, SideQuestionRequest, SideQuestionResponse,
-    UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
+    TypedResourceBindingDto, UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
     CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
 use nomifun_common::{
     AgentKillReason, AppError, ConversationStatus, MessagePosition, MessageStatus, MessageType,
     PaginatedResult,
     normalize_keys_to_snake_case,
+};
+use nomifun_common::paths::{
+    WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
 };
 use nomifun_conversation::{
     AgentMutationReceipt, BackgroundTaskRegistrar, CanonicalAgentSessionOwner,
@@ -868,7 +871,7 @@ impl NomiCoreSessionOwner {
             }
         }
         nomifun_api_types::ExecutionConstraints::from_extra(&request.extra)?;
-        let metadata: NomiCoreSessionMetadata = serde_json::from_value(
+        let mut metadata: NomiCoreSessionMetadata = serde_json::from_value(
             request
                 .extra
                 .get(NOMI_CORE_SESSION_METADATA_KEY)
@@ -880,6 +883,41 @@ impl NomiCoreSessionOwner {
         .map_err(|error| AppError::Conflict(format!(
             "canonical AgentSession metadata is invalid: {error}"
         )))?;
+        if let Some(workspace) = request
+            .extra
+            .get("workspace")
+            .and_then(Value::as_str)
+            .filter(|workspace| !workspace.is_empty())
+            .map(str::to_owned)
+        {
+            let mut binding = agent_binding_dto(&metadata.binding)
+                .map_err(|error| AppError::Conflict(error.message))?;
+            let canonical_workspace = freeze_selected_workspace(
+                &mut binding,
+                owner_id,
+                &workspace,
+                WorkspaceDirectoryCheck::Create,
+            )?;
+            metadata.binding = serde_json::to_value(&binding)
+                .and_then(serde_json::from_value)
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "selected workspace binding could not be frozen: {error}"
+                    ))
+                })?;
+            attach_session_metadata_with_fork(
+                &mut request.extra,
+                &metadata.binding,
+                metadata.remote.clone(),
+                metadata.parent_session_id.clone(),
+                metadata.fork_base_payload_id.clone(),
+            )
+            .map_err(|error| AppError::Conflict(error.message))?;
+            request.extra["workspace"] = Value::String(canonical_workspace);
+            if let Some(snapshot) = snapshot.as_mut() {
+                snapshot.canonical_binding = Some(binding);
+            }
+        }
         if metadata
             .binding
             .typed_resource_bindings
@@ -1032,6 +1070,12 @@ impl NomiCoreSessionOwner {
             return Err(AppError::Conflict(
                 "AgentSession binding differs from its saved immutable artifacts".to_owned(),
             ));
+        }
+        if let Some(workspace) = frozen_workspace_root(owner_id, session_id, &saved_binding)? {
+            canonical_existing_workspace_directory(
+                std::path::Path::new(&workspace),
+                WorkspaceDirectoryCheck::Runtime,
+            )?;
         }
         let route_identity = snapshot.content.chat_route_identity.clone().ok_or_else(|| {
             AppError::UnprocessableEntity(
@@ -4006,6 +4050,94 @@ fn cron_session_handle_from_response(
     })
 }
 
+const SELECTED_WORKSPACE_RESOURCE_PREFIX: &str = "selected-workspace-";
+
+/// Freeze a user-picked host directory into the Session binding without ever
+/// accepting client-supplied operations or typed authority. The host validates
+/// the directory, derives an opaque resource identity, and keeps every
+/// workspace-bearing resource on the same exact canonical root.
+fn freeze_selected_workspace(
+    binding: &mut AgentBindingValueDto,
+    owner_id: &str,
+    raw_workspace: &str,
+    check: WorkspaceDirectoryCheck,
+) -> Result<String, AppError> {
+    let canonical = canonical_existing_workspace_directory(
+        std::path::Path::new(raw_workspace),
+        check,
+    )?;
+    let canonical = canonical.to_str().ok_or_else(|| match check {
+        WorkspaceDirectoryCheck::Create => {
+            AppError::WorkspaceDirectoryUnavailable(raw_workspace.to_owned())
+        }
+        WorkspaceDirectoryCheck::Runtime => {
+            AppError::WorkspaceDirectoryRuntimeUnavailable(raw_workspace.to_owned())
+        }
+    })?;
+    let resource_id = format!(
+        "{SELECTED_WORKSPACE_RESOURCE_PREFIX}{:x}",
+        Sha256::digest(canonical.as_bytes())
+    );
+    let mut has_workspace_resource = false;
+
+    for resource in &mut binding.typed_resource_bindings {
+        if resource.owner_id != owner_id {
+            return Err(AppError::Forbidden(
+                "AgentSession workspace resource belongs to another owner".to_owned(),
+            ));
+        }
+        match resource.resource_kind.as_str() {
+            "workspace" => {
+                has_workspace_resource = true;
+                resource.resource_id = resource_id.clone();
+                resource.binding_id = format!("workspace:{resource_id}");
+                resource
+                    .typed_parameters
+                    .insert("workspace_root".to_owned(), canonical.to_owned());
+            }
+            "process_session" => {
+                resource
+                    .typed_parameters
+                    .insert("workspace_root".to_owned(), canonical.to_owned());
+            }
+            _ => {}
+        }
+    }
+
+    // A project directory is also the process cwd for Agents that do not expose
+    // workspace file Actions. Keep a zero-operation workspace identity so the
+    // Session can freeze that cwd without manufacturing any file authority.
+    if !has_workspace_resource {
+        binding.typed_resource_bindings.push(TypedResourceBindingDto {
+            binding_id: format!("workspace:{resource_id}"),
+            resource_kind: "workspace".to_owned(),
+            resource_id,
+            owner_id: owner_id.to_owned(),
+            operations: BTreeSet::new(),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::from([(
+                "workspace_root".to_owned(),
+                canonical.to_owned(),
+            )]),
+        });
+        binding
+            .typed_resource_bindings
+            .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    }
+
+    Ok(canonical.to_owned())
+}
+
+fn has_selected_workspace(binding: &AgentBindingValue) -> bool {
+    binding.typed_resource_bindings.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "workspace"
+            && resource
+                .resource_id
+                .as_ref()
+                .starts_with(SELECTED_WORKSPACE_RESOURCE_PREFIX)
+    })
+}
+
 fn frozen_workspace_root(
     owner_id: &str,
     _session_id: &AgentSessionId,
@@ -4131,6 +4263,7 @@ fn canonical_conversation_response(
         projection,
         ..
     } = projected;
+    let custom_workspace = has_selected_workspace(&binding);
     let snapshot = projection.snapshot;
     let mut request = projection.request;
     let extra = request.extra.as_object_mut().ok_or_else(|| {
@@ -4140,6 +4273,7 @@ fn canonical_conversation_response(
     })?;
     if let Some(workspace) = workspace {
         extra.insert("workspace".to_owned(), Value::String(workspace));
+        extra.insert("custom_workspace".to_owned(), Value::Bool(custom_workspace));
     }
     attach_session_metadata_with_fork(
         &mut request.extra,
@@ -4508,7 +4642,8 @@ mod session_boundary_tests {
     use super::{
         canonical_autowork_config_snapshot, companion_archive_message,
         cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
-        frozen_workspace_root, initial_delivery_requested, NomiCoreSessionOwner,
+        freeze_selected_workspace, frozen_workspace_root, has_selected_workspace,
+        initial_delivery_requested, NomiCoreSessionOwner,
         parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -4520,11 +4655,12 @@ mod session_boundary_tests {
         PresetRevisionRef, ResolvedSnapshotId, ResolvedSnapshotRef,
         ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
     };
-    use nomifun_api_types::{AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelRef, MessageResponse};
+    use nomifun_api_types::{AgentBindingValueDto, AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelRef, MessageResponse};
     use nomifun_common::{
         AgentType, ConversationSource, ConversationStatus, DecisionPolicy, DelegationPolicy,
         MessagePosition, MessageType, ProviderWithModel,
     };
+    use nomifun_common::paths::WorkspaceDirectoryCheck;
     use serde_json::json;
 
     const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
@@ -4642,6 +4778,46 @@ mod session_boundary_tests {
             }],
             binding_version: 1,
         }
+    }
+
+    #[test]
+    fn selected_workspace_is_host_validated_and_frozen_as_an_opaque_resource() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut binding: AgentBindingValueDto = serde_json::from_value(
+            serde_json::to_value(frozen_binding(
+                &std::env::temp_dir().to_string_lossy(),
+                OWNER_ID,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let canonical = freeze_selected_workspace(
+            &mut binding,
+            OWNER_ID,
+            &directory.path().to_string_lossy(),
+            WorkspaceDirectoryCheck::Create,
+        )
+        .unwrap();
+        let binding: AgentBindingValue = serde_json::from_value(
+            serde_json::to_value(binding).unwrap(),
+        )
+        .unwrap();
+
+        assert!(has_selected_workspace(&binding));
+        assert_eq!(
+            frozen_workspace_root(
+                OWNER_ID,
+                &AgentSessionId::from(SESSION_ID),
+                &binding,
+            )
+            .unwrap(),
+            Some(canonical)
+        );
+        assert!(binding.typed_resource_bindings[0]
+            .resource_id
+            .as_ref()
+            .starts_with("selected-workspace-"));
     }
 
     #[test]
@@ -9044,7 +9220,7 @@ async fn create_nomi_core_agent_session(
         .control_plane
         .resolve_agent_session_binding_with_model(&owner.0, &request.preset_id, request.model.as_ref())
         .await?;
-    let binding = state
+    let mut binding = state
         .resource_bindings
         .resolve_for_saved_binding(
             &state.control_plane,
@@ -9053,6 +9229,14 @@ async fn create_nomi_core_agent_session(
             &request.resource_selections,
         )
         .await?;
+    if let Some(workspace) = request.workspace.as_deref() {
+        freeze_selected_workspace(
+            &mut binding,
+            owner.as_ref(),
+            workspace,
+            WorkspaceDirectoryCheck::Create,
+        )?;
+    }
     let agent_name = state
         .control_plane
         .editor(
@@ -11275,6 +11459,8 @@ fn cancel_error_is_known_rejection(error: &AppError) -> bool {
             | AppError::UnprocessableEntity(_)
             | AppError::WorkspacePathEdgeWhitespace(_)
             | AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_)
+            | AppError::WorkspaceDirectoryUnavailable(_)
+            | AppError::WorkspaceDirectoryRuntimeUnavailable(_)
     )
 }
 

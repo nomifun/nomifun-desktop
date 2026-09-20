@@ -9,6 +9,9 @@ use nomifun_common::{
     AgentType, AppError, ConversationId, ExecutionAuthority, ProviderWithModel, UserId,
     workspace_path_has_edge_whitespace_segment,
 };
+use nomifun_common::paths::{
+    WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
+};
 use nomifun_realtime::UserEventSink;
 use tracing::{error, info, warn};
 
@@ -245,6 +248,14 @@ impl JobExecutor {
                 AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(workspace),
             ));
         }
+
+        // Recheck immediately before conversation resolution. A directory may
+        // be removed after task creation; rejecting here prevents the scheduler
+        // from materializing a ghost Conversation/workpath in the sidebar.
+        canonical_existing_workspace_directory(
+            Path::new(&workspace),
+            WorkspaceDirectoryCheck::Runtime,
+        )?;
 
         Ok(())
     }

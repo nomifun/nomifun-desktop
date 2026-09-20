@@ -2,6 +2,7 @@
 //! bridges PTY output/exit to the realtime event bus.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +13,9 @@ use nomifun_api_types::{CreateTerminalRequest, TerminalSessionResponse};
 use nomifun_common::{
     ConversationId, KnowledgeBaseId, LoopbackCapabilityLeaseSet, OnTerminalDelete, TerminalId,
     UserId,
+};
+use nomifun_common::paths::{
+    WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
 };
 use nomifun_db::{
     CreateTerminalParams, ITerminalRepository, TerminalTurnAdmissionClaim,
@@ -674,6 +678,12 @@ impl TerminalService {
     ) -> Result<TerminalSessionResponse, TerminalError> {
         let _shutdown_guard = self.enter_operation().await?;
         validate_pty_size(req.cols, req.rows)?;
+        if !req.cwd.is_empty() {
+            canonical_existing_workspace_directory(
+                Path::new(&req.cwd),
+                WorkspaceDirectoryCheck::Create,
+            )?;
+        }
         let name = req
             .name
             .clone()
@@ -3834,6 +3844,25 @@ mod tests {
             defer_spawn: false,
             knowledge_base_ids: None,
         }
+    }
+
+    #[tokio::test]
+    async fn deferred_create_rejects_a_missing_cwd_before_persisting_a_sidebar_row() {
+        let (svc, _events, repo) = service_with_repo();
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("removed-project");
+        let mut request = req("unused-deferred-command", &[]);
+        request.defer_spawn = true;
+        request.cwd = missing.to_string_lossy().into_owned();
+
+        let error = svc.create(TEST_USER_ID, request).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            TerminalError::App(nomifun_common::AppError::WorkspaceDirectoryUnavailable(path))
+                if path == missing.display().to_string()
+        ));
+        assert!(repo.rows.lock().unwrap().is_empty());
     }
 
     /// The gateway's terminal-target binding translation: a default-workpath

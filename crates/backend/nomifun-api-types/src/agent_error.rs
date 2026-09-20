@@ -27,6 +27,7 @@ pub enum AgentErrorCode {
     /// accepted turn would deterministically reproduce the rejected payload.
     NomifunToolResultEncodingError,
     WorkspacePathEdgeWhitespaceRuntimeUnsupported,
+    WorkspaceDirectoryRuntimeUnavailable,
     UserAgentHandshakeFailed,
     UserAgentHandshakeTimeout,
     UserAgentAcpInitFailed,

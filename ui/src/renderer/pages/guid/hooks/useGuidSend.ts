@@ -35,6 +35,10 @@ import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentL
 import type { GuidCollaborationConfig } from './useGuidCollaboration';
 import { creationDraftStorageKey, emptyCreationDraft } from '@/renderer/creation/useCreationDraft';
 import { prepareCompanionConversation, sendCompanionLaunchMessage } from './companionLaunch';
+import {
+  WorkspaceDirectoryUnavailableError,
+  validateExistingWorkspaceDirectory,
+} from '@/renderer/components/workspace';
 
 export type GuidSendDeps = {
   input: string;
@@ -156,6 +160,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     autoWork,
     collaboration,
     dir,
+    workspaceEnabled,
     resourceResolutionReady,
     resourceSelections,
     setMentionOpen,
@@ -188,6 +193,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     if (startsCollaboration && files.length > 0) {
       throw new Error(t('guid.collaboration.attachmentsUnsupported'));
     }
+    const selectedWorkspace = workspaceEnabled ? dir.trim() : '';
+    const canonicalWorkspace = selectedWorkspace
+      ? await validateExistingWorkspaceDirectory(selectedWorkspace)
+      : '';
     let conversationId: ConversationId;
     let conversation;
 
@@ -220,6 +229,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model: current_model.use_model,
       },
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
+      ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
     try {
@@ -238,7 +248,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           await startGuidCollaboration(
             conversationId,
             input,
-            conversation.extra?.workspace ?? dir,
+            conversation.extra?.workspace ?? canonicalWorkspace,
             current_model,
             collaboration
           );
@@ -309,6 +319,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedTemplate,
     resourceResolutionReady,
     resourceSelections,
+    workspaceEnabled,
     t,
   ]);
 
@@ -353,7 +364,11 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       })
       .catch((error) => {
         console.error('Failed to create Guid conversation:', error);
-        Message.error(getConversationCreateErrorMessage(error, t));
+        Message.error(
+          error instanceof WorkspaceDirectoryUnavailableError
+            ? t('guid.workspace.unavailable', { workspacePath: error.workspacePath })
+            : getConversationCreateErrorMessage(error, t)
+        );
       })
       .finally(() => {
         sendingRef.current = false;

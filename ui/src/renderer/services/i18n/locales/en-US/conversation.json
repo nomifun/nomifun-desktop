@@ -89,7 +89,8 @@
   },
   "createError": {
     "pathVariants": {
-      "WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED": "The selected workspace path \"{{workspacePath}}\" contains a folder name that begins or ends with a space or other whitespace character. Rename the affected folder so its name does not begin or end with whitespace, then try again."
+      "WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED": "The selected workspace path \"{{workspacePath}}\" contains a folder name that begins or ends with a space or other whitespace character. Rename the affected folder so its name does not begin or end with whitespace, then try again.",
+      "WORKSPACE_DIRECTORY_UNAVAILABLE": "The selected project directory \"{{workspacePath}}\" does not exist, is not a folder, or cannot currently be accessed. Restore it or choose an existing directory, then try again."
     }
   },
   "agentError": {
@@ -287,6 +288,11 @@
         "title": "This workspace path cannot be used for execution",
         "body": "This conversation or task is bound to a workspace path that contains a directory name beginning or ending with whitespace. Rename the affected directory, or recreate the conversation or task with a valid workspace path.",
         "bodyWithPath": "The workspace path \"{{workspacePath}}\" contains a directory name that begins or ends with whitespace. Rename the affected directory, or recreate the conversation or task with a valid workspace path."
+      },
+      "WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE": {
+        "title": "Project directory is unavailable",
+        "body": "The project directory bound to this conversation or task no longer exists or cannot be accessed. Restore it, or create a new conversation or task with another project.",
+        "bodyWithPath": "The project directory \"{{workspacePath}}\" no longer exists or cannot be accessed. Restore it, or create a new conversation or task with another project."
       },
       "UNKNOWN_UPSTREAM_ERROR": {
         "title": "The upstream agent or provider failed",

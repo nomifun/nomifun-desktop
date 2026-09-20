@@ -7,12 +7,13 @@
 import '../../../../../test/setup-dom.ts';
 
 import { act, cleanup, renderHook } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import type { TFunction } from 'i18next';
 import type { Dispatch, SetStateAction } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import type { TProviderWithModel } from '@/common/config/storage';
+import { ipcBridge } from '@/common';
 import {
   conversationTarget,
   parseAgentPresetId,
@@ -78,6 +79,18 @@ type FetchCall = {
 };
 
 const realFetch = globalThis.fetch;
+let workspaceMetadata: ReturnType<typeof spyOn> | undefined;
+
+beforeEach(() => {
+  workspaceMetadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockResolvedValue({
+    name: 'workspace',
+    path: WORKSPACE,
+    size: 0,
+    type: 'inode/directory',
+    lastModified: 1,
+    isDirectory: true,
+  });
+});
 
 const jsonResponse = (data: unknown): Response =>
   new Response(JSON.stringify({ success: true, data }), {
@@ -439,6 +452,8 @@ afterEach(() => {
   cleanup();
   sessionStorage.clear();
   globalThis.fetch = realFetch;
+  workspaceMetadata?.mockRestore();
+  workspaceMetadata = undefined;
 });
 
 describe('useGuidSend HTTP behavior', () => {
@@ -563,10 +578,11 @@ describe('useGuidSend HTTP behavior', () => {
         model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
         preset_id: PRESET_ID,
         title: INPUT,
+        workspace: WORKSPACE,
       },
     });
     expect(Object.keys(calls[0].body as Record<string, unknown>).sort()).toEqual(
-      ['model', 'preset_id', 'title']
+      ['model', 'preset_id', 'title', 'workspace']
     );
     expect(calls[1]).toEqual({
       method: 'GET',
@@ -653,6 +669,20 @@ describe('useGuidSend HTTP behavior', () => {
     expect(navigations).toEqual([
       `/conversation/${PRESET_CONVERSATION_ID}`,
     ]);
+  });
+
+  test('rejects a removed project before creating an AgentSession', async () => {
+    resetBrowserStorage();
+    workspaceMetadata?.mockRejectedValueOnce(new Error('directory not found'));
+    const calls = installFetchRecorder();
+    const hook = renderHook(() => useGuidSend(createDeps({
+      selection: { kind: 'preset', presetId: PRESET_ID },
+      selectedPreset: PRESET,
+    })));
+
+    await expect(hook.result.current.handleSend()).rejects.toThrow('Workspace directory is unavailable');
+
+    expect(calls).toHaveLength(0);
   });
 
   test('preset mode blocks session creation until every required resource is selected', async () => {
