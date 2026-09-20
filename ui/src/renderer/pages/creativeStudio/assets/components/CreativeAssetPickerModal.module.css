@@ -106,6 +106,12 @@
   opacity: 0.45;
 }
 
+/* Incompatible records remain legible because this picker is also a truthful
+ * view of the shared asset library, not a filtered copy of it. */
+.item[data-selectable='false']:disabled {
+  opacity: 0.72;
+}
+
 .media {
   display: block;
   height: 96px;
