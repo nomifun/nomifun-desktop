@@ -393,6 +393,14 @@
     "noMatch": "未找到匹配内容",
     "count": "{{count}} 条"
   },
+  "systemPermissions": {
+    "label": "系统权限",
+    "title": "此 Agent 需要系统权限",
+    "missing": "当前缺少：{{permissions}}。开启后返回本会话，NomiFun 会自动重新检测。",
+    "checkFailed": "暂时无法确认此 Agent 所需的系统权限，请前往权限中心检查。",
+    "later": "稍后",
+    "openSettings": "去开启"
+  },
   "chat": {
     "noModelSelected": "当前会话未选择模型，无法发送消息",
     "modelHealedToDefault": "已回退到默认模型 {{model}}",

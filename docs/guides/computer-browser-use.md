@@ -37,6 +37,8 @@ Windows catalog integration and public queries are verified. Full main-applicati
 
 Computer automation remains desktop-oriented and separate from Browser Workspace. Select it in the Agent workbench, then use Settings → Capabilities & Permissions → Computer Use to inspect and grant OS access. Before creating a session with Computer actions, the product checks the exact frozen action set and links here when a required grant is missing; a launch-only Agent is not blocked by unrelated screen permissions.
 
+An enabled Computer card in Agent Workbench names the exact missing OS grants and links to the permission center; this is a runtime-readiness reminder, never authority persisted into the Agent. If an existing conversation has never received—or later loses—a required grant, its header auto-opens a permission bubble once. Dismissing the bubble leaves a warning chip available, and returning from System Settings triggers a live re-check.
+
 Standalone Nomi Computer configuration remains:
 
 ```toml

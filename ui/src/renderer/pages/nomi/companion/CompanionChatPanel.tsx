@@ -16,6 +16,7 @@ import { useCompanion } from '../useNomi';
 import CompanionConversation from './CompanionConversation';
 import CompanionDevicesControl from './CompanionDevicesControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
+import SystemPermissionReminder from '@/renderer/pages/conversation/components/SystemPermissionReminder';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
@@ -59,9 +60,10 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation, extraTabs }) => {
       sider={<ChatSlider conversation={conversation} extraTabs={extraTabs} />}
       siderTitle={<span className='text-16px font-bold text-t-primary'>{t('conversation.workspace.title')}</span>}
       workspaceExtraTabs={extraTabs}
-      headerExtra={showDeviceControl ? <div className='flex items-center gap-8px'>
-        {companionId && <CompanionDevicesControl companion={companion} conversationId={conversation.id} />}
-      </div> : undefined}
+      headerExtra={<div className='flex items-center gap-8px'>
+        <SystemPermissionReminder conversationId={conversation.id} snapshot={conversation.agent_snapshot} />
+        {showDeviceControl && companionId && <CompanionDevicesControl companion={companion} conversationId={conversation.id} />}
+      </div>}
     >
       {content}
     </ExecutionConversationLayout>

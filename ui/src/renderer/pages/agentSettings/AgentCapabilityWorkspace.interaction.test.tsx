@@ -1,12 +1,13 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { ipcBridge } from '@/common';
 import { Modal } from '@arco-design/web-react';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import {
   asCapabilityId,
   asPackageId,
@@ -18,13 +19,14 @@ import {
 } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
+import settings from '../../services/i18n/locales/en-US/settings.json';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'en-US',
   fallbackLng: 'en-US',
-  resources: { 'en-US': { translation: { agentSettings: en, common } } },
+  resources: { 'en-US': { translation: { agentSettings: en, common, settings } } },
   interpolation: { escapeValue: false },
 });
 
@@ -83,6 +85,7 @@ const files = moduleItem('workspace.files', [
 const knowledge = moduleItem('knowledge', [['knowledge/search', 'read_sensitive']], ['knowledge_base']);
 const browser = moduleItem('browser', [['browser/observe', 'read_sensitive']]);
 const unavailableComputer = moduleItem('computer', [['computer/observe', 'read_sensitive']], ['computer']);
+const availableComputer = moduleItem('computer', [['computer/input', 'physical']], ['computer']);
 
 const catalog = (modules = [files, knowledge, browser, unavailableComputer]): AgentCatalogResponse => ({
   modules,
@@ -108,6 +111,7 @@ function mount(
   disabled = false
 ) {
   let current = initialDocument;
+  const Location = () => <span data-testid='location'>{useLocation().pathname}{useLocation().search}</span>;
   const Harness = () => {
     const [value, setValue] = useState(initialDocument);
     return (
@@ -125,6 +129,7 @@ function mount(
   const result = render(
     <MemoryRouter>
       <I18nextProvider i18n={testI18n}><Harness /></I18nextProvider>
+      <Location />
     </MemoryRouter>
   );
   return { ...result, state: () => current };
@@ -200,6 +205,24 @@ describe('Agent capability Module workbench', () => {
     expect(toggle.disabled).toBe(true);
     expect(screen.getByText(en.common.unavailable)).toBeTruthy();
     expect(screen.state().enabled_capabilities).toEqual([]);
+  });
+
+  test('warns on the enabled Computer card and links to the exact permission tab', async () => {
+    const get = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
+      platform: 'macos', app_label: 'NomiFun', permissions: [
+        { kind: 'microphone', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] },
+        { kind: 'accessibility', state: 'not_determined', can_request: true, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
+        { kind: 'screen_recording', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: true, capabilities: ['computer_use'] },
+      ],
+    });
+    const screen = mount(
+      documentWith([[availableComputer.module, ['computer/input']]]),
+      catalog([availableComputer])
+    );
+    expect(await screen.findByText(/Missing system access: Accessibility/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.workbench.openSystemPermissions }));
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/permissions?tab=computer-use'));
+    get.mockRestore();
   });
 
   test('preserves a missing exact grant until the user explicitly disables it', async () => {

@@ -5,6 +5,7 @@ import {
   capabilityPermissionsHref,
   computerPermissionKindsForActions,
   computerPermissionsReady,
+  missingComputerPermissionKinds,
 } from './systemPermissionModel';
 
 const status = (accessibility: 'granted' | 'not_determined', screen: 'granted' | 'not_determined'): SystemPermissionStatus => ({
@@ -59,6 +60,8 @@ describe('system permission product model', () => {
     expect(computerPermissionsReady(status('not_determined', 'granted'), [])).toBe(false);
     expect(computerPermissionsReady(status('granted', 'not_determined'), ['computer/observe'])).toBe(false);
     expect(computerPermissionsReady(status('not_determined', 'granted'), ['computer/launch'])).toBe(true);
+    expect(missingComputerPermissionKinds(status('not_determined', 'granted'), [])).toEqual(['accessibility']);
+    expect(missingComputerPermissionKinds(status('granted', 'not_determined'), ['computer/observe'])).toEqual(['screen_recording']);
   });
 
   test('builds direct HashRouter recovery links for contextual prompts', () => {

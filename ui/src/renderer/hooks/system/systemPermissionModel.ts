@@ -97,8 +97,14 @@ export const computerPermissionsReady = (
   status: SystemPermissionStatus | null,
   actionIds: Iterable<string>
 ): boolean =>
-  computerPermissionKindsForActions(actionIds).every((kind) =>
-    permissionEntryIsReady(systemPermissionEntry(status, kind))
+  missingComputerPermissionKinds(status, actionIds).length === 0;
+
+export const missingComputerPermissionKinds = (
+  status: SystemPermissionStatus | null,
+  actionIds: Iterable<string>
+): Array<'accessibility' | 'screen_recording'> =>
+  computerPermissionKindsForActions(actionIds).filter(
+    (kind) => !permissionEntryIsReady(systemPermissionEntry(status, kind))
   );
 
 export const capabilityPermissionsHref = (tab: Exclude<PermissionCapabilityTab, 'overview'>): string =>
