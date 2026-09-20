@@ -135,6 +135,7 @@ export const humanizeResourceKind = (resourceKind: string): string =>
 /** Product-localized copy keys for the vNext Module identities only. */
 export const MODULE_I18N_KEYS: Readonly<Record<string, string>> = {
   'agent.collaboration': 'agentCollaboration',
+  'agent.tool-discovery': 'toolDiscovery',
   'automation.schedule': 'automationSchedule',
   browser: 'browser',
   'channel.messaging': 'channelMessaging',

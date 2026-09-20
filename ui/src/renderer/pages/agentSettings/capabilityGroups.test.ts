@@ -25,6 +25,7 @@ test('groups provider-neutral Browser and device Modules by product category', (
   expect(moduleCategory(moduleItem('web.research').module)).toBe('web');
   expect(moduleCategory(moduleItem('computer').module)).toBe('devices');
   expect(moduleCategory(moduleItem('robot').module)).toBe('devices');
+  expect(moduleCategory(moduleItem('agent.tool-discovery').module)).toBe('integrations');
 });
 
 test('marks missing exact actions as unavailable without dropping the saved grant', () => {

@@ -60,7 +60,7 @@ await testI18n.use(initReactI18next).init({
           template: {
             chat: {
               minimal: {
-                name: 'Minimal Agent',
+                name: 'Minimal',
               },
             },
           },
@@ -196,7 +196,7 @@ describe('AgentPreset library deletion', () => {
     expect(deleteTriggers).toHaveLength(1);
     expect(selected).toBe(0);
     expect(deleteTriggers[0].getAttribute('title')).toBe('Delete');
-    expect(body.queryAllByRole('button', { name: 'Delete Agent “Minimal Agent”' })).toHaveLength(0);
+    expect(body.queryAllByRole('button', { name: 'Delete Agent “Minimal”' })).toHaveLength(0);
   });
 
   test('shows the deleting state on the matching row', () => {
