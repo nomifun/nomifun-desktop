@@ -90,4 +90,15 @@ describe('GuidPage advanced controls', () => {
       page.includes("content={t('agentSettings.errors.presetCapabilitiesLoadFailed')}")
     ).toBe(true);
   });
+
+  test('blocks a tool-using Agent before launch when the selected model cannot call tools', () => {
+    const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
+    const modelSelection = readSource(new URL('./hooks/useGuidModelSelection.ts', import.meta.url));
+
+    expect(page.includes('selectedAgentRequiresToolCalls = presetActionIds.size > 0')).toBe(true);
+    expect(page.includes("currentModelTraits.includes('function_calling')")).toBe(true);
+    expect(page.includes('selectedAgentModelCompatible')).toBe(true);
+    expect(page.includes("t('guid.agentEntries.modelToolsRequired')")).toBe(true);
+    expect(modelSelection.includes("capabilityOf(provider, current_model.use_model, 'chat')?.traits")).toBe(true);
+  });
 });

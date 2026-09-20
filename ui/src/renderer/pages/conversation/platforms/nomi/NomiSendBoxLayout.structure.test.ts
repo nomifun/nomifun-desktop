@@ -159,16 +159,44 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('prefix={<ComposerSceneHeader agent={agentSelectorNode} />}')).toBe(true);
   });
 
-  test('waits for passive runtime warmup before delivering the Guid initial message', () => {
+  test('waits for passive readiness without requiring an unnecessary warmup POST', () => {
     const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const initialMessageBlock = source.slice(
       source.indexOf('// Handle the Guid handoff only after passive warmup'),
       source.indexOf('const onSendHandler'),
     );
 
-    expect(initialMessageBlock.includes('!agentWarmed')).toBe(true);
-    expect(initialMessageBlock.includes('agentWarmed, conversation_id')).toBe(true);
+    expect(initialMessageBlock.includes('!initialDeliveryReady')).toBe(true);
+    expect(initialMessageBlock.includes('initialDeliveryReady')).toBe(true);
     expect(initialMessageBlock.includes('initialOnly: true')).toBe(true);
+    expect(source.includes('setInitialDeliveryReady(true)')).toBe(true);
+    expect(source.includes('setAgentWarmed(warmed)')).toBe(true);
+  });
+
+  test('consuming the Agent identity draft cannot strand the Guid initial message', () => {
+    const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const handoffBlock = source.slice(
+      source.indexOf('// Handle the Guid handoff only after passive warmup'),
+      source.indexOf('const onSendHandler'),
+    );
+    const draftBranch = handoffBlock.slice(
+      handoffBlock.indexOf('if (!sessionStorage.getItem(draftProcessedKey))'),
+      handoffBlock.indexOf("const storageKey = sessionStorageKey('initial-message-nomi'"),
+    );
+
+    expect(draftBranch.includes('sessionStorage.removeItem(draftStorageKey)')).toBe(true);
+    expect(draftBranch.includes('return;')).toBe(false);
+    expect(handoffBlock.indexOf('const processInitialMessage')).toBeGreaterThan(
+      handoffBlock.indexOf('sessionStorage.removeItem(draftStorageKey)'),
+    );
+  });
+
+  test('generation task polling follows the frozen creation.media grant', () => {
+    const chatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const conversationSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    expect(chatSource.includes('creationTasksEnabled?: boolean')).toBe(true);
+    expect(chatSource.includes('enabled={creationTasksEnabled}')).toBe(true);
+    expect(conversationSource.includes("enabled_capabilities.includes('creation.media') === true")).toBe(true);
   });
 
   test('ordinary turns cannot override the frozen Agent while creation reuses only that binding', () => {

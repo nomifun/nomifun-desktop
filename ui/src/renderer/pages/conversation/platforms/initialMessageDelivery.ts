@@ -117,9 +117,12 @@ export const quarantineInitialMessageDelivery = (
  * Recover a Guid/QuickStart handoff only while durable backend state still
  * proves that this is an untouched, newly-created Conversation.
  *
+ * A canonical newly-created Session is already Ready and therefore projects
+ * through the legacy Conversation adapter as Finished. Pending and idle
+ * Finished projections are both only candidates here: the empty transcript
+ * check below and the backend's atomic initial-only fence remain authoritative.
  * Status, transcript, or transport uncertainty is terminal for automatic
- * delivery. The record is cleared so returning to an old/Finished
- * Conversation can never manufacture another turn.
+ * delivery, so returning to an old Conversation can never manufacture a turn.
  */
 export const readAuthorizedInitialMessageDelivery = async (
   storage: InitialMessageStorage,
@@ -143,7 +146,7 @@ export const readAuthorizedInitialMessageDelivery = async (
     if (
       !conversation ||
       conversation.id !== conversationId ||
-      conversation.status !== 'pending' ||
+      (conversation.status !== 'pending' && conversation.status !== 'finished') ||
       conversation.runtime?.active_turn_id != null ||
       conversation.runtime?.is_processing === true
     ) {

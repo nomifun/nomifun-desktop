@@ -444,6 +444,49 @@ impl AgentSessionStore {
         operation_id: OperationId,
         input: StrictJsonValue,
     ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        self.start_turn_with_admission(
+            session_id,
+            producer_id,
+            idempotency_key,
+            operation_id,
+            input,
+            false,
+        )
+        .await
+    }
+
+    /// Accept the creation handoff only while this Session is still at its
+    /// untouched generation-zero boundary. Exact-key replays remain valid
+    /// after admission, but a different initial delivery can never create a
+    /// second first Turn.
+    pub async fn start_initial_turn(
+        &self,
+        session_id: &AgentSessionId,
+        producer_id: EventProducerId,
+        idempotency_key: IdempotencyKey,
+        operation_id: OperationId,
+        input: StrictJsonValue,
+    ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        self.start_turn_with_admission(
+            session_id,
+            producer_id,
+            idempotency_key,
+            operation_id,
+            input,
+            true,
+        )
+        .await
+    }
+
+    async fn start_turn_with_admission(
+        &self,
+        session_id: &AgentSessionId,
+        producer_id: EventProducerId,
+        idempotency_key: IdempotencyKey,
+        operation_id: OperationId,
+        input: StrictJsonValue,
+        initial_only: bool,
+    ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
         if input
             .0
             .get("content")
@@ -539,6 +582,31 @@ impl AgentSessionStore {
             _ => {
                 return Err(SessionStoreError::IdempotencyConflict(
                     "turn start idempotency pair is incomplete".to_owned(),
+                ));
+            }
+        }
+
+        if initial_only {
+            let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+            let has_history = sqlx::query_scalar::<_, i64>(
+                "SELECT CASE WHEN \
+                    EXISTS(SELECT 1 FROM agent_turns WHERE session_id = ?) OR \
+                    EXISTS(SELECT 1 FROM agent_events WHERE session_id = ? AND kind LIKE 'message/%') \
+                 THEN 1 ELSE 0 END",
+            )
+            .bind(session_id.as_ref())
+            .bind(session_id.as_ref())
+            .fetch_one(&mut *tx)
+            .await?
+                != 0;
+            if head.status != "ready"
+                || head.active_turn_id.is_some()
+                || head.active_set_generation != 0
+                || has_history
+            {
+                return Err(SessionStoreError::Conflict(
+                    "initial-only turn requires a ready generation-zero Session with no committed Turn or transcript"
+                        .to_owned(),
                 ));
             }
         }

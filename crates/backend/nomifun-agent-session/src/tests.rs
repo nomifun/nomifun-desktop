@@ -1035,6 +1035,80 @@ async fn chat_operation_claim_is_atomic_and_respects_turn_fence() {
 }
 
 #[tokio::test]
+async fn initial_turn_is_atomic_replayable_and_cannot_be_admitted_twice() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "initial-only").await;
+    let session_id = &session.agent_session_id;
+    let producer = EventProducerId("session-api".to_owned());
+    let key = IdempotencyKey("initial-only-key".to_owned());
+    let operation = OperationId("turn-initial-only".to_owned());
+    let input = StrictJsonValue(json!({"content": "hello"}));
+
+    let first = store
+        .start_initial_turn(
+            session_id,
+            producer.clone(),
+            key.clone(),
+            operation.clone(),
+            input.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!first.1.duplicate);
+
+    let replay = store
+        .start_initial_turn(
+            session_id,
+            producer.clone(),
+            key,
+            operation.clone(),
+            input,
+        )
+        .await
+        .unwrap();
+    assert!(replay.0.duplicate);
+    assert!(replay.1.duplicate);
+
+    store
+        .cancel_active_turn(
+            session_id,
+            IdempotencyKey("cancel-initial-only".to_owned()),
+            producer.clone(),
+        )
+        .await
+        .unwrap();
+    let cursor_before_rejected = store.current_cursor(session_id).await.unwrap();
+    let second = store
+        .start_initial_turn(
+            session_id,
+            producer.clone(),
+            IdempotencyKey("different-initial-key".to_owned()),
+            OperationId("turn-second-initial".to_owned()),
+            StrictJsonValue(json!({"content": "must not be admitted"})),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(second, SessionStoreError::Conflict(_)));
+    assert_eq!(
+        store.current_cursor(session_id).await.unwrap(),
+        cursor_before_rejected,
+        "a rejected second initial delivery must not append any fact"
+    );
+
+    let ordinary = store
+        .start_turn(
+            session_id,
+            producer,
+            IdempotencyKey("ordinary-follow-up".to_owned()),
+            OperationId("turn-ordinary-follow-up".to_owned()),
+            StrictJsonValue(json!({"content": "ordinary follow-up"})),
+        )
+        .await
+        .unwrap();
+    assert!(!ordinary.1.duplicate);
+}
+
+#[tokio::test]
 async fn turn_receipt_is_running_without_a_terminal_fact_and_does_not_infer_from_text() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, turn_event) = create_turn(&store, "turn-receipt-running", "turn-running").await;

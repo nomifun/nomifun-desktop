@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IProvider, TProviderWithModel } from '@/common/config/storage';
+import type { IProvider, ModelTrait, TProviderWithModel } from '@/common/config/storage';
 import type { ConfigKeyMap } from '@/common/config/configKeys';
 import { configService } from '@/common/config/configService';
+import { capabilityOf } from '@/common/utils/providerModels';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -43,6 +44,7 @@ export type GuidModelSelectionResult = {
   getAvailableModels: (provider: IProvider) => string[];
   formatGeminiModelLabel: (provider: { platform?: string } | undefined, modelName?: string) => string;
   current_model: TProviderWithModel | undefined;
+  currentModelTraits: readonly ModelTrait[];
   setCurrentModel: (model_info: TProviderWithModel) => Promise<void>;
 };
 
@@ -84,6 +86,11 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
   }, []);
 
   const [current_model, _setCurrentModel] = useState<TProviderWithModel>();
+  const currentModelTraits = useMemo(() => {
+    if (!current_model?.id || !current_model.use_model) return [];
+    const provider = modelList.find((candidate) => candidate.id === current_model.id);
+    return capabilityOf(provider, current_model.use_model, 'chat')?.traits ?? [];
+  }, [current_model?.id, current_model?.use_model, modelList]);
   const selectedModelKeyRef = useRef<string | null>(null);
   const prevStorageKeyRef = useRef<string | null>(null);
 
@@ -182,6 +189,7 @@ export const useGuidModelSelection = (agentKey: ProviderAgentKey = 'nomi'): Guid
     getAvailableModels: availableModelsFor,
     formatGeminiModelLabel,
     current_model,
+    currentModelTraits,
     setCurrentModel,
   };
 };

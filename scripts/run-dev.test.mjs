@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   createMacosDevLifetime,
   developmentEnvironment,
+  ensureGeneratedDevelopmentDataDirectory,
   formatWindowsLinkEnvironmentError,
   hasWindowsLinkEnvironmentShape,
   loadWindowsToolchainEnvironment,
@@ -44,6 +45,40 @@ describe('Windows development data generation', () => {
       .toEqual({ HOME: '/home/dev', NOMI_CHANNEL: 'dev' });
     expect(developmentEnvironment({ NOMIFUN_DATA_DIR: '/tmp/dev' }, 'darwin'))
       .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev' });
+  });
+
+  test('creates the generated Windows root before launching Tauri', () => {
+    const source = { LOCALAPPDATA: 'C:\\Users\\developer\\AppData\\Local' };
+    const environment = developmentEnvironment(source, 'win32');
+    const calls = [];
+    expect(ensureGeneratedDevelopmentDataDirectory(
+      environment,
+      source,
+      'win32',
+      (...args) => calls.push(args),
+    )).toBe(join(source.LOCALAPPDATA, 'NomiFun-dev-plugin-v1'));
+    expect(calls).toEqual([[
+      join(source.LOCALAPPDATA, 'NomiFun-dev-plugin-v1'),
+      { recursive: true },
+    ]]);
+  });
+
+  test('does not create caller-owned explicit roots or non-Windows roots', () => {
+    const calls = [];
+    const createDirectory = (...args) => calls.push(args);
+    expect(ensureGeneratedDevelopmentDataDirectory(
+      { NOMIFUN_DATA_DIR: 'D:\\owned-by-caller' },
+      { NOMIFUN_DATA_DIR: 'D:\\owned-by-caller' },
+      'win32',
+      createDirectory,
+    )).toBeNull();
+    expect(ensureGeneratedDevelopmentDataDirectory(
+      { NOMIFUN_DATA_DIR: '/tmp/dev' },
+      {},
+      'darwin',
+      createDirectory,
+    )).toBeNull();
+    expect(calls).toEqual([]);
   });
 });
 

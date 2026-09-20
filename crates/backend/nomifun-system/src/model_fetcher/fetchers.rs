@@ -1415,7 +1415,12 @@ mod tests {
         assert_eq!(tasks, vec![ModelTask::Chat]);
         assert_eq!(
             traits,
-            vec![ModelTrait::VisionInput, ModelTrait::VideoInput]
+            vec![
+                ModelTrait::VisionInput,
+                ModelTrait::VideoInput,
+                ModelTrait::FunctionCalling,
+                ModelTrait::Streaming,
+            ]
         );
     }
 

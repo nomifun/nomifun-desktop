@@ -3274,6 +3274,8 @@ export type I18nKey =
   | 'guid.agentEntries.loading'
   | 'guid.agentEntries.manage'
   | 'guid.agentEntries.modelNeeded'
+  | 'guid.agentEntries.modelToolsRequired'
+  | 'guid.agentEntries.modelToolsRequiredTitle'
   | 'guid.agentEntries.needsSetup'
   | 'guid.agentEntries.search'
   | 'guid.agentPresetRequired'
