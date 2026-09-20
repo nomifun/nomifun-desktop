@@ -190,7 +190,9 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
             <Route path='/settings/javascript-runtime' element={withRouteFallback(JavaScriptRuntimeSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
-            <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/permissions' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/computer-use' element={<Navigate to='/settings/permissions?tab=computer-use' replace />} />
+            <Route path='/settings/voice-input' element={<Navigate to='/settings/permissions?tab=voice-input' replace />} />
             <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
             <Route path='/settings' element={<Navigate to='/settings/system' replace />} />

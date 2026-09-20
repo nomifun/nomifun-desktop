@@ -58,7 +58,6 @@ export type ConfigKeyMap = {
   'chat.sendKey': 'enter' | 'mod-enter' | undefined;
   // Desktop control (computer-use): gates the nomi engine's Computer tool
   // (observe/click/type/launch). Read by the backend agent factory per session.
-  'agent.computerUse': boolean | undefined;
   'channels.telegram.agent':
     | { agent_type: string; backend?: string; name?: string }
     | undefined;

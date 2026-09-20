@@ -18,6 +18,7 @@ import {
 } from '@/renderer/services/speechToTextConfig';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { modelSupportsTask } from '@/common/utils/providerModels';
+import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 
 type SpeechInputButtonProps = {
   disabled?: boolean;
@@ -177,7 +178,22 @@ const SpeechInputButton: React.FC<SpeechInputButtonProps> = ({ disabled, locale,
       clearError();
       return;
     }
-    Message.error(detail ? `${baseMessage}: ${detail}` : baseMessage);
+    const message = detail ? `${baseMessage}: ${detail}` : baseMessage;
+    if (errorCode === 'permission-denied' || errorCode === 'recording-unsupported') {
+      Message.error({
+        duration: 6000,
+        content: (
+          <span className='inline-flex items-center gap-8px'>
+            <span>{message}</span>
+            <a className='font-600 text-primary-6 no-underline' href={capabilityPermissionsHref('voice-input')}>
+              {t('conversation.chat.speech.openPermissionSettings')}
+            </a>
+          </span>
+        ),
+      });
+    } else {
+      Message.error(message);
+    }
     clearError();
   }, [clearError, errorCode, errorMessage, t]);
 

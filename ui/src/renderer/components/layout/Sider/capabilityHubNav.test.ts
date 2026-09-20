@@ -71,13 +71,14 @@ describe('capability hub navigation', () => {
     expect(routerSource.includes("path='/extensions'")).toBe(false);
   });
 
-  test('browser lives in the conversation workspace, not a global settings destination', () => {
+  test('browser runtime lives in the conversation while settings exposes only permission guidance', () => {
     const siderSource = readSource(new URL('./index.tsx', import.meta.url));
     const routerSource = readSource(new URL('../Router.tsx', import.meta.url));
 
     expect(siderSource.includes('SiderBrowserEntry')).toBe(false);
     expect(siderSource.includes('useBrowserOverview')).toBe(false);
     expect(routerSource.includes("path='/settings/browser-use'")).toBe(false);
+    expect(routerSource.includes("path='/settings/permissions'")).toBe(true);
     expect(routerSource.includes("path='/browser'")).toBe(false);
     const conversationSource=readSource(new URL('../../../pages/conversation/components/ChatLayout/index.tsx', import.meta.url));
     expect(conversationSource.includes('chat-browser-toggle')).toBe(false);

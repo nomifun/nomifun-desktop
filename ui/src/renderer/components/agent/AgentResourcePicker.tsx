@@ -16,6 +16,11 @@ import {
   type AgentResourceSelectionValue,
   type UserAgentResourceKind,
 } from '@/renderer/hooks/agent/agentResourceSelection';
+import {
+  computerPermissionKindsForActions,
+  computerPermissionsReady,
+} from '@/renderer/hooks/system/systemPermissionModel';
+import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import styles from './AgentResourcePicker.module.css';
 
 export type AgentResourceOption = {
@@ -219,6 +224,18 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const required = useMemo(() => new Set(requiredKey ? requiredKey.split('\u0000') : []), [requiredKey]);
   const capabilities = useMemo(() => new Set(capabilityKey ? capabilityKey.split('\u0000') : []), [capabilityKey]);
   const actions = useMemo(() => new Set(actionKey ? actionKey.split('\u0000') : []), [actionKey]);
+  const needsComputer = required.has('computer');
+  const computerPermissionKinds = useMemo(
+    () => computerPermissionKindsForActions(actions),
+    [actions]
+  );
+  const needsComputerPermissionCheck = needsComputer && computerPermissionKinds.length > 0;
+  const computerPermissions = useSystemPermissions(needsComputerPermissionCheck);
+  const computerReady = !needsComputerPermissionCheck || (
+    !computerPermissions.loading &&
+    !computerPermissions.error &&
+    computerPermissionsReady(computerPermissions.status, actions)
+  );
   const multipleMcp = companionBindings || allowsMultipleMcpServers(capabilities);
   const [rosterRevision, setRosterRevision] = useState(0);
   useEffect(() => {
@@ -311,15 +328,16 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     requiredFields.includes(kind)
       || (kind === 'mcp_server' ? selectedMcpResourceIds(value).length > 0 : Boolean(value[kind]))
   );
-  const liveResourcesReady = !pendingBlocksLaunch && selectedResourcesAvailable;
+  const liveResourcesReady = !pendingBlocksLaunch && selectedResourcesAvailable && computerReady;
   const displayedMissingCount = missingChoiceCount
-    + (value.robot && !selectedResourcesAvailable ? 1 : 0);
+    + (value.robot && !selectedResourcesAvailable ? 1 : 0)
+    + (needsComputer && !computerReady ? 1 : 0);
   useEffect(() => {
     onAvailabilityChange?.(liveResourcesReady);
     return () => onAvailabilityChange?.(false);
   }, [liveResourcesReady, onAvailabilityChange]);
 
-  if (!fields.length) return null;
+  if (!fields.length && !needsComputer) return null;
   const kindName = (kind: string) => t(`agentSettings.resources.kinds.${kind === 'mcp_server' ? 'mcpConnection' : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())}`);
   const permissionName = (permission: keyof IApiRobotPermissions) =>
     t(`agentSettings.resources.robotPermissions.${permission}`);
@@ -348,7 +366,45 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     <div className={styles.header}><div className={styles.headerCopy}><strong>{t('agentSettings.resources.pickerTitle')}</strong><span>{t(companionBindings ? 'agentSettings.resources.companionBindingHint' : 'agentSettings.resources.pickerHint')}</span></div>
       <span className={`${styles.status} ${!resolution.missingKinds.length && liveResourcesReady ? styles.statusReady : ''}`}>{t(resolution.missingKinds.length || !liveResourcesReady ? 'agentSettings.resources.missingCount' : 'agentSettings.resources.ready', { count: displayedMissingCount })}</span>
     </div>
-    <div className={styles.fields}>{fields.map((kind) => {
+    <div className={styles.fields}>
+      {needsComputer && <div className={styles.field}>
+        <span className={styles.fieldLabel}>{t('agentSettings.resources.kinds.computer')}</span>
+        <div className={styles.fieldControl}>
+          <div className='min-w-0 flex-1 text-12px text-t-primary'>
+            {computerPermissions.loading
+              ? t('agentSettings.resources.computerChecking')
+              : computerPermissions.error
+                ? t('agentSettings.resources.computerCheckFailed')
+                : computerReady
+                  ? t('agentSettings.resources.computerReady')
+                  : t('agentSettings.resources.computerPermissionNeeded')}
+          </div>
+          {!computerReady && !computerPermissions.loading && <Button
+            className={styles.emptyButton}
+            size='mini'
+            type='text'
+            icon={<LinkOne theme='outline' size={13} />}
+            onClick={(event) => {
+              event.preventDefault();
+              const route = '/settings/permissions?tab=computer-use';
+              if (onNavigateToResource) onNavigateToResource(route);
+              else void navigate(route);
+            }}
+          >{t('agentSettings.resources.configure')}</Button>}
+        </div>
+        <span className={`${styles.fieldHint} ${computerPermissions.error || !computerReady ? styles.fieldError : ''}`}>
+          {computerPermissions.loading
+            ? <Spin size={10} />
+            : computerPermissionKinds.length === 0
+              ? t('agentSettings.resources.computerPermissionNotRequired')
+              : t('agentSettings.resources.computerPermissionScope', {
+                permissions: computerPermissionKinds
+                  .map((kind) => t(`settings.capabilityPermissions.permissions.${kind === 'screen_recording' ? 'screenRecording' : 'accessibility'}`))
+                  .join(', '),
+              })}
+        </span>
+      </div>}
+      {fields.map((kind) => {
       const options = fieldOptions(kind);
       const loading = pending.has(kind);
       const error = inventory.errors[kind];

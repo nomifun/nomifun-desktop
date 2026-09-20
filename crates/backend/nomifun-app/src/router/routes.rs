@@ -45,6 +45,7 @@ use crate::services::AppServices;
 
 use super::computer_permissions::{
     computer_permission_status, open_permission_settings, request_computer_permission,
+    request_system_permission, system_permission_status,
 };
 use super::health::{
     health_check, knowledge_global_status_handler, mcp_register_template_handler,
@@ -984,14 +985,30 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Computer-use OS permission status + prompt (macOS TCC). Stateless: the
-    // handlers probe/trigger the host process's own grants. Auth-gated like the
-    // other diagnostic endpoints. Registered on every build (handlers degrade to
-    // null/no-op off macOS / non-computer-use), so the shared settings UI can
-    // always query without a 404.
-    let computer_permissions_authenticated = protect_instance_owner(
+    // Host OS permission inventory + prompt (macOS TCC). The canonical system
+    // surface includes microphone, Accessibility and Screen Recording. Keep
+    // the old Computer-only paths as API-compatible aliases while product UI
+    // converges on /api/system/permissions.
+    let system_permissions_read_authenticated = protect_instance_owner(
         Router::new()
-            .route("/api/computer/permissions", get(computer_permission_status))
+            .route("/api/system/permissions", get(system_permission_status))
+            .route("/api/computer/permissions", get(computer_permission_status)),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+    // Prompting TCC or opening a host System Settings pane is a local physical
+    // action. A remotely authenticated owner may inspect readiness but cannot
+    // pop UI or mutate privacy state on the host.
+    let system_permissions_write_local = protect_instance_owner(
+        Router::new()
+            .route(
+                "/api/system/permissions/request",
+                post(request_system_permission),
+            )
+            .route(
+                "/api/system/permissions/open-settings",
+                post(open_permission_settings),
+            )
             .route(
                 "/api/computer/permissions/request",
                 post(request_computer_permission),
@@ -999,7 +1016,8 @@ fn create_nomi_core_router_with_all_state(
             .route(
                 "/api/computer/permissions/open-settings",
                 post(open_permission_settings),
-            ),
+            )
+            .route_layer(middleware::from_fn(require_local_trust_middleware)),
         &auth_mw_state,
         &instance_owner_state,
     );
@@ -1076,7 +1094,8 @@ fn create_nomi_core_router_with_all_state(
         .merge(auth_routes(auth_state))
         .merge(crate::router::instance_token_routes::instance_token_routes(instance_token_state))
         .merge(system_authenticated)
-        .merge(computer_permissions_authenticated)
+        .merge(system_permissions_read_authenticated)
+        .merge(system_permissions_write_local)
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
         .merge(ssh_host_authenticated)

@@ -96,11 +96,13 @@
   "dismissNotice": "关闭提示",
   "permissionTitle": "网站权限",
   "permissionRetryHint": "网站权限请求已取消或被拒绝，刷新页面后可重新申请。",
+  "permissionSettings": "检查系统权限",
+  "permissionGuide": "权限说明",
   "permissionRequest": "{{origin}} 请求使用{{permission}}",
   "permissionAllow": "仅本次允许",
   "permissionDeny": "拒绝",
   "permissionExpired": "权限请求已结束或页面已改变，请在页面中重新发起请求。",
-  "permissionKinds": { "camera": "摄像头", "microphone": "麦克风", "geolocation": "位置信息", "notifications": "通知", "clipboard-read": "剪贴板", "midi": "MIDI 设备" },
+  "permissionKinds": { "camera": "摄像头", "microphone": "麦克风", "camera_microphone": "摄像头和麦克风", "geolocation": "位置信息", "notifications": "通知", "clipboard-read": "剪贴板", "midi": "MIDI 设备" },
   "start": "开始浏览",
   "startHint": "在地址栏输入网址。此浏览器资源属于当前会话；启动 Agent 后，Agent 可以读取和操作其中的页面。"
 }

@@ -40,6 +40,8 @@
 .permission > span { flex:1 1 180px; overflow-wrap:anywhere; }
 .permission > div { display:flex; gap:6px; }
 .permission button { padding:5px 9px; border:1px solid var(--bg-3); border-radius:5px; background:var(--bg-1); color:inherit; cursor:pointer; }
+.permissionLink { padding:5px 9px; border:1px solid var(--bg-3); border-radius:5px; background:var(--bg-1); color:rgb(var(--primary-6)); font-weight:600; text-decoration:none; white-space:nowrap; }
+.permissionLink:hover { background:var(--bg-3); }
 .empty { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:clamp(20px, 7cqi, 40px); text-align:center; color:var(--text-secondary); overflow:auto; }
 .empty strong { font-size:15px; font-weight:500; }
 .empty p { margin:0; font-size:12px; line-height:1.65; max-width:360px; overflow-wrap:anywhere; }

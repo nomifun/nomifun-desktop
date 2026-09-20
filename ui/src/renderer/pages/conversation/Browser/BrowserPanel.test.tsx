@@ -766,6 +766,7 @@ test('a cancelled website permission offers a scoped page refresh, not an implic
   const denied: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, tabs: [{ ...initial.runtime!.tabs[0], blocked_permissions: ['geolocation'] }] } };
   const screen = fixture({ async ensure() { return denied; } }); await screen.ready();
   const hint = screen.getByText(words.permissionRetryHint);
+  expect(screen.getByRole('link', { name: words.permissionSettings }).getAttribute('href')).toBe('#/settings/permissions?tab=browser-use');
   fireEvent.click(hint.parentElement!.querySelector('button')!);
   await waitFor(() => expect(screen.commands).toEqual([{ command: 'reload', target }]));
   expect(screen.queryByRole('button', { name: words.permissionAllow })).toBeNull();

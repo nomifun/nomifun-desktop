@@ -12,15 +12,15 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 describe('settings navigation', () => {
   test('exposes Nomi Runtime diagnostics and JavaScript Runtime as separate settings destinations', () => {
     const siderSource = readSource(new URL('./SettingsSider.tsx', import.meta.url));
-    for (const id of ['system', 'execution-engines', 'javascript-runtime', 'computer-use', 'about']) {
+    for (const id of ['system', 'permissions', 'execution-engines', 'javascript-runtime', 'about']) {
       expect(siderSource.includes(`'${id}'`)).toBe(true);
     }
 
     expect(siderSource.includes("'browser-use'")).toBe(false);
-    expect(siderSource.indexOf("'system'")).toBeLessThan(siderSource.indexOf("'execution-engines'"));
+    expect(siderSource.indexOf("'system'")).toBeLessThan(siderSource.indexOf("'permissions'"));
+    expect(siderSource.indexOf("'permissions'")).toBeLessThan(siderSource.indexOf("'execution-engines'"));
     expect(siderSource.indexOf("'execution-engines'")).toBeLessThan(siderSource.indexOf("'javascript-runtime'"));
-    expect(siderSource.indexOf("'javascript-runtime'")).toBeLessThan(siderSource.indexOf("'computer-use'"));
-    expect(siderSource.indexOf("'computer-use'")).toBeLessThan(siderSource.indexOf("'about'"));
+    expect(siderSource.indexOf("'javascript-runtime'")).toBeLessThan(siderSource.indexOf("'about'"));
   });
 
   test('routes one Nomi Runtime diagnostics page without an Agent Runtime selector', () => {
@@ -29,7 +29,7 @@ describe('settings navigation', () => {
     const javascriptPageSource = readSource(new URL('../JavaScriptRuntimeSettings.tsx', import.meta.url));
     const modelHubSource = readSource(new URL('../../modelHub/index.tsx', import.meta.url));
 
-    for (const path of ['/settings/execution-engines', '/settings/javascript-runtime', '/settings/computer-use']) {
+    for (const path of ['/settings/execution-engines', '/settings/javascript-runtime', '/settings/permissions']) {
       expect(routerSource.includes(`path='${path}'`)).toBe(true);
     }
 
@@ -49,7 +49,8 @@ describe('settings navigation', () => {
     expect(javascriptPageSource.includes('<RuntimeManager />')).toBe(true);
     expect(javascriptPageSource.includes('separateHint')).toBe(true);
     expect(routerSource.includes("path='/settings/browser-use'")).toBe(false);
+    expect(routerSource.includes("path='/settings/voice-input' element={<Navigate to='/settings/permissions?tab=voice-input'")).toBe(true);
     expect(routerSource.includes("path='/browser'")).toBe(false);
-    expect(routerSource.includes("path='/settings/computer-use' element={<Navigate to='/settings/system'")).toBe(false);
+    expect(routerSource.includes("path='/settings/computer-use' element={<Navigate to='/settings/permissions?tab=computer-use'")).toBe(true);
   });
 });

@@ -1,10 +1,10 @@
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import {
-  Computer,
   Cpu,
   Code,
   Info,
   Server,
+  Shield,
   System,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -17,10 +17,10 @@ import { getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
 /** Builtin settings tab IDs in display order (must match router paths). */
 export const BUILTIN_TAB_IDS = [
   'system',
+  'permissions',
   'execution-engines',
   'javascript-runtime',
   'ssh-hosts',
-  'computer-use',
   'about',
 ] as const;
 
@@ -30,6 +30,7 @@ export const BUILTIN_TAB_IDS = [
  */
 const GROUP_HEADER_BEFORE: Record<string, string> = {
   system: 'settings.groupApp',
+  permissions: 'settings.groupCapabilities',
   'execution-engines': 'settings.groupRuntimes',
   about: 'settings.groupAbout',
 };
@@ -71,11 +72,11 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         path: 'ssh-hosts',
       },
       system: { id: 'system', label: t('settings.system'), icon: <System />, path: 'system' },
-      'computer-use': {
-        id: 'computer-use',
-        label: t('settings.computerUseNav'),
-        icon: <Computer />,
-        path: 'computer-use',
+      permissions: {
+        id: 'permissions',
+        label: t('settings.capabilityPermissions.nav'),
+        icon: <Shield />,
+        path: 'permissions',
       },
       about: { id: 'about', label: t('settings.about'), icon: <Info />, path: 'about' },
     };

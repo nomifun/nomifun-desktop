@@ -115,6 +115,10 @@ try {
     LSMinimumSystemVersion: '14.0',
     NSHighResolutionCapable: true,
     LSUIElement: true,
+    NSMicrophoneUsageDescription: 'NomiFun lets websites use the microphone only after you explicitly allow the request in Browser Use.',
+    NSCameraUsageDescription: 'NomiFun lets websites use the camera only after you explicitly allow the request in Browser Use.',
+    NSLocationUsageDescription: 'NomiFun shares your location with a website only after you explicitly allow the request in Browser Use.',
+    NSLocalNetworkUsageDescription: 'NomiFun connects to local websites and services only when you ask it to.',
   };
   for (const name of helperNames) {
     const helperApp = join(frameworks, `${name}.app`);

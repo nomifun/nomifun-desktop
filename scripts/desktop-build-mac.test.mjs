@@ -51,4 +51,26 @@ describe('macOS Desktop build contract', () => {
     expect(notarize).toBeGreaterThan(dmg);
     expect(source.includes('TRIPLES=(aarch64-apple-darwin)')).toBe(true);
   });
+
+  test('declares website media and local-network privacy reasons in the host and staged CEF helpers', () => {
+    const hostPlist = readFileSync(
+      new URL('../apps/desktop/Info.plist', import.meta.url), 'utf8',
+    );
+    const stage = readFileSync(
+      new URL('./validation/stage-macos-cef-bundle.mjs', import.meta.url), 'utf8',
+    );
+    const smoke = readFileSync(
+      new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8',
+    );
+    for (const key of [
+      'NSMicrophoneUsageDescription',
+      'NSCameraUsageDescription',
+      'NSLocationUsageDescription',
+      'NSLocalNetworkUsageDescription',
+    ]) {
+      expect(hostPlist.includes(`<key>${key}</key>`)).toBe(true);
+      expect(stage.includes(`${key}:`)).toBe(true);
+      expect(smoke.includes(`${key}:`)).toBe(true);
+    }
+  });
 });

@@ -282,6 +282,8 @@
     "computerCheckFailed": "无法确认电脑控制可用性，请检查系统设置后重试。",
     "computerReady": "此桌面已具备所需的电脑操作权限。",
     "computerPermissionNeeded": "启动前，请授予所需的屏幕或辅助功能权限。",
+    "computerPermissionScope": "本 Agent 需要：{{permissions}}。系统授权不会扩大 Agent 的能力范围。",
+    "computerPermissionNotRequired": "本 Agent 仅使用启动应用/网址动作，不需要屏幕录制或辅助功能权限。",
     "configure": "去配置",
     "bindingPolicyTitle": "具体资源在使用 Agent 时选择",
     "bindingPolicyBody": "Agent 只声明可使用哪些能力和需要哪些资源种类。知识库、工作区与连接由具体会话、伙伴或自动化目标选择和管理。",

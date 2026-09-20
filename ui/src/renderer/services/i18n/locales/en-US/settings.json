@@ -332,20 +332,95 @@
   "saveUploadToWorkspace": "Save Uploads to Project Folder",
   "autoPreviewOfficeFiles": "Auto Preview New Office Files",
   "autoPreviewOfficeFilesDesc": "Automatically open newly created Word, Excel, and PowerPoint files in the current project. Office temporary lock files are ignored.",
-  "computerUse": "Desktop control (computer use)",
-  "computerUseDesc": "Let the agent see and operate the desktop (screenshot, read window controls, click, type, scroll, reliably launch apps/URLs). When off, the agent is limited to tools like the terminal.",
-  "computerUseNav": "Computer Use",
-  "computerUseSection": "Desktop capability",
-  "computerUsePermSection": "System permissions (macOS)",
-  "computerUsePermRefresh": "Re-check",
-  "computerUsePermGranted": "In effect",
-  "computerUsePermNotInEffect": "Not in effect",
-  "computerUseOpenSettings": "Open System Settings",
-  "computerUseAccessibility": "Accessibility",
-  "computerUseAccessibilityDesc": "Needed to read the accessibility tree and synthesize mouse/keyboard input.",
-  "computerUseScreenRecording": "Screen Recording",
-  "computerUseScreenRecordingDesc": "Needed for screenshots and the Set-of-Marks overlay.",
-  "computerUseRestartHint": "If a permission shows \"Not in effect\": grant it to {{app}} (not a terminal/editor) in System Settings, then COMPLETELY quit and reopen {{app}} — macOS does not hot-load these permissions for an already-running process. If the toggle is clearly on yet still not in effect, it is usually a stale code-signing identity: remove {{app}} from the list and re-add the grant.",
+  "capabilityPermissions": {
+    "nav": "Capabilities & Permissions",
+    "title": "Capabilities & System Permissions",
+    "subtitle": "See the system access each capability actually needs. An OS grant exposes device access; it never adds Agent tools or lets a website grant itself access.",
+    "refresh": "Re-check",
+    "desktopOnly": "These are permissions for the computer running NomiFun. This WebUI can test its own browser microphone, but host permissions must be managed in the desktop app.",
+    "loadFailed": "The latest system permission state could not be read. Return to the desktop app and try again.",
+    "restartAfterGrant": "Completely quit and reopen NomiFun after granting this permission.",
+    "requestAccess": "Request access",
+    "openSystemSettings": "Open System Settings",
+    "tabs": {
+      "overview": "Overview",
+      "voice": "Voice Input",
+      "computer": "Computer Use",
+      "browser": "Browser Use",
+      "notifications": "Notifications"
+    },
+    "states": {
+      "granted": "Granted",
+      "denied": "Denied",
+      "not_determined": "Needs access",
+      "restricted": "System restricted",
+      "not_required": "Not required",
+      "unknown": "Checked on use"
+    },
+    "summaryStates": {
+      "ready": "Ready",
+      "attention": "Needs attention",
+      "onDemand": "Ask on use"
+    },
+    "voice": {
+      "title": "Voice Input (ASR)",
+      "summary": "Records from the microphone and sends the clip to your selected speech-recognition model.",
+      "description": "The microphone starts only after you press the voice or test button and is released as soon as recording stops.",
+      "configureModel": "Configure ASR model",
+      "test": "Test microphone",
+      "testPassed": "The microphone is available. Test audio was neither saved nor uploaded.",
+      "testFailed": "The microphone is unavailable. Check the device and system privacy settings.",
+      "privacy": "The test acquires and immediately releases an audio stream; it does not save or submit a recording. Normal voice input sends only the clip you deliberately record to the selected ASR service."
+    },
+    "computer": {
+      "title": "Computer Use",
+      "summary": "Observes and controls the whole desktop using Screen Recording and Accessibility.",
+      "description": "Grant access to the running NomiFun app, not a terminal or editor. Only an Agent that explicitly contains the Computer capability can invoke these actions.",
+      "ready": "The system permissions required for Computer Use on this platform are ready.",
+      "blocked": "Computer Use is not ready. Grant access to {{app}}. If the system toggle is already on, remove the stale entry and grant it again."
+    },
+    "browser": {
+      "title": "Browser Use",
+      "summary": "Basic navigation and interaction need no desktop-control grant; website media is approved per site.",
+      "baseReady": "Browser Use navigation, page observation, clicking, and typing do not depend on Accessibility or Screen Recording.",
+      "websiteTitle": "Website permissions on demand",
+      "websiteDescription": "A website must request access in the visible Browser panel and you decide whether to allow it for that request. macOS may then show a second system prompt.",
+      "siteKinds": {
+        "camera": "Uses the camera only after a website asks and you approve it in the Browser panel.",
+        "microphone": "Uses the microphone only after a website asks and you approve it; this is separate from ASR access.",
+        "location": "Shares location only with the website currently making the request.",
+        "notifications": "Website notifications are approved per site and are separate from NomiFun task-completion notifications."
+      },
+      "agentBoundary": "While an Agent owns page input, new website permissions are never silently approved. Stop the run, then handle the request in the visible page."
+    },
+    "notifications": {
+      "title": "System Notifications",
+      "summary": "Used for task completion, scheduled tasks, and other local alerts.",
+      "description": "The in-product notification preference and the operating-system grant are separate; both must be enabled before NomiFun can deliver an alert.",
+      "preferenceHint": "Use Settings → System to choose whether normal and scheduled-task completion notifications are enabled."
+    },
+    "localNetwork": {
+      "title": "Local network connections",
+      "description": "macOS 15 and later asks on demand when Browser opens a LAN page or NomiFun connects to a local SSH/MCP service or companion device. Merely listening for inbound WebUI connections does not require this grant.",
+      "browserDescription": "This is not a permission a website grants itself. macOS 15 and later may show the system Local Network prompt when you navigate to a LAN address."
+    },
+    "files": {
+      "title": "Files and protected folders",
+      "description": "File capabilities use only a workspace, upload, or system file-picker result that you selected. Full Disk Access is not requested by default; consider it only when you intentionally need a protected folder and macOS denies that exact access."
+    },
+    "permissions": {
+      "microphone": "Microphone",
+      "microphoneDesc": "Used by voice input. On macOS, grant access to {{app}}.",
+      "accessibility": "Accessibility",
+      "accessibilityDesc": "Reads the accessibility tree and synthesizes mouse, keyboard, and scroll input.",
+      "screenRecording": "Screen Recording",
+      "screenRecordingDesc": "Captures the desktop and builds Set-of-Marks overlays; it is not used to render native Browser Use pages.",
+      "camera": "Camera",
+      "location": "Location",
+      "notifications": "Notifications",
+      "notificationsDesc": "Lets NomiFun deliver system alerts when work completes or needs your attention."
+    }
+  },
   "startOnBoot": "Start on Boot",
   "startOnBootDesc": "Launch Nomi automatically when you sign in to macOS or Windows.",
   "startOnBootUnsupported": "Available only in packaged macOS and Windows apps.",
@@ -357,10 +432,13 @@
   "sendKeyModEnter": "Ctrl/⌘+Enter",
   "keepAwakeDesc": "When on, Nomi keeps your Mac awake while the lid is open, so scheduled tasks run on time. The display can still turn off normally (saving power and your screen — tasks keep running). Closing the lid still sleeps it and pauses tasks — unless it's plugged in with an external display and an external keyboard/mouse (clamshell mode).",
   "notification": "Notifications",
+  "notificationPermissionDenied": "System notification access is not enabled. The in-product switch cannot bypass the OS setting.",
+  "notificationPermissionManage": "Manage permission",
   "cronNotificationEnabled": "Scheduled Task Completion",
   "promptTimeout": "LLM Prompt Timeout (s)",
   "promptTimeoutDesc": "Maximum wait time for a single model request before aborting it.",
   "groupApp": "Application",
+  "groupCapabilities": "Capabilities",
   "groupRuntimes": "Runtimes",
   "groupAbout": "Other",
   "agentParameters": "Execution Engine Runtime",

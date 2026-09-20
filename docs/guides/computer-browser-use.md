@@ -35,7 +35,7 @@ Windows catalog integration and public queries are verified. Full main-applicati
 
 ## Computer Use
 
-Computer automation remains desktop-oriented and separate from Browser Workspace. Use the Agent workbench to select its capabilities and Settings → Computer Use to manage desktop-control settings and OS permissions.
+Computer automation remains desktop-oriented and separate from Browser Workspace. Select it in the Agent workbench, then use Settings → Capabilities & Permissions → Computer Use to inspect and grant OS access. Before creating a session with Computer actions, the product checks the exact frozen action set and links here when a required grant is missing; a launch-only Agent is not blocked by unrelated screen permissions.
 
 Standalone Nomi Computer configuration remains:
 
@@ -58,19 +58,31 @@ Computer use needs OS permissions the first time it is used:
 
 These run **in-process inside the desktop app**, so the permission must be
 granted to **NomiFun itself** (the entry named "NomiFun" in System Settings),
-not to the terminal/editor — and a freshly-granted permission only takes effect
-after the app is **completely quit and reopened** (macOS does not hot-load TCC
-grants into a running process). Permission-failure messages name "NomiFun"
-explicitly so the guidance is unambiguous.
+not to the terminal/editor. Accessibility is re-probed when the app regains
+focus. A newly granted Screen Recording permission can remain cached for the
+running process, so completely quit and reopen NomiFun before treating it as
+still denied. Permission-failure messages name "NomiFun" explicitly so the
+guidance is unambiguous.
 
-Settings → Computer Use surfaces a live status panel (macOS): it shows whether
+Settings → Capabilities & Permissions → Computer Use surfaces a live status panel (macOS): it shows whether
 Accessibility / Screen Recording are *in effect for the running process* —
 which is authoritative, since a System Settings toggle bound to a stale
 code-signing identity reads "Not in effect" even while it looks on — with
 buttons that deep-link to the exact Privacy pane and trigger the OS prompt.
-Backed by `GET/POST /api/computer/permissions[/request|/open-settings]`
+Backed by `GET/POST /api/system/permissions[/request|/open-settings]`
 (`nomi_computer::permissions` → `AXIsProcessTrusted` /
 `CG*ScreenCaptureAccess`).
+
+## Voice, Browser, Notification, and File Permissions
+
+- **Voice input (ASR)** requests the microphone only after the user presses the voice or test button. The test immediately releases the stream and neither stores nor uploads audio. A denial links directly to the Voice Input permission tab.
+- **Browser Use** navigation, page observation, clicking, and typing do not borrow Computer Use Accessibility or Screen Recording grants. Camera, microphone, location, and website notifications begin with a visible per-site request that only the user can approve. macOS may then add its own OS prompt; the packaged host and CEF helper bundles declare the matching privacy reasons.
+- **Local Network** access is requested on macOS 15 and later when Browser/CEF opens a LAN address or NomiFun actively connects to a local SSH/MCP service or companion device. Merely listening for inbound WebUI TCP connections needs no grant. Both the app and CEF helper bundles carry the usage description.
+- **System notifications** require both the in-product preference and the OS grant. Enabling normal or scheduled-task notifications requests the native grant and provides a recovery link if it was denied.
+- **Files and protected folders** use a workspace, upload, or file-picker result selected by the user. NomiFun does not ask everyone for Full Disk Access; that remains an optional recovery choice only after an intentional protected-folder operation is denied.
+- **Robot device permissions** such as camera, motion, display, and proactive speech remain owned by Device and Companion settings and are rechecked against the Agent's exact actions before launch. They are not host macOS permissions, and grants on this page never replace them.
+
+Permission reads require the installation owner. Requests and System Settings deep-links additionally require the desktop process's local-trust proof, so a remote WebUI session cannot pop privacy UI on the host. The old `/api/computer/permissions*` routes remain compatibility aliases only.
 
 > **Stale grant.** If a toggle is clearly on yet computer use still fails, the
 > grant is bound to an older build's identity. Quit NomiFun, run

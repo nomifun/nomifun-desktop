@@ -190,6 +190,35 @@ async fn remote_owner_login_cannot_write_external_mcp_registration() {
     );
 }
 
+#[tokio::test]
+async fn remote_owner_cannot_prompt_host_system_permissions() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    for uri in [
+        "/api/system/permissions/request",
+        "/api/system/permissions/open-settings",
+        "/api/computer/permissions/request",
+        "/api/computer/permissions/open-settings",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(post_json_with_csrf(
+                uri,
+                r#"{"kind":"microphone"}"#,
+                &token,
+                &csrf,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "remote owner unexpectedly triggered host UI through {uri}"
+        );
+    }
+}
+
 // ===========================================================================
 // T12. Security Middleware
 // ===========================================================================
@@ -485,6 +514,7 @@ async fn installation_control_plane_uses_canonical_owner_identity() {
         "/api/terminals",
         "/api/agent-executions",
         "/api/agent-execution-templates",
+        "/api/system/permissions",
         "/api/computer/permissions",
     ] {
         let response = app

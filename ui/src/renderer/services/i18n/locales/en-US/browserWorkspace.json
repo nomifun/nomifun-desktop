@@ -97,11 +97,13 @@
   "dismissNotice": "Dismiss notice",
   "permissionTitle": "Website permission",
   "permissionRetryHint": "Website permission was cancelled or denied. Reload the page to request it again.",
+  "permissionSettings": "Check system permissions",
+  "permissionGuide": "Permission guide",
   "permissionRequest": "{{origin}} requests access to {{permission}}",
   "permissionAllow": "Allow this time",
   "permissionDeny": "Deny",
   "permissionExpired": "This permission request ended or the page changed. Request access again from the page.",
-  "permissionKinds": { "camera": "camera", "microphone": "microphone", "geolocation": "location", "notifications": "notifications", "clipboard-read": "clipboard", "midi": "MIDI devices" },
+  "permissionKinds": { "camera": "camera", "microphone": "microphone", "camera_microphone": "camera and microphone", "geolocation": "location", "notifications": "notifications", "clipboard-read": "clipboard", "midi": "MIDI devices" },
   "start": "Start browsing",
   "startHint": "Enter a URL above. This Browser resource belongs to the current session. When the Agent starts, it can read and interact with these pages."
 }
