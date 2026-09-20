@@ -38,9 +38,11 @@ describe('CanvasZoomControls', () => {
     fireEvent.click(trigger);
 
     const menu = getByRole('menu');
-    expect(within(menu).getByRole('menuitemradio', {
+    const selectedBackground = within(menu).getByRole('menuitemradio', {
       name: 'creativeStudio.canvas.backgrounds.dots',
-    }).getAttribute('aria-checked')).toBe('true');
+    });
+    expect(selectedBackground.getAttribute('aria-checked')).toBe('true');
+    expect(selectedBackground.lastElementChild?.querySelector('svg')).not.toBeNull();
     expect(within(menu).getByRole('menuitemradio', {
       name: 'creativeStudio.canvas.backgrounds.lines',
     }).getAttribute('aria-checked')).toBe('false');

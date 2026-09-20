@@ -104,13 +104,13 @@
 
 .toolbarButton {
   display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
   place-items: center;
   border-radius: 8px;
   background: transparent;
-  color: var(--color-text-1);
+  color: var(--creative-canvas-control-ink, var(--color-text-1));
   cursor: pointer;
 }
 
@@ -130,8 +130,8 @@
 
 .toolbarButton :global(.i-icon) {
   display: grid;
-  width: 17px;
-  height: 17px;
+  width: 18px;
+  height: 18px;
   place-items: center;
   line-height: 0;
   vertical-align: middle;

@@ -2,15 +2,15 @@
   display: flex;
   box-sizing: border-box;
   min-width: 0;
-  height: 42px;
+  height: 38px;
   align-items: center;
   gap: 2px;
-  padding: 4px 5px;
+  padding: 3px 4px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 12px;
+  border-radius: 11px;
   background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-  color: var(--color-text-2);
+  box-shadow: none;
+  color: var(--creative-canvas-control-ink, var(--color-text-1));
   backdrop-filter: blur(18px) saturate(135%);
 }
 
@@ -18,7 +18,7 @@
 .percentageButton,
 .stepButton {
   display: grid;
-  height: 32px;
+  height: 30px;
   flex: 0 0 auto;
   place-items: center;
   padding: 0;
@@ -34,16 +34,16 @@
 }
 
 .iconButton {
-  width: 32px;
+  width: 30px;
 }
 
 .percentageButton {
   display: flex;
-  min-width: 76px;
+  min-width: 68px;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 0 7px;
+  gap: 4px;
+  padding: 0 6px;
   font: inherit;
   font-size: 13px;
   font-weight: 650;
@@ -52,7 +52,7 @@
 }
 
 .percentageButton > span:first-child {
-  min-width: 36px;
+  min-width: 34px;
   text-align: right;
 }
 
@@ -68,13 +68,13 @@
   position: absolute;
   z-index: 30;
   bottom: calc(100% + 8px);
-  left: 0;
+  left: var(--creative-canvas-zoom-menu-offset-x, 0);
   box-sizing: border-box;
-  width: 220px;
+  width: 200px;
   max-width: calc(100vw - 40px);
-  padding: 8px;
+  padding: 6px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
-  border-radius: 14px;
+  border-radius: 12px;
   background: color-mix(in srgb, var(--color-bg-2) 98%, transparent);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
   backdrop-filter: blur(18px) saturate(135%);
@@ -124,7 +124,7 @@
 }
 
 .backgroundHeading {
-  padding: 3px 8px 7px;
+  padding: 2px 7px 5px;
   color: var(--color-text-3);
   font-size: 11px;
   font-weight: 650;
@@ -138,10 +138,10 @@
 .backgroundOption {
   display: flex;
   width: 100%;
-  min-height: 36px;
+  min-height: 32px;
   align-items: center;
-  gap: 9px;
-  padding: 0 8px;
+  gap: 7px;
+  padding: 0 7px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -170,7 +170,7 @@
   color: rgb(var(--primary-6));
 }
 
-.selectionIndicator + span {
+.backgroundOption > span:first-child {
   min-width: 0;
   flex: 1 1 auto;
 }
@@ -183,22 +183,22 @@
 .zoomStepper {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-  padding-top: 8px;
+  gap: 6px;
+  margin-top: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--color-border-2);
 }
 
 .stepButton {
-  width: 28px;
-  height: 30px;
-  flex: 0 0 28px;
+  width: 27px;
+  height: 28px;
+  flex: 0 0 27px;
 }
 
 .zoomInput {
   display: flex;
   min-width: 0;
-  height: 32px;
+  height: 30px;
   flex: 1 1 auto;
   align-items: center;
   gap: 3px;
