@@ -554,6 +554,7 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
     for capability_id in [
         "web.research",
         "agent.collaboration",
+        "agent.tool-discovery",
         "automation.schedule",
     ] {
         let capability = capabilities.iter()
@@ -591,6 +592,38 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         .expect("read official template response");
     let template_value: Value =
         serde_json::from_slice(&template_body).expect("official template JSON");
+    let general = template_value["data"]["official_templates"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["template_key"] == "assistant.general")
+        })
+        .expect("general template");
+    let general_enabled = general["seed"]["enabled_capabilities"]
+        .as_array()
+        .expect("general enabled capabilities");
+    for (module_id, action_id) in [
+        ("plugin.development", "plugin.development/edit"),
+        ("workspace.artifacts", "workspace.artifacts/read"),
+        ("workspace.files", "workspace.files/patch"),
+        ("workspace.process", "workspace.process/exec"),
+        ("workspace.vcs", "workspace.vcs/commit"),
+        ("agent.collaboration", "agent/delegate"),
+        ("requirements", "requirements/read"),
+        ("agent.tool-discovery", "tool.discovery.rank"),
+    ] {
+        let selection = general_enabled
+            .iter()
+            .find(|item| item["capability"]["id"] == module_id)
+            .unwrap_or_else(|| panic!("missing general Module {module_id}"));
+        assert!(
+            selection["action_allowlist"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| action == action_id)),
+            "{module_id} must retain exact Action {action_id}"
+        );
+    }
     let coding = template_value["data"]["official_templates"]
         .as_array()
         .and_then(|items| {

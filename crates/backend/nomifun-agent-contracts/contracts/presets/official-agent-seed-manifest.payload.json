@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "71a97d60633264c9e278b49aeef84e7e3b927adcd827a56309b477ee166c619d",
+  "target_first_party_contribution_digest": "ff831335aa83839b5f25b26e7e61c6155e71b827ef6bf137e9a2d8c886f481e3",
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
@@ -72,6 +72,97 @@
             "computer/a11y.observe",
             "computer/observe"
           ]
+        },
+        {
+          "capability": {
+            "id": "plugin.development",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "plugin.development/edit",
+            "plugin.development/read",
+            "plugin.development/serve"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.artifacts",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.artifacts/read"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.files",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.files/patch",
+            "workspace.files/read",
+            "workspace.files/search",
+            "workspace.files/write"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.process",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.process/cancel",
+            "workspace.process/close_stdin",
+            "workspace.process/exec",
+            "workspace.process/input",
+            "workspace.process/poll",
+            "workspace.process/resize",
+            "workspace.process/start"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.vcs",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.vcs/commit",
+            "workspace.vcs/diff",
+            "workspace.vcs/stage",
+            "workspace.vcs/status"
+          ]
+        },
+        {
+          "capability": {
+            "id": "agent.collaboration",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "agent/delegate",
+            "agent/fork",
+            "agent/request_user_decision"
+          ]
+        },
+        {
+          "capability": {
+            "id": "requirements",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "requirements/claim",
+            "requirements/read",
+            "requirements/status",
+            "requirements/write"
+          ]
+        },
+        {
+          "capability": {
+            "id": "agent.tool-discovery",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "tool.discovery.rank"
+          ]
         }
       ],
       "skill_bindings": [],
@@ -79,8 +170,11 @@
         "browser",
         "computer",
         "knowledge_base",
+        "plugin",
+        "process_session",
         "project_memory",
-        "scheduler"
+        "scheduler",
+        "workspace"
       ],
       "required_runtime_features": []
     },
@@ -312,28 +406,47 @@
     },
     "assistant.general": {
       "required_capability_categories": [
+        "agent_collaboration",
         "automation",
         "browser",
         "computer",
+        "file_operations",
         "knowledge",
         "project_memory",
-        "web_research"
+        "requirements",
+        "shell_process_pty",
+        "skills_plugins",
+        "tool_discovery",
+        "vcs_review",
+        "web_research",
+        "workspace_repository"
       ],
       "required_capability_ids": [
+        "agent.collaboration",
+        "agent.tool-discovery",
         "automation.schedule",
         "browser",
         "computer",
         "knowledge",
+        "plugin.development",
         "project.memory",
-        "web.research"
+        "requirements",
+        "web.research",
+        "workspace.artifacts",
+        "workspace.files",
+        "workspace.process",
+        "workspace.vcs"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [
         "browser",
         "computer",
         "knowledge_base",
+        "plugin",
+        "process_session",
         "project_memory",
-        "scheduler"
+        "scheduler",
+        "workspace"
       ]
     },
     "coding.codex": {

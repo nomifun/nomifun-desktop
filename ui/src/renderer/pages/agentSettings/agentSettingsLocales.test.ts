@@ -23,6 +23,17 @@ describe('Agent Settings locale contract', () => {
     expect(flattenKeys(en).sort()).toEqual(flattenKeys(zh).sort());
   });
 
+  test('uses concise official preset names', () => {
+    expect(zh.template.chat.minimal.name).toBe('最简');
+    expect(zh.template.assistant.general.name).toBe('通用');
+    expect(zh.template.coding.codex.name).toBe('编程');
+    expect(zh.template.creativeStudio.default.name).toBe('多模');
+    expect(en.template.chat.minimal.name).toBe('Minimal');
+    expect(en.template.assistant.general.name).toBe('General');
+    expect(en.template.coding.codex.name).toBe('Coding');
+    expect(en.template.creativeStudio.default.name).toBe('Multimodal');
+  });
+
   test('contains fresh-start copy and no editor test feature in either locale', () => {
     expect(en.freshStart.body.includes('not imported')).toBe(true);
     expect(zh.freshStart.body.includes('不会导入')).toBe(true);
@@ -61,6 +72,7 @@ describe('Agent Settings locale contract', () => {
       expect(Object.hasOwn(locale.workbench, 'moveOut')).toBe(false);
       expect(Object.hasOwn(locale.workbench, 'enabledCapabilities')).toBe(false);
       expect(locale.modules.browser.name.length).toBeGreaterThan(0);
+      expect(locale.modules.toolDiscovery.name.length).toBeGreaterThan(0);
       expect(locale.effects.destructive.length).toBeGreaterThan(0);
     }
   });

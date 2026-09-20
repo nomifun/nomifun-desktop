@@ -539,6 +539,27 @@
       },
       {
         "package": {
+          "id": "nomifun.tool-discovery",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.tool-discovery"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "agent.tool-discovery",
+              "version": "1.0.0"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
           "id": "nomifun.notification",
           "version": "1.0.0"
         },
@@ -565,5 +586,5 @@
       }
     ]
   },
-  "payload_digest": "71a97d60633264c9e278b49aeef84e7e3b927adcd827a56309b477ee166c619d"
+  "payload_digest": "ff831335aa83839b5f25b26e7e61c6155e71b827ef6bf137e9a2d8c886f481e3"
 }

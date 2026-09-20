@@ -106,19 +106,19 @@
     "zeroToolBody": "No capability, Skill, MCP, workspace, Coding context, or hidden capability search is constructed.",
     "chat": {
       "minimal": {
-        "name": "Minimal Agent",
+        "name": "Minimal",
         "description": "A clean, no-tool starting point for conversation and custom setups."
       }
     },
     "assistant": {
       "general": {
-        "name": "General Agent",
-        "description": "A ready-to-customize set of everyday research, knowledge, memory and creation modules."
+        "name": "General",
+        "description": "A ready-to-customize set of research, knowledge, workspace, collaboration, and extension modules."
       }
     },
     "coding": {
       "codex": {
-        "name": "Coding Agent",
+        "name": "Coding",
         "description": "Workspace, version control, processes and research for software work."
       }
     },
@@ -136,8 +136,8 @@
     },
     "creativeStudio": {
       "default": {
-        "name": "Creative Studio",
-        "description": "Combine assets, content creation and PluginRuntime capabilities for creative work."
+        "name": "Multimodal",
+        "description": "Combine image, video, audio, canvas, and document creation capabilities."
       }
     }
   },
@@ -159,6 +159,7 @@
     "requirements": { "name": "Requirements", "description": "Read, write, update and claim work from the requirements platform." },
     "robot": { "name": "Robot", "description": "Observe and control an explicitly bound robot device." },
     "ssh": { "name": "SSH", "description": "Read files or run authorized commands on a selected SSH host." },
+    "toolDiscovery": { "name": "Tool discovery policy", "description": "Choose how ToolSearch discovers and ranks authorized tools." },
     "webResearch": { "name": "Web research", "description": "Search public sources and fetch pages without using browser sign-in state." },
     "workspaceArtifacts": { "name": "Workspace artifacts", "description": "Read or publish artifacts from the selected workspace." },
     "workspaceFiles": { "name": "Workspace files", "description": "Read, search and make explicit changes inside the selected workspace." },
@@ -176,7 +177,7 @@
     "publish": "Publish", "serve": "Serve", "status": "View status", "diff": "Review changes", "stage": "Stage changes", "commit": "Commit", "push": "Push",
     "exec": "Run commands", "start": "Start process", "poll": "Read process output", "input": "Send input", "close_stdin": "Close input", "resize": "Resize terminal", "cancel": "Stop process",
     "fs_read": "Read remote files", "fs_write": "Write remote files", "sudo": "Run privileged commands", "claim": "Claim work", "a11y_observe": "Inspect accessibility tree",
-    "vision": "Use robot vision", "display": "Use robot display", "motion": "Control motion", "device": "Use device tools"
+    "vision": "Use robot vision", "display": "Use robot display", "motion": "Control motion", "device": "Use device tools", "tool_discovery_rank": "Discover tools"
   },
   "effects": {
     "pure": "No external effect", "read_local": "Reads local data", "read_sensitive": "Reads sensitive data",
@@ -435,7 +436,7 @@
     "noModules": "No capability modules are available",
     "noModulesHint": "Refresh the installation catalog or enable a product extension that publishes Agent modules.",
     "firstRunTitle": "Choose your starting point",
-    "firstRunHint": "Begin with a zero-tool Minimal Agent or create a blank custom setup. General Agent is available under Official presets.",
+    "firstRunHint": "Begin with the zero-tool Minimal preset or create a blank custom setup. General is available under Official presets.",
     "startMinimal": "Start minimal",
     "startCustom": "Blank custom",
     "emptyWorkbenchTitle": "Create your first Agent",

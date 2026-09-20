@@ -106,19 +106,19 @@
     "zeroToolBody": "不会构造 Capability、Skill、MCP、Workspace、Coding Context 或隐藏的能力搜索。",
     "chat": {
       "minimal": {
-        "name": "最简 Agent",
+        "name": "最简",
         "description": "零工具的干净起点，适合普通对话和从头定制。"
       }
     },
     "assistant": {
       "general": {
-        "name": "通用 Agent",
-        "description": "预选日常调研、知识、记忆与创作模块，并可继续定制。"
+        "name": "通用",
+        "description": "预选调研、知识、工作区、协作与扩展能力，并可继续定制。"
       }
     },
     "coding": {
       "codex": {
-        "name": "编程 Agent",
+        "name": "编程",
         "description": "使用工作区、版本控制、进程与调研模块完成软件开发。"
       }
     },
@@ -136,8 +136,8 @@
     },
     "creativeStudio": {
       "default": {
-        "name": "创意工坊",
-        "description": "按创作需求组合素材、内容生成与插件相关能力。"
+        "name": "多模",
+        "description": "组合图片、视频、音频、画布与办公内容创作能力。"
       }
     }
   },
@@ -159,6 +159,7 @@
     "requirements": { "name": "需求", "description": "读取、编写、更新和认领需求平台中的工作。" },
     "robot": { "name": "机器人", "description": "观察和控制明确绑定的机器人设备。" },
     "ssh": { "name": "SSH", "description": "在所选 SSH 主机读取文件或运行已授权命令。" },
+    "toolDiscovery": { "name": "工具发现策略", "description": "为已授权工具选择 ToolSearch 的发现与排序策略。" },
     "webResearch": { "name": "Web 调研", "description": "搜索公开来源并读取网页，不使用浏览器登录状态。" },
     "workspaceArtifacts": { "name": "工作区产物", "description": "读取或发布所选工作区中的产物。" },
     "workspaceFiles": { "name": "工作区文件", "description": "在所选工作区内读取、搜索和执行明确的文件改动。" },
@@ -176,7 +177,7 @@
     "publish": "发布", "serve": "运行服务", "status": "查看状态", "diff": "查看改动", "stage": "暂存改动", "commit": "创建提交", "push": "推送",
     "exec": "执行命令", "start": "启动进程", "poll": "读取进程输出", "input": "发送输入", "close_stdin": "关闭输入", "resize": "调整终端", "cancel": "停止进程",
     "fs_read": "读取远程文件", "fs_write": "写入远程文件", "sudo": "执行特权命令", "claim": "认领工作", "a11y_observe": "检查无障碍树",
-    "vision": "使用机器人视觉", "display": "使用机器人显示", "motion": "控制运动", "device": "使用设备工具"
+    "vision": "使用机器人视觉", "display": "使用机器人显示", "motion": "控制运动", "device": "使用设备工具", "tool_discovery_rank": "发现工具"
   },
   "effects": {
     "pure": "无外部效果", "read_local": "读取本地数据", "read_sensitive": "读取敏感数据",
@@ -435,7 +436,7 @@
     "noModules": "当前没有可用的能力模块",
     "noModulesHint": "请刷新安装目录，或启用会发布 Agent 模块的产品扩展。",
     "firstRunTitle": "选择起点",
-    "firstRunHint": "可从零工具的最简 Agent 开始，也可创建空白自定义配置；通用 Agent 位于官方预设。",
+    "firstRunHint": "可从零工具的“最简”开始，也可创建空白自定义配置；“通用”位于官方预设。",
     "startMinimal": "从最简开始",
     "startCustom": "空白自定义",
     "emptyWorkbenchTitle": "创建第一个 Agent",
