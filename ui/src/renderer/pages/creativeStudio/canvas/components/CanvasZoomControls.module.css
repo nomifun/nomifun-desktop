@@ -53,7 +53,7 @@
 
 .percentageButton > span:first-child {
   min-width: 34px;
-  text-align: right;
+  text-align: center;
 }
 
 .menuAnchor {
@@ -70,9 +70,9 @@
   bottom: calc(100% + 8px);
   left: var(--creative-canvas-zoom-menu-offset-x, 0);
   box-sizing: border-box;
-  width: 200px;
+  width: 168px;
   max-width: calc(100vw - 40px);
-  padding: 6px;
+  padding: 5px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 88%, transparent);
   border-radius: 12px;
   background: color-mix(in srgb, var(--color-bg-2) 98%, transparent);
@@ -124,7 +124,7 @@
 }
 
 .backgroundHeading {
-  padding: 2px 7px 5px;
+  padding: 1px 6px 4px;
   color: var(--color-text-3);
   font-size: 11px;
   font-weight: 650;
@@ -138,10 +138,10 @@
 .backgroundOption {
   display: flex;
   width: 100%;
-  min-height: 32px;
+  min-height: 29px;
   align-items: center;
-  gap: 7px;
-  padding: 0 7px;
+  gap: 6px;
+  padding: 0 6px;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -183,9 +183,9 @@
 .zoomStepper {
   display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding-top: 6px;
+  gap: 5px;
+  margin-top: 5px;
+  padding-top: 5px;
   border-top: 1px solid var(--color-border-2);
 }
 
@@ -198,11 +198,12 @@
 .zoomInput {
   display: flex;
   min-width: 0;
-  height: 30px;
+  height: 28px;
   flex: 1 1 auto;
   align-items: center;
+  justify-content: center;
   gap: 3px;
-  padding: 0 9px;
+  padding: 0 8px;
   border: 1px solid color-mix(in srgb, rgb(var(--primary-6)) 70%, var(--color-border-2));
   border-radius: 8px;
   background: var(--color-bg-2);
@@ -212,7 +213,7 @@
 }
 
 .zoomInput input {
-  width: 100%;
+  width: 4ch;
   min-width: 0;
   padding: 0;
   border: 0;

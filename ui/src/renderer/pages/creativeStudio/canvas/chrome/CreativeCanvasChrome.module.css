@@ -48,7 +48,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: 14px;
+  margin: 10px 14px;
   pointer-events: none;
 }
 
@@ -56,12 +56,12 @@
 .topActions {
   display: flex;
   min-width: 0;
-  height: 42px;
+  height: 38px;
   align-items: center;
   gap: 2px;
-  padding: 4px 6px;
+  padding: 3px 6px;
   border: 1px solid color-mix(in srgb, var(--color-border-2) 90%, transparent);
-  border-radius: 12px;
+  border-radius: 11px;
   background: color-mix(in srgb, var(--color-bg-2) 95%, transparent);
   box-shadow: none;
   color: var(--creative-canvas-control-ink);
@@ -96,9 +96,9 @@
 
 .backButton {
   display: grid;
-  width: 32px;
-  height: 32px;
-  flex: 0 0 32px;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
   place-items: center;
   padding: 0;
   border-radius: 8px;
@@ -144,10 +144,10 @@
 .saveState {
   display: inline-flex;
   min-width: 0;
-  height: 24px;
+  height: 22px;
   align-items: center;
-  gap: 5px;
-  padding: 0 7px;
+  gap: 4px;
+  padding: 0 6px;
   border-radius: 999px;
   background: var(--color-fill-1);
   color: var(--color-text-3);
@@ -441,7 +441,7 @@
 }
 
 .leftPanel[data-left-open='true'] {
-  top: 70px;
+  top: 64px;
   bottom: 72px;
   width: min(320px, calc(100% - 28px));
   max-height: none;
@@ -532,7 +532,7 @@
 }
 
 .iconButton {
-  height: 32px;
+  height: 30px;
   padding: 0;
   border-radius: 8px;
   background: transparent;
@@ -546,9 +546,17 @@
 
 .iconButton {
   display: grid;
-  width: 32px;
-  flex: 0 0 32px;
+  width: 30px;
+  flex: 0 0 30px;
   place-items: center;
+}
+
+/* Icon Park glyphs render as inline SVG wrappers; give every top-bar icon a
+   grid box so icons and text share the same center line. */
+.topBar :global(.i-icon) {
+  display: grid;
+  place-items: center;
+  line-height: 0;
 }
 
 /* Arco Tooltip wraps disabled controls in a span and moves the supplied class
@@ -627,7 +635,7 @@
 
 .divider {
   width: 1px;
-  height: 20px;
+  height: 18px;
   flex: 0 0 1px;
   margin: 0 2px;
   background: var(--color-border-2);
@@ -772,7 +780,7 @@
 }
 
 .root[data-compact='true'] .backButton {
-  width: 34px;
+  width: 30px;
   justify-content: center;
   padding: 0;
 }
@@ -801,7 +809,7 @@
   }
 
   .backButton {
-    width: 34px;
+    width: 30px;
     justify-content: center;
     padding: 0;
   }
