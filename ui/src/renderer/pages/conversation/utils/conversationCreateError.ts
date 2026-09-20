@@ -10,14 +10,22 @@ import type { TFunction } from 'i18next';
 
 export type WorkspacePathErrorCode =
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
-  | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED';
+  | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
+  | 'WORKSPACE_DIRECTORY_UNAVAILABLE'
+  | 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE';
 
-export type ConversationCreateErrorCode = 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED';
-export type ConversationRuntimeWorkspaceErrorCode = 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED';
+export type ConversationCreateErrorCode =
+  | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
+  | 'WORKSPACE_DIRECTORY_UNAVAILABLE';
+export type ConversationRuntimeWorkspaceErrorCode =
+  | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
+  | 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE';
 
 const BACKEND_ERROR_CODE_MAP: Record<string, WorkspacePathErrorCode> = {
   WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED: 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED',
   WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED: 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED',
+  WORKSPACE_DIRECTORY_UNAVAILABLE: 'WORKSPACE_DIRECTORY_UNAVAILABLE',
+  WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE: 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE',
 };
 
 const PROVIDER_ERROR_CODES = new Set(['PROVIDER_UNAVAILABLE']);
@@ -109,14 +117,19 @@ export const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathEr
 
 export const normalizeConversationCreateErrorCode = (error: unknown): ConversationCreateErrorCode | undefined => {
   const code = normalizeWorkspacePathErrorCode(error);
-  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED' ? code : undefined;
+  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED' || code === 'WORKSPACE_DIRECTORY_UNAVAILABLE'
+    ? code
+    : undefined;
 };
 
 export const normalizeConversationRuntimeWorkspaceErrorCode = (
   error: unknown
 ): ConversationRuntimeWorkspaceErrorCode | undefined => {
   const code = normalizeWorkspacePathErrorCode(error);
-  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED' ? code : undefined;
+  return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
+    || code === 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE'
+    ? code
+    : undefined;
 };
 
 export const getConversationCreateErrorMessage = (error: unknown, t: TFunction): string => {

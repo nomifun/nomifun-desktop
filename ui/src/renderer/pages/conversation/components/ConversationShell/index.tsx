@@ -10,7 +10,6 @@ import { Outlet, useNavigate } from 'react-router-dom';
 import { ipcBridge } from '@/common';
 import { Message } from '@arco-design/web-react';
 import ContentSider, { useContentSiderCollapse } from '@renderer/components/layout/ContentSider';
-import { addRecentWorkspace } from '@renderer/components/workspace';
 import { useResizableSplit } from '@renderer/hooks/ui/useResizableSplit';
 import WorkpathSessionList from '@renderer/pages/conversation/SessionList';
 import { useSidebarDisplayPreferences } from '@renderer/pages/conversation/SessionList/hooks/useSidebarDisplayPreferences';
@@ -100,7 +99,6 @@ const ConversationShell: React.FC = () => {
       const projectPath = paths?.[0]?.trim();
       if (!projectPath) return;
       addProjectWorkpath(projectPath);
-      addRecentWorkspace(projectPath);
       void navigate('/guid', {
         // A project is a workspace context, not an instruction to downgrade
         // the user's Agent to chat.minimal. Keep the current Agent choice.

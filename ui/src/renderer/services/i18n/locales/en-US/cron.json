@@ -131,6 +131,7 @@
       "workspaceHint": "Optional: set a project folder for file operations",
       "selectFolder": "Select Folder",
       "clearFolder": "Clear",
+      "workspaceUnavailable": "The selected project directory “{{workspacePath}}” does not exist or cannot be accessed. Restore it or choose an existing directory before saving the task.",
       "model": "Model",
       "nomiModelRequired": "Please select a model for Nomi",
       "removedPresetLabel": "Removed preset ({{id}})",

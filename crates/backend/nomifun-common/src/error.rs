@@ -59,6 +59,16 @@ pub enum AppError {
         "Workspace path contains a directory name that begins or ends with whitespace and cannot be used for send or warmup: {0}. Rename the affected directory, then update this conversation or task."
     )]
     WorkspacePathEdgeWhitespaceRuntimeUnsupported(String),
+
+    #[error(
+        "Workspace directory does not exist, is not a directory, or cannot be accessed: {0}. Select an existing directory and try again."
+    )]
+    WorkspaceDirectoryUnavailable(String),
+
+    #[error(
+        "Workspace directory no longer exists, is not a directory, or cannot be accessed: {0}. Restore the directory or select another workspace before running the task."
+    )]
+    WorkspaceDirectoryRuntimeUnavailable(String),
 }
 
 /// Internal error response body matching the `ErrorResponse` format from `nomifun-api-types`.
@@ -90,6 +100,8 @@ impl AppError {
             Self::UnprocessableEntity(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::WorkspacePathEdgeWhitespace(_) => StatusCode::BAD_REQUEST,
             Self::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_) => StatusCode::BAD_REQUEST,
+            Self::WorkspaceDirectoryUnavailable(_) => StatusCode::BAD_REQUEST,
+            Self::WorkspaceDirectoryRuntimeUnavailable(_) => StatusCode::BAD_REQUEST,
         }
     }
 
@@ -119,6 +131,10 @@ impl AppError {
             Self::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_) => {
                 "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED"
             }
+            Self::WorkspaceDirectoryUnavailable(_) => "WORKSPACE_DIRECTORY_UNAVAILABLE",
+            Self::WorkspaceDirectoryRuntimeUnavailable(_) => {
+                "WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE"
+            }
         }
     }
 
@@ -130,10 +146,24 @@ impl AppError {
             Self::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => {
                 Some(workspace_path_whitespace_details(path, "runtime"))
             }
+            Self::WorkspaceDirectoryUnavailable(path) => {
+                Some(workspace_directory_details(path, "create"))
+            }
+            Self::WorkspaceDirectoryRuntimeUnavailable(path) => {
+                Some(workspace_directory_details(path, "runtime"))
+            }
             Self::ProviderInUse(details) => Some(json!({ "usages": details.usages })),
             _ => None,
         }
     }
+}
+
+fn workspace_directory_details(path: &str, operation: &str) -> Value {
+    json!({
+        "field": "workspace",
+        "workspace_path": path,
+        "operation": operation,
+    })
 }
 
 fn workspace_path_whitespace_details(path: &str, operation: &str) -> Value {
@@ -262,6 +292,14 @@ mod tests {
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported("x".into()).status_code(),
             StatusCode::BAD_REQUEST
         );
+        assert_eq!(
+            AppError::WorkspaceDirectoryUnavailable("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            AppError::WorkspaceDirectoryRuntimeUnavailable("x".into()).status_code(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[test]
@@ -294,6 +332,14 @@ mod tests {
         assert_eq!(
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported("x".into()).error_code(),
             "WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED"
+        );
+        assert_eq!(
+            AppError::WorkspaceDirectoryUnavailable("x".into()).error_code(),
+            "WORKSPACE_DIRECTORY_UNAVAILABLE"
+        );
+        assert_eq!(
+            AppError::WorkspaceDirectoryRuntimeUnavailable("x".into()).error_code(),
+            "WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE"
         );
     }
 
@@ -364,6 +410,20 @@ mod tests {
         assert_eq!(json["details"]["workspace_path"], "/tmp/Archive ");
         assert_eq!(json["details"]["offending_segments"], serde_json::json!(["Archive "]));
         assert_eq!(json["details"]["operation"], "runtime");
+    }
+
+    #[tokio::test]
+    async fn test_workspace_directory_unavailable_response_contains_details() {
+        let resp = AppError::WorkspaceDirectoryUnavailable("/tmp/missing".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["code"], "WORKSPACE_DIRECTORY_UNAVAILABLE");
+        assert_eq!(json["details"]["field"], "workspace");
+        assert_eq!(json["details"]["workspace_path"], "/tmp/missing");
+        assert_eq!(json["details"]["operation"], "create");
     }
 
     #[test]

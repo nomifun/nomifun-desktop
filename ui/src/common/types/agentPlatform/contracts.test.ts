@@ -45,15 +45,17 @@ describe('Agent Platform TypeScript contracts', () => {
     ]);
   });
 
-  test('CreateAgentSessionRequest contains only preset identity and optional title', () => {
+  test('CreateAgentSessionRequest carries a workspace candidate without exposing a binding', () => {
     const request: CreateAgentSessionRequest = {
       preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
       title: 'Coding Test',
+      workspace: '/Users/example/project',
     };
 
     expect(request).toEqual({
       preset_id: '0190f5fe-7c00-7a00-8000-000000000001',
       title: 'Coding Test',
+      workspace: '/Users/example/project',
     });
     expect('agent_binding' in request).toBe(false);
   });

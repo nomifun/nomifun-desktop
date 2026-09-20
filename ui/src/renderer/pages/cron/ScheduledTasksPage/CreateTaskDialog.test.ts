@@ -74,7 +74,15 @@ function fixture() {
   const success = spyOn(Message, 'success').mockReturnValue(() => {});
   const error = spyOn(Message, 'error').mockReturnValue(() => {});
   const logging = spyOn(console, 'error').mockImplementation(() => {});
-  for (const spy of [adding, updating, listing, identities, modelList, conversationList, themeValue, success, error, logging]) {
+  const metadata = spyOn(ipcBridge.fs.getFileMetadata, 'invoke').mockImplementation(async ({ path }) => ({
+    name: path.split(/[\\/]/).pop() || path,
+    path,
+    size: 0,
+    type: 'inode/directory',
+    lastModified: 1,
+    isDirectory: true,
+  }));
+  for (const spy of [adding, updating, listing, identities, modelList, conversationList, themeValue, success, error, logging, metadata]) {
     restore.push(() => spy.mockRestore());
   }
   const mount = async (job?: ICronJob) => {
@@ -88,7 +96,7 @@ function fixture() {
     const name = () => view.getByPlaceholderText(cronStrings.page.form.namePlaceholder) as HTMLInputElement;
     return { ...view, save, name, show: (visible: boolean, nextJob = job) => view.rerender(element(visible, nextJob)) };
   };
-  return { mount, closed, requests, adding, updating, success, error };
+  return { mount, closed, requests, adding, updating, success, error, metadata };
 }
 
 describe('CreateTaskDialog actual form lifecycle', () => {
@@ -142,6 +150,25 @@ describe('CreateTaskDialog actual form lifecycle', () => {
     await act(async () => { v.save(); });
     expect(f.requests).toHaveLength(2);
     await act(async () => { f.requests[1]!.resolve(cronJob(dailySchedule)); });
+  });
+
+  test('rejects a removed scheduled-task project before updating the job', async () => {
+    const f = fixture();
+    const job: ICronJob = {
+      ...cronJob(dailySchedule),
+      metadata: {
+        ...cronJob(dailySchedule).metadata,
+        agent_config: { name: 'Legacy Agent', workspace: '/projects/removed' },
+      },
+    };
+    const v = await f.mount(job);
+    f.metadata.mockRejectedValueOnce(new Error('directory not found'));
+
+    await act(async () => { v.save(); });
+
+    expect(f.updating).not.toHaveBeenCalled();
+    expect(f.error).toHaveBeenCalledTimes(1);
+    expect(String(f.error.mock.calls[0]?.[0])).toContain('removed');
   });
 
   test.each([false, true])('old save after closing/reopening cannot close or notify the new dialog (failure=%s)', async (failure) => {

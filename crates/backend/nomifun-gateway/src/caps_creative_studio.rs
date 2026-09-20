@@ -186,7 +186,9 @@ fn canvas_operation_error(error: AppError) -> String {
         AppError::Unauthorized(_) => "Creative Studio Canvas access is unauthorized".to_owned(),
         AppError::Forbidden(_) => "Creative Studio Canvas access is forbidden".to_owned(),
         AppError::WorkspacePathEdgeWhitespace(_)
-        | AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_) => {
+        | AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(_)
+        | AppError::WorkspaceDirectoryUnavailable(_)
+        | AppError::WorkspaceDirectoryRuntimeUnavailable(_) => {
             "Creative Studio Canvas operation failed because a workspace path is invalid".to_owned()
         }
     }

@@ -89,7 +89,8 @@
   },
   "createError": {
     "pathVariants": {
-      "WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED": "所选工作区路径“{{workspacePath}}”中存在以空格或其他空白字符开头/结尾的目录名。请重命名相关目录（目录名首尾不能是空白字符）后重试。"
+      "WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED": "所选工作区路径“{{workspacePath}}”中存在以空格或其他空白字符开头/结尾的目录名。请重命名相关目录（目录名首尾不能是空白字符）后重试。",
+      "WORKSPACE_DIRECTORY_UNAVAILABLE": "所选项目目录“{{workspacePath}}”不存在、不是文件夹或当前无法访问。请恢复该目录，或重新选择一个现有目录后再试。"
     }
   },
   "agentError": {
@@ -287,6 +288,11 @@
         "title": "该工作区路径无法运行",
         "body": "该会话或任务绑定的工作区路径中存在以空白字符开头/结尾的目录名。请重命名相关目录，或使用有效的工作区路径重新创建对话或任务。",
         "bodyWithPath": "工作区路径“{{workspacePath}}”中存在以空白字符开头/结尾的目录名。请重命名相关目录，或使用有效的工作区路径重新创建对话或任务。"
+      },
+      "WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE": {
+        "title": "项目目录不可用",
+        "body": "该会话或任务绑定的项目目录已不存在或无法访问。请恢复目录，或选择其他项目新建会话或任务。",
+        "bodyWithPath": "项目目录“{{workspacePath}}”已不存在或无法访问。请恢复目录，或选择其他项目新建会话或任务。"
       },
       "UNKNOWN_UPSTREAM_ERROR": {
         "title": "上游 Agent 或模型服务商出错",

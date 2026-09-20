@@ -71,6 +71,7 @@
     "subtitle": "Pick a working directory and (optionally) an agent to launch.",
     "workspace": "Working directory",
     "workspacePlaceholder": "Choose a folder (runs cd there)",
+    "workspaceUnavailable": "The selected working directory “{{workspacePath}}” does not exist or cannot be accessed. Restore it or choose an existing directory before launching.",
     "recent": "Recent",
     "chooseFolder": "Choose a different folder",
     "preset": "Launch",

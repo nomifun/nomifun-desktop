@@ -16,7 +16,11 @@ import type { TProviderWithModel } from '@/common/config/storage';
 import type { ConversationId, ProviderId } from '@/common/types/ids';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import ChatModelSelector from '@renderer/components/chat/ChatModelSelector';
-import { WorkspaceFolderSelect } from '@renderer/components/workspace';
+import {
+  WorkspaceDirectoryUnavailableError,
+  WorkspaceFolderSelect,
+  validateExistingWorkspaceDirectory,
+} from '@renderer/components/workspace';
 import type { AgentMetadata } from '@renderer/utils/model/agentTypes';
 import { createCronSchedule, getCurrentCronTimeZone } from '@renderer/pages/cron/cronUtils';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
@@ -424,7 +428,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     setWorkspace(undefined);
   }, []);
 
-  const resolveAgentConfig = (agentValue: string) => {
+  const resolveAgentConfig = (agentValue: string, workspaceForSubmission = workspace) => {
     const selection = parseCronAgentSelection(agentValue);
     if (!selection) throw new Error(t('cron.page.form.agentRequired'));
 
@@ -446,7 +450,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           provider_id: providerId,
           name: geminiCurrentModel.name,
           model,
-          workspace,
+          workspace: workspaceForSubmission,
           clear_context_each_run: shouldClearContextEachRun,
         };
       } else {
@@ -455,7 +459,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           ...(agent.backend ? { backend: agent.backend } : {}),
           custom_agent_id: agent.agent_id,
           name: resolveCronAgentDisplayName(agent, i18n.language),
-          workspace,
+          workspace: workspaceForSubmission,
           clear_context_each_run: shouldClearContextEachRun,
         };
       }
@@ -476,7 +480,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       agent_config = {
         name: preset.display_name,
         preset_id: preset.preset_id,
-        workspace,
+        workspace: workspaceForSubmission,
         clear_context_each_run: shouldClearContextEachRun,
       };
     }
@@ -506,6 +510,23 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         return;
       }
 
+      const selectedConversation = conversationTarget.kind === 'specified'
+        ? conversations.find((conversation) => conversation.id === conversationTarget.conversationId)
+        : undefined;
+      const specifiedWorkspace = selectedConversation?.extra?.workspace;
+      const workspaceCandidate = conversationTarget.kind === 'specified'
+        ? (typeof specifiedWorkspace === 'string' ? specifiedWorkspace : undefined)
+        : workspace;
+      let workspaceForSubmission = workspace;
+      if (workspaceCandidate?.trim()) {
+        const canonicalWorkspace = await validateExistingWorkspaceDirectory(workspaceCandidate);
+        if (!isCurrent()) return;
+        if (conversationTarget.kind !== 'specified') {
+          workspaceForSubmission = canonicalWorkspace;
+          if (canonicalWorkspace !== workspace) setWorkspace(canonicalWorkspace);
+        }
+      }
+
       // ─── 指定会话 — 复用已存在的会话 ─────────────────────────────────
       // 复用的会话已经带有自己的执行 Agent 和项目（workspace），这里不再重复配置，
       // 也绝不能传 agent_config：否则 agent_config.workspace 会覆盖会话自身的工作目录
@@ -519,7 +540,6 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           Message.error(t('cron.page.form.conversationAlreadyBound', { defaultValue: '该会话已被其它定时任务绑定，请另选一个' }));
           return;
         }
-        const selectedConversation = conversations.find((c) => c.id === specifiedConversationId);
         const specifiedAgentType =
           (selectedConversation && getBackendKeyFromConversation(selectedConversation)) || 'claude';
 
@@ -557,10 +577,12 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           model,
           providerId,
           configOptions: config_options,
-          workspace,
+          workspace: workspaceForSubmission,
           clearContextEachRun,
         });
-        const agent_config = agentConfigChanged ? resolveAgentConfig(agentValue).agent_config : undefined;
+        const agent_config = agentConfigChanged
+          ? resolveAgentConfig(agentValue, workspaceForSubmission).agent_config
+          : undefined;
         await ipcBridge.cron.updateJob.invoke({
           cron_job_id: editJob!.cron_job_id,
           updates: {
@@ -574,7 +596,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
         if (!isCurrent()) return;
         Message.success(t('cron.page.updateSuccess'));
       } else {
-        const { agent_config, resolvedAgentType } = resolveAgentConfig(agentValue);
+        const { agent_config, resolvedAgentType } = resolveAgentConfig(agentValue, workspaceForSubmission);
         const params: ICreateCronJobParams = {
           name: values.name,
           description: values.description,
@@ -592,7 +614,13 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
       onClose();
     } catch (err) {
-      if (isCurrent()) Message.error(getConversationCreateErrorMessage(err, t));
+      if (isCurrent()) {
+        Message.error(
+          err instanceof WorkspaceDirectoryUnavailableError
+            ? t('cron.page.form.workspaceUnavailable', { workspacePath: err.workspacePath })
+            : getConversationCreateErrorMessage(err, t)
+        );
+      }
     } finally {
       if (isCurrent()) {
         submittingRef.current = false;

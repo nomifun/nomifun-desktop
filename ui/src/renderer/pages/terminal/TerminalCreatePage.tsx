@@ -11,7 +11,11 @@ import { useTranslation } from 'react-i18next';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { emitter } from '@/renderer/utils/emitter';
-import { WorkspaceFolderSelect } from '@/renderer/components/workspace';
+import {
+  WorkspaceDirectoryUnavailableError,
+  WorkspaceFolderSelect,
+  validateExistingWorkspaceDirectory,
+} from '@/renderer/components/workspace';
 import {
   buildLaunchCommand,
   formatCommandPreview,
@@ -89,8 +93,13 @@ const TerminalCreatePage: React.FC = () => {
     owner.busy = true;
     setCreating(true);
     try {
+      const launchCwd = cwd.trim()
+        ? await validateExistingWorkspaceDirectory(cwd)
+        : '';
+      if (!isCurrent()) return;
+      if (launchCwd !== cwd) setCwd(launchCwd);
       const session = await ipcBridge.terminal.create.invoke({
-        cwd,
+        cwd: launchCwd,
         command,
         args,
         backend: preset.backend,
@@ -107,7 +116,13 @@ const TerminalCreatePage: React.FC = () => {
       emitter.emit('terminal.list.refresh');
       navigate(`/terminal/${session.terminal_id}`);
     } catch (err) {
-      if (isCurrent()) Message.error(err instanceof Error ? err.message : String(err));
+      if (isCurrent()) {
+        Message.error(
+          err instanceof WorkspaceDirectoryUnavailableError
+            ? t('terminal.create.workspaceUnavailable', { workspacePath: err.workspacePath })
+            : err instanceof Error ? err.message : String(err)
+        );
+      }
     } finally {
       if (isCurrent()) {
         owner.busy = false;

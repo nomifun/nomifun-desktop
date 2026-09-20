@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { fromApiTurnCompletedEvent } from './ipcBridge';
+import { fromApiFileMetadata, fromApiTurnCompletedEvent } from './ipcBridge';
 import { isAuthoritativeCompletionRuntimeIdle } from '@/renderer/pages/conversation/platforms/authoritativeTurnLifecyclePolicy';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
@@ -14,6 +14,24 @@ const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000001';
 const MESSAGE_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 
 describe('ipc bridge wire ID contracts', () => {
+  test('maps filesystem metadata snake-case fields before directory validation', () => {
+    expect(fromApiFileMetadata({
+      name: 'project',
+      path: '/tmp/project',
+      size: 0,
+      type: 'inode/directory',
+      last_modified: 123,
+      is_directory: true,
+    })).toEqual({
+      name: 'project',
+      path: '/tmp/project',
+      size: 0,
+      type: 'inode/directory',
+      lastModified: 123,
+      isDirectory: true,
+    });
+  });
+
   test('revoke user uses channel_user_id and not user_id', () => {
     expect(source.includes('revokeUser: httpPost<void, { channel_user_id:')).toBe(true);
     expect(source.includes("'/api/channel/users/revoke'")).toBe(true);

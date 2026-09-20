@@ -21,7 +21,10 @@ import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
 import { useCronJobRuns } from '@renderer/pages/cron/useCronJobs';
 import { repairCronJobTimeZone } from '@renderer/pages/cron/repairCronJobTimeZone';
 import { mutate } from 'swr';
-import { getConversationRuntimeWorkspaceErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
+import {
+  getConversationCreateErrorMessage,
+  getConversationRuntimeWorkspaceErrorMessage,
+} from '@renderer/pages/conversation/utils/conversationCreateError';
 import { tryParseEntityId } from '@/common/types/ids';
 import {
   claimCronRunNowDelivery,
@@ -103,7 +106,7 @@ const TaskDetailPage: React.FC = () => {
       Message.success(job.enabled ? t('cron.pauseSuccess') : t('cron.resumeSuccess'));
       await fetchJob();
     } catch (err) {
-      Message.error(String(err));
+      Message.error(getConversationCreateErrorMessage(err, t));
     } finally {
       setToggling(false);
     }

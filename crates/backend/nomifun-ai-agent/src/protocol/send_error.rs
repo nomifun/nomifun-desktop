@@ -139,6 +139,21 @@ impl AgentSendError {
                     )),
                 },
             },
+            AppError::WorkspaceDirectoryRuntimeUnavailable(path) => Self {
+                stream_error: AgentStreamErrorData {
+                    message: "This workspace directory is no longer available".into(),
+                    code: Some(AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable),
+                    ownership: Some(AgentErrorOwnership::Nomifun),
+                    detail: Some(sanitize_error_detail(&detail)),
+                    workspace_path: Some(path.clone()),
+                    retryable: Some(false),
+                    feedback_recommended: Some(false),
+                    resolution: Some(AgentErrorResolution::new(
+                        AgentErrorResolutionKind::StartNewSession,
+                        Some(AgentErrorResolutionTarget::NewConversation),
+                    )),
+                },
+            },
             AppError::Internal(_) => Self::new(
                 "Nomi failed while sending the message",
                 AgentErrorCode::NomifunInternalError,
@@ -1016,6 +1031,28 @@ mod tests {
         );
         assert_eq!(err.stream_error().retryable, Some(false));
         assert_eq!(err.stream_error().feedback_recommended, Some(false));
+        assert_eq!(
+            err.stream_error().resolution.map(|value| value.kind),
+            Some(AgentErrorResolutionKind::StartNewSession)
+        );
+    }
+
+    #[test]
+    fn preserves_missing_runtime_workspace_as_structured_nomifun_error() {
+        let err = AgentSendError::from_app_error(
+            AppError::WorkspaceDirectoryRuntimeUnavailable("/Users/test/removed".into()),
+        );
+
+        assert_eq!(
+            err.code(),
+            Some(AgentErrorCode::WorkspaceDirectoryRuntimeUnavailable)
+        );
+        assert_eq!(err.ownership(), Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(
+            err.stream_error().workspace_path.as_deref(),
+            Some("/Users/test/removed")
+        );
+        assert_eq!(err.stream_error().retryable, Some(false));
         assert_eq!(
             err.stream_error().resolution.map(|value| value.kind),
             Some(AgentErrorResolutionKind::StartNewSession)

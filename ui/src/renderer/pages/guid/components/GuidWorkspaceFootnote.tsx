@@ -6,7 +6,12 @@
 
 import { ipcBridge } from '@/common';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
-import { addRecentWorkspace, getRecentWorkspaces } from '@/renderer/components/workspace';
+import {
+  addProjectWorkpath,
+  getProjectWorkpaths,
+  subscribeProjectWorkpaths,
+} from '@/renderer/pages/conversation/SessionList/utils/projectWorkpaths';
+import { workpathKey } from '@/renderer/pages/conversation/SessionList/utils/workpathKey';
 import { Tooltip } from '@arco-design/web-react';
 import { Close, Down } from '@icon-park/react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -55,13 +60,32 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
 }) => {
   const { t } = useTranslation();
   const workspaceName = workspaceDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || workspaceDir;
-  const recentWorkspaces = getRecentWorkspaces();
+  const [projectWorkspaces, setProjectWorkspaces] = useState<string[]>(() => getProjectWorkpaths());
   const [open, setOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
   const triggerRef = useRef<HTMLButtonElement | HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const workspaceDirRef = useRef(workspaceDir);
+  const projectWorkspacesRef = useRef(projectWorkspaces);
+  workspaceDirRef.current = workspaceDir;
+  projectWorkspacesRef.current = projectWorkspaces;
+
+  useEffect(
+    () =>
+      subscribeProjectWorkpaths(() => {
+        const previous = projectWorkspacesRef.current;
+        const next = getProjectWorkpaths();
+        const selected = workpathKey(workspaceDirRef.current);
+        if (workspaceDirRef.current && previous.includes(selected) && !next.includes(selected)) {
+          onClearWorkspace();
+        }
+        projectWorkspacesRef.current = next;
+        setProjectWorkspaces(next);
+      }),
+    [onClearWorkspace]
+  );
 
   const handleBrowseWorkspace = useCallback(() => {
     setOpen(false);
@@ -69,8 +93,9 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
       .invoke({ properties: ['openDirectory', 'createDirectory'] })
       .then((dirs) => {
         if (dirs && dirs[0]) {
-          addRecentWorkspace(dirs[0]);
-          onSelectWorkspace(dirs[0]);
+          const projectPath = workpathKey(dirs[0]);
+          addProjectWorkpath(projectPath);
+          onSelectWorkspace(projectPath);
         }
       })
       .catch((error) => {
@@ -80,7 +105,6 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
 
   const handleSelectPath = useCallback(
     (path: string) => {
-      addRecentWorkspace(path);
       onSelectWorkspace(path);
       setOpen(false);
       setSearchQuery('');
@@ -137,7 +161,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
     return () => document.removeEventListener('mousedown', handler);
   }, [open, closeDropdown]);
 
-  const filteredRecent = recentWorkspaces.filter((p) => {
+  const filteredProjects = projectWorkspaces.filter((p) => {
     if (!searchQuery) return true;
     const name = p.split(/[\\/]/).pop() || p;
     return (
@@ -170,9 +194,9 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
             />
           </div>
 
-          {filteredRecent.map((path) => {
+          {filteredProjects.map((path) => {
             const name = path.split(/[\\/]/).pop() || path;
-            const isActive = path === workspaceDir;
+            const isActive = path === workpathKey(workspaceDir);
             return (
               <div
                 key={path}
@@ -203,7 +227,7 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
             );
           })}
 
-          {filteredRecent.length > 0 && <div className={styles.wsDropdownSep} />}
+          {filteredProjects.length > 0 && <div className={styles.wsDropdownSep} />}
 
           <div className={`${styles.wsDropdownItem} ${styles.wsDropdownItemAccent}`} onClick={handleBrowseWorkspace}>
             <PlusIcon />
@@ -285,11 +309,11 @@ const GuidWorkspaceFootnote: React.FC<GuidWorkspaceFootnoteProps> = ({
             ref={triggerRef as React.RefObject<HTMLButtonElement>}
             className={styles.workspaceEmptyBtn}
             data-testid='workspace-selector-btn'
-            onClick={recentWorkspaces.length > 0 ? toggleOpen : handleBrowseWorkspace}
+            onClick={projectWorkspaces.length > 0 ? toggleOpen : handleBrowseWorkspace}
           >
             <FolderIcon size={14} />
             <span>{t('conversation.welcome.specifyWorkspace')}</span>
-            {recentWorkspaces.length > 0 && (
+            {projectWorkspaces.length > 0 && (
               <Down
                 theme='outline'
                 size='12'

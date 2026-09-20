@@ -15,6 +15,9 @@ use nomifun_common::{
     UserId, now_ms,
     workspace_path_has_edge_whitespace_segment,
 };
+use nomifun_common::paths::{
+    WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
+};
 use crate::session_port::{
     CronSessionProjection, CronTurnReceiptState, CronTurnReconciliation,
 };
@@ -2687,6 +2690,17 @@ impl CronService {
             return Err(CronError::App(AppError::WorkspacePathEdgeWhitespace(
                 workspace,
             )));
+        }
+
+        // Disabled jobs remain editable/removable even if an external drive is
+        // offline. Creation and every transition to an enabled aggregate must
+        // prove that its selected project is executable before any row/timer is
+        // committed.
+        if job.enabled {
+            canonical_existing_workspace_directory(
+                Path::new(&workspace),
+                WorkspaceDirectoryCheck::Create,
+            )?;
         }
 
         Ok(())

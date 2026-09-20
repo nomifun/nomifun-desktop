@@ -880,6 +880,11 @@ pub struct CreateAgentSessionRequestDto {
     /// themselves resource permissions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_selections: Vec<AgentResourceSelectionDto>,
+    /// Optional user-selected host workspace. This is only a candidate path:
+    /// the authenticated host must canonicalize it, prove it is an existing
+    /// directory, and derive the frozen typed resource binding itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1201,6 +1206,7 @@ mod snapshot_tests {
         assert_eq!(request.resource_selections.len(), 2);
         assert_eq!(request.resource_selections[0].resource_kind, "companion");
         assert_eq!(request.resource_selections[1].resource_id, "channel-1");
+        assert!(request.workspace.is_none());
 
         assert!(
             serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
@@ -1214,6 +1220,17 @@ mod snapshot_tests {
             .is_err(),
             "clients must not be able to submit resource operations"
         );
+    }
+
+    #[test]
+    fn create_agent_session_request_accepts_a_workspace_candidate_not_a_binding() {
+        let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+            "preset_id": PRESET_ID,
+            "workspace": "/Users/example/project"
+        }))
+        .expect("a host-validated workspace candidate is supported Session input");
+
+        assert_eq!(request.workspace.as_deref(), Some("/Users/example/project"));
     }
 
     #[test]

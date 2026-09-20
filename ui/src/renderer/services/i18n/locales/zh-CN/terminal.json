@@ -71,6 +71,7 @@
     "subtitle": "选择工作目录，并可选择要启动的智能体。",
     "workspace": "工作目录",
     "workspacePlaceholder": "选择文件夹（自动 cd 进入）",
+    "workspaceUnavailable": "所选工作目录“{{workspacePath}}”不存在或无法访问。请恢复该目录，或重新选择一个现有目录后再启动。",
     "recent": "最近",
     "chooseFolder": "选择其他文件夹",
     "preset": "启动方式",

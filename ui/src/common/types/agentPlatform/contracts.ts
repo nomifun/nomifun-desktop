@@ -538,6 +538,9 @@ export interface CreateAgentSessionRequest {
   preset_id: AgentPresetId;
   title?: string;
   resource_selections?: AgentResourceSelection[];
+  /** User-selected host directory candidate. The backend validates and freezes
+   * the canonical workspace resource; this field is never authority by itself. */
+  workspace?: string;
 }
 
 export interface AgentResourceSelection {

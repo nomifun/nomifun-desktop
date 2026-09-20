@@ -1334,6 +1334,22 @@ export interface ISkillMarketMcpConfigResponse {
   config_json: unknown;
 }
 
+type RawFileMetadata = Omit<IFileMetadata, 'lastModified' | 'isDirectory'> & {
+  last_modified?: number;
+  lastModified?: number;
+  is_directory?: boolean;
+  isDirectory?: boolean;
+};
+
+export const fromApiFileMetadata = (metadata: RawFileMetadata): IFileMetadata => ({
+  name: metadata.name,
+  path: metadata.path,
+  size: metadata.size,
+  type: metadata.type,
+  lastModified: metadata.lastModified ?? metadata.last_modified ?? 0,
+  isDirectory: metadata.isDirectory ?? metadata.is_directory,
+});
+
 export const fs = {
   listWorkspaceFiles: withResponseMap(
     httpPost<Array<RawWorkspaceFlatFile>, { root: string }>('/api/fs/list'),
@@ -1356,7 +1372,10 @@ export const fs = {
     }
   >('/api/fs/zip'),
   cancelZip: httpPost<boolean, { request_id: string }>('/api/fs/zip/cancel'),
-  getFileMetadata: httpPost<IFileMetadata, { path: string; workspace?: string }>('/api/fs/metadata'),
+  getFileMetadata: withResponseMap(
+    httpPost<RawFileMetadata, { path: string; workspace?: string }>('/api/fs/metadata'),
+    fromApiFileMetadata
+  ),
   copyFilesToWorkspace: httpPost<
     {
       copied_files: string[];
