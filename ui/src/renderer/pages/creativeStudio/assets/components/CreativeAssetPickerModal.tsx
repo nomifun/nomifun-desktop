@@ -14,6 +14,14 @@ import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetKind } fr
 import CreativeAssetMedia from './CreativeAssetMedia';
 import styles from './CreativeAssetPickerModal.module.css';
 
+export const CREATIVE_ASSET_PICKER_KIND_FILTERS = [
+  'all',
+  'image',
+  'video',
+  'audio',
+  'text',
+] as const satisfies readonly ('all' | CreativeAssetKind)[];
+
 export interface CreativeAssetPickerModalProps {
   open: boolean;
   assets: readonly CreativeAsset[];
@@ -85,11 +93,10 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
     }),
     [t]
   );
-  const compatible = useMemo(() => {
+  const visibleAssets = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
     return assets.filter((asset) => {
       if (isCreativeAssetDeleted(asset)) return false;
-      if (!acceptedKinds.includes(asset.kind)) return false;
       if (kind !== 'all' && asset.kind !== kind) return false;
       if (!query) return true;
       return [asset.title, asset.collection ?? '', ...asset.tags]
@@ -97,7 +104,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         .toLocaleLowerCase()
         .includes(query);
     });
-  }, [acceptedKinds, assets, kind, search]);
+  }, [assets, kind, search]);
   const acceptedLabel = useMemo(() => {
     const labels = acceptedKinds.map((acceptedKind) => kindLabels[acceptedKind]);
     try {
@@ -154,7 +161,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
           role='group'
           aria-label={t('creativeStudio.assets.picker.kindLabel', { defaultValue: '素材类型' })}
         >
-          {(['all', ...acceptedKinds] as const).map((value) => (
+          {CREATIVE_ASSET_PICKER_KIND_FILTERS.map((value) => (
             <button
               key={value}
               type='button'
@@ -206,12 +213,12 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         <strong>{selectionHint(t, selectedIds.length, selectionLimit)}</strong>
       </div>
 
-      {loading && compatible.length === 0 ? (
+      {loading && visibleAssets.length === 0 ? (
         <div className={styles.empty} role='status'>
           <Spin />
           <span>{t('creativeStudio.assets.picker.loading', { defaultValue: '正在载入素材…' })}</span>
         </div>
-      ) : error && compatible.length === 0 ? (
+      ) : error && visibleAssets.length === 0 ? (
         <div className={styles.empty} role='alert'>
           <strong>{t('creativeStudio.assets.picker.loadFailed', { defaultValue: '素材加载失败' })}</strong>
           <span>{error.message}</span>
@@ -221,7 +228,7 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
             </Button>
           ) : null}
         </div>
-      ) : compatible.length === 0 ? (
+      ) : visibleAssets.length === 0 ? (
         <div className={styles.empty} role='status'>
           <Empty
             description={
@@ -233,26 +240,33 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
         </div>
       ) : (
         <div className={styles.grid} role='listbox' aria-multiselectable={selectionLimit !== 1}>
-          {compatible.map((asset) => {
+          {visibleAssets.map((asset) => {
+            const selectable = acceptedKinds.includes(asset.kind);
             const selected = selectedIds.includes(asset.id);
             const limitReached =
               !selected && selectionLimit !== undefined && selectedIds.length >= selectionLimit;
+            const selectionState = !selectable
+              ? t('creativeStudio.assets.picker.unavailableForSelection', {
+                  defaultValue: '当前创作模式不可选择',
+                })
+              : selected
+                ? t('creativeStudio.assets.picker.selected', { defaultValue: '已选择' })
+                : t('creativeStudio.assets.picker.notSelected', { defaultValue: '未选择' });
             return (
               <button
                 key={asset.id}
                 type='button'
                 className={styles.item}
                 data-selected={selected}
+                data-selectable={selectable}
                 role='option'
                 aria-selected={selected}
                 aria-label={t('creativeStudio.assets.picker.assetSelectionLabel', {
                   defaultValue: '{{title}}，{{state}}',
                   title: asset.title,
-                  state: selected
-                    ? t('creativeStudio.assets.picker.selected', { defaultValue: '已选择' })
-                    : t('creativeStudio.assets.picker.notSelected', { defaultValue: '未选择' }),
+                  state: selectionState,
                 })}
-                disabled={limitReached}
+                disabled={!selectable || limitReached}
                 onClick={() => onToggle(asset)}
               >
                 <span className={styles.media}>
@@ -268,11 +282,15 @@ const CreativeAssetPickerModal: React.FC<CreativeAssetPickerModalProps> = ({
                   <strong title={asset.title}>{asset.title}</strong>
                   <small>
                     {kindLabels[asset.kind]} ·{' '}
-                    {selected
-                      ? t('creativeStudio.assets.picker.selected', { defaultValue: '已选择' })
-                      : t('creativeStudio.assets.picker.clickToSelect', {
-                          defaultValue: '点击选择',
-                        })}
+                    {!selectable
+                      ? t('creativeStudio.assets.picker.unavailableForSelection', {
+                          defaultValue: '当前创作模式不可选择',
+                        })
+                      : selected
+                        ? t('creativeStudio.assets.picker.selected', { defaultValue: '已选择' })
+                        : t('creativeStudio.assets.picker.clickToSelect', {
+                            defaultValue: '点击选择',
+                          })}
                   </small>
                 </span>
               </button>

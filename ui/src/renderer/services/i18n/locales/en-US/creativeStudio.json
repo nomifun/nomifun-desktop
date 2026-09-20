@@ -225,7 +225,8 @@
       "searchPlaceholder": "Search assets",
       "selected": "Selected",
       "selectedCount": "{{itemCount}} selected",
-      "title": "Asset library"
+      "title": "Asset library",
+      "unavailableForSelection": "Unavailable for the current creation mode"
     },
     "preview": {
       "close": "Close",
