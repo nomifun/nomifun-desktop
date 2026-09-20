@@ -677,6 +677,7 @@
       "interfaceModeLabel": "API mode",
       "insertReference": "Mention a connected reference",
       "locateReference": "Locate reference {{name}}",
+      "previewReference": "Preview reference {{name}}",
       "noEditModels": "No image editing models available",
       "noGenerateModels": "No image generation models available",
       "noMatchingReferences": "No matching connected references",
@@ -1149,6 +1150,7 @@
     "video": {
       "aspectRatioAriaLabel": "Video aspect ratio",
       "aspectRatioLabel": "Aspect ratio",
+      "closePreview": "Close video preview",
       "connectedImage": "Image connected",
       "durationAriaLabel": "Video duration",
       "durationLabel": "Duration",

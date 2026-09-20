@@ -21,7 +21,7 @@ export interface CreativeCanvasPromptReferenceOption {
   /** Stable canvas node identity. Labels and ordinals are presentation only. */
   nodeId: string;
   label: string;
-  kind?: 'image' | 'text';
+  kind?: 'image' | 'video' | 'text';
   textContent?: string;
   mentionLabel?: string;
   thumbnailUrl?: string | null;
@@ -886,7 +886,7 @@ const CreativeCanvasReferencePromptInput: React.FC<
                           <span className={styles.thumbnailText}>{reference.textContent}</span>
                         ) : reference.thumbnailUrl || reference.originalUrl ? (
                           <CreativeMediaPreview
-                            kind='image'
+                            kind={reference.kind === 'video' ? 'video' : 'image'}
                             src={reference.originalUrl ?? reference.thumbnailUrl}
                             posterSrc={reference.thumbnailUrl}
                             alt=''

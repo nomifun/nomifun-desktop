@@ -94,13 +94,40 @@
 }
 
 .referenceName {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
   overflow: hidden;
+  border: 0;
+  outline: none;
+  background: transparent;
   color: var(--color-text-3);
+  font: inherit;
   font-size: 9px;
   line-height: 12px;
   text-align: center;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+button.referenceName {
+  cursor: pointer;
+}
+
+button.referenceName:hover:not(:disabled),
+button.referenceName:focus-visible {
+  color: var(--color-text-1);
+}
+
+button.referenceName:focus-visible {
+  outline: 1px solid rgb(var(--primary-6));
+  outline-offset: 1px;
+}
+
+button.referenceName:disabled {
+  cursor: not-allowed;
 }
 
 .referenceRemove {

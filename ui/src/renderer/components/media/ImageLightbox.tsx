@@ -3,11 +3,13 @@ import { Message, Modal, Tooltip } from '@arco-design/web-react';
 import { Close, Download, Minus, Plus } from '@icon-park/react';
 import styles from './ImageLightbox.module.css';
 
-export default function ImageLightbox({ src, title, onClose, onDownload }: {
+export default function ImageLightbox({ src, title, onClose, onDownload, zIndex }: {
   src: string;
   title: string;
   onClose(): void;
   onDownload?: () => Promise<void>;
+  /** Raise the lightbox above product-local overlay stacks such as the canvas composer. */
+  zIndex?: number;
 }) {
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [bounds, setBounds] = useState({ width: 1, height: 1 });
@@ -34,7 +36,7 @@ export default function ImageLightbox({ src, title, onClose, onDownload }: {
     catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { setDownloading(false); }
   };
-  return <Modal visible title='查看图片' className={`nomifun-modal-fullscreen ${styles.modal}`} wrapClassName={styles.wrap} maskStyle={{ background: 'rgba(0, 0, 0, .88)' }} footer={null} closable={false} focusLock unmountOnExit onCancel={onClose}>
+  return <Modal visible title='查看图片' className={`nomifun-modal-fullscreen ${styles.modal}`} wrapClassName={styles.wrap} maskStyle={{ background: 'rgba(0, 0, 0, .88)', zIndex }} wrapStyle={zIndex === undefined ? undefined : { zIndex }} footer={null} closable={false} focusLock unmountOnExit onCancel={onClose}>
     <div className={styles.viewport} ref={setViewport} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
       {!failed && <img className={styles.image} src={src} alt={title} draggable={false} style={{ width: loaded ? natural.width * zoom : undefined, height: loaded ? natural.height * zoom : undefined, visibility: loaded ? 'visible' : 'hidden' }} onLoad={event => {
         const image = event.currentTarget;

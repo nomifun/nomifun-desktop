@@ -1,9 +1,16 @@
 import '../../../../test/setup-dom.ts';
+import { readFileSync } from 'node:fs';
 import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, test } from 'bun:test';
 import ImageLightbox from './ImageLightbox';
 
 afterEach(cleanup);
+
+test('keeps the image viewport sized through the focus-lock wrapper', () => {
+  const styles = readFileSync(new URL('./ImageLightbox.module.css', import.meta.url), 'utf8');
+  expect(styles).toMatch(/\.modal\s*>\s*:global\(\[data-focus-lock-disabled\]\)\s*\{[^}]*height:\s*100%/s);
+  expect(styles).toMatch(/\.modal\s+:global\(\.arco-modal-content\)\s*\{[^}]*height:\s*100%/s);
+});
 
 test('fits the original image, zooms, resets, downloads and closes', async () => {
   const originalObserver = globalThis.ResizeObserver;
