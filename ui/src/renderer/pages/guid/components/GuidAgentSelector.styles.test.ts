@@ -26,5 +26,7 @@ describe('GuidAgentSelector styles', () => {
     expect(rule('rowCopy').includes('justify-content: center;')).toBe(true);
     expect(rule('searchWrap').includes('min-height: 34px;')).toBe(true);
     expect(rule('searchInput').includes('padding: 5px 0;')).toBe(true);
+    expect(rule('moreButton').includes('width: calc(100% - 20px);')).toBe(true);
+    expect(rule('moreButton').includes('min-height: 30px;')).toBe(true);
   });
 });

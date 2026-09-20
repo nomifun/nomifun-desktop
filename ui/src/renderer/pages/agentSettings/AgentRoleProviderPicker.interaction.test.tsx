@@ -72,11 +72,20 @@ describe('component implementation selection', () => {
 
   test('professional generation preset saves through the existing form without a chat model', () => {
     const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Creative', document: createEmptyAgentPresetDocument() };
-    original.document.enabled_capabilities = [{ capability: { id: asCapabilityId('creation.media'), version: '1.0.0' }, action_allowlist: ['creation.media/music'] }];
+    original.document.enabled_capabilities = [
+      { capability: { id: asCapabilityId('creation.media'), version: '1.0.0' }, action_allowlist: ['creation.media/music'] },
+      { capability: { id: asCapabilityId('workspace.files'), version: '1.0.0' }, action_allowlist: ['workspace.files/read'] },
+    ];
     const mediaModule: CapabilityModuleCatalogItem = { ...capabilityModule,
       module: original.document.enabled_capabilities[0].capability, display_name: 'Media creation',
       actions: [{ action_id: 'creation.media/music', input_schema: 'input', output_schema: 'output', effect_class: 'external_transmit', presentation: 'function_tool' }] };
-    const mediaCatalog: AgentCatalogResponse = { ...catalog, modules: [mediaModule], capabilities: [{ ...catalog.capabilities[0], capability: mediaModule.module }] };
+    const workspaceModule: CapabilityModuleCatalogItem = { ...capabilityModule,
+      module: original.document.enabled_capabilities[1].capability, display_name: 'Workspace files',
+      actions: [{ action_id: 'workspace.files/read', input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'function_tool' }] };
+    const mediaCatalog: AgentCatalogResponse = { ...catalog, modules: [mediaModule, workspaceModule], capabilities: [
+      { ...catalog.capabilities[0], capability: mediaModule.module },
+      { ...catalog.capabilities[0], capability: workspaceModule.module },
+    ] };
     let saved = false;
     const result = render(<I18nextProvider i18n={i18n}><MemoryRouter>
       <AgentPresetEditor editor={{ preset: { preset_id: original.preset_id, display_name: original.display_name, source: 'user', bound_target_count: 0 }, draft: original }}

@@ -10,7 +10,7 @@ import { SWRConfig } from 'swr';
 import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
-import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
+import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import * as roleDefaults from './AgentRoleDefaults';
 import * as libraryPanel from './AgentPresetLibrary';
@@ -75,13 +75,16 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
       <Route path='/plugins/create/:id' element={<Author />} /><Route path='/plugins/run/:id' element={<Published />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
   if (initialEditor) await view.findByRole('heading', { name: initialEditor.preset.display_name });
-  else await view.findByRole('textbox', { name: en.workbench.customName });
+  else await view.findByRole('heading', { name: en.template.chat.minimal.name });
   return { ...view, create, save, turn, states, library, getEditor };
 }
 
 test('missing-model CTA keeps the unsaved name and exact Module grant through model management and a single explicit save', async () => {
   const v = await mount();
-  fireEvent.input(v.getByRole('textbox', { name: en.workbench.customName }), { target: { value: 'My inspection Agent' } });
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editName }));
+  const name = v.getByRole('textbox', { name: en.fields.name });
+  fireEvent.input(name, { target: { value: 'My inspection Agent' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('button', { name: en.workbench.saveAsMine }));
   await v.findByText(en.workbench.modelNeeded);
@@ -90,7 +93,7 @@ test('missing-model CTA keeps the unsaved name and exact Module grant through mo
   await v.findByRole('heading', { name: 'Model management' });
   expect(v.create).toHaveBeenCalledTimes(1);
   fireEvent.click(v.getByRole('button', { name: 'Back to editing' }));
-  await waitFor(() => expect((v.getByRole('textbox', { name: en.workbench.customName }) as HTMLInputElement).value).toBe('My inspection Agent'));
+  await v.findByRole('heading', { name: 'My inspection Agent' });
   const snapshot = v.states.find(value => value && typeof value === 'object' && 'agentEditorReturn' in value) as { agentEditorReturn: { editing: { document: Record<string, unknown> } } };
   expect(snapshot.agentEditorReturn.editing.document.model_route_refs).toBeUndefined();
   expect(snapshot.agentEditorReturn.editing.document.chat_route_records).toBeUndefined();
@@ -108,14 +111,67 @@ test('missing-model CTA keeps the unsaved name and exact Module grant through mo
 
 test('normal navigation to a different template does not restore the previous unsaved input', async () => {
   const v = await mount();
-  fireEvent.input(v.getByRole('textbox', { name: en.workbench.customName }), { target: { value: 'Do not copy me' } });
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editName }));
+  const name = v.getByRole('textbox', { name: en.fields.name });
+  fireEvent.input(name, { target: { value: 'Do not copy me' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
   fireEvent.click(v.getByRole('button', { name: en.workbench.saveAsMine }));
   await v.findByRole('button', { name: en.workbench.configureChatModel });
   fireEvent.click(v.getByRole('button', { name: en.workbench.configureChatModel }));
   await v.findByRole('heading', { name: 'Model management' });
   fireEvent.click(v.getByRole('button', { name: 'Other template' }));
-  await waitFor(() => expect((v.getByRole('textbox', { name: en.workbench.customName }) as HTMLInputElement).value).toBe(en.template.coding.codex.name));
+  await v.findByRole('heading', { name: en.template.coding.codex.name });
   expect(v.create).toHaveBeenCalledTimes(1);
+});
+
+test('personal Agent header exposes name and description editing and saves metadata changes', async () => {
+  const document = createEmptyAgentPresetDocument();
+  const original: AgentPresetEditorResponse = {
+    preset: {
+      preset_id: presetId,
+      source: 'user',
+      display_name: 'Saved Agent',
+      description: 'Old description',
+      bound_target_count: 0,
+      current_stable_revision: revision,
+    },
+    draft: {
+      preset_id: presetId,
+      display_name: 'Saved Agent',
+      description: 'Old description',
+      document,
+      current_revision: revision,
+    },
+    revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 },
+  };
+  const v = await mount(undefined, original);
+  v.save.mockImplementation(async ({ request }) => ({
+    preset: {
+      ...original.preset,
+      display_name: request.draft.display_name,
+      description: request.draft.description,
+    },
+    revision: original.revision!,
+    resolved_snapshot_ref: {
+      snapshot_id: asResolvedSnapshotId('0190f5fe-7c00-7a00-8000-000000000199'),
+      snapshot_digest: asDigestHex('c'.repeat(64)),
+    },
+  }));
+
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editName }));
+  const name = v.getByRole('textbox', { name: en.fields.name }) as HTMLInputElement;
+  fireEvent.input(name, { target: { value: 'Renamed Agent' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
+  expect(v.getByRole('heading', { name: 'Renamed Agent' })).toBeTruthy();
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editIdentity }));
+  expect(v.getByRole('tab', { name: en.workbench.settingsTab }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.input(v.getByRole('textbox', { name: en.fields.description }), {
+    target: { value: 'Updated description' },
+  });
+  await act(async () => { fireEvent.click(v.getByRole('button', { name: common.save })); });
+  expect(v.save).toHaveBeenCalledTimes(1);
+  expect(v.save.mock.calls[0][0].request.draft.display_name).toBe('Renamed Agent');
+  expect(v.save.mock.calls[0][0].request.draft.description).toBe('Updated description');
 });
 
 test('unrelated failures never offer model configuration as the recovery action', async () => {

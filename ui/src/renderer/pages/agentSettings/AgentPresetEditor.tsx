@@ -23,6 +23,7 @@ import {
   Tag,
 } from '@arco-design/web-react';
 import {
+  Edit,
   LinkCloud,
   MessageOne,
   Save,
@@ -47,6 +48,7 @@ import {
 import styles from './AgentSettingsPage.module.css';
 import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
 import AgentEditorTabs from './AgentEditorTabs';
+import AgentInlineNameEditor from './AgentInlineNameEditor';
 
 type AgentPresetEditorProps = {
   editor: AgentPresetEditorResponse;
@@ -147,9 +149,13 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const unavailableCount = unavailableModuleReferences(draft.document, catalog).length;
   const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
   const moduleIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
-  const directCreation = moduleIds.includes('creation.media') &&
-    moduleIds.every((id) => ['creation.media', 'creative.workshop', 'office'].includes(id));
-  const needsChatModel = !directCreation && !chatRouteRecord;
+  const taskOnlyCreation = moduleIds.includes('creation.media') && !chatRouteRecord;
+  const savedDocumentUnchanged = Boolean(
+    editor.revision && JSON.stringify(draft.document) === JSON.stringify(editor.revision.document)
+  );
+  const metadataOnlyChange = Boolean(editor.preset.current_stable_revision) && savedDocumentUnchanged;
+  const needsChatModel = !taskOnlyCreation && !chatRouteRecord;
+  const modelBlocksSave = needsChatModel && !metadataOnlyChange;
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const catalogByReference = useMemo(() => new Map(catalog.capabilities.map((item) => [capabilityReferenceKey(item.capability), item])), [catalog.capabilities]);
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) => onDraftChange(updateDocument(draft, transform));
@@ -167,15 +173,36 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     { key: 'settings', label: t('agentSettings.workbench.settingsTab') },
     { key: 'extensions', label: t('agentSettings.workbench.skillsTab') },
   ];
+  const editIdentity = () => setActiveTab('settings');
 
   return <main className={styles.editorSurface}>
     <header className={styles.editorHeader}>
       <div className={styles.editorHeaderCopy}>
         <div className={styles.headerEyebrow}>{t('agentSettings.workbench.personalBadge')}</div>
-        <h2>{draft.display_name || t('agentSettings.defaults.untitledName')}</h2>
+        <AgentInlineNameEditor
+          value={draft.display_name}
+          fallback={t('agentSettings.defaults.untitledName')}
+          disabled={busy}
+          onChange={(displayName) => onDraftChange({ ...draft, display_name: displayName })}
+        />
         <p>{draft.description || t('agentSettings.workbench.selectedHint')}</p>
       </div>
-      {sourceTemplate && <Tag size='small'>{t(`agentSettings.template.${TEMPLATE_I18N_PATH[sourceTemplate.template_key]}.name`)}</Tag>}
+      <div className={styles.editorHeaderActions}>
+        {sourceTemplate && <Tag size='small'>{t(`agentSettings.template.${TEMPLATE_I18N_PATH[sourceTemplate.template_key]}.name`)}</Tag>}
+        <Button
+          className={styles.identityEdit}
+          type='text'
+          size='small'
+          icon={<Edit theme='outline' size={14} />}
+          disabled={busy}
+          aria-label={t('agentSettings.workbench.editIdentity')}
+          title={t('agentSettings.workbench.editIdentity')}
+          aria-controls='agent-panel-settings'
+          onClick={editIdentity}
+        >
+          {t('agentSettings.workbench.editIdentity')}
+        </Button>
+      </div>
     </header>
     <AgentEditorTabs tabs={tabs} active={activeTab} onChange={setActiveTab} idPrefix='agent' label={t('agentSettings.title')} />
     <div className={`${styles.editorBody} ${activeTab === 'capabilities' ? styles.capabilityBody : ''}`}>
@@ -208,7 +235,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
               }
             />
           </label>
-          {!directCreation && <label className={styles.field}>
+          {!taskOnlyCreation && <label className={styles.field}>
             <span>{t('common.model')}</span>
             <AgentChatModelPicker
               record={chatRouteRecord}
@@ -253,7 +280,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             />
           </label>
         </div>
-        {needsChatModel && (
+        {modelBlocksSave && (
           <Alert
             className={styles.inlineNotice}
             type='warning'
@@ -265,7 +292,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
           />
         )}
       </section>
-        {needsChatModel && onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
+        {modelBlocksSave && onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
       </div>}
       {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'>
         <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onOpenAuthor={onOpenAuthor} onChange={(document) => onDraftChange({ ...draft, document })} />
@@ -358,10 +385,10 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section></div>}
     </div>
     <AgentEditorActionBar>
-      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : needsChatModel ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>
+      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : modelBlocksSave ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>
       <div className={styles.actionButtons}>
         {dirty && onDiscard && <Button type='text' disabled={busy} onClick={onDiscard}>{t('agentSettings.workbench.resetChanges')}</Button>}
-        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || needsChatModel} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :
+        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || modelBlocksSave} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :
           <AgentConversationAction hasStableRevision={Boolean(editor.preset.current_stable_revision)} dirty={dirty} busy={busy} onClick={() => onStartConversation(editor.preset)} />}
       </div>
     </AgentEditorActionBar>
