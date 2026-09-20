@@ -1,6 +1,6 @@
 import type { AgentCatalogResponse, AgentPresetDocument, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { createEmptyAgentPresetDocument } from '@/common/types/agentPlatform';
-import { Button, Input } from '@arco-design/web-react';
+import { Button } from '@arco-design/web-react';
 import { Refresh, Save } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -11,6 +11,7 @@ import { TEMPLATE_I18N_PATH, editingDocument, type TemplateEditingState } from '
 import styles from './AgentSettingsPage.module.css';
 import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
 import AgentEditorTabs from './AgentEditorTabs';
+import AgentInlineNameEditor from './AgentInlineNameEditor';
 
 type Props = {
   template: OfficialPresetTemplate;
@@ -56,7 +57,12 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
   return <main className={styles.editorSurface}>
     <header className={styles.editorHeader}>
       <div className={styles.editorHeaderCopy}>
-        <h2>{name}</h2>
+        <AgentInlineNameEditor
+          value={displayName}
+          fallback={name}
+          disabled={busy}
+          onChange={setDisplayName}
+        />
         <p>{t(`agentSettings.template.${path}.description`)}</p>
       </div>
       <Button className={styles.templateReset} size='small' type='text' icon={<Refresh theme='outline' size={14} />} disabled={busy || !dirty} onClick={() => { setDocument(structuredClone(original)); setDisplayName(name); }}>{t('agentSettings.workbench.resetTemplate')}</Button>
@@ -71,7 +77,6 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
       </div>}
     </div>
     <AgentEditorActionBar>
-      <label className={styles.footerName}><span>{t('agentSettings.workbench.customName')}</span><Input value={displayName} maxLength={80} disabled={busy} onChange={setDisplayName} onInput={(event) => setDisplayName((event.target as HTMLInputElement).value)} aria-label={t('agentSettings.workbench.customName')} /></label>
       <div className={styles.templateSaveState}><span className={blocked ? styles.statusWarningDot : styles.statusReadyDot} /><span>{t(blocked ? 'agentSettings.workbench.disabledSave' : 'agentSettings.workbench.readyToSave')}</span></div>
       <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{t('agentSettings.workbench.saveAsMine')}</AgentEditorActionButton>
     </AgentEditorActionBar>

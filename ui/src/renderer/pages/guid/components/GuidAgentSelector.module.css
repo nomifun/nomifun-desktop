@@ -99,15 +99,31 @@
 .rowStatus { flex-shrink: 0; font-size: 11px; color: var(--text-secondary); }
 .check { display: block; flex-shrink: 0; color: rgb(var(--primary-6)); }
 .arrow { display: block; flex-shrink: 0; color: var(--text-secondary); }
+.moreButton {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 20px);
+  min-height: 30px;
+  margin: 3px 10px 5px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.moreButton:hover { border-color: rgba(var(--primary-6), .28); background: rgba(var(--primary-6), .06); color: rgb(var(--primary-6)); }
 .templateSection { border-top: 1px solid var(--color-border-2); margin: 4px 0 0; padding-top: 2px; }
-.footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 8px 18px; border-top: 1px solid var(--color-border-2); }
+.footer { display: flex; align-items: center; justify-content: flex-end; gap: 12px; flex-shrink: 0; padding: 8px 18px; border-top: 1px solid var(--color-border-2); }
 .textAction, .manageLink { border: 0; background: transparent; padding: 4px 0; font: inherit; font-size: 13px; line-height: 20px; cursor: pointer; text-decoration: none; }
 .textAction { color: rgb(var(--primary-6)); }
 .manageLink { color: var(--text-secondary); }
 .textAction:hover, .manageLink:hover { text-decoration: underline; }
 .notice { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 10px; font-size: 12px; color: var(--text-secondary); }
 .empty { padding: 22px 10px; margin: 0; text-align: center; font-size: 13px; color: var(--text-secondary); }
-.trigger:focus-visible, .row:focus-visible, .textAction:focus-visible, .manageLink:focus-visible { outline: 2px solid rgba(var(--primary-6), 0.6); outline-offset: -2px; }
+.trigger:focus-visible, .row:focus-visible, .moreButton:focus-visible, .textAction:focus-visible, .manageLink:focus-visible { outline: 2px solid rgba(var(--primary-6), 0.6); outline-offset: -2px; }
 
 .trigger:disabled {
   cursor: wait;
