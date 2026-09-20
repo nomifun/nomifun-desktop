@@ -7,6 +7,8 @@ use nomifun_ai_agent::tool_discovery::{self, CAPABILITY_ID, PACKAGE_ID, ROLE_ID}
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+const TOOL_DISCOVERY_MOUNT_ID: &str = "nomifun-tool-discovery";
+
 #[cfg(test)]
 #[path = "nomi_core_middleware_validation_tests.rs"]
 mod middleware_validation_tests;
@@ -55,7 +57,7 @@ pub(crate) fn registration() -> anyhow::Result<PluginRegistration> {
         &[CapabilitySpec::tool(CAPABILITY_ID, EffectClass::Pure, &[])];
     let base = nomifun_agent_domain_support::registration(PackageSpec {
         id: PACKAGE_ID,
-        mount_id: "nomifun-tool-discovery",
+        mount_id: TOOL_DISCOVERY_MOUNT_ID,
         display_name: "Tool discovery",
         description: "Select a pure discovery/ranking policy for the Session's authorized tools.",
         capabilities: CAPABILITIES,
@@ -113,6 +115,38 @@ pub(crate) fn registration() -> anyhow::Result<PluginRegistration> {
     Ok(registration)
 }
 
+/// Select the bundled discovery policy for every host boot. Agents may declare
+/// Tool Discovery without asking the user to configure an internal Role; an
+/// explicitly selected compatible provider can still replace this default.
+pub(crate) fn installation_binding(
+    registry: &nomifun_agent_kernel::MaterializedRegistry,
+) -> anyhow::Result<BTreeMap<ExecutionRoleId, InstallationRoleBinding>> {
+    let role_id = ExecutionRoleId::from(ROLE_ID);
+    let mount_id = PluginMountId::from(TOOL_DISCOVERY_MOUNT_ID);
+    let installed = registry.role_provider(&role_id, &mount_id).ok_or_else(|| {
+        anyhow::anyhow!("Bundled Tool Discovery Role Provider is missing from the host registry")
+    })?;
+    anyhow::ensure!(
+        installed.provider.role.key.role_id == role_id,
+        "Bundled Tool Discovery Provider has the wrong Role contract"
+    );
+    anyhow::ensure!(
+        installed.source.source_kind == PluginSourceKind::Bundled,
+        "Bundled Tool Discovery Provider must use the bundled source"
+    );
+    Ok(BTreeMap::from([(
+        role_id,
+        InstallationRoleBinding {
+            selection: RoleProviderSelection {
+                role: installed.provider.role.clone(),
+                provider_mount_id: installed.provider.mount_id.clone(),
+            },
+            binding_version: 1,
+            updated_at_ms: 0,
+        },
+    )]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +172,14 @@ mod tests {
         );
         assert_eq!(materialized.role_providers.len(), 1);
         assert_eq!(tool_discovery::schemas().len(), 2);
+        let binding = installation_binding(&materialized).unwrap();
+        assert_eq!(binding.len(), 1);
+        assert_eq!(
+            binding[&ExecutionRoleId::from(ROLE_ID)]
+                .selection
+                .provider_mount_id
+                .as_ref(),
+            TOOL_DISCOVERY_MOUNT_ID,
+        );
     }
 }

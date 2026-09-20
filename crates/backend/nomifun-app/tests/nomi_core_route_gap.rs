@@ -604,7 +604,6 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         .as_array()
         .expect("general enabled capabilities");
     for (module_id, action_id) in [
-        ("plugin.development", "plugin.development/edit"),
         ("workspace.artifacts", "workspace.artifacts/read"),
         ("workspace.files", "workspace.files/patch"),
         ("workspace.process", "workspace.process/exec"),
@@ -624,6 +623,18 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
             "{module_id} must retain exact Action {action_id}"
         );
     }
+    assert!(
+        general_enabled
+            .iter()
+            .all(|item| item["capability"]["id"] != "plugin.development"),
+        "general conversations must not require a selected Plugin project"
+    );
+    assert!(
+        general["seed"]["required_resource_kinds"]
+            .as_array()
+            .is_some_and(|kinds| kinds.iter().all(|kind| kind != "plugin")),
+        "general conversations must launch without a Plugin resource binding"
+    );
     let coding = template_value["data"]["official_templates"]
         .as_array()
         .and_then(|items| {
@@ -1216,49 +1227,21 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
         &format!("/api/companion/companions/{companion_id}"),
         json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
     assert_eq!(status, StatusCode::OK, "{patched}");
-    use nomifun_db::IChannelRepository;
-    let channel_repo = nomifun_db::SqliteChannelRepository::new(services.database.pool().clone());
-    let now = nomifun_common::now_ms();
-    let channel = channel_repo.create_plugin(&nomifun_db::models::NewChannelPluginRow {
-        r#type: "telegram".to_owned(),
-        name: "Companion binding fixture".to_owned(),
-        enabled: true,
-        config: "test-only".to_owned(),
-        status: None,
-        last_connected: None,
-        companion_id: Some(companion_id.to_owned()),
-        bot_key: Some("companion-binding-fixture".to_owned()),
-        owner_domain: nomifun_db::models::CHANNEL_OWNER_DOMAIN_COMPANION.to_owned(),
-        group_access_mode: nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned(),
-        created_at: now,
-        updated_at: now,
-    }).await.unwrap();
-    let robot_registry = &services.robot.as_ref().expect("robot services").registry;
-    let (reported_robot, _) = robot_registry.upsert_on_report(nomifun_robot::registry::RobotReport {
-        robot_id: "companion-binding-robot".to_owned(),
-        client_id: "companion-binding-client".to_owned(),
-        board: "test".to_owned(),
-        firmware_version: "test".to_owned(),
-    }, now).await.unwrap();
-    let activation_code = reported_robot.activation_code.as_deref().expect("activation code");
-    let robot = robot_registry.claim(activation_code, companion_id).await.unwrap();
     let (status, selected_default) = call(router.clone(), "PUT",
         &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
             "selection": { "kind": "template", "template_key": "companion.default" },
             "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
             "resource_selections": [
                 { "resource_kind": "companion", "resource_id": companion_id },
-                { "resource_kind": "companion_memory", "resource_id": companion_id },
-                { "resource_kind": "channel", "resource_id": channel.channel_plugin_id },
-                { "resource_kind": "robot", "resource_id": robot.robot_id }
+                { "resource_kind": "companion_memory", "resource_id": companion_id }
             ]
         })).await;
     assert_eq!(status, StatusCode::OK, "{selected_default}");
     let frozen_resources = selected_default["data"]["agent_binding"]["typed_resource_bindings"]
         .as_array().expect("typed product resources");
-    assert_eq!(frozen_resources.len(), 4);
-    assert!(frozen_resources.iter().any(|resource|
-        resource["resource_kind"] == "robot" && resource["resource_id"] == robot.robot_id));
+    assert_eq!(frozen_resources.len(), 2);
+    assert!(frozen_resources.iter().all(|resource|
+        resource["resource_kind"] != "robot" && resource["resource_kind"] != "channel"));
     let path = format!("/api/companion/companions/{companion_id}/companion/threads");
     let ((status, thread), (other_status, other_thread)) = tokio::join!(
         call(router.clone(), "POST", &path, json!({})),
@@ -1340,7 +1323,7 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
 }
 
 #[tokio::test]
-async fn creative_agent_launches_without_any_chat_or_generation_provider() {
+async fn creative_agent_launches_without_chat_generation_provider_or_canvas() {
     use nomifun_db::IProviderRepository;
     const TRUST: &str = "creative-agent-no-model";
     async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
@@ -1370,16 +1353,10 @@ async fn creative_agent_launches_without_any_chat_or_generation_provider() {
     assert!(document.chat_route_records.is_empty(), "professional presets must not bind a Chat route");
     assert!(document.model_route_refs.is_empty(), "professional presets must not require a model route");
     let preset_id = editor["preset"]["preset_id"].as_str().unwrap();
-    let (status, canvas) = call(router.clone(), "/api/creative-studio/canvases", json!({
-        "title": "Provider-free Creative canvas"
-    })).await;
-    assert_eq!(status, StatusCode::CREATED, "{canvas}");
-    let canvas_id = canvas["data"]["canvas"]["canvasId"].as_str().unwrap();
     let (status, launched) = call(router.clone(), "/api/agent-sessions", json!({
         "preset_id": preset_id, "title": "Creative without providers",
         "resource_selections":[
-            {"resource_kind":"asset_library", "resource_id":"creative-studio-assets"},
-            {"resource_kind":"canvas", "resource_id":canvas_id}
+            {"resource_kind":"asset_library", "resource_id":"creative-studio-assets"}
         ],
     })).await;
     assert_eq!(status, StatusCode::OK, "{launched}");
@@ -1393,7 +1370,7 @@ async fn creative_agent_launches_without_any_chat_or_generation_provider() {
         observed.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
     assert_eq!(observed["data"]["session"]["agent_binding"], launched["data"]["agent_binding"]);
     let resources = launched["data"]["agent_binding"]["typed_resource_bindings"].as_array().unwrap();
-    assert!(resources.iter().any(|binding| binding["resource_kind"] == "canvas" && binding["resource_id"] == canvas_id));
+    assert!(resources.iter().all(|binding| binding["resource_kind"] != "canvas"));
     assert!(resources.iter().any(|binding| binding["resource_kind"] == "asset_library"));
     assert!(providers.list().await.unwrap().is_empty(), "professional launch must not create a hidden provider fallback");
     let capabilities = editor["revision"]["document"]["enabled_capabilities"].as_array().unwrap();

@@ -29,7 +29,7 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000102
 const messageId = '0190f5fe-7c00-7a00-8000-000000000106';
 const model = { providerId, model: 'image-exact' };
 const provider = { id: providerId, name: 'Provider', platform: 'openai', enabled: true, models: [{ model: model.model, enabled: true, capabilities: [{ task: 'image_generation', traits: [], protocol: 'openai.images' }, { task: 'image_edit', traits: [], protocol: 'openai.images' }] }] } as unknown as IProvider;
-const template = { template_key: 'creative-studio.default', seed: { required_resource_kinds: ['asset_library'] } } as OfficialPresetTemplate;
+const template = { template_key: 'creative-studio.default', seed: { required_resource_kinds: ['asset_library', 'canvas'] } } as OfficialPresetTemplate;
 const realFetch = globalThis.fetch;
 beforeEach(() => setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000107'));
 afterEach(() => { cleanup(); sessionStorage.clear(); globalThis.fetch = realFetch; });

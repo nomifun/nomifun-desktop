@@ -77,17 +77,6 @@
           },
           {
             "capability": {
-              "id": "plugin.development",
-              "version": "1.0.0"
-            },
-            "action_allowlist": [
-              "plugin.development/edit",
-              "plugin.development/read",
-              "plugin.development/serve"
-            ]
-          },
-          {
-            "capability": {
               "id": "workspace.artifacts",
               "version": "1.0.0"
             },
@@ -172,7 +161,6 @@
           "browser",
           "computer",
           "knowledge_base",
-          "plugin",
           "process_session",
           "project_memory",
           "scheduler",
@@ -417,7 +405,6 @@
           "project_memory",
           "requirements",
           "shell_process_pty",
-          "skills_plugins",
           "tool_discovery",
           "vcs_review",
           "web_research",
@@ -430,7 +417,6 @@
           "browser",
           "computer",
           "knowledge",
-          "plugin.development",
           "project.memory",
           "requirements",
           "web.research",
@@ -444,7 +430,6 @@
           "browser",
           "computer",
           "knowledge_base",
-          "plugin",
           "process_session",
           "project_memory",
           "scheduler",
@@ -564,5 +549,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "4386d08387ca472cd0e499e1538b0debec257adc99d70ffe887a7269c5e73456"
+  "payload_digest": "741247ef00d9f3551acbfc151306515acd174eb26bfb31e1e5f4f183280bee66"
 }

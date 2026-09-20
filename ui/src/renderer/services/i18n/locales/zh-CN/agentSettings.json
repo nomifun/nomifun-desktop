@@ -250,7 +250,7 @@
     "requiredAtUse": "使用时需要",
     "pickerTitle": "选择本次使用的资源",
     "pickerHint": "只选择产品中的实际资源；权限、路径、凭据和运行参数由系统安全解析。",
-    "companionBindingHint": "与侧边栏共用这位伙伴的聊天记录和设置。请选择归属于这位伙伴的渠道与机器人；启动时会把四项资源冻结到本次 Agent 会话。",
+    "companionBindingHint": "与侧边栏共用这位伙伴的聊天记录和设置。渠道与机器人可按需选择；未选择时仍可进行基础聊天和使用伙伴记忆。",
     "ready": "资源已就绪",
     "missingCount": "还需选择 {{count}} 项",
     "selectPlaceholder": "请选择{{resource}}",
@@ -260,6 +260,7 @@
     "selectionHint": "启动时使用所选资源，可在下次启动前更换。",
     "mcpSelectionHint": "包含 Agent 已授权工具所属的全部 MCP 服务器；已选择 MCP 资源能力时可另选资源服务器（合计最多 16 个）。多选不会增加工具权限，资源读取须指定已绑定服务器。",
     "emptyOptions": "没有可用资源，请先完成配置。",
+    "emptyOptional": "没有可用资源；你仍可继续使用该 Agent 的其他能力。",
     "loadFailed": "资源列表加载失败，请前往配置页检查。",
     "robotPhases": {
       "offline": "离线——请先连接设备再启动",

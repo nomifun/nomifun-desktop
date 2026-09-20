@@ -99,6 +99,20 @@ describe('Agent resource picker', () => {
     await act(async () => { finishMcp({ options: { mcp_server: [] }, errors: {} }); });
   });
 
+  test('does not block launch when an optional enhancement has no bound resource', async () => {
+    const states: boolean[] = [];
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['robot']} optionalKinds={['robot']} capabilityIds={['robot']}
+      actionIds={['robot/vision']} value={{}} onChange={() => undefined}
+      onAvailabilityChange={(ready) => states.push(ready)}
+      loadInventory={async () => ({ options: { robot: [] }, errors: {} })}
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(states.at(-1)).toBe(true));
+    expect(screen.container.textContent).toContain(common.optional);
+    expect(screen.getByText(en.resources.ready)).toBeTruthy();
+    expect(screen.getByText(en.resources.emptyOptional)).toBeTruthy();
+  });
+
   test('loads enabled Plugin products with surfaces through the runtime library contract', async () => {
     const calls: string[] = [];
     const plugin = {
@@ -122,6 +136,18 @@ describe('Agent resource picker', () => {
     expect(inventory.options.plugin).toEqual([
       { value: plugin.plugin_id, label: plugin.display_name, description: plugin.description },
     ]);
+  });
+
+  test('uses the localized Plugin label instead of exposing an i18n key', async () => {
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['plugin']} capabilityIds={['plugin.development']}
+      value={{}} onChange={() => undefined}
+      loadInventory={async () => ({ options: { plugin: [
+        { value: 'plugin-1', label: 'Workspace panel' },
+      ] }, errors: {} })}
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(screen.getByRole('combobox', { name: `Select ${en.resources.kinds.pluginRuntime}` })).toBeTruthy());
+    expect(screen.container.textContent).not.toContain('agentSettings.resources.kinds.plugin');
   });
 
   test('joins live Robot status and exact Action permissions before offering a device', async () => {
@@ -221,6 +247,7 @@ describe('Agent resource picker', () => {
     await waitFor(() => expect(states.at(-1)).toBe(false));
     expect(permissions).toHaveBeenCalledTimes(1);
     expect(screen.getByText(en.resources.computerPermissionNeeded)).toBeTruthy();
+    expect(screen.queryByText(en.resources.pickerTitle)).toBeNull();
     fireEvent.click(screen.getByText(en.resources.configure));
     await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/permissions?tab=computer-use'));
   });
@@ -235,7 +262,25 @@ describe('Agent resource picker', () => {
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
     expect(permissions).not.toHaveBeenCalled();
-    expect(screen.getByText(en.resources.computerPermissionNotRequired)).toBeTruthy();
+    expect(screen.container.querySelector('section')).toBeNull();
+  });
+
+  test('hides the Computer setup panel when every required permission is ready', async () => {
+    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
+      platform: 'macos', app_label: 'NomiFun', permissions: [
+        { kind: 'accessibility', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
+        { kind: 'screen_recording', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['computer_use'] },
+      ],
+    });
+    restores.push(() => permissions.mockRestore());
+    const states: boolean[] = [];
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe', 'computer/a11y.observe']}
+      value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(states.at(-1)).toBe(true));
+    expect(permissions).toHaveBeenCalledTimes(1);
+    expect(screen.container.querySelector('section')).toBeNull();
   });
 
   test('filters dependent resources by the selected product owner', () => {

@@ -63,7 +63,7 @@ describe('GuidPage advanced controls', () => {
     expect(
       page.includes('requiredKinds={resourcePickerKinds}')
     ).toBe(true);
-    expect(page.includes("optionalKinds={isCompanionAgent ? ['channel', 'robot', 'mcp_server'] : undefined}")).toBe(false);
+    expect(page.includes('optionalKinds={optionalResourcePickerKinds}')).toBe(true);
     expect(page.includes('{workspaceEnabled && <GuidWorkspaceFootnote')).toBe(true);
     expect(page.includes('resourceSelections: resourceSelectionResolution.selections')).toBe(true);
     expect(page.includes('resourceSelectionResolution.missingKinds.length === 0')).toBe(true);

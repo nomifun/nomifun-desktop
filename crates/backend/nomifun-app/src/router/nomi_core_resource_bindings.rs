@@ -38,10 +38,19 @@ pub(crate) const INSTALLATION_SCHEDULER_RESOURCE_ID: &str = "installation-schedu
 
 const MAX_RESOURCE_SELECTIONS: usize = 32;
 const MAX_RESOURCE_FIELD_BYTES: usize = 512;
-// Knowledge mounting is deliberately optional at session creation. A session
-// may start without a base and gain its conversation-scoped, read/write policy
-// through the knowledge binding control before the first task is delivered.
-const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 1] = ["knowledge_base"];
+// Enhancement Modules remain part of the frozen Agent grant even when a
+// concrete target is absent. Session materialization omits their resource-
+// backed Actions until a target is selected. Identity/infrastructure resources
+// and Computer remain mandatory; a bound Computer also retains its live OS
+// permission gate.
+const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 6] = [
+    "knowledge_base",
+    "channel",
+    "robot",
+    "canvas",
+    "plugin",
+    "ssh_host",
+];
 
 type FrozenActionAllowlists = BTreeMap<String, BTreeSet<ActionId>>;
 
@@ -1544,6 +1553,55 @@ mod tests {
             .unwrap();
 
         assert!(bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn enhancement_resources_may_remain_unbound_without_blocking_session_creation() {
+        for (kind, capability, action) in [
+            ("channel", "channel.messaging", "channel.messaging/reply"),
+            (
+                "robot",
+                nomifun_agent_domain_wave4::ROBOT_MODULE_ID,
+                nomifun_agent_domain_wave4::ROBOT_VISION_ACTION_ID,
+            ),
+            ("canvas", "creative.workshop", "creative.workshop/canvas.read"),
+            ("plugin", "plugin.development", "plugin.development/read"),
+            ("ssh_host", nomifun_agent_domain_wave2::SSH_MODULE_ID, "ssh/exec"),
+        ] {
+            let bindings = registry(kind, &[])
+                .resolve_selected(
+                    "owner-1",
+                    &[],
+                    &BTreeSet::from([capability.to_owned()]),
+                    &BTreeMap::from([(
+                        capability.to_owned(),
+                        BTreeSet::from([ActionId::from(action)]),
+                    )]),
+                    &[],
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{kind} must be optional: {}", error.message()));
+            assert!(bindings.is_empty(), "{kind} must remain unbound");
+        }
+    }
+
+    #[tokio::test]
+    async fn computer_resource_binding_remains_a_hard_session_requirement() {
+        let capability = nomifun_agent_domain_wave2::COMPUTER_MODULE_ID.to_owned();
+        let error = registry("computer", &["observe"])
+            .resolve_selected(
+                "owner-1",
+                &[],
+                &BTreeSet::from([capability.clone()]),
+                &BTreeMap::from([(
+                    capability,
+                    BTreeSet::from([ActionId::from("computer/observe")]),
+                )]),
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "RESOURCE_SELECTION_REQUIRED");
     }
 
     #[tokio::test]

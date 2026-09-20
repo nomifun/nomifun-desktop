@@ -250,7 +250,7 @@
     "requiredAtUse": "Required when used",
     "pickerTitle": "Choose resources for this run",
     "pickerHint": "Choose actual product resources only. The system securely resolves permissions, paths, credentials and runtime parameters.",
-    "companionBindingHint": "Use this companion's shared conversation and settings. Choose its channel and robot; all four resources are frozen into this Agent session at launch.",
+    "companionBindingHint": "Use this companion's shared conversation and settings. Channel and robot are optional; chat and companion memory remain available without them.",
     "ready": "Resources ready",
     "missingCount": "{{count}} selections required",
     "selectPlaceholder": "Select {{resource}}",
@@ -260,6 +260,7 @@
     "selectionHint": "This resource is used for this launch and can be changed before the next one.",
     "mcpSelectionHint": "Include every server used by the Agent's authorized tools. With MCP resources selected, you may add resource servers (16 total). Selection grants no extra tools; resource reads must target a bound server.",
     "emptyOptions": "No available resource. Configure one before starting.",
+    "emptyOptional": "No resource is available. You can still use the Agent's other capabilities.",
     "loadFailed": "The resource list could not be loaded. Check its configuration page.",
     "robotPhases": {
       "offline": "Offline — connect this device before starting",

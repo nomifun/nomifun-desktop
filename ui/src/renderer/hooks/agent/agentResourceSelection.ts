@@ -22,6 +22,24 @@ export const USER_AGENT_RESOURCE_KINDS = [
   'plugin',
 ] as const;
 
+/**
+ * Enhancement resources may be absent from a Session. Their capability grant
+ * remains frozen, but resource-backed Actions are materialized only when the
+ * concrete target is selected. Computer is intentionally excluded: once the
+ * local desktop is bound its OS permissions are a hard launch prerequisite.
+ */
+export const OPTIONAL_UNBOUND_AGENT_RESOURCE_KINDS = [
+  'knowledge_base',
+  'channel',
+  'robot',
+  'canvas',
+  'plugin',
+  'ssh_host',
+] as const;
+
+export const agentResourceKindMayRemainUnbound = (kind: string): boolean =>
+  (OPTIONAL_UNBOUND_AGENT_RESOURCE_KINDS as readonly string[]).includes(kind);
+
 export type UserAgentResourceKind = (typeof USER_AGENT_RESOURCE_KINDS)[number];
 export type AgentResourceSelectionValue = Partial<Record<UserAgentResourceKind, string>> & {
   /** Frozen tool/resource servers. The singular field remains legacy-compatible. */
@@ -85,7 +103,7 @@ export const resolveAgentResourceSelections = (
     const pickerKind = pickerKindForResourceKind(resourceKind);
     const resourceId = automaticId ?? (pickerKind ? value[pickerKind] : undefined);
     if (!resourceId) {
-      missingKinds.push(resourceKind);
+      if (!agentResourceKindMayRemainUnbound(resourceKind)) missingKinds.push(resourceKind);
       continue;
     }
     selections.push({ resource_kind: resourceKind, resource_id: resourceId });

@@ -1369,6 +1369,7 @@ fn action_input_schema(action_id: &str) -> StrictJsonValue {
     }
     match action_id {
         "ssh/fs.read" => StrictJsonValue(serde_json::json!({
+            "type": "object",
             "oneOf": [
                 {
                     "type":"object",
@@ -3237,6 +3238,19 @@ mod tests {
                 module.contributions.actions,
                 "changing display kind must not rewrite Action contributions"
             );
+        }
+    }
+
+    #[test]
+    fn ssh_read_union_schema_has_a_strict_model_tool_object_root() {
+        let schema = action_input_schema("ssh/fs.read");
+        assert_eq!(schema.0["type"], "object");
+        let variants = schema.0["oneOf"].as_array().unwrap();
+        assert_eq!(variants.len(), 4);
+        for variant in variants {
+            assert_eq!(variant["type"], "object");
+            assert_eq!(variant["additionalProperties"], false);
+            assert!(variant["properties"].is_object());
         }
     }
 
