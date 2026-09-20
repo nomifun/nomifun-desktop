@@ -69,9 +69,8 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(
       component.includes('CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS.map')
     ).toBe(true);
-    expect(
-      component.includes('onClick={() => props.onAddNode(kind)}')
-    ).toBe(true);
+    expect(component.includes('onClick={() => handleNodeAdd(kind)}')).toBe(true);
+    expect(component.includes('if (canvasPanelOpen) props.onLeftPanelOpenChange(false)')).toBe(true);
     expect(component.includes('nodeMenuOpen')).toBe(false);
     expect(types.includes('nodeMenuOpen')).toBe(false);
   });
@@ -118,6 +117,11 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(component.includes("aria-haspopup='dialog'")).toBe(true);
     expect(component.includes('<CreativeCanvasResourceDialog')).toBe(true);
     expect(css.includes('.resourceDialogContent')).toBe(true);
+    expect(css.includes('height: min(56vh, 500px);')).toBe(true);
+    expect(css.includes('padding: 18px 14px 10px;')).toBe(true);
+    expect(css.includes('text-align: left;')).toBe(true);
+    expect(component.includes('width: 860')).toBe(true);
+    expect(component.includes('view === \'assets\' ? 860 : 920')).toBe(false);
   });
 
   test('layers the compact top actions and side rail above the canvas', () => {

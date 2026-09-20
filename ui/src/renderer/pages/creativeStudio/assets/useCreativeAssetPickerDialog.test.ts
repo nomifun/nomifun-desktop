@@ -19,6 +19,10 @@ const pickerSource = readFileSync(
   new URL('./components/CreativeAssetPickerModal.tsx', import.meta.url),
   'utf8'
 );
+const pickerContentSource = readFileSync(
+  new URL('./components/CreativeAssetPickerContent.tsx', import.meta.url),
+  'utf8'
+);
 const pickerCss = readFileSync(
   new URL('./components/CreativeAssetPickerModal.module.css', import.meta.url),
   'utf8'
@@ -40,17 +44,18 @@ describe('Creative asset picker dialog', () => {
   });
 
   test('uses real asset media and exposes loading, error, retry and completion states', () => {
-    expect(pickerSource.includes('<CreativeAssetMedia')).toBe(true);
+    const source = `${pickerSource}\n${pickerContentSource}`;
+    expect(source.includes('<CreativeAssetMedia')).toBe(true);
     expect(pickerSource.includes('alignCenter={false}')).toBe(true);
-    expect(pickerSource.includes("role='listbox'")).toBe(true);
+    expect(source.includes("role='listbox'")).toBe(true);
     expect(pickerSource.includes("role='tablist'")).toBe(false);
-    expect(pickerSource.includes("t('creativeStudio.assets.picker.searchPlaceholder'")).toBe(
+    expect(source.includes("t('creativeStudio.assets.picker.searchPlaceholder'")).toBe(
       true
     );
-    expect(pickerSource.includes("t('creativeStudio.assets.picker.addAsset'")).toBe(true);
-    expect(pickerSource.includes("role='alert'")).toBe(true);
-    expect(pickerSource.includes('onRetry')).toBe(true);
-    expect(pickerSource.includes('onConfirm ?? onCancel')).toBe(true);
+    expect(source.includes("t('creativeStudio.assets.picker.addAsset'")).toBe(true);
+    expect(source.includes("role='alert'")).toBe(true);
+    expect(source.includes('onRetry')).toBe(true);
+    expect(source.includes('onConfirm ?? onCancel')).toBe(true);
     expect(pickerCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
   });
 

@@ -735,6 +735,12 @@
 .resourceDialog :global(.arco-modal-title) {
   font-size: 14px;
   font-weight: 700;
+  text-align: left;
+}
+
+.resourceDialog :global(.arco-modal-header) {
+  height: 44px;
+  padding: 0 16px;
 }
 
 .resourceDialog :global(.arco-modal-body) {
@@ -743,10 +749,26 @@
 
 .resourceDialogContent {
   width: 100%;
-  height: min(68vh, 640px);
-  min-height: 360px;
+  height: min(56vh, 500px);
+  min-height: 440px;
+  box-sizing: border-box;
+  padding: 18px 14px 10px;
   overflow: hidden;
   background: var(--color-bg-2);
+}
+
+.resourceDialogContent[data-canvas-resource-dialog='assets'] > [data-product-asset-library] {
+  display: flex;
+  flex-direction: column;
+}
+
+.resourceDialogContent[data-canvas-resource-dialog='assets'] > [data-product-asset-library] > [data-asset-picker-content] {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.resourceDialogContent[data-canvas-resource-dialog='assets'] [data-asset-picker-empty] {
+  min-height: 240px;
 }
 
 .resourceDialogContent > * {

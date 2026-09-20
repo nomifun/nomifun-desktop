@@ -10,6 +10,11 @@ export { default as CreativeAssetMedia, creativeAssetKindIcon } from './Creative
 export type { CreativeAssetMediaProps } from './CreativeAssetMedia';
 export { default as CreativeAssetPickerModal } from './CreativeAssetPickerModal';
 export type { CreativeAssetPickerModalProps } from './CreativeAssetPickerModal';
+export {
+  default as CreativeAssetPickerContent,
+  CREATIVE_ASSET_PICKER_KIND_FILTERS,
+} from './CreativeAssetPickerContent';
+export type { CreativeAssetPickerContentProps } from './CreativeAssetPickerContent';
 export { default as CreativeAssetUploadQueue } from './CreativeAssetUploadQueue';
 export type { CreativeAssetUploadQueueProps } from './CreativeAssetUploadQueue';
 export { default as CreateCreativeTextAssetModal } from './CreateCreativeTextAssetModal';
