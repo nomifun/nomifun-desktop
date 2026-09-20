@@ -221,9 +221,13 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const requiredKey = [...requiredKinds].sort().join('\u0000');
   const capabilityKey = [...capabilityIds].sort().join('\u0000');
   const actionKey = [...actionIds].sort().join('\u0000');
+  const optionalKey = optionalKinds.join('\u0000');
   const required = useMemo(() => new Set(requiredKey ? requiredKey.split('\u0000') : []), [requiredKey]);
   const capabilities = useMemo(() => new Set(capabilityKey ? capabilityKey.split('\u0000') : []), [capabilityKey]);
   const actions = useMemo(() => new Set(actionKey ? actionKey.split('\u0000') : []), [actionKey]);
+  const optional = useMemo(() => new Set<UserAgentResourceKind>(
+    optionalKey ? optionalKey.split('\u0000') as UserAgentResourceKind[] : []
+  ), [optionalKey]);
   const needsComputer = required.has('computer');
   const computerPermissionKinds = useMemo(
     () => computerPermissionKindsForActions(actions),
@@ -249,7 +253,6 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     const refresh = () => setRosterRevision((previous) => previous + 1);
     return ipcBridge.robot.onStatus.on(refresh);
   }, [optionalKinds, required]);
-  const optionalKey = optionalKinds.join('\u0000');
   const fields = useMemo(() => requiredAgentResourcePickerKinds([...required, ...optionalKey.split('\u0000')]), [required, optionalKey]);
   const [inventory, setInventory] = useState<AgentResourceInventory>(emptyInventory);
   const [pending, setPending] = useState<ReadonlySet<UserAgentResourceKind>>(() => new Set(fields));
@@ -323,7 +326,12 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     ? (inventory.options.robot ?? []).find((option) => option.value === value.robot)
     : undefined;
   const selectedResourcesAvailable = !value.robot || selectedRobot?.selectable === true;
-  const requiredFields = requiredAgentResourcePickerKinds(required);
+  const requiredFields = requiredAgentResourcePickerKinds(
+    [...required].filter((kind) => {
+      const pickerKind = kind === 'companion_memory' ? 'companion' : kind;
+      return !optional.has(pickerKind as UserAgentResourceKind);
+    })
+  );
   const pendingBlocksLaunch = [...pending].some((kind) =>
     requiredFields.includes(kind)
       || (kind === 'mcp_server' ? selectedMcpResourceIds(value).length > 0 : Boolean(value[kind]))
@@ -331,14 +339,53 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const liveResourcesReady = !pendingBlocksLaunch && selectedResourcesAvailable && computerReady;
   const displayedMissingCount = missingChoiceCount
     + (value.robot && !selectedResourcesAvailable ? 1 : 0)
-    + (needsComputer && !computerReady ? 1 : 0);
+    + (needsComputerPermissionCheck && !computerPermissions.loading && !computerReady ? 1 : 0);
   useEffect(() => {
     onAvailabilityChange?.(liveResourcesReady);
     return () => onAvailabilityChange?.(false);
   }, [liveResourcesReady, onAvailabilityChange]);
 
-  if (!fields.length && !needsComputer) return null;
-  const kindName = (kind: string) => t(`agentSettings.resources.kinds.${kind === 'mcp_server' ? 'mcpConnection' : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase())}`);
+  const showComputerSetup = needsComputerPermissionCheck
+    && !computerPermissions.loading
+    && !computerReady;
+  if (!fields.length) {
+    if (!showComputerSetup) return null;
+    return <section className={styles.computerNotice} aria-label={t('agentSettings.resources.kinds.computer')}>
+      <div className={styles.computerNoticeCopy}>
+        <strong>{t('agentSettings.resources.kinds.computer')}</strong>
+        <span className={computerPermissions.error ? styles.fieldError : undefined}>
+          {t(computerPermissions.error
+            ? 'agentSettings.resources.computerCheckFailed'
+            : 'agentSettings.resources.computerPermissionNeeded')}
+        </span>
+        <small>{t('agentSettings.resources.computerPermissionScope', {
+          permissions: computerPermissionKinds
+            .map((kind) => t(`settings.capabilityPermissions.permissions.${kind === 'screen_recording' ? 'screenRecording' : 'accessibility'}`))
+            .join(', '),
+        })}</small>
+      </div>
+      <Button
+        className={styles.emptyButton}
+        size='mini'
+        type='text'
+        icon={<LinkOne theme='outline' size={13} />}
+        onClick={(event) => {
+          event.preventDefault();
+          const route = '/settings/permissions?tab=computer-use';
+          if (onNavigateToResource) onNavigateToResource(route);
+          else void navigate(route);
+        }}
+      >{t('agentSettings.resources.configure')}</Button>
+    </section>;
+  }
+  const kindName = (kind: string) => {
+    const key = kind === 'mcp_server'
+      ? 'mcpConnection'
+      : kind === 'plugin'
+        ? 'pluginRuntime'
+        : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+    return t(`agentSettings.resources.kinds.${key}`);
+  };
   const permissionName = (permission: keyof IApiRobotPermissions) =>
     t(`agentSettings.resources.robotPermissions.${permission}`);
   const optionDescription = (kind: UserAgentResourceKind, option: AgentResourceOption) => {
@@ -367,7 +414,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
       <span className={`${styles.status} ${!resolution.missingKinds.length && liveResourcesReady ? styles.statusReady : ''}`}>{t(resolution.missingKinds.length || !liveResourcesReady ? 'agentSettings.resources.missingCount' : 'agentSettings.resources.ready', { count: displayedMissingCount })}</span>
     </div>
     <div className={styles.fields}>
-      {needsComputer && <div className={styles.field}>
+      {showComputerSetup && <div className={styles.field}>
         <span className={styles.fieldLabel}>{t('agentSettings.resources.kinds.computer')}</span>
         <div className={styles.fieldControl}>
           <div className='min-w-0 flex-1 text-12px text-t-primary'>
@@ -413,8 +460,8 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
       // Select owns an internal input. A wrapping label forwards a second native
       // click to it, toggling the popup closed immediately after it opens. Keep
       // the field non-labeling; the combobox has its own accessible aria-label.
-      return <div className={styles.field} key={kind}><span className={styles.fieldLabel}>{kindName(kind)} {optionalKinds.includes(kind) && t('common.optional')}</span><div className={styles.fieldControl}>
-        <Select allowClear={optionalKinds.includes(kind)} mode={kind === 'mcp_server' && multipleMcp ? 'multiple' : undefined} value={kind === 'mcp_server' && multipleMcp ? selectedMcpResourceIds(value) : value[kind]} disabled={disabled || loading || waitingDependency || options.length === 0} placeholder={t(waitingDependency ? 'agentSettings.resources.selectDependency' : 'agentSettings.resources.selectPlaceholder', { resource: dependsOn ? kindName(dependsOn as UserAgentResourceKind) : kindName(kind) })} aria-label={t('agentSettings.resources.selectAria', { resource: kindName(kind) })} onClear={() => { const next = { ...value }; delete next[kind]; if (kind === 'mcp_server') next.mcp_servers = []; onChange(next); }} onChange={(resourceId: string | string[]) => {
+      return <div className={styles.field} key={kind}><span className={styles.fieldLabel}>{kindName(kind)} {optional.has(kind) && t('common.optional')}</span><div className={styles.fieldControl}>
+        <Select allowClear={optional.has(kind)} mode={kind === 'mcp_server' && multipleMcp ? 'multiple' : undefined} value={kind === 'mcp_server' && multipleMcp ? selectedMcpResourceIds(value) : value[kind]} disabled={disabled || loading || waitingDependency || options.length === 0} placeholder={t(waitingDependency ? 'agentSettings.resources.selectDependency' : 'agentSettings.resources.selectPlaceholder', { resource: dependsOn ? kindName(dependsOn as UserAgentResourceKind) : kindName(kind) })} aria-label={t('agentSettings.resources.selectAria', { resource: kindName(kind) })} onClear={() => { const next = { ...value }; delete next[kind]; if (kind === 'mcp_server') next.mcp_servers = []; onChange(next); }} onChange={(resourceId: string | string[]) => {
           if (kind === 'mcp_server' && multipleMcp) {
             const ids = Array.isArray(resourceId) ? resourceId : [resourceId];
             if (ids.length > 16) return;
@@ -433,7 +480,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
           </span></Select.Option>)}
         </Select>
         {!loading && !waitingDependency && options.length === 0 && <Button className={styles.emptyButton} size='mini' type='text' icon={<LinkOne theme='outline' size={13} />} onClick={(event) => { event.preventDefault(); const route = routeForKind(kind, value); if (onNavigateToResource) onNavigateToResource(route); else void navigate(route); }}>{t('agentSettings.resources.configure')}</Button>}
-      </div><span className={`${styles.fieldHint} ${error ? styles.fieldError : ''}`}>{loading ? <Spin size={10} /> : error ? t('agentSettings.resources.loadFailed') : waitingDependency ? t('agentSettings.resources.dependencyHint', { resource: kindName(dependsOn as UserAgentResourceKind) }) : options.length === 0 ? t('agentSettings.resources.emptyOptions') : t(kind === 'mcp_server' && companionBindings ? 'nomi.chat.mcpScopeHint' : kind === 'mcp_server' && multipleMcp ? 'agentSettings.resources.mcpSelectionHint' : 'agentSettings.resources.selectionHint')}</span></div>;
+      </div><span className={`${styles.fieldHint} ${error ? styles.fieldError : ''}`}>{loading ? <Spin size={10} /> : error ? t('agentSettings.resources.loadFailed') : waitingDependency ? t('agentSettings.resources.dependencyHint', { resource: kindName(dependsOn as UserAgentResourceKind) }) : options.length === 0 ? t(optional.has(kind) ? 'agentSettings.resources.emptyOptional' : 'agentSettings.resources.emptyOptions') : t(kind === 'mcp_server' && companionBindings ? 'nomi.chat.mcpScopeHint' : kind === 'mcp_server' && multipleMcp ? 'agentSettings.resources.mcpSelectionHint' : 'agentSettings.resources.selectionHint')}</span></div>;
     })}</div>
   </section>;
 };

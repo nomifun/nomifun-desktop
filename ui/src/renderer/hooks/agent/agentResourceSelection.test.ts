@@ -67,13 +67,27 @@ describe('Agent resource selection contract', () => {
     expect(requiredAgentResourcePickerKinds(['companion_memory', 'companion'])).toEqual(['companion']);
   });
 
-  test('reports missing and unsupported kinds instead of inventing ids', () => {
+  test('allows optional channel absence while reporting unsupported kinds', () => {
     expect(resolveAgentResourceSelections(
       ['customer', 'channel', 'future_resource'],
       { customer: 'customer-1' },
     )).toEqual({
       selections: [{ resource_kind: 'customer', resource_id: 'customer-1' }],
-      missingKinds: ['channel', 'future_resource'],
+      missingKinds: ['future_resource'],
+    });
+  });
+
+  test('allows enhancement resources to remain unbound without blocking the Session', () => {
+    expect(resolveAgentResourceSelections(
+      ['workspace', 'knowledge_base', 'channel', 'robot', 'canvas', 'plugin', 'ssh_host'],
+      {},
+    )).toEqual({
+      selections: [{ resource_kind: 'workspace', resource_id: 'default-workspace' }],
+      missingKinds: [],
+    });
+    expect(resolveAgentResourceSelections(['computer'], {})).toEqual({
+      selections: [{ resource_kind: 'computer', resource_id: 'local-desktop' }],
+      missingKinds: [],
     });
   });
 

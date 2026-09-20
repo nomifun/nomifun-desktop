@@ -438,6 +438,7 @@ export type I18nKey =
   | 'agentSettings.resources.computerReady'
   | 'agentSettings.resources.configure'
   | 'agentSettings.resources.dependencyHint'
+  | 'agentSettings.resources.emptyOptional'
   | 'agentSettings.resources.emptyOptions'
   | 'agentSettings.resources.kinds.assetLibrary'
   | 'agentSettings.resources.kinds.browser'
