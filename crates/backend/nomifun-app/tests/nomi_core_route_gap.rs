@@ -1559,6 +1559,68 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         assert_eq!(status, StatusCode::OK);
         let binding = result["data"]["agent_binding"].clone();
         assert_eq!(observation["data"]["session"]["agent_binding"], binding);
+        let (status, projection) = call(
+            router.clone(),
+            "GET",
+            &format!("/api/agent-sessions/{id}/projection"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{projection}");
+        assert_eq!(projection["data"]["extra"]["custom_workspace"], false);
+        assert_eq!(
+            projection["data"]["extra"]["is_temporary_workspace"],
+            true,
+            "the default-workspace resource must survive projection as a Nomi-managed workpath"
+        );
+        if sessions.is_empty() {
+            let original_workspace = projection["data"]["extra"]["workspace"].clone();
+            let (status, enabled) = call(
+                router.clone(),
+                "POST",
+                "/api/requirements/autowork",
+                json!({
+                    "kind": "conversation",
+                    "target_id": id,
+                    "enabled": true,
+                    "tag": "workspace-projection-regression"
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{enabled}");
+
+            let (status, refreshed) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{id}/projection"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{refreshed}");
+            assert_eq!(
+                refreshed["data"]["extra"]["workspace"],
+                original_workspace,
+                "enabling AutoWork must not replace the frozen Session workspace"
+            );
+            assert_eq!(refreshed["data"]["extra"]["custom_workspace"], false);
+            assert_eq!(
+                refreshed["data"]["extra"]["is_temporary_workspace"],
+                true
+            );
+
+            let (status, disabled) = call(
+                router.clone(),
+                "POST",
+                "/api/requirements/autowork",
+                json!({
+                    "kind": "conversation",
+                    "target_id": id,
+                    "enabled": false
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{disabled}");
+        }
         let variant = binding["preset_revision_ref"]["preset_id"].as_str().unwrap();
         let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{variant}/editor"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
