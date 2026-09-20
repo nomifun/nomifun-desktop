@@ -34,6 +34,7 @@ import {
   moduleCategory,
   moduleIsAvailable,
   moduleIsSelectable,
+  requiredModuleReferences,
   selectedModuleReferences,
   type ModuleCategory,
   type ModuleReference,
@@ -74,10 +75,16 @@ type MissingModule = {
   description: string;
   missing: true;
   savedActions: string[];
+  requiredBy: ModuleReference[];
 };
 
 type ModuleEntry =
-  | { module: CapabilityModuleCatalogItem; missing: false; savedActions: string[] }
+  | {
+    module: CapabilityModuleCatalogItem;
+    missing: false;
+    savedActions: string[];
+    requiredBy: ModuleReference[];
+  }
   | MissingModule;
 
 type Props = {
@@ -128,25 +135,35 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     () => new Set(selectedReferences.map(capabilityReferenceKey)),
     [selectedReferences]
   );
+  const requiredModules = useMemo(
+    () => requiredModuleReferences(document, catalog.modules),
+    [catalog.modules, document]
+  );
+  const requiredByKey = useMemo(
+    () => new Map(requiredModules.map((entry) => [capabilityReferenceKey(entry.module), entry.requiredBy])),
+    [requiredModules]
+  );
   const selectedComputer = useMemo(
     () => document.enabled_capabilities.find((selection) => String(selection.capability.id) === 'computer'),
     [document.enabled_capabilities]
   );
-  const selectedComputerModule = selectedComputer
-    ? moduleByKey.get(capabilityReferenceKey(selectedComputer.capability))
+  const requiredComputer = requiredModules.find((entry) => String(entry.module.id) === 'computer');
+  const activeComputerReference = selectedComputer?.capability ?? requiredComputer?.module;
+  const activeComputerModule = activeComputerReference
+    ? moduleByKey.get(capabilityReferenceKey(activeComputerReference))
     : undefined;
-  const selectedComputerAvailable = Boolean(
-    selectedComputerModule && moduleIsAvailable(selectedComputerModule, catalog.capabilities)
+  const activeComputerAvailable = Boolean(
+    activeComputerModule && moduleIsAvailable(activeComputerModule, catalog.capabilities)
   );
   const computerActions = useMemo(
-    () => selectedComputer?.action_allowlist ?? [],
-    [selectedComputer?.action_allowlist]
+    () => selectedComputer?.action_allowlist ?? activeComputerModule?.actions.map((action) => action.action_id) ?? [],
+    [activeComputerModule, selectedComputer?.action_allowlist]
   );
   const requiredComputerPermissions = useMemo(
-    () => selectedComputer && selectedComputerAvailable && computerActions.length > 0
+    () => activeComputerReference && activeComputerAvailable && computerActions.length > 0
       ? computerPermissionKindsForActions(computerActions)
       : [],
-    [computerActions, selectedComputer, selectedComputerAvailable]
+    [activeComputerAvailable, activeComputerReference, computerActions]
   );
   const computerPermissions = useSystemPermissions(requiredComputerPermissions.length > 0);
   const missingComputerPermissions = useMemo(
@@ -155,7 +172,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
       : [],
     [computerActions, computerPermissions.status]
   );
-  const computerPermissionIssue = selectedComputer && requiredComputerPermissions.length > 0 && !computerPermissions.loading
+  const computerPermissionIssue = activeComputerReference && requiredComputerPermissions.length > 0 && !computerPermissions.loading
     ? computerPermissions.error
       ? 'check_failed'
       : missingComputerPermissions.length > 0
@@ -170,6 +187,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
         module,
         missing: false,
         savedActions: selectionByKey.get(capabilityReferenceKey(module.module))?.action_allowlist ?? [],
+        requiredBy: requiredByKey.get(capabilityReferenceKey(module.module)) ?? [],
       }));
     const visible = new Set(
       catalog.modules
@@ -185,6 +203,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
           module: catalogModule,
           missing: false,
           savedActions: selection.action_allowlist ?? [],
+          requiredBy: requiredByKey.get(key) ?? [],
         });
       } else {
         direct.push({
@@ -193,8 +212,33 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
           description: t('agentSettings.workbench.missingReason'),
           missing: true,
           savedActions: selection.action_allowlist ?? [],
+          requiredBy: requiredByKey.get(key) ?? [],
         });
       }
+      visible.add(key);
+    }
+    for (const dependency of requiredModules) {
+      const key = capabilityReferenceKey(dependency.module);
+      if (visible.has(key)) continue;
+      const catalogModule = moduleByKey.get(key);
+      if (catalogModule) {
+        direct.push({
+          module: catalogModule,
+          missing: false,
+          savedActions: [],
+          requiredBy: dependency.requiredBy,
+        });
+      } else {
+        direct.push({
+          module: dependency.module,
+          display_name: String(dependency.module.id),
+          description: t('agentSettings.workbench.missingReason'),
+          missing: true,
+          savedActions: [],
+          requiredBy: dependency.requiredBy,
+        });
+      }
+      visible.add(key);
     }
     return direct.sort((left, right) => {
       const leftRef = left.missing ? left.module : left.module.module;
@@ -203,7 +247,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
         MODULE_CATEGORIES.indexOf(moduleCategory(rightRef)) ||
         String(leftRef.id).localeCompare(String(rightRef.id));
     });
-  }, [catalog.modules, document.enabled_capabilities, moduleByKey, selectionByKey, t]);
+  }, [catalog.modules, document.enabled_capabilities, moduleByKey, requiredByKey, requiredModules, selectionByKey, t]);
 
   useEffect(() => {
     if (searchParams.get('source') !== 'plugin') return;
@@ -233,17 +277,25 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     !entry.missing && moduleIsAvailable(entry.module, catalog.capabilities);
   const selectable = (entry: ModuleEntry): boolean =>
     !entry.missing && moduleIsSelectable(entry.module, catalog.capabilities);
+  const isSelected = (entry: ModuleEntry): boolean =>
+    selectedKeys.has(capabilityReferenceKey(referenceOf(entry)));
+  const dependencyProvided = (entry: ModuleEntry): boolean =>
+    entry.requiredBy.length > 0 && !isSelected(entry);
+  const active = (entry: ModuleEntry): boolean => isSelected(entry) || dependencyProvided(entry);
+  const effectiveActions = (entry: ModuleEntry): string[] =>
+    dependencyProvided(entry) && !entry.missing
+      ? entry.module.actions.map((action) => action.action_id)
+      : entry.savedActions;
   const hasUnknownActions = (entry: ModuleEntry): boolean => {
     if (entry.missing) return entry.savedActions.length > 0;
     const actions = new Set(entry.module.actions.map((action) => action.action_id));
     return entry.savedActions.some((action) => !actions.has(action));
   };
   const hasEmptyActionGrant = (entry: ModuleEntry): boolean =>
-    !entry.missing && entry.module.actions.length > 0 && entry.savedActions.length === 0;
+    isSelected(entry) && !entry.missing && entry.module.actions.length > 0 && entry.savedActions.length === 0;
   const moduleNeedsAttention = (entry: ModuleEntry): boolean => {
-    const key = capabilityReferenceKey(referenceOf(entry));
-    return selectedKeys.has(key) && (
-      !materialized(entry) || hasUnknownActions(entry) || hasEmptyActionGrant(entry)
+    return active(entry) && (
+      !materialized(entry) || (isSelected(entry) && hasUnknownActions(entry)) || hasEmptyActionGrant(entry)
     );
   };
   const permissionNeedsAttention = (entry: ModuleEntry): boolean =>
@@ -268,7 +320,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
 
   const visibleEntries = entries.filter((entry) => {
     const reference = referenceOf(entry);
-    const key = capabilityReferenceKey(reference);
     const copy = copyOf(entry);
     const matchesQuery = entry.missing
       ? `${copy.name} ${copy.description} ${reference.id} ${entry.savedActions.join(' ')}`
@@ -276,7 +327,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
       : moduleMatchesSearch(entry.module, query, copy.name, copy.description);
     return (category === 'all' || moduleCategory(reference) === category) &&
       (!pluginsOnly || (!entry.missing && !isBuiltinModule(entry.module, catalog.capabilities))) &&
-      (status === 'all' || (status === 'enabled' && selectedKeys.has(key)) ||
+      (status === 'all' || (status === 'enabled' && active(entry)) ||
         (status === 'attention' && needsAttention(entry))) && matchesQuery;
   });
 
@@ -327,16 +378,14 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     onChange(setModuleActions(document, reference, [...current]));
   };
 
-  const selectedCount = selectedKeys.size;
+  const enabledCount = entries.filter(active).length;
   const categoryCounts = useMemo(() => Object.fromEntries(
     MODULE_CATEGORIES.map((value) => {
       const categoryEntries = entries.filter((entry) =>
         moduleCategory(referenceOf(entry)) === value
       );
       return [value, {
-        enabled: categoryEntries.filter((entry) =>
-          selectedKeys.has(capabilityReferenceKey(referenceOf(entry)))
-        ).length,
+        enabled: categoryEntries.filter(active).length,
         total: categoryEntries.length,
       }];
     })
@@ -347,15 +396,14 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   );
   const attentionCount = entries.filter(needsAttention).length;
   const resourceModuleCount = entries.filter((entry) => {
-    const key = capabilityReferenceKey(referenceOf(entry));
-    return selectedKeys.has(key) && !entry.missing && entry.module.required_resource_kinds.length > 0;
+    return active(entry) && !entry.missing && entry.module.required_resource_kinds.length > 0;
   }).length;
 
   return (
     <div className={styles.workspace}>
       <div className={styles.overview}>
         <div className={styles.metrics} aria-live='polite'>
-          <span><i />{t('agentSettings.workbench.enabledModules')}<strong>{selectedCount}</strong></span>
+          <span><i />{t('agentSettings.workbench.enabledModules')}<strong>{enabledCount}</strong></span>
           <span>{t('agentSettings.workbench.resourceModules')}<strong>{resourceModuleCount}</strong></span>
           {attentionCount > 0 && <span className={styles.attentionMetric}>
             {t('agentSettings.workbench.needsAttention')}<strong>{attentionCount}</strong>
@@ -409,9 +457,9 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
             <Connection theme='outline' size={15} />
             <span>{t('agentSettings.workbench.allCategories')}</span>
             <small
-              aria-label={categoryCountLabel(selectedCount, entries.length)}
-              title={categoryCountLabel(selectedCount, entries.length)}
-            >{selectedCount} / {entries.length}</small>
+              aria-label={categoryCountLabel(enabledCount, entries.length)}
+              title={categoryCountLabel(enabledCount, entries.length)}
+            >{enabledCount} / {entries.length}</small>
           </button>
           {MODULE_CATEGORIES.map((value) => {
             const count = categoryCounts[value];
@@ -451,6 +499,8 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
               const reference = referenceOf(entry);
               const key = capabilityReferenceKey(reference);
               const selected = selectedKeys.has(key);
+              const implicitDependency = dependencyProvided(entry);
+              const enabled = selected || implicitDependency;
               const canEnable = selectable(entry);
               const isMaterialized = materialized(entry);
               const copy = copyOf(entry);
@@ -459,11 +509,23 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
               const knownActions: CapabilityModuleAction[] = entry.missing ? [] : entry.module.actions;
               const knownActionIds = new Set(knownActions.map((action) => action.action_id));
               const missingActions = entry.savedActions.filter((action) => !knownActionIds.has(action));
+              const grantedActions = effectiveActions(entry);
               const resources = entry.missing ? [] : entry.module.required_resource_kinds;
+              const requiredByNames = new Intl.ListFormat(
+                i18n.resolvedLanguage ?? i18n.language,
+                { style: 'short', type: 'conjunction' }
+              ).format(entry.requiredBy.map((root) => {
+                const rootModule = moduleByKey.get(capabilityReferenceKey(root));
+                if (!rootModule) return String(root.id);
+                const rootI18nKey = moduleI18nKey(String(root.id));
+                return rootI18nKey
+                  ? t(`agentSettings.modules.${rootI18nKey}.name`, { defaultValue: rootModule.display_name })
+                  : rootModule.display_name;
+              }));
               return (
                 <article
                   key={key}
-                  className={`${styles.moduleCard} ${selected ? styles.moduleCardEnabled : ''} ${needsAttention(entry) ? styles.moduleCardAttention : ''}`}
+                  className={`${styles.moduleCard} ${enabled ? styles.moduleCardEnabled : ''} ${needsAttention(entry) ? styles.moduleCardAttention : ''}`}
                 >
                   <div className={styles.moduleHeader}>
                     <span className={styles.moduleIcon}>
@@ -476,25 +538,31 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                       </div>
                       <p>{copy.description}</p>
                     </div>
-                    <button
-                      type='button'
-                      role='switch'
-                      aria-checked={selected}
-                      aria-label={t(selected ? 'agentSettings.workbench.disableModule' : 'agentSettings.workbench.enableModule', { name: copy.name })}
-                      className={styles.moduleSwitch}
-                      disabled={disabled || (!selected && !canEnable)}
-                      onClick={() => changeModule(entry, !selected)}
-                    >
-                      <span />
-                    </button>
+                    {implicitDependency ? <span className={styles.dependencyControl}>
+                      {t('agentSettings.workbench.dependencyBadge')}
+                    </span> : <button
+                        type='button'
+                        role='switch'
+                        aria-checked={selected}
+                        aria-label={t(selected ? 'agentSettings.workbench.disableModule' : 'agentSettings.workbench.enableModule', { name: copy.name })}
+                        className={styles.moduleSwitch}
+                        disabled={disabled || (!selected && !canEnable)}
+                        onClick={() => changeModule(entry, !selected)}
+                      >
+                        <span />
+                      </button>}
                   </div>
 
                   <div className={styles.moduleMeta}>
-                    <span className={selected ? styles.enabledState : styles.disabledState}>
-                      {selected && <Check theme='outline' size={12} />}
-                      {t(selected ? 'agentSettings.capabilities.enabled' : 'agentSettings.capabilities.notSelected')}
+                    <span className={enabled ? styles.enabledState : styles.disabledState}>
+                      {enabled && <Check theme='outline' size={12} />}
+                      {t(implicitDependency
+                        ? 'agentSettings.workbench.dependencyActive'
+                        : selected
+                          ? 'agentSettings.capabilities.enabled'
+                          : 'agentSettings.capabilities.notSelected')}
                     </span>
-                    {!isMaterialized && !selected && <span className={styles.unavailableState}>
+                    {!isMaterialized && !enabled && <span className={styles.unavailableState}>
                       {t('agentSettings.common.unavailable')}
                     </span>}
                     {resources.length > 0 ? (
@@ -505,6 +573,13 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                       <span className={styles.resourceState}>{t('agentSettings.resources.noneRequired')}</span>
                     )}
                   </div>
+
+                  {implicitDependency && (
+                    <div className={styles.dependencyNotice}>
+                      <Connection theme='outline' size={14} />
+                      <span>{t('agentSettings.workbench.dependencyHint', { names: requiredByNames })}</span>
+                    </div>
+                  )}
 
                   {moduleNeedsAttention(entry) && (
                     <div className={styles.cardWarning} role='status'>
@@ -571,13 +646,16 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                         </div>
                       )}
                       <fieldset className={styles.actionList} disabled={disabled || !selected}>
-                        <legend>{t('agentSettings.workbench.actionPermissions')}</legend>
+                        <legend>{t(implicitDependency
+                          ? 'agentSettings.workbench.dependencyActionPermissions'
+                          : 'agentSettings.workbench.actionPermissions')}</legend>
                         {knownActions.map((action) => {
                           const actionName = localizedActionName(action.action_id);
                           return (
                             <div key={action.action_id} className={styles.actionRow}>
                               <Checkbox
-                                checked={entry.savedActions.includes(action.action_id)}
+                                checked={grantedActions.includes(action.action_id)}
+                                disabled={disabled || !selected}
                                 onChange={() => toggleAction(entry, action.action_id)}
                                 aria-label={t('agentSettings.workbench.toggleAction', { action: actionName, module: copy.name })}
                               />

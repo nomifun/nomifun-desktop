@@ -4,18 +4,18 @@
     "ledger_version": "1.0.0",
     "artifacts": {
       "canonical_api_inventory": "ae0ae25648dcda0908ada7e07a8da5843fcf9cc1241320c0d8fa04dd7b0bbb1d",
-      "canonical_schema_manifest": "3ccd20a0e54b60990f84d5770895c8ca6907b90699f6a7b65b2d2df0ea8aaba7",
+      "canonical_schema_manifest": "0615a3505154dc54382b52580ae59521ad9ac4354d7b15d75c0d539b2cb1365e",
       "capability_catalog_entry": "8d141dfd2782909f7bcb1d7ce22f080bcbe6630661a67fbf3ec7d7dce6529ba8",
       "cargo_lock": "b2af99a5f5693ef7b2fb7f8ddbb9d3ad40dd4a6f680ec6b2cfea38cbbf887f75",
-      "coding_codex_native_contract": "940e7bd5d4fe74ef9afbb3a3a5f624d18c1dca735695917821f711834ece2d14",
+      "coding_codex_native_contract": "694bf07a4edc9ba4648512ea664e1c278af829eef5b35cff31bfcb73db5488c7",
       "confirmed_decision_contract": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848",
       "database_schema": "49c6ed0038770f09755d3c207d777c3d76441ef1923b55b29b8224503e02b44f",
       "deletion_manifest_set": "d43cbc10166bdb566184abe675959457e89f46337aab904b84089e842261697f",
       "error_registry": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
-      "official_preset_seed_manifest": "741247ef00d9f3551acbfc151306515acd174eb26bfb31e1e5f4f183280bee66",
+      "official_preset_seed_manifest": "ef67c86183a8c42ea4c23b9a0acbaa119019e347f7a6685daf4db7f6a95fb864",
       "package_schema": "27d2a130667208209d17da375a92577bbbf978dd3eef92ace9d7f1da218b0825",
       "platform_validation_contract": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
-      "platform_validation_fixture": "25743731c34c4fbfca1d1bee2fa91779a1e0d3e3752c79549000140c35a110fe",
+      "platform_validation_fixture": "2c919c1e3c62b1208f73877559af3dbfb6b2f0f09db051ed42b6141ecf4190e1",
       "plugin_n1_contract": "a8a838368f774cfc36bb3655a799030242ee2c39f817df87e0b6f9113f216154",
       "plugin_n1_schema": "3ec6f81edc02c1e68b158de878d639828fbf5babd62c62ee20c61758017535c4",
       "plugin_runtime_contract": "acd2bff815bad0c48516feb4bf8de1593989661e64b47f42b9a62eed9cd77039",
@@ -27,5 +27,5 @@
       "target_first_party_inventory": "ff831335aa83839b5f25b26e7e61c6155e71b827ef6bf137e9a2d8c886f481e3"
     }
   },
-  "payload_digest": "9a628f758416f3822bba4dcc9aa0b6d96caeae34438ba5c844a455321ea7aeb0"
+  "payload_digest": "49fd986532d22b80a9bac6537a32b67b693b4c72336ee2b2c5f09f17314a51c5"
 }

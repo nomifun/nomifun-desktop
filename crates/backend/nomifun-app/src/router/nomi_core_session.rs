@@ -437,6 +437,26 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                 .iter()
                 .filter_map(|kind| {
                     let resource_id = match (target.target_kind.as_str(), kind.as_ref()) {
+                        (_, "workspace") => {
+                            super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID
+                                .to_owned()
+                        }
+                        (_, "project_memory") => {
+                            super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID
+                                .to_owned()
+                        }
+                        (_, "process_session") => {
+                            super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID
+                                .to_owned()
+                        }
+                        (_, "terminal") => {
+                            super::nomi_core_resource_bindings::MANAGED_TERMINAL_RESOURCE_ID
+                                .to_owned()
+                        }
+                        (_, "scheduler") => {
+                            super::nomi_core_resource_bindings::INSTALLATION_SCHEDULER_RESOURCE_ID
+                                .to_owned()
+                        }
                         ("creative_studio_canvas", "canvas") => target.target_id.clone(),
                         ("creative_studio_canvas", "asset_library") => {
                             super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID

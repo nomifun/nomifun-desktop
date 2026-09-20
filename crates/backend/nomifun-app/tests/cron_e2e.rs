@@ -179,6 +179,9 @@ async fn seed_conversation(
                 }, {
                     "resource_kind": "process_session",
                     "resource_id": "managed-process-session"
+                }, {
+                    "resource_kind": "project_memory",
+                    "resource_id": "default-project-memory"
                 }]
             }),
             token,

@@ -63,6 +63,7 @@ describe('Agent capability workspace contrast contract', () => {
     expect(workspaceCss).toContain('--capability-card-surface: var(--color-bg-5');
     expect(workspaceCss).toContain('--capability-muted-text: color-mix(in srgb, var(--color-text-2) 50%, var(--color-text-3))');
     expect(rule('.moduleCard')).toContain('background: var(--capability-card-surface)');
+    expect(rule('.dependencyNotice')).toContain('color: var(--color-text-2)');
     expect(rule('.moduleCopy p')).toContain('color: var(--capability-muted-text)');
     expect(rule('.moduleCopy p')).toContain('font-size: 12px');
     expect(rule('.categories small')).toContain('color: var(--capability-muted-text)');

@@ -29,7 +29,7 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000102
 const messageId = '0190f5fe-7c00-7a00-8000-000000000106';
 const model = { providerId, model: 'image-exact' };
 const provider = { id: providerId, name: 'Provider', platform: 'openai', enabled: true, models: [{ model: model.model, enabled: true, capabilities: [{ task: 'image_generation', traits: [], protocol: 'openai.images' }, { task: 'image_edit', traits: [], protocol: 'openai.images' }] }] } as unknown as IProvider;
-const template = { template_key: 'creative-studio.default', seed: { required_resource_kinds: ['asset_library', 'canvas'] } } as OfficialPresetTemplate;
+const template = { template_key: 'creative-studio.default', seed: { required_resource_kinds: ['asset_library', 'canvas', 'process_session', 'project_memory', 'workspace'] } } as OfficialPresetTemplate;
 const realFetch = globalThis.fetch;
 beforeEach(() => setBrowserStorageGeneration('0190f5fe-7c00-7a00-8000-000000000107'));
 afterEach(() => { cleanup(); sessionStorage.clear(); globalThis.fetch = realFetch; });
@@ -96,7 +96,12 @@ describe('conversation creation admission and draft behavior', () => {
     await act(async () => { await hook.result.current.creation.send(); });
     expect(hook.result.current.input).toBe('');
     expect(hook.result.current.creation.draft.references).toEqual([]);
-    expect(calls.find(call => call.url.endsWith('/api/agent-sessions'))?.body).toEqual({ preset_id: presetId, title: '一只橘猫', resource_selections: [{ resource_kind: 'asset_library', resource_id: 'creative-studio-assets' }] });
+    expect(calls.find(call => call.url.endsWith('/api/agent-sessions'))?.body).toEqual({ preset_id: presetId, title: '一只橘猫', resource_selections: [
+      { resource_kind: 'asset_library', resource_id: 'creative-studio-assets' },
+      { resource_kind: 'process_session', resource_id: 'managed-process-session' },
+      { resource_kind: 'project_memory', resource_id: 'default-project-memory' },
+      { resource_kind: 'workspace', resource_id: 'default-workspace' },
+    ] });
     const presetCalls = calls.filter(call => call.url.endsWith('/from-template/creative-studio.default'));
     expect(presetCalls).toHaveLength(2);
     for (const call of presetCalls) expect(call.body).not.toHaveProperty('model');
