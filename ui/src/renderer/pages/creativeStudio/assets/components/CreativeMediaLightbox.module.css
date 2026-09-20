@@ -1,0 +1,19 @@
+.videoViewport {
+  overflow: hidden;
+}
+
+.videoFrame {
+  width: min(100%, 1280px);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: auto;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #000;
+}
+
+.videoFrame :global([data-creative-video-player]),
+.videoFrame :global(video) {
+  background: #000;
+}

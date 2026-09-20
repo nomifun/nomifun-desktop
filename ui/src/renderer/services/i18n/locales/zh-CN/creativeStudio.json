@@ -677,6 +677,7 @@
       "interfaceModeLabel": "接口模式",
       "insertReference": "引用已连接素材",
       "locateReference": "定位参考 {{name}}",
+      "previewReference": "预览参考 {{name}}",
       "noEditModels": "没有可用图片编辑模型",
       "noGenerateModels": "没有可用图片生成模型",
       "noMatchingReferences": "没有匹配的已连接素材",
@@ -1149,6 +1150,7 @@
     "video": {
       "aspectRatioAriaLabel": "视频宽高比",
       "aspectRatioLabel": "宽高比",
+      "closePreview": "关闭视频预览",
       "connectedImage": "已连接图片",
       "durationAriaLabel": "视频时长",
       "durationLabel": "时长",

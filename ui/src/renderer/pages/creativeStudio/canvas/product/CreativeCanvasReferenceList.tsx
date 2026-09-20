@@ -8,6 +8,7 @@ import { CloseOne } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeMediaLightbox from '../../assets/components/CreativeMediaLightbox';
 import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import type { CreativeCanvasPromptReferenceOption } from './CreativeCanvasReferencePromptInput';
 import styles from './CreativeCanvasReferenceList.module.css';
@@ -41,6 +42,7 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
   const { t } = useTranslation();
   const [managing, setManaging] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
   const manageButton = useRef<HTMLButtonElement>(null);
   const connectionIds = [...new Set(references.flatMap((reference) =>
     !reference.base && reference.connectionId ? [reference.connectionId] : []
@@ -50,6 +52,15 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
   const allSelected = connectionIds.length > 0 && selected.length === connectionIds.length;
   const canManage = Boolean(onDisconnectMany) && connectionIds.length > 0;
   const batchMode = managing && canManage;
+  const previewReference = references.find((reference) => reference.nodeId === previewNodeId);
+  const previewKind = previewReference?.kind === 'video'
+    ? 'video'
+    : previewReference?.kind === 'text'
+      ? null
+      : 'image';
+  const previewSource = previewKind === 'video'
+    ? previewReference?.originalUrl
+    : previewReference?.originalUrl ?? previewReference?.thumbnailUrl;
 
   useEffect(() => {
     const available = new Set<string>(JSON.parse(connectionKey));
@@ -65,6 +76,7 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
 
   if (references.length === 0) return null;
   return (
+    <>
     <div
       className={styles.referenceSection}
       data-reference-batch={batchMode || undefined}
@@ -85,6 +97,23 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
           {references.map((reference) => {
             const removable = !reference.base && Boolean(reference.connectionId);
             const checked = Boolean(reference.connectionId && selected.includes(reference.connectionId));
+            const mediaKind = reference.kind === 'video'
+              ? 'video'
+              : reference.kind === 'text'
+                ? null
+                : 'image';
+            const mediaSource = mediaKind === 'video'
+              ? reference.originalUrl
+              : reference.originalUrl ?? reference.thumbnailUrl;
+            const canPreview = Boolean(mediaKind && mediaSource);
+            const locateLabel = t('creativeStudio.canvas.image.locateReference', {
+              name: reference.label,
+              defaultValue: '定位参考 {{name}}',
+            });
+            const previewLabel = t('creativeStudio.canvas.image.previewReference', {
+              name: reference.label,
+              defaultValue: '预览参考 {{name}}',
+            });
             return (
               <div
                 key={reference.nodeId}
@@ -99,18 +128,21 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
                   className={styles.referencePreview}
                   title={batchMode && !removable
                     ? t('creativeStudio.canvas.image.baseReferencePinned')
-                    : reference.disabledReason ?? reference.textContent ?? reference.label}
-                  aria-label={t(batchMode
-                    ? 'creativeStudio.canvas.image.selectReference'
-                    : 'creativeStudio.canvas.image.locateReference', {
-                    name: reference.label,
-                    defaultValue: batchMode ? '选择参考 {{name}}' : '定位参考 {{name}}',
-                  })}
+                    : reference.disabledReason ?? reference.textContent ?? (canPreview ? previewLabel : reference.label)}
+                  aria-label={batchMode
+                    ? t('creativeStudio.canvas.image.selectReference', {
+                        name: reference.label,
+                        defaultValue: '选择参考 {{name}}',
+                      })
+                    : canPreview
+                      ? previewLabel
+                      : locateLabel}
                   aria-pressed={batchMode ? checked : undefined}
                   disabled={disabled || (batchMode && !removable)}
                   onClick={() => {
                     if (!batchMode) {
-                      onActivate?.(reference.nodeId);
+                      if (canPreview) setPreviewNodeId(reference.nodeId);
+                      else onActivate?.(reference.nodeId);
                     } else if (reference.connectionId && removable) {
                       const id = reference.connectionId;
                       setSelectedIds((current) => current.includes(id)
@@ -123,7 +155,7 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
                     <span className={styles.referenceText}>{reference.textContent || reference.label}</span>
                   ) : reference.thumbnailUrl || reference.originalUrl ? (
                     <CreativeMediaPreview
-                      kind='image'
+                      kind={mediaKind ?? 'image'}
                       src={reference.originalUrl ?? reference.thumbnailUrl}
                       posterSrc={reference.thumbnailUrl}
                       alt=''
@@ -138,9 +170,22 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
                     <span className={styles.referenceCheck} aria-hidden='true'>{checked ? '✓' : ''}</span>
                   ) : null}
                 </button>
-                <span className={styles.referenceName} title={reference.label}>
-                  {reference.kind === 'text' ? reference.mentionLabel : reference.label}
-                </span>
+                {!batchMode && onActivate && canPreview ? (
+                  <button
+                    type='button'
+                    className={styles.referenceName}
+                    title={locateLabel}
+                    aria-label={locateLabel}
+                    disabled={disabled}
+                    onClick={() => onActivate(reference.nodeId)}
+                  >
+                    {reference.kind === 'text' ? reference.mentionLabel : reference.label}
+                  </button>
+                ) : (
+                  <span className={styles.referenceName} title={reference.label}>
+                    {reference.kind === 'text' ? reference.mentionLabel : reference.label}
+                  </span>
+                )}
                 {!batchMode && removable && onDisconnect ? (
                   <button
                     type='button'
@@ -202,6 +247,18 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
         </div>
       ) : null}
     </div>
+    {previewReference && previewKind && previewSource ? (
+      <CreativeMediaLightbox
+        key={`${previewReference.nodeId}:${previewSource}`}
+        kind={previewKind}
+        src={previewSource}
+        posterSrc={previewReference.thumbnailUrl}
+        title={previewReference.label}
+        zIndex={1700}
+        onClose={() => setPreviewNodeId(null)}
+      />
+    ) : null}
+    </>
   );
 };
 
