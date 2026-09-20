@@ -1891,6 +1891,7 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
             &["question"],
         ),
         REQUIREMENTS_READ_ACTION_ID => StrictJsonValue(serde_json::json!({
+            "type": "object",
             "oneOf": [
                 {
                     "type":"object","additionalProperties":false,
@@ -1915,6 +1916,7 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
             ]
         })),
         REQUIREMENTS_WRITE_ACTION_ID => StrictJsonValue(serde_json::json!({
+            "type": "object",
             "oneOf": [
                 {
                     "type":"object","additionalProperties":false,
@@ -2355,5 +2357,20 @@ mod tests {
             schema.0["properties"].as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from(["question".to_owned()])
         );
+    }
+
+    #[test]
+    fn requirements_union_schemas_have_a_strict_model_tool_object_root() {
+        for action in [REQUIREMENTS_READ_ACTION_ID, REQUIREMENTS_WRITE_ACTION_ID] {
+            let schema = action_input_schema_for(action).unwrap();
+            assert_eq!(schema.0["type"], "object", "{action}");
+            let variants = schema.0["oneOf"].as_array().unwrap();
+            assert!(!variants.is_empty() && variants.len() <= 16, "{action}");
+            for variant in variants {
+                assert_eq!(variant["type"], "object", "{action}");
+                assert_eq!(variant["additionalProperties"], false, "{action}");
+                assert!(variant["properties"].is_object(), "{action}");
+            }
+        }
     }
 }

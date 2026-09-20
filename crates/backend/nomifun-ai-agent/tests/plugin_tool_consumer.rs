@@ -30,9 +30,10 @@ use nomifun_agent_contracts::{
     PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PresetRevisionRef,
-    PrincipalRef, RuntimeProfileKind, RuntimeTarget, ScopeKey,
+    PrincipalRef, ResourceBindingId, ResourceKind, ResourceId,
+    RuntimeProfileKind, RuntimeTarget, ScopeKey,
     StrictJsonValue, ToolPresentationKind, UserId,
-    ValidatedPluginConfig, VersionString, capability_surface_declarations,
+    TypedResourceBinding, ValidatedPluginConfig, VersionString, capability_surface_declarations,
     digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -935,6 +936,58 @@ async fn dynamic_schema_registers_and_kernel_invoke_preserves_native_tools() {
     assert_eq!(evidence[0].operation_id, evidence[0].idempotency_key);
     assert_eq!(evidence[0].operation_id, evidence[0].correlation_id);
     assert!(evidence[0].operation_id.starts_with("nomi-plugin:tool-call-v1-"));
+}
+
+#[tokio::test]
+async fn unbound_enhancement_capability_stays_declared_without_exposing_its_tool() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let evidence = Arc::new(Mutex::new(Vec::new()));
+    let (mut registration, schemas) =
+        registration('c', "resource:", Arc::clone(&calls), Arc::clone(&evidence));
+    let manifest = &mut registration.metadata.manifest.payload;
+    manifest
+        .contributions
+        .capabilities
+        .iter_mut()
+        .find(|capability| capability.id.as_ref() == AGENT_TOOL)
+        .unwrap()
+        .contributions
+        .resource_kinds = BTreeSet::from([ResourceKind::from("workspace")]);
+    registration.metadata.manifest = ArtifactEnvelope::new(manifest.clone()).unwrap();
+
+    let kernel = Arc::new(
+        KernelRegistry::new(
+            policy(),
+            Arc::new(InMemoryPluginStatePersistence::new())
+                as Arc<dyn PluginStatePersistence>,
+        )
+        .unwrap(),
+    );
+    let materialized = kernel.replace_all(vec![registration]).unwrap();
+    let compiled = compile(&materialized);
+    assert!(!compiled
+        .capability_resources_bound(&CapabilityId::from(AGENT_TOOL))
+        .unwrap());
+    let unbound = session(Arc::clone(&kernel), compiled.clone(), Arc::clone(&schemas)).await;
+    assert!(unbound.actions().is_empty());
+
+    let bound = compiled
+        .with_target_resource_bindings(
+            &owner(),
+            vec![TypedResourceBinding {
+                binding_id: ResourceBindingId::from("workspace:fixture"),
+                resource_kind: ResourceKind::from("workspace"),
+                resource_id: ResourceId::from("fixture"),
+                owner_id: OWNER.to_owned(),
+                operations: BTreeSet::from(["read".to_owned()]),
+                connection_config_ref: None,
+                typed_parameters: BTreeMap::new(),
+            }],
+        )
+        .unwrap();
+    let bound = session(kernel, bound, schemas).await;
+    assert_eq!(bound.actions().len(), 1);
+    assert_eq!(bound.actions()[0].capability_id().as_ref(), AGENT_TOOL);
 }
 
 #[tokio::test]

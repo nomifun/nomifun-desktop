@@ -2272,6 +2272,9 @@ impl KernelNomiPluginToolSession {
                         != ContributionSourceKind::PlatformBuiltin
                     || resolved.resolved_source.source_kind != PluginSourceKind::Bundled)
             { continue; }
+            if !compiled.capability_resources_bound(&resolved.capability.id)? {
+                continue;
+            }
             let schema_source = match resolved.contribution_lock.source_kind {
                 ContributionSourceKind::PluginMount => {
                     NomiKernelToolSchemaSource::ManagedPlugin
@@ -2560,6 +2563,9 @@ async fn assemble_initial_capability_context(
         &resolved.capability.id,
     ));
     for resolved in ordered {
+        if !compiled.capability_resources_bound(&resolved.capability.id)? {
+            continue;
+        }
         let managed_plugin = resolved.contribution_lock.source_kind
             == ContributionSourceKind::PluginMount
             && resolved.resolved_source.source_kind
@@ -2697,6 +2703,9 @@ async fn assemble_initial_platform_builtin_lifecycle(
         {
             continue;
         }
+        if !compiled.capability_resources_bound(&resolved.capability.id)? {
+            continue;
+        }
         let current = registry
             .capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
@@ -2757,6 +2766,9 @@ fn turn_middleware_identities(
         if admission.target_for(resolved)?.is_none() {
             continue;
         }
+        if !compiled.capability_resources_bound(&resolved.capability.id)? {
+            continue;
+        }
         let current = registry
             .capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
@@ -2793,6 +2805,7 @@ async fn lifecycle_context_contributors(
     let mut contributors = Vec::new();
     for resolved in compiled.content().contributions() {
         if admission.target_for(resolved)?.is_none() { continue; }
+        if !compiled.capability_resources_bound(&resolved.capability.id)? { continue; }
         let current = registry.capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: resolved.capability.id.clone(),

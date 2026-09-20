@@ -618,12 +618,17 @@ async fn build_nomi_core_agent_api_state(
 
     let schema_digest = digest_payload(&agent_store_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
+    let installation_role_bindings =
+        super::nomi_core_tool_discovery::installation_binding(&materialized)?;
     #[cfg(feature = "browser-use")]
-    let installation_role_bindings = crate::browser_workspace_provider::installation_binding(
-        &materialized, services.browser_resources.is_some(),
-    )?;
-    #[cfg(not(feature = "browser-use"))]
-    let installation_role_bindings = Default::default();
+    let installation_role_bindings = {
+        let mut bindings = installation_role_bindings;
+        bindings.extend(crate::browser_workspace_provider::installation_binding(
+            &materialized,
+            services.browser_resources.is_some(),
+        )?);
+        bindings
+    };
     #[cfg(feature = "computer-use")]
     let installation_role_bindings = {
         let mut bindings = installation_role_bindings;

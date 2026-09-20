@@ -233,6 +233,16 @@ pub(super) async fn compile(
             ));
         }
     }
+    let mut resource_ready = Vec::with_capacity(exposures.len());
+    for exposure in exposures {
+        if snapshot
+            .capability_resources_bound(&exposure.capability_id)
+            .map_err(error)?
+        {
+            resource_ready.push(exposure);
+        }
+    }
+    let exposures = resource_ready;
     if exposures.len() > 128 {
         return Err(error(
             "selected tool surface exceeds 128 actions; narrow the Agent selection",
@@ -368,6 +378,108 @@ mod tests {
         assert_eq!(exposures[0].capability_id, module);
         assert_eq!(exposures[0].action_id.as_ref(), "workspace.files/read");
         assert_eq!(exposures[0].definition.name, "read_file");
+    }
+
+    #[test]
+    fn union_input_schemas_pass_the_runtime_model_tool_gate() {
+        for action_id in [
+            nomifun_agent_domain_wave5::REQUIREMENTS_READ_ACTION_ID,
+            nomifun_agent_domain_wave5::REQUIREMENTS_WRITE_ACTION_ID,
+        ] {
+            let schema = nomifun_agent_domain_wave5::action_input_schema_for(action_id).unwrap();
+            assert!(concrete_object_schema(&schema.0, true), "{action_id}");
+        }
+
+        let ssh = nomifun_agent_domain_wave2::registrations()
+            .unwrap()
+            .into_iter()
+            .flat_map(|registration| {
+                registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+            })
+            .find(|capability| capability.id.as_ref() == nomifun_agent_domain_wave2::SSH_MODULE_ID)
+            .unwrap();
+        let read = ssh
+            .contributions
+            .actions
+            .iter()
+            .find(|action| action.action_id.as_ref() == "ssh/fs.read")
+            .unwrap();
+        let schema = nomifun_agent_domain_wave2::resolve_action_schema(
+            nomifun_agent_domain_wave2::SSH_MODULE_ID,
+            &read.input_schema,
+        )
+        .unwrap();
+        assert!(concrete_object_schema(&schema.0, true));
+    }
+
+    fn assert_strict_model_tool_inputs(
+        family: &str,
+        registrations: Vec<nomifun_agent_kernel::PluginRegistration>,
+        resolve: impl Fn(
+            &str,
+            &nomifun_agent_contracts::CanonicalSchemaRef,
+        ) -> Result<StrictJsonValue, String>,
+    ) {
+        for capability in registrations.into_iter().flat_map(|registration| {
+            registration
+                .metadata
+                .manifest
+                .payload
+                .contributions
+                .capabilities
+        }) {
+            for action in capability
+                .contributions
+                .actions
+                .iter()
+                .filter(|action| action.presentation == ToolPresentationKind::FunctionTool)
+            {
+                let schema = resolve(capability.id.as_ref(), &action.input_schema)
+                    .unwrap_or_else(|error| panic!("{family} {}: {error}", action.action_id.as_ref()));
+                assert!(
+                    concrete_object_schema(&schema.0, true),
+                    "{family} action {} has no strict object input",
+                    action.action_id.as_ref(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_bundled_function_action_passes_the_runtime_model_tool_gate() {
+        assert_strict_model_tool_inputs(
+            "Wave 1",
+            nomifun_agent_domain_wave1::registrations().unwrap(),
+            nomifun_agent_domain_wave1::resolve_canonical_schema,
+        );
+        assert_strict_model_tool_inputs(
+            "Wave 2",
+            nomifun_agent_domain_wave2::registrations().unwrap(),
+            nomifun_agent_domain_wave2::resolve_action_schema,
+        );
+        assert_strict_model_tool_inputs(
+            "Wave 3",
+            nomifun_agent_domain_wave3::registrations().unwrap(),
+            nomifun_agent_domain_wave3::resolve_action_schema,
+        );
+        assert_strict_model_tool_inputs(
+            "Wave 4",
+            nomifun_agent_domain_wave4::registrations().unwrap(),
+            |_capability_id, reference| {
+                nomifun_agent_domain_wave4::resolve_capability_schema(reference)?
+                    .ok_or_else(|| format!("schema {} is unavailable", reference.as_ref()))
+            },
+        );
+        assert_strict_model_tool_inputs(
+            "Wave 5",
+            nomifun_agent_domain_wave5::registrations().unwrap(),
+            nomifun_agent_domain_wave5::resolve_action_schema,
+        );
     }
 
     #[test]
