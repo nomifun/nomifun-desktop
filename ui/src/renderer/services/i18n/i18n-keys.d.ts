@@ -573,6 +573,7 @@ export type I18nKey =
   | 'agentSettings.workbench.modelNeeded'
   | 'agentSettings.workbench.moduleCatalog'
   | 'agentSettings.workbench.moduleCategories'
+  | 'agentSettings.workbench.moduleCategoryCount'
   | 'agentSettings.workbench.moduleGuide'
   | 'agentSettings.workbench.moduleStatus.all'
   | 'agentSettings.workbench.moduleStatus.attention'

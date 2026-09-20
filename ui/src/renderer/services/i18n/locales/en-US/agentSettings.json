@@ -413,6 +413,7 @@
     "searchModules": "Search modules, actions or resources",
     "moduleStatus": { "all": "All", "enabled": "Enabled", "attention": "Needs attention" },
     "moduleCategories": "Module categories",
+    "moduleCategoryCount": "{{enabled}} enabled, {{total}} total",
     "moduleCatalog": "Capability module catalog",
     "enableModule": "Enable {{name}}",
     "disableModule": "Disable {{name}}",
