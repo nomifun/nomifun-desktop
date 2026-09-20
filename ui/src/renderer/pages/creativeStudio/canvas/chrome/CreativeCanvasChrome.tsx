@@ -197,10 +197,10 @@ function bottomIcon(_view: CreativeCanvasBottomView): React.ReactNode {
 }
 
 function saveIcon(status: CreativeCanvasChromeSaveStatus): React.ReactNode {
-  if (status === 'saving') return <Loading className={styles.spin} {...iconProps} />;
-  if (status === 'saved') return <CheckOne {...iconProps} />;
-  if (status === 'conflict' || status === 'error') return <Error {...iconProps} />;
-  return <Dot {...iconProps} />;
+  if (status === 'saving') return <Loading className={styles.spin} {...iconProps} size={14} />;
+  if (status === 'saved') return <CheckOne {...iconProps} size={14} />;
+  if (status === 'conflict' || status === 'error') return <Error {...iconProps} size={14} />;
+  return <Dot {...iconProps} size={14} />;
 }
 
 interface ChromeIconButtonProps {
