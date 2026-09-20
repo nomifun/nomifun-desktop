@@ -16,6 +16,7 @@ import { useCompanion } from '../useNomi';
 import CompanionConversation from './CompanionConversation';
 import CompanionDevicesControl from './CompanionDevicesControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
+import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import SystemPermissionReminder from '@/renderer/pages/conversation/components/SystemPermissionReminder';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
 
@@ -52,8 +53,11 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation, extraTabs }) => {
       conversation_id={conversation.id}
       backend='nomi'
       agent_name={profile?.name}
-      headerControls={companionId && conversation.agent_snapshot?.required_resource_kinds.includes('knowledge_base')
-        ? <KnowledgeControl target={{ kind: 'companion', id: companionId }} /> : null}
+      headerControls={<div className='flex items-center gap-8px'>
+        <IdmmControl target={{ id: conversation.id }} />
+        {companionId && conversation.agent_snapshot?.required_resource_kinds.includes('knowledge_base')
+          ? <KnowledgeControl target={{ kind: 'companion', id: companionId }} /> : null}
+      </div>}
       disableRename
       workspaceEnabled={Boolean(workspace)}
       workspacePath={workspace || undefined}

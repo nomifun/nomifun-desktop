@@ -5,6 +5,17 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Intelligent Decision (IDMM) is restored on canonical AgentSessions.** Each
+  Session can opt into a model-free rule guard or rules plus an explicitly
+  selected bypass model. The supervisor recovers retryable provider faults and
+  safe model-stage stalls, answers explicit safe choices, records bounded
+  idempotent interventions, and never interrupts an in-flight tool or approves
+  credential, payment, permission, or destructive prompts. The global model
+  failover queue is now frozen into newly created Nomi Session routes; existing
+  immutable Sessions are not rebound. Agent Workbench now stores IDMM under a
+  Revision's runtime policy (not the Capability Catalog); each new Session
+  receives that frozen default once and can then override it independently.
+
 - **Breaking: MiniApp and Plugin are one Plugin product model.** Products,
   projects, immutable releases, capabilities, surfaces and managed storage use
   Plugin identities and plugin_* tables. The old MiniApp API, CLI, bridge names

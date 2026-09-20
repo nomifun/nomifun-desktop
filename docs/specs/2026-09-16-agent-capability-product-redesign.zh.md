@@ -386,6 +386,10 @@ AutoWork 不是 Agent Runtime，也不是模型 Tool。它是 Requirements Platf
 
 ### 6.3 IDMM：当前是旁路监督器，目标应拆解
 
+> 2026-09-20 更新：IDMM 已按 canonical AgentSession 边界恢复。下述“拆解”仍约束
+> owner 和权限模型，但“不再保留 IDMM 产品层”的旧结论已被重建方案取代。IDMM
+> 继续不是 Agent Capability；AgentPreset 只保存其版本化运行策略默认值。
+
 当前 IDMM（Intelligent Decision-Making Mode）在 Conversation/Terminal 外部轮询会话，检测 Provider
 故障和决策停滞，通过规则或旁路模型进行干预。它与 AutoWork 配合时，AutoWork 提供推进，IDMM
 尝试保证单轮存活。
@@ -406,13 +410,14 @@ AutoWork 不是 Agent Runtime，也不是模型 Tool。它是 Requirements Platf
 目标状态：
 
 - `idmm.observe`、`idmm.intervene`、`idmm.fallback_policy` 不再是 Agent Capability；
-- Agent Session 不再需要旁路模型偷偷形成第二个决策者；
+- 旁路模型必须是显式配置、无工具、受限上下文和约束输出的辅助决策者；
 - Runtime 内的恢复和决策逻辑遵守同一 Snapshot、输入来源、效果账本和终态；
 - AutoWork 使用同一执行回执决定继续或暂停；
 - Terminal 若仍需要守护，使用 Terminal 专用配置和实现。
 
-职责迁移完成后，删除 Agent 路径中的独立 `nomifun-idmm` 监督循环、对应 UI 状态和 IDMM 产品名称；
-Terminal 若仍需要守护，使用 Terminal Supervisor 的领域名称，不保留横跨所有会话的 IDMM 执行层。
+恢复后的 `nomifun-idmm` 只观察 canonical Session 事实并通过同一命令入口介入；它不恢复
+Terminal probe、第二套 Session/Runtime 或跨域私有执行状态。Terminal 若仍需要守护，继续
+使用 Terminal Supervisor 的领域名称。
 
 ### 6.4 三者与 AgentPreset 的关系
 
@@ -420,7 +425,7 @@ Terminal 若仍需要守护，使用 Terminal Supervisor 的领域名称，不�
 | --- | --- |
 | Requirements Platform | 可选 `requirements` Module 及精确 Actions |
 | AutoWork | 不保存 runner；AutoWork 配置单独引用 exact AgentPreset Revision |
-| IDMM | 不保存 IDMM Capability；需要的可靠性由 Runtime/Execution policy 强制提供 |
+| IDMM | 不保存 IDMM Capability；`runtime_policy.idmm` 保存新 Session 的版本化默认值，Session 创建后独立覆盖 |
 | AgentExecution | 可由 `agent.collaboration` Actions 发起，但持久 Execution 不属于 Preset |
 
 ## 7. Browser 产品模型纠正

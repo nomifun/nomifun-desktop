@@ -15,7 +15,7 @@ describe('GuidPage advanced controls', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
-    expect(source.includes('IdmmControl')).toBe(false);
+    expect(source.includes('<IdmmControl')).toBe(true);
     expect(source.includes('<AgentResourcePicker')).toBe(true);
     expect(source.includes('<KnowledgeControl')).toBe(true);
     expect(source.includes('knowledgeEnabled && (')).toBe(true);
@@ -36,7 +36,9 @@ describe('GuidPage advanced controls', () => {
     const source = readSource(new URL('./hooks/useGuidSessionOptions.ts', import.meta.url));
 
     expect(source.includes('autoWork: AutoWorkDraftValue')).toBe(true);
-    expect(source.includes('IIdmmConfig')).toBe(false);
+    expect(source.includes('idmm: IIdmmConfig')).toBe(true);
+    expect(source.includes('setIdmmDefault: (next: IIdmmConfig) => void')).toBe(true);
+    expect(source.includes('idmmOverriddenRef.current')).toBe(true);
     expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
   });
 
@@ -71,6 +73,9 @@ describe('GuidPage advanced controls', () => {
       true
     );
     expect(capabilityHook.includes('requiredResourceKindsForDocument')).toBe(true);
+    expect(capabilityHook.includes('document.runtime_policy?.idmm')).toBe(true);
+    expect(page.includes('presetCapabilities.idmm')).toBe(true);
+    expect(page.includes('const idmmControlEnabled = !isCompanionAgent')).toBe(true);
   });
 
   test('shows a visible error when selected Preset capabilities cannot be resolved', () => {

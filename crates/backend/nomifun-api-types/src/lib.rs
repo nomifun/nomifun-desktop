@@ -14,6 +14,7 @@ mod conversation;
 mod cron;
 mod custom_agent;
 mod file;
+mod idmm;
 mod knowledge;
 mod lifecycle;
 mod managed_model;
@@ -117,6 +118,10 @@ pub use file::{
     SnapshotBaselineRequest, SnapshotCompareResponse, SnapshotDiscardRequest, SnapshotInfoResponse,
     SnapshotMode, SnapshotStageRequest, SnapshotWorkspaceRequest, WorkspaceFlatFileResponse,
     WorkspaceOfficeWatchRequest, WriteFileRequest, ZipFileEntry, ZipRequest,
+};
+pub use idmm::{
+    IdmmBypassModelRef, IdmmConfig, IdmmIntervention, IdmmInterventionKind,
+    IdmmInterventionStatus, IdmmMode, IdmmRunState, IdmmScanScope, IdmmState,
 };
 pub use knowledge::{
     CreateKnowledgeTagRequest, KnowledgeEmbeddingConfig, KnowledgeEntry, KnowledgeEntryKind,

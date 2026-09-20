@@ -1652,6 +1652,7 @@ mod tests {
             persona: "fixture".to_owned(),
             instructions: "fixture".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {

@@ -6226,6 +6226,7 @@ dependencies = [
  "nomifun-engine-core",
  "nomifun-file",
  "nomifun-gateway",
+ "nomifun-idmm",
  "nomifun-js-authoring",
  "nomifun-js-host",
  "nomifun-js-kernel-adapter",
@@ -6748,6 +6749,26 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "nomifun-idmm"
+version = "0.7.6"
+dependencies = [
+ "async-trait",
+ "dashmap",
+ "nomi-redact",
+ "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

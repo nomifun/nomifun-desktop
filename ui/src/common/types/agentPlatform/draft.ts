@@ -8,6 +8,7 @@ import type {
   OfficialPresetTemplate,
   SkillCatalogItem,
 } from './contracts';
+import { createDefaultIdmmConfig } from '../idmm';
 
 export function canonicalizeDraftValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalizeDraftValue);
@@ -40,6 +41,9 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   persona: '',
   instructions: '',
   starter_prompts: [],
+  runtime_policy: {
+    idmm: createDefaultIdmmConfig(),
+  },
 });
 
 const selection = (capability: ExactCatalogRef<'capability'>): CapabilitySelection => ({
@@ -67,6 +71,7 @@ export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft => {
   const cloned = structuredClone(draft);
   cloned.document.chat_route_records ??= {};
   cloned.document.starter_prompts ??= [];
+  cloned.document.runtime_policy ??= { idmm: createDefaultIdmmConfig() };
   return cloned;
 };
 

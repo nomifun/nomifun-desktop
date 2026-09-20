@@ -403,6 +403,26 @@ mod tests {
         set_global_failover_config(&client_prefs, &cfg)
             .await
             .unwrap();
+        let idmm_key = "agent_session.idmm.0190f5fe-7c00-7a00-8000-000000000099";
+        let idmm_value = serde_json::json!({
+            "schema_version": 1,
+            "session_id": "0190f5fe-7c00-7a00-8000-000000000099",
+            "revision": 3,
+            "config": {
+                "mode": "rule_plus_model",
+                "bypass_model": {
+                    "provider_id": "0190f5fe-7c00-7a00-8000-000000000026",
+                    "model": "sidecar"
+                }
+            },
+            "last_checked_at": null,
+            "interventions": []
+        })
+        .to_string();
+        client_prefs
+            .upsert_batch(&[(idmm_key, idmm_value.as_str())])
+            .await
+            .unwrap();
 
         SqliteProviderRepository::new(db.pool().clone())
             .delete("0190f5fe-7c00-7a00-8000-000000000026")
@@ -411,6 +431,11 @@ mod tests {
         let after = get_global_failover_config(&client_prefs).await;
         assert_eq!(after.queue.len(), 1);
         assert_eq!(after.queue[0].provider_id, "0190f5fe-7c00-7a00-8000-000000000023");
+        let idmm = client_prefs.get_by_keys(&[idmm_key]).await.unwrap();
+        let idmm: serde_json::Value = serde_json::from_str(&idmm[0].value).unwrap();
+        assert_eq!(idmm["revision"], 4);
+        assert_eq!(idmm["config"]["mode"], "rule_only");
+        assert_eq!(idmm["config"]["bypass_model"], serde_json::json!({}));
     }
 
     #[tokio::test]

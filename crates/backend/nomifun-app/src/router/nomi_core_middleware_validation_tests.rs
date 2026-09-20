@@ -124,6 +124,7 @@ fn compile_selection(
             persona: "fixture".into(),
             instructions: "fixture".into(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         },
         contribution_locks: vec![contribution_lock],
         created_by: "fixture-owner".into(),

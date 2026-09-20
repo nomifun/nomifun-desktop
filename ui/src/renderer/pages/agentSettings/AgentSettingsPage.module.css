@@ -84,6 +84,15 @@
 .nativeSelect:disabled { cursor:not-allowed; opacity:.55; }
 .fieldHint { color: var(--agent-muted); font-size: 12px; line-height: 1.6; }
 .modelPicker { min-width: 0; display: grid; gap: 7px; }
+.runtimePolicyBoundary { flex-shrink:0; padding:4px 8px; border:1px solid rgba(var(--primary-6),.18); border-radius:999px; background:rgba(var(--primary-6),.06); color:rgb(var(--primary-6)); font-size:10px; font-weight:600; line-height:1.4; }
+.runtimePolicyFlow { list-style:none; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:22px; margin:0 0 18px; padding:0; }
+.runtimePolicyFlowStep { position:relative; display:flex; align-items:flex-start; gap:9px; min-width:0; padding:11px 12px; border:1px solid var(--agent-border); border-radius:10px; background:var(--color-bg-1); }
+.runtimePolicyFlowStep:not(:last-child)::after { content:'→'; position:absolute; right:-17px; top:50%; transform:translateY(-50%); color:var(--agent-muted); font-size:13px; }
+.runtimePolicyFlowStep > span:last-child { min-width:0; display:flex; flex-direction:column; gap:3px; }
+.runtimePolicyFlowStep strong { color:var(--color-text-1); font-size:12px; font-weight:600; line-height:1.45; }
+.runtimePolicyFlowStep small { color:var(--agent-muted); font-size:10px; line-height:1.5; }
+.runtimePolicyStepNumber { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; flex:0 0 20px; border-radius:6px; background:rgba(var(--primary-6),.09); color:rgb(var(--primary-6)); font-size:10px; font-weight:700; }
+.runtimePolicyEditor { min-width:0; padding:16px; border:1px solid var(--agent-border); border-radius:14px; background:var(--color-fill-1); }
 .inlineNotice { margin: 16px 0; border-radius: 9px; }
 .inlineEmpty { padding: 20px 14px; border-radius: 9px; background: var(--color-fill-1); color: var(--agent-muted); font-size: 12px; line-height: 1.7; }
 .tagRow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
@@ -149,4 +158,8 @@
   .capabilityPanel { height:auto; flex:none; }
   .actionBar { flex-wrap:wrap; padding:12px; gap:8px; }
   .templateSaveState { display:none; }
+  .runtimePolicyFlow { grid-template-columns:1fr; gap:8px; }
+  .runtimePolicyFlowStep:not(:last-child)::after { content:'↓'; right:auto; left:21px; top:auto; bottom:-10px; transform:none; z-index:1; }
+  .runtimePolicyBoundary { max-width:180px; white-space:normal; text-align:right; }
+  .runtimePolicyEditor { padding:12px; }
 }

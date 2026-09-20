@@ -1,0 +1,60 @@
+{
+  "title": "智能决策",
+  "shortLabel": "智能决策",
+  "description": "在主模型意外中断或把决定交给用户时自动值守。规则优先；只有规则无法安全判断时才会调用旁路模型。",
+  "saved": "智能决策配置已保存",
+  "evaluated": "已完成一次即时检查",
+  "evaluateNow": "立即检查",
+  "seconds": "秒",
+  "recoverProviderFailures": "恢复供应商/网络故障",
+  "recoverStalledTurns": "恢复模型静默超时",
+  "autoSelectOptions": "自动选择安全选项",
+  "preferRecommended": "优先推荐项",
+  "idleTimeout": "静默判定阈值",
+  "bypassModel": "旁路模型",
+  "scanScope": "旁路阅读范围",
+  "contextMessages": "最近消息数",
+  "recentActivity": "最近介入",
+  "mode": {
+    "label": "值守模式",
+    "off": "关闭",
+    "ruleOnly": "规则值守",
+    "rulePlusModel": "规则 + 旁路模型",
+    "ruleOnlyHint": "完全不调用模型。可恢复可重试故障，并在明确选项中选择首个安全项；权限、凭据、付款和破坏性决定始终等待人工。",
+    "rulePlusModelHint": "先执行同一套确定性规则；只有开放问题或歧义选择无法解决时，才把受限上下文交给旁路模型。"
+  },
+  "scope": {
+    "lastTurn": "仅最后一轮",
+    "lastMessages": "最近消息",
+    "fullSession": "完整会话（受字符上限约束）"
+  },
+  "state": {
+    "off": "已关闭",
+    "monitoring": "值守中",
+    "intervening": "正在介入",
+    "degraded": "介入失败"
+  },
+  "interventionStatus": {
+    "pending": "处理中",
+    "succeeded": "已恢复",
+    "failed": "失败",
+    "halted": "等待人工"
+  },
+  "interventionReason": {
+    "tool_stalled_safety_halt": "工具长时间无进展；为避免重复副作用，已等待人工",
+    "model_stalled": "主模型在非工具阶段超过静默阈值",
+    "recovery_limit_reached": "供应商故障恢复已达到重试上限",
+    "provider_fault_detected": "检测到可恢复的供应商、网络或限流故障",
+    "sensitive_input_required": "问题涉及凭据、付款或权限，规则禁止自动回答",
+    "rule_selected_safe_option": "规则选择了首个安全选项",
+    "bypass_model_decision": "规则无法确定，旁路模型给出了受约束决策",
+    "bypass_model_halted": "旁路模型选择停止并等待人工输入",
+    "bypass_model_failed": "旁路模型未能完成受约束决策",
+    "rule_cannot_answer": "规则值守无法安全回答开放问题，已等待人工",
+    "destructive_answer_rejected": "候选回答包含破坏性操作，已拒绝自动发送"
+  },
+  "validation": {
+    "bypassRequired": "请先选择旁路模型",
+    "noChatModel": "没有可用于旁路决策的聊天模型"
+  }
+}

@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ExecutionModelRef;
+use crate::{ExecutionModelRef, IdmmConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +22,14 @@ pub struct AgentKnowledgePolicy {
     pub eagerness: Option<String>,
     #[serde(default)]
     pub grounded: bool,
+}
+
+/// Versioned defaults for Session behavior that do not grant model Actions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRuntimePolicyDto {
+    #[serde(default)]
+    pub idmm: IdmmConfig,
 }
 
 impl Default for AgentKnowledgePolicy {
@@ -272,6 +280,8 @@ pub struct AgentPresetDocumentDto {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starter_prompts: Vec<String>,
+    #[serde(default)]
+    pub runtime_policy: AgentRuntimePolicyDto,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1133,6 +1143,21 @@ mod snapshot_tests {
             "\"user\""
         );
         assert!(serde_json::from_str::<AgentPresetSourceDto>("\"package\"").is_err());
+    }
+
+    #[test]
+    fn legacy_agent_document_defaults_to_idmm_off() {
+        let document: AgentPresetDocumentDto = serde_json::from_value(json!({
+            "schema_version": "1.0.0",
+            "model_route_refs": {},
+            "enabled_capabilities": [],
+            "skill_bindings": [],
+            "persona": "",
+            "instructions": ""
+        }))
+        .unwrap();
+        assert_eq!(document.runtime_policy.idmm.mode, crate::IdmmMode::Off);
+        assert!(document.runtime_policy.idmm.recover_provider_failures);
     }
 
     #[test]

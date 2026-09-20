@@ -1065,6 +1065,16 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
     ),
     json_text_ref!(
+        "client_preferences", "value", "$.config.bypass_model.provider_id (agent_session.idmm.*)",
+        "SELECT json_extract(value, '$.config.bypass_model.provider_id') AS value FROM client_preferences WHERE key GLOB 'agent_session.idmm.*' AND json_valid(value) AND json_type(value, '$.config.bypass_model.provider_id') = 'text'" =>
+        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+    ),
+    json_text_ref!(
+        "client_preferences", "value", "$.session_id (agent_session.idmm.*)",
+        "SELECT json_extract(value, '$.session_id') AS value FROM client_preferences WHERE key GLOB 'agent_session.idmm.*' AND json_valid(value)" =>
+        "agent_sessions", "agent_session_id", "idx_client_preferences_provider_key", Cascade, RequireParent
+    ),
+    json_text_ref!(
         "client_preferences", "value", "$[].provider_id",
         "SELECT json_extract(item.value, '$.provider_id') AS value FROM client_preferences preference, json_each(preference.value) item WHERE preference.key = 'nomi.collaborationModels' AND json_valid(preference.value)" =>
         "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent

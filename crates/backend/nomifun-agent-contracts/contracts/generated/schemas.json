@@ -116,6 +116,116 @@
   },
   "agent_preset_revision": {
     "$defs": {
+      "AgentIdmmBypassModelRef": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AgentIdmmMode": {
+        "enum": [
+          "off",
+          "rule_only",
+          "rule_plus_model"
+        ],
+        "type": "string"
+      },
+      "AgentIdmmPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_select_options": {
+            "default": true,
+            "type": "boolean"
+          },
+          "bypass_model": {
+            "$ref": "#/$defs/AgentIdmmBypassModelRef",
+            "default": {}
+          },
+          "idle_timeout_secs": {
+            "default": 90,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_context_chars": {
+            "default": 8000,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_context_messages": {
+            "default": 12,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_interventions_per_hour": {
+            "default": 20,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_interval_secs": {
+            "default": 10,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/$defs/AgentIdmmMode",
+            "default": "off"
+          },
+          "prefer_recommended": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recover_provider_failures": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recover_stalled_turns": {
+            "default": true,
+            "type": "boolean"
+          },
+          "scan_interval_secs": {
+            "default": 15,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scan_scope": {
+            "$ref": "#/$defs/AgentIdmmScanScope",
+            "default": "last_messages"
+          }
+        },
+        "type": "object"
+      },
+      "AgentIdmmScanScope": {
+        "enum": [
+          "last_turn",
+          "last_messages",
+          "full_session"
+        ],
+        "type": "string"
+      },
       "AgentPresetRevisionPayload": {
         "additionalProperties": false,
         "properties": {
@@ -158,6 +268,10 @@
           "persona": {
             "type": "string"
           },
+          "runtime_policy": {
+            "$ref": "#/$defs/AgentRuntimePolicy",
+            "description": "Session supervision defaults. These are runtime policy, never a model\nCapability grant, and are copied only when a new Session is created."
+          },
           "schema_version": {
             "type": "string"
           },
@@ -188,6 +302,31 @@
           "persona",
           "instructions"
         ],
+        "type": "object"
+      },
+      "AgentRuntimePolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "idmm": {
+            "$ref": "#/$defs/AgentIdmmPolicy",
+            "default": {
+              "auto_select_options": true,
+              "bypass_model": {},
+              "idle_timeout_secs": 90,
+              "max_context_chars": 8000,
+              "max_context_messages": 12,
+              "max_interventions_per_hour": 20,
+              "max_retries": 3,
+              "min_interval_secs": 10,
+              "mode": "off",
+              "prefer_recommended": true,
+              "recover_provider_failures": true,
+              "recover_stalled_turns": true,
+              "scan_interval_secs": 15,
+              "scan_scope": "last_messages"
+            }
+          }
+        },
         "type": "object"
       },
       "CapabilitySelection": {
@@ -516,6 +655,116 @@
   },
   "agent_preset_revision_digest_input": {
     "$defs": {
+      "AgentIdmmBypassModelRef": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AgentIdmmMode": {
+        "enum": [
+          "off",
+          "rule_only",
+          "rule_plus_model"
+        ],
+        "type": "string"
+      },
+      "AgentIdmmPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_select_options": {
+            "default": true,
+            "type": "boolean"
+          },
+          "bypass_model": {
+            "$ref": "#/$defs/AgentIdmmBypassModelRef",
+            "default": {}
+          },
+          "idle_timeout_secs": {
+            "default": 90,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_context_chars": {
+            "default": 8000,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_context_messages": {
+            "default": 12,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_interventions_per_hour": {
+            "default": 20,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_interval_secs": {
+            "default": 10,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/$defs/AgentIdmmMode",
+            "default": "off"
+          },
+          "prefer_recommended": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recover_provider_failures": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recover_stalled_turns": {
+            "default": true,
+            "type": "boolean"
+          },
+          "scan_interval_secs": {
+            "default": 15,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scan_scope": {
+            "$ref": "#/$defs/AgentIdmmScanScope",
+            "default": "last_messages"
+          }
+        },
+        "type": "object"
+      },
+      "AgentIdmmScanScope": {
+        "enum": [
+          "last_turn",
+          "last_messages",
+          "full_session"
+        ],
+        "type": "string"
+      },
       "AgentPresetRevisionPayload": {
         "additionalProperties": false,
         "properties": {
@@ -558,6 +807,10 @@
           "persona": {
             "type": "string"
           },
+          "runtime_policy": {
+            "$ref": "#/$defs/AgentRuntimePolicy",
+            "description": "Session supervision defaults. These are runtime policy, never a model\nCapability grant, and are copied only when a new Session is created."
+          },
           "schema_version": {
             "type": "string"
           },
@@ -588,6 +841,31 @@
           "persona",
           "instructions"
         ],
+        "type": "object"
+      },
+      "AgentRuntimePolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "idmm": {
+            "$ref": "#/$defs/AgentIdmmPolicy",
+            "default": {
+              "auto_select_options": true,
+              "bypass_model": {},
+              "idle_timeout_secs": 90,
+              "max_context_chars": 8000,
+              "max_context_messages": 12,
+              "max_interventions_per_hour": 20,
+              "max_retries": 3,
+              "min_interval_secs": 10,
+              "mode": "off",
+              "prefer_recommended": true,
+              "recover_provider_failures": true,
+              "recover_stalled_turns": true,
+              "scan_interval_secs": 15,
+              "scan_scope": "last_messages"
+            }
+          }
+        },
         "type": "object"
       },
       "CapabilitySelection": {
@@ -875,6 +1153,141 @@
   },
   "agent_preset_revision_payload": {
     "$defs": {
+      "AgentIdmmBypassModelRef": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AgentIdmmMode": {
+        "enum": [
+          "off",
+          "rule_only",
+          "rule_plus_model"
+        ],
+        "type": "string"
+      },
+      "AgentIdmmPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_select_options": {
+            "default": true,
+            "type": "boolean"
+          },
+          "bypass_model": {
+            "$ref": "#/$defs/AgentIdmmBypassModelRef",
+            "default": {}
+          },
+          "idle_timeout_secs": {
+            "default": 90,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_context_chars": {
+            "default": 8000,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_context_messages": {
+            "default": 12,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_interventions_per_hour": {
+            "default": 20,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_retries": {
+            "default": 3,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_interval_secs": {
+            "default": 10,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mode": {
+            "$ref": "#/$defs/AgentIdmmMode",
+            "default": "off"
+          },
+          "prefer_recommended": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recover_provider_failures": {
+            "default": true,
+            "type": "boolean"
+          },
+          "recover_stalled_turns": {
+            "default": true,
+            "type": "boolean"
+          },
+          "scan_interval_secs": {
+            "default": 15,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "scan_scope": {
+            "$ref": "#/$defs/AgentIdmmScanScope",
+            "default": "last_messages"
+          }
+        },
+        "type": "object"
+      },
+      "AgentIdmmScanScope": {
+        "enum": [
+          "last_turn",
+          "last_messages",
+          "full_session"
+        ],
+        "type": "string"
+      },
+      "AgentRuntimePolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "idmm": {
+            "$ref": "#/$defs/AgentIdmmPolicy",
+            "default": {
+              "auto_select_options": true,
+              "bypass_model": {},
+              "idle_timeout_secs": 90,
+              "max_context_chars": 8000,
+              "max_context_messages": 12,
+              "max_interventions_per_hour": 20,
+              "max_retries": 3,
+              "min_interval_secs": 10,
+              "mode": "off",
+              "prefer_recommended": true,
+              "recover_provider_failures": true,
+              "recover_stalled_turns": true,
+              "scan_interval_secs": 15,
+              "scan_scope": "last_messages"
+            }
+          }
+        },
+        "type": "object"
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -1128,6 +1541,10 @@
       },
       "persona": {
         "type": "string"
+      },
+      "runtime_policy": {
+        "$ref": "#/$defs/AgentRuntimePolicy",
+        "description": "Session supervision defaults. These are runtime policy, never a model\nCapability grant, and are copied only when a new Session is created."
       },
       "schema_version": {
         "type": "string"

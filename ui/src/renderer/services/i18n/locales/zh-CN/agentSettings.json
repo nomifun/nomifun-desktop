@@ -369,6 +369,7 @@
     "myHint": "为你的工作准备好合适的 Agent",
     "capabilityTab": "模块与操作",
     "settingsTab": "名称与行为",
+    "runtimeTab": "运行策略",
     "skillsTab": "技能与扩展",
     "saveAsMine": "保存为我的 Agent",
     "customizeTitle": "自定义这份预设",
@@ -391,6 +392,7 @@
     "settingsHint": "定义身份、模型和工作方式",
     "manageModels": "前往模型管理",
     "modelNeeded": "先配置一个可用的聊天模型，再保存 Agent。",
+    "runtimePolicyNeeded": "请先为“规则 + 旁路模型”选择旁路模型。",
     "configureChatModel": "配置聊天模型",
     "configureModelReturn": "配置完成后，使用返回按钮继续编辑；本次未保存的 Agent 输入会保留。",
     "returnChanged": "离开期间此 Agent 已发生变化。已打开当前保存版本，未套用先前未保存的输入。",
@@ -450,5 +452,27 @@
     "emptyWorkbenchHint": "当前没有官方预设或个人 Agent。可先创建空白自定义 Agent，再从已安装目录添加模块。",
     "showList": "展开 Agent 列表",
     "hideList": "收起 Agent 列表"
+  },
+  "runtimePolicy": {
+    "title": "运行与值守",
+    "hint": "设置这个 Agent 创建新会话时采用的恢复策略。策略随 Revision 固化，不会追改已有会话。",
+    "noCapabilityGrant": "不增加任何能力或权限",
+    "flowLabel": "IDMM 策略继承方式",
+    "flow": {
+      "agent": {
+        "title": "Agent 默认值",
+        "description": "随当前配置保存进不可变 Revision"
+      },
+      "session": {
+        "title": "新会话冻结",
+        "description": "创建时复制，不读取后来修改的默认值"
+      },
+      "override": {
+        "title": "会话可覆盖",
+        "description": "胶囊只修改当前会话，不反写 Agent"
+      }
+    },
+    "applyNote": "保存 Agent 后仅应用于之后创建的会话；已有会话继续使用各自已经冻结的设置。",
+    "busy": "当前 Agent 正在保存，请稍候。"
   }
 }

@@ -9,6 +9,8 @@ import type {
   AgentPresetDocument,
 } from '@/common/types/agentPlatform';
 import type { AgentPresetId } from '@/common/types/ids';
+import type { IIdmmConfig } from '@/common/types/idmm';
+import { createDefaultIdmmConfig } from '@/common/types/idmm';
 import { requiredResourceKindsForCapabilityReferences } from '@/renderer/hooks/agent/useAgentCapabilityResources';
 import { useEffect, useState } from 'react';
 
@@ -17,6 +19,7 @@ export type GuidPresetCapabilityState = {
   actionIds: ReadonlySet<string>;
   requiredResourceKinds: ReadonlySet<string>;
   skillNames: ReadonlySet<string>;
+  idmm: IIdmmConfig;
   isLoading: boolean;
   error: Error | undefined;
 };
@@ -26,6 +29,7 @@ const emptyState = (): GuidPresetCapabilityState => ({
   actionIds: new Set<string>(),
   requiredResourceKinds: new Set<string>(),
   skillNames: new Set<string>(),
+  idmm: createDefaultIdmmConfig(),
   isLoading: false,
   error: undefined,
 });
@@ -64,6 +68,7 @@ export const useGuidPresetCapabilities = (
       actionIds: new Set<string>(),
       requiredResourceKinds: new Set<string>(),
       skillNames: new Set<string>(),
+      idmm: createDefaultIdmmConfig(),
       isLoading: true,
       error: undefined,
     });
@@ -92,6 +97,9 @@ export const useGuidPresetCapabilities = (
           actionIds,
           requiredResourceKinds: requiredResourceKindsForDocument(document, catalog),
           skillNames: new Set(document.skill_bindings.map((skill) => skill.id)),
+          idmm: structuredClone(
+            document.runtime_policy?.idmm ?? createDefaultIdmmConfig()
+          ),
           isLoading: false,
           error: undefined,
         });
@@ -106,6 +114,7 @@ export const useGuidPresetCapabilities = (
           actionIds: new Set<string>(),
           requiredResourceKinds: new Set<string>(),
           skillNames: new Set<string>(),
+          idmm: createDefaultIdmmConfig(),
           isLoading: false,
           error: normalizedError,
         });

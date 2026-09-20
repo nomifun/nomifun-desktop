@@ -886,6 +886,7 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
         persona: "Echo fixture".to_owned(),
         instructions: "Use the selected echo capability.".to_owned(),
         starter_prompts: Vec::new(),
+        runtime_policy: Default::default(),
     };
     let contribution_locks = Vec::new();
     let mut revision = AgentPresetRevision {

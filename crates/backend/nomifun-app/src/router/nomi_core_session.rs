@@ -106,6 +106,7 @@ pub(crate) struct NomiCoreSessionOwner {
     runtime_control_plane: std::sync::OnceLock<std::sync::Weak<AgentControlPlane>>,
     product_agent_resolver:
         std::sync::OnceLock<std::sync::Weak<NomiCoreProductAgentResolver>>,
+    idmm: std::sync::OnceLock<std::sync::Weak<nomifun_idmm::IdmmService>>,
     canonical: CanonicalAgentSessionOwner,
     runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     user_events: Arc<dyn UserEventSink>,
@@ -603,6 +604,7 @@ impl NomiCoreSessionOwner {
             official_runtime: std::sync::OnceLock::new(),
             runtime_control_plane: std::sync::OnceLock::new(),
             product_agent_resolver: std::sync::OnceLock::new(),
+            idmm: std::sync::OnceLock::new(),
             runtime_sessions,
             user_events,
             background_tasks,
@@ -639,6 +641,77 @@ impl NomiCoreSessionOwner {
         self.product_agent_resolver
             .set(resolver)
             .map_err(|_| AppError::Conflict("Session product Agent resolver already installed".into()))
+    }
+
+    pub(crate) fn install_idmm(
+        &self,
+        service: std::sync::Weak<nomifun_idmm::IdmmService>,
+    ) -> Result<(), AppError> {
+        self.idmm
+            .set(service)
+            .map_err(|_| AppError::Conflict("IDMM supervisor already installed".into()))
+    }
+
+    async fn remove_idmm_state(&self, session_id: &str) -> Result<(), AppError> {
+        if let Some(service) = self.idmm.get().and_then(std::sync::Weak::upgrade) {
+            service.remove(session_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn initialize_idmm_state(
+        &self,
+        session_id: &str,
+        config: nomifun_api_types::IdmmConfig,
+    ) -> Result<(), AppError> {
+        if config.mode == nomifun_api_types::IdmmMode::Off {
+            return Ok(());
+        }
+        let service = self
+            .idmm
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "Agent IDMM policy is enabled but the IDMM supervisor is unavailable".into(),
+                )
+            })?;
+        service.initialize_config(session_id, config).await?;
+        Ok(())
+    }
+
+    async fn validate_idmm_state(
+        &self,
+        config: &nomifun_api_types::IdmmConfig,
+    ) -> Result<(), AppError> {
+        if config.mode == nomifun_api_types::IdmmMode::Off {
+            return Ok(());
+        }
+        let service = self
+            .idmm
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                AppError::Conflict(
+                    "Agent IDMM policy is enabled but the IDMM supervisor is unavailable".into(),
+                )
+            })?;
+        service.validate_configuration(config).await
+    }
+
+    async fn inherit_idmm_state(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+    ) -> Result<(), AppError> {
+        let Some(service) = self.idmm.get().and_then(std::sync::Weak::upgrade) else {
+            return Ok(());
+        };
+        let parent = service.state(parent_session_id).await?;
+        service
+            .initialize_config(child_session_id, parent.config)
+            .await?;
+        Ok(())
     }
 
     /// Create one canonical Session for every product/automation consumer.
@@ -838,6 +911,7 @@ impl NomiCoreSessionOwner {
         }
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
             .map_err(|error| AppError::Forbidden(error.to_string()))?;
+        let idmm_config = idmm_config_from_runtime_policy(&revision.payload.runtime_policy)?;
         let projected = super::agent_binding_projection::project_saved_artifacts(
             &common_owner,
             saved_binding.clone(),
@@ -875,6 +949,7 @@ impl NomiCoreSessionOwner {
             .filter(|capability| capability.consumption.is_contribution())
             .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect();
+        self.validate_idmm_state(&idmm_config).await?;
         let opened = self
             .canonical
             .open_with_provenance(
@@ -890,6 +965,11 @@ impl NomiCoreSessionOwner {
                 now_ms(),
             )
             .await?;
+        self.initialize_idmm_state(
+            opened.session.agent_session_id.as_ref(),
+            idmm_config,
+        )
+        .await?;
         self.canonical_conversation_projection(owner_id, &opened.session.agent_session_id)
             .await?
             .ok_or_else(|| AppError::Internal(
@@ -1747,6 +1827,34 @@ impl NomiCoreSessionOwner {
             owner_id,
             &session_id,
             &format!("cancel:{}", Uuid::now_v7()),
+            nomifun_common::AgentKillReason::UserCancelled,
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn cancel_session_for_idmm(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+    ) -> Result<(), AppError> {
+        let session_id = AgentSessionId::from(session_id.to_owned());
+        if self
+            .canonical
+            .store()
+            .head(&session_id)
+            .await
+            .map_err(agent_session_store_error)?
+            .active_turn_id
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.cancel_turn(
+            owner_id,
+            &session_id,
+            &format!("idmm-timeout:{}", Uuid::now_v7()),
+            nomifun_common::AgentKillReason::IdleTimeout,
         )
         .await?;
         Ok(())
@@ -1757,6 +1865,7 @@ impl NomiCoreSessionOwner {
         owner_id: &str,
         session_id: &AgentSessionId,
         idempotency_key: &str,
+        reason: nomifun_common::AgentKillReason,
     ) -> Result<AgentMutationReceipt, AppError> {
         let head = self
             .canonical
@@ -1795,7 +1904,7 @@ impl NomiCoreSessionOwner {
         self.runtime_sessions.cancel_runtime_turn(
             session_id.as_ref(),
             generation,
-            Some(nomifun_common::AgentKillReason::UserCancelled),
+            Some(reason),
         )?;
         Ok(receipt)
     }
@@ -2641,6 +2750,16 @@ fn control_plane_error_to_app(
     }
 }
 
+fn idmm_config_from_runtime_policy(
+    policy: &nomifun_agent_contracts::AgentRuntimePolicy,
+) -> Result<nomifun_api_types::IdmmConfig, AppError> {
+    serde_json::to_value(&policy.idmm)
+        .and_then(serde_json::from_value)
+        .map_err(|error| {
+            AppError::Conflict(format!("Agent IDMM policy is invalid: {error}"))
+        })
+}
+
 fn product_agent_target_from_request(extra: &Value) -> Option<ProductAgentTarget> {
     let object = extra.as_object()?;
     if let (Some(target_kind), Some(target_id)) = (
@@ -3349,7 +3468,10 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             )
             .await?
         {
-            PreparedAgentSessionDelete::AlreadyDeleted(_) => return Ok(()),
+            PreparedAgentSessionDelete::AlreadyDeleted(_) => {
+                self.remove_idmm_state(session_id.as_ref()).await?;
+                return Ok(());
+            }
             PreparedAgentSessionDelete::Fenced(command) => command,
         };
         self.runtime_sessions
@@ -3364,6 +3486,7 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
             ));
         }
         self.canonical.complete_fenced_delete(&command, now_ms()).await?;
+        self.remove_idmm_state(session_id.as_ref()).await?;
         Ok(())
     }
 
@@ -3517,10 +3640,14 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             )
             .await?
         {
-            PreparedAgentSessionDelete::AlreadyDeleted(_) => return Ok(()),
+            PreparedAgentSessionDelete::AlreadyDeleted(_) => {
+                self.remove_idmm_state(session_id.as_ref()).await?;
+                return Ok(());
+            }
             PreparedAgentSessionDelete::Fenced(command) => command,
         };
         self.canonical.complete_fenced_delete(&command, now_ms()).await?;
+        self.remove_idmm_state(session_id.as_ref()).await?;
         Ok(())
     }
 
@@ -5546,6 +5673,9 @@ impl NomiCoreAgentApiState {
                 .canonical()
                 .complete_fenced_delete(&command, now_ms())
                 .await?;
+            self.session_owner
+                .remove_idmm_state(session_id.as_ref())
+                .await?;
             if let Err(error) = self
                 .wave4_owners
                 .release_session(&owner.principal_id, session_id.as_ref())
@@ -6135,6 +6265,13 @@ impl SessionControlSink for NomiCoreSessionControlSink {
         )
         .await
         .map_err(|error| error.to_string())?;
+        self.session_owner
+            .inherit_idmm_state(
+                self.session_id.as_ref(),
+                result.child_session.agent_session_id.as_ref(),
+            )
+            .await
+            .map_err(|error| error.to_string())?;
         serde_json::to_value(result).map_err(|error| error.to_string())
     }
 }
@@ -8929,6 +9066,7 @@ async fn create_nomi_core_agent_session(
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
+    let idmm_config = idmm_config_from_runtime_policy(&projection.runtime_policy)?;
     let creation_key = request_idempotency_key(
         &headers,
         "nomi-core-agent-session-create",
@@ -8944,6 +9082,7 @@ async fn create_nomi_core_agent_session(
         .filter(|capability| capability.consumption.is_contribution())
         .map(|capability| capability.capability.id.as_ref().to_owned())
         .collect();
+    state.session_owner.validate_idmm_state(&idmm_config).await?;
     let opened = state
         .session_owner
         .canonical()
@@ -8955,6 +9094,10 @@ async fn create_nomi_core_agent_session(
             &creation_key,
             now_ms(),
         )
+        .await?;
+    state
+        .session_owner
+        .initialize_idmm_state(opened.session.agent_session_id.as_ref(), idmm_config)
         .await?;
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
         agent_session_id: opened.session.agent_session_id.as_ref().to_owned(),
@@ -9953,7 +10096,12 @@ async fn cancel_nomi_core_agent_session_turn(
     let principal = authenticated_principal(&owner);
     let receipt = state
         .session_owner
-        .cancel_turn(&principal.principal_id, &session_id, &key)
+        .cancel_turn(
+            &principal.principal_id,
+            &session_id,
+            &key,
+            nomifun_common::AgentKillReason::UserCancelled,
+        )
         .await?;
     Ok(Json(ApiResponse::ok(AgentSessionTurnMutationResponseDto {
         agent_session_id: session_id.as_ref().to_owned(),
@@ -10110,6 +10258,13 @@ async fn fork_nomi_core_agent_session(
             now_ms(),
         )
         .await?;
+    state
+        .session_owner
+        .inherit_idmm_state(
+            session_id.as_ref(),
+            fork.child_session.agent_session_id.as_ref(),
+        )
+        .await?;
     Ok(Json(ApiResponse::ok(ForkAgentSessionResponseDto {
         parent_agent_session_id: session_id.as_ref().to_owned(),
         child_agent_session_id: fork.child_session.agent_session_id.as_ref().to_owned(),
@@ -10250,6 +10405,10 @@ async fn execute_nomi_core_agent_session_delete(
                 .await?
         }
     };
+    state
+        .session_owner
+        .remove_idmm_state(session_id.as_ref())
+        .await?;
     if let Err(error) = state
         .wave4_owners
         .release_session(owner.as_ref(), session_id.as_ref())

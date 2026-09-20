@@ -1,115 +1,43 @@
 # Intelligent Decision (IDMM)
 
-**IDMM** — Intelligent Decision-Making Mode — is Nomi's reliability layer for
-unattended work. It is a **session supervisor** that watches each turn and
-intervenes the moment it stalls, so a long, automated run reaches a terminal
-state instead of hanging on a provider hiccup or a model that has stopped
-making progress.
+IDMM is an opt-in supervisor for the canonical AgentSession. It does not own a
+second session or runtime. It observes durable turns/messages plus live runtime
+progress and sends every recovery through the same AgentSession command boundary.
 
-If [AutoWork](autowork-requirements.md) is the engine that drives work
-*forward*, IDMM is the guard that keeps each turn *moving*. The two are designed
-to compose: AutoWork claims and executes requirements; IDMM makes sure every
-turn it starts actually finishes.
+Personal Agents can save an IDMM default under **Agent Workbench → Runtime
+policy**. That configuration is part of the immutable AgentPreset Revision and
+is copied once when a new AgentSession is created. The new-Session screen can
+override the default before launch, while the conversation capsule changes only
+that Session. Later Agent edits never rewrite existing Sessions. IDMM is not a
+Capability Catalog entry and grants no Tool, Context, resource, or OS permission.
 
-> IDMM is an **optional** supervisor (the `nomifun-idmm` crate). You turn it on
-> per session, from the same place you toggle AutoWork — the session header.
+## Modes
 
-## Why it exists
+**Rule guard** calls no model. It recovers retryable provider/network failures,
+detects model-stage silence, and answers explicit option prompts with the first
+safe option (preferring a marked recommendation). It never auto-answers
+permission, credential, purchase, or destructive prompts. A silent tool/effect
+is not cancelled because doing so could duplicate an external side effect.
 
-Agent turns fail in boring, recoverable ways far more often than they fail in
-interesting ones:
+**Rules + bypass model** runs the same rules first. Only unresolved open questions
+or ambiguous choices are sent to an explicitly selected bypass model. Its
+context is bounded, it receives no tools, and its output is constrained to a
+safe option, a short answer, or halt. Common API keys, tokens, passwords, and
+private keys are best-effort redacted before context leaves the primary Session.
 
-- a provider returns a transient `429` / `5xx` and the turn would otherwise give
-  up;
-- the model retries the same failing call in a loop;
-- the model spins on a tool call and never decides what to do next;
-- the turn simply goes quiet and would eventually hit a hard timeout.
+## Failover and safety
 
-For an interactive session you would just nudge it yourself. For an *unattended*
-session — an AutoWork queue running overnight, a scheduled job, or a task
-delegated to another Agent — there is nobody watching. IDMM is that watcher.
+The global Model Failover queue is frozen into each new AgentSession's immutable
+chat route. The Broker retries/switches routes inside a model call; IDMM wakes the
+task after a whole turn still fails. Existing Sessions are never silently rebound
+when the global queue changes.
 
-## The two tiers
+Every intervention has a stable fingerprint and idempotency key, rate and retry
+budgets, and a bounded audit entry. Session deletion removes its IDMM record. If
+a configured bypass provider is deleted, the Session is downgraded to rule-only.
 
-When IDMM detects a stall it resolves it with the cheapest mechanism that can,
-escalating only when it must.
+## API
 
-### Rule tier (no LLM)
-
-A deterministic policy handles the common, mechanical stalls **without calling a
-model at all** — so it is fast and free:
-
-- **Provider faults** — transient errors and rate limits are absorbed and the
-  turn is retried under a sane backoff instead of failing outright.
-- **Retry loops** — repeated identical retries are detected and broken.
-- **Tool-spin** — a model that keeps re-issuing the same tool call without
-  progress is steered back on track.
-
-Most interventions never get past this tier.
-
-### Sidecar tier (a backup model)
-
-When a stall is genuinely a *decision* problem — the main model is stuck and a
-rule cannot resolve it — IDMM asks a **lightweight sidecar model** to make the
-next decision so the session does not deadlock. The sidecar is a small, cheap
-"second opinion" model: its only job is to unstick the turn, not to take over
-the work.
-
-This is the **bypass model** in product terms: a model that sits beside the main
-agent and steps in only when needed.
-
-## Session guard & keep-alive
-
-Together, the rule tier and the sidecar form the **session guard**: IDMM keeps
-the target alive through faults and decision stalls and shepherds the turn to a
-terminal state. This is what "session keep-alive" means in Nomi — not a dumb
-heartbeat, but an active supervisor that resolves the thing that would otherwise
-have stalled the turn.
-
-## How it composes with AutoWork
-
-IDMM and AutoWork are independent but complementary:
-
-- **AutoWork** claims the next requirement, injects it, waits for the turn to
-  finish, and finalises it.
-- When AutoWork starts a turn, it asks IDMM (if wired) to **ensure supervision**
-  of that target for the duration of the turn.
-- **IDMM** keeps that turn from getting stuck, so it reaches `done` / `failed`
-  cleanly instead of timing out.
-
-The net effect: AutoWork provides forward progress; IDMM provides liveness. A
-queue can run for hours, unattended, and individual transient failures no longer
-abort the run.
-
-```
-AutoWork: claim ─▶ inject ─▶ [ turn runs ] ─▶ finalize (done/failed)
-                                  ▲
-                                  │ ensure supervision
-                              IDMM guard ──▶ rule tier ──▶ (escalate) ──▶ sidecar model
-```
-
-See `crates/backend/nomifun-idmm/` for the per-tier policy detail and the
-intervention log API.
-
-## Enabling it
-
-IDMM is toggled from the **session header**, the same control surface as
-AutoWork. Turn it on for a conversation or a terminal target that you intend to
-leave running unattended. There is nothing to configure for the rule tier; the
-sidecar tier uses a lightweight model from your configured providers.
-
-## When to use it
-
-- **Use it** for any unattended run: AutoWork queues, scheduled
-  ([cron](scheduled-tasks.md)) jobs, overnight batches, or long terminal-driven
-  agent sessions.
-- **You may not need it** for short, interactive sessions where you are watching
-  the turn and can intervene yourself.
-
-## See also
-
-- [AutoWork & Requirements](autowork-requirements.md) — the engine IDMM most
-  often guards.
-- [Scheduled Tasks](scheduled-tasks.md) — unattended jobs that benefit from
-  supervision.
-- [Terminal](terminal.md) — IDMM can supervise long-running terminal targets.
+- `GET /api/agent-sessions/{id}/idmm`
+- `PUT /api/agent-sessions/{id}/idmm`
+- `POST /api/agent-sessions/{id}/idmm/evaluate`

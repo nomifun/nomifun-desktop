@@ -9,6 +9,7 @@ import { I18nextProvider } from 'react-i18next';
 
 import { ipcBridge } from '@/common';
 import { parseConversationId } from '@/common/types/ids';
+import { createDefaultIdmmConfig } from '@/common/types/idmm';
 import { useGuidSessionOptions } from './useGuidSessionOptions';
 
 const i18n = createInstance();
@@ -19,6 +20,32 @@ const wrapper = ({ children }: PropsWithChildren) => (
 );
 
 afterEach(() => cleanup());
+
+test('Agent IDMM defaults rely on server inheritance while an explicit Session override is applied', async () => {
+  const setConfig = spyOn(ipcBridge.idmm.setConfig, 'invoke').mockResolvedValue(
+    undefined as never
+  );
+  const hook = renderHook(() => useGuidSessionOptions(), { wrapper });
+  const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000018');
+
+  act(() =>
+    hook.result.current.setIdmmDefault({
+      ...createDefaultIdmmConfig(),
+      mode: 'rule_only',
+    })
+  );
+  await hook.result.current.applyToConversation(conversationId);
+  expect(setConfig).not.toHaveBeenCalled();
+
+  act(() => hook.result.current.setIdmm(createDefaultIdmmConfig()));
+  await hook.result.current.applyToConversation(conversationId);
+  expect(setConfig).toHaveBeenCalledTimes(1);
+  expect(setConfig.mock.calls[0]?.[0]).toEqual({
+    agent_session_id: conversationId,
+    config: createDefaultIdmmConfig(),
+  });
+  setConfig.mockRestore();
+});
 
 test('AutoWork launch configuration failure propagates to the Guid session owner', async () => {
   const failure = new Error('frozen AgentSession workspace is unavailable');

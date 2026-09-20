@@ -37,6 +37,7 @@ import ssh from './ssh.json';
 import pluginRuntime from './pluginRuntime.json';
 import agentSettings from './agentSettings.json';
 import pluginWorkbench from './pluginWorkbench.json';
+import idmm from './idmm.json';
 
 export default {
   common,
@@ -73,4 +74,5 @@ export default {
   pluginRuntime,
   agentSettings,
   pluginWorkbench,
+  idmm,
 };

@@ -2963,6 +2963,7 @@ mod tests {
             persona: "Wave 2 state test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         let contribution_locks = vec![materialized
             .capability(&CapabilityId::from(capability_id))
@@ -3503,6 +3504,7 @@ mod tests {
                 persona: "Browser provider fixture".to_owned(),
                 instructions: "Navigate with the selected Browser provider.".to_owned(),
                 starter_prompts: Vec::new(),
+                runtime_policy: Default::default(),
             };
             let contribution_locks = payload
                 .enabled_capabilities

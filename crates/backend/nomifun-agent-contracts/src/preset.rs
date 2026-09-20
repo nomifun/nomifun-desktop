@@ -235,6 +235,13 @@ pub struct AgentPresetRevisionPayload {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starter_prompts: Vec<String>,
+    /// Session supervision defaults. These are runtime policy, never a model
+    /// Capability grant, and are copied only when a new Session is created.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::AgentRuntimePolicy::is_default"
+    )]
+    pub runtime_policy: crate::AgentRuntimePolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -270,6 +277,7 @@ impl AgentPresetRevision {
     }
 
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        self.payload.runtime_policy.validate()?;
         validate_chat_route_records_for_revision(
             &self.payload,
             Some(&self.reference.revision_id()),
@@ -1771,9 +1779,11 @@ mod tests {
             persona: String::new(),
             instructions: String::new(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         })
         .unwrap();
         assert!(payload.get("context_order").is_none());
+        assert!(payload.get("runtime_policy").is_none());
         let legacy: AgentPresetRevisionPayload = serde_json::from_value(payload.clone()).unwrap();
         assert!(legacy.context_order.is_empty());
         assert!(payload.get("middleware_order").is_none());

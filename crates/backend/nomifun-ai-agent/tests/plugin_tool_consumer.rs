@@ -703,6 +703,7 @@ fn revision_with_capabilities(
             persona: String::new(),
             instructions: String::new(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         },
         contribution_locks: [AGENT_TOOL, CONTEXT_CAPABILITY]
             .into_iter()
@@ -1569,6 +1570,7 @@ fn compile_plugin_product_fixture(
         persona: "Plugin fixture".to_owned(),
         instructions: "Use the Plugin fixture.".to_owned(),
         starter_prompts: Vec::new(),
+        runtime_policy: Default::default(),
     };
     let mut revision = AgentPresetRevision {
         reference: PresetRevisionRef {

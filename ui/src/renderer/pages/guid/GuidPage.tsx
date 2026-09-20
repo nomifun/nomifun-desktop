@@ -18,6 +18,7 @@ import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPicker';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
+import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
@@ -66,6 +67,7 @@ import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 import { useCompanion } from '@/renderer/pages/nomi/useNomi';
 import { parseCompanionId } from '@/common/types/ids';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
+import { createDefaultIdmmConfig } from '@/common/types/idmm';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
@@ -172,6 +174,7 @@ const GuidPage: React.FC = () => {
     resourceSelectionValue
   );
   const advancedControlsEnabled = !isCompanionAgent && presetResourceResolutionReady && presetCapabilityIds.size > 0;
+  const idmmControlEnabled = !isCompanionAgent && presetResourceResolutionReady;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
   const collaborationLaunchConfigured = collaborationEnabled
@@ -198,6 +201,7 @@ const GuidPage: React.FC = () => {
   const selectedAgentResourceKey = agentSelection.selection.kind === 'template'
     ? `template:${agentSelection.selection.templateKey}`
     : `preset:${agentSelection.selection.presetId}`;
+  const appliedIdmmDefaultRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     setResourceSelectionValue({});
     advancedConfig.setKnowledge({
@@ -208,6 +212,24 @@ const GuidPage: React.FC = () => {
       kb_ids: [],
     });
   }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
+  useEffect(() => {
+    if (!presetResourceResolutionReady) return;
+    const sourceKey = `${location.key}:${selectedAgentResourceKey}`;
+    if (appliedIdmmDefaultRef.current === sourceKey) return;
+    advancedConfig.setIdmmDefault(
+      agentSelection.selection.kind === 'preset'
+        ? presetCapabilities.idmm
+        : createDefaultIdmmConfig()
+    );
+    appliedIdmmDefaultRef.current = sourceKey;
+  }, [
+    advancedConfig.setIdmmDefault,
+    agentSelection.selection.kind,
+    location.key,
+    presetCapabilities.idmm,
+    presetResourceResolutionReady,
+    selectedAgentResourceKey,
+  ]);
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
@@ -234,7 +256,7 @@ const GuidPage: React.FC = () => {
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
         allowKnowledgeBinding: knowledgeEnabled,
-        allowAutomation: advancedControlsEnabled,
+        allowAutomation: advancedControlsEnabled || idmmControlEnabled,
       }),
     autoWork: effectiveAutoWork,
     workspaceEnabled,
@@ -490,7 +512,7 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled ? (
+  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled || idmmControlEnabled ? (
     <>
       {knowledgeEnabled && (
         <KnowledgeControl
@@ -503,17 +525,25 @@ const GuidPage: React.FC = () => {
         />
       )}
       {advancedControlsEnabled && (
-        <>
-          <AutoWorkControl
-            key={`autowork-${location.key}`}
-            draft={{
-              value: advancedConfig.autoWork,
-              onChange: advancedConfig.setAutoWork,
-            }}
-            applyNote={t('guid.advanced.applyNote')}
-            disabledReason={collaborationLaunchConfigured ? t('guid.collaboration.autoworkExclusive') : undefined}
-          />
-        </>
+        <AutoWorkControl
+          key={`autowork-${location.key}`}
+          draft={{
+            value: advancedConfig.autoWork,
+            onChange: advancedConfig.setAutoWork,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+          disabledReason={collaborationLaunchConfigured ? t('guid.collaboration.autoworkExclusive') : undefined}
+        />
+      )}
+      {idmmControlEnabled && (
+        <IdmmControl
+          key={`idmm-${location.key}-${selectedAgentResourceKey}`}
+          draft={{
+            value: advancedConfig.idmm,
+            onChange: advancedConfig.setIdmm,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+        />
       )}
     </>
   ) : null;

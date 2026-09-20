@@ -8,6 +8,7 @@ import type {
   AutoWorkRunState,
   IApiRobotPhase,
   ISshLinkPhase,
+  IdmmRunState,
 } from '@/common/adapter/ipcBridge';
 
 import { CAPABILITY_COLORS } from './CapabilityIcon';
@@ -27,6 +28,13 @@ export const AUTOWORK_STATUS_COLOR: Record<AutoWorkRunState, string> = {
   idle: CAPABILITY_COLORS.idle,
   active: CAPABILITY_COLORS.active,
   paused: CAPABILITY_COLORS.armed,
+};
+
+export const IDMM_STATUS_COLOR: Record<IdmmRunState, string> = {
+  off: CAPABILITY_COLORS.off,
+  monitoring: CAPABILITY_COLORS.active,
+  intervening: CAPABILITY_COLORS.armed,
+  degraded: CAPABILITY_COLORS.danger,
 };
 
 /**

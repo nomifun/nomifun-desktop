@@ -211,6 +211,7 @@ impl Fixture {
             persona: String::new(),
             instructions: String::new(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         Self {
             catalog: CatalogSnapshot {
