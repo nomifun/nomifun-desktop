@@ -29,6 +29,7 @@ import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import SshHostStatusPill from './SshHostStatusPill';
+import SystemPermissionReminder from './SystemPermissionReminder';
 import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
@@ -304,6 +305,10 @@ const NomiConversationPanel: React.FC<{
     sider: <ChatSlider conversation={conversation} />,
     headerExtra: (
       <div className='flex items-center gap-8px'>
+        <SystemPermissionReminder
+          conversationId={conversation.id}
+          snapshot={conversation.agent_snapshot}
+        />
         {/* An SSH-bound session is indistinguishable from a local one everywhere
             else in the chrome, so the host it drives — and whether the link is
             actually up — leads the header. */}

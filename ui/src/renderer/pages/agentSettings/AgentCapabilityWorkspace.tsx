@@ -21,7 +21,12 @@ import {
 } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import {
+  computerPermissionKindsForActions,
+  missingComputerPermissionKinds,
+} from '@/renderer/hooks/system/systemPermissionModel';
+import { useSystemPermissions } from '@/renderer/hooks/system/useSystemPermissions';
 import {
   MODULE_CATEGORIES,
   isBuiltinModule,
@@ -97,7 +102,8 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   disabled = false,
   onChange,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<ModuleCategory | 'all'>('all');
@@ -122,6 +128,40 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     () => new Set(selectedReferences.map(capabilityReferenceKey)),
     [selectedReferences]
   );
+  const selectedComputer = useMemo(
+    () => document.enabled_capabilities.find((selection) => String(selection.capability.id) === 'computer'),
+    [document.enabled_capabilities]
+  );
+  const selectedComputerModule = selectedComputer
+    ? moduleByKey.get(capabilityReferenceKey(selectedComputer.capability))
+    : undefined;
+  const selectedComputerAvailable = Boolean(
+    selectedComputerModule && moduleIsAvailable(selectedComputerModule, catalog.capabilities)
+  );
+  const computerActions = useMemo(
+    () => selectedComputer?.action_allowlist ?? [],
+    [selectedComputer?.action_allowlist]
+  );
+  const requiredComputerPermissions = useMemo(
+    () => selectedComputer && selectedComputerAvailable && computerActions.length > 0
+      ? computerPermissionKindsForActions(computerActions)
+      : [],
+    [computerActions, selectedComputer, selectedComputerAvailable]
+  );
+  const computerPermissions = useSystemPermissions(requiredComputerPermissions.length > 0);
+  const missingComputerPermissions = useMemo(
+    () => computerPermissions.status
+      ? missingComputerPermissionKinds(computerPermissions.status, computerActions)
+      : [],
+    [computerActions, computerPermissions.status]
+  );
+  const computerPermissionIssue = selectedComputer && requiredComputerPermissions.length > 0 && !computerPermissions.loading
+    ? computerPermissions.error
+      ? 'check_failed'
+      : missingComputerPermissions.length > 0
+        ? 'missing'
+        : null
+    : null;
 
   const entries = useMemo<ModuleEntry[]>(() => {
     const direct: ModuleEntry[] = catalog.modules
@@ -200,12 +240,17 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
   };
   const hasEmptyActionGrant = (entry: ModuleEntry): boolean =>
     !entry.missing && entry.module.actions.length > 0 && entry.savedActions.length === 0;
-  const needsAttention = (entry: ModuleEntry): boolean => {
+  const moduleNeedsAttention = (entry: ModuleEntry): boolean => {
     const key = capabilityReferenceKey(referenceOf(entry));
     return selectedKeys.has(key) && (
       !materialized(entry) || hasUnknownActions(entry) || hasEmptyActionGrant(entry)
     );
   };
+  const permissionNeedsAttention = (entry: ModuleEntry): boolean =>
+    !entry.missing && materialized(entry) &&
+    String(referenceOf(entry).id) === 'computer' && computerPermissionIssue !== null;
+  const needsAttention = (entry: ModuleEntry): boolean =>
+    moduleNeedsAttention(entry) || permissionNeedsAttention(entry);
   const localizedActionName = (actionId: string): string => t(
     `agentSettings.actionLabels.${actionTranslationKey(actionId)}`,
     { defaultValue: actionFallbackName(actionId) }
@@ -435,7 +480,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                     )}
                   </div>
 
-                  {needsAttention(entry) && (
+                  {moduleNeedsAttention(entry) && (
                     <div className={styles.cardWarning} role='status'>
                       <Info theme='outline' size={14} />
                       <span>{entry.missing
@@ -445,6 +490,32 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                           : hasEmptyActionGrant(entry)
                             ? t('agentSettings.workbench.actionRequired')
                           : unavailableGuidance(availability?.unavailable_code)}</span>
+                    </div>
+                  )}
+
+                  {permissionNeedsAttention(entry) && (
+                    <div className={styles.cardWarning} role='status'>
+                      <Info theme='outline' size={14} />
+                      <span>{computerPermissionIssue === 'missing'
+                        ? t('agentSettings.workbench.systemPermissionMissing', {
+                          permissions: new Intl.ListFormat(i18n.resolvedLanguage ?? i18n.language, {
+                            style: 'short',
+                            type: 'conjunction',
+                          }).format(missingComputerPermissions.map((kind) => t(
+                            kind === 'accessibility'
+                              ? 'settings.capabilityPermissions.permissions.accessibility'
+                              : 'settings.capabilityPermissions.permissions.screenRecording'
+                          ))),
+                        })
+                        : t('agentSettings.workbench.systemPermissionCheckFailed')}</span>
+                      <Button
+                        className={styles.permissionAction}
+                        type='text'
+                        size='mini'
+                        onClick={() => void navigate('/settings/permissions?tab=computer-use')}
+                      >
+                        {t('agentSettings.workbench.openSystemPermissions')}
+                      </Button>
                     </div>
                   )}
 

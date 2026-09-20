@@ -219,6 +219,7 @@
 .unavailableState { color: rgb(var(--orange-6)); background: rgba(var(--orange-6), .09); }
 .cardWarning { display: flex; gap: 7px; margin: 0 10px 8px; padding: 7px 8px; border-radius: 7px; color: rgb(var(--orange-6)); background: rgba(var(--orange-6), .08); font-size: 11px; line-height: 1.45; }
 .cardWarning span { min-width: 0; overflow-wrap: anywhere; }
+.cardWarning .permissionAction { flex: 0 0 auto; margin-left: auto; padding-inline: 5px; color: rgb(var(--orange-7)); }
 
 .disclosure {
   width: 100%;

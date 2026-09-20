@@ -393,6 +393,14 @@
     "noMatch": "No matching content found",
     "count": "{{count}} turns"
   },
+  "systemPermissions": {
+    "label": "System permissions",
+    "title": "This Agent needs system access",
+    "missing": "Missing: {{permissions}}. Return to this conversation after granting access and NomiFun will re-check automatically.",
+    "checkFailed": "NomiFun could not verify the system permissions required by this Agent. Check the permission center.",
+    "later": "Later",
+    "openSettings": "Grant access"
+  },
   "chat": {
     "noModelSelected": "No model selected for current session, cannot send message",
     "modelHealedToDefault": "Switched to your default model {{model}}",
