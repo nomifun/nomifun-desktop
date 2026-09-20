@@ -4153,6 +4153,55 @@ fn frozen_workspace_root(
     nomifun_agent_execution::resolve_frozen_automation_workspace(owner_id, &binding)
 }
 
+/// Derive legacy Conversation workspace presentation from the immutable
+/// AgentSession resource identity.
+///
+/// A non-empty path is not evidence that the user selected a custom workpath:
+/// the server-owned `default-workspace` and managed process resource both
+/// carry the configured absolute work root. Losing that distinction makes a
+/// refreshed default Session jump into a path drawer in the desktop sidebar.
+/// Keep the old response fields while deriving them from the frozen binding,
+/// never from path-shape heuristics.
+fn workspace_projection_flags(
+    binding: &AgentBindingValue,
+    has_workspace: bool,
+) -> (bool, bool) {
+    if !has_workspace {
+        return (false, false);
+    }
+
+    let custom_workspace = has_selected_workspace(binding);
+    let workspace_resource = binding
+        .typed_resource_bindings
+        .iter()
+        .find(|resource| resource.resource_kind.as_ref() == "workspace");
+    let uses_managed_default = !custom_workspace
+        && workspace_resource.map_or_else(
+            || {
+                binding.typed_resource_bindings.iter().any(|resource| {
+                    resource.resource_kind.as_ref() == "process_session"
+                        && resource.resource_id.as_ref()
+                            == super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID
+                })
+            },
+            |resource| {
+                resource.resource_id.as_ref()
+                    == super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID
+            },
+        );
+    let companion_workspace = binding.typed_resource_bindings.iter().any(|resource| {
+        matches!(
+            resource.resource_kind.as_ref(),
+            "companion" | "companion_memory"
+        )
+    });
+
+    (
+        custom_workspace,
+        uses_managed_default && !companion_workspace,
+    )
+}
+
 #[cfg(feature = "browser-use")]
 fn managed_browser_profile_bindings(
     owner_id: &str,
@@ -4263,7 +4312,6 @@ fn canonical_conversation_response(
         projection,
         ..
     } = projected;
-    let custom_workspace = has_selected_workspace(&binding);
     let snapshot = projection.snapshot;
     let mut request = projection.request;
     let extra = request.extra.as_object_mut().ok_or_else(|| {
@@ -4271,9 +4319,18 @@ fn canonical_conversation_response(
             "canonical Agent projection extra must be a JSON object".to_owned(),
         )
     })?;
+    let (custom_workspace, is_temporary_workspace) =
+        workspace_projection_flags(&binding, workspace.is_some());
+    extra.insert(
+        "custom_workspace".to_owned(),
+        Value::Bool(custom_workspace),
+    );
+    extra.insert(
+        "is_temporary_workspace".to_owned(),
+        Value::Bool(is_temporary_workspace),
+    );
     if let Some(workspace) = workspace {
         extra.insert("workspace".to_owned(), Value::String(workspace));
-        extra.insert("custom_workspace".to_owned(), Value::Bool(custom_workspace));
     }
     attach_session_metadata_with_fork(
         &mut request.extra,
@@ -4645,6 +4702,7 @@ mod session_boundary_tests {
         freeze_selected_workspace, frozen_workspace_root, has_selected_workspace,
         initial_delivery_requested, NomiCoreSessionOwner,
         parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
+        workspace_projection_flags, SELECTED_WORKSPACE_RESOURCE_PREFIX,
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use std::collections::{BTreeMap, BTreeSet};
@@ -5009,6 +5067,40 @@ mod session_boundary_tests {
             frozen_workspace_root(OWNER_ID, &session_id, &no_workspace).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn workspace_projection_preserves_managed_default_identity() {
+        let root = std::env::temp_dir().to_string_lossy().into_owned();
+        let default = frozen_binding(&root, OWNER_ID);
+        assert_eq!(
+            workspace_projection_flags(&default, true),
+            (false, true),
+            "a server-owned default workspace must remain in the default workpath"
+        );
+
+        let mut custom = default.clone();
+        custom.typed_resource_bindings[0].resource_id = ResourceId::from(format!(
+            "{SELECTED_WORKSPACE_RESOURCE_PREFIX}project"
+        ));
+        assert_eq!(workspace_projection_flags(&custom, true), (true, false));
+
+        let mut companion = default;
+        companion.typed_resource_bindings.push(TypedResourceBinding {
+            binding_id: ResourceBindingId::from("companion-binding"),
+            resource_kind: ResourceKind::from("companion"),
+            resource_id: ResourceId::from("companion-1"),
+            owner_id: OWNER_ID.to_owned(),
+            operations: BTreeSet::from(["read".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        });
+        assert_eq!(
+            workspace_projection_flags(&companion, true),
+            (false, false),
+            "a permanent Companion workspace is managed but not temporary"
+        );
+        assert_eq!(workspace_projection_flags(&custom, false), (false, false));
     }
 
     #[test]
