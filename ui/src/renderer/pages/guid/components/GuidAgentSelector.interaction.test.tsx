@@ -23,7 +23,19 @@ const saved = {
   current_stable_revision: { preset_id: '0190f5fe-7c00-7a00-8000-000000000101', revision: 1, revision_digest: 'a'.repeat(64) },
 } as ExecutableAgentPreset;
 const draft = { ...saved, preset_id: '0190f5fe-7c00-7a00-8000-000000000102' as typeof saved.preset_id, display_name: 'New researcher', current_stable_revision: undefined };
-const templates = ['chat.minimal', 'assistant.general', 'coding.codex', 'customer-service.default'].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
+const templates = [
+  'chat.minimal',
+  'assistant.general',
+  'coding.codex',
+  'companion.default',
+  'creative-studio.default',
+  'customer-service.default',
+].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
+const personalAgents = Array.from({ length: 6 }, (_, index) => ({
+  ...saved,
+  preset_id: `0190f5fe-7c00-7a00-8000-${String(110 + index).padStart(12, '0')}` as typeof saved.preset_id,
+  display_name: `Custom Agent ${index + 1}`,
+}));
 const LocationProbe = () => {
   const location = useLocation();
   return <output data-testid='location'>{location.pathname}{location.search}</output>;
@@ -77,7 +89,7 @@ describe('Guid Agent selector', () => {
     expect(selections.at(-1)).toEqual({ kind: 'template', templateKey: 'chat.minimal' });
   });
 
-  test('searches names and descriptions, including templates outside the initial preview', async () => {
+  test('searches custom and official Agent names and descriptions', async () => {
     const { page, open } = renderSelector();
     await open();
     const search = page.getByRole('searchbox');
@@ -113,9 +125,9 @@ describe('Guid Agent selector', () => {
     await open();
     const search = page.getByRole('searchbox');
     fireEvent.keyDown(search, { key: 'ArrowDown' });
-    expect(document.activeElement?.textContent?.includes('Release reviewer')).toBe(true);
+    expect(document.activeElement?.textContent?.includes(agentSettings.template.chat.minimal.name)).toBe(true);
     fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
-    expect(document.activeElement?.textContent?.includes('New researcher')).toBe(true);
+    expect(document.activeElement?.textContent?.includes(agentSettings.template.assistant.general.name)).toBe(true);
     await act(async () => { fireEvent.keyDown(document.activeElement!, { key: 'Escape' }); });
     expect(page.queryByRole('dialog')).toBeNull();
   });
@@ -132,6 +144,43 @@ describe('Guid Agent selector', () => {
     expect(within(page.getByRole('dialog')).getByRole('button', { name: agentSettings.template.assistant.general.name }).getAttribute('aria-pressed')).toBe('true');
   });
 
+  test('keeps official Agent rows to one visible line while descriptions remain searchable', async () => {
+    const { page, open } = renderSelector();
+    await open();
+    const dialog = within(page.getByRole('dialog'));
+    const officialName = agentSettings.template.assistant.general.name;
+    const officialDescription = agentSettings.template.assistant.general.description;
+    const row = dialog.getByRole('button', { name: officialName });
+    expect(row.textContent).toBe(officialName);
+    expect(row.textContent?.includes(officialDescription)).toBe(false);
+
+    const search = page.getByRole('searchbox');
+    await act(async () => { fireEvent.input(search, { target: { value: officialDescription } }); });
+    expect(dialog.getByRole('button', { name: officialName })).not.toBeNull();
+  });
+
+  test('groups official Agent choices in the compact two-column grid', async () => {
+    const { page, open } = renderSelector();
+    await open();
+    const officialGroup = page.getByRole('group', { name: guid.agentEntries.fromTemplate });
+    expect(officialGroup.children[1]?.tagName).toBe('DIV');
+    expect(officialGroup.children[1]?.childElementCount).toBe(5);
+    expect(within(officialGroup).getAllByRole('button')).toHaveLength(5);
+  });
+
+  test('prioritizes official Agents before the collapsed personal Agent section', async () => {
+    const { page, open } = renderSelector({ presets: personalAgents, draftPresets: [draft] });
+    await open();
+    const dialog = page.getByRole('dialog');
+    const officialGroup = page.getByRole('group', { name: guid.agentEntries.fromTemplate });
+    const personalGroup = page.getByRole('group', { name: agentSettings.library.mine });
+    expect(
+      Boolean(officialGroup.compareDocumentPosition(personalGroup) & Node.DOCUMENT_POSITION_FOLLOWING)
+    ).toBe(true);
+    expect(within(personalGroup).getAllByRole('button', { name: /Custom Agent/ })).toHaveLength(3);
+    expect(within(dialog).getByRole('button', { name: guid.agentEntries.showMorePersonal.replace('{{count}}', '4') })).not.toBeNull();
+  });
+
   test('drafts stay discoverable and open the exact editor', async () => {
     const { page, open, selections } = renderSelector();
     await open();
@@ -140,15 +189,46 @@ describe('Guid Agent selector', () => {
     expect(selections).toEqual([]);
   });
 
-  test('all templates can be expanded and collapsed without changing the current Agent', async () => {
-    const { page, open, selections } = renderSelector();
+  test('shows every conversation-capable official Agent without an expansion step', async () => {
+    const { page, open } = renderSelector();
     await open();
-    expect(page.queryByRole('button', { name: agentSettings.template.coding.codex.name })).toBeNull();
-    fireEvent.click(page.getByRole('button', { name: guid.agentEntries.browseTemplates }));
-    expect(page.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
-    fireEvent.click(page.getByRole('button', { name: guid.agentEntries.fewerTemplates }));
-    expect(page.queryByRole('button', { name: agentSettings.template.coding.codex.name })).toBeNull();
-    expect(selections).toEqual([]);
+    const dialog = within(page.getByRole('dialog'));
+    expect(dialog.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
+    expect(dialog.getByRole('button', { name: agentSettings.template.assistant.general.name })).not.toBeNull();
+    expect(dialog.getByRole('button', { name: agentSettings.template.chat.minimal.name })).not.toBeNull();
+    expect(dialog.getByRole('button', { name: agentSettings.template.companion.default.name })).not.toBeNull();
+    expect(dialog.getByRole('button', { name: agentSettings.template.creativeStudio.default.name })).not.toBeNull();
+  });
+
+  test('limits custom Agents to three and expands the combined saved and draft list on demand', async () => {
+    const { page, open } = renderSelector({ presets: personalAgents, draftPresets: [draft] });
+    await open();
+    for (const preset of personalAgents.slice(0, 3)) {
+      expect(page.getByRole('button', { name: new RegExp(preset.display_name) })).not.toBeNull();
+    }
+    expect(page.queryByRole('button', { name: /Custom Agent 4/ })).toBeNull();
+    expect(page.queryByRole('button', { name: /New researcher/ })).toBeNull();
+    fireEvent.click(page.getByRole('button', { name: guid.agentEntries.showMorePersonal.replace('{{count}}', '4') }));
+    expect(page.getByRole('button', { name: /Custom Agent 6/ })).not.toBeNull();
+    expect(page.getByRole('button', { name: /New researcher/ })).not.toBeNull();
+    fireEvent.click(page.getByRole('button', { name: guid.agentEntries.showFewerPersonal }));
+    expect(page.queryByRole('button', { name: /Custom Agent 4/ })).toBeNull();
+    expect(page.queryByRole('button', { name: /New researcher/ })).toBeNull();
+  });
+
+  test('keeps a selected custom Agent visible inside the collapsed three-item list', async () => {
+    const selected = personalAgents[5];
+    const { page, open } = renderSelector({
+      presets: personalAgents,
+      draftPresets: [],
+      selection: { kind: 'preset', presetId: selected.preset_id },
+    });
+    await open();
+    const selectedRow = within(page.getByRole('dialog')).getByRole('button', {
+      name: selected.display_name,
+    });
+    expect(selectedRow.getAttribute('aria-pressed')).toBe('true');
+    expect(within(page.getByRole('dialog')).getAllByRole('button', { name: /Custom Agent/ })).toHaveLength(3);
   });
 
   test('empty search results do not hide management or submit a different Agent', async () => {

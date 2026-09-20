@@ -107,7 +107,7 @@
     "chat": {
       "minimal": {
         "name": "Minimal",
-        "description": "A clean, no-tool starting point for conversation and custom setups."
+        "description": "Keeps only base chat and current-message input; no capability module, Skill, MCP tool, or resource is bound."
       }
     },
     "assistant": {
@@ -119,13 +119,13 @@
     "coding": {
       "codex": {
         "name": "Coding",
-        "description": "Workspace, version control, processes and research for software work."
+        "description": "Combines workspace I/O, version control, processes, deliverables, project memory, research, and collaboration. Computer control can be added when needed."
       }
     },
     "companion": {
       "default": {
         "name": "Companion",
-        "description": "Choose the role, memory and communication abilities for a companion."
+        "description": "Combines companion identity, long-term memory, knowledge, and schedules. Channels, robots, and computer control can be connected when needed."
       }
     },
     "customerService": {
@@ -137,7 +137,7 @@
     "creativeStudio": {
       "default": {
         "name": "Multimodal",
-        "description": "Combine image, video, audio, canvas, and document creation capabilities."
+        "description": "For professional multimodal work across media, canvas, Office, workspace, project memory, and web research."
       }
     }
   },
@@ -148,7 +148,7 @@
     "channelMessaging": { "name": "Channel messaging", "description": "Reply or send through a channel selected by the usage target." },
     "companion": { "name": "Companion", "description": "Learn and evolve the selected companion within its product boundary." },
     "companionMemory": { "name": "Companion memory", "description": "Recall or write memory for the selected companion." },
-    "computer": { "name": "Computer", "description": "Observe or control the desktop when platform permission and a device resource are available." },
+    "computer": { "name": "Computer", "description": "High-privilege extension. Once the local computer is bound, screen and accessibility permissions are required before the Agent can use it." },
     "creationMedia": { "name": "Media creation", "description": "Create text, images, video, audio and music through configured generation services." },
     "creativeWorkshop": { "name": "Creative workshop", "description": "Work with canvases, assets and reusable creative templates." },
     "customerService": { "name": "Customer service", "description": "Read and update service notes or hand work to a person." },
@@ -159,11 +159,11 @@
     "requirements": { "name": "Requirements", "description": "Read, write, update and claim work from the requirements platform." },
     "robot": { "name": "Robot", "description": "Observe and control an explicitly bound robot device." },
     "ssh": { "name": "SSH", "description": "Read files or run authorized commands on a selected SSH host." },
-    "toolDiscovery": { "name": "Tool discovery policy", "description": "Choose how ToolSearch discovers and ranks authorized tools." },
+    "toolDiscovery": { "name": "Tool selection policy", "description": "When many tools are available, filter and rank only the authorized tools relevant to the current request. This grants no new authority." },
     "webResearch": { "name": "Web research", "description": "Search public sources and fetch pages without using browser sign-in state." },
-    "workspaceArtifacts": { "name": "Workspace artifacts", "description": "Read or publish artifacts from the selected workspace." },
-    "workspaceFiles": { "name": "Workspace files", "description": "Read, search and make explicit changes inside the selected workspace." },
-    "workspaceProcess": { "name": "Workspace processes", "description": "Run and control command processes inside the selected workspace." },
+    "workspaceArtifacts": { "name": "Deliverables", "description": "Publish workspace files as verified deliverables or read published content by artifact ID." },
+    "workspaceFiles": { "name": "Workspace I/O", "description": "Read, search, create, and modify files by path inside the workspace." },
+    "workspaceProcess": { "name": "Local processes", "description": "Start, observe, and control local command processes in the workspace." },
     "workspaceVcs": { "name": "Version control", "description": "Inspect and explicitly change version-control state in the selected workspace." }
   },
   "actionLabels": {
@@ -193,7 +193,7 @@
     "unknown": "Availability could not be confirmed. Refresh the catalog before enabling this module."
   },
   "sections": {
-    "basic": "Basic settings",
+    "basic": "Agent details",
     "basicHint": "Define its identity, model and working style",
     "capabilities": "Capability modules",
     "capabilitiesHint": "Choose product modules, then refine their permitted actions",
@@ -243,13 +243,13 @@
     "empty": "No MCP tool materializations."
   },
   "resources": {
-    "noneRequired": "No additional resources",
-    "requiredCount": "{{count}} resources at use time",
+    "noneRequired": "No concrete resource dependency",
+    "requiredCount": "Uses {{count}} resource kinds",
     "bindingStatus": "Resource status",
-    "bindingStatusHint": "This Agent declares the resource type. Choose the actual resource when starting a conversation or automation.",
-    "requiredAtUse": "Required when used",
-    "pickerTitle": "Choose resources for this run",
-    "pickerHint": "Choose actual product resources only. The system securely resolves permissions, paths, credentials and runtime parameters.",
+    "bindingStatusHint": "These are resource kinds the capabilities may use. Concrete targets are bound by the session or product scene when needed.",
+    "requiredAtUse": "May use",
+    "pickerTitle": "Resources for this session",
+    "pickerHint": "Choose only targets needed for this session. Unbound enhancements do not block the session; their tools stay unavailable.",
     "companionBindingHint": "Use this companion's shared conversation and settings. Channel and robot are optional; chat and companion memory remain available without them.",
     "ready": "Resources ready",
     "missingCount": "{{count}} selections required",
@@ -287,8 +287,8 @@
     "computerPermissionScope": "This Agent needs: {{permissions}}. OS access does not expand the Agent's capability boundary.",
     "computerPermissionNotRequired": "This Agent only launches apps or URLs and needs neither Screen Recording nor Accessibility.",
     "configure": "Configure",
-    "bindingPolicyTitle": "Choose actual resources when using the Agent",
-    "bindingPolicyBody": "An Agent only declares its capability boundary and required resource kinds. Each conversation, companion, or automation target selects and manages its own knowledge bases, workspace, and connections.",
+    "bindingPolicyTitle": "Manage capability grants and resource bindings separately",
+    "bindingPolicyBody": "The Agent configuration grants capabilities; the session or product scene binds knowledge, workspaces, devices, and connections. An unbound resource disables only its related tools. A bound computer must satisfy system permissions.",
     "kinds": {
       "assetLibrary": "Asset library",
       "browser": "Browser resource",
@@ -368,12 +368,11 @@
     "officialHint": "Start with a preset and make it yours",
     "myHint": "Prepare the right Agent for your work",
     "capabilityTab": "Modules & actions",
-    "settingsTab": "Basic settings",
+    "settingsTab": "Profile & behavior",
     "skillsTab": "Skills & extensions",
     "saveAsMine": "Save as my Agent",
     "customizeTitle": "Make this preset yours",
     "customizeHint": "Adjust capabilities and save your own Agent. The official preset stays available.",
-    "customName": "Agent name",
     "readyToSave": "Ready for server validation",
     "pendingChanges": "Unsaved changes",
     "savedHint": "All changes saved",
@@ -388,7 +387,7 @@
     "resetTitle": "Discard your changes?",
     "resetBody": "Restore the last saved configuration.",
     "saveSuccess": "Agent configuration saved",
-    "selectedHint": "Choose modules and exact actions for this Agent",
+    "selectedHint": "Choose capability modules for the scenario, then review their exact actions",
     "settingsHint": "Define its identity, model and working style",
     "manageModels": "Manage models",
     "modelNeeded": "Configure an available chat model before saving this Agent.",
@@ -398,6 +397,8 @@
     "disabledSave": "Resolve unavailable modules or actions before saving",
     "presetBadge": "Customizable preset",
     "personalBadge": "Personal Agent",
+    "editIdentity": "Edit Agent details",
+    "editName": "Rename Agent",
     "createHint": "Start from a blank Agent",
     "createTitle": "New Agent",
     "changeBlocked": "Cannot change modules",
@@ -406,15 +407,19 @@
     "enableDependencies": "These dependencies will also be enabled: {{names}}.",
     "disableDependents": "These enabled modules depend on the removed items and will also be disabled: {{names}}.",
     "undo": "Undo last change",
-    "enabledModules": "Enabled modules",
-    "resourceModules": "Need resources",
-    "moduleGuide": "Enable a module, then review its exact actions",
+    "enabledModules": "Effective modules",
+    "resourceModules": "Resource-backed modules",
+    "moduleGuide": "The list includes directly configurable modules and read-only dependencies brought in by this configuration. Skill and MCP binding details remain under Skills & extensions.",
+    "dependencyBadge": "Dependency",
+    "dependencyActive": "Active dependency",
+    "dependencyHint": "Required by {{names}}. It is frozen with them when saved and cannot be toggled independently here.",
+    "dependencyActionPermissions": "Actions available to dependency calls",
     "moduleUnavailableSummary": "{{count}} enabled modules, actions, or runtime conditions need attention.",
     "searchModules": "Search modules, actions or resources",
-    "moduleStatus": { "all": "All", "enabled": "Enabled", "attention": "Needs attention" },
+    "moduleStatus": { "all": "All", "enabled": "Effective", "attention": "Needs attention" },
     "moduleCategories": "Module categories",
     "moduleCategoryCount": "{{enabled}} enabled, {{total}} total",
-    "moduleCatalog": "Capability module catalog",
+    "moduleCatalog": "Capability modules and dependencies",
     "enableModule": "Enable {{name}}",
     "disableModule": "Disable {{name}}",
     "moduleUnavailable": "This Module is unavailable on the current installation. Open technical details for diagnostics.",
@@ -438,7 +443,7 @@
     "noModules": "No capability modules are available",
     "noModulesHint": "Refresh the installation catalog or enable a product extension that publishes Agent modules.",
     "firstRunTitle": "Choose your starting point",
-    "firstRunHint": "Begin with the zero-tool Minimal preset or create a blank custom setup. General is available under Official presets.",
+    "firstRunHint": "Minimal provides base chat only, with no Skill, MCP tool, or capability module. You can also start blank and add capabilities one by one.",
     "startMinimal": "Start minimal",
     "startCustom": "Blank custom",
     "emptyWorkbenchTitle": "Create your first Agent",

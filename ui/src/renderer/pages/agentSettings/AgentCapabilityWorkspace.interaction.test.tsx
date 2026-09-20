@@ -1,6 +1,6 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { ipcBridge } from '@/common';
 import { Modal } from '@arco-design/web-react';
@@ -86,6 +86,14 @@ const knowledge = moduleItem('knowledge', [['knowledge/search', 'read_sensitive'
 const browser = moduleItem('browser', [['browser/observe', 'read_sensitive']]);
 const unavailableComputer = moduleItem('computer', [['computer/observe', 'read_sensitive']], ['computer']);
 const availableComputer = moduleItem('computer', [['computer/input', 'physical']], ['computer']);
+const workspaceGuard: CapabilityModuleCatalogItem = {
+  ...moduleItem('workspace.guard', [['workspace.guard/read', 'read_local']]),
+  authoring_policy: 'dependency_only',
+};
+const filesWithDependency: CapabilityModuleCatalogItem = {
+  ...files,
+  required_modules: [workspaceGuard.module],
+};
 
 const catalog = (modules = [files, knowledge, browser, unavailableComputer]): AgentCatalogResponse => ({
   modules,
@@ -153,7 +161,7 @@ describe('Agent capability Module workbench', () => {
   test('shows one searchable Module catalog without the legacy transfer controls', () => {
     const screen = mount(documentWith([[files.module, ['workspace.files/read']]]));
     expect(screen.getByRole('region', { name: en.workbench.moduleCatalog })).toBeTruthy();
-    expect(screen.getByRole('switch', { name: 'Disable Workspace files' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('switch', { name: 'Disable Workspace I/O' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByRole('switch', { name: 'Enable Browser' }).getAttribute('aria-checked')).toBe('false');
     expect(screen.queryByText('Move in')).toBeNull();
     expect(screen.queryByText('Move out')).toBeNull();
@@ -179,12 +187,12 @@ describe('Agent capability Module workbench', () => {
 
   test('enables a Module with safe exact actions, then explicitly grants a write action', async () => {
     const screen = mount(documentWith([]));
-    await act(async () => { fireEvent.click(screen.getByRole('switch', { name: 'Enable Workspace files' })); });
+    await act(async () => { fireEvent.click(screen.getByRole('switch', { name: 'Enable Workspace I/O' })); });
     await waitFor(() => expect(screen.state().enabled_capabilities).toEqual([{
       capability: files.module,
       action_allowlist: ['workspace.files/read'],
     }]));
-    const write = screen.getByRole('checkbox', { name: 'Allow Write in Workspace files' });
+    const write = screen.getByRole('checkbox', { name: 'Allow Write in Workspace I/O' });
     expect((write as HTMLInputElement).checked).toBe(false);
     fireEvent.click(write);
     expect(screen.state().enabled_capabilities[0].action_allowlist).toEqual([
@@ -205,7 +213,7 @@ describe('Agent capability Module workbench', () => {
     fireEvent.input(screen.getByRole('searchbox', { name: en.workbench.searchModules }), {
       target: { value: 'workspace' },
     });
-    expect(screen.getByRole('switch', { name: 'Enable Workspace files' })).toBeTruthy();
+    expect(screen.getByRole('switch', { name: 'Enable Workspace I/O' })).toBeTruthy();
   });
 
   test('shows resource binding status without authoring a concrete resource', async () => {
@@ -214,6 +222,24 @@ describe('Agent capability Module workbench', () => {
     expect(await screen.findByText(en.resources.bindingStatus)).toBeTruthy();
     expect(screen.getByText('Workspace')).toBeTruthy();
     expect('resource_bindings' in screen.state()).toBe(false);
+  });
+
+  test('shows compiler-owned dependency capabilities as described read-only cards', () => {
+    const screen = mount(
+      documentWith([[filesWithDependency.module, ['workspace.files/read']]]),
+      catalog([filesWithDependency, workspaceGuard])
+    );
+    const heading = screen.getByRole('heading', { name: 'workspace.guard' });
+    const card = heading.closest('article');
+    expect(card).toBeTruthy();
+    const dependency = within(card!);
+    expect(dependency.getByText(en.workbench.dependencyBadge)).toBeTruthy();
+    expect(dependency.getByText(/Required by Workspace I\/O/)).toBeTruthy();
+    expect(dependency.queryByRole('switch')).toBeNull();
+    fireEvent.click(dependency.getByRole('button', { name: /1 actions and contributions/ }));
+    const action = dependency.getByRole('checkbox', { name: 'Allow Read in workspace.guard' }) as HTMLInputElement;
+    expect(action.checked).toBe(true);
+    expect(action.disabled).toBe(true);
   });
 
   test('keeps an unavailable Module inspectable but cannot enable it', () => {

@@ -209,6 +209,26 @@
         },
         {
           "capability": {
+            "id": "workspace.artifacts",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.artifacts/publish",
+            "workspace.artifacts/read"
+          ]
+        },
+        {
+          "capability": {
+            "id": "project.memory",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "project.memory/read",
+            "project.memory/write"
+          ]
+        },
+        {
+          "capability": {
             "id": "web.research",
             "version": "1.0.0"
           },
@@ -216,11 +236,32 @@
             "web.research/fetch",
             "web.research/search"
           ]
+        },
+        {
+          "capability": {
+            "id": "agent.collaboration",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "agent/delegate",
+            "agent/fork",
+            "agent/request_user_decision"
+          ]
+        },
+        {
+          "capability": {
+            "id": "agent.tool-discovery",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "tool.discovery.rank"
+          ]
         }
       ],
       "skill_bindings": [],
       "required_resource_kinds": [
         "process_session",
+        "project_memory",
         "workspace"
       ],
       "required_runtime_features": [
@@ -272,6 +313,16 @@
         },
         {
           "capability": {
+            "id": "knowledge",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "knowledge/read",
+            "knowledge/search"
+          ]
+        },
+        {
+          "capability": {
             "id": "channel.messaging",
             "version": "1.0.0"
           },
@@ -287,6 +338,27 @@
           "action_allowlist": [
             "robot/vision"
           ]
+        },
+        {
+          "capability": {
+            "id": "automation.schedule",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "automation.schedule/create",
+            "automation.schedule/delete",
+            "automation.schedule/list",
+            "automation.schedule/update"
+          ]
+        },
+        {
+          "capability": {
+            "id": "agent.tool-discovery",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "tool.discovery.rank"
+          ]
         }
       ],
       "skill_bindings": [],
@@ -294,7 +366,9 @@
         "channel",
         "companion",
         "companion_memory",
-        "robot"
+        "knowledge_base",
+        "robot",
+        "scheduler"
       ],
       "required_runtime_features": []
     },
@@ -373,14 +447,86 @@
             "version": "1.0.0"
           },
           "action_allowlist": [
-            "office/preview"
+            "office/document.edit",
+            "office/preview",
+            "office/sheet.edit",
+            "office/slides.edit"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.files",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.files/patch",
+            "workspace.files/read",
+            "workspace.files/search",
+            "workspace.files/write"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.artifacts",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.artifacts/publish",
+            "workspace.artifacts/read"
+          ]
+        },
+        {
+          "capability": {
+            "id": "workspace.process",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "workspace.process/cancel",
+            "workspace.process/close_stdin",
+            "workspace.process/exec",
+            "workspace.process/input",
+            "workspace.process/poll",
+            "workspace.process/resize",
+            "workspace.process/start"
+          ]
+        },
+        {
+          "capability": {
+            "id": "project.memory",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "project.memory/read",
+            "project.memory/write"
+          ]
+        },
+        {
+          "capability": {
+            "id": "web.research",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "web.research/fetch",
+            "web.research/search"
+          ]
+        },
+        {
+          "capability": {
+            "id": "agent.tool-discovery",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "tool.discovery.rank"
           ]
         }
       ],
       "skill_bindings": [],
       "required_resource_kinds": [
         "asset_library",
-        "canvas"
+        "canvas",
+        "process_session",
+        "project_memory",
+        "workspace"
       ],
       "required_runtime_features": []
     }
@@ -436,15 +582,23 @@
     },
     "coding.codex": {
       "required_capability_categories": [
+        "agent_collaboration",
         "file_operations",
         "native_responses",
+        "project_memory",
         "shell_process_pty",
         "skills_plugins",
+        "tool_discovery",
         "vcs_review",
+        "web_research",
         "workspace_repository"
       ],
       "required_capability_ids": [
+        "agent.collaboration",
+        "agent.tool-discovery",
+        "project.memory",
         "web.research",
+        "workspace.artifacts",
         "workspace.files",
         "workspace.process",
         "workspace.vcs"
@@ -475,20 +629,27 @@
       ],
       "required_resource_kinds": [
         "process_session",
+        "project_memory",
         "workspace"
       ]
     },
     "companion.default": {
       "required_capability_categories": [
+        "automation",
         "companion_memory",
         "im_channel",
+        "knowledge",
         "learning_evolution",
-        "persona"
+        "persona",
+        "tool_discovery"
       ],
       "required_capability_ids": [
+        "agent.tool-discovery",
+        "automation.schedule",
         "channel.messaging",
         "companion",
         "companion.memory",
+        "knowledge",
         "robot"
       ],
       "required_runtime_features": [],
@@ -496,7 +657,9 @@
         "channel",
         "companion",
         "companion_memory",
-        "robot"
+        "knowledge_base",
+        "robot",
+        "scheduler"
       ]
     },
     "customer-service.default": {
@@ -523,17 +686,32 @@
       "required_capability_categories": [
         "attachments",
         "editing",
-        "generation"
+        "file_operations",
+        "generation",
+        "project_memory",
+        "shell_process_pty",
+        "tool_discovery",
+        "web_research",
+        "workspace_repository"
       ],
       "required_capability_ids": [
+        "agent.tool-discovery",
         "creation.media",
         "creative.workshop",
-        "office"
+        "office",
+        "project.memory",
+        "web.research",
+        "workspace.artifacts",
+        "workspace.files",
+        "workspace.process"
       ],
       "required_runtime_features": [],
       "required_resource_kinds": [
         "asset_library",
-        "canvas"
+        "canvas",
+        "process_session",
+        "project_memory",
+        "workspace"
       ]
     }
   },

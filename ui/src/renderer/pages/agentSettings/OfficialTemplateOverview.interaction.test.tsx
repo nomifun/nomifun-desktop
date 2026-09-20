@@ -52,6 +52,7 @@ const template: OfficialPresetTemplate = {
 
 function mount(busy = false) {
   const saves: AgentPresetDocument[] = [];
+  const names: string[] = [];
   let dirty = false;
   const screen = render(
     <I18nextProvider i18n={i18n}>
@@ -60,13 +61,16 @@ function mount(busy = false) {
           template={template}
           busy={busy}
           catalog={catalog}
-          onSave={(_name, document) => saves.push(structuredClone(document))}
+          onSave={(displayName, document) => {
+            names.push(displayName);
+            saves.push(structuredClone(document));
+          }}
           onDirtyChange={(value) => { dirty = value; }}
         />
       </MemoryRouter>
     </I18nextProvider>
   );
-  return { ...screen, saves, dirty: () => dirty };
+  return { ...screen, saves, names, dirty: () => dirty };
 }
 
 test('official template preserves exact server-seeded actions and never exposes a Runtime selector', () => {
@@ -92,6 +96,18 @@ test('template reset restores the exact server-seeded Module actions', async () 
   await waitFor(() => expect(screen.dirty()).toBe(false));
   fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
   expect(screen.saves[0]).toEqual(documentFromTemplate(template, catalog));
+});
+
+test('official template name edits inline without a duplicate footer field', () => {
+  const screen = mount();
+  expect(screen.queryByRole('textbox', { name: en.fields.name })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.workbench.editName }));
+  const name = screen.getByRole('textbox', { name: en.fields.name });
+  fireEvent.input(name, { target: { value: 'My General Agent' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
+  expect(screen.getByRole('heading', { name: 'My General Agent' })).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
+  expect(screen.names).toEqual(['My General Agent']);
 });
 
 test('an action-bearing Module with no granted Action is visibly invalid and cannot save', () => {

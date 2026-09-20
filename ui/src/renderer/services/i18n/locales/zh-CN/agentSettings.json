@@ -107,7 +107,7 @@
     "chat": {
       "minimal": {
         "name": "最简",
-        "description": "零工具的干净起点，适合普通对话和从头定制。"
+        "description": "只保留基础对话和当前消息输入；不绑定能力模块、Skill、MCP 或资源。"
       }
     },
     "assistant": {
@@ -119,13 +119,13 @@
     "coding": {
       "codex": {
         "name": "编程",
-        "description": "使用工作区、版本控制、进程与调研模块完成软件开发。"
+        "description": "组合工作区读写、版本控制、进程、交付产物、项目记忆、调研与协作；电脑控制可按需添加。"
       }
     },
     "companion": {
       "default": {
         "name": "伙伴",
-        "description": "为日常陪伴配置角色、记忆与沟通能力。"
+        "description": "结合伙伴身份、长期记忆、知识库与定时任务；渠道、机器人和电脑控制可按需接入。"
       }
     },
     "customerService": {
@@ -137,7 +137,7 @@
     "creativeStudio": {
       "default": {
         "name": "多模",
-        "description": "组合图片、视频、音频、画布与办公内容创作能力。"
+        "description": "面向专业多模态任务，组合媒体、画布、办公、工作区、项目记忆与 Web 调研能力。"
       }
     }
   },
@@ -148,7 +148,7 @@
     "channelMessaging": { "name": "渠道消息", "description": "通过使用目标选择的渠道回复或发送消息。" },
     "companion": { "name": "伙伴", "description": "在产品边界内学习和演进所选伙伴。" },
     "companionMemory": { "name": "伙伴记忆", "description": "读取或写入所选伙伴的记忆。" },
-    "computer": { "name": "电脑控制", "description": "在平台权限和设备资源可用时观察或控制桌面。" },
+    "computer": { "name": "电脑控制", "description": "高权限扩展；绑定本机后，必须完成屏幕与辅助功能授权才能使用相关 Agent。" },
     "creationMedia": { "name": "媒体创作", "description": "通过已配置的生成服务创作文本、图片、视频、音频和音乐。" },
     "creativeWorkshop": { "name": "创意工坊", "description": "处理画布、素材和可复用的创作模板。" },
     "customerService": { "name": "客户服务", "description": "读取和更新服务备注，或将工作转交给人工。" },
@@ -159,11 +159,11 @@
     "requirements": { "name": "需求", "description": "读取、编写、更新和认领需求平台中的工作。" },
     "robot": { "name": "机器人", "description": "观察和控制明确绑定的机器人设备。" },
     "ssh": { "name": "SSH", "description": "在所选 SSH 主机读取文件或运行已授权命令。" },
-    "toolDiscovery": { "name": "工具发现策略", "description": "为已授权工具选择 ToolSearch 的发现与排序策略。" },
+    "toolDiscovery": { "name": "工具选择策略", "description": "工具较多时按当前请求筛选和排序已授权工具；不会增加权限。" },
     "webResearch": { "name": "Web 调研", "description": "搜索公开来源并读取网页，不使用浏览器登录状态。" },
-    "workspaceArtifacts": { "name": "工作区产物", "description": "读取或发布所选工作区中的产物。" },
-    "workspaceFiles": { "name": "工作区文件", "description": "在所选工作区内读取、搜索和执行明确的文件改动。" },
-    "workspaceProcess": { "name": "工作区进程", "description": "在所选工作区内运行和控制命令进程。" },
+    "workspaceArtifacts": { "name": "交付产物", "description": "将工作区文件固化为可校验的交付物，或按产物 ID 读取已发布内容。" },
+    "workspaceFiles": { "name": "工作区读写", "description": "按路径读取、搜索、创建和修改工作区中的文件。" },
+    "workspaceProcess": { "name": "本地进程", "description": "在工作区中启动、观察和控制本地命令进程。" },
     "workspaceVcs": { "name": "版本控制", "description": "检查并明确修改所选工作区的版本控制状态。" }
   },
   "actionLabels": {
@@ -193,7 +193,7 @@
     "unknown": "暂时无法确认可用性，请刷新目录后再启用。"
   },
   "sections": {
-    "basic": "基本设置",
+    "basic": "Agent 信息",
     "basicHint": "定义身份、模型和工作方式",
     "capabilities": "能力模块",
     "capabilitiesHint": "先选择产品模块，再细化允许的操作",
@@ -243,13 +243,13 @@
     "empty": "暂无 MCP Tool 物化。"
   },
   "resources": {
-    "noneRequired": "无需额外资源",
-    "requiredCount": "使用时需要 {{count}} 类资源",
+    "noneRequired": "不依赖具体资源",
+    "requiredCount": "涉及 {{count}} 类资源",
     "bindingStatus": "资源状态",
-    "bindingStatusHint": "Agent 只声明资源类型；在启动会话或自动化时选择具体资源。",
-    "requiredAtUse": "使用时需要",
-    "pickerTitle": "选择本次使用的资源",
-    "pickerHint": "只选择产品中的实际资源；权限、路径、凭据和运行参数由系统安全解析。",
+    "bindingStatusHint": "这些是能力可能使用的资源类型；具体对象在会话或场景中按需绑定。",
+    "requiredAtUse": "可能使用",
+    "pickerTitle": "本次会话资源",
+    "pickerHint": "只选择本次确实要使用的对象；未绑定的增强能力不会阻止会话，相关工具不会出现。",
     "companionBindingHint": "与侧边栏共用这位伙伴的聊天记录和设置。渠道与机器人可按需选择；未选择时仍可进行基础聊天和使用伙伴记忆。",
     "ready": "资源已就绪",
     "missingCount": "还需选择 {{count}} 项",
@@ -287,8 +287,8 @@
     "computerPermissionScope": "本 Agent 需要：{{permissions}}。系统授权不会扩大 Agent 的能力范围。",
     "computerPermissionNotRequired": "本 Agent 仅使用启动应用/网址动作，不需要屏幕录制或辅助功能权限。",
     "configure": "去配置",
-    "bindingPolicyTitle": "具体资源在使用 Agent 时选择",
-    "bindingPolicyBody": "Agent 只声明可使用哪些能力和需要哪些资源种类。知识库、工作区与连接由具体会话、伙伴或自动化目标选择和管理。",
+    "bindingPolicyTitle": "能力授权与资源绑定分开管理",
+    "bindingPolicyBody": "Agent 配置决定允许哪些能力；会话或场景再绑定知识库、工作区、设备和连接。未绑定时只停用相关工具，不影响其他能力；电脑一旦绑定，必须满足系统权限。",
     "kinds": {
       "assetLibrary": "资产库",
       "browser": "浏览器资源",
@@ -368,12 +368,11 @@
     "officialHint": "从预设开始，也可以自由调整",
     "myHint": "为你的工作准备好合适的 Agent",
     "capabilityTab": "模块与操作",
-    "settingsTab": "基本设置",
+    "settingsTab": "名称与行为",
     "skillsTab": "技能与扩展",
     "saveAsMine": "保存为我的 Agent",
     "customizeTitle": "自定义这份预设",
     "customizeHint": "自由调整能力，保存为你的 Agent。官方预设仍可随时使用。",
-    "customName": "Agent 名称",
     "readyToSave": "等待服务端校验",
     "pendingChanges": "有未保存的修改",
     "savedHint": "所有修改已保存",
@@ -388,7 +387,7 @@
     "resetTitle": "还原本次修改？",
     "resetBody": "将恢复到上次保存的配置。",
     "saveSuccess": "Agent 配置已保存",
-    "selectedHint": "为该 Agent 选择模块和精确操作",
+    "selectedHint": "按场景选择能力模块，再核对允许的具体操作",
     "settingsHint": "定义身份、模型和工作方式",
     "manageModels": "前往模型管理",
     "modelNeeded": "先配置一个可用的聊天模型，再保存 Agent。",
@@ -398,6 +397,8 @@
     "disabledSave": "请先处理不可用模块或操作",
     "presetBadge": "可自定义预设",
     "personalBadge": "个人 Agent",
+    "editIdentity": "编辑 Agent 信息",
+    "editName": "修改 Agent 名称",
     "createHint": "从空白开始",
     "createTitle": "新建 Agent",
     "changeBlocked": "无法更改模块",
@@ -406,15 +407,19 @@
     "enableDependencies": "需要同时启用以下依赖模块：{{names}}。",
     "disableDependents": "以下已启用模块依赖本次移出的模块，将一同禁用：{{names}}。",
     "undo": "撤销上一步",
-    "enabledModules": "已启用模块",
-    "resourceModules": "需要资源",
-    "moduleGuide": "先启用模块，再检查精确操作",
+    "enabledModules": "当前生效模块",
+    "resourceModules": "资源相关模块",
+    "moduleGuide": "列表同时显示可直接配置的模块和当前配置带入的只读依赖；Skill 与 MCP 的绑定详情位于“技能与扩展”。",
+    "dependencyBadge": "依赖带入",
+    "dependencyActive": "依赖生效",
+    "dependencyHint": "由 {{names}} 依赖；保存时会一起冻结，但不能在这里单独开关。",
+    "dependencyActionPermissions": "依赖内部可用的操作",
     "moduleUnavailableSummary": "有 {{count}} 个已启用模块、操作或运行条件需要处理。",
     "searchModules": "搜索模块、操作或资源",
-    "moduleStatus": { "all": "全部", "enabled": "已启用", "attention": "需要处理" },
+    "moduleStatus": { "all": "全部", "enabled": "生效中", "attention": "需要处理" },
     "moduleCategories": "模块分类",
     "moduleCategoryCount": "已启用 {{enabled}} 个，总计 {{total}} 个",
-    "moduleCatalog": "能力模块目录",
+    "moduleCatalog": "能力模块与依赖",
     "enableModule": "启用 {{name}}",
     "disableModule": "停用 {{name}}",
     "moduleUnavailable": "当前安装无法使用此模块；可展开技术详情查看诊断信息。",
@@ -438,7 +443,7 @@
     "noModules": "当前没有可用的能力模块",
     "noModulesHint": "请刷新安装目录，或启用会发布 Agent 模块的产品扩展。",
     "firstRunTitle": "选择起点",
-    "firstRunHint": "可从零工具的“最简”开始，也可创建空白自定义配置；“通用”位于官方预设。",
+    "firstRunHint": "“最简”只提供基础对话，不绑定 Skill、MCP 或能力模块；也可以创建空白配置后逐项添加。",
     "startMinimal": "从最简开始",
     "startCustom": "空白自定义",
     "emptyWorkbenchTitle": "创建第一个 Agent",

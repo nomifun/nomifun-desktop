@@ -1,4 +1,5 @@
 import type { AgentPresetLibraryResponse, AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import type { AgentPresetId } from '@/common/types/ids';
 import { Button, Popconfirm } from '@arco-design/web-react';
 import { AddOne, ExpandLeft, Code, Customer, Delete, Loading, Magic, MessageOne, Search, User } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
@@ -11,6 +12,7 @@ type Selection = { kind: 'template'; template: OfficialPresetTemplate } | { kind
 type Props = {
   width?: number; resizeHandle?: React.ReactNode; onCollapse?: () => void;
   library: AgentPresetLibraryResponse; selection: Selection; busy: boolean; creating: boolean;
+  dirtyPresetId?: AgentPresetId;
   openingPresetId: string | null; deletingPresetId: string | null;
   onSelectTemplate: (template: OfficialPresetTemplate) => void;
   onSelectPreset: (preset: AgentPresetSummary) => void;
@@ -27,6 +29,7 @@ const TemplateIcon: React.FC<{ templateKey: OfficialPresetKey }> = ({ templateKe
 
 const AgentPresetLibrary: React.FC<Props> = ({
   width = 300, resizeHandle, onCollapse, library, selection, busy, creating, openingPresetId, deletingPresetId,
+  dirtyPresetId,
   onSelectTemplate, onSelectPreset, onCreatePreset, onDeletePreset,
 }) => {
   const { t } = useTranslation();
@@ -99,7 +102,7 @@ const AgentPresetLibrary: React.FC<Props> = ({
           return <div key={preset.preset_id} className={`${styles.libraryPersonalRow} ${selected ? styles.libraryRowActive : ''}`}>
             <button type='button' className={styles.librarySelect} disabled={busy} aria-pressed={selected} aria-busy={openingPresetId === preset.preset_id} onClick={() => onSelectPreset(preset)}>
               <span className={styles.libraryIcon}>{openingPresetId === preset.preset_id ? <Loading theme='outline' size={18} className='animate-spin' /> : <User theme='outline' size={18} />}</span>
-              <span className={styles.libraryCopy}><span className={styles.libraryName}>{preset.display_name}</span><span className={styles.libraryMeta}>{preset.description || t(preset.current_stable_revision ? 'agentSettings.status.saved' : 'agentSettings.status.dirty')}</span></span>
+              <span className={styles.libraryCopy}><span className={styles.libraryName}>{preset.display_name}</span><span className={styles.libraryMeta}>{dirtyPresetId === preset.preset_id ? t('agentSettings.status.dirty') : preset.description || t(preset.current_stable_revision ? 'agentSettings.status.saved' : 'agentSettings.status.dirty')}</span></span>
             </button>
             <Popconfirm title={t('agentSettings.library.deleteConfirmTitle', { name: preset.display_name })} content={t('agentSettings.library.deleteConfirmBody')} okText={t('agentSettings.actions.delete')} cancelText={t('common.cancel')} disabled={busy} okButtonProps={{ status: 'danger' }} onOk={() => onDeletePreset(preset)}>
               <Button type='text' status='danger' size='mini' className={styles.rowAction} title={t('agentSettings.actions.delete')} aria-label={t('agentSettings.library.deleteAria', { name: preset.display_name })} icon={<Delete theme='outline' size={14} />} loading={deletingPresetId === preset.preset_id} disabled={busy} />

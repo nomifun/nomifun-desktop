@@ -650,6 +650,11 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         ("workspace.files", "workspace.files/patch"),
         ("workspace.vcs", "workspace.vcs/commit"),
         ("workspace.process", "workspace.process/exec"),
+        ("workspace.artifacts", "workspace.artifacts/publish"),
+        ("project.memory", "project.memory/read"),
+        ("agent.collaboration", "agent/delegate"),
+        ("agent.tool-discovery", "tool.discovery.rank"),
+        ("web.research", "web.research/search"),
     ] {
         let selection = enabled.iter()
             .find(|item| item["capability"]["id"] == module_id)
@@ -914,7 +919,8 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
             "selection": coding, "model": model,
             "resource_selections": [
                 {"resource_kind":"workspace", "resource_id":"default-workspace"},
-                {"resource_kind":"process_session", "resource_id":"managed-process-session"}
+                {"resource_kind":"process_session", "resource_id":"managed-process-session"},
+                {"resource_kind":"project_memory", "resource_id":"default-project-memory"}
             ]
         })).await;
         assert_eq!(status, StatusCode::OK, "a chat-only model must support the headless-safe Coding Agent: {saved}");
@@ -960,7 +966,8 @@ async fn canonical_coding_session_has_no_in_place_binding_override_routes() {
     assert_ne!(original["preset"]["preset_id"], target["preset"]["preset_id"]);
     let resources = json!([
         {"resource_kind":"workspace", "resource_id":"default-workspace"},
-        {"resource_kind":"process_session", "resource_id":"managed-process-session"}
+        {"resource_kind":"process_session", "resource_id":"managed-process-session"},
+        {"resource_kind":"project_memory", "resource_id":"default-project-memory"}
     ]);
     let session = post(router.clone(), "/api/agent-sessions", json!({
         "preset_id":original["preset"]["preset_id"], "model":model,
@@ -1233,13 +1240,14 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
             "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
             "resource_selections": [
                 { "resource_kind": "companion", "resource_id": companion_id },
-                { "resource_kind": "companion_memory", "resource_id": companion_id }
+                { "resource_kind": "companion_memory", "resource_id": companion_id },
+                { "resource_kind": "scheduler", "resource_id": "installation-scheduler" }
             ]
         })).await;
     assert_eq!(status, StatusCode::OK, "{selected_default}");
     let frozen_resources = selected_default["data"]["agent_binding"]["typed_resource_bindings"]
         .as_array().expect("typed product resources");
-    assert_eq!(frozen_resources.len(), 2);
+    assert_eq!(frozen_resources.len(), 3);
     assert!(frozen_resources.iter().all(|resource|
         resource["resource_kind"] != "robot" && resource["resource_kind"] != "channel"));
     let path = format!("/api/companion/companions/{companion_id}/companion/threads");
@@ -1264,13 +1272,17 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
     let enabled = snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .map(|capability| capability.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(enabled, std::collections::BTreeSet::from([
-        "channel.messaging", "companion", "companion.memory", "robot",
+        "agent.tool-discovery", "automation.schedule", "channel.messaging", "companion",
+        "companion.memory", "knowledge", "robot",
     ]));
     for (module, expected) in [
         ("companion", &["companion/evolve", "companion/learn"][..]),
         ("companion.memory", &["companion.memory/recall", "companion.memory/write"][..]),
+        ("knowledge", &["knowledge/read", "knowledge/search"][..]),
         ("channel.messaging", &["channel.messaging/reply"][..]),
         ("robot", &["robot/vision"][..]),
+        ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"][..]),
+        ("agent.tool-discovery", &["tool.discovery.rank"][..]),
     ] {
         let actual = snapshot["enabled_capability_actions"][module].as_array().unwrap().iter()
             .map(|action| action.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
@@ -1323,8 +1335,7 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
 }
 
 #[tokio::test]
-async fn creative_agent_launches_without_chat_generation_provider_or_canvas() {
-    use nomifun_db::IProviderRepository;
+async fn creative_agent_launches_without_enabled_chat_generation_provider_or_canvas() {
     const TRUST: &str = "creative-agent-no-model";
     async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
         let response = router.oneshot(Request::builder().method("POST").uri(path)
@@ -1335,14 +1346,21 @@ async fn creative_agent_launches_without_chat_generation_provider_or_canvas() {
         (status, serde_json::from_slice(&bytes).unwrap())
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    // App bootstrap seeds its built-in default provider. Remove it from this
-    // isolated fixture so the route cannot accidentally rely on that fallback.
-    let providers = nomifun_db::SqliteProviderRepository::new(services.database.pool().clone());
-    for provider in providers.list().await.unwrap() {
-        providers.delete(&provider.provider_id).await.unwrap();
-    }
-    let provider_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM providers").fetch_one(services.database.pool()).await.unwrap();
-    assert_eq!(provider_count, 0, "the fixture must not supply a hidden Chat or media provider");
+    // The managed Provider is a permanent application service and its refresh
+    // task may recreate a deleted projection. Disable it through its owner so
+    // this fixture proves the professional route does not depend on any usable
+    // Chat or media model supply without racing that background task.
+    services.managed_model_service.set_free_enabled(false).await.unwrap();
+    let enabled_provider_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM providers WHERE enabled = 1",
+    )
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        enabled_provider_count, 0,
+        "the fixture must not supply an enabled Chat or media provider"
+    );
     let (status, created) = call(router.clone(), "/api/agent-presets/from-template/creative-studio.default", json!({
         "display_name":"Creative", "reuse_existing":true,
     })).await;
@@ -1356,7 +1374,10 @@ async fn creative_agent_launches_without_chat_generation_provider_or_canvas() {
     let (status, launched) = call(router.clone(), "/api/agent-sessions", json!({
         "preset_id": preset_id, "title": "Creative without providers",
         "resource_selections":[
-            {"resource_kind":"asset_library", "resource_id":"creative-studio-assets"}
+            {"resource_kind":"asset_library", "resource_id":"creative-studio-assets"},
+            {"resource_kind":"process_session", "resource_id":"managed-process-session"},
+            {"resource_kind":"project_memory", "resource_id":"default-project-memory"},
+            {"resource_kind":"workspace", "resource_id":"default-workspace"}
         ],
     })).await;
     assert_eq!(status, StatusCode::OK, "{launched}");
@@ -1372,9 +1393,25 @@ async fn creative_agent_launches_without_chat_generation_provider_or_canvas() {
     let resources = launched["data"]["agent_binding"]["typed_resource_bindings"].as_array().unwrap();
     assert!(resources.iter().all(|binding| binding["resource_kind"] != "canvas"));
     assert!(resources.iter().any(|binding| binding["resource_kind"] == "asset_library"));
-    assert!(providers.list().await.unwrap().is_empty(), "professional launch must not create a hidden provider fallback");
+    assert!(resources.iter().any(|binding| binding["resource_kind"] == "workspace"));
+    assert!(resources.iter().any(|binding| binding["resource_kind"] == "process_session"));
+    assert!(resources.iter().any(|binding| binding["resource_kind"] == "project_memory"));
+    let enabled_provider_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM providers WHERE enabled = 1",
+    )
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        enabled_provider_count, 0,
+        "professional launch must not enable a hidden provider fallback"
+    );
     let capabilities = editor["revision"]["document"]["enabled_capabilities"].as_array().unwrap();
-    for capability in ["creation.media", "creative.workshop", "office"] {
+    for capability in [
+        "agent.tool-discovery", "creation.media", "creative.workshop", "office",
+        "project.memory", "web.research", "workspace.artifacts", "workspace.files",
+        "workspace.process",
+    ] {
         assert!(capabilities.iter().any(|entry| entry["capability"]["id"] == capability), "{editor}");
     }
     services.shutdown_browser_platform().await.unwrap();
