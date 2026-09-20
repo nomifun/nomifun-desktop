@@ -2163,6 +2163,7 @@ mod tests {
             persona: "Wave 2 host test".to_owned(),
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         let contribution_locks = vec![materialized
             .capability(&CapabilityId::from("workspace.files"))

@@ -188,6 +188,20 @@ import type {
   UpdateRemoteBindingRequest,
 } from '../types/agentPlatform';
 import type {
+  IIdmmConfig,
+  IIdmmState,
+} from '../types/idmm';
+export type {
+  IdmmInterventionKind,
+  IdmmInterventionStatus,
+  IdmmMode,
+  IdmmRunState,
+  IdmmScanScope,
+  IIdmmConfig,
+  IIdmmIntervention,
+  IIdmmState,
+} from '../types/idmm';
+import type {
   TAgentExecutionTemplate,
   TAgentExecutionTemplateDetail,
   TAgentExecutionTemplateParticipant,
@@ -4058,9 +4072,9 @@ export const requirements = {
 };
 
 // ── Phase-3 model failover queue (mirrors `ModelFailoverConfig`, plan D1/D8). ──
-// A global, ordered list of provider+model candidates the conversation send-loop
-// falls back through when a NOMI session hits a pre-response provider fault. Read
-// & written through the `agent.model_failover` client preference (one JSON blob).
+// A global, ordered provider+model list frozen into newly created Nomi
+// AgentSession Chat routes. Existing immutable Session bindings do not change.
+// Read & written through the `agent.model_failover` client preference.
 
 /** One ordered candidate in the failover queue. */
 export interface IModelFailoverCandidate {
@@ -4095,6 +4109,48 @@ export const agentModelFailover = {
   updateSettings: withResponseMap(
     httpPut<IModelFailoverConfig, IModelFailoverConfig>('/api/agent/model-failover'),
     fromApiModelFailoverConfig
+  ),
+};
+
+// ── Intelligent Decision-Making Mode (canonical AgentSession supervisor). ──
+
+const fromApiIdmmConfig = (config: IIdmmConfig): IIdmmConfig => ({
+  ...config,
+  bypass_model: {
+    ...config.bypass_model,
+    provider_id:
+      config.bypass_model.provider_id == null
+        ? null
+        : parseProviderId(config.bypass_model.provider_id),
+  },
+});
+
+const fromApiIdmmState = (state: IIdmmState): IIdmmState => ({
+  ...state,
+  agent_session_id: parseConversationId(state.agent_session_id),
+  config: fromApiIdmmConfig(state.config),
+});
+
+export const idmm = {
+  getStatus: withResponseMap(
+    httpGet<IIdmmState, { agent_session_id: ConversationId }>(
+      (p) => `/api/agent-sessions/${p.agent_session_id}/idmm`
+    ),
+    fromApiIdmmState
+  ),
+  setConfig: withResponseMap(
+    httpPut<IIdmmState, { agent_session_id: ConversationId; config: IIdmmConfig }>(
+      (p) => `/api/agent-sessions/${p.agent_session_id}/idmm`,
+      (p) => p.config
+    ),
+    fromApiIdmmState
+  ),
+  evaluateNow: withResponseMap(
+    httpPost<IIdmmState, { agent_session_id: ConversationId }>(
+      (p) => `/api/agent-sessions/${p.agent_session_id}/idmm/evaluate`,
+      () => undefined
+    ),
+    fromApiIdmmState
   ),
 };
 

@@ -166,6 +166,7 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
                 persona: String::new(),
                 instructions: String::new(),
                 starter_prompts: Vec::new(),
+                runtime_policy: Default::default(),
             }),
         },
     )

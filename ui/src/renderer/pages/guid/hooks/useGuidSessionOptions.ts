@@ -6,18 +6,23 @@
 
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBinding } from '@/common/adapter/ipcBridge';
+import type { IIdmmConfig } from '@/common/types/idmm';
 import type { ConversationId } from '@/common/types/ids';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
+import { defaultIdmmConfig } from '@/renderer/pages/conversation/components/IdmmControl';
 
 export type GuidSessionOptions = {
   knowledge: IKnowledgeBinding;
   setKnowledge: (next: IKnowledgeBinding) => void;
   autoWork: AutoWorkDraftValue;
   setAutoWork: (next: AutoWorkDraftValue) => void;
+  idmm: IIdmmConfig;
+  setIdmm: (next: IIdmmConfig) => void;
+  setIdmmDefault: (next: IIdmmConfig) => void;
   applyToConversation: (
     conversationId: ConversationId,
     options?: { allowKnowledgeBinding?: boolean; allowAutomation?: boolean }
@@ -37,16 +42,26 @@ export const useGuidSessionOptions = (): GuidSessionOptions => {
   const [autoWork, setAutoWork] = useState<AutoWorkDraftValue>({
     enabled: false,
   });
+  const [idmm, setIdmmState] = useState<IIdmmConfig>(defaultIdmmConfig);
+  const idmmOverriddenRef = useRef(false);
+  const setIdmm = useCallback((next: IIdmmConfig) => {
+    idmmOverriddenRef.current = true;
+    setIdmmState(next);
+  }, []);
+  const setIdmmDefault = useCallback((next: IIdmmConfig) => {
+    idmmOverriddenRef.current = false;
+    setIdmmState(structuredClone(next));
+  }, []);
 
-  const draftsRef = useRef({ knowledge, autoWork });
-  draftsRef.current = { knowledge, autoWork };
+  const draftsRef = useRef({ knowledge, autoWork, idmm });
+  draftsRef.current = { knowledge, autoWork, idmm };
 
   const applyToConversation = useCallback(
     async (
       conversationId: ConversationId,
       options?: { allowKnowledgeBinding?: boolean; allowAutomation?: boolean }
     ) => {
-      const { knowledge: kb, autoWork: aw } = draftsRef.current;
+      const { knowledge: kb, autoWork: aw, idmm: idmmConfig } = draftsRef.current;
       const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [];
 
       if (
@@ -88,6 +103,19 @@ export const useGuidSessionOptions = (): GuidSessionOptions => {
         report(tasks, await Promise.allSettled(tasks.map((task) => task.run())));
       }
 
+      if (options?.allowAutomation !== false && idmmOverriddenRef.current) {
+        const idmmTask = {
+          label: t('idmm.title'),
+          run: () =>
+            ipcBridge.idmm.setConfig.invoke({
+              agent_session_id: conversationId,
+              config: idmmConfig,
+            }),
+        };
+        const [result] = await Promise.allSettled([idmmTask.run()]);
+        report([idmmTask], [result]);
+      }
+
       if (options?.allowAutomation !== false && aw.enabled && aw.tag) {
         const autoWorkTask = {
           label: t('requirements.autowork.label'),
@@ -114,6 +142,8 @@ export const useGuidSessionOptions = (): GuidSessionOptions => {
   const reset = useCallback(() => {
     setKnowledge(defaultKnowledgeBinding());
     setAutoWork({ enabled: false });
+    idmmOverriddenRef.current = false;
+    setIdmmState(defaultIdmmConfig());
   }, []);
 
   return {
@@ -121,6 +151,9 @@ export const useGuidSessionOptions = (): GuidSessionOptions => {
     setKnowledge,
     autoWork,
     setAutoWork,
+    idmm,
+    setIdmm,
+    setIdmmDefault,
     applyToConversation,
     reset,
   };

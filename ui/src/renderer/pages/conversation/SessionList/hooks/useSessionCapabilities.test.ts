@@ -72,10 +72,12 @@ describe('SessionList capability snapshot', () => {
     expect(snapshot.autowork.get(capabilityKey('conversation', replacementId))).toBe('paused');
   });
 
-  test('does not subscribe to the retired independent decision layer', () => {
+  test('does not create an N+1 IDMM subscription from the session-list projection', () => {
     const hook = readFileSync(new URL('./useSessionCapabilities.ts', import.meta.url), 'utf8');
     const projection = readFileSync(new URL('../utils/sessionCapabilityItems.tsx', import.meta.url), 'utf8');
 
+    // IDMM is read from its per-Session header control. The list must not poll
+    // every row independently until a batched supervisor snapshot exists.
     expect(hook.includes('ipcBridge.idmm')).toBe(false);
     expect(hook.includes('ipcBridge.conversation.reconnected.on(')).toBe(true);
     expect(projection.includes('idmmState')).toBe(false);

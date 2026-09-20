@@ -8,6 +8,7 @@ import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import ChatTitleEditor from '@/renderer/pages/conversation/components/ChatTitleEditor';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
+import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import WorkspacePanelHeader from './WorkspacePanelHeader';
 import WorkspaceToolRail, {
@@ -358,6 +359,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
         {props.headerControls !== undefined ? props.headerControls : !props.hideAdvancedControls && conversation_id != null && (
           <>
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
+            <IdmmControl target={{ id: conversation_id }} />
             {(props.knowledgeEnabled ?? true) && (
               <KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />
             )}

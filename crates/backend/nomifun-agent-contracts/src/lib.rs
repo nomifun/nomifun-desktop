@@ -26,6 +26,7 @@ pub mod remote;
 pub mod runtime;
 pub mod schema;
 pub mod session;
+pub mod supervision;
 pub mod validation;
 
 pub use closure::*;
@@ -53,4 +54,5 @@ pub use schema::{
     agent_store_schema_manifest_payload,
 };
 pub use session::*;
+pub use supervision::*;
 pub use validation::*;

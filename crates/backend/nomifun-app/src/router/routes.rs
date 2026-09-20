@@ -53,6 +53,7 @@ use super::health::{
     unregister_knowledge_global_handler,
 };
 use super::model_failover::{ModelFailoverRouterState, model_failover_routes};
+use super::idmm::idmm_routes;
 use super::state::{ModuleStates, try_build_module_states, build_ws_state};
 use super::trace::with_access_log;
 
@@ -722,6 +723,11 @@ fn create_nomi_core_router_with_all_state(
         &auth_mw_state,
         &instance_owner_state,
     );
+    let idmm_authenticated = protect_instance_owner(
+        idmm_routes(states.idmm.clone()),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
     let nomi_core_remote_authenticated =
         super::nomi_core_session::build_nomi_core_remote_router(
             states.nomi_core_agent_api.clone(),
@@ -1105,6 +1111,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(javascript_runtime_authenticated)
         .merge(agent_authenticated)
         .merge(nomi_core_agent_authenticated)
+        .merge(idmm_authenticated)
         .merge(nomi_core_remote_authenticated)
         .nest("/mcp", nomi_core_remote_mcp)
         .merge(model_failover_authenticated)

@@ -62,6 +62,7 @@ mod nomi_core_mcp;
 mod nomi_core_mcp_resources;
 mod mcp_effect_receipts;
 mod hosted_effect_receipts;
+mod idmm;
 mod nomi_core_mcp_catalog;
 pub(crate) mod plugin_platform;
 mod plugin_runtime_host;

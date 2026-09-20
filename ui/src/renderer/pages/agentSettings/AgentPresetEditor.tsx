@@ -49,6 +49,7 @@ import styles from './AgentSettingsPage.module.css';
 import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
 import AgentEditorTabs from './AgentEditorTabs';
 import AgentInlineNameEditor from './AgentInlineNameEditor';
+import AgentRuntimePolicyPanel from './AgentRuntimePolicyPanel';
 
 type AgentPresetEditorProps = {
   editor: AgentPresetEditorResponse;
@@ -148,6 +149,9 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const busy = busyAction !== null;
   const unavailableCount = unavailableModuleReferences(draft.document, catalog).length;
   const chatRouteRecord = draft.document.chat_route_records[AGENT_CHAT_MODEL_TASK];
+  const idmmPolicy = draft.document.runtime_policy.idmm;
+  const idmmPolicyBlocksSave = idmmPolicy.mode === 'rule_plus_model' &&
+    (!idmmPolicy.bypass_model.provider_id || !idmmPolicy.bypass_model.model);
   const moduleIds = draft.document.enabled_capabilities.map((selection) => String(selection.capability.id));
   const taskOnlyCreation = moduleIds.includes('creation.media') && !chatRouteRecord;
   const savedDocumentUnchanged = Boolean(
@@ -171,6 +175,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
     { key: 'providers', label: t('agentSettings.providers.title') },
     { key: 'settings', label: t('agentSettings.workbench.settingsTab') },
+    { key: 'runtime', label: t('agentSettings.workbench.runtimeTab') },
     { key: 'extensions', label: t('agentSettings.workbench.skillsTab') },
   ];
   const editIdentity = () => setActiveTab('settings');
@@ -294,6 +299,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section>
         {modelBlocksSave && onOpenModels && <Button type='text' onClick={onOpenModels}>{t('agentSettings.workbench.manageModels')}</Button>}
       </div>}
+      {activeTab === 'runtime' && <AgentRuntimePolicyPanel idPrefix='agent' document={draft.document} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />}
       {activeTab === 'extensions' && <div role='tabpanel' id='agent-panel-extensions' aria-labelledby='agent-tab-extensions'>
         <AgentContributionOrder kind='middleware' document={draft.document} catalog={catalog.capabilities} disabled={busy} onOpenAuthor={onOpenAuthor} onChange={(document) => onDraftChange({ ...draft, document })} />
         <AgentContributionOrder document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
@@ -385,10 +391,10 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
       </section></div>}
     </div>
     <AgentEditorActionBar>
-      <div className={styles.saveStatus}><span className={dirty || unavailableCount ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : modelBlocksSave ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>
+      <div className={styles.saveStatus}><span className={dirty || unavailableCount || idmmPolicyBlocksSave ? styles.statusWarningDot : styles.statusReadyDot} /><div><strong>{t(dirty ? 'agentSettings.workbench.pendingChanges' : 'agentSettings.workbench.savedHint')}</strong><span>{t(unavailableCount ? 'agentSettings.workbench.disabledSave' : idmmPolicyBlocksSave ? 'agentSettings.workbench.runtimePolicyNeeded' : modelBlocksSave ? 'agentSettings.workbench.modelNeeded' : dirty ? 'agentSettings.workbench.previewCompileHint' : 'agentSettings.workbench.saveHint')}</span></div></div>
       <div className={styles.actionButtons}>
         {dirty && onDiscard && <Button type='text' disabled={busy} onClick={onDiscard}>{t('agentSettings.workbench.resetChanges')}</Button>}
-        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || modelBlocksSave} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :
+        {dirty || !editor.preset.current_stable_revision ? <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busyAction === 'save'} disabled={busy || unavailableCount > 0 || !draft.display_name.trim() || modelBlocksSave || idmmPolicyBlocksSave} onClick={onSave}>{t('common.save')}</AgentEditorActionButton> :
           <AgentConversationAction hasStableRevision={Boolean(editor.preset.current_stable_revision)} dirty={dirty} busy={busy} onClick={() => onStartConversation(editor.preset)} />}
       </div>
     </AgentEditorActionBar>

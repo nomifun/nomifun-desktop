@@ -282,8 +282,16 @@ body[arco-theme='dark'] .sider-soft-popover .arco-popover-arrow {
    gutter instead of a doubled left side. */
 .knowledge-control-popover .arco-popover-content,
 .knowledge-control-popover .arco-popover-inner,
-.knowledge-control-popover .arco-popover-inner-content {
+.knowledge-control-popover .arco-popover-inner-content,
+.idmm-control-popover .arco-popover-content,
+.idmm-control-popover .arco-popover-inner,
+.idmm-control-popover .arco-popover-inner-content {
   padding: 0 !important;
+}
+
+.idmm-control-popover,
+.idmm-control-popover .arco-popover-content {
+  max-width: calc(100vw - 24px);
 }
 
 .knowledge-control-popover .knowledge-control-search,

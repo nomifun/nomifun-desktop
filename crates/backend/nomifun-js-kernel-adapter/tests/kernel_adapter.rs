@@ -347,6 +347,7 @@ fn revision(
             persona: "JavaScript adapter fixture".into(),
             instructions: "Exercise direct typed exports.".into(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         },
         contribution_locks: [TOOL_ID, CONTEXT_ID]
             .into_iter()

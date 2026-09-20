@@ -1,0 +1,24 @@
+[package]
+name = "nomifun-idmm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nomifun-api-types.workspace = true
+nomifun-common.workspace = true
+nomifun-db.workspace = true
+nomi-redact.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

@@ -1025,6 +1025,7 @@ mod tests {
             persona: "Managed fixture".to_owned(),
             instructions: "Use exact managed contributions.".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
 
         catalog.validate().unwrap();
@@ -1182,6 +1183,7 @@ mod tests {
             persona: "Plugin fixture".to_owned(),
             instructions: "Use the exact Catalog lock.".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
 
         let registry = MaterializedRegistry::empty();

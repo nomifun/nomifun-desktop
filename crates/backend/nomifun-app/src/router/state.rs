@@ -80,6 +80,7 @@ use super::nomi_core_session::{
     NomiCoreAgentApiState, NomiCorePluginToolSessionProvider,
     NomiCoreSessionOwner,
 };
+use super::idmm::IdmmRouterState;
 /// All module-level router states bundled into a single struct.
 ///
 /// Reduces parameter bloat on router constructors and makes it easy for
@@ -96,6 +97,8 @@ pub struct ModuleStates {
     pub channel: ChannelRouterState,
     pub cron: CronRouterState,
     pub requirement: RequirementRouterState,
+    /// Per-AgentSession intelligent decision supervisor.
+    pub(crate) idmm: IdmmRouterState,
     pub knowledge: KnowledgeRouterState,
     pub companion: CompanionRouterState,
     /// 客服独立域 (customer-service domain).
@@ -203,6 +206,16 @@ pub(crate) async fn try_build_module_states(
         services.database.pool().clone(),
         services.creation_service.clone(),
     ));
+    let idmm_service = super::idmm::build_idmm_service(
+        services.authoritative_user_id.clone(),
+        services.database.pool().clone(),
+        conversation_owner.clone(),
+        services.model_invoke_service.clone(),
+        services.work_dir.join("idmm"),
+        services.provider_lifecycle.clone(),
+    );
+    conversation_owner.install_idmm(Arc::downgrade(&idmm_service))?;
+    let idmm_state = IdmmRouterState::new(idmm_service.clone(), conversation_owner.clone());
     let javascript_runtime_foundation =
         super::javascript_runtime::build_javascript_runtime_foundation(
             services.database.pool().clone(),
@@ -222,6 +235,7 @@ pub(crate) async fn try_build_module_states(
             services,
             conversation_owner.clone(),
             runtime_authority.clone(),
+            idmm_service.clone(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
@@ -397,6 +411,8 @@ pub(crate) async fn try_build_module_states(
     agent_execution.spawn_recovery();
     requirement_state.auto_work_runner.start_sweeper();
     requirement_state.auto_work_runner.resume_persisted_bindings();
+    let idmm_shutdown = services.background_shutdown.child_token();
+    services.register_background_task(tokio::spawn(idmm_service.run(idmm_shutdown)));
     let companion_state = build_companion_state(
         services,
         channel_components.manager.clone(),
@@ -421,6 +437,7 @@ pub(crate) async fn try_build_module_states(
         channel: channel_state,
         cron,
         requirement: requirement_state,
+        idmm: idmm_state,
         knowledge: KnowledgeRouterState::new(services.knowledge_service.clone()),
         companion: companion_state,
         customer_service: nomifun_customer_service::CustomerServiceRouterState {
@@ -464,6 +481,7 @@ async fn build_nomi_core_agent_api_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
     runtime: Arc<dyn nomifun_js_runtime::CommittedRuntimeProvider>,
+    idmm: Arc<nomifun_idmm::IdmmService>,
 ) -> anyhow::Result<(
     NomiCoreAgentApiState,
     nomifun_plugin_platform::application::PluginRouterState,
@@ -714,6 +732,7 @@ async fn build_nomi_core_agent_api_state(
             engine_sessions,
             Arc::clone(&plugin.schema_resolver),
             Arc::clone(&builtin_plan.schema_resolver),
+            idmm,
         ))?;
     conversation_owner.install_official_runtime(Arc::clone(&services.official_runtime), Arc::downgrade(&control_plane))?;
     let plugin_tool_sessions = Arc::new(NomiCorePluginToolSessionProvider::new(

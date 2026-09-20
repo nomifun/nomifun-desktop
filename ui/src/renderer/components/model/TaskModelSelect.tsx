@@ -6,6 +6,7 @@
 
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import classNames from 'classnames';
 import type { ModelTask, ModelTrait } from '@/common/config/storage';
 import type { ProviderId } from '@/common/types/ids';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
@@ -45,6 +46,8 @@ interface TaskModelSelectProps {
   emptyHint?: string;
   /** Optional copy for the model field; provider keeps its task-aware default. */
   placeholder?: string;
+  /** Keep compact settings panels from overflowing by stacking every selector. */
+  layout?: 'inline' | 'stacked';
 }
 
 /**
@@ -72,6 +75,7 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
   onHintChange,
   emptyHint,
   placeholder,
+  layout = 'inline',
 }) => {
   const { t } = useTranslation();
   const { groups, isLoading } = useModelsForTask(task, traits);
@@ -125,13 +129,26 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
     onHintChange?.(hint);
   }, [hint, onHintChange]);
 
+  const stacked = layout === 'stacked';
+
   return (
-    <div className='flex min-w-0 flex-col items-end gap-4px'>
-      <div className='flex min-w-0 flex-wrap items-center justify-end gap-6px'>
+    <div
+      className={classNames(
+        'flex min-w-0 flex-col gap-4px',
+        stacked ? 'items-stretch' : 'items-end'
+      )}
+    >
+      <div
+        className={classNames(
+          'flex min-w-0 gap-6px',
+          stacked ? 'flex-col items-stretch' : 'flex-wrap items-center justify-end'
+        )}
+      >
         <NomiSelect
           size={size}
-          contentFit
+          contentFit={!stacked}
           contentMaxWidth={220}
+          className={stacked ? 'w-full' : undefined}
           disabled={disabled}
           placeholder={t('settings.taskModel.providerPlaceholder')}
           value={providerId ?? undefined}
@@ -150,8 +167,9 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
         </NomiSelect>
         <NomiSelect
           size={size}
-          contentFit
+          contentFit={!stacked}
           contentMaxWidth={280}
+          className={stacked ? 'w-full' : undefined}
           disabled={disabled || providerId == null || state.providerStale}
           placeholder={placeholder ?? t('settings.taskModel.modelPlaceholder')}
           value={selectedModel ?? undefined}
@@ -189,8 +207,9 @@ const TaskModelSelect: React.FC<TaskModelSelectProps> = ({
         {withVoice && !modelIdIsVoice && (
           <NomiSelect
             size={size}
-            contentFit
+            contentFit={!stacked}
             contentMaxWidth={200}
+            className={stacked ? 'w-full' : undefined}
             showSearch
             allowCreate
             disabled={disabled || selectedModel == null}

@@ -29,6 +29,7 @@ nomifun-shell = { path = "crates/backend/nomifun-shell" }
 nomifun-ai-agent = { path = "crates/backend/nomifun-ai-agent" }
 nomifun-mcp = { path = "crates/backend/nomifun-mcp" }
 nomifun-model-invoke = { path = "crates/backend/nomifun-model-invoke" }
+nomifun-idmm = { path = "crates/backend/nomifun-idmm" }
 nomifun-conversation = { path = "crates/backend/nomifun-conversation" }
 nomifun-skill-library = { path = "crates/backend/nomifun-skill-library" }
 nomifun-channel = { path = "crates/backend/nomifun-channel" }

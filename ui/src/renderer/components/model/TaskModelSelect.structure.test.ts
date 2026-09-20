@@ -46,6 +46,12 @@ describe('TaskModelSelect', () => {
     expect(src.includes('!hideHint && hint')).toBe(true);
   });
 
+  test('supports an opt-in stacked layout for bounded popover panels', () => {
+    expect(src.includes("layout?: 'inline' | 'stacked'")).toBe(true);
+    expect(src.includes("const stacked = layout === 'stacked'")).toBe(true);
+    expect(src.includes('contentFit={!stacked}')).toBe(true);
+  });
+
   test('the voice select is free text with a candidate list, and only for the TTS variant', () => {
     expect(src.includes('withVoice')).toBe(true);
     expect(src.includes('showSearch')).toBe(true);

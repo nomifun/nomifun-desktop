@@ -38,6 +38,7 @@ pub struct AgentBindingProjection {
 pub struct SavedAgentBindingProjection {
     pub binding: AgentBindingValue,
     pub snapshot: ResolvedSnapshotEnvelope,
+    pub runtime_policy: nomifun_agent_contracts::AgentRuntimePolicy,
     pub projection: AgentBindingProjection,
 }
 
@@ -48,6 +49,7 @@ pub fn project_saved_artifacts(
     snapshot: ResolvedSnapshotEnvelope,
     title: Option<&str>,
 ) -> Result<SavedAgentBindingProjection, AppError> {
+    let runtime_policy = revision.payload.runtime_policy.clone();
     let projection = project(ProjectionInput {
         owner,
         binding: &binding,
@@ -58,6 +60,7 @@ pub fn project_saved_artifacts(
     Ok(SavedAgentBindingProjection {
         binding,
         snapshot,
+        runtime_policy,
         projection,
     })
 }
@@ -395,6 +398,7 @@ mod tests {
             persona: "Persona".into(),
             instructions: "Instructions".into(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         let reference = PresetRevisionRef {
             preset_id: "preset".into(),

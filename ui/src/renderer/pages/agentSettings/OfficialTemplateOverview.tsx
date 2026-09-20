@@ -12,6 +12,7 @@ import styles from './AgentSettingsPage.module.css';
 import { AgentEditorActionBar, AgentEditorActionButton } from './AgentEditorActionBar';
 import AgentEditorTabs from './AgentEditorTabs';
 import AgentInlineNameEditor from './AgentInlineNameEditor';
+import AgentRuntimePolicyPanel from './AgentRuntimePolicyPanel';
 
 type Props = {
   template: OfficialPresetTemplate;
@@ -41,16 +42,23 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
   const [document, setDocument] = useState<AgentPresetDocument>(() => ({ ...original, ...initialEditing?.document }));
   const [displayName, setDisplayName] = useState(initialEditing?.displayName ?? name);
   const [activeTab, setActiveTab] = useState(
-    initialEditing?.activeTab === 'providers' ? 'providers' : 'capabilities'
+    initialEditing?.activeTab === 'providers' || initialEditing?.activeTab === 'runtime'
+      ? initialEditing.activeTab
+      : 'capabilities'
   );
   useEffect(() => { onEditingChange?.({ displayName, document: editingDocument(document), activeTab }); },
     [displayName, document, activeTab, onEditingChange]);
   const tabs = [
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
     { key: 'providers', label: t('agentSettings.providers.title') },
+    { key: 'runtime', label: t('agentSettings.workbench.runtimeTab') },
   ];
   const dirty = JSON.stringify(document) !== JSON.stringify(original) || displayName !== name;
-  const blocked = unavailableModuleReferences(document, catalog).length > 0;
+  const moduleBlocked = unavailableModuleReferences(document, catalog).length > 0;
+  const idmmPolicy = document.runtime_policy.idmm;
+  const idmmPolicyBlocksSave = idmmPolicy.mode === 'rule_plus_model' &&
+    (!idmmPolicy.bypass_model.provider_id || !idmmPolicy.bypass_model.model);
+  const blocked = moduleBlocked || idmmPolicyBlocksSave;
   useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
   useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
@@ -75,9 +83,10 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
       {activeTab === 'providers' && <div role='tabpanel' id='template-panel-providers' aria-labelledby='template-tab-providers'>
         <AgentRoleProviderPicker document={document} catalog={catalog} disabled={busy} onChange={setDocument} />
       </div>}
+      {activeTab === 'runtime' && <AgentRuntimePolicyPanel idPrefix='template' document={document} disabled={busy} onChange={setDocument} />}
     </div>
     <AgentEditorActionBar>
-      <div className={styles.templateSaveState}><span className={blocked ? styles.statusWarningDot : styles.statusReadyDot} /><span>{t(blocked ? 'agentSettings.workbench.disabledSave' : 'agentSettings.workbench.readyToSave')}</span></div>
+      <div className={styles.templateSaveState}><span className={blocked ? styles.statusWarningDot : styles.statusReadyDot} /><span>{t(moduleBlocked ? 'agentSettings.workbench.disabledSave' : idmmPolicyBlocksSave ? 'agentSettings.workbench.runtimePolicyNeeded' : 'agentSettings.workbench.readyToSave')}</span></div>
       <AgentEditorActionButton icon={<Save theme='outline' size={15} fill='currentColor' />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{t('agentSettings.workbench.saveAsMine')}</AgentEditorActionButton>
     </AgentEditorActionBar>
   </main>;

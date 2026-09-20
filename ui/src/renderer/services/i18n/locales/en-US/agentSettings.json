@@ -369,6 +369,7 @@
     "myHint": "Prepare the right Agent for your work",
     "capabilityTab": "Modules & actions",
     "settingsTab": "Profile & behavior",
+    "runtimeTab": "Runtime policy",
     "skillsTab": "Skills & extensions",
     "saveAsMine": "Save as my Agent",
     "customizeTitle": "Make this preset yours",
@@ -391,6 +392,7 @@
     "settingsHint": "Define its identity, model and working style",
     "manageModels": "Manage models",
     "modelNeeded": "Configure an available chat model before saving this Agent.",
+    "runtimePolicyNeeded": "Select a bypass model before saving rules plus bypass model.",
     "configureChatModel": "Configure chat model",
     "configureModelReturn": "After configuring a model, use Back to continue editing. Your unsaved Agent inputs are kept for this return.",
     "returnChanged": "This Agent changed while you were away. Its current saved version is open; the earlier unsaved inputs were not applied.",
@@ -450,5 +452,27 @@
     "emptyWorkbenchHint": "No official presets or personal Agents are available. Start with a blank custom Agent and add modules from the installed catalog.",
     "showList": "Show Agent list",
     "hideList": "Hide Agent list"
+  },
+  "runtimePolicy": {
+    "title": "Runtime & supervision",
+    "hint": "Choose the recovery policy used when this Agent creates a new Session. The policy is frozen with the Revision and never rewrites existing Sessions.",
+    "noCapabilityGrant": "Grants no capabilities or permissions",
+    "flowLabel": "IDMM policy inheritance",
+    "flow": {
+      "agent": {
+        "title": "Agent default",
+        "description": "Saved with the current immutable Revision"
+      },
+      "session": {
+        "title": "Frozen for a new Session",
+        "description": "Copied at creation; later defaults are not read"
+      },
+      "override": {
+        "title": "Session override",
+        "description": "The capsule changes only that Session, never the Agent"
+      }
+    },
+    "applyNote": "Saving the Agent affects only Sessions created afterward. Existing Sessions keep their already-frozen settings.",
+    "busy": "This Agent is being saved. Try again in a moment."
   }
 }

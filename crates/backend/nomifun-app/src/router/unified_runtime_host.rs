@@ -243,11 +243,13 @@ pub(crate) fn factory(
     platform_builtin_schemas: Arc<
         dyn nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver,
     >,
+    supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
 ) -> OfficialRuntimeFactory {
     Arc::new(move |options, binding| {
         let plugin_schemas = plugin_schemas.clone();
         let platform_builtin_schemas = platform_builtin_schemas.clone();
         let session_host = session_host.clone();
+        let supervision = supervision.clone();
         Box::pin(async move {
             let admitted = session_host.resolve(&options, &binding).await?;
             super::agent_tool_surface::validate_session_mcp(admitted.snapshot(), &admitted.agent_binding().typed_resource_bindings, &admitted.session().extra)?;
@@ -321,6 +323,7 @@ pub(crate) fn factory(
                 last_terminal_root: std::sync::Mutex::new(None),
                 tools: tools.clone(),
                 resources: resources.clone(),
+                supervision,
             });
             let model = host.session_host.compose_model_port(host.clone())?;
             let model = resources.wrap_model_middleware(model)?;
@@ -365,6 +368,7 @@ struct ConversationRuntimeHost {
     last_terminal_root: std::sync::Mutex<Option<String>>,
     tools: Arc<JoinedTools>,
     resources: Arc<super::engine_kernel_session::EngineKernelSession>,
+    supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
 }
 
 impl ConversationRuntimeHost {
@@ -461,7 +465,16 @@ impl ConversationRuntimeHost {
 #[async_trait]
 impl UnifiedRuntimeHost for ConversationRuntimeHost {
     async fn admit_tool(&self, message: &SendMessageData, event: &AgentEngineEvent) -> Result<bool, AppError> {
-        self.admit_steerable_tool(message, event).await
+        let admitted = self.admit_steerable_tool(message, event).await?;
+        if admitted {
+            let operation = self.active.lock().await.as_ref().map(|turn| turn.operation.clone());
+            self.supervision.note_progress(
+                &self.options.conversation_id,
+                operation.as_deref(),
+                nomifun_idmm::IdmmProgressPhase::Tool,
+            );
+        }
+        Ok(admitted)
     }
 
     async fn queue_steer(&self, delivery: nomifun_ai_agent::RuntimeSteerDelivery) -> Result<bool, AppError> {
@@ -645,6 +658,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 | AgentEngineEvent::TurnFailed { .. }
         );
         let root = self.root(message);
+        let operation = self
+            .active
+            .lock()
+            .await
+            .as_ref()
+            .map(|turn| turn.operation.clone());
         if terminal_event && self.active.lock().await.is_none() {
             // No canonical receipt could be re-resolved during cleanup. No
             // Runtime resource was opened, but the Hosted SDK still requires
@@ -654,6 +673,11 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 .last_terminal_root
                 .lock()
                 .map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
+            self.supervision.note_progress(
+                &self.options.conversation_id,
+                operation.as_deref(),
+                nomifun_idmm::IdmmProgressPhase::Terminal,
+            );
             return Ok(());
         }
         if matches!(event, AgentEngineEvent::TurnInputScope { .. } | AgentEngineEvent::SteeringInputs { .. } | AgentEngineEvent::SteeringDeferred { .. }) {
@@ -715,6 +739,27 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.tools.mark_observed(result.call_id.as_ref())?;
         }
         }
+        let phase = match event {
+            AgentEngineEvent::ToolStarted { .. }
+            | AgentEngineEvent::ToolCompleted { .. } => {
+                nomifun_idmm::IdmmProgressPhase::Tool
+            }
+            AgentEngineEvent::TurnCompleted { .. }
+            | AgentEngineEvent::TurnCancelled { .. }
+            | AgentEngineEvent::TurnFailed { .. } => nomifun_idmm::IdmmProgressPhase::Terminal,
+            AgentEngineEvent::ModelStepStarted { .. }
+            | AgentEngineEvent::OutputTextDelta { .. }
+            | AgentEngineEvent::ReasoningDelta { .. }
+            | AgentEngineEvent::ToolResultsOrdered { .. } => {
+                nomifun_idmm::IdmmProgressPhase::Model
+            }
+            _ => nomifun_idmm::IdmmProgressPhase::Other,
+        };
+        self.supervision.note_progress(
+            &self.options.conversation_id,
+            operation.as_deref(),
+            phase,
+        );
         Ok(())
     }
 

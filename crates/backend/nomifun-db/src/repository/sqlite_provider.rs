@@ -639,6 +639,44 @@ impl IProviderRepository for SqliteProviderRepository {
             }
         }
 
+        // IDMM is per canonical AgentSession and stores its bounded domain
+        // record under a namespaced client-preference key.  A deleted bypass
+        // provider must not leave the supervisor in a model tier that can no
+        // longer run.  Downgrade only that tier to deterministic rules while
+        // preserving its intervention history and every unrelated setting.
+        let idmm_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM client_preferences \
+             WHERE key GLOB 'agent_session.idmm.*'",
+        )
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut idmm_updates = Vec::new();
+        for (key, value) in idmm_rows {
+            let mut parsed: serde_json::Value = serde_json::from_str(&value).map_err(|error| {
+                DbError::Conflict(format!("invalid IDMM preference '{key}': {error}"))
+            })?;
+            let selected = parsed
+                .pointer("/config/bypass_model/provider_id")
+                .and_then(serde_json::Value::as_str);
+            if selected != Some(id) {
+                continue;
+            }
+            let config = parsed
+                .get_mut("config")
+                .and_then(serde_json::Value::as_object_mut)
+                .ok_or_else(|| DbError::Conflict(format!("invalid IDMM preference '{key}'")))?;
+            config.insert("bypass_model".to_owned(), serde_json::json!({}));
+            if config.get("mode").and_then(serde_json::Value::as_str)
+                == Some("rule_plus_model")
+            {
+                config.insert("mode".to_owned(), serde_json::json!("rule_only"));
+            }
+            if let Some(revision) = parsed.get("revision").and_then(serde_json::Value::as_u64) {
+                parsed["revision"] = serde_json::json!(revision.saturating_add(1));
+            }
+            idmm_updates.push((key, parsed.to_string()));
+        }
+
         sqlx::query("DELETE FROM providers WHERE provider_id = ?")
             .bind(id)
             .execute(&mut *transaction)
@@ -697,6 +735,17 @@ impl IProviderRepository for SqliteProviderRepository {
                 }
                 ProviderPreferenceDeleteAction::Keep => unreachable!(),
             }
+        }
+        for (key, value) in idmm_updates {
+            sqlx::query(
+                "UPDATE client_preferences \
+                 SET value = ?, updated_at = MAX(updated_at, ?) WHERE key = ?",
+            )
+            .bind(value)
+            .bind(now)
+            .bind(key)
+            .execute(&mut *transaction)
+            .await?;
         }
 
         // Cascade the provider delete to its current catalog tables in the

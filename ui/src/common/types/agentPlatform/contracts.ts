@@ -7,6 +7,7 @@ import type {
   RemoteBindingId,
   ResolvedSnapshotId,
 } from '@/common/types/ids';
+import type { IIdmmConfig } from '@/common/types/idmm';
 
 export type {
   AgentPresetId,
@@ -192,6 +193,10 @@ export interface AgentPresetDocument {
   persona: string;
   instructions: string;
   starter_prompts: string[];
+  /** Runtime behavior defaults; never an Agent capability or permission grant. */
+  runtime_policy: {
+    idmm: IIdmmConfig;
+  };
 }
 
 export interface AgentPresetDraft {

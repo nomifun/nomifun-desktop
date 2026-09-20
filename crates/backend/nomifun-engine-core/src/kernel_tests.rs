@@ -137,6 +137,7 @@ mod tests {
             persona: "Coding Engine Kernel test".to_owned(),
             instructions: "Read one file.".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {

@@ -506,6 +506,7 @@ impl AgentControlPlane {
             persona: String::new(),
             instructions: String::new(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         };
         if request.reuse_existing {
             let requested_payload: nomifun_agent_contracts::AgentPresetRevisionPayload = wire_cast(&document)?;
@@ -1571,6 +1572,7 @@ fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
         persona: String::new(),
         instructions: String::new(),
         starter_prompts: Vec::new(),
+        runtime_policy: Default::default(),
     }
 }
 

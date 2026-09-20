@@ -53,7 +53,7 @@ describe('ChatLayout advanced controls', () => {
     const source = readSource(new URL('./index.tsx', import.meta.url));
 
     expect(source.includes("<AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
-    expect(source.includes('IdmmControl')).toBe(false);
+    expect(source.includes("<IdmmControl target={{ id: conversation_id }} />")).toBe(true);
     expect(source.includes('(props.knowledgeEnabled ?? true) && (')).toBe(true);
     expect(source.includes("<KnowledgeControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
   });

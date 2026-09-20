@@ -1584,6 +1584,7 @@ mod tests {
             persona: "Route lookup test agent".to_owned(),
             instructions: "Exercise the persisted canonical route.".to_owned(),
             starter_prompts: Vec::new(),
+            runtime_policy: Default::default(),
         }
     }
 

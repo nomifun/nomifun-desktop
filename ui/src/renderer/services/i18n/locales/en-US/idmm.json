@@ -1,0 +1,60 @@
+{
+  "title": "Smart Decision",
+  "shortLabel": "Smart Decision",
+  "description": "Guards a task when the primary model stops unexpectedly or hands a decision to the user. Rules run first; the bypass model is used only when rules cannot decide safely.",
+  "saved": "Smart Decision settings saved",
+  "evaluated": "Immediate evaluation completed",
+  "evaluateNow": "Check now",
+  "seconds": "sec",
+  "recoverProviderFailures": "Recover provider/network failures",
+  "recoverStalledTurns": "Recover silent model stalls",
+  "autoSelectOptions": "Select safe options automatically",
+  "preferRecommended": "Prefer recommended options",
+  "idleTimeout": "Silence threshold",
+  "bypassModel": "Bypass model",
+  "scanScope": "Bypass reading range",
+  "contextMessages": "Recent message count",
+  "recentActivity": "Recent interventions",
+  "mode": {
+    "label": "Guard mode",
+    "off": "Off",
+    "ruleOnly": "Rule guard",
+    "rulePlusModel": "Rules + bypass model",
+    "ruleOnlyHint": "Uses no model. It can recover retryable faults and choose the first safe explicit option; permissions, credentials, purchases, and destructive choices always wait for a person.",
+    "rulePlusModelHint": "Runs the same deterministic rules first. Only unresolved open questions or ambiguous choices are sent to the bypass model with bounded context."
+  },
+  "scope": {
+    "lastTurn": "Last turn only",
+    "lastMessages": "Recent messages",
+    "fullSession": "Full session (character-bounded)"
+  },
+  "state": {
+    "off": "Off",
+    "monitoring": "Monitoring",
+    "intervening": "Intervening",
+    "degraded": "Intervention failed"
+  },
+  "interventionStatus": {
+    "pending": "In progress",
+    "succeeded": "Recovered",
+    "failed": "Failed",
+    "halted": "Waiting for user"
+  },
+  "interventionReason": {
+    "tool_stalled_safety_halt": "A tool stopped progressing; waiting for a person to avoid duplicate effects",
+    "model_stalled": "The primary model exceeded the silence threshold outside a tool",
+    "recovery_limit_reached": "Provider-fault recovery reached its retry limit",
+    "provider_fault_detected": "A recoverable provider, network, or rate-limit fault was detected",
+    "sensitive_input_required": "Credentials, payment, or permission input requires a person",
+    "rule_selected_safe_option": "The rule guard selected the first safe option",
+    "bypass_model_decision": "Rules were inconclusive; the bypass model returned a constrained decision",
+    "bypass_model_halted": "The bypass model stopped and requested human input",
+    "bypass_model_failed": "The bypass model could not produce a constrained decision",
+    "rule_cannot_answer": "The rule guard cannot safely answer this open question",
+    "destructive_answer_rejected": "A destructive candidate answer was rejected"
+  },
+  "validation": {
+    "bypassRequired": "Select a bypass model first",
+    "noChatModel": "No chat model is available for bypass decisions"
+  }
+}

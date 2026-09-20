@@ -48,8 +48,21 @@ describe('AgentPreset draft model', () => {
 
     expect(draft.document.enabled_capabilities).toEqual([]);
     expect(draft.document.skill_bindings).toEqual([]);
+    expect(draft.document.runtime_policy.idmm.mode).toBe('off');
     expect('resource_bindings' in draft.document).toBe(false);
     expect(draft.document.chat_route_records).toEqual({});
+  });
+
+  test('runtime policy changes are revision-bearing authoring data', () => {
+    const saved: AgentPresetDraft = {
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
+      display_name: 'Guarded Agent',
+      document: createEmptyAgentPresetDocument(),
+    };
+    const draft = cloneDraft(saved);
+    draft.document.runtime_policy.idmm.mode = 'rule_only';
+    expect(isDraftDirty(saved, draft)).toBe(true);
+    expect(saved.document.runtime_policy.idmm.mode).toBe('off');
   });
 
   test('clone preserves the explicit agent_chat route record', () => {

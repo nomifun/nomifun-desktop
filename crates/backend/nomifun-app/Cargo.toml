@@ -58,6 +58,10 @@ name = "model_failover_e2e"
 path = "tests/model_failover_e2e.rs"
 
 [[test]]
+name = "idmm_e2e"
+path = "tests/idmm_e2e.rs"
+
+[[test]]
 name = "ssh_host_e2e"
 path = "tests/ssh_host_e2e.rs"
 
@@ -198,6 +202,7 @@ dunce.workspace = true
 nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
+nomifun-idmm.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-agent-runtime.workspace = true
 nomifun-engine-core.workspace = true

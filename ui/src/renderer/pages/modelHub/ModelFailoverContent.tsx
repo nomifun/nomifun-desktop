@@ -25,11 +25,10 @@ const DEFAULT_CONFIG: IModelFailoverConfig = {
 };
 
 /**
- * Global model failover queue editor (Phase-3 D8). An ordered list of
- * provider+model candidates the conversation send-loop falls back through when a
- * NOMI session hits a pre-response provider fault. Persisted as one JSON blob
- * under the `agent.model_failover` client preference, via the same
- * settings-style channel as the retired global defaults tab.
+ * Global model failover queue editor. New Nomi AgentSessions freeze this
+ * ordered provider+model list into their immutable Chat route; the Broker then
+ * owns bounded pre-response switching. Existing Sessions are intentionally not
+ * rebound when this preference changes.
  */
 const ModelFailoverContent: React.FC = () => {
   const { t } = useTranslation();

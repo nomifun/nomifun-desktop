@@ -5,6 +5,7 @@ import type {
   ChatRouteRecord,
 } from '@/common/types/agentPlatform';
 import { asCapabilityId, asPackageId } from '@/common/types/agentPlatform';
+import { createDefaultIdmmConfig } from '@/common/types/idmm';
 import {
   actionFallbackName,
   agentUiErrorKey,
@@ -30,6 +31,7 @@ const draft = (): AgentPresetDraft => ({
     persona: '',
     instructions: '',
     starter_prompts: [],
+    runtime_policy: { idmm: createDefaultIdmmConfig() },
   },
 });
 
