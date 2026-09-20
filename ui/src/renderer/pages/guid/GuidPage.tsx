@@ -22,6 +22,8 @@ import KnowledgeControl from '@/renderer/pages/conversation/components/Knowledge
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
+  agentResourceKindMayRemainUnbound,
+  requiredAgentResourcePickerKinds,
   resolveAgentResourceSelections,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
@@ -161,6 +163,9 @@ const GuidPage: React.FC = () => {
     !isCompanionAgent && presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
   const resourcePickerKinds = new Set(
     [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
+  );
+  const optionalResourcePickerKinds = requiredAgentResourcePickerKinds(
+    [...resourcePickerKinds].filter(agentResourceKindMayRemainUnbound)
   );
   const resourceSelectionResolution = resolveAgentResourceSelections(
     resourcePickerKinds,
@@ -651,6 +656,7 @@ const GuidPage: React.FC = () => {
 
             {!creation.draft.mode && <AgentResourcePicker
               requiredKinds={resourcePickerKinds}
+              optionalKinds={optionalResourcePickerKinds}
               companionBindings={isCompanionAgent}
               capabilityIds={presetCapabilityIds}
               actionIds={presetActionIds}

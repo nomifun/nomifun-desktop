@@ -2172,7 +2172,12 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         };
         let robot_module_id = super::nomi_core_robot::module_capability_id();
         let robot_selected = compiled.resolved_capability(&robot_module_id);
-        let dynamic = if robot_selected.is_none() || constraints.restricted() {
+        let robot_resources_bound = robot_selected
+            .is_some()
+            && compiled
+                .capability_resources_bound(&robot_module_id)
+                .map_err(kernel_error_to_app)?;
+        let dynamic = if !robot_resources_bound || constraints.restricted() {
             None
         } else {
             let selected = robot_selected.expect("checked above");

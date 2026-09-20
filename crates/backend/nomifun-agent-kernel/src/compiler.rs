@@ -96,6 +96,35 @@ impl CompiledSnapshot {
         &self.target_resource_bindings
     }
 
+    /// Whether every resource kind required by a selected capability has a
+    /// concrete target binding for this Session. A false result is not a
+    /// compilation error: enhancement capabilities remain frozen but their
+    /// Actions and lifecycle contributions must not be materialized.
+    pub fn capability_resources_bound(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<bool, KernelError> {
+        let policy = self.policy(capability_id).ok_or_else(|| {
+            KernelError::CapabilityNotInPreset {
+                capability_id: capability_id.clone(),
+            }
+        })?;
+        let mut bound_kinds = BTreeSet::new();
+        for binding_id in &policy.resource_binding_ids {
+            let binding = self.binding(binding_id).ok_or_else(|| {
+                KernelError::InvalidPresetRevision {
+                    reason: format!(
+                        "capability {} references missing target resource binding {}",
+                        capability_id.as_ref(),
+                        binding_id.as_ref(),
+                    ),
+                }
+            })?;
+            bound_kinds.insert(binding.resource_kind.clone());
+        }
+        Ok(policy.required_resource_kinds.is_subset(&bound_kinds))
+    }
+
     pub fn resolved_capability(
         &self,
         capability_id: &CapabilityId,
@@ -1772,6 +1801,44 @@ mod tests {
                 .required_resource_kinds,
             BTreeSet::from(["workspace".into()])
         );
+    }
+
+    #[test]
+    fn unbound_enhancement_resources_are_detected_without_invalidating_the_snapshot() {
+        let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
+        let capability = plugin_product_capability(action_allowlist.clone());
+        let saved_revision = revision(
+            action_allowlist,
+            capability.contribution_lock.clone(),
+        );
+        let principal = PrincipalRef {
+            principal_kind: "user".to_owned(),
+            principal_id: "fixture-user".to_owned(),
+        };
+        let compiled = AgentPresetCompiler::compile(
+            &MaterializedRegistry::empty(),
+            &environment(),
+            compile_request(saved_revision, capability),
+        )
+        .unwrap();
+        let capability_id = CapabilityId::from(CAPABILITY_ID);
+        assert!(!compiled.capability_resources_bound(&capability_id).unwrap());
+
+        let bound = compiled
+            .with_target_resource_bindings(
+                &principal,
+                vec![TypedResourceBinding {
+                    binding_id: ResourceBindingId::from("workspace:fixture"),
+                    resource_kind: ResourceKind::from("workspace"),
+                    resource_id: "fixture".into(),
+                    owner_id: principal.principal_id.clone(),
+                    operations: BTreeSet::from(["read".to_owned()]),
+                    connection_config_ref: None,
+                    typed_parameters: BTreeMap::new(),
+                }],
+            )
+            .unwrap();
+        assert!(bound.capability_resources_bound(&capability_id).unwrap());
     }
 
     #[test]

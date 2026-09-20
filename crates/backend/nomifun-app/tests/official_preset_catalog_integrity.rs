@@ -84,7 +84,6 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("automation.schedule", &["automation.schedule/list"]),
             ("browser", &["browser/navigate", "browser/observe", "browser/render_content"]),
             ("computer", &["computer/a11y.observe", "computer/observe"]),
-            ("plugin.development", &["plugin.development/edit", "plugin.development/read", "plugin.development/serve"]),
             ("workspace.artifacts", &["workspace.artifacts/read"]),
             ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
             ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
