@@ -160,6 +160,23 @@ describe('Agent capability Module workbench', () => {
     expect(screen.queryByRole('combobox')).toBeNull();
   });
 
+  test('shows enabled and total Module counts for all categories', () => {
+    const screen = mount(documentWith([
+      [files.module, ['workspace.files/read']],
+      [browser.module, ['browser/observe']],
+    ]));
+    const all = screen.getByRole('button', { name: /All categories 2 enabled, 4 total/ });
+    const development = screen.getByRole('button', {
+      name: /Files & development 1 enabled, 1 total/,
+    });
+    const knowledgeCategory = screen.getByRole('button', {
+      name: /Knowledge & memory 0 enabled, 1 total/,
+    });
+    expect(all.querySelector('small')?.textContent).toBe('2 / 4');
+    expect(development.querySelector('small')?.textContent).toBe('1 / 1');
+    expect(knowledgeCategory.querySelector('small')?.textContent).toBe('0 / 1');
+  });
+
   test('enables a Module with safe exact actions, then explicitly grants a write action', async () => {
     const screen = mount(documentWith([]));
     await act(async () => { fireEvent.click(screen.getByRole('switch', { name: 'Enable Workspace files' })); });
