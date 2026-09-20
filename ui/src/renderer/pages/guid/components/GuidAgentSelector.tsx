@@ -16,7 +16,7 @@ import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
 import styles from './GuidAgentSelector.module.css';
 
-export const DEFAULT_VISIBLE_PERSONAL_AGENTS = 5;
+export const DEFAULT_VISIBLE_PERSONAL_AGENTS = 3;
 
 export type GuidAgentSelectorProps = {
   presets: ExecutableAgentPreset[];
@@ -203,8 +203,18 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
                     {onRetry && <button type='button' className={styles.textAction} onClick={() => void onRetry()}>{t('agentSettings.actions.retry')}</button>}
                   </div>
                 )}
+                {templateMatches.length > 0 && (
+                  <section role='group' aria-labelledby={templateHeading}>
+                    <h3 id={templateHeading} className={styles.heading}>{t('guid.agentEntries.fromTemplate')}</h3>
+                    <div className={styles.templateGrid}>
+                      {templateMatches.map((template) => (
+                        <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} selected={selection.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
+                      ))}
+                    </div>
+                  </section>
+                )}
                 {hasMine && (
-                  <section role='group' aria-labelledby={mineHeading}>
+                  <section role='group' aria-labelledby={mineHeading} className={templateMatches.length > 0 ? styles.personalSection : undefined}>
                     <h3 id={mineHeading} className={styles.heading}>{t('agentSettings.library.mine')}</h3>
                     {visibleMineMatches.map(({ kind, preset }) => kind === 'saved' ? (
                       <AgentRow key={`saved:${preset.preset_id}`} name={preset.display_name} description={preset.description} icon={<User theme='outline' size={21} fill='currentColor' />} selected={selection.kind === 'preset' && selection.presetId === preset.preset_id} onClick={() => choose(() => onSelectPreset(preset.preset_id))} />
@@ -223,14 +233,6 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
                           : 'guid.agentEntries.showMorePersonal', { count: hiddenPersonalCount })}
                       </button>
                     )}
-                  </section>
-                )}
-                {templateMatches.length > 0 && (
-                  <section role='group' aria-labelledby={templateHeading} className={hasMine ? styles.templateSection : undefined}>
-                    <h3 id={templateHeading} className={styles.heading}>{t('guid.agentEntries.fromTemplate')}</h3>
-                    {templateMatches.map((template) => (
-                      <AgentRow key={template.template_key} name={template.name} description={template.description} icon={templateIcon(template.template_key)} selected={selection.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
-                    ))}
                   </section>
                 )}
                 {!isLoading && noMatches && <p className={styles.empty} role='status'>{t('guid.agentEntries.empty')}</p>}

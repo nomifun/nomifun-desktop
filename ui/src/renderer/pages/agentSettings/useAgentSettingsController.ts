@@ -41,6 +41,29 @@ const emptyCatalog: AgentCatalogResponse = {
   roles: [],
 };
 
+export const upsertPresetSummary = (
+  library: AgentPresetLibraryResponse,
+  preset: AgentPresetSummary
+): AgentPresetLibraryResponse => {
+  const existingIndex = library.user_presets.findIndex(
+    (candidate) => candidate.preset_id === preset.preset_id
+  );
+  const userPresets = existingIndex === -1
+    ? [...library.user_presets, preset]
+    : library.user_presets.map((candidate, index) =>
+        index === existingIndex ? preset : candidate
+      );
+
+  return {
+    ...library,
+    user_presets: userPresets,
+    fresh_start: {
+      ...library.fresh_start,
+      user_preset_count: userPresets.length,
+    },
+  };
+};
+
 export function useAgentSettingsController() {
   const { t } = useTranslation();
   const { mutate } = useSWRConfig();
@@ -124,6 +147,15 @@ export function useAgentSettingsController() {
     [load]
   );
 
+  const publishPresetSummary = useCallback(async (preset: AgentPresetSummary) => {
+    setLibrary((current) => current ? upsertPresetSummary(current, preset) : current);
+    await mutate<AgentPresetLibraryResponse>(
+      AGENT_PRESET_LIBRARY_SWR_KEY,
+      (current) => current ? upsertPresetSummary(current, preset) : current,
+      { revalidate: false }
+    );
+  }, [mutate]);
+
   const openTemplate = useCallback((template: OfficialPresetTemplate) => {
     setSelection({ kind: 'template', template });
     clearEditorState();
@@ -183,7 +215,9 @@ export function useAgentSettingsController() {
           display_name: displayName,
         });
         applyEditor(response);
+        await publishPresetSummary(response.preset);
         await refreshPresetLibraries();
+        await publishPresetSummary(response.preset);
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (createError) {
         reportError(createError, 'create');
@@ -191,7 +225,7 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [applyEditor, refreshPresetLibraries, reportError]
+    [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError]
   );
 
   const forkTemplate = useCallback(
@@ -214,7 +248,9 @@ export function useAgentSettingsController() {
           },
         });
         applyEditor(response);
+        await publishPresetSummary(response.preset);
         await refreshPresetLibraries();
+        await publishPresetSummary(response.preset);
         setSelection({ kind: 'preset', preset: response.preset });
       } catch (forkError) {
         reportError(forkError, 'fork');
@@ -222,7 +258,7 @@ export function useAgentSettingsController() {
         setBusyAction(null);
       }
     },
-    [applyEditor, refreshPresetLibraries, reportError]
+    [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError]
   );
 
   const createConfiguredPreset = useCallback(async (displayName: string, document: AgentPresetDocument, description?: string) => {
@@ -235,7 +271,9 @@ export function useAgentSettingsController() {
         document,
       });
       applyEditor(response);
+      await publishPresetSummary(response.preset);
       await refreshPresetLibraries();
+      await publishPresetSummary(response.preset);
       setSelection({ kind: 'preset', preset: response.preset });
       return response;
     } catch (createError) {
@@ -247,7 +285,7 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [applyEditor, refreshPresetLibraries, reportError, t]);
+  }, [applyEditor, publishPresetSummary, refreshPresetLibraries, reportError, t]);
 
   const discardChanges = useCallback(() => {
     if (savedDraft) setDraftState(cloneDraft(savedDraft));
@@ -312,7 +350,9 @@ export function useAgentSettingsController() {
             }
           : current
       );
+      await publishPresetSummary(saved.preset);
       await refreshPresetLibraries();
+      await publishPresetSummary(saved.preset);
       setSelection({ kind: 'preset', preset: saved.preset });
       return saved;
     } catch (saveError) {
@@ -324,7 +364,7 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft, refreshPresetLibraries, reportError, t]);
+  }, [draft, publishPresetSummary, refreshPresetLibraries, reportError, t]);
 
   const dirty = useMemo(
     () => (draft ? isDraftDirty(savedDraft, draft) : false),

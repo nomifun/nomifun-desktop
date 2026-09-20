@@ -8,7 +8,9 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
+import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderEvents';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
 import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
@@ -42,8 +44,11 @@ afterEach(() => { cleanup(); mock.restore(); });
 
 async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, initialEditor?: AgentPresetEditorResponse) {
   spyOn(roleDefaults, 'default').mockImplementation(() => <div>Default roles</div>);
-  spyOn(libraryPanel, 'default').mockImplementation(({ library, onSelectTemplate }) => <nav>
+  spyOn(libraryPanel, 'default').mockImplementation(({ library, dirtyPresetId, onSelectTemplate }) => <nav>
     {library.official_templates.map(value => <button key={value.template_key} onClick={() => onSelectTemplate(value)}>{value.template_key}</button>)}
+    {library.user_presets.map(value => <output key={value.preset_id} data-testid={`library-preset-${value.preset_id}`}>
+      {value.display_name}|{dirtyPresetId === value.preset_id ? 'dirty' : 'saved'}
+    </output>)}
   </nav>);
   let editor: AgentPresetEditorResponse | undefined = initialEditor;
   const library = spyOn(agentPlatform.library, 'invoke').mockImplementation(async () => ({
@@ -69,8 +74,12 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
     <button onClick={history.back}>Back to Agent</button><button onClick={() => navigate('/plugins/run/check?saved=1')}>Publish destination</button></div>; };
   const Published = () => { const history = useNavigationHistory()!; return <div><h1>Published check</h1><button onClick={history.back}>Back to author</button></div>; };
   const HistoryControls = () => { const history = useNavigationHistory()!; return <button disabled={!history.canForward} onClick={history.forward}>App forward</button>; };
+  const PresetCacheProbe = () => {
+    const { presets } = useAgentPresets();
+    return <output data-testid='preset-cache-name'>{presets[0]?.display_name ?? ''}</output>;
+  };
   const view = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
-    fallback: { providers: [] } }}><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
+    fallback: { providers: [] } }}><PresetCacheProbe /><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
     <NavigationHistoryProvider><Probe /><HistoryControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
       <Route path='/plugins/create/:id' element={<Author />} /><Route path='/plugins/run/:id' element={<Published />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
@@ -163,6 +172,9 @@ test('personal Agent header exposes name and description editing and saves metad
   fireEvent.input(name, { target: { value: 'Renamed Agent' } });
   fireEvent.keyDown(name, { key: 'Enter' });
   expect(v.getByRole('heading', { name: 'Renamed Agent' })).toBeTruthy();
+  await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
+  expect(v.getByTestId(`library-preset-${presetId}`).textContent).toBe('Renamed Agent|dirty');
+  await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
   fireEvent.click(v.getByRole('button', { name: en.workbench.editIdentity }));
   expect(v.getByRole('tab', { name: en.workbench.settingsTab }).getAttribute('aria-selected')).toBe('true');
   fireEvent.input(v.getByRole('textbox', { name: en.fields.description }), {
@@ -172,6 +184,9 @@ test('personal Agent header exposes name and description editing and saves metad
   expect(v.save).toHaveBeenCalledTimes(1);
   expect(v.save.mock.calls[0][0].request.draft.display_name).toBe('Renamed Agent');
   expect(v.save.mock.calls[0][0].request.draft.description).toBe('Updated description');
+  await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
+  await waitFor(() => expect(v.getByTestId(`library-preset-${presetId}`).textContent).toBe('Renamed Agent|saved'));
+  expect(v.getByTestId('preset-cache-name').textContent).toBe('Renamed Agent');
 });
 
 test('unrelated failures never offer model configuration as the recovery action', async () => {

@@ -28,6 +28,7 @@ describe('Agent Workbench visual acceptance harness', () => {
 
   test('imports only current Guid selector surfaces', () => {
     expect(selector).toContain("components/chat/ChatModelSelector");
+    expect(selector).toContain('useAgentPresets');
     expect(selector).not.toContain('GuidModelSelector');
     expect(selector).not.toContain("kind: 'default'");
   });

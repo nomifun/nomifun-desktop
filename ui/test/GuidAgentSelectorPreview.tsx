@@ -6,6 +6,8 @@ import ChatModelSelector from '../src/renderer/components/chat/ChatModelSelector
 import { SWRConfig } from 'swr';
 import type { IProvider, TProviderWithModel } from '../src/common/config/storage';
 import type { ExecutableAgentPreset } from '../src/renderer/pages/guid/types';
+import { useAgentPresets } from '../src/renderer/hooks/agent/useAgentPresets';
+import { isExecutableAgentPreset } from '../src/renderer/pages/guid/hooks/agentSelectionUtils';
 
 const provider = {
   id: '0190f5fe-7c00-7a00-8000-000000000111', platform: 'preview', name: '测试模型服务',
@@ -14,19 +16,17 @@ const provider = {
     capabilities: [{ task: 'chat', traits: [], protocol: 'openai.chat_text', connection_role: 'default' }] })),
 } as IProvider;
 const modelCache = { provider: () => new Map(), revalidateOnMount: false, fallback: { providers: [provider] } };
-const personal = {
-  preset_id: '0190f5fe-7c00-7a00-8000-000000000112', source: 'user', display_name: '我的研究助理', bound_target_count: 0,
-  current_stable_revision: { preset_id: '0190f5fe-7c00-7a00-8000-000000000112', revision: 1, revision_digest: 'a'.repeat(64) },
-} as ExecutableAgentPreset;
-
 /** Uses the production selector, with no conversation or model transport. */
 export default function GuidAgentSelectorPreview({ templates }: { templates: OfficialPresetTemplate[] }) {
+  const { library, presets, isLoading, error, refresh } = useAgentPresets();
+  const personalAgents = presets.filter(isExecutableAgentPreset) as ExecutableAgentPreset[];
   const [selection, setSelection] = useState<GuidAgentSelection>({ kind: 'template', templateKey: 'chat.minimal' });
   const [input, setInput] = useState('帮我整理今天的工作计划');
   const [model, setModel] = useState<TProviderWithModel>({ ...provider, use_model: '模型 A' });
   return <SWRConfig value={modelCache}><main style={{ maxWidth: 760, margin: '64px auto', padding: 24 }}>
     <div style={{ border: '1px solid var(--color-border-2)', borderRadius: 20, padding: 24, background: 'var(--color-bg-2)' }}>
-      <GuidAgentSelector presets={[personal]} officialTemplates={templates} selection={selection}
+      <GuidAgentSelector presets={personalAgents} officialTemplates={library?.official_templates ?? templates} selection={selection}
+        isLoading={isLoading} loadError={error} onRetry={refresh}
         onSelectPreset={(presetId) => setSelection({ kind: 'preset', presetId })}
         onSelectTemplate={(templateKey) => setSelection({ kind: 'template', templateKey })} />
       <textarea aria-label='待发送消息' value={input} onChange={(event) => setInput(event.target.value)}
