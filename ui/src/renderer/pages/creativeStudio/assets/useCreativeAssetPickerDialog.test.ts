@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import '../../../../../test/setup-dom.ts';
+
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
-import { toggleCreativeAssetPickerSelection } from './useCreativeAssetPickerDialog';
+import type { CreativeAssetLibraryPort } from './types';
+import { toggleCreativeAssetPickerSelection, useCreativeAssetPickerDialog } from './useCreativeAssetPickerDialog';
+
+afterEach(cleanup);
 
 const pickerSource = readFileSync(
   new URL('./components/CreativeAssetPickerModal.tsx', import.meta.url),
@@ -46,5 +52,26 @@ describe('Creative asset picker dialog', () => {
     expect(pickerSource.includes('onRetry')).toBe(true);
     expect(pickerSource.includes('onConfirm ?? onCancel')).toBe(true);
     expect(pickerCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
+  });
+
+  test('refreshes the authoritative asset list whenever the picker opens', async () => {
+    let listCalls = 0;
+    const client = {
+      list: async () => {
+        listCalls += 1;
+        return { items: [], total: 0 };
+      },
+    } as unknown as CreativeAssetLibraryPort;
+    const hook = renderHook(() => useCreativeAssetPickerDialog({ client }));
+    await waitFor(() => expect(listCalls).toBe(1));
+
+    let pending!: Promise<string[] | null>;
+    act(() => {
+      pending = hook.result.current.pick({ acceptedKinds: ['image'] });
+    });
+    await waitFor(() => expect(listCalls).toBe(2));
+
+    act(() => hook.unmount());
+    expect(await pending).toBeNull();
   });
 });

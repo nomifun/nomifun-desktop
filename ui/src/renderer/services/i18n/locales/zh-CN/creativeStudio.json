@@ -225,7 +225,8 @@
       "searchPlaceholder": "搜索素材",
       "selected": "已选择",
       "selectedCount": "已选择 {{itemCount}} 项",
-      "title": "资产库"
+      "title": "资产库",
+      "unavailableForSelection": "当前创作模式不可选择"
     },
     "preview": {
       "close": "关闭",
