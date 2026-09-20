@@ -6,7 +6,11 @@ import {
   type AgentCatalogResponse,
   type CapabilityModuleCatalogItem,
 } from '@/common/types/agentPlatform';
-import { moduleCategory, unavailableModuleReferences } from './capabilityGroups';
+import {
+  moduleCategory,
+  requiredModuleReferences,
+  unavailableModuleReferences,
+} from './capabilityGroups';
 
 const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
   module: { id: asCapabilityId(id), version: '1.0.0' },
@@ -18,6 +22,23 @@ const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
   actions: [{ action_id: `${id}/read`, input_schema: 'input', output_schema: 'output', effect_class: 'read_local', presentation: 'function_tool' }],
   context_schema_refs: [], event_schema_refs: [], required_resource_kinds: [], required_host_ports: [],
   required_modules: [], conflicting_modules: [], supported_surfaces: ['desktop'],
+});
+
+const availableCapability = (module: CapabilityModuleCatalogItem) => ({
+  capability: module.module,
+  kind: module.summary_kind,
+  display_name: module.display_name,
+  description: module.description,
+  source_package: module.source_package,
+  source_kind: 'bundled' as const,
+  materialization_state: 'materialized' as const,
+  supported_surfaces: ['desktop'],
+  required_runtime_features: [],
+  required_resource_kinds: [],
+  required_capabilities: module.required_modules,
+  conflicting_capabilities: [],
+  action_count: module.actions.length,
+  context_contributor_count: 0,
 });
 
 test('groups provider-neutral Browser and device Modules by product category', () => {
@@ -49,4 +70,31 @@ test('marks missing exact actions as unavailable without dropping the saved gran
   };
   expect(unavailableModuleReferences(document, catalog)).toEqual([module.module]);
   expect(document.enabled_capabilities[0].action_allowlist).toContain('workspace.files/retired');
+});
+
+test('projects transitive compiler dependencies without authoring them into the preset', () => {
+  const leaf = { ...moduleItem('platform.guard'), authoring_policy: 'platform_managed' as const };
+  const middle = {
+    ...moduleItem('workspace.guard'),
+    authoring_policy: 'dependency_only' as const,
+    required_modules: [leaf.module],
+  };
+  const root = { ...moduleItem('workspace.files'), required_modules: [middle.module] };
+  const document = {
+    ...createEmptyAgentPresetDocument(),
+    enabled_capabilities: [{
+      capability: root.module,
+      action_allowlist: ['workspace.files/read'],
+    }],
+  };
+
+  expect(requiredModuleReferences(document, [root, middle, leaf])).toEqual([
+    { module: leaf.module, requiredBy: [root.module] },
+    { module: middle.module, requiredBy: [root.module] },
+  ]);
+  expect(unavailableModuleReferences(document, {
+    modules: [root, middle, leaf],
+    capabilities: [availableCapability(root), availableCapability(middle)],
+  })).toEqual([leaf.module]);
+  expect(document.enabled_capabilities).toHaveLength(1);
 });

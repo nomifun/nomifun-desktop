@@ -721,7 +721,8 @@ async fn create_agent_preset(
 fn coding_resource_selections() -> Value {
     json!([
         {"resource_kind": "workspace", "resource_id": "default-workspace"},
-        {"resource_kind": "process_session", "resource_id": "managed-process-session"}
+        {"resource_kind": "process_session", "resource_id": "managed-process-session"},
+        {"resource_kind": "project_memory", "resource_id": "default-project-memory"}
     ])
 }
 
@@ -2093,15 +2094,17 @@ mod evidence_tests {
     }
 
     #[test]
-    fn coding_product_selections_require_both_resources_and_minimal_requires_none() {
+    fn coding_product_selections_require_all_infrastructure_resources_and_minimal_requires_none() {
         let selections = coding_resource_selections();
         let typed: Vec<nomifun_api_types::AgentResourceSelectionDto> =
             serde_json::from_value(selections.clone()).unwrap();
-        assert_eq!(typed.len(), 2);
+        assert_eq!(typed.len(), 3);
         assert_eq!(typed[0].resource_kind, "workspace");
         assert_eq!(typed[0].resource_id, "default-workspace");
         assert_eq!(typed[1].resource_kind, "process_session");
         assert_eq!(typed[1].resource_id, "managed-process-session");
+        assert_eq!(typed[2].resource_kind, "project_memory");
+        assert_eq!(typed[2].resource_id, "default-project-memory");
         for selection in selections.as_array().unwrap() {
             assert_eq!(selection.as_object().unwrap().len(), 2);
         }

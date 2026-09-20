@@ -16,6 +16,8 @@ import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
 import styles from './GuidAgentSelector.module.css';
 
+export const DEFAULT_VISIBLE_PERSONAL_AGENTS = 3;
+
 export type GuidAgentSelectorProps = {
   presets: ExecutableAgentPreset[];
   draftPresets?: AgentPresetSummary[];
@@ -55,7 +57,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
-  const [allTemplates, setAllTemplates] = useState(false);
+  const [allPersonalAgents, setAllPersonalAgents] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const mineHeading = useId();
   const templateHeading = useId();
@@ -70,7 +72,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
     setOpen(next);
     if (!next) {
       setQuery('');
-      setAllTemplates(false);
+      setAllPersonalAgents(false);
     }
   };
   const { refs, floatingStyles, context } = useFloating({
@@ -109,9 +111,27 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
       description: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.description`),
     })), [officialTemplates, t]);
   const templateMatches = templates.filter((template) => matches(template.name, template.description));
-  const visibleTemplates = normalizedQuery || allTemplates ? templateMatches : templateMatches.slice(0, 2);
-  const hasMine = savedMatches.length > 0 || draftMatches.length > 0;
-  const noMatches = !hasMine && visibleTemplates.length === 0;
+  const mineMatches = [
+    ...savedMatches.map((preset) => ({ kind: 'saved' as const, preset })),
+    ...draftMatches.map((preset) => ({ kind: 'draft' as const, preset })),
+  ];
+  const collapsedMineMatches = mineMatches.slice(0, DEFAULT_VISIBLE_PERSONAL_AGENTS);
+  if (selection.kind === 'preset') {
+    const selectedIndex = mineMatches.findIndex((entry) => entry.preset.preset_id === selection.presetId);
+    if (selectedIndex >= DEFAULT_VISIBLE_PERSONAL_AGENTS) {
+      collapsedMineMatches.splice(
+        DEFAULT_VISIBLE_PERSONAL_AGENTS - 1,
+        1,
+        mineMatches[selectedIndex]
+      );
+    }
+  }
+  const visibleMineMatches = normalizedQuery || allPersonalAgents
+    ? mineMatches
+    : collapsedMineMatches;
+  const hiddenPersonalCount = Math.max(0, mineMatches.length - collapsedMineMatches.length);
+  const hasMine = mineMatches.length > 0;
+  const noMatches = !hasMine && templateMatches.length === 0;
 
   const choose = (action: () => void) => {
     changeOpen(false);
@@ -183,31 +203,41 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
                     {onRetry && <button type='button' className={styles.textAction} onClick={() => void onRetry()}>{t('agentSettings.actions.retry')}</button>}
                   </div>
                 )}
-                {hasMine && (
-                  <section role='group' aria-labelledby={mineHeading}>
-                    <h3 id={mineHeading} className={styles.heading}>{t('agentSettings.library.mine')}</h3>
-                    {savedMatches.map((preset) => (
-                      <AgentRow key={preset.preset_id} name={preset.display_name} description={preset.description} icon={<User theme='outline' size={21} fill='currentColor' />} selected={selection.kind === 'preset' && selection.presetId === preset.preset_id} onClick={() => choose(() => onSelectPreset(preset.preset_id))} />
-                    ))}
-                    {draftMatches.map((preset) => (
-                      <AgentRow key={preset.preset_id} name={preset.display_name} description={preset.description} icon={<Edit theme='outline' size={20} fill='currentColor' />} status={t('guid.agentEntries.needsSetup')} onClick={() => choose(() => navigate(`/agent?preset=${encodeURIComponent(preset.preset_id)}`))} />
-                    ))}
+                {templateMatches.length > 0 && (
+                  <section role='group' aria-labelledby={templateHeading}>
+                    <h3 id={templateHeading} className={styles.heading}>{t('guid.agentEntries.fromTemplate')}</h3>
+                    <div className={styles.templateGrid}>
+                      {templateMatches.map((template) => (
+                        <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} selected={selection.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
+                      ))}
+                    </div>
                   </section>
                 )}
-                {visibleTemplates.length > 0 && (
-                  <section role='group' aria-labelledby={templateHeading} className={hasMine ? styles.templateSection : undefined}>
-                    <h3 id={templateHeading} className={styles.heading}>{t('guid.agentEntries.fromTemplate')}</h3>
-                    {visibleTemplates.map((template) => (
-                      <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} selected={selection.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
+                {hasMine && (
+                  <section role='group' aria-labelledby={mineHeading} className={templateMatches.length > 0 ? styles.personalSection : undefined}>
+                    <h3 id={mineHeading} className={styles.heading}>{t('agentSettings.library.mine')}</h3>
+                    {visibleMineMatches.map(({ kind, preset }) => kind === 'saved' ? (
+                      <AgentRow key={`saved:${preset.preset_id}`} name={preset.display_name} description={preset.description} icon={<User theme='outline' size={21} fill='currentColor' />} selected={selection.kind === 'preset' && selection.presetId === preset.preset_id} onClick={() => choose(() => onSelectPreset(preset.preset_id))} />
+                    ) : (
+                      <AgentRow key={`draft:${preset.preset_id}`} name={preset.display_name} description={preset.description} icon={<Edit theme='outline' size={20} fill='currentColor' />} status={t('guid.agentEntries.needsSetup')} onClick={() => choose(() => navigate(`/agent?preset=${encodeURIComponent(preset.preset_id)}`))} />
                     ))}
+                    {!normalizedQuery && mineMatches.length > DEFAULT_VISIBLE_PERSONAL_AGENTS && (
+                      <button
+                        type='button'
+                        className={styles.moreButton}
+                        aria-expanded={allPersonalAgents}
+                        onClick={() => setAllPersonalAgents((current) => !current)}
+                      >
+                        {t(allPersonalAgents
+                          ? 'guid.agentEntries.showFewerPersonal'
+                          : 'guid.agentEntries.showMorePersonal', { count: hiddenPersonalCount })}
+                      </button>
+                    )}
                   </section>
                 )}
                 {!isLoading && noMatches && <p className={styles.empty} role='status'>{t('guid.agentEntries.empty')}</p>}
               </div>
               <footer className={styles.footer}>
-                <button type='button' className={styles.textAction} onClick={() => { setQuery(''); setAllTemplates(!allTemplates); }}>
-                  {t(allTemplates ? 'guid.agentEntries.fewerTemplates' : 'guid.agentEntries.browseTemplates')}
-                </button>
                 <Link className={styles.manageLink} to='/agent' onClick={() => changeOpen(false)}>{t('guid.agentEntries.manage')}</Link>
               </footer>
             </div>
@@ -226,7 +256,7 @@ const AgentRow: React.FC<{
   status?: string;
   onClick: () => void;
 }> = ({ name, description, icon, selected, status, onClick }) => (
-  <button type='button' data-agent-choice className={`${styles.row} ${selected ? styles.selected : ''}`} aria-pressed={selected} onClick={onClick}>
+  <button type='button' data-agent-choice className={`${styles.row} ${selected ? styles.selected : ''}`} aria-label={name} aria-pressed={selected} onClick={onClick}>
     <span className={styles.rowIcon} aria-hidden='true'>{icon}</span>
     <span className={styles.rowCopy}>
       <span className={styles.rowName}>{name}</span>

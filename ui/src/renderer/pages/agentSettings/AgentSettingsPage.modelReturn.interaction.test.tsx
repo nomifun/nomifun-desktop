@@ -8,9 +8,11 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { SWRConfig } from 'swr';
 import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
+import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderEvents';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
-import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
+import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import * as roleDefaults from './AgentRoleDefaults';
 import * as libraryPanel from './AgentPresetLibrary';
@@ -42,8 +44,11 @@ afterEach(() => { cleanup(); mock.restore(); });
 
 async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, initialEditor?: AgentPresetEditorResponse) {
   spyOn(roleDefaults, 'default').mockImplementation(() => <div>Default roles</div>);
-  spyOn(libraryPanel, 'default').mockImplementation(({ library, onSelectTemplate }) => <nav>
+  spyOn(libraryPanel, 'default').mockImplementation(({ library, dirtyPresetId, onSelectTemplate }) => <nav>
     {library.official_templates.map(value => <button key={value.template_key} onClick={() => onSelectTemplate(value)}>{value.template_key}</button>)}
+    {library.user_presets.map(value => <output key={value.preset_id} data-testid={`library-preset-${value.preset_id}`}>
+      {value.display_name}|{dirtyPresetId === value.preset_id ? 'dirty' : 'saved'}
+    </output>)}
   </nav>);
   let editor: AgentPresetEditorResponse | undefined = initialEditor;
   const library = spyOn(agentPlatform.library, 'invoke').mockImplementation(async () => ({
@@ -69,19 +74,26 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
     <button onClick={history.back}>Back to Agent</button><button onClick={() => navigate('/plugins/run/check?saved=1')}>Publish destination</button></div>; };
   const Published = () => { const history = useNavigationHistory()!; return <div><h1>Published check</h1><button onClick={history.back}>Back to author</button></div>; };
   const HistoryControls = () => { const history = useNavigationHistory()!; return <button disabled={!history.canForward} onClick={history.forward}>App forward</button>; };
+  const PresetCacheProbe = () => {
+    const { presets } = useAgentPresets();
+    return <output data-testid='preset-cache-name'>{presets[0]?.display_name ?? ''}</output>;
+  };
   const view = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
-    fallback: { providers: [] } }}><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
+    fallback: { providers: [] } }}><PresetCacheProbe /><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
     <NavigationHistoryProvider><Probe /><HistoryControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
       <Route path='/plugins/create/:id' element={<Author />} /><Route path='/plugins/run/:id' element={<Published />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
   if (initialEditor) await view.findByRole('heading', { name: initialEditor.preset.display_name });
-  else await view.findByRole('textbox', { name: en.workbench.customName });
+  else await view.findByRole('heading', { name: en.template.chat.minimal.name });
   return { ...view, create, save, turn, states, library, getEditor };
 }
 
 test('missing-model CTA keeps the unsaved name and exact Module grant through model management and a single explicit save', async () => {
   const v = await mount();
-  fireEvent.input(v.getByRole('textbox', { name: en.workbench.customName }), { target: { value: 'My inspection Agent' } });
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editName }));
+  const name = v.getByRole('textbox', { name: en.fields.name });
+  fireEvent.input(name, { target: { value: 'My inspection Agent' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('button', { name: en.workbench.saveAsMine }));
   await v.findByText(en.workbench.modelNeeded);
@@ -90,7 +102,7 @@ test('missing-model CTA keeps the unsaved name and exact Module grant through mo
   await v.findByRole('heading', { name: 'Model management' });
   expect(v.create).toHaveBeenCalledTimes(1);
   fireEvent.click(v.getByRole('button', { name: 'Back to editing' }));
-  await waitFor(() => expect((v.getByRole('textbox', { name: en.workbench.customName }) as HTMLInputElement).value).toBe('My inspection Agent'));
+  await v.findByRole('heading', { name: 'My inspection Agent' });
   const snapshot = v.states.find(value => value && typeof value === 'object' && 'agentEditorReturn' in value) as { agentEditorReturn: { editing: { document: Record<string, unknown> } } };
   expect(snapshot.agentEditorReturn.editing.document.model_route_refs).toBeUndefined();
   expect(snapshot.agentEditorReturn.editing.document.chat_route_records).toBeUndefined();
@@ -108,14 +120,73 @@ test('missing-model CTA keeps the unsaved name and exact Module grant through mo
 
 test('normal navigation to a different template does not restore the previous unsaved input', async () => {
   const v = await mount();
-  fireEvent.input(v.getByRole('textbox', { name: en.workbench.customName }), { target: { value: 'Do not copy me' } });
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editName }));
+  const name = v.getByRole('textbox', { name: en.fields.name });
+  fireEvent.input(name, { target: { value: 'Do not copy me' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
   fireEvent.click(v.getByRole('button', { name: en.workbench.saveAsMine }));
   await v.findByRole('button', { name: en.workbench.configureChatModel });
   fireEvent.click(v.getByRole('button', { name: en.workbench.configureChatModel }));
   await v.findByRole('heading', { name: 'Model management' });
   fireEvent.click(v.getByRole('button', { name: 'Other template' }));
-  await waitFor(() => expect((v.getByRole('textbox', { name: en.workbench.customName }) as HTMLInputElement).value).toBe(en.template.coding.codex.name));
+  await v.findByRole('heading', { name: en.template.coding.codex.name });
   expect(v.create).toHaveBeenCalledTimes(1);
+});
+
+test('personal Agent header exposes name and description editing and saves metadata changes', async () => {
+  const document = createEmptyAgentPresetDocument();
+  const original: AgentPresetEditorResponse = {
+    preset: {
+      preset_id: presetId,
+      source: 'user',
+      display_name: 'Saved Agent',
+      description: 'Old description',
+      bound_target_count: 0,
+      current_stable_revision: revision,
+    },
+    draft: {
+      preset_id: presetId,
+      display_name: 'Saved Agent',
+      description: 'Old description',
+      document,
+      current_revision: revision,
+    },
+    revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 },
+  };
+  const v = await mount(undefined, original);
+  v.save.mockImplementation(async ({ request }) => ({
+    preset: {
+      ...original.preset,
+      display_name: request.draft.display_name,
+      description: request.draft.description,
+    },
+    revision: original.revision!,
+    resolved_snapshot_ref: {
+      snapshot_id: asResolvedSnapshotId('0190f5fe-7c00-7a00-8000-000000000199'),
+      snapshot_digest: asDigestHex('c'.repeat(64)),
+    },
+  }));
+
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editName }));
+  const name = v.getByRole('textbox', { name: en.fields.name }) as HTMLInputElement;
+  fireEvent.input(name, { target: { value: 'Renamed Agent' } });
+  fireEvent.keyDown(name, { key: 'Enter' });
+  expect(v.getByRole('heading', { name: 'Renamed Agent' })).toBeTruthy();
+  await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
+  expect(v.getByTestId(`library-preset-${presetId}`).textContent).toBe('Renamed Agent|dirty');
+  await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
+  fireEvent.click(v.getByRole('button', { name: en.workbench.editIdentity }));
+  expect(v.getByRole('tab', { name: en.workbench.settingsTab }).getAttribute('aria-selected')).toBe('true');
+  fireEvent.input(v.getByRole('textbox', { name: en.fields.description }), {
+    target: { value: 'Updated description' },
+  });
+  await act(async () => { fireEvent.click(v.getByRole('button', { name: common.save })); });
+  expect(v.save).toHaveBeenCalledTimes(1);
+  expect(v.save.mock.calls[0][0].request.draft.display_name).toBe('Renamed Agent');
+  expect(v.save.mock.calls[0][0].request.draft.description).toBe('Updated description');
+  await act(async () => { window.dispatchEvent(new Event(AGENT_SIDER_TOGGLE_EVENT)); });
+  await waitFor(() => expect(v.getByTestId(`library-preset-${presetId}`).textContent).toBe('Renamed Agent|saved'));
+  expect(v.getByTestId('preset-cache-name').textContent).toBe('Renamed Agent');
 });
 
 test('unrelated failures never offer model configuration as the recovery action', async () => {

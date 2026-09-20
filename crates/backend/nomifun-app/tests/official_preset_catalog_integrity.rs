@@ -96,13 +96,20 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
             ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
             ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
+            ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
+            ("project.memory", &["project.memory/read", "project.memory/write"]),
             ("web.research", &["web.research/fetch", "web.research/search"]),
+            ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
+            ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
         (OfficialPresetKey::CompanionDefault, actions(&[
             ("companion", &["companion/evolve", "companion/learn"]),
             ("companion.memory", &["companion.memory/recall", "companion.memory/write"]),
+            ("knowledge", &["knowledge/read", "knowledge/search"]),
             ("channel.messaging", &["channel.messaging/reply"]),
             ("robot", &["robot/vision"]),
+            ("automation.schedule", &["automation.schedule/create", "automation.schedule/delete", "automation.schedule/list", "automation.schedule/update"]),
+            ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
         (OfficialPresetKey::CustomerServiceDefault, actions(&[
             ("customer.service", &["customer.service/handoff", "customer.service/notes.read"]),
@@ -112,7 +119,13 @@ fn official_preset_action_safety_matrix_is_exact() {
         (OfficialPresetKey::CreativeStudioDefault, actions(&[
             ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/text", "creation.media/video"]),
             ("creative.workshop", &["creative.workshop/asset.read", "creative.workshop/asset.write", "creative.workshop/canvas.edit", "creative.workshop/canvas.read", "creative.workshop/template.run"]),
-            ("office", &["office/preview"]),
+            ("office", &["office/document.edit", "office/preview", "office/sheet.edit", "office/slides.edit"]),
+            ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
+            ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
+            ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
+            ("project.memory", &["project.memory/read", "project.memory/write"]),
+            ("web.research", &["web.research/fetch", "web.research/search"]),
+            ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
     ]);
     let manifest = official_preset_seed_manifest_payload();
@@ -377,6 +390,12 @@ async fn assert_official_preset_catalog_integrity(
                     selection.capability.id, selection.capability.version,
                 )),
                 Some(module) => {
+                    if module.display_name.trim().is_empty() || module.description.trim().is_empty() {
+                        unavailable.push(format!(
+                            "{template_key}: {} has no user-visible Module introduction",
+                            selection.capability.id,
+                        ));
+                    }
                     let declared = module
                         .actions
                         .iter()

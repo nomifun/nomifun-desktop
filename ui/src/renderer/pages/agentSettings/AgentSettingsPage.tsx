@@ -4,7 +4,7 @@ import { AGENT_SIDER_TOGGLE_EVENT, dispatchAgentSiderStateEvent } from '@/render
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
 import { AddOne, Refresh } from '@icon-park/react';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
@@ -160,12 +160,30 @@ const AgentSettingsPage: React.FC = () => {
     });
   };
 
-  const libraryPanel = controller.library ? (<AgentPresetLibrary
+  const visibleLibrary = useMemo(() => {
+    const currentDraft = controller.draft;
+    if (!controller.library || !currentDraft) return controller.library;
+    return {
+      ...controller.library,
+      user_presets: controller.library.user_presets.map((preset) =>
+        preset.preset_id === currentDraft.preset_id
+          ? {
+              ...preset,
+              display_name: currentDraft.display_name.trim() || t('agentSettings.defaults.untitledName'),
+              description: currentDraft.description,
+            }
+          : preset
+      ),
+    };
+  }, [controller.draft, controller.library, t]);
+
+  const libraryPanel = visibleLibrary ? (<AgentPresetLibrary
             width={narrow ? 300 : resize.splitRatio}
             resizeHandle={narrow ? undefined : resize.createDragHandle({ className: 'right-0' })}
             onCollapse={collapse}
-            library={controller.library}
+            library={visibleLibrary}
             selection={controller.selection}
+            dirtyPresetId={controller.dirty ? controller.draft?.preset_id : undefined}
             busy={controller.busyAction !== null}
             creating={controller.busyAction === 'create'}
             openingPresetId={controller.openingPresetId}

@@ -21,6 +21,11 @@ export const MODULE_CATEGORIES = [
 export type ModuleCategory = (typeof MODULE_CATEGORIES)[number];
 export type ModuleReference = ExactCatalogRef<'capability'>;
 
+export type RequiredModuleReference = {
+  module: ModuleReference;
+  requiredBy: ModuleReference[];
+};
+
 export function moduleCategory(reference: ModuleReference): ModuleCategory {
   const id = String(reference.id);
   if (id === 'knowledge' || id.endsWith('.memory')) return 'knowledge';
@@ -51,6 +56,56 @@ export const selectedModuleReferences = (document: AgentPresetDocument): ModuleR
       capability,
     ])
   ).values()];
+
+/**
+ * Project the compiler-owned transitive dependency closure for presentation.
+ * Dependencies stay out of the editable preset document, but the compiler
+ * freezes them into the resolved Snapshot and grants their declared actions
+ * only to scoped dependency calls.
+ */
+export function requiredModuleReferences(
+  document: AgentPresetDocument,
+  modules: readonly CapabilityModuleCatalogItem[]
+): RequiredModuleReference[] {
+  const byKey = new Map(modules.map((module) => [capabilityReferenceKey(module.module), module]));
+  const required = new Map<string, {
+    module: ModuleReference;
+    requiredBy: Map<string, ModuleReference>;
+  }>();
+
+  for (const root of selectedModuleReferences(document)) {
+    const rootKey = capabilityReferenceKey(root);
+    const visited = new Set<string>([rootKey]);
+    const work = [...(byKey.get(rootKey)?.required_modules ?? [])];
+    while (work.length > 0) {
+      const dependency = work.pop()!;
+      const dependencyKey = capabilityReferenceKey(dependency);
+      if (visited.has(dependencyKey)) continue;
+      visited.add(dependencyKey);
+      const entry = required.get(dependencyKey) ?? {
+        module: dependency,
+        requiredBy: new Map<string, ModuleReference>(),
+      };
+      entry.requiredBy.set(rootKey, root);
+      required.set(dependencyKey, entry);
+      const dependencyModule = byKey.get(dependencyKey);
+      if (dependencyModule) work.push(...dependencyModule.required_modules);
+    }
+  }
+
+  return [...required.values()]
+    .map((entry) => ({
+      module: entry.module,
+      requiredBy: [...entry.requiredBy.values()].sort((left, right) =>
+        String(left.id).localeCompare(String(right.id)) ||
+        left.version.localeCompare(right.version)
+      ),
+    }))
+    .sort((left, right) =>
+      String(left.module.id).localeCompare(String(right.module.id)) ||
+      left.module.version.localeCompare(right.module.version)
+    );
+}
 
 export const isBuiltinModule = (
   module: CapabilityModuleCatalogItem,
@@ -84,7 +139,7 @@ export function unavailableModuleReferences(
   catalog: Pick<AgentCatalogResponse, 'modules' | 'capabilities'>
 ): ModuleReference[] {
   const byKey = new Map(catalog.modules.map((module) => [capabilityReferenceKey(module.module), module]));
-  return document.enabled_capabilities.flatMap((selection) => {
+  const unavailable = document.enabled_capabilities.flatMap((selection) => {
     const module = byKey.get(capabilityReferenceKey(selection.capability));
     const knownActions = new Set(module?.actions.map((action) => action.action_id) ?? []);
     const actions = selection.action_allowlist ?? [];
@@ -94,4 +149,12 @@ export function unavailableModuleReferences(
       ? [selection.capability]
       : [];
   });
+  for (const dependency of requiredModuleReferences(document, catalog.modules)) {
+    const module = byKey.get(capabilityReferenceKey(dependency.module));
+    if (!moduleIsAvailable(module, catalog.capabilities)) unavailable.push(dependency.module);
+  }
+  return [...new Map(unavailable.map((reference) => [
+    capabilityReferenceKey(reference),
+    reference,
+  ])).values()];
 }
