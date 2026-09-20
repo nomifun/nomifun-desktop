@@ -68,6 +68,12 @@ import { useCompanion } from '@/renderer/pages/nomi/useNomi';
 import { parseCompanionId } from '@/common/types/ids';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 import { createDefaultIdmmConfig } from '@/common/types/idmm';
+import type { ModelTrait } from '@/common/config/storage';
+import { capabilityOf } from '@/common/utils/providerModels';
+import { modelDisplayLabel } from '@/common/utils/modelPresentation';
+import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
+import GuidModelCompatibilityNotice from './components/GuidModelCompatibilityNotice';
+import { modelCapabilityConfigurationRoute } from '@/renderer/pages/modelHub/modelConfigurationRoute';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
@@ -84,6 +90,7 @@ const GuidPage: React.FC = () => {
   const pendingConversation = usePendingConversation();
   const guidContainerRef = useRef<HTMLDivElement>(null);
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const [selectedResourcesAvailable, setSelectedResourcesAvailable] = useState(false);
 
@@ -149,11 +156,38 @@ const GuidPage: React.FC = () => {
       )
     : presetCapabilities.actionIds;
   const selectedAgentRequiresToolCalls = presetActionIds.size > 0;
-  const selectedModelSupportsToolCalls = modelSelection.currentModelTraits.includes('function_calling');
-  const selectedAgentModelCompatible =
-    !selectedAgentRequiresToolCalls || selectedModelSupportsToolCalls;
+  const requiredModelTraits: readonly ModelTrait[] = selectedAgentRequiresToolCalls
+    ? ['function_calling']
+    : [];
+  const missingModelTraits = requiredModelTraits.filter(
+    (trait) => !modelSelection.currentModelTraits.includes(trait)
+  );
+  const selectedAgentModelCompatible = missingModelTraits.length === 0;
   const selectedAgentModelIncompatible =
     Boolean(modelSelection.current_model) && !selectedAgentModelCompatible;
+  const currentModelProvider = modelSelection.modelList.find(
+    (provider) => provider.id === modelSelection.current_model?.id
+  );
+  const currentModelDefinition = currentModelProvider?.models.find(
+    (model) => model.model === modelSelection.current_model?.use_model
+  );
+  const currentModelLabel = modelDisplayLabel(
+    modelSelection.current_model?.use_model ?? '',
+    currentModelDefinition?.display_name
+  );
+  const currentProviderLabel =
+    currentModelProvider?.name ?? modelSelection.current_model?.name ?? '';
+  const compatibleModelCount = modelSelection.modelList.reduce(
+    (count, provider) => count + modelSelection.getAvailableModels(provider).filter((model) => {
+      const traits = capabilityOf(provider, model, 'chat')?.traits ?? [];
+      return requiredModelTraits.every((trait) => traits.includes(trait));
+    }).length,
+    0
+  );
+  const canConfigureCurrentModel = Boolean(
+    modelSelection.current_model &&
+      !isManagedModelProvider(modelSelection.current_model)
+  );
   const collaborationEnabled = presetResourceResolutionReady
     && presetCapabilityIds.has('agent.collaboration');
   // Knowledge is an optional, session-scoped mount. It keeps its compact
@@ -558,6 +592,9 @@ const GuidPage: React.FC = () => {
         providers={modelSelection.modelList}
         currentModel={modelSelection.current_model}
         getAvailableModels={modelSelection.getAvailableModels}
+        requiredTraits={requiredModelTraits}
+        popupVisible={modelPickerOpen}
+        onPopupVisibleChange={setModelPickerOpen}
         onSelectModel={(provider, model) => modelSelection.setCurrentModel({ ...provider, use_model: model })}
       />
     )
@@ -596,12 +633,22 @@ const GuidPage: React.FC = () => {
             )}
 
             {selectedAgentModelIncompatible && (
-              <Alert
-                type='warning'
-                showIcon
-                title={t('guid.agentEntries.modelToolsRequiredTitle')}
-                content={t('guid.agentEntries.modelToolsRequired')}
-                className={styles.guidPresetCapabilityError}
+              <GuidModelCompatibilityNotice
+                modelLabel={currentModelLabel}
+                providerLabel={currentProviderLabel}
+                missingTraits={missingModelTraits}
+                compatibleModelCount={compatibleModelCount}
+                canConfigureCurrentModel={canConfigureCurrentModel}
+                onChooseCompatibleModel={() => setModelPickerOpen(true)}
+                onOpenModelConfiguration={() => {
+                  const currentModel = modelSelection.current_model;
+                  if (!currentModel) return;
+                  void navigate(
+                    canConfigureCurrentModel
+                      ? modelCapabilityConfigurationRoute(currentModel.id, currentModel.use_model)
+                      : '/models?section=chat'
+                  );
+                }}
               />
             )}
 

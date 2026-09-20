@@ -33,7 +33,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import {
   featureRoute,
@@ -57,6 +57,10 @@ import { healthFailureHeadline } from './healthFailureHeadline';
 import {
   capabilityInputFromResponse,
 } from '@/renderer/pages/settings/components/providerModelAdvanced';
+import {
+  modelConfigurationTarget,
+  withoutModelConfigurationTarget,
+} from '@/renderer/pages/modelHub/modelConfigurationRoute';
 import '../model-provider.css';
 
 /**
@@ -461,6 +465,7 @@ const PriorityDragHandle: React.FC<SortableRenderProps & { label: string }> = ({
 const ModelModalContent: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   // 以「内容面板实际宽度」而非视口宽度做分档：模型管理面板被一次 rail + 二级
   // ContentSider 占去宽度，视口断点(md:/lg:)会误判为宽屏。窄面板下用紧凑布局，
   // 避免 provider 头 hover 展开区(320px)挤占供应商名称。
@@ -474,6 +479,10 @@ const ModelModalContent: React.FC = () => {
   // per-boot credential.
   const editableProviders = useMemo(() => (data ?? []).filter((provider) => !isManagedModelProvider(provider)), [data]);
   const [message, messageContext] = useArcoMessage();
+  const configurationTarget = useMemo(
+    () => modelConfigurationTarget(searchParams),
+    [searchParams]
+  );
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -482,6 +491,31 @@ const ModelModalContent: React.FC = () => {
     () => editableProviders.map((platform) => providerSortableId(platform.id)),
     [editableProviders]
   );
+
+  useEffect(() => {
+    if (!data || !configurationTarget) return;
+    const provider = editableProviders.find(
+      (candidate) => candidate.id === configurationTarget.providerId
+    );
+    const modelExists = provider?.models.some(
+      (candidate) => candidate.model === configurationTarget.model
+    );
+    if (provider && modelExists) {
+      setCollapseKey((previous) => ({ ...previous, [provider.id]: true }));
+      return;
+    }
+
+    message.warning(t('guid.agentEntries.modelCompatibility.targetNotFound'));
+    setSearchParams(withoutModelConfigurationTarget(searchParams), { replace: true });
+  }, [
+    configurationTarget,
+    data,
+    editableProviders,
+    message,
+    searchParams,
+    setSearchParams,
+    t,
+  ]);
 
   /**
    * 行级模型更新：统一走 providerModel.save 全量模型聚合写。
@@ -1175,6 +1209,18 @@ const ModelModalContent: React.FC = () => {
                                   displayName={modelDisplayName}
                                   capabilities={row.capabilities}
                                   onSave={(patch) => updateModelDefinition(platform, row, patch)}
+                                  openRequest={
+                                    configurationTarget?.providerId === platform.id &&
+                                    configurationTarget.model === model
+                                      ? `${configurationTarget.providerId}:${configurationTarget.model}`
+                                      : undefined
+                                  }
+                                  onOpenRequestHandled={() => {
+                                    setSearchParams(
+                                      withoutModelConfigurationTarget(searchParams),
+                                      { replace: true }
+                                    );
+                                  }}
                                 />
 
                                 {/* 模型启用开关（行级）/ Model enable switch (row-level) */}

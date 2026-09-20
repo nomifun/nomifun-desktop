@@ -319,6 +319,11 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
                     {t('settings.modelHub.modality.traitVision')}
                   </Tag>
                 )}
+                {row.traits.includes('function_calling') && (
+                  <Tag size='small' color='green'>
+                    {t('settings.modelTrait.function_calling')}
+                  </Tag>
+                )}
                 <Tag size='small' color='gray'>
                   {row.protocol}
                 </Tag>

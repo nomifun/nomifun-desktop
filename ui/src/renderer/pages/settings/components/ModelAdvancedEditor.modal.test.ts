@@ -37,4 +37,10 @@ describe('existing-model advanced editor modal shell', () => {
       )
     ).toBe(true);
   });
+
+  test('accepts a one-shot deep-link request that opens the exact model editor', () => {
+    expect(source.includes('openRequest?: string;')).toBe(true);
+    expect(source.includes('handledOpenRequestRef.current === openRequest')).toBe(true);
+    expect(source.includes('onOpenRequestHandled?.(openRequest)')).toBe(true);
+  });
 });

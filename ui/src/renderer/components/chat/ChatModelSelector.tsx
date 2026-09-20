@@ -1,6 +1,7 @@
-import type { IProvider, TProviderWithModel } from '@/common/config/storage';
+import type { IProvider, ModelTrait, TProviderWithModel } from '@/common/config/storage';
 import { compositeKey } from '@/common/utils/compositeKey';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
+import { capabilityOf } from '@/common/utils/providerModels';
 import { exactChatHealthDotColor } from './chatModelHealth';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
@@ -12,6 +13,7 @@ import { useNavigate } from 'react-router-dom';
 /** Rendering is shared; the caller owns eligibility and persistence. */
 export default function ChatModelSelector({ providers, currentModel, getAvailableModels, onSelectModel,
   disabled = false, compact = false, className = '', readOnlyLabel, testId = 'chat-model-selector',
+  requiredTraits = [], popupVisible, onPopupVisibleChange,
 }: {
   providers: IProvider[];
   currentModel?: TProviderWithModel;
@@ -22,6 +24,9 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
   className?: string;
   readOnlyLabel?: string;
   testId?: string;
+  requiredTraits?: readonly ModelTrait[];
+  popupVisible?: boolean;
+  onPopupVisibleChange?: (visible: boolean) => void;
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -44,14 +49,34 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
     </span>
   </Button>;
   if (disabled) return trigger;
-  return <Dropdown trigger='click' droplist={<Menu selectedKeys={currentModel ? [compositeKey(currentModel.id, currentModel.use_model)] : []}>
-    {groups.length === 0 && <Menu.Item key='no-models' disabled>{t('settings.noAvailableModels')}</Menu.Item>}
-    {groups.map(group => <Menu.ItemGroup key={group.provider.id} title={providerLabel(group.provider)}>
+  const compatibleGroups = groups
+    .map(group => ({
+      ...group,
+      models: group.models.filter(name => {
+        const traits = capabilityOf(group.provider, name, 'chat')?.traits ?? [];
+        return requiredTraits.every(trait => traits.includes(trait));
+      }),
+    }))
+    .filter(group => group.models.length > 0);
+  return <Dropdown
+    trigger='click'
+    popupVisible={popupVisible}
+    onVisibleChange={onPopupVisibleChange}
+    droplist={<Menu selectedKeys={currentModel ? [compositeKey(currentModel.id, currentModel.use_model)] : []}>
+    {compatibleGroups.length === 0 && <Menu.Item key='no-models' disabled>{t(
+      requiredTraits.length > 0
+        ? 'guid.agentEntries.modelCompatibility.noCompatibleOption'
+        : 'settings.noAvailableModels'
+    )}</Menu.Item>}
+    {compatibleGroups.map(group => <Menu.ItemGroup key={group.provider.id} title={providerLabel(group.provider)}>
       {group.models.map(name => {
         const dot = exactChatHealthDotColor(configuredProviders ?? providers, group.provider.id, name);
         const displayName = group.provider.models.find(item => item.model === name)?.display_name;
         return <Menu.Item key={compositeKey(group.provider.id, name)} data-testid={`nomi-model-option-${name}`}
-          onClick={() => { void onSelectModel(group.provider, name).catch(error => console.error('Failed to select chat model:', error)); }}>
+          onClick={() => {
+            onPopupVisibleChange?.(false);
+            void onSelectModel(group.provider, name).catch(error => console.error('Failed to select chat model:', error));
+          }}>
           <div className='flex items-center gap-8px w-full'>
             {dot && <span className={`w-6px h-6px rounded-full shrink-0 ${dot}`} />}
             <span>{modelDisplayLabel(name, displayName)}</span>

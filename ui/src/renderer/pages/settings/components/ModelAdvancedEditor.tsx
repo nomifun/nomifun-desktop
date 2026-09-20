@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Tooltip } from '@arco-design/web-react';
 import { SettingTwo } from '@icon-park/react';
@@ -41,12 +41,15 @@ const ModelAdvancedEditor: React.FC<{
   displayName?: string;
   capabilities: ProviderModelCapabilityResponse[];
   onSave: (patch: ModelAdvancedPatch) => Promise<void>;
-}> = ({ providerId, providerName, preset, providerBaseUrl, providerAuthScheme, model, displayName, capabilities, onSave }) => {
+  openRequest?: string;
+  onOpenRequestHandled?: (request: string) => void;
+}> = ({ providerId, providerName, preset, providerBaseUrl, providerAuthScheme, model, displayName, capabilities, onSave, openRequest, onOpenRequestHandled }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
   const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
+  const handledOpenRequestRef = useRef<string | undefined>(undefined);
   const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => ({
     model,
     displayName,
@@ -87,15 +90,22 @@ const ModelAdvancedEditor: React.FC<{
     ]
   );
 
-  const resetDraft = () => {
+  const resetDraft = useCallback(() => {
     setDefinition({ model, displayName, capabilities: capabilities.map(capabilityDraftFromResponse) });
-  };
+  }, [capabilities, displayName, model]);
 
-  const handleOpen = () => {
+  const handleOpen = useCallback(() => {
     resetDraft();
     setFocusedCallConfigTask(undefined);
     setOpen(true);
-  };
+  }, [resetDraft]);
+
+  useEffect(() => {
+    if (!openRequest || handledOpenRequestRef.current === openRequest) return;
+    handledOpenRequestRef.current = openRequest;
+    handleOpen();
+    onOpenRequestHandled?.(openRequest);
+  }, [handleOpen, onOpenRequestHandled, openRequest]);
 
   const handleSave = async () => {
     const nextCapabilities = capabilityInputsFromDefinition(definition);
