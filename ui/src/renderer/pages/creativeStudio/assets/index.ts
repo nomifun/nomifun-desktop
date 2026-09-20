@@ -15,6 +15,11 @@ export { CREATIVE_ASSET_PAGE_SIZE, creativeAssetMatchesQuery, useCreativeAssets 
 export { CreativeAssetPickerModal } from './components';
 export type { CreativeAssetPickerModalProps } from './components';
 export {
+  CreativeAssetPickerContent,
+  CREATIVE_ASSET_PICKER_KIND_FILTERS,
+} from './components';
+export type { CreativeAssetPickerContentProps } from './components';
+export {
   toggleCreativeAssetPickerSelection,
   useCreativeAssetPickerDialog,
 } from './useCreativeAssetPickerDialog';

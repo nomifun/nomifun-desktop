@@ -1408,6 +1408,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
 
   const handleResourceViewChange = useCallback(
     (view: CreativeCanvasResourceView | null) => {
+      if (view === null || view === 'assets') {
+        setSelectedAssetIds(new Set());
+      }
+      if (view === 'assets') {
+        setAssetSearch('');
+        setAssetKind('all');
+      }
       setResourceDialogView(view);
       if (view !== null && panelsRef.current.left.open) {
         persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, false));
@@ -5575,6 +5582,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 onKindChange={setAssetKind}
                 onToggleAsset={handleToggleAsset}
                 onInsert={handleInsertAssets}
+                onCancel={() => handleResourceViewChange(null)}
               />
             ),
             prompts: (

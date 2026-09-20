@@ -68,7 +68,7 @@ describe('CreativeCanvasProductAssetLibrary', () => {
     expect(markup.includes('海边参考图')).toBe(true);
     expect(asset.thumbnailUrl !== null && markup.includes(asset.thumbnailUrl)).toBe(true);
     expect(markup.includes('aria-pressed="true"')).toBe(true);
-    expect(markup.includes('1 项真实素材')).toBe(true);
+    expect(markup.includes('data-asset-picker-content')).toBe(true);
     expect(markup.includes('fake')).toBe(false);
   });
 
@@ -87,7 +87,7 @@ describe('CreativeCanvasProductAssetLibrary', () => {
     );
     expect(markup.includes('data-state="error"')).toBe(true);
     expect(markup.includes('backend unavailable')).toBe(true);
-    expect(markup.includes('资产库加载失败')).toBe(true);
+    expect(markup.includes('素材加载失败')).toBe(true);
   });
 
   test('uses the video preview when an asset has no thumbnail', () => {

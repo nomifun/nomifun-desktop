@@ -129,6 +129,30 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
     expect(openChanges).toEqual([false, false]);
   });
 
+  test('keeps node creation buttons from reopening the canvas bubble', () => {
+    const created: string[] = [];
+    const NodeHarness: React.FC = () => {
+      const [leftOpen, setLeftOpen] = useState(true);
+      return (
+        <CreativeCanvasChrome
+          {...baseProps({
+            leftOpen,
+            onLeftPanelOpenChange: setLeftOpen,
+            onAddNode: (kind) => created.push(kind),
+          })}
+        />
+      );
+    };
+
+    const { getByRole, container } = render(withCanvasTestI18n(<NodeHarness />));
+    fireEvent.click(
+      getByRole('button', { name: 'creativeStudio.canvas.nodeKinds.text' })
+    );
+
+    expect(created).toEqual(['text']);
+    expect(container.querySelector('[data-left-open="false"]')).not.toBeNull();
+  });
+
   test('opens assets, prompts, and templates in the shared resource dialog', () => {
     const resourceChanges: Array<string | null> = [];
     const PanelHarness: React.FC = () => {

@@ -4,23 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  Loading,
-  Plus,
-  Refresh,
-  Search,
-} from '@icon-park/react';
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import {
+  CreativeAssetPickerContent,
   creativeAssetClient,
   isCreativeAssetDeleted,
   type CreativeAsset,
   type CreativeAssetKind,
   type UseCreativeAssetsResult,
 } from '../../assets';
-import CreativeAssetMedia from '../../assets/components/CreativeAssetMedia';
 import {
   createNomiPromptLibraryPort,
   PromptLibrarySidebar,
@@ -40,37 +34,20 @@ export interface CreativeCanvasProductAssetLibraryProps {
   onKindChange(value: CreativeCanvasAssetKindFilter): void;
   onToggleAsset(assetId: string): void;
   onInsert(assets: readonly CreativeAsset[]): void;
+  onCancel?(): void;
 }
 
-const ASSET_KIND_LABEL_KEYS: Record<
-  CreativeCanvasAssetKindFilter,
-  string
-> = {
-  all: 'creativeStudio.canvas.assets.kind.all',
-  image: 'creativeStudio.canvas.assets.kind.image',
-  video: 'creativeStudio.canvas.assets.kind.video',
-  audio: 'creativeStudio.canvas.assets.kind.audio',
-  text: 'creativeStudio.canvas.assets.kind.text',
-};
-
-const assetKindFallbacks: Record<CreativeCanvasAssetKindFilter, string> = {
-  all: '全部类型',
-  image: '图片',
-  video: '视频',
-  audio: '音频',
-  text: '文本',
-};
-
-const iconProps = {
-  theme: 'outline' as const,
-  size: 18,
-  fill: 'currentColor',
-  strokeWidth: 2.5,
-};
+const ALL_ASSET_KINDS: readonly CreativeAssetKind[] = [
+  'image',
+  'video',
+  'audio',
+  'text',
+];
 
 /**
- * A read-only view of the authoritative NomiFun asset library. Mutations stay
- * in the asset product; this panel only selects real records and inserts them.
+ * The Canvas entry point for the authoritative asset picker. It shares the
+ * conversation picker content while keeping Canvas insertion as its only
+ * product-specific action.
  */
 export const CreativeCanvasProductAssetLibrary: React.FC<
   CreativeCanvasProductAssetLibraryProps
@@ -84,10 +61,9 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
   onKindChange,
   onToggleAsset,
   onInsert,
+  onCancel,
 }) => {
   const { t } = useTranslation();
-  const assetKindLabel = (value: CreativeCanvasAssetKindFilter): string =>
-    t(ASSET_KIND_LABEL_KEYS[value], { defaultValue: assetKindFallbacks[value] });
   const selectedAssets = useMemo(
     () => state.assets.filter((asset) => !isCreativeAssetDeleted(asset) && selectedIds.has(asset.id)),
     [selectedIds, state.assets]
@@ -95,185 +71,45 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
 
   return (
     <section
-      className={styles.assetPanel}
       aria-label={t('creativeStudio.canvas.assets.libraryLabel', {
         defaultValue: 'NomiFun 资产库',
       })}
       data-product-asset-library
     >
-      <header className={styles.assetHeader}>
-        <div>
-          <strong>
-            {t('creativeStudio.canvas.assets.libraryTitle', {
-              defaultValue: '资产库',
-            })}
-          </strong>
-          <span>
-            {t('creativeStudio.canvas.assets.totalCount', {
-              count: state.total,
-              defaultValue: `${state.total} 项真实素材`,
-            })}
-          </span>
-        </div>
-        <button
-          type='button'
-          aria-label={t('creativeStudio.canvas.assets.refresh', {
-            defaultValue: '刷新资产库',
-          })}
-          disabled={disabled || state.loading}
-          onClick={() => void state.reload()}
-        >
-          <Refresh {...iconProps} />
-        </button>
-      </header>
-
-      <div className={styles.filters}>
-        <label className={styles.searchField}>
-          <Search {...iconProps} />
-          <span className={styles.srOnly}>
-            {t('creativeStudio.canvas.assets.searchLabel', {
-              defaultValue: '搜索素材',
-            })}
-          </span>
-          <input
-            type='search'
-            value={search}
-            placeholder={t('creativeStudio.canvas.assets.searchPlaceholder', {
-              defaultValue: '搜索真实素材',
-            })}
-            disabled={disabled}
-            onChange={(event) => onSearchChange(event.target.value)}
-          />
-        </label>
-        <label className={styles.kindField}>
-          <span className={styles.srOnly}>
-            {t('creativeStudio.canvas.assets.kindLabel', {
-              defaultValue: '素材类型',
-            })}
-          </span>
-          <select
-            value={kind}
-            disabled={disabled}
-            onChange={(event) =>
-              onKindChange(event.target.value as CreativeCanvasAssetKindFilter)
-            }
-          >
-            {(
-              Object.keys(ASSET_KIND_LABEL_KEYS) as CreativeCanvasAssetKindFilter[]
-            ).map((value) => (
-                <option key={value} value={value}>
-                  {assetKindLabel(value)}
-                </option>
-              ))}
-          </select>
-        </label>
-      </div>
-
-      <div className={styles.assetBody}>
-        {state.loading ? (
-          <div className={styles.state} role='status' data-state='loading'>
-            <Loading className={styles.spin} {...iconProps} />
-            <span>
-              {t('creativeStudio.canvas.assets.loading', {
-                defaultValue: '正在读取资产库…',
-              })}
-            </span>
-          </div>
-        ) : state.error ? (
-          <div className={styles.state} role='alert' data-state='error'>
-            <strong>
-              {t('creativeStudio.canvas.assets.loadFailed', {
-                defaultValue: '资产库加载失败',
-              })}
-            </strong>
-            <span>{state.error.message}</span>
-            <button type='button' onClick={() => void state.reload()}>
-              {t('creativeStudio.canvas.assets.reload', {
-                defaultValue: '重新加载',
-              })}
-            </button>
-          </div>
-        ) : state.assets.length === 0 ? (
-          <div className={styles.state} role='status' data-state='empty'>
-            <strong>
-              {t('creativeStudio.canvas.assets.noMatches', {
-                defaultValue: '没有匹配的素材',
-              })}
-            </strong>
-            <span>
-              {t('creativeStudio.canvas.assets.realRecordsOnly', {
-                defaultValue: '这里只显示后端资产库返回的真实记录。',
-              })}
-            </span>
-          </div>
-        ) : (
-          <div className={styles.assetGrid} role='list'>
-            {state.assets.map((asset) => {
-              const selected = selectedIds.has(asset.id);
-              return (
-                <button
-                  key={asset.id}
-                  type='button'
-                  className={styles.assetCard}
-                  data-selected={selected || undefined}
-                  aria-pressed={selected}
-                  disabled={disabled || isCreativeAssetDeleted(asset)}
-                  onClick={() => onToggleAsset(asset.id)}
-                  role='listitem'
-                >
-                  <div className={styles.assetPreview}>
-                    <CreativeAssetMedia
-                      asset={asset}
-                      compact
-                      unavailableLabel={t('creativeStudio.assets.library.mediaUnavailable', {
-                        defaultValue: '素材暂时无法预览',
-                      })}
-                    />
-                  </div>
-                  <span className={styles.assetCopy}>
-                    <strong>{asset.title}</strong>
-                    <span>{assetKindLabel(asset.kind)}</span>
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      <footer className={styles.assetFooter}>
-        {state.hasMore ? (
-          <button
-            type='button'
-            className={styles.secondaryButton}
-            disabled={disabled || state.loadingMore}
-            onClick={() => void state.loadMore()}
-          >
-            {state.loadingMore ? <Loading className={styles.spin} {...iconProps} /> : null}
-            {t('creativeStudio.canvas.assets.loadMore', {
-              defaultValue: '加载更多',
-            })}
-          </button>
-        ) : (
-          <span className={styles.endLabel}>
-            {t('creativeStudio.canvas.assets.allLoaded', {
-              defaultValue: '已载入当前查询的全部素材',
-            })}
-          </span>
-        )}
-        <button
-          type='button'
-          className={styles.insertButton}
-          disabled={disabled || selectedAssets.length === 0}
-          onClick={() => onInsert(selectedAssets)}
-        >
-          <Plus {...iconProps} />
-          {t('creativeStudio.canvas.assets.insert', {
-            count: selectedAssets.length,
-            defaultValue: '插入 {{count}}',
-          })}
-        </button>
-      </footer>
+      <CreativeAssetPickerContent
+        open
+        assets={state.assets}
+        acceptedKinds={ALL_ASSET_KINDS}
+        selectedIds={[...selectedIds]}
+        loading={state.loading}
+        loadingMore={state.loadingMore}
+        hasMore={state.hasMore}
+        error={state.error ?? state.mutationError}
+        disabled={disabled}
+        uploading={state.mutating}
+        search={search}
+        kind={kind}
+        uploadAccept='image/*,video/*'
+        onSearchChange={onSearchChange}
+        onKindChange={onKindChange}
+        onToggle={(asset) => onToggleAsset(asset.id)}
+        onLoadMore={() => void state.loadMore()}
+        onRetry={() => void state.reload()}
+        onUploadFiles={(files) => {
+          void Promise.all(
+            files.map((file) => state.upload(file, {
+              title: file.name,
+              tags: ['canvas-import'],
+              inLibrary: true,
+            }))
+          ).catch(() => undefined);
+        }}
+        onCancel={onCancel}
+        onConfirm={() => {
+          if (selectedAssets.length > 0) onInsert(selectedAssets);
+          onCancel?.();
+        }}
+      />
     </section>
   );
 };

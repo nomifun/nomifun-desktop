@@ -331,7 +331,10 @@ export const CreativeCanvasResourceDialog: React.FC<
       title={t(LEFT_LABEL_KEYS[view])}
       footer={null}
       className={styles.resourceDialog}
-      style={{ width: 920, maxWidth: 'calc(100vw - 48px)' }}
+      style={{
+        width: 860,
+        maxWidth: 'calc(100vw - 48px)',
+      }}
       autoFocus={false}
       focusLock
       maskClosable
@@ -380,6 +383,14 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     onPointerUp: stopChromeEvent,
     onDoubleClick: stopChromeEvent,
     onWheel: stopChromeEvent,
+  };
+
+  const handleNodeAdd = (kind: CreativeCanvasChromeNodeKind): void => {
+    // Node creation controls are actions, not a request to open the Canvas
+    // outline. Keep the rail compact after creating a node when the outline
+    // bubble was already expanded.
+    if (canvasPanelOpen) props.onLeftPanelOpenChange(false);
+    props.onAddNode(kind);
   };
 
   const collapseResourcesLabel = t(
@@ -719,7 +730,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
                   aria-label={label}
                   data-node-kind={kind}
                   disabled={props.disabled}
-                  onClick={() => props.onAddNode(kind)}
+                  onClick={() => handleNodeAdd(kind)}
                 >
                   {nodeIcon(kind)}
                   <span className={styles.tabLabel}>{label}</span>
