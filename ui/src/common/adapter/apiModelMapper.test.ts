@@ -102,6 +102,28 @@ describe('fromApiConversation first-class fields', () => {
 
     expect(mapped.runtime?.active_turn_id).toBe(turnId);
   });
+
+  test('keeps a refreshed Nomi-managed workspace in the default workpath', () => {
+    const mapped = fromApiConversation(
+      apiConv({
+        extra: {
+          workspace: 'C:\\Users\\me\\AppData\\Local\\NomiFun',
+          is_temporary_workspace: true,
+        },
+      })
+    ) as { extra?: Record<string, unknown> };
+
+    expect(mapped.extra?.custom_workspace).toBe(false);
+    expect(mapped.extra?.is_temporary_workspace).toBe(true);
+  });
+
+  test('continues to classify an unmarked external workspace as custom', () => {
+    const mapped = fromApiConversation(
+      apiConv({ extra: { workspace: 'D:\\projects\\game' } })
+    ) as { extra?: Record<string, unknown> };
+
+    expect(mapped.extra?.custom_workspace).toBe(true);
+  });
 });
 
 describe('fromApiConversation Agent lineage boundary', () => {
