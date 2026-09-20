@@ -282,11 +282,7 @@
   .guide { display: none; }
   .toolbar { align-items: stretch; }
   .searchField { width: 100%; flex: 1; }
-  .catalogLayout { grid-template-columns: 1fr; overflow: visible; }
-  .categories { flex-direction: row; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--color-border-1); }
-  .categories button { grid-template-columns: 18px auto auto; width: auto; flex: 0 0 auto; }
-  .moduleResults { overflow: visible; }
-  .moduleGrid { grid-template-columns: 1fr; overflow-y: visible; }
+  .moduleGrid { grid-template-columns: 1fr; }
 }
 
 @container (max-width: 560px) {
