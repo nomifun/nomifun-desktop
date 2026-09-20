@@ -257,6 +257,16 @@ if-addrs = "0.13"
 # Decode request paths before matching the immutable embedded WebUI asset map.
 percent-encoding = "2"
 
+# Computer Role implementation. Optional; only the `computer-use` feature pulls
+# the native screen/input/UI-Automation stack, so web/headless builds stay lean.
+nomi-computer = { workspace = true, optional = true }
+# Browser v2 native contracts and isolated page execution, without the old facade.
+nomi-browser-engine = { workspace = true, optional = true }
+nomifun-browser-platform = { workspace = true, optional = true }
+nomi-config = { workspace = true, optional = true }
+nomi-tools = { workspace = true, optional = true }
+nomi-types = { workspace = true, optional = true }
+
 # The in-process macOS desktop backend is the only authority that can report
 # whether the running NomiFun code identity may use the microphone.  Keep the
 # binding target-scoped so Linux/Windows and server-only builds do not link
@@ -270,16 +280,6 @@ objc2-av-foundation = { version = "0.3", default-features = false, features = [
     "AVCaptureDevice",
     "AVMediaFormat",
 ] }
-
-# Computer Role implementation. Optional; only the `computer-use` feature pulls
-# the native screen/input/UI-Automation stack, so web/headless builds stay lean.
-nomi-computer = { workspace = true, optional = true }
-# Browser v2 native contracts and isolated page execution, without the old facade.
-nomi-browser-engine = { workspace = true, optional = true }
-nomifun-browser-platform = { workspace = true, optional = true }
-nomi-config = { workspace = true, optional = true }
-nomi-tools = { workspace = true, optional = true }
-nomi-types = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

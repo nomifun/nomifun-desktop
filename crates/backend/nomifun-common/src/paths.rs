@@ -18,9 +18,12 @@
 //! * [`simplified`] normalizes an already-resolved path for comparison or
 //!   display without touching the filesystem.
 //! * [`paths_equivalent`] compares two path *spellings* of already-canonical
-//!   paths, tolerating the `\\?\` prefix on either side. Durable markers
-//!   written by older releases contain verbatim spellings; markers written by
-//!   current code do not. Both must keep matching the same directory.
+//!   paths, tolerating the `\\?\` prefix on either side. On Windows it also
+//!   compares the OS identity of existing local paths, because package file
+//!   virtualization can expose one directory through both `%LOCALAPPDATA%`
+//!   and `Packages\<identity>\LocalCache\Local` without a lexical relationship.
+//!   Durable markers written through either view must keep matching the same
+//!   directory.
 
 use std::path::{Path, PathBuf};
 
@@ -40,13 +43,43 @@ pub fn simplified(path: &Path) -> PathBuf {
 }
 
 /// Compare two spellings of already-canonicalized paths, tolerating the
-/// Windows verbatim prefix on either side.
+/// Windows verbatim prefix on either side and package-virtualized aliases.
 ///
-/// Both inputs are expected to originate from `fs::canonicalize` (directly or
-/// from a durable marker that stored such a value), so component casing and
-/// symlink resolution already match; only the `\\?\` prefix may differ.
+/// The lexical comparison is sufficient on ordinary filesystems. Windows can
+/// preserve two different canonical spellings for the same package-virtualized
+/// local directory, so an existing drive-backed pair falls back to the stable
+/// file identity reported by the OS. UNC paths deliberately remain lexical so
+/// a marker comparison never initiates access to an unrelated network root.
 pub fn paths_equivalent(a: &Path, b: &Path) -> bool {
-    dunce::simplified(a) == dunce::simplified(b)
+    let a = dunce::simplified(a);
+    let b = dunce::simplified(b);
+    if a == b {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        windows_local_paths_share_identity(a, b)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_local_paths_share_identity(a: &Path, b: &Path) -> bool {
+    use std::path::{Component, Prefix};
+
+    let is_drive_path = |path: &Path| {
+        matches!(
+            path.components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+        )
+    };
+    is_drive_path(a)
+        && is_drive_path(b)
+        && same_file::is_same_file(a, b).unwrap_or(false)
 }
 
 /// String-typed convenience for durable markers: does the stored spelling
@@ -99,6 +132,23 @@ mod tests {
             Path::new(r"\\?\C:\Users\example\NomiFun\Nomi"),
             Path::new(r"C:\Users\example\NomiFun"),
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_windows_aliases_are_equivalent_by_file_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = canonicalize_simplified(dir.path()).unwrap();
+        let case_alias = PathBuf::from(canonical.to_string_lossy().to_uppercase());
+        assert_ne!(simplified(&case_alias), canonical);
+        assert!(paths_equivalent(&case_alias, &canonical));
+        assert!(stored_path_matches(
+            &case_alias.display().to_string(),
+            &canonical,
+        ));
+
+        let other = tempfile::tempdir().unwrap();
+        assert!(!paths_equivalent(other.path(), &canonical));
     }
 
     #[test]

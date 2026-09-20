@@ -184,12 +184,36 @@ pub fn materialize_bundled_extension_host(
         ));
     }
     let canonical = std::fs::canonicalize(&path).map_err(io_error)?;
-    if !canonical.starts_with(&directory) {
+    let canonical_parent = canonical.parent().ok_or_else(|| {
+        JavaScriptHostError::InvalidConfiguration(
+            "bundled JavaScript Host has no parent directory".into(),
+        )
+    })?;
+    if !same_existing_directory(canonical_parent, &directory) {
         return Err(JavaScriptHostError::InvalidConfiguration(
             "bundled JavaScript Host escaped its managed directory".into(),
         ));
     }
     Ok(canonical)
+}
+
+fn same_existing_directory(a: &Path, b: &Path) -> bool {
+    dunce::simplified(a) == dunce::simplified(b)
+        || same_file::is_same_file(a, b).unwrap_or(false)
+}
+
+#[cfg(all(test, windows))]
+mod windows_path_tests {
+    use super::*;
+
+    #[test]
+    fn existing_directory_aliases_match_by_file_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(directory.path()).unwrap();
+        let case_alias = PathBuf::from(canonical.to_string_lossy().to_uppercase());
+        assert_ne!(dunce::simplified(&case_alias), dunce::simplified(&canonical));
+        assert!(same_existing_directory(&case_alias, &canonical));
+    }
 }
 
 fn fs_create_dir_all(path: &Path) -> Result<(), JavaScriptHostError> {
