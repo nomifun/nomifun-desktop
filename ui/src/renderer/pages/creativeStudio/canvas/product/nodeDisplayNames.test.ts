@@ -15,12 +15,14 @@ test('numbers node kinds independently and uses a real filename when available',
   const names = canvasNodeDisplayNames(nodes, new Map([['asset', { title: 'portrait.png' } as CreativeAsset]]), t);
   expect([...names.values()]).toEqual(['文本1', 'portrait.png', '图片2', '文本2', '视频1']);
 });
-test('all empty user nodes start square; imported image and video nodes fit their aspect ratio', () => {
+test('empty media nodes start square while the timeline uses its editing layout', () => {
   const state = createInitialCanvasState();
   for (const kind of ['text', 'image', 'video', 'audio', 'panorama', 'group'] as const) {
     expect(createCreativeCanvasProductNode(kind, state, { width: 1000, height: 800 }).size)
       .toEqual({ width: 288, height: 288 });
   }
+  expect(createCreativeCanvasProductNode('timeline', state, { width: 1000, height: 800 }).size)
+    .toEqual({ width: 680, height: 148 });
   for (const kind of ['image', 'video'] as const) {
     const asset = { id: 'asset', kind, title: 'portrait', width: 600, height: 900 } as CreativeAsset;
     const node = creativeNodeFromAsset(asset, state, { width: 1000, height: 800 });

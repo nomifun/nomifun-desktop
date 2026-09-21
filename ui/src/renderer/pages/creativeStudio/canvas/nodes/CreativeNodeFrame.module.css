@@ -31,6 +31,10 @@
   --creative-node-accent: rgb(var(--primary-6));
 }
 
+.frame[data-node-type='timeline'] {
+  --creative-node-accent: rgb(var(--primary-5));
+}
+
 .frame[data-node-type='panorama'] {
   --creative-node-accent: rgb(var(--primary-5));
 }

@@ -30,6 +30,7 @@ export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
   panorama: { width: 320, height: 320 },
   video: { width: 320, height: 320 },
   audio: { width: 320, height: 320 },
+  timeline: { width: 680, height: 148 },
   config: { width: 440, height: 240 },
   group: { width: 320, height: 320 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
@@ -41,6 +42,7 @@ export const CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES = {
   panorama: { width: 288, height: 288 },
   video: { width: 288, height: 288 },
   audio: { width: 288, height: 288 },
+  timeline: CREATIVE_CANVAS_PRODUCT_NODE_SIZES.timeline,
   config: CREATIVE_CANVAS_PRODUCT_NODE_SIZES.config,
   group: { width: 288, height: 288 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
@@ -104,6 +106,11 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     trimStartMs: 0,
     trimEndMs: null,
     composer: null,
+  },
+  timeline: {
+    title: '',
+    muted: false,
+    clips: [],
   },
   group: {
     title: '',
@@ -210,7 +217,8 @@ export function creativeCanvasProductNodePosition(
 }
 
 const defaultDataFor = <K extends CreativeCanvasNodeKind>(
-  kind: K
+  kind: K,
+  state: CreativeCanvasProductState
 ): CreativeCanvasNodeDataByKind[K] => {
   const data = structuredClone(DEFAULT_NODE_DATA[kind]);
   if (kind === 'group') {
@@ -218,6 +226,15 @@ const defaultDataFor = <K extends CreativeCanvasNodeKind>(
       creativeStudioProductText(
         'creativeStudio.canvas.nodes.defaultGroupTitle',
         '节点组'
+      );
+  }
+  if (kind === 'timeline') {
+    const ordinal = state.document.nodes.filter((node) => node.type === 'timeline').length + 1;
+    (data as CreativeCanvasNodeDataByKind['timeline']).title =
+      creativeStudioProductText(
+        'creativeStudio.canvas.timeline.defaultTitle',
+        '时间线{{ordinal}}',
+        { ordinal }
       );
   }
   return data;
@@ -268,7 +285,7 @@ export function createCreativeCanvasProductNode<K extends CreativeCanvasNodeKind
 ): Extract<CreativeCanvasNode, { type: K }> {
   return createNodeWithData(
     kind,
-    defaultDataFor(kind),
+    defaultDataFor(kind, state),
     state,
     viewportSize,
     overrides.size

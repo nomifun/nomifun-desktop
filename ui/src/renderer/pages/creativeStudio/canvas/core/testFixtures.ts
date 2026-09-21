@@ -79,6 +79,11 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     trimEndMs: null,
     composer: null,
   },
+  timeline: {
+    title: 'Timeline 1',
+    muted: false,
+    clips: [],
+  },
   group: {
     title: 'Group',
     color: null,

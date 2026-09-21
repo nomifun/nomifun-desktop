@@ -267,12 +267,12 @@ describe('CreativeCanvasChrome top action interactions', () => {
     const rail = getByRole('toolbar', {
       name: 'creativeStudio.canvas.chrome.resources',
     });
-    for (const kind of ['text', 'image', 'video', 'audio', 'panorama']) {
+    for (const kind of ['text', 'image', 'video', 'audio', 'timeline', 'panorama']) {
       fireEvent.click(within(rail).getByRole('button', {
         name: `creativeStudio.canvas.nodeKinds.${kind}`,
       }));
     }
-    expect(created).toEqual(['text', 'image', 'video', 'audio', 'panorama']);
+    expect(created).toEqual(['text', 'image', 'video', 'audio', 'timeline', 'panorama']);
   });
 });
 describe('CreativeCanvasChrome right panel resize interaction', () => {

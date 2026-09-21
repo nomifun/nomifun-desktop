@@ -37,6 +37,8 @@ import {
   type CreativeRightPanelView,
   type CreativeStudioPanelState,
   type CreativeTextNodeData,
+  type CreativeTimelineClip,
+  type CreativeTimelineNodeData,
   type CreativeVideoNodeData,
   type CreativeVideoComposerDraft,
   type RenameCreativeProjectRequest,
@@ -812,6 +814,59 @@ const parseAudioData = (value: unknown, path: string): CreativeAudioNodeData => 
   };
 };
 
+const parseTimelineClip = (value: unknown, path: string): CreativeTimelineClip => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(
+    record,
+    ['id', 'assetId', 'kind', 'startMs', 'durationMs', 'sourceStartMs', 'sourceDurationMs'],
+    [],
+    path,
+    code
+  );
+  const startMs = asNumber(record.startMs, `${path}.startMs`, code, {
+    min: 0,
+    max: 86_400_000,
+  });
+  const durationMs = asNumber(record.durationMs, `${path}.durationMs`, code, {
+    min: 100,
+    max: 86_400_000,
+  });
+  const sourceStartMs = asNumber(record.sourceStartMs, `${path}.sourceStartMs`, code, {
+    min: 0,
+    max: 86_400_000,
+  });
+  const sourceDurationMs = record.sourceDurationMs === null
+    ? null
+    : asNumber(record.sourceDurationMs, `${path}.sourceDurationMs`, code, {
+        min: sourceStartMs + durationMs,
+        max: 86_400_000,
+      });
+  return {
+    id: asId(record.id, `${path}.id`, code),
+    assetId: asId(record.assetId, `${path}.assetId`, code),
+    kind: asLiteral(record.kind, ['image', 'video'], `${path}.kind`, code),
+    startMs,
+    durationMs,
+    sourceStartMs,
+    sourceDurationMs,
+  };
+};
+
+const parseTimelineData = (value: unknown, path: string): CreativeTimelineNodeData => {
+  const code = 'INVALID_DOCUMENT';
+  const record = asRecord(value, path, code);
+  exactKeys(record, ['title', 'muted', 'clips'], [], path, code);
+  const clips = asArray(record.clips, `${path}.clips`, code, parseTimelineClip);
+  if (clips.length > 2_000) fail(code, `${path}.clips`, 'array with at most 2000 clips');
+  assertUnique(clips.map((clip) => clip.id), `${path}.clips[].id`, code);
+  return {
+    title: asString(record.title, `${path}.title`, code, { maxLength: 1_000 }),
+    muted: asBoolean(record.muted, `${path}.muted`, code),
+    clips,
+  };
+};
+
 const parseGroupData = (value: unknown, path: string): CreativeGroupNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
@@ -833,6 +888,7 @@ const NODE_KINDS: readonly CreativeCanvasNodeKind[] = [
   'config',
   'video',
   'audio',
+  'timeline',
   'group',
 ];
 
@@ -868,6 +924,8 @@ const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
       return { ...base, type, data: parseVideoData(record.data, `${path}.data`) };
     case 'audio':
       return { ...base, type, data: parseAudioData(record.data, `${path}.data`) };
+    case 'timeline':
+      return { ...base, type, data: parseTimelineData(record.data, `${path}.data`) };
     case 'group':
       return { ...base, type, data: parseGroupData(record.data, `${path}.data`) };
   }

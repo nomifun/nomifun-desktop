@@ -21,6 +21,7 @@ export type CreativeCanvasNodeKind =
   | 'config'
   | 'video'
   | 'audio'
+  | 'timeline'
   | 'group';
 
 /** Node kinds that belong to the user-authored canvas surface. */
@@ -213,6 +214,26 @@ export interface CreativeAudioComposerDraft {
   format: 'mp3' | 'wav';
 }
 
+export type CreativeTimelineClipKind = 'image' | 'video';
+
+/** One durable image/video edit on a timeline track. Times are milliseconds. */
+export interface CreativeTimelineClip {
+  id: string;
+  assetId: string;
+  kind: CreativeTimelineClipKind;
+  startMs: number;
+  durationMs: number;
+  sourceStartMs: number;
+  /** Resolved media duration when known; null keeps image clips and old video metadata valid. */
+  sourceDurationMs: number | null;
+}
+
+export interface CreativeTimelineNodeData {
+  title: string;
+  muted: boolean;
+  clips: CreativeTimelineClip[];
+}
+
 export interface CreativeGroupNodeData {
   title: string;
   color: string | null;
@@ -226,6 +247,7 @@ export interface CreativeCanvasNodeDataByKind {
   config: CreativeConfigNodeData;
   video: CreativeVideoNodeData;
   audio: CreativeAudioNodeData;
+  timeline: CreativeTimelineNodeData;
   group: CreativeGroupNodeData;
 }
 

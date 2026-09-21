@@ -130,6 +130,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'image',
       'video',
       'audio',
+      'timeline',
       'panorama',
     ]);
     for (const label of [
@@ -137,6 +138,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'creativeStudio.canvas.nodeKinds.image',
       'creativeStudio.canvas.nodeKinds.video',
       'creativeStudio.canvas.nodeKinds.audio',
+      'creativeStudio.canvas.nodeKinds.timeline',
       'creativeStudio.canvas.nodeKinds.panorama',
     ]) {
       expect(html.includes(`aria-label="${label}"`)).toBe(true);
@@ -209,13 +211,13 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
 });
 
 describe('CreativeCanvasChrome controlled menus', () => {
-  test('offers exactly the six user-facing node kinds', () => {
+  test('offers exactly the seven user-facing node kinds', () => {
     const html = renderToStaticMarkup(
       withCanvasTestI18n(<CreativeCanvasNodeMenu onSelect={noop} />)
     );
 
-    expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(6);
-    expect((html.match(/data-node-kind=/g) ?? []).length).toBe(6);
+    expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(7);
+    expect((html.match(/data-node-kind=/g) ?? []).length).toBe(7);
     for (const kind of CREATIVE_CANVAS_CHROME_NODE_KINDS) {
       expect(html.includes(`data-node-kind="${kind}"`)).toBe(true);
     }

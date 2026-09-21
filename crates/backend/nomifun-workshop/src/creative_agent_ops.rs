@@ -73,6 +73,7 @@ pub enum CreativeAgentOpResult {
 fn default_size(node_type: CreativeNodeType) -> (f64, f64) {
     match node_type {
         CreativeNodeType::Config => (360.0, 300.0),
+        CreativeNodeType::Timeline => (680.0, 148.0),
         CreativeNodeType::Image
         | CreativeNodeType::Panorama
         | CreativeNodeType::Text

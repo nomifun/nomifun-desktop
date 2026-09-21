@@ -860,6 +860,7 @@
       "image": "图片",
       "panorama": "全景图",
       "text": "文本",
+      "timeline": "时间线",
       "video": "视频"
     },
     "nodes": {
@@ -912,6 +913,27 @@
         "seek": "视频进度",
         "unmute": "取消静音"
       }
+    },
+    "timeline": {
+      "addAssets": "添加素材到时间线",
+      "assetUnavailable": "素材不可用",
+      "assetsAdded": "已向时间线添加 {{count}} 项素材。",
+      "close": "删除时间线节点",
+      "clipLabel": "{{title}}，时长 {{duration}}",
+      "defaultTitle": "时间线{{ordinal}}",
+      "exitFullscreen": "退出全屏编辑",
+      "export": "导出时间线",
+      "fullscreen": "全屏编辑",
+      "mute": "关闭声音",
+      "noCompatibleAssets": "时间线只支持图片和视频素材。",
+      "pause": "暂停",
+      "play": "播放",
+      "previewEmpty": "移动时间指针以预览素材",
+      "removeClip": "移除片段",
+      "trimEnd": "裁切片段终点",
+      "trimStart": "裁切片段起点",
+      "unmute": "开启声音",
+      "uploading": "正在上传 {{count}} 项时间线素材…"
     },
     "notices": {
       "agentApplyReloadFailed": "Agent 提案应用失败，远端画布也暂时无法重新载入。",
@@ -1003,6 +1025,7 @@
       "autoplay": "自动播放",
       "capability": "能力",
       "caption": "说明",
+      "clipCount": "片段",
       "collapsed": "已折叠",
       "color": "颜色",
       "content": "内容",
@@ -1140,6 +1163,7 @@
       "rejectedFiles": "{{count}} 个文件未导入（{{fileName}}：{{reason}}）"
     },
     "values": {
+      "clipCount": "{{count}} 个片段",
       "itemCount": "{{count}} 项",
       "milliseconds": "{{value}} ms",
       "no": "否",
