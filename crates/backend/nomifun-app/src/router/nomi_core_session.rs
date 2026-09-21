@@ -1038,6 +1038,105 @@ impl NomiCoreSessionOwner {
             )))
     }
 
+    /// Turn Cron's explicit provider/model-only selection into the same saved
+    /// immutable binding used by an ordinary minimal AgentSession. This is a
+    /// host application-service operation: Cron never reads Preset/compiler
+    /// storage and the Session owner never accepts provider/model as identity.
+    async fn materialize_cron_model_only_snapshot(
+        &self,
+        owner_id: &str,
+        model: Option<&nomifun_common::ProviderWithModel>,
+    ) -> Result<AgentResolvedSnapshot, AppError> {
+        let model = model.ok_or_else(|| {
+            AppError::Conflict(
+                "model-only Cron AgentSession requires an exact provider/model".to_owned(),
+            )
+        })?;
+        let owner = UserId::from(owner_id.to_owned());
+        let resolver = self
+            .product_agent_resolver
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                AppError::Conflict("Session product Agent resolver is unavailable".to_owned())
+            })?;
+        let selected_model = AgentChatModelSelectionDto {
+            provider_id: model.provider_id.clone(),
+            model: model.model.clone(),
+        };
+        let binding = resolver
+            .materialize(
+                &owner,
+                &ProductAgentSelection::Template {
+                    template_key: "chat.minimal".to_owned(),
+                },
+                Some(&selected_model),
+            )
+            .await?;
+        let control_plane = self
+            .runtime_control_plane
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| AppError::Conflict("Session control plane is unavailable".to_owned()))?;
+        let (binding, revision, snapshot) = control_plane
+            .saved_binding_artifacts(&owner, &binding)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let editor = control_plane
+            .editor(
+                &owner,
+                binding.preset_revision_ref.preset_id.as_ref(),
+                Some(binding.preset_revision_ref.revision),
+            )
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+            .map_err(|error| AppError::Forbidden(error.to_string()))?;
+        super::agent_binding_projection::project_saved_artifacts(
+            &common_owner,
+            binding,
+            revision,
+            snapshot,
+            Some(&editor.preset.display_name),
+        )
+        .map(|projected| projected.projection.snapshot)
+    }
+
+    /// Cron historically supplies no project for a model-only task. Keep that
+    /// valid without manufacturing workspace Actions: the path below is only
+    /// a runtime/presentation cwd fallback and is never added to the immutable
+    /// Agent resource binding. Sessions with an explicitly frozen workspace
+    /// continue to use that authoritative resource instead.
+    async fn ensure_cron_workspace_projection(
+        &self,
+        mut response: ConversationResponse,
+    ) -> Result<ConversationResponse, AppError> {
+        let has_workspace = response
+            .extra
+            .get("workspace")
+            .and_then(Value::as_str)
+            .is_some_and(|workspace| !workspace.trim().is_empty());
+        if has_workspace {
+            return Ok(response);
+        }
+        let fallback = self
+            .fallback_workspace_root
+            .join(&response.conversation_id);
+        tokio::fs::create_dir_all(&fallback)
+            .await
+            .map_err(|error| AppError::Internal(format!(
+                "create Cron AgentSession fallback workspace: {error}"
+            )))?;
+        let extra = response.extra.as_object_mut().ok_or_else(|| {
+            AppError::Conflict("canonical AgentSession extra must be an object".to_owned())
+        })?;
+        extra.insert(
+            "workspace".to_owned(),
+            Value::String(fallback.to_string_lossy().into_owned()),
+        );
+        Ok(response)
+    }
+
     fn turn_operation_id(
         owner_id: &str,
         session_id: &str,
@@ -2968,6 +3067,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 "AgentSession {} not found",
                 query.agent_session_id.as_ref(),
             )))?;
+        let response = self.ensure_cron_workspace_projection(response).await?;
         let cron_job_id = sqlx::query_scalar::<_, String>(
             "SELECT cron_job_id FROM cron_jobs \
              WHERE user_id = ? AND conversation_id = ? \
@@ -3001,7 +3101,7 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 .canonical_conversation_projection(&query.owner_id, &session_id)
                 .await?
             {
-                sessions.push(session);
+                sessions.push(self.ensure_cron_workspace_projection(session).await?);
             }
         }
         Ok(sessions)
@@ -3018,17 +3118,31 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                 "AgentSession {} not found",
                 request.agent_session_id.as_ref(),
             )))?;
-        let relation: Option<String> = sqlx::query_scalar(
-            "SELECT conversation_id FROM cron_jobs WHERE user_id = ? AND cron_job_id = ?",
+        let relation_exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS( \
+                SELECT 1 FROM cron_jobs job \
+                 WHERE job.user_id = ? AND job.cron_job_id = ? \
+                   AND job.conversation_id = ? \
+                UNION ALL \
+                SELECT 1 FROM cron_run_reservations reservation \
+                  JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
+                 WHERE job.user_id = ? AND reservation.cron_job_id = ? \
+                   AND reservation.conversation_id = ? \
+                   AND reservation.status = 'reserved' \
+            )",
         )
         .bind(&request.owner_id)
         .bind(&request.cron_job_id)
-        .fetch_optional(&self.pool)
+        .bind(request.agent_session_id.as_ref())
+        .bind(&request.owner_id)
+        .bind(&request.cron_job_id)
+        .bind(request.agent_session_id.as_ref())
+        .fetch_one(&self.pool)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-        if relation.as_deref() != Some(request.agent_session_id.as_ref()) {
+        if relation_exists == 0 {
             return Err(AppError::Conflict(
-                "Cron relation was not committed to the canonical AgentSession"
+                "Cron relation was not committed to its job or exact run reservation"
                     .to_owned(),
             ));
         }
@@ -3093,18 +3207,20 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         &self,
         user_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<AgentResolvedSnapshot>,
+        agent_binding: nomifun_cron::CronSessionAgentBinding,
         creation_key: &str,
     ) -> Result<nomifun_cron::CronSessionHandle, AppError> {
-        let mut response = self.create_session_idempotent(user_id, request, snapshot, creation_key).await?;
-        if response.extra.get("workspace").is_none() {
-            response.extra["workspace"] = Value::String(
-                self.fallback_workspace_root
-                    .join(&response.conversation_id)
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
+        let snapshot = match agent_binding {
+            nomifun_cron::CronSessionAgentBinding::Frozen(snapshot) => snapshot,
+            nomifun_cron::CronSessionAgentBinding::ModelOnly => {
+                self.materialize_cron_model_only_snapshot(user_id, request.model.as_ref())
+                    .await?
+            }
+        };
+        let response = self
+            .create_session_idempotent(user_id, request, Some(snapshot), creation_key)
+            .await?;
+        let response = self.ensure_cron_workspace_projection(response).await?;
         cron_session_handle_from_response(response)
     }
 
@@ -3123,27 +3239,43 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
         nomifun_common::CronJobId::parse(&runtime.overlay.cron_job_id).map_err(|error| {
             AppError::BadRequest(format!("invalid Cron runtime annotation: {error}"))
         })?;
+        nomifun_common::CronJobRunId::parse(&runtime.overlay.cron_job_run_id).map_err(|error| {
+            AppError::BadRequest(format!("invalid Cron run annotation: {error}"))
+        })?;
+        // The exact durable run reservation owns the relation for both modes.
+        // `new_conversation` never writes a per-run Session onto cron_jobs, and
+        // lazy `existing` cannot do so before its first turn succeeds. Checking
+        // cron_jobs.conversation_id here therefore rejects every legitimate
+        // first run; the reservation was atomically attached before dispatch.
         let relation: Option<String> = sqlx::query_scalar(
-            "SELECT conversation_id FROM cron_jobs WHERE user_id = ? AND cron_job_id = ?",
+            "SELECT reservation.conversation_id \
+             FROM cron_run_reservations reservation \
+             JOIN cron_jobs job ON job.cron_job_id = reservation.cron_job_id \
+             WHERE job.user_id = ? AND reservation.cron_job_id = ? \
+               AND reservation.cron_job_run_id = ? AND reservation.status = 'reserved'",
         )
         .bind(&owner_id)
         .bind(&runtime.overlay.cron_job_id)
+        .bind(&runtime.overlay.cron_job_run_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
         if relation.as_deref() != Some(session_id) {
             return Err(AppError::Conflict(format!(
-                "AgentSession {session_id} is not bound to Cron job {}",
-                runtime.overlay.cron_job_id
+                "AgentSession {session_id} is not bound to Cron run {}",
+                runtime.overlay.cron_job_run_id
             )));
         }
         let session = self.get_session(&owner_id, session_id).await?;
+        let session = self.ensure_cron_workspace_projection(session).await?;
         let workspace = session
             .extra
             .get("workspace")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| self.fallback_workspace_root.to_string_lossy().into_owned());
+            .ok_or_else(|| AppError::Conflict(format!(
+                "AgentSession {session_id} has no Cron workspace projection"
+            )))?;
         let delivery = self
             .send_session_message_idempotent(
                 &owner_id,
