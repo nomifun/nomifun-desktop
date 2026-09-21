@@ -222,6 +222,9 @@ fn node_asset_ids(node: &CreativeNode) -> Vec<&str> {
             .map(String::as_str)
             .collect(),
         CreativeNodeData::Audio(data) => data.asset_id.iter().map(String::as_str).collect(),
+        CreativeNodeData::Timeline(data) => {
+            data.clips.iter().map(|clip| clip.asset_id.as_str()).collect()
+        }
     }
 }
 
@@ -245,6 +248,9 @@ fn summarize_node(node: &CreativeNode) -> Value {
             (!data.title.is_empty()).then(|| truncate_chars(&data.title, SUMMARY_TEXT_MAX))
         }
         CreativeNodeData::Group(data) => Some(truncate_chars(&data.title, SUMMARY_TEXT_MAX)),
+        CreativeNodeData::Timeline(data) => {
+            Some(truncate_chars(&data.title, SUMMARY_TEXT_MAX))
+        }
         CreativeNodeData::Panorama(_) | CreativeNodeData::Video(_) => None,
     };
     let status = match &node.data {

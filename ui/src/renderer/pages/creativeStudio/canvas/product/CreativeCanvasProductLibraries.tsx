@@ -29,6 +29,7 @@ export interface CreativeCanvasProductAssetLibraryProps {
   search: string;
   kind: CreativeCanvasAssetKindFilter;
   selectedIds: ReadonlySet<string>;
+  acceptedKinds?: readonly CreativeAssetKind[];
   disabled?: boolean;
   onSearchChange(value: string): void;
   onKindChange(value: CreativeCanvasAssetKindFilter): void;
@@ -56,6 +57,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
   search,
   kind,
   selectedIds,
+  acceptedKinds = ALL_ASSET_KINDS,
   disabled = false,
   onSearchChange,
   onKindChange,
@@ -79,7 +81,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
       <CreativeAssetPickerContent
         open
         assets={state.assets}
-        acceptedKinds={ALL_ASSET_KINDS}
+        acceptedKinds={acceptedKinds}
         selectedIds={[...selectedIds]}
         loading={state.loading}
         loadingMore={state.loadingMore}

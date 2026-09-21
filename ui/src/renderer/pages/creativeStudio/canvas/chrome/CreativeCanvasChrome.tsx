@@ -26,6 +26,7 @@ import {
   Setting,
   Square,
   Text,
+  Timeline,
   Undo,
   VideoTwo,
   Voice,
@@ -67,6 +68,7 @@ const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
+  timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
@@ -171,6 +173,8 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
+    case 'timeline':
+      return <Timeline {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }

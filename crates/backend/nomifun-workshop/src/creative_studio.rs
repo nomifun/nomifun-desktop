@@ -350,6 +350,9 @@ impl<'de> Deserialize<'de> for CreativeNode {
             CreativeNodeType::Audio => CreativeNodeData::Audio(
                 serde_json::from_value(wire.data).map_err(D::Error::custom)?,
             ),
+            CreativeNodeType::Timeline => CreativeNodeData::Timeline(
+                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            ),
             CreativeNodeType::Group => CreativeNodeData::Group(
                 serde_json::from_value(wire.data).map_err(D::Error::custom)?,
             ),
@@ -377,10 +380,11 @@ pub enum CreativeNodeType {
     Config,
     Video,
     Audio,
+    Timeline,
     Group,
 }
 
-/// Closed payload union for the seven canonical v1 node kinds. Untagged wire
+/// Closed payload union for the eight canonical v1 node kinds. Untagged wire
 /// encoding keeps the product JSON shape as `type + data`; [`CreativeNode`]'s
 /// custom deserializer selects exactly one strict payload from the sibling
 /// `type`, so kind/data drift is rejected before service validation.
@@ -393,6 +397,7 @@ pub enum CreativeNodeData {
     Config(CreativeConfigNodeData),
     Video(CreativeVideoNodeData),
     Audio(CreativeAudioNodeData),
+    Timeline(CreativeTimelineNodeData),
     Group(CreativeGroupNodeData),
 }
 
@@ -405,6 +410,7 @@ impl CreativeNodeData {
             Self::Config(_) => CreativeNodeType::Config,
             Self::Video(_) => CreativeNodeType::Video,
             Self::Audio(_) => CreativeNodeType::Audio,
+            Self::Timeline(_) => CreativeNodeType::Timeline,
             Self::Group(_) => CreativeNodeType::Group,
         }
     }
@@ -417,6 +423,7 @@ impl CreativeNodeData {
             Self::Config(data) => data.validate(path),
             Self::Video(data) => data.validate(path),
             Self::Audio(data) => data.validate(path),
+            Self::Timeline(data) => data.validate(path),
             Self::Group(data) => data.validate(path),
         }
     }
@@ -1078,6 +1085,84 @@ impl CreativeAudioComposerDraft {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CreativeTimelineClipKind {
+    Image,
+    Video,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeTimelineClip {
+    pub id: String,
+    pub asset_id: String,
+    pub kind: CreativeTimelineClipKind,
+    pub start_ms: f64,
+    pub duration_ms: f64,
+    pub source_start_ms: f64,
+    pub source_duration_ms: Option<f64>,
+}
+
+impl CreativeTimelineClip {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_id(&format!("{path}.id"), &self.id)?;
+        require_id(&format!("{path}.assetId"), &self.asset_id)?;
+        require_range(&format!("{path}.startMs"), self.start_ms, 0.0, 86_400_000.0)?;
+        require_range(
+            &format!("{path}.durationMs"),
+            self.duration_ms,
+            100.0,
+            86_400_000.0,
+        )?;
+        require_range(
+            &format!("{path}.sourceStartMs"),
+            self.source_start_ms,
+            0.0,
+            86_400_000.0,
+        )?;
+        if self.start_ms + self.duration_ms > 86_400_000.0 {
+            return Err(format!(
+                "{path} startMs + durationMs must not exceed 86400000"
+            ));
+        }
+        if let Some(source_duration_ms) = self.source_duration_ms {
+            require_range(
+                &format!("{path}.sourceDurationMs"),
+                source_duration_ms,
+                self.source_start_ms + self.duration_ms,
+                86_400_000.0,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreativeTimelineNodeData {
+    pub title: String,
+    pub muted: bool,
+    pub clips: Vec<CreativeTimelineClip>,
+}
+
+impl CreativeTimelineNodeData {
+    fn validate(&self, path: &str) -> Result<(), String> {
+        require_string(&format!("{path}.title"), &self.title, false, 1_000)?;
+        if self.clips.len() > 2_000 {
+            return Err(format!("{path}.clips must contain at most 2000 clips"));
+        }
+        let mut clip_ids = BTreeSet::new();
+        for (index, clip) in self.clips.iter().enumerate() {
+            clip.validate(&format!("{path}.clips[{index}]"))?;
+            if !clip_ids.insert(clip.id.as_str()) {
+                return Err(format!("{path}.clips contains duplicate clip id {:?}", clip.id));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeGroupNodeData {
@@ -1611,6 +1696,19 @@ mod tests {
                     "format": "mp3"
                 }
             }),
+            "timeline" => serde_json::json!({
+                "title": "Timeline 1",
+                "muted": false,
+                "clips": [{
+                    "id": "clip-1",
+                    "assetId": "asset-video",
+                    "kind": "video",
+                    "startMs": 0,
+                    "durationMs": 5000,
+                    "sourceStartMs": 0,
+                    "sourceDurationMs": 10000
+                }]
+            }),
             "group" => serde_json::json!({
                 "title": "scene group",
                 "color": "#f8a100",
@@ -1783,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn all_seven_node_payloads_round_trip_and_validate() {
+    fn all_eight_node_payloads_round_trip_and_validate() {
         for kind in [
             "image",
             "panorama",
@@ -1791,6 +1889,7 @@ mod tests {
             "config",
             "video",
             "audio",
+            "timeline",
             "group",
         ] {
             let parsed = node(&format!("node-{kind}"), kind);
@@ -1803,6 +1902,34 @@ mod tests {
             doc.validate_for_project(PROJECT_ID)
                 .unwrap_or_else(|error| panic!("{kind} payload must validate: {error}"));
         }
+    }
+
+    #[test]
+    fn timeline_rejects_duplicate_clips_and_invalid_source_trim_bounds() {
+        let mut duplicate = node("timeline-duplicate", "timeline");
+        let CreativeNodeData::Timeline(data) = &mut duplicate.data else {
+            unreachable!()
+        };
+        let duplicate_clip = data.clips[0].clone();
+        data.clips.push(duplicate_clip);
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(duplicate);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("duplicate clip id"));
+
+        let mut invalid_trim = node("timeline-trim", "timeline");
+        let CreativeNodeData::Timeline(data) = &mut invalid_trim.data else {
+            unreachable!()
+        };
+        data.clips[0].source_start_ms = 7_000.0;
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_trim);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("sourceDurationMs"));
     }
 
     #[test]

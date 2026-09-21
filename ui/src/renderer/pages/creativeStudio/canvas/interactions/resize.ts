@@ -61,6 +61,11 @@ export const SOURCE_CANVAS_MIN_TEXT_NODE_SIZE: CanvasSize = {
   height: 88,
 };
 
+export const SOURCE_CANVAS_MIN_TIMELINE_NODE_SIZE: CanvasSize = {
+  width: 480,
+  height: 128,
+};
+
 const finitePoint = (point: CanvasPoint): boolean =>
   Number.isFinite(point.x) && Number.isFinite(point.y);
 
@@ -83,6 +88,8 @@ export function startCanvasResize(
   const defaultMinSize =
     node.type === 'text'
       ? SOURCE_CANVAS_MIN_TEXT_NODE_SIZE
+      : node.type === 'timeline'
+        ? SOURCE_CANVAS_MIN_TIMELINE_NODE_SIZE
       : SOURCE_CANVAS_MIN_NODE_SIZE;
   const minSize = {
     width: positiveFinite(options.minSize?.width ?? defaultMinSize.width, 1),

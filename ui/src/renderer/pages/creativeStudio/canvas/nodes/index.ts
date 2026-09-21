@@ -19,6 +19,22 @@ export type {
   CreativeTextNodeProps,
   CreativeVideoNodeProps,
 } from './CreativeNodeViews';
+export { default as CreativeTimelineNode } from './CreativeTimelineNode';
+export type {
+  CreativeTimelineAssetPresentation,
+  CreativeTimelineNodeProps,
+} from './CreativeTimelineNode';
+export {
+  appendTimelineClips,
+  moveTimelineClip,
+  removeTimelineClip,
+  resolveTimelineClipDuration,
+  timelineClipAtTime,
+  timelineDurationMs,
+  timelineScaleDurationMs,
+  timelineTickValues,
+  trimTimelineClip,
+} from './timelineModel';
 export type {
   CreativeNodeAssetPresentation,
   CreativeNodeOfKind,

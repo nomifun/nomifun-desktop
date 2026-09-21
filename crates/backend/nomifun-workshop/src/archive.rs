@@ -1173,6 +1173,11 @@ pub(crate) fn collect_document_asset_ids(
             CreativeNodeData::Audio(data) => {
                 insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?
             }
+            CreativeNodeData::Timeline(data) => {
+                for clip in &data.clips {
+                    insert_asset(&mut asset_ids, &clip.asset_id)?;
+                }
+            }
             CreativeNodeData::Text(_) | CreativeNodeData::Group(_) => {}
         }
     }
@@ -1320,6 +1325,12 @@ fn remap_node_references(
             remap_optional_asset(&mut data.poster_asset_id, asset_ids)
         }
         CreativeNodeData::Audio(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
+        CreativeNodeData::Timeline(data) => {
+            for clip in &mut data.clips {
+                remap_asset_vec(std::slice::from_mut(&mut clip.asset_id), asset_ids)?;
+            }
+            Ok(())
+        }
         CreativeNodeData::Text(_) | CreativeNodeData::Group(_) => Ok(()),
     }
 }
@@ -2012,6 +2023,59 @@ mod tests {
                 if message.contains("invalid assetId")
                     && message.contains("not-an-asset-id")
         ));
+    }
+
+    #[test]
+    fn timeline_asset_references_are_collected_and_remapped() {
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.into());
+        let timeline: CreativeNode = serde_json::from_value(serde_json::json!({
+            "id": "timeline-node",
+            "type": "timeline",
+            "position": { "x": 0, "y": 0 },
+            "size": { "width": 680, "height": 148 },
+            "groupId": null,
+            "zIndex": 1,
+            "locked": false,
+            "data": {
+                "title": "Timeline 1",
+                "muted": false,
+                "clips": [{
+                    "id": "clip-1",
+                    "assetId": ASSET_ID,
+                    "kind": "image",
+                    "startMs": 0,
+                    "durationMs": 5000,
+                    "sourceStartMs": 0,
+                    "sourceDurationMs": null
+                }]
+            }
+        }))
+        .unwrap();
+        document.nodes.push(timeline);
+        document.validate_for_project(PROJECT_ID).unwrap();
+        assert_eq!(
+            collect_document_asset_ids(&document).unwrap(),
+            [ASSET_ID.to_owned()].into_iter().collect()
+        );
+
+        let bytes = build_creative_project_archive(
+            "timeline",
+            &document,
+            vec![opaque_image_asset_snapshot(ASSET_ID, "timeline", false)],
+            30,
+        )
+        .unwrap();
+        let parsed = parse_creative_archive(&bytes).unwrap();
+        let imported = remap_creative_archive_for_import(
+            parsed,
+            "0190f5fe-7c00-7a00-8abc-000000000715",
+        )
+        .unwrap();
+        let CreativeNodeData::Timeline(data) = &imported.document.nodes[0].data else {
+            panic!("expected timeline node")
+        };
+        assert_ne!(data.clips[0].asset_id, ASSET_ID);
+        WorkshopAssetId::parse(&data.clips[0].asset_id).unwrap();
     }
 
     #[test]

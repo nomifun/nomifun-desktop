@@ -81,6 +81,7 @@ export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
   'panorama',
   'video',
   'audio',
+  'timeline',
   'group',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
@@ -89,6 +90,7 @@ export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
   'image',
   'video',
   'audio',
+  'timeline',
   'panorama',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 

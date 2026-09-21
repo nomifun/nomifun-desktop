@@ -83,6 +83,11 @@ const expectedData: CreativeCanvasNodeDataByKind = {
     trimEndMs: null,
     composer: null,
   },
+  timeline: {
+    title: '时间线1',
+    muted: false,
+    clips: [],
+  },
   group: {
     title: '节点组',
     color: null,
@@ -124,7 +129,7 @@ describe('createCreativeCanvasProductNode', () => {
     expect(JSON.stringify(historical).includes('originalUrl')).toBe(false);
   });
 
-  test('builds all seven canonical payloads with independent bare UUIDv7 ids', () => {
+  test('builds all eight canonical payloads with independent bare UUIDv7 ids', () => {
     const state = createInitialCanvasState();
     const kinds: CreativeCanvasNodeKind[] = [
       'text',
@@ -132,6 +137,7 @@ describe('createCreativeCanvasProductNode', () => {
       'panorama',
       'video',
       'audio',
+      'timeline',
       'config',
       'group',
     ];
@@ -139,7 +145,7 @@ describe('createCreativeCanvasProductNode', () => {
       createCreativeCanvasProductNode(kind, state, VIEWPORT_SIZE, { cascadeIndex: 0 })
     );
 
-    expect(new Set(nodes.map((node) => node.id)).size).toBe(7);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(8);
     for (const node of nodes) {
       expect(UUID_V7.test(node.id)).toBe(true);
       expect(node.id.includes('node-')).toBe(false);

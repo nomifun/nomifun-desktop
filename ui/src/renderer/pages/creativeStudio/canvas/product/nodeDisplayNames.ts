@@ -12,6 +12,7 @@ const KIND_LABELS = {
   image: 'creativeStudio.canvas.nodeKinds.image',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
+  timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   group: 'creativeStudio.canvas.nodeKinds.group',
 } as const;
@@ -31,7 +32,9 @@ export function canvasNodeDisplayNames(
     const asset = 'assetId' in node.data && node.data.assetId
       ? assets.get(node.data.assetId) : undefined;
     const localName = node.type === 'image' ? node.data.caption
-      : node.type === 'audio' || node.type === 'group' ? node.data.title : '';
+      : node.type === 'audio' || node.type === 'timeline' || node.type === 'group'
+        ? node.data.title
+        : '';
     names.set(node.id, asset?.title.trim() || localName.trim() || `${t(KIND_LABELS[node.type])}${ordinal}`);
   }
   return names;
