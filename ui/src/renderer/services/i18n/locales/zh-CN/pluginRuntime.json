@@ -474,6 +474,7 @@
     "disabled": "已停用",
     "ready": "可使用",
     "untitled": "未命名插件",
+    "agentName": "通用 Agent",
     "continue": "继续创作",
     "discardDraft": "删除草稿",
     "draftSaved": "草稿已保留",

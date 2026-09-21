@@ -474,6 +474,7 @@
     "disabled": "Disabled",
     "ready": "Ready to use",
     "untitled": "Untitled plugin",
+    "agentName": "General Agent",
     "continue": "Continue creating",
     "discardDraft": "Delete draft",
     "draftSaved": "Draft retained",
