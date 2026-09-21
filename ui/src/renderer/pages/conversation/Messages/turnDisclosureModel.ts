@@ -341,6 +341,51 @@ const coalesceTurnDisclosures = (
   return output;
 };
 
+const placeTurnDisclosuresAtTurnBoundary = (
+  items: TurnDisclosureOutputItem[],
+  requestByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>,
+  finalAssistantByTurn: ReadonlyMap<MessageId, TurnDisclosureInputItem>
+): TurnDisclosureOutputItem[] => {
+  const disclosureByTurn = new Map<MessageId, Extract<TurnDisclosureOutputItem, { type: 'turn_disclosure' }>>();
+  for (const item of items) {
+    if (item.type === 'turn_disclosure') disclosureByTurn.set(item.turnId, item);
+  }
+
+  const visibleItemIds = new Set(items.flatMap((item) => (item.type === 'item' ? [item.id] : [])));
+  const requestTurnByItemId = new Map<string, MessageId>();
+  for (const [turnId, request] of requestByTurn) {
+    if (visibleItemIds.has(request.id)) requestTurnByItemId.set(request.id, turnId);
+  }
+  const requestAnchoredTurns = new Set(requestTurnByItemId.values());
+
+  const finalAssistantTurnByItemId = new Map<string, MessageId>();
+  for (const [turnId, finalAssistant] of finalAssistantByTurn) {
+    if (!requestAnchoredTurns.has(turnId) && visibleItemIds.has(finalAssistant.id)) {
+      finalAssistantTurnByItemId.set(finalAssistant.id, turnId);
+    }
+  }
+  const anchoredTurns = new Set([...requestAnchoredTurns, ...finalAssistantTurnByItemId.values()]);
+
+  const output: TurnDisclosureOutputItem[] = [];
+  for (const item of items) {
+    if (item.type === 'turn_disclosure' && anchoredTurns.has(item.turnId)) {
+      continue;
+    }
+    if (item.type === 'item') {
+      const turnId = finalAssistantTurnByItemId.get(item.id);
+      const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
+      if (disclosure) output.push(disclosure);
+    }
+    output.push(item);
+    if (item.type === 'item') {
+      const turnId = requestTurnByItemId.get(item.id);
+      const disclosure = turnId ? disclosureByTurn.get(turnId) : undefined;
+      if (disclosure) output.push(disclosure);
+    }
+  }
+  return output;
+};
+
 const applyStopNotice = (
   items: TurnDisclosureOutputItem[],
   stopNotice?: { stoppedAt: number }
@@ -374,12 +419,14 @@ export function buildTurnDisclosureItems(
   const output: TurnDisclosureOutputItem[] = [];
   let segment: TurnDisclosureInputItem[] = [];
   const activeTurnId = options.tailClosed === true ? undefined : options.activeTurnId;
+  const requestByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const finalAssistantByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const turnStartedAtByTurn = new Map<MessageId, number>();
   const processObservedAtByItemId = new Map<string, number>();
 
   for (const item of items) {
     if (item.turnId && item.role === 'user') {
+      if (!requestByTurn.has(item.turnId)) requestByTurn.set(item.turnId, item);
       const currentStart = turnStartedAtByTurn.get(item.turnId);
       if (currentStart === undefined || item.createdAt < currentStart) {
         turnStartedAtByTurn.set(item.turnId, item.createdAt);
@@ -431,8 +478,13 @@ export function buildTurnDisclosureItems(
 
   flush(options.tailClosed === true);
   // Delayed events can make one logical turn appear in multiple non-contiguous
-  // segments. Keep ordinary transcript items in arrival order, but fold their
-  // synthetic process metadata into the first disclosure so IDs/DOM controls
-  // remain unique and one turn can never render two "processed" headers.
-  return applyStopNotice(coalesceTurnDisclosures(output, processObservedAtByItemId), options.stopNotice);
+  // segments. Keep ordinary transcript items in arrival order, fold their
+  // synthetic process metadata into one disclosure, then place that disclosure
+  // after the visible request (or before the final answer for a background
+  // turn). Persisted process rows may arrive after several later messages;
+  // leaving the synthetic header there stacks old "processed" rows below the
+  // newest text.
+  const coalesced = coalesceTurnDisclosures(output, processObservedAtByItemId);
+  const placed = placeTurnDisclosuresAtTurnBoundary(coalesced, requestByTurn, finalAssistantByTurn);
+  return applyStopNotice(placed, options.stopNotice);
 }

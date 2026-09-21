@@ -34,6 +34,8 @@ describe('CompanionSessionGroup structure', () => {
     expect(source.includes('robotsByCompanion')).toBe(false);
     expect(source.includes('companion_id')).toBe(true);
     expect(source.includes('ensureCompanionSession')).toBe(true);
+    expect(source.includes('navigate(`/conversation/${cached}`)')).toBe(true);
+    expect(source.includes('navigate(`/conversation/${thread.conversation_id}`)')).toBe(true);
     expect(source.includes('openRobotConversation')).toBe(false);
     // The standalone top-level bucket is gone.
     const listSource = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'index.tsx'), 'utf8');

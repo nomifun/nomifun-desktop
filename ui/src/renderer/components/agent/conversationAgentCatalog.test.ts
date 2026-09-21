@@ -33,12 +33,16 @@ const binding = (targetKind: string, presetId: string): AgentBindingSummary => (
 } as AgentBindingSummary);
 
 describe('Conversation Agent catalog boundary', () => {
-  test('keeps dedicated Customer Service out of ordinary Conversation templates', () => {
+  test('keeps dedicated product Agents out of ordinary Conversation templates', () => {
+    expect(isConversationAgentTemplateKey('companion.default')).toBe(false);
     expect(isConversationAgentTemplateKey('customer-service.default')).toBe(false);
     expect(isConversationAgentTemplateKey('assistant.general')).toBe(true);
     expect(isConversationAgentTemplateKey('removed.template')).toBe(false);
     expect(isConversationAgentTemplate({
       template_key: 'customer-service.default',
+    } as OfficialPresetTemplate)).toBe(false);
+    expect(isConversationAgentTemplate({
+      template_key: 'companion.default',
     } as OfficialPresetTemplate)).toBe(false);
   });
 

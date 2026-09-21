@@ -99,12 +99,15 @@ describe('Guid Agent selector', () => {
     expect(page.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
   });
 
-  test('never exposes the dedicated Customer Service Agent in Conversation search', async () => {
+  test('never exposes dedicated product Agents in Conversation search', async () => {
     const { page, open, selections } = renderSelector();
     await open();
     const search = page.getByRole('searchbox');
     await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.customerService.default.name } }); });
     expect(page.queryByRole('button', { name: agentSettings.template.customerService.default.name })).toBeNull();
+    expect(within(page.getByRole('dialog')).getByRole('status').textContent).toBe(guid.agentEntries.empty);
+    await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.companion.default.name } }); });
+    expect(page.queryByRole('button', { name: agentSettings.template.companion.default.name })).toBeNull();
     expect(within(page.getByRole('dialog')).getByRole('status').textContent).toBe(guid.agentEntries.empty);
     expect(selections).toEqual([]);
   });
@@ -164,8 +167,8 @@ describe('Guid Agent selector', () => {
     await open();
     const officialGroup = page.getByRole('group', { name: guid.agentEntries.fromTemplate });
     expect(officialGroup.children[1]?.tagName).toBe('DIV');
-    expect(officialGroup.children[1]?.childElementCount).toBe(5);
-    expect(within(officialGroup).getAllByRole('button')).toHaveLength(5);
+    expect(officialGroup.children[1]?.childElementCount).toBe(4);
+    expect(within(officialGroup).getAllByRole('button')).toHaveLength(4);
   });
 
   test('prioritizes official Agents before the collapsed personal Agent section', async () => {
@@ -196,7 +199,7 @@ describe('Guid Agent selector', () => {
     expect(dialog.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
     expect(dialog.getByRole('button', { name: agentSettings.template.assistant.general.name })).not.toBeNull();
     expect(dialog.getByRole('button', { name: agentSettings.template.chat.minimal.name })).not.toBeNull();
-    expect(dialog.getByRole('button', { name: agentSettings.template.companion.default.name })).not.toBeNull();
+    expect(dialog.queryByRole('button', { name: agentSettings.template.companion.default.name })).toBeNull();
     expect(dialog.getByRole('button', { name: agentSettings.template.creativeStudio.default.name })).not.toBeNull();
   });
 

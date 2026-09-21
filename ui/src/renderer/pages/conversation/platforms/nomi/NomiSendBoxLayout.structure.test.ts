@@ -156,7 +156,7 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('preset_id: presetId')).toBe(false);
     expect(agentSwitchBlock.includes('conversation.stop.invoke')).toBe(false);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
-    expect(sendBoxSource.includes('prefix={<ComposerSceneHeader agent={agentSelectorNode} />}')).toBe(true);
+    expect(sendBoxSource.includes('prefix={<ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
   });
 
   test('waits for passive readiness without requiring an unnecessary warmup POST', () => {

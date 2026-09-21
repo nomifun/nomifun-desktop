@@ -307,6 +307,10 @@ export type IMessageAgentStatus = IMessage<
     session_id?: string;
     is_connected?: boolean;
     has_active_session?: boolean;
+    /** Durable, renderer-facing lifecycle receipt derived from the canonical Turn. */
+    turn_summary?: boolean;
+    started_seq?: number;
+    finished_seq?: number | null;
   }
 >;
 
@@ -921,6 +925,13 @@ const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['conte
     ...(data.session_id != null ? { session_id: toDisplayText(data.session_id) } : {}),
     ...(typeof data.is_connected === 'boolean' ? { is_connected: data.is_connected } : {}),
     ...(typeof data.has_active_session === 'boolean' ? { has_active_session: data.has_active_session } : {}),
+    ...(data.turn_summary === true ? { turn_summary: true } : {}),
+    ...(finiteNumber(data.started_seq) != null ? { started_seq: finiteNumber(data.started_seq) } : {}),
+    ...(data.finished_seq === null
+      ? { finished_seq: null }
+      : finiteNumber(data.finished_seq) != null
+        ? { finished_seq: finiteNumber(data.finished_seq) }
+        : {}),
   };
 };
 

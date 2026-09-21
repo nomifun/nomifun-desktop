@@ -178,6 +178,7 @@
     "personaTitle": "Character intro",
     "modelSection": "Model configuration",
     "modelSectionHint": "Which model it thinks and replies with",
+    "fixedAgentHint": "Desktop, IM, and robot entry points share the official Companion Agent. Channels and robots are optional connections.",
     "mainChatModel": "Main chat model",
     "modelMissing": "No chat model configured for {{companionName}} yet — it can't learn or chat.",
     "fallbackChatModel": "Fallback chat model",
@@ -362,6 +363,8 @@
   },
   "chat": {
     "modelSaveFailed": "Could not save the conversation model. Please retry.",
+    "fixedAgentAria": "Fixed Agent: {{agent}}",
+    "fixedAgentHint": "Companion conversations always use the official Companion Agent.",
     "skillsScopeHint": "Default skills for future companion conversations. An existing AgentSession keeps its frozen Skill snapshot.",
     "mcpScopeHint": "Select MCP servers before launch; the exact resources are frozen into the new companion conversation.",
     "mcpFrozenHint": "MCP resources are frozen for this companion conversation. Configure the Agent and start a new conversation to change them.",

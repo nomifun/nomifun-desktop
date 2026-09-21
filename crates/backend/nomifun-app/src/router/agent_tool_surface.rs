@@ -24,6 +24,7 @@ pub(super) async fn compile(
     registry: &MaterializedRegistry,
     plugin_schemas: &dyn NomiPluginToolSchemaResolver,
     platform_builtin_schemas: &dyn NomiPlatformBuiltinToolSchemaResolver,
+    host_dynamic_capability_ids: &std::collections::BTreeSet<CapabilityId>,
 ) -> Result<AgentToolPlan, AppError> {
     if snapshot.registry_generation != registry.generation
         || snapshot.registry_digest != registry.registry_digest
@@ -96,6 +97,12 @@ pub(super) async fn compile(
                     == ContributionSourceKind::PlatformBuiltin
         })
     {
+        // Host-dynamic Modules (currently Robot) are compiled from their exact
+        // bound device later by the Engine session host. They have no static
+        // schema owner and must never block a chat-only Session when unbound.
+        if host_dynamic_capability_ids.contains(&selected.capability.id) {
+            continue;
+        }
         let capability = registry
             .capability(&selected.capability.id)
             .ok_or_else(|| error("selected PlatformBuiltin capability is unavailable"))?;

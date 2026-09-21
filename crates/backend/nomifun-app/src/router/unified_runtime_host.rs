@@ -243,11 +243,14 @@ pub(crate) fn factory(
     platform_builtin_schemas: Arc<
         dyn nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver,
     >,
+    host_dynamic_capability_ids: BTreeSet<CapabilityId>,
     supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
 ) -> OfficialRuntimeFactory {
+    let host_dynamic_capability_ids = Arc::new(host_dynamic_capability_ids);
     Arc::new(move |options, binding| {
         let plugin_schemas = plugin_schemas.clone();
         let platform_builtin_schemas = platform_builtin_schemas.clone();
+        let host_dynamic_capability_ids = Arc::clone(&host_dynamic_capability_ids);
         let session_host = session_host.clone();
         let supervision = supervision.clone();
         Box::pin(async move {
@@ -275,6 +278,7 @@ pub(crate) fn factory(
                 &registry,
                 plugin_schemas.as_ref(),
                 platform_builtin_schemas.as_ref(),
+                host_dynamic_capability_ids.as_ref(),
             )
             .await?;
             let full_plan = resources.compile_tool_plan(full_plan.model_definitions().into_iter().map(|definition| {
@@ -764,6 +768,8 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
     }
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
+        use super::engine_journal::EngineJournalWrite;
+
         let root = self.root(message);
         if self.terminal_already_recorded(root)? {
             return Ok(());
@@ -791,24 +797,16 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                     turn_operation_id: turn.operation.clone().into(),
                 })
                 .map_err(error)?;
-                self.append_locked_record(
-                    turn,
-                    started,
-                    None,
-                    false,
-                )
-                .await?;
+                turn.journal
+                    .append(started, None, EngineJournalWrite::Cleanup)
+                    .await?;
                 let input_scope = serde_json::to_string(&AgentEngineEvent::TurnInputScope {
                     wire_turn_id: turn.wire_id.clone(),
                 })
                 .map_err(error)?;
-                self.append_locked_record(
-                    turn,
-                    input_scope,
-                    None,
-                    false,
-                )
-                .await?;
+                turn.journal
+                    .append(input_scope, None, EngineJournalWrite::Cleanup)
+                    .await?;
             }
         }
         // Always attempt owned-effect cleanup even if inbox journaling fails.

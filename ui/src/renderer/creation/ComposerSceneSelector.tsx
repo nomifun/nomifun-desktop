@@ -8,12 +8,16 @@ const scenes = ['chat', 'image', 'video', 'music'] as const;
 const icons = { chat: MessageOne, image: AddPicture, video: VideoTwo, music: Music };
 
 /** Shared scene navigation stays beside the Agent while configuration changes below. */
-export function ComposerSceneHeader({ agent }: { agent?: ReactNode }) {
+export function ComposerSceneHeader({ agent, sceneSelectionEnabled = true }: {
+  agent?: ReactNode;
+  sceneSelectionEnabled?: boolean;
+}) {
   const creation = useCreationComposer();
-  if (!agent && !creation) return null;
+  const showSceneSelector = sceneSelectionEnabled && creation;
+  if (!agent && !showSceneSelector) return null;
   return <div className={styles.header} data-composer-scene-header>
     {agent && <div className={styles.agent}>{agent}</div>}
-    {creation && <ComposerSceneSelector />}
+    {showSceneSelector && <ComposerSceneSelector />}
   </div>;
 }
 

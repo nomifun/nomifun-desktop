@@ -722,23 +722,35 @@ const ProcessTraceItem: React.FC<{
               key: item.id,
               state,
               label:
-                item.content.status === 'preparing'
-                  ? t('messages.processReceipt.preparingAction', {
-                      defaultValue: 'Preparing next action',
-                    })
-                  : item.content.status === 'prepared'
-                    ? t('messages.processReceipt.preparedAction', {
-                        defaultValue: 'Prepared next action',
+                item.content.turn_summary
+                  ? item.content.status === 'preparing'
+                    ? t('messages.processReceipt.turnSummaryRunning', {
+                        defaultValue: 'Processing this turn',
                       })
-                  : state === 'failed'
-                  ? t('messages.processReceipt.agentFailed', {
-                      target: item.content.agent_name || item.content.backend,
-                      defaultValue: '{{target}} failed',
-                    })
-                  : t('messages.processReceipt.agentConnecting', {
-                      target: item.content.agent_name || item.content.backend,
-                      defaultValue: 'Connecting {{target}}',
-                    }),
+                    : item.content.status === 'prepared'
+                      ? t('messages.processReceipt.turnSummaryCompleted', {
+                          defaultValue: 'Turn processing completed',
+                        })
+                      : t('messages.processReceipt.turnSummaryFailed', {
+                          defaultValue: 'Turn processing did not complete',
+                        })
+                  : item.content.status === 'preparing'
+                    ? t('messages.processReceipt.preparingAction', {
+                        defaultValue: 'Preparing next action',
+                      })
+                    : item.content.status === 'prepared'
+                      ? t('messages.processReceipt.preparedAction', {
+                          defaultValue: 'Prepared next action',
+                        })
+                      : state === 'failed'
+                        ? t('messages.processReceipt.agentFailed', {
+                            target: item.content.agent_name || item.content.backend,
+                            defaultValue: '{{target}} failed',
+                          })
+                        : t('messages.processReceipt.agentConnecting', {
+                            target: item.content.agent_name || item.content.backend,
+                            defaultValue: 'Connecting {{target}}',
+                          }),
             },
           ]}
         />

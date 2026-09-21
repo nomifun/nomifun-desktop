@@ -837,12 +837,16 @@ export const mergeFetchedMessagesForConversation = (
   messages: TMessage[],
   conversationId: ConversationId
 ): TMessage[] => {
-  if (!currentList.length) return messages;
+  // The history API pages newest-first for keyset pagination. Rendering and
+  // stream reconciliation are chronological, including the first hydration
+  // where there is no live list available to trigger the merge sort below.
+  const orderedMessages = [...messages].sort(compareTranscriptOrder);
+  if (!currentList.length) return orderedMessages;
   const sameConversation = currentList.filter((m) => m.conversation_id === conversationId);
-  if (!sameConversation.length) return messages;
+  if (!sameConversation.length) return orderedMessages;
 
-  const dbIds = new Set(messages.map(getPersistedMessageId));
-  const dbKeys = new Set(messages.map(getFetchedMergeKey).filter((key): key is string => Boolean(key)));
+  const dbIds = new Set(orderedMessages.map(getPersistedMessageId));
+  const dbKeys = new Set(orderedMessages.map(getFetchedMergeKey).filter((key): key is string => Boolean(key)));
   const streamingByKey = new Map<string, TMessage>();
 
   for (const message of sameConversation) {
@@ -852,7 +856,7 @@ export const mergeFetchedMessagesForConversation = (
     }
   }
 
-  const mergedMessages = messages.map((dbMessage) => {
+  const mergedMessages = orderedMessages.map((dbMessage) => {
     const key = getFetchedMergeKey(dbMessage);
     const streamMessage = key ? streamingByKey.get(key) : undefined;
     if (!streamMessage) return dbMessage;
@@ -892,7 +896,7 @@ export const mergeFetchedMessagesForConversation = (
     return true;
   });
 
-  if (!streamingOnly.length && !streamingByKey.size) return messages;
+  if (!streamingOnly.length && !streamingByKey.size) return orderedMessages;
   return [...mergedMessages, ...streamingOnly].sort(compareTranscriptOrder);
 };
 
@@ -948,7 +952,7 @@ export const useMessageLstCache = (key: ConversationId) => {
         conversation_id: key, cursor: '', page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
       });
       if (!isCurrent()) return;
-      const messages = result.items.map(normalizeDbMessage);
+      const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
       scope.cursor = messages.length ? messageCursorOf(messages[0]) : null;
       scope.hasMore = Boolean(result.has_more) && scope.cursor !== null;
       mergeIntoList(messages, revision);
@@ -976,7 +980,7 @@ export const useMessageLstCache = (key: ConversationId) => {
         page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
       });
       if (!isCurrent()) return;
-      const messages = result.items.map(normalizeDbMessage);
+      const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
       scope.hasMore = Boolean(result.has_more) && messages.length > 0;
       if (messages.length) scope.cursor = messageCursorOf(messages[0]);
       // A refresh can leave previously loaded older pages in the list. Merge

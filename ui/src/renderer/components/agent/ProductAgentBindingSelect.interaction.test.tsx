@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react
 import { SWRConfig } from 'swr';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { agentPlatform, companion } from '@/common/adapter/ipcBridge';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { Message } from '@arco-design/web-react';
 import ProductAgentBindingSelect from './ProductAgentBindingSelect';
 import type { ProductAgentOptions } from '@/common/types/agentPlatform';
@@ -33,32 +33,30 @@ const initial: ProductAgentOptions = {
   ],
 };
 
-test('composer Agent selector updates the companion binding and existing session together', async () => {
+test('compact product Agent selector updates a product binding with its existing session', async () => {
   let state = { ...structuredClone(initial), needs_model: false };
   const options = spyOn(agentPlatform.productBindingOptions, 'invoke').mockImplementation(async () => state);
   const save = spyOn(agentPlatform.selectProductBinding, 'invoke').mockImplementation(async ({ request }) => {
     state = { ...state, selection: request.selection };
     return { selection: request.selection, needs_model: false };
   });
-  const active = spyOn(companion.getCompanionSession, 'invoke');
   const success = spyOn(Message, 'success').mockImplementation(() => () => {});
-  for (const spy of [options, save, active, success]) restores.push(() => spy.mockRestore());
+  for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
   const conversationId = parseConversationId('019b0000-0000-7000-8000-000000000002');
   const providerId = parseProviderId('019b0000-0000-7000-8000-000000000003');
   const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
-    <ProductAgentBindingSelect compact targetKind='companion'
-      targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='companion.default'
+    <ProductAgentBindingSelect compact targetKind='customer'
+      targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default'
       conversationId={conversationId} model={{ id: providerId, use_model: 'model-a' }} />
   </I18nextProvider></SWRConfig>);
   fireEvent.click(await view.findByRole('button', { name: 'Agent setup: Companion' }));
   fireEvent.click(await view.findByText('Minimal'));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0]).toEqual({
-    target_kind: 'companion', target_id: '019b0000-0000-7000-8000-000000000001',
+    target_kind: 'customer', target_id: '019b0000-0000-7000-8000-000000000001',
     request: { selection: { kind: 'template', template_key: 'chat.minimal' },
       model: { provider_id: providerId, model: 'model-a' }, conversation_id: conversationId },
   });
-  expect(active).not.toHaveBeenCalled();
   await waitFor(() => expect(view.getByRole('button', { name: 'Agent setup: Minimal' })).toBeTruthy());
 });
 test('allows Agent selection before model setup and prevents selecting incompatible options', async () => {
@@ -68,11 +66,10 @@ test('allows Agent selection before model setup and prevents selecting incompati
     state = { ...state, selection: request.selection };
     return { selection: request.selection, needs_model: true };
   });
-  const active = spyOn(companion.getCompanionSession, 'invoke').mockResolvedValue({ conversation_id: null });
   const success = spyOn(Message, 'success').mockImplementation(() => () => {});
-  for (const spy of [options, save, active, success]) restores.push(() => spy.mockRestore());
+  for (const spy of [options, save, success]) restores.push(() => spy.mockRestore());
   const view = render(<SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}><I18nextProvider i18n={i18n}>
-    <ProductAgentBindingSelect targetKind='companion' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='companion.default' />
+    <ProductAgentBindingSelect targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' />
   </I18nextProvider></SWRConfig>);
   await waitFor(() => expect(view.getByText('Choose a model later')).toBeTruthy());
   const selector = view.container.querySelector('.arco-select')!;
@@ -85,7 +82,6 @@ test('allows Agent selection before model setup and prevents selecting incompati
   fireEvent.click(view.getByText('Minimal'));
   await waitFor(() => expect(save).toHaveBeenCalledTimes(1));
   expect(save.mock.calls[0][0].request).toEqual({ selection: { kind: 'template', template_key: 'chat.minimal' } });
-  expect(active).not.toHaveBeenCalled();
 });
 
 test('rechecks options when the model changes and displays fetch failures instead of a default selection', async () => {

@@ -334,7 +334,16 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
             )
             .await
             .map_err(control_plane_error_to_app)?;
-        let mut selection = self.selection(&owner, &target.target_kind, &target.target_id).await?;
+        // A Companion is a product identity, not a generic Agent launcher. Keep
+        // its official recipe authoritative even if an older client persisted a
+        // custom product selection before this invariant was introduced.
+        let mut selection = if target.target_kind == "companion" {
+            Some(ProductAgentSelection::Template {
+                template_key: target.default_template_key.clone(),
+            })
+        } else {
+            self.selection(&owner, &target.target_kind, &target.target_id).await?
+        };
         if selection.is_none() && let Some(record) = existing.as_ref() {
             // An implicit official choice follows its current seed just like
             // an explicit template choice. User-authored presets stay pinned.
@@ -1257,6 +1266,36 @@ impl NomiCoreSessionOwner {
         Ok(())
     }
 
+    /// A process restart cannot retain an in-memory Runtime owner. Reconcile
+    /// every durable running Turn before publishing routes so the Session is
+    /// immediately usable again instead of remaining permanently busy.
+    pub(crate) async fn reconcile_orphaned_active_turns(&self) -> Result<usize, AppError> {
+        let rows = sqlx::query_as::<_, (String, String)>(
+            "SELECT head.session_id, head.active_turn_id \
+             FROM agent_session_heads head \
+             JOIN agent_sessions session ON session.agent_session_id = head.session_id \
+             WHERE session.state = 'live' AND head.status = 'running' \
+               AND head.active_turn_id IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+        let mut reconciled = 0;
+        for (session_id, operation_id) in rows {
+            if self.runtime_sessions.get_runtime(&session_id).is_some() {
+                continue;
+            }
+            self.settle_dispatch_failure(
+                &AgentSessionId::from(session_id),
+                &OperationId::from(operation_id),
+                "Runtime owner was not recoverable after restart",
+            )
+            .await?;
+            reconciled += 1;
+        }
+        Ok(reconciled)
+    }
+
     /// Allocate one renderer-stream segment for the assistant side of an exact
     /// canonical Turn. The accepted user message remains the Turn root; sharing
     /// its ID with assistant output causes the renderer to merge both text rows.
@@ -1752,6 +1791,21 @@ impl NomiCoreSessionOwner {
                     .to_owned(),
             ));
         }
+        let official_template = control_plane
+            .internal_official_template(
+                &owner,
+                binding.preset_revision_ref.preset_id.as_ref(),
+            )
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let companion_id = if official_template
+            .as_ref()
+            .is_some_and(|template| template.as_str() == "companion.default")
+        {
+            companion_id_from_binding(&binding)?
+        } else {
+            None
+        };
         let common_owner = nomifun_common::UserId::parse(owner_id.to_owned()).map_err(|error| {
             AppError::Forbidden(format!("invalid canonical AgentSession owner: {error}"))
         })?;
@@ -1816,6 +1870,7 @@ impl NomiCoreSessionOwner {
             workspace,
             created_at,
             execution_link,
+            companion_id,
         )?))
     }
 
@@ -4202,6 +4257,34 @@ fn workspace_projection_flags(
     )
 }
 
+/// Recover the product-owned Companion identity from the immutable binding.
+/// This keeps historical Sessions routable even though presentation-only
+/// request extras are not stored in the canonical AgentSession record.
+fn companion_id_from_binding(
+    binding: &AgentBindingValue,
+) -> Result<Option<String>, AppError> {
+    let companion_ids = binding
+        .typed_resource_bindings
+        .iter()
+        .filter(|resource| resource.resource_kind.as_ref() == "companion")
+        .map(|resource| resource.resource_id.as_ref().to_owned())
+        .collect::<BTreeSet<_>>();
+    let Some(companion_id) = companion_ids.iter().next().cloned() else {
+        return Ok(None);
+    };
+    if companion_ids.len() != 1
+        || binding.typed_resource_bindings.iter().any(|resource| {
+            resource.resource_kind.as_ref() == "companion_memory"
+                && resource.resource_id.as_ref() != companion_id
+        })
+    {
+        return Err(AppError::Conflict(
+            "Companion AgentSession has inconsistent Companion resources".to_owned(),
+        ));
+    }
+    Ok(Some(companion_id))
+}
+
 #[cfg(feature = "browser-use")]
 fn managed_browser_profile_bindings(
     owner_id: &str,
@@ -4305,6 +4388,7 @@ fn canonical_conversation_response(
     workspace: Option<String>,
     created_at: i64,
     execution_link: Option<(String, String, Option<String>, Option<String>)>,
+    companion_id: Option<String>,
 ) -> Result<ConversationResponse, AppError> {
     let SessionObservation { session, head, events, .. } = observed;
     let super::agent_binding_projection::SavedAgentBindingProjection {
@@ -4331,6 +4415,21 @@ fn canonical_conversation_response(
     );
     if let Some(workspace) = workspace {
         extra.insert("workspace".to_owned(), Value::String(workspace));
+    }
+    if let Some(companion_id) = companion_id {
+        extra.insert("companion_session".to_owned(), Value::Bool(true));
+        extra.insert(
+            "companion_id".to_owned(),
+            Value::String(companion_id.clone()),
+        );
+        extra.insert(
+            "product_agent_target_kind".to_owned(),
+            Value::String("companion".to_owned()),
+        );
+        extra.insert(
+            "product_agent_target_id".to_owned(),
+            Value::String(companion_id),
+        );
     }
     attach_session_metadata_with_fork(
         &mut request.extra,
@@ -6805,12 +6904,20 @@ async fn product_agent_options(
         _ => return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "MODEL_ROUTE_NOT_FOUND", "incomplete model selection")),
     };
     let library = state.control_plane.library(&owner).await?;
-    let mut candidates = library.official_templates.iter().map(|template| {
-        let key = serde_json::to_value(template.template_key).unwrap().as_str().unwrap().to_owned();
-        (ProductAgentSelection::Template { template_key: key.clone() }, key)
-    }).collect::<Vec<_>>();
-    candidates.extend(library.user_presets.iter().map(|preset| (ProductAgentSelection::Preset { preset_id: preset.preset_id.clone() }, preset.display_name.clone())));
-    let selection = match state.product_agent_resolver.selection(&owner, &kind, &id).await? {
+    let fixed_selection = (kind == "companion").then(|| ProductAgentSelection::Template {
+        template_key: default.to_owned(),
+    });
+    let mut candidates = if let Some(selection) = fixed_selection.as_ref() {
+        vec![(selection.clone(), default.to_owned())]
+    } else {
+        let mut candidates = library.official_templates.iter().map(|template| {
+            let key = serde_json::to_value(template.template_key).unwrap().as_str().unwrap().to_owned();
+            (ProductAgentSelection::Template { template_key: key.clone() }, key)
+        }).collect::<Vec<_>>();
+        candidates.extend(library.user_presets.iter().map(|preset| (ProductAgentSelection::Preset { preset_id: preset.preset_id.clone() }, preset.display_name.clone())));
+        candidates
+    };
+    let selection = match fixed_selection.or(state.product_agent_resolver.selection(&owner, &kind, &id).await?) {
         Some(selection) => selection,
         None => match state.control_plane.get_agent_binding(&owner, kind.clone(), id.clone()).await? {
             Some(record) => {
@@ -6853,12 +6960,23 @@ async fn select_product_agent_binding(
     Path((target_kind, target_id)): Path<(String, String)>,
     Json(request): Json<SelectProductAgentBindingRequest>,
 ) -> Result<Json<ApiResponse<Value>>, NomiCoreApiError> {
-    let _default = require_product_target(&state, &owner, &target_kind, &target_id)?;
+    let default = require_product_target(&state, &owner, &target_kind, &target_id)?;
     let selection = match (request.selection, request.preset_id) {
         (Some(selection), None) => selection,
         (None, Some(preset_id)) => ProductAgentSelection::Preset { preset_id },
         _ => return Err(NomiCoreApiError::new(StatusCode::BAD_REQUEST, "AGENT_PRESET_NOT_FOUND", "select exactly one Agent")),
     };
+    if target_kind == "companion"
+        && selection != (ProductAgentSelection::Template {
+            template_key: default.to_owned(),
+        })
+    {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+            "Companion conversations always use companion.default",
+        ));
+    }
     let _guard = state.product_agent_resolver.default_binding_lock.lock().await;
     let model = request.model;
     let resource_selections = request.resource_selections;
@@ -9461,6 +9579,62 @@ fn canonical_message_response(
             "canonical message projection is not an object",
         )
     })?;
+    let state = document
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or("completed");
+    if projection.presentation_intent == "turn_summary" {
+        let Some(summary_message_id) = document.get("correlation_id").and_then(Value::as_str)
+        else {
+            return Ok(None);
+        };
+        let Some(root_message_id) = document
+            .get("source_message_id")
+            .and_then(Value::as_str)
+        else {
+            return Ok(None);
+        };
+        if [summary_message_id, root_message_id].into_iter().any(|value| {
+            Uuid::parse_str(value)
+                .ok()
+                .is_none_or(|uuid| uuid.get_version_num() != 7)
+        })
+        {
+            return Ok(None);
+        }
+        let stream_message_id =
+            super::engine_journal::canonical_assistant_message_id(root_message_id)?;
+        let (activity_status, status) = match state {
+            "running" => ("preparing", MessageStatus::Work),
+            "completed" => ("prepared", MessageStatus::Finish),
+            "failed" | "cancelled" | "interrupted" => ("error", MessageStatus::Error),
+            _ => return Ok(None),
+        };
+        return Ok(Some(MessageResponse {
+            message_id: summary_message_id.to_owned(),
+            conversation_id: session_id.as_ref().to_owned(),
+            // Match the live AgentStatus stream key so terminal hydration
+            // replaces that transient row instead of rendering a duplicate.
+            msg_id: Some(stream_message_id),
+            r#type: MessageType::AgentStatus,
+            content: json!({
+                "backend": "nomi",
+                "status": activity_status,
+                "agent_name": "Nomi",
+                "turn_id": root_message_id,
+                "turn_summary": true,
+                "started_seq": document.get("started_seq").cloned().unwrap_or(Value::Null),
+                "finished_seq": document.get("finished_seq").cloned().unwrap_or(Value::Null),
+            }),
+            position: Some(MessagePosition::Center),
+            status: Some(status),
+            hidden: false,
+            created_at: created_at.saturating_add(
+                i64::try_from(projection.first_seq).unwrap_or(i64::MAX),
+            ),
+        }));
+    }
+
     let Some(message_id) = document.get("correlation_id").and_then(Value::as_str) else {
         return Ok(None);
     };
@@ -9470,10 +9644,6 @@ fn canonical_message_response(
     {
         return Ok(None);
     }
-    let state = document
-        .get("state")
-        .and_then(Value::as_str)
-        .unwrap_or("completed");
     let (message_type, content, position) = match projection.presentation_intent.as_str() {
         "message" => (
             MessageType::Text,
@@ -9577,7 +9747,7 @@ async fn get_nomi_core_agent_session_message_history(
         .session_owner
         .canonical()
         .store()
-        .messages_before(&session_id, before_seq, page_size)
+        .message_history_before(&session_id, before_seq, page_size)
         .await
         .map_err(agent_session_store_error)?;
     let mut items = Vec::new();

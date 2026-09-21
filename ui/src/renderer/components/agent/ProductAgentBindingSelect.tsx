@@ -1,8 +1,7 @@
-import { agentPlatform, companion } from '@/common/adapter/ipcBridge';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { OfficialPresetKey, ProductAgentOptions, ProductAgentSelection } from '@/common/types/agentPlatform';
-import { parseCompanionId } from '@/common/types/ids';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import { Button, Dropdown, Menu, Message, Select, Spin, Tooltip } from '@arco-design/web-react';
 import { Down, Robot } from '@icon-park/react';
@@ -11,7 +10,7 @@ import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 
 type Props = {
-  targetKind: 'companion' | 'robot' | 'customer' | 'creative_studio_canvas';
+  targetKind: 'robot' | 'customer' | 'creative_studio_canvas';
   targetId: string;
   defaultTemplateKey: OfficialPresetKey;
   model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
@@ -68,9 +67,7 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     onSavingChange?.(true);
     setSaveError(undefined);
     try {
-      const activeId = selectedModel ? conversationId ?? (targetKind === 'companion'
-        ? (await companion.getCompanionSession.invoke({ companion_id: parseCompanionId(targetId) })).conversation_id
-        : null) : null;
+      const activeId = selectedModel ? conversationId ?? null : null;
       if (!current()) return;
       const result = await agentPlatform.selectProductBinding.invoke({
         target_kind: targetKind, target_id: targetId,

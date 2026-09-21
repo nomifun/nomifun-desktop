@@ -12,7 +12,7 @@ import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
 import CompanionModelControl from '@renderer/pages/nomi/CompanionModelControl';
 import type { CompanionHandle } from '../../types';
-import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
+import CompanionAgentIndicator from '@/renderer/pages/nomi/companion/CompanionAgentIndicator';
 
 interface ModelsSectionProps {
   companion: CompanionHandle;
@@ -45,20 +45,8 @@ const ModelsSection: React.FC<ModelsSectionProps> = ({ companion, status, compan
       <NomiSettingList>
         <NomiSettingRow
           title={t('agentSettings.productBinding.label', { defaultValue: 'Agent 设定' })}
-          description={t('agentSettings.productBinding.companionHint', {
-            defaultValue: '决定伙伴对话可使用的能力；未选择时使用官方“伙伴”。',
-          })}
-          controls={
-            <ProductAgentBindingSelect
-              targetKind='companion'
-              targetId={profile.companion_id}
-              defaultTemplateKey='companion.default'
-              model={profile.model ? {
-                id: profile.model.provider_id,
-                use_model: profile.model.model,
-              } : undefined}
-            />
-          }
+          description={t('nomi.overview.fixedAgentHint')}
+          controls={<CompanionAgentIndicator surface='settings' />}
         />
         <NomiSettingRow
           title={t('nomi.overview.mainChatModel')}

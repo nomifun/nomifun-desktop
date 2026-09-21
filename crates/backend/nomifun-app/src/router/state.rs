@@ -732,9 +732,17 @@ async fn build_nomi_core_agent_api_state(
             engine_sessions,
             Arc::clone(&plugin.schema_resolver),
             Arc::clone(&builtin_plan.schema_resolver),
+            builtin_plan.host_dynamic_tool_capability_ids.clone(),
             idmm,
         ))?;
     conversation_owner.install_official_runtime(Arc::clone(&services.official_runtime), Arc::downgrade(&control_plane))?;
+    let reconciled_turns = conversation_owner.reconcile_orphaned_active_turns().await?;
+    if reconciled_turns > 0 {
+        tracing::warn!(
+            reconciled_turns,
+            "reconciled orphaned AgentSession turns before route publication"
+        );
+    }
     let plugin_tool_sessions = Arc::new(NomiCorePluginToolSessionProvider::new(
         Arc::clone(&conversation_owner),
         Arc::clone(&control_plane),

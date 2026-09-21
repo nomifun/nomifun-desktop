@@ -1890,6 +1890,97 @@ impl AgentSessionStore {
         Ok((messages, has_more, as_u64(total, "message projection total")?))
     }
 
+    /// Read the renderer-facing conversation history. In addition to canonical
+    /// message/tool projections, expose one derived lifecycle summary for every
+    /// durable Turn. The summary is reconstructed from `agent_turns`, so older
+    /// Sessions created before this view existed receive the same cold-reload
+    /// behavior without mutating their event log or projection tables.
+    pub async fn message_history_before(
+        &self,
+        session_id: &AgentSessionId,
+        before_seq: Option<u64>,
+        limit: u32,
+    ) -> Result<(Vec<MessageProjection>, bool, u64), SessionStoreError> {
+        if limit == 0 || limit > MAX_EVENT_PAGE_SIZE {
+            return Err(SessionStoreError::InvalidEvent(format!(
+                "message history page limit must be between 1 and {MAX_EVENT_PAGE_SIZE}",
+            )));
+        }
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let boundary = before_seq.unwrap_or(head.last_seq.saturating_add(1));
+        if boundary > head.last_seq.saturating_add(1) {
+            return Err(SessionStoreError::InvalidEvent(
+                "message history cursor is ahead of the committed AgentSession sequence"
+                    .to_owned(),
+            ));
+        }
+        let query_limit = i64::from(limit) + 1;
+        let projection_rows = sqlx::query_as::<_, StoredProjectionRow>(
+            "SELECT session_id, projection_id, first_seq, last_seq, presentation_intent, \
+                    projection_json, semantic_digest \
+             FROM agent_messages \
+             WHERE session_id = ? AND first_seq < ? \
+               AND presentation_intent IN ('message', 'tool') \
+             ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
+        )
+        .bind(session_id.as_ref())
+        .bind(as_i64(boundary, "before_seq")?)
+        .bind(query_limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        let turn_rows = sqlx::query_as::<_, StoredTurnHistoryRow>(
+            "SELECT session_id, turn_id, source_message_id, state, started_event_id, accepted_at, started_at, finished_at \
+             FROM agent_turns \
+             WHERE session_id = ? AND source_message_id IS NOT NULL \
+               AND COALESCE(started_at, accepted_at) < ? \
+             ORDER BY COALESCE(started_at, accepted_at) DESC, turn_id DESC LIMIT ?",
+        )
+        .bind(session_id.as_ref())
+        .bind(as_i64(boundary, "before_seq")?)
+        .bind(query_limit)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut history = projection_rows
+            .into_iter()
+            .map(projection_from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        for row in turn_rows {
+            if let Some(summary) = turn_history_projection_from_row(row)? {
+                history.push(summary);
+            }
+        }
+        history.sort_by(|left, right| {
+            right
+                .first_seq
+                .cmp(&left.first_seq)
+                .then_with(|| right.projection_id.cmp(&left.projection_id))
+        });
+        let has_more = history.len() > limit as usize;
+        history.truncate(limit as usize);
+
+        let message_total = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
+               AND presentation_intent IN ('message', 'tool')",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        let turn_total = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM agent_turns WHERE session_id = ? AND source_message_id IS NOT NULL",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        let total = message_total.checked_add(turn_total).ok_or_else(|| {
+            SessionStoreError::InvalidSession("message history total overflowed".to_owned())
+        })?;
+        tx.commit().await?;
+        Ok((history, has_more, as_u64(total, "message history total")?))
+    }
+
     async fn messages_after_tx(
         tx: &mut Transaction<'_, Sqlite>,
         session_id: &AgentSessionId,
@@ -3814,6 +3905,18 @@ struct StoredTurnRow {
     state: String,
     started_event_id: String,
     terminal_event_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StoredTurnHistoryRow {
+    session_id: String,
+    turn_id: String,
+    source_message_id: String,
+    state: String,
+    started_event_id: String,
+    accepted_at: i64,
+    started_at: Option<i64>,
+    finished_at: Option<i64>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -6099,6 +6202,69 @@ fn projection_from_row(row: StoredProjectionRow) -> Result<MessageProjection, Se
         projection: serde_json::from_str(&row.projection_json)?,
         semantic_digest: row.semantic_digest,
     })
+}
+
+fn turn_history_projection_from_row(
+    row: StoredTurnHistoryRow,
+) -> Result<Option<MessageProjection>, SessionStoreError> {
+    let Ok(source_message_uuid) = Uuid::parse_str(&row.source_message_id) else {
+        return Ok(None);
+    };
+    if source_message_uuid.get_version_num() != 7 {
+        return Ok(None);
+    }
+    let Ok(started_event_uuid) = Uuid::parse_str(&row.started_event_id) else {
+        return Ok(None);
+    };
+    if started_event_uuid.get_version_num() != 7 {
+        return Ok(None);
+    }
+    if !matches!(
+        row.state.as_str(),
+        "running" | "completed" | "failed" | "cancelled" | "interrupted"
+    ) {
+        return Err(SessionStoreError::InvalidSession(format!(
+            "canonical Agent Turn has unknown history state {}",
+            row.state
+        )));
+    }
+    let first_seq = as_u64(
+        row.started_at.unwrap_or(row.accepted_at),
+        "turn history first_seq",
+    )?;
+    let last_seq = row
+        .finished_at
+        .map(|value| as_u64(value, "turn history last_seq"))
+        .transpose()?
+        .unwrap_or(first_seq);
+    if last_seq < first_seq {
+        return Err(SessionStoreError::InvalidSession(
+            "canonical Agent Turn history ends before it starts".to_owned(),
+        ));
+    }
+    let projection_id = format!("turn_summary:{}", row.started_event_id);
+    let projection = json!({
+        "projection_id": projection_id,
+        "correlation_id": started_event_uuid.to_string(),
+        "presentation_intent": "turn_summary",
+        "state": row.state,
+        "source_message_id": source_message_uuid.to_string(),
+        "turn_operation_id": row.turn_id,
+        "started_seq": first_seq,
+        "finished_seq": row.finished_at,
+    });
+    let semantic_digest = digest_payload(&projection)?.0;
+    Ok(Some(MessageProjection {
+        session_id: AgentSessionId::from(row.session_id),
+        projection_id,
+        first_seq,
+        last_seq,
+        presentation_intent: "turn_summary".to_owned(),
+        message_type: Some("agent_status".to_owned()),
+        message_status: Some(if row.state == "running" { "work" } else { "finish" }.to_owned()),
+        projection,
+        semantic_digest,
+    }))
 }
 
 fn validate_automation_config_request(

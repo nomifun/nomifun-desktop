@@ -7,7 +7,6 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react';
 import { Message } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
-import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
 import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import type { IProvider, TChatConversation } from '@/common/config/storage';
@@ -15,6 +14,7 @@ import NomiChat from '@/renderer/pages/conversation/platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/nomi/useNomiModelSelection';
 import type { useCompanion } from '../useNomi';
 import CompanionCapabilityControls from './CompanionCapabilityControls';
+import CompanionAgentIndicator from './CompanionAgentIndicator';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
@@ -25,13 +25,12 @@ interface Props {
   companion: ReturnType<typeof useCompanion>;
 }
 
-/** Standard conversation UI with companion-owned model, Agent and skill settings. */
+/** Standard chat UI with companion-owned model and skills plus a fixed product Agent. */
 const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
   const { groups } = useModelsForTask('chat');
   const [modelSaving, setModelSaving] = useState(false);
-  const [agentSaving, setAgentSaving] = useState(false);
   const savingRef = useRef(false);
   const initialModel = useMemo(() => {
     if (!profile?.model) return undefined;
@@ -45,7 +44,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => 
     });
   }, [conversation.id, t]);
   const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
-    if (savingRef.current || agentSaving) return false;
+    if (savingRef.current) return false;
     savingRef.current = true;
     setModelSaving(true);
     try {
@@ -60,7 +59,7 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => 
       savingRef.current = false;
       setModelSaving(false);
     }
-  }, [agentSaving, patchCompanion, refreshSession, t]);
+  }, [patchCompanion, refreshSession, t]);
   const modelSelection = useNomiModelSelection({
     initialModel,
     onSelectModel,
@@ -74,21 +73,12 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => 
       workspace={workspace}
       modelSelection={modelSelection}
       modelSelectionHint={t('nomi.chat.modelConfigHint')}
-      modelSelectionDisabled={modelSaving || agentSaving}
+      modelSelectionDisabled={modelSaving}
       emptySlot={!profile?.model ? <div className='p-20px text-center text-t-secondary'>{t('nomi.chat.modelMissing')}</div> : undefined}
-      agentSelectorNode={profile && <ProductAgentBindingSelect
-        compact
-        targetKind='companion'
-        targetId={profile.companion_id}
-        defaultTemplateKey='companion.default'
-        conversationId={conversation.id}
-        model={initialModel}
-        disabled={modelSaving}
-        onSavingChange={setAgentSaving}
-        onChanged={refreshSession}
-      />}
+      agentSelectorNode={<CompanionAgentIndicator />}
       capabilityControls={<CompanionCapabilityControls companion={companion} conversation={conversation} />}
       agent_name={profile?.name}
+      creationEnabled={false}
     />
   );
 };
