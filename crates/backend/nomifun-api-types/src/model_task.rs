@@ -210,6 +210,9 @@ fn verified_provider_profile(
                     ModelTrait::VisionInput,
                     ModelTrait::VideoInput,
                     ModelTrait::FunctionCalling,
+                    // Step Plan emits `reasoning_content`; tool continuations
+                    // must be able to replay it without losing semantics.
+                    ModelTrait::Reasoning,
                     ModelTrait::Streaming,
                 ],
             )),
@@ -580,6 +583,7 @@ mod tests {
         assert!(traits.contains(&ModelTrait::VisionInput));
         assert!(traits.contains(&ModelTrait::VideoInput));
         assert!(traits.contains(&ModelTrait::FunctionCalling));
+        assert!(traits.contains(&ModelTrait::Reasoning));
         assert!(traits.contains(&ModelTrait::Streaming));
     }
 

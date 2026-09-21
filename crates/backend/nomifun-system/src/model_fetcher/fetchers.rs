@@ -1419,6 +1419,7 @@ mod tests {
                 ModelTrait::VisionInput,
                 ModelTrait::VideoInput,
                 ModelTrait::FunctionCalling,
+                ModelTrait::Reasoning,
                 ModelTrait::Streaming,
             ]
         );

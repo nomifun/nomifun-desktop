@@ -1,4 +1,5 @@
 import type { PluginProductCategory, PluginProductItem, PluginProductStatus } from './pluginProductModel';
+import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 import { Button, Input, Select, Switch } from '@arco-design/web-react';
 import { AddOne, Code, List, Plug, Pushpin, Search, Upload } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
@@ -97,7 +98,13 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
       </header>
 
       <section className={styles.quickCreate} aria-label={t('pluginWorkbench.product.quickCreate')}>
-        <span className={styles.quickCreateIcon}><Code theme='outline' size={18} /></span>
+        <div className='flex min-w-0 flex-col items-start gap-6px'>
+          <span className={styles.quickCreateIcon}><Code theme='outline' size={18} /></span>
+          <AgentIdentityBadge
+            backend='nomi'
+            name={t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}
+          />
+        </div>
         <Input.TextArea
           value={requirement}
           autoSize={{ minRows: 1, maxRows: 4 }}

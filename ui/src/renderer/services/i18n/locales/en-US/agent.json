@@ -34,6 +34,14 @@
   "sendbox": {
     "placeholder": "Send message to {{backend}}..."
   },
+  "identity": {
+    "label": "Using Agent",
+    "shortLabel": "Agent",
+    "ariaLabel": "{{label}}: {{name}}",
+    "loading": "Loading…",
+    "unknown": "Unspecified",
+    "unavailable": "Unavailable"
+  },
   "status": {
     "connecting": "Connecting to {{agent}}...",
     "connected": "Connected to {{agent}}",

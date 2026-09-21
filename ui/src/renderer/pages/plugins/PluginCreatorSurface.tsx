@@ -2,6 +2,7 @@ import type {
   GeneratedPluginDraft,
   PluginProjectDetail,
 } from '@/common/types/pluginPlatform';
+import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 import { Alert, Button, Input, Progress, Spin, Tag } from '@arco-design/web-react';
 import {
   ArrowLeft,
@@ -95,6 +96,11 @@ const PluginCreatorSurface: React.FC<PluginCreatorSurfaceProps> = ({
             <span className={styles.eyebrow}>{t('pluginWorkbench.product.aiCreator')}</span>
             <h2>{title || t('pluginWorkbench.product.untitled')}</h2>
             <p>{t('pluginWorkbench.product.autoSaved')}</p>
+            <AgentIdentityBadge
+              backend='nomi'
+              name={t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}
+              className='mt-8px w-fit'
+            />
           </div>
         </div>
         <div className={styles.creatorStatus}>
@@ -123,7 +129,7 @@ const PluginCreatorSurface: React.FC<PluginCreatorSurfaceProps> = ({
             ) : (
               <div key={`${message.role}-${index}`} className={`${styles.chatMessage} ${styles.chatMessageAssistant}`}>
                 <span className={styles.creatorAvatar}><Code theme='outline' size={15} /></span>
-                <div><strong>Nomi</strong><p>{message.content}</p></div>
+                <div><strong>{t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}</strong><p>{message.content}</p></div>
               </div>
             )
           ))}
@@ -220,7 +226,7 @@ const PluginCreatorSurface: React.FC<PluginCreatorSurfaceProps> = ({
                 </Tag>
               </div>
               <div className={styles.previewFlow}>
-                <div><strong>{t('pluginWorkbench.product.flow.request')}</strong><small>Nomi</small></div>
+                <div><strong>{t('pluginWorkbench.product.flow.request')}</strong><small>{t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}</small></div>
                 <div><strong>{t('pluginWorkbench.product.flow.system')}</strong><small>{t('pluginWorkbench.product.flow.builtin')}</small></div>
                 <div data-plugin='true'><strong>{t('pluginWorkbench.product.flow.plugin')}</strong><small>{draft?.capabilities[0]?.display_name ?? title}</small></div>
                 <div><strong>{t('pluginWorkbench.product.flow.result')}</strong><small>{t('pluginWorkbench.product.flow.consumer')}</small></div>
