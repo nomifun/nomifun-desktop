@@ -12,6 +12,7 @@ import {
   Play,
   Refresh,
   Right,
+  Search,
   Workbench,
 } from '@icon-park/react';
 import classNames from 'classnames';
@@ -148,62 +149,76 @@ const CreativeCanvasTemplatePanel: React.FC<CreativeCanvasTemplatePanelProps> = 
         defaultValue: '画布模板',
       })}
     >
-      <header className={styles.header}>
-        <div>
-          <h2>
-            {t('creativeStudio.canvas.templates.title', {
-              defaultValue: '模板',
-            })}
-          </h2>
+      <header className={styles.headerCard}>
+        <div className={styles.headerIdentity}>
+          <div className={styles.titleRow}>
+            <Workbench {...iconProps} size={20} />
+            <h2>
+              {t('creativeStudio.canvas.templates.label', {
+                defaultValue: '画布模板',
+              })}
+            </h2>
+          </div>
           <p>
-            {t('creativeStudio.canvas.templates.summary', {
-              count: templates.length,
-              defaultValue: `${templates.length} 个模板`,
+            {t('creativeStudio.canvas.templates.workspaceDescription', {
+              defaultValue: '运行模板，并将结果直接插入当前画布。',
             })}
-            {activeCount > 0
-              ? t('creativeStudio.canvas.templates.activeSummary', {
-                  count: activeCount,
-                  defaultValue: ` · ${activeCount} 个进行中`,
-                })
-              : ''}
+            <span className={styles.templateSummary}>
+              {' · '}
+              {t('creativeStudio.canvas.templates.summary', {
+                count: templates.length,
+                defaultValue: `${templates.length} 个模板`,
+              })}
+              {activeCount > 0
+                ? t('creativeStudio.canvas.templates.activeSummary', {
+                    count: activeCount,
+                    defaultValue: ` · ${activeCount} 个进行中`,
+                  })
+                : ''}
+            </span>
           </p>
         </div>
-        <button
-          type='button'
-          className={styles.iconButton}
-          aria-label={t('creativeStudio.canvas.templates.openCenter', {
-            defaultValue: '打开模板工作台',
-          })}
-          onClick={onOpenCenter}
-        >
-          <Right {...iconProps} />
-        </button>
+        <div className={styles.headerActions}>
+          <label className={styles.searchField}>
+            <Search {...iconProps} aria-hidden='true' />
+            <input
+              type='search'
+              value={search}
+              placeholder={t('creativeStudio.canvas.templates.searchPlaceholder', {
+                defaultValue: '搜索模板',
+              })}
+              aria-label={t('creativeStudio.canvas.templates.searchLabel', {
+                defaultValue: '搜索模板',
+              })}
+              onChange={(event) => setSearch(event.currentTarget.value)}
+            />
+          </label>
+          <button
+            type='button'
+            className={styles.iconButton}
+            aria-label={t('creativeStudio.canvas.templates.refresh', {
+              defaultValue: '刷新模板',
+            })}
+            disabled={loading}
+            onClick={onRetry}
+          >
+            <Refresh className={loading ? styles.spinning : undefined} {...iconProps} />
+          </button>
+          <button
+            type='button'
+            className={styles.openCenterButton}
+            onClick={onOpenCenter}
+          >
+            <Workbench {...iconProps} />
+            <span>
+              {t('creativeStudio.templates.workspace.title', {
+                defaultValue: '模板工作台',
+              })}
+            </span>
+            <Right {...iconProps} />
+          </button>
+        </div>
       </header>
-
-      <div className={styles.searchRow}>
-        <input
-          type='search'
-          value={search}
-          placeholder={t('creativeStudio.canvas.templates.searchPlaceholder', {
-            defaultValue: '搜索模板',
-          })}
-          aria-label={t('creativeStudio.canvas.templates.searchLabel', {
-            defaultValue: '搜索模板',
-          })}
-          onChange={(event) => setSearch(event.currentTarget.value)}
-        />
-        <button
-          type='button'
-          className={styles.iconButton}
-          aria-label={t('creativeStudio.canvas.templates.refresh', {
-            defaultValue: '刷新模板',
-          })}
-          disabled={loading}
-          onClick={onRetry}
-        >
-          <Refresh className={loading ? styles.spinning : undefined} {...iconProps} />
-        </button>
-      </div>
 
       {error || runtime.loadError ? (
         <div className={styles.error} role='alert'>
@@ -260,84 +275,87 @@ const CreativeCanvasTemplatePanel: React.FC<CreativeCanvasTemplatePanelProps> = 
             const inserting = run?.request.id === insertingRunId;
             return (
               <article key={template.id} className={styles.card} role='listitem'>
-                <div className={styles.cardHeading}>
-                  <div className={styles.templateIcon}><Workbench {...iconProps} /></div>
-                  <div className={styles.identity}>
-                    <strong title={template.metadata.name}>{template.metadata.name}</strong>
-                    <span>
-                      {template.metadata.category ||
-                        t('creativeStudio.canvas.templates.uncategorized', {
-                          defaultValue: '未分类',
-                        })}{' '}
-                      ·{' '}
-                      {template.output.kind === 'multi-image-series'
-                        ? t('creativeStudio.canvas.templates.series', {
-                            count: template.output.targetCount,
-                            defaultValue: '{{count}} 张系列',
-                          })
-                        : t('creativeStudio.canvas.templates.singleImage', {
-                            defaultValue: '单图',
-                          })}
-                    </span>
-                  </div>
-                </div>
-                {template.metadata.description ? (
-                  <p className={styles.description}>{template.metadata.description}</p>
-                ) : null}
-                {run ? (
-                  <div className={styles.runRow}>
-                    <CreativeTemplateRunStatus run={run} />
-                    {resultCount > 0 ? (
+                <div className={styles.cardAccent} aria-hidden='true' />
+                <div className={styles.cardBody}>
+                  <div className={styles.cardHeading}>
+                    <div className={styles.templateIcon}><Workbench {...iconProps} /></div>
+                    <div className={styles.identity}>
+                      <strong title={template.metadata.name}>{template.metadata.name}</strong>
                       <span>
-                        {t('creativeStudio.canvas.templates.resultCount', {
-                          count: resultCount,
-                          defaultValue: `${resultCount} 项真实结果`,
-                        })}
+                        {template.metadata.category ||
+                          t('creativeStudio.canvas.templates.uncategorized', {
+                            defaultValue: '未分类',
+                          })}{' '}
+                        ·{' '}
+                        {template.output.kind === 'multi-image-series'
+                          ? t('creativeStudio.canvas.templates.series', {
+                              count: template.output.targetCount,
+                              defaultValue: '{{count}} 张系列',
+                            })
+                          : t('creativeStudio.canvas.templates.singleImage', {
+                              defaultValue: '单图',
+                            })}
                       </span>
-                    ) : null}
+                    </div>
                   </div>
-                ) : null}
-                <div className={styles.actions}>
-                  <button
-                    type='button'
-                    disabled={disabled || active}
-                    onClick={() => onRun(template)}
-                  >
-                    <Play {...iconProps} />
-                    {active
-                      ? t('creativeStudio.canvas.templates.runningAction', {
-                          defaultValue: '正在运行',
-                        })
-                      : run
-                        ? t('creativeStudio.canvas.templates.rerun', {
-                            defaultValue: '再次运行',
-                          })
-                        : t('creativeStudio.canvas.templates.run', {
-                            defaultValue: '运行',
+                  {template.metadata.description ? (
+                    <p className={styles.description}>{template.metadata.description}</p>
+                  ) : null}
+                  {run ? (
+                    <div className={styles.runRow}>
+                      <CreativeTemplateRunStatus run={run} />
+                      {resultCount > 0 ? (
+                        <span>
+                          {t('creativeStudio.canvas.templates.resultCount', {
+                            count: resultCount,
+                            defaultValue: `${resultCount} 项真实结果`,
                           })}
-                  </button>
-                  {run && run.record.status === 'succeeded' && resultCount > 0 ? (
+                        </span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  <div className={styles.actions}>
                     <button
                       type='button'
-                      disabled={disabled || inserting}
-                      onClick={() => onInsertResults(run)}
+                      disabled={disabled || active}
+                      onClick={() => onRun(template)}
                     >
-                      {inserting ? <Loading className={styles.spinning} {...iconProps} /> : <Pic {...iconProps} />}
-                      {inserting
-                        ? t('creativeStudio.canvas.templates.inserting', {
-                            defaultValue: '正在插入',
+                      <Play {...iconProps} />
+                      {active
+                        ? t('creativeStudio.canvas.templates.runningAction', {
+                            defaultValue: '正在运行',
                           })
-                        : t('creativeStudio.canvas.templates.insertResults', {
-                            defaultValue: '插入结果',
-                          })}
+                        : run
+                          ? t('creativeStudio.canvas.templates.rerun', {
+                              defaultValue: '再次运行',
+                            })
+                          : t('creativeStudio.canvas.templates.run', {
+                              defaultValue: '运行',
+                            })}
                     </button>
-                  ) : run?.record.status === 'awaiting-review' ? (
-                    <button type='button' onClick={onOpenCenter}>
-                      {t('creativeStudio.canvas.templates.review', {
-                        defaultValue: '去审核',
-                      })}
-                    </button>
-                  ) : null}
+                    {run && run.record.status === 'succeeded' && resultCount > 0 ? (
+                      <button
+                        type='button'
+                        disabled={disabled || inserting}
+                        onClick={() => onInsertResults(run)}
+                      >
+                        {inserting ? <Loading className={styles.spinning} {...iconProps} /> : <Pic {...iconProps} />}
+                        {inserting
+                          ? t('creativeStudio.canvas.templates.inserting', {
+                              defaultValue: '正在插入',
+                            })
+                          : t('creativeStudio.canvas.templates.insertResults', {
+                              defaultValue: '插入结果',
+                            })}
+                      </button>
+                    ) : run?.record.status === 'awaiting-review' ? (
+                      <button type='button' onClick={onOpenCenter}>
+                        {t('creativeStudio.canvas.templates.review', {
+                          defaultValue: '去审核',
+                        })}
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               </article>
             );

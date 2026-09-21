@@ -2,6 +2,14 @@ import { imageGenerationSizePolicyForModel, type ImageGenerationAspectRatioOptio
 import type { CreationMode, CreationParameters, CreationInput } from './types';
 
 type Model = Pick<ImageGenerationModelOption, 'model' | 'protocol' | 'platform'> | null | undefined;
+
+export const CREATION_MUSIC_DURATION_OPTIONS = [60, 120, 180, 240, 300, 360] as const;
+
+export function creationMusicDuration(value: unknown): number | undefined {
+  const seconds = Number(value);
+  return CREATION_MUSIC_DURATION_OPTIONS.some(option => option === seconds) ? seconds : undefined;
+}
+
 export function creationVideoInputRoles(model: Model): CreationInput['role'][] {
   if (model?.protocol === 'ark.video_jobs' || (model?.protocol === 'xai.video_jobs' && model.model === 'grok-imagine-video-1.5')) return ['reference', 'first_frame', 'last_frame'];
   return ['reference', 'first_frame'];
@@ -31,7 +39,7 @@ export function creationParameterPolicy(model: Model) {
     : protocol === 'zhipu.video_jobs' ? { seconds: [5, 10], sizes: ['1280x720', '1920x1080'] }
     : protocol === 'xai.video_jobs' ? { seconds: [5, 10], sizes: ['480p', '720p', '1080p'] }
     : protocol === 'siliconflow.video_jobs' ? { seconds: [], sizes: ['1280x720', '720x1280'] }
-    : protocol === 'agnes.video_jobs' ? { seconds: [], sizes: ['1280x720', '720x1280', '720x720', '1920x1080', '1080x1920', '1080x1080'] }
+    : protocol === 'agnes.video_jobs' ? { seconds: [5, 10, 15], sizes: ['1280x720', '720x1280', '720x720', '1920x1080', '1080x1920', '1080x1080'] }
     : { seconds: [], sizes: [] };
   return { qualities, video };
 }
@@ -56,7 +64,7 @@ export function creationCount(mode: CreationMode, value: unknown, model: Model):
 
 /** Only composer-owned user parameters can be copied from history to a new task. */
 export function creationUserParameters(mode: CreationMode, value: Record<string, unknown>): CreationParameters {
-  const keys = mode === 'image' ? ['size', 'width', 'height', 'aspect', 'quality', 'count'] : mode === 'video' ? ['size', 'aspect', 'resolution', 'seconds', 'count'] : ['lyrics', 'instrumental', 'format'];
+  const keys = mode === 'image' ? ['size', 'width', 'height', 'aspect', 'quality', 'count'] : mode === 'video' ? ['size', 'aspect', 'resolution', 'seconds', 'count'] : ['lyrics', 'instrumental', 'format', 'seconds'];
   return Object.fromEntries(keys.flatMap(key => typeof value[key] === 'string' || typeof value[key] === 'number' || typeof value[key] === 'boolean' || value[key] === null ? [[key, value[key]]] : [])) as CreationParameters;
 }
 export function normalizeCreationParameters(mode: CreationMode, value: CreationParameters, model: Model): CreationParameters {
@@ -77,6 +85,8 @@ export function normalizeCreationParameters(mode: CreationMode, value: CreationP
     if (!policy.video.sizes.includes(String(params.size))) delete params.size;
     delete params.aspect; delete params.resolution;
     params.count = creationCount(mode, params.count, model);
+  } else if (mode === 'music' && creationMusicDuration(params.seconds) === undefined) {
+    delete params.seconds;
   }
   return params;
 }

@@ -10,6 +10,14 @@ import { readFileSync } from 'node:fs';
 const component = readFileSync(new URL('./CreativeCanvasChrome.tsx', import.meta.url), 'utf8');
 const types = readFileSync(new URL('./types.ts', import.meta.url), 'utf8');
 const css = readFileSync(new URL('./CreativeCanvasChrome.module.css', import.meta.url), 'utf8');
+const resourceDialog = readFileSync(
+  new URL('../../components/CreativeResourceDialog.tsx', import.meta.url),
+  'utf8'
+);
+const resourceDialogCss = readFileSync(
+  new URL('../../components/CreativeResourceDialog.module.css', import.meta.url),
+  'utf8'
+);
 
 describe('CreativeCanvasChrome architecture boundaries', () => {
   test('uses canonical product types, IconPark, Arco, and injected slots', () => {
@@ -116,12 +124,13 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     ).toBe(true);
     expect(component.includes("aria-haspopup='dialog'")).toBe(true);
     expect(component.includes('<CreativeCanvasResourceDialog')).toBe(true);
-    expect(css.includes('.resourceDialogContent')).toBe(true);
-    expect(css.includes('height: min(56vh, 500px);')).toBe(true);
+    expect(component.includes('<CreativeResourceDialog')).toBe(true);
+    expect(css.includes('.canvasResourceContent')).toBe(true);
+    expect(resourceDialogCss.includes('height: min(680px, calc(100vh - 120px));')).toBe(true);
     expect(css.includes('padding: 18px 14px 10px;')).toBe(true);
-    expect(css.includes('text-align: left;')).toBe(true);
-    expect(component.includes('width: 860')).toBe(true);
-    expect(component.includes('view === \'assets\' ? 860 : 920')).toBe(false);
+    expect(resourceDialogCss.includes('text-align: left;')).toBe(true);
+    expect(resourceDialog.includes('width: 1120')).toBe(true);
+    expect(component.includes("scope='canvas'")).toBe(true);
   });
 
   test('layers the compact top actions and side rail above the canvas', () => {

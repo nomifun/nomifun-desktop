@@ -26,12 +26,13 @@ import {
   Setting,
   Square,
   Text,
+  Timeline,
   Undo,
   VideoTwo,
   Voice,
   Workbench,
 } from '@icon-park/react';
-import { Modal, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import classNames from 'classnames';
 import React, {
   useCallback,
@@ -41,6 +42,7 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeResourceDialog from '../../components/CreativeResourceDialog';
 import styles from './CreativeCanvasChrome.module.css';
 import CreativeCanvasTitle from './CreativeCanvasTitle';
 import {
@@ -66,6 +68,7 @@ const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
+  timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
@@ -170,6 +173,8 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
+    case 'timeline':
+      return <Timeline {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }
@@ -315,40 +320,36 @@ export const CreativeCanvasBackgroundMenu: React.FC<CreativeCanvasBackgroundMenu
 export interface CreativeCanvasResourceDialogProps {
   view: CreativeCanvasResourceView | null;
   content?: React.ReactNode;
+  popupContainer?: HTMLElement | null;
   onClose(): void;
 }
 
 /** One presentation contract for the three canvas resource libraries. */
 export const CreativeCanvasResourceDialog: React.FC<
   CreativeCanvasResourceDialogProps
-> = ({ view, content, onClose }) => {
+> = ({ view, content, popupContainer, onClose }) => {
   const { t } = useTranslation();
   if (!view) return null;
+  const title =
+    view === 'prompts'
+      ? '选择提示词'
+      : view === 'templates'
+        ? t('creativeStudio.templates.workspace.title', {
+            defaultValue: '模板工作台',
+          })
+        : t(LEFT_LABEL_KEYS.assets);
 
   return (
-    <Modal
-      visible
-      title={t(LEFT_LABEL_KEYS[view])}
-      footer={null}
-      className={styles.resourceDialog}
-      style={{
-        width: 860,
-        maxWidth: 'calc(100vw - 48px)',
-      }}
-      autoFocus={false}
-      focusLock
-      maskClosable
-      escToExit
-      unmountOnExit
-      onCancel={onClose}
+    <CreativeResourceDialog
+      kind={view}
+      title={title}
+      scope='canvas'
+      contentClassName={styles.canvasResourceContent}
+      popupContainer={popupContainer}
+      onClose={onClose}
     >
-      <div
-        className={styles.resourceDialogContent}
-        data-canvas-resource-dialog={view}
-      >
-        {content}
-      </div>
-    </Modal>
+      {content}
+    </CreativeResourceDialog>
   );
 };
 
@@ -910,6 +911,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       <CreativeCanvasResourceDialog
         view={props.resourceView}
         content={resourceSlot}
+        popupContainer={props.resourceDialogPopupContainer}
         onClose={() => props.onResourceViewChange(null)}
       />
     </section>

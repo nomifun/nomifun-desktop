@@ -30,6 +30,19 @@
 .parameterPanel [data-image-size-picker] fieldset > div:first-of-type:has(> button:only-child), .quantityOptions:has(> button:only-child) { width: fit-content; min-width: 72px; }
 .parameterPanel [data-image-size-picker] fieldset button[aria-pressed='true'] { background: var(--color-fill-3); color: var(--color-text-1); }
 .panelActions { display: flex; flex-wrap: wrap; gap: 2px; border-top: 1px solid var(--color-border-2); padding-top: 6px; }
+.durationPicker { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; }
+.durationPicker > legend { grid-column: 1; margin: 0; }
+.automaticDuration { grid-column: 2; display: inline-flex; align-items: center; gap: 7px; color: var(--color-text-3); font-size: 11px; white-space: nowrap; }
+.durationRow { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) 72px; align-items: center; gap: 12px; padding: 8px 9px; border-radius: 8px; background: var(--color-fill-1); }
+.durationRow[data-disabled='true'] { opacity: .58; }
+.durationScale { display: grid; min-width: 0; gap: 1px; }
+.durationScale input { width: 100%; height: 18px; margin: 0; accent-color: rgb(var(--primary-6)); cursor: pointer; }
+.durationScale input:disabled { cursor: default; }
+.durationTicks { display: flex; justify-content: space-between; color: var(--color-text-3); font-size: 10px; line-height: 14px; font-variant-numeric: tabular-nums; }
+.durationValue { display: inline-flex; min-height: 34px; align-items: center; justify-content: space-between; gap: 8px; box-sizing: border-box; padding: 6px 10px; border: 1px solid var(--color-border-1); border-radius: 7px; background: var(--color-bg-2); color: var(--color-text-1); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.durationValue span { color: var(--color-text-3); font-size: 11px; font-weight: 400; }
+.durationHint { margin: -4px 0 0; color: var(--color-text-3); font-size: 10px; line-height: 15px; }
+.resourceLoading { display: grid; place-items: center; color: var(--color-text-3); font-size: 12px; }
 .summaryShape { width: 13px; height: 13px; border: 1.5px solid currentColor; border-radius: 3px; }
 .referencePreview { display: grid; place-items: center; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; color: var(--color-text-3); cursor: pointer; }
 .referencePreview:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: -2px; }

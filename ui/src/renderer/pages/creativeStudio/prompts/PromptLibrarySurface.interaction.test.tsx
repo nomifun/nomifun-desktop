@@ -80,4 +80,41 @@ describe('PromptLibrarySurface copy interaction', () => {
       },
     ]);
   });
+
+  test('reveals the visual card overlay before applying the prompt', () => {
+    const selected: PromptLibraryItem[] = [];
+    const { container } = render(
+      <I18nextProvider i18n={testI18n}>
+        <PromptLibrarySurface
+          variant='sidebar'
+          items={[{ ...ITEM, coverUrl: 'https://example.com/prompt-cover.jpg' }]}
+          showHeader={false}
+          cardPresentation='visual-picker'
+          applyLabel='使用提示词'
+          onSelect={(item) => selected.push(item)}
+        />
+      </I18nextProvider>
+    );
+
+    const card = container.querySelector<HTMLElement>('[data-prompt-library-item="prompt-copy"]');
+    const activateButton = container.querySelector<HTMLButtonElement>(
+      'button[data-prompt-card-action="activate"]'
+    );
+    const applyButton = container.querySelector<HTMLButtonElement>(
+      'button[data-prompt-card-action="apply"]'
+    );
+    expect(card?.dataset.active).toBeUndefined();
+    expect(applyButton?.tabIndex).toBe(-1);
+
+    fireEvent.click(activateButton!);
+
+    expect(selected).toEqual([]);
+    expect(card?.dataset.active).toBe('true');
+    expect(activateButton?.getAttribute('aria-pressed')).toBe('true');
+    expect(applyButton?.tabIndex).toBe(0);
+
+    fireEvent.click(applyButton!);
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.id).toBe(ITEM.id);
+  });
 });

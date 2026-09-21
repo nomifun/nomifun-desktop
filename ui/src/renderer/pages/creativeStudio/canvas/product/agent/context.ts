@@ -173,6 +173,13 @@ const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedN
         );
       }
       break;
+    case 'timeline':
+      truncated = addText(details, 'title', node.data.title) || truncated;
+      details.muted = node.data.muted;
+      details.clipCount = node.data.clips.length;
+      details.assetIds = node.data.clips.slice(0, 32).map((clip) => clip.assetId);
+      truncated = node.data.clips.length > 32 || truncated;
+      break;
     case 'config':
       details.task = node.data.task;
       details.capability = node.data.capability;

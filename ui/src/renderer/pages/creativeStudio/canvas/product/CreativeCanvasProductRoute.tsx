@@ -134,7 +134,11 @@ import {
   type CreativeImageSplitParams,
   type UploadedCreativeImageSplitPiece,
 } from '../imageTools';
-import { CreativeNodeView } from '../nodes';
+import {
+  appendTimelineClips,
+  CreativeNodeView,
+  type CreativeTimelineAssetPresentation,
+} from '../nodes';
 import CreativeCanvasAgentPanel, {
   type CreativeCanvasAgentPanelHandle,
 } from './agent/CreativeCanvasAgentPanel';
@@ -953,6 +957,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const [resourceDialogView, setResourceDialogView] =
     useState<CreativeCanvasResourceView | null>(null);
+  const [resourceDialogPopupContainer, setResourceDialogPopupContainer] =
+    useState<HTMLElement | null>(null);
+  const [timelineAssetTargetId, setTimelineAssetTargetId] = useState<string | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState('');
@@ -1153,6 +1160,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const canvasMediaAssetIds = useMemo(() => [...new Set([
     ...selectedCanvasImageReferenceAssetIds,
     ...(canvasState?.document.nodes.flatMap((node) => {
+      if (node.type === 'timeline') {
+        return node.data.clips.map((clip) => clip.assetId);
+      }
       if (node.type === 'video') {
         return [node.data.assetId, node.data.posterAssetId].filter(
           (assetId): assetId is string => Boolean(assetId)
@@ -1274,6 +1284,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
     setResourceDialogView(null);
+    setResourceDialogPopupContainer(null);
+    setTimelineAssetTargetId(null);
     hydratedPanelsRef.current = null;
     canvasStateRef.current = null;
     setCanvasState(null);
@@ -1407,7 +1419,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const handleResourceViewChange = useCallback(
-    (view: CreativeCanvasResourceView | null) => {
+    (
+      view: CreativeCanvasResourceView | null,
+      popupContainer: HTMLElement | null = null
+    ) => {
       if (view === null || view === 'assets') {
         setSelectedAssetIds(new Set());
       }
@@ -1415,6 +1430,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setAssetSearch('');
         setAssetKind('all');
       }
+      if (view !== 'assets') setTimelineAssetTargetId(null);
+      setResourceDialogPopupContainer(view === null ? null : popupContainer);
       setResourceDialogView(view);
       if (view !== null && panelsRef.current.left.open) {
         persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, false));
@@ -4521,6 +4538,115 @@ const CreativeCanvasProductRoute: React.FC = () => {
     });
   }, []);
 
+  const appendAssetsToTimeline = useCallback(
+    (nodeId: string, selectedAssets: readonly CreativeAsset[]) => {
+      const editor = editorRef.current;
+      if (!editor) return 0;
+      const node = editor.getState().document.nodes.find(
+        (candidate): candidate is Extract<CreativeCanvasNode, { type: 'timeline' }> =>
+          candidate.id === nodeId && candidate.type === 'timeline'
+      );
+      if (!node || node.locked) return 0;
+      const compatible = selectedAssets.filter(
+        (asset): asset is CreativeAsset & { kind: 'image' | 'video' } =>
+          !isCreativeAssetDeleted(asset) &&
+          (asset.kind === 'image' || asset.kind === 'video')
+      );
+      if (compatible.length === 0) {
+        setNotice(
+          t('creativeStudio.canvas.timeline.noCompatibleAssets', {
+            defaultValue: '时间线只支持图片和视频素材。',
+          })
+        );
+        return 0;
+      }
+
+      const known = new Map(knownAssetsRef.current);
+      for (const asset of compatible) known.set(asset.id, asset);
+      knownAssetsRef.current = known;
+      setCanvasReferenceAssets((current) => {
+        const next = new Map(current);
+        for (const asset of compatible) next.set(asset.id, asset);
+        return next;
+      });
+
+      editor.dispatch(
+        canvasCommands.updateNode({
+          ...node,
+          data: appendTimelineClips(
+            node.data,
+            compatible.map((asset) => ({ id: asset.id, kind: asset.kind })),
+            uuidv7
+          ),
+        })
+      );
+      setSelectedAssetIds(new Set());
+      setNotice(
+        t('creativeStudio.canvas.timeline.assetsAdded', {
+          count: compatible.length,
+          defaultValue: '已向时间线添加 {{count}} 项素材。',
+        })
+      );
+      return compatible.length;
+    },
+    [t]
+  );
+
+  const openTimelineAssetLibrary = useCallback(
+    (nodeId: string, popupContainer: HTMLElement | null) => {
+      setTimelineAssetTargetId(nodeId);
+      handleResourceViewChange('assets', popupContainer);
+    },
+    [handleResourceViewChange]
+  );
+
+  const handleTimelineUploadFiles = useCallback(
+    async (nodeId: string, files: readonly File[]) => {
+      if (assetImportBusyRef.current) {
+        setNotice(
+          t('creativeStudio.canvas.notices.uploadBusy', {
+            defaultValue: '已有素材正在上传，请等待完成。',
+          })
+        );
+        return;
+      }
+      const compatible = files.filter(
+        (file) => file.type.startsWith('image/') || file.type.startsWith('video/')
+      );
+      if (compatible.length === 0) return;
+      assetImportBusyRef.current = true;
+      setAssetImportBusy(true);
+      setNotice(
+        t('creativeStudio.canvas.timeline.uploading', {
+          count: compatible.length,
+          defaultValue: '正在上传 {{count}} 项时间线素材…',
+        })
+      );
+      try {
+        const uploaded = await Promise.all(
+          compatible.map((file) =>
+            creativeAssetClient.upload(file, {
+              title: file.name,
+              tags: ['canvas-import', 'timeline'],
+              inLibrary: true,
+            })
+          )
+        );
+        if (activeProjectIdRef.current !== projectId) return;
+        appendAssetsToTimeline(nodeId, uploaded);
+        void assets.reload();
+      } catch (error) {
+        if (activeProjectIdRef.current === projectId) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        assetImportBusyRef.current = false;
+        setAssetImportBusy(false);
+      }
+    },
+    [appendAssetsToTimeline, assets, projectId, t]
+  );
+
   const handleInsertAssets = useCallback(
     (selectedAssets: readonly CreativeAsset[]) => {
       const insertion = prepareCenteredInsertion();
@@ -4600,6 +4726,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     void copyText(selection.prompt)
       .then(() => {
         setSelectedPromptId(selection.id);
+        handleResourceViewChange(null);
         setNotice(
           t('creativeStudio.canvas.notices.promptCopied', {
             title: selection.title,
@@ -4614,7 +4741,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           })
         );
       });
-  }, []);
+  }, [handleResourceViewChange, t]);
 
   const selection = useMemo(
     () => creativeCanvasProductSelectionCapabilities(canvasState),
@@ -4774,6 +4901,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         leftOpen={panels.left.open && panelViews.left === 'canvas'}
         leftView={panelViews.left}
         resourceView={resourceDialogView}
+        resourceDialogPopupContainer={resourceDialogPopupContainer}
         rightView={panelViews.right}
         rightPanelWidth={panels.right.width}
         bottomView={panelViews.bottom}
@@ -4824,6 +4952,33 @@ const CreativeCanvasProductRoute: React.FC = () => {
                   onToggleLock,
                   dragHandleProps,
                 }) => {
+                  const timelineAssets = node.type === 'timeline'
+                    ? new Map<string, CreativeTimelineAssetPresentation>(
+                        node.data.clips.flatMap((clip) => {
+                          const asset = knownAssetsById.get(clip.assetId);
+                          if (
+                            !asset ||
+                            (asset.kind !== 'image' && asset.kind !== 'video')
+                          ) {
+                            return [];
+                          }
+                          return [[
+                            clip.assetId,
+                            {
+                              assetId: clip.assetId,
+                              kind: asset.kind,
+                              title: asset.title,
+                              src: asset.originalUrl,
+                              thumbnailSrc: asset.thumbnailUrl,
+                              deleted: isCreativeAssetDeleted(asset),
+                              width: asset.width,
+                              height: asset.height,
+                              mimeType: asset.mimeType,
+                            },
+                          ]];
+                        })
+                      )
+                    : undefined;
                   const nodeView = (
                     <CreativeNodeView
                       node={node}
@@ -4856,6 +5011,46 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       onTextEditingComplete={
                         node.type === 'text'
                           ? () => finishInlineTextEditing(node.id)
+                          : undefined
+                      }
+                      timelineAssets={timelineAssets}
+                      onTimelineChange={
+                        node.type === 'timeline'
+                          ? (data, mergeKey) => {
+                              const editor = editorRef.current;
+                              const latest = editor?.getState().document.nodes.find(
+                                (candidate): candidate is Extract<
+                                  CreativeCanvasNode,
+                                  { type: 'timeline' }
+                                > => candidate.id === node.id && candidate.type === 'timeline'
+                              );
+                              if (!editor || !latest || latest.locked) return;
+                              editor.dispatch(
+                                canvasCommands.updateNode(
+                                  { ...latest, data },
+                                  mergeKey ? { mergeKey } : undefined
+                                )
+                              );
+                            }
+                          : undefined
+                      }
+                      onTimelineDelete={
+                        node.type === 'timeline'
+                          ? () =>
+                              dispatch(
+                                canvasCommands.deleteSelection({ nodeIds: [node.id] })
+                              )
+                          : undefined
+                      }
+                      onTimelineRequestAssets={
+                        node.type === 'timeline'
+                          ? (popupContainer) =>
+                              openTimelineAssetLibrary(node.id, popupContainer)
+                          : undefined
+                      }
+                      onTimelineUploadFiles={
+                        node.type === 'timeline'
+                          ? (files) => handleTimelineUploadFiles(node.id, files)
                           : undefined
                       }
                     />
@@ -5577,11 +5772,18 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 search={assetSearch}
                 kind={assetKind}
                 selectedIds={selectedAssetIds}
+                acceptedKinds={timelineAssetTargetId ? ['image', 'video'] : undefined}
                 disabled={productDisabled}
                 onSearchChange={setAssetSearch}
                 onKindChange={setAssetKind}
                 onToggleAsset={handleToggleAsset}
-                onInsert={handleInsertAssets}
+                onInsert={(selectedAssets) => {
+                  if (timelineAssetTargetId) {
+                    appendAssetsToTimeline(timelineAssetTargetId, selectedAssets);
+                    return;
+                  }
+                  handleInsertAssets(selectedAssets);
+                }}
                 onCancel={() => handleResourceViewChange(null)}
               />
             ),
