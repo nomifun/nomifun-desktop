@@ -1167,8 +1167,7 @@ CREATE TABLE creative_studio_agent_sessions (
                         AND replace(conversation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
                     ),
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL,
-    UNIQUE (owner_id, project_id, session_id)
+    updated_at      INTEGER NOT NULL
 );
 
 CREATE TABLE creative_studio_projects (
@@ -2573,8 +2572,7 @@ CREATE TABLE plugin_build_operation_lineage (
         AND build_profile_version NOT GLOB '*[^!-~]*'
     ),
     build_generation INTEGER NOT NULL CHECK (build_generation >= 1),
-    started_at_ms INTEGER NOT NULL CHECK (started_at_ms > 0),
-    UNIQUE (owner_user_id, operation_id, plugin_product_id, project_id)
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms > 0)
 );
 
 CREATE TABLE plugin_candidate_test_receipts (
@@ -2654,14 +2652,6 @@ CREATE TABLE plugin_catalog_publications (
         length(catalog_digest) = 64
         AND lower(catalog_digest) = catalog_digest
         AND catalog_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    UNIQUE (owner_user_id, plugin_product_id),
-    UNIQUE (
-        owner_user_id,
-        plugin_product_id,
-        active_release_id,
-        active_release_digest,
-        active_release_epoch
     )
 );
 
@@ -2740,8 +2730,7 @@ CREATE TABLE plugin_deletion_intents (
             length(last_error_code) BETWEEN 1 AND 256
             AND last_error_code NOT GLOB '*[^!-~]*'
         )
-    ),
-    UNIQUE (owner_user_id, plugin_product_id)
+    )
 );
 
 CREATE TABLE plugin_dependency_mutation_commits (
@@ -2807,8 +2796,7 @@ CREATE TABLE plugin_dependency_mutation_intents (
     CHECK (
         expected_source_digest <> next_source_digest
         OR expected_lock_digest <> next_lock_digest
-    ),
-    UNIQUE (owner_user_id, project_id)
+    )
 );
 
 CREATE TABLE plugin_kv (
@@ -3135,7 +3123,6 @@ CREATE TABLE plugin_products (
         CHECK (credential_bindings_revision >= 1),
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (owner_user_id, plugin_product_id),
     CHECK ((ready_release_id IS NULL) = (ready_release_digest IS NULL)),
     CHECK ((active_release_id IS NULL) = (active_release_digest IS NULL)),
     CHECK ((previous_release_id IS NULL) = (previous_release_digest IS NULL)),
@@ -3365,9 +3352,7 @@ CREATE TABLE plugin_publish_authorizations (
     ),
     revision INTEGER NOT NULL CHECK (revision >= 1),
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    user_authorized_at_ms INTEGER NOT NULL CHECK (user_authorized_at_ms > 0),
-    UNIQUE (owner_user_id, plugin_product_id),
-    UNIQUE (owner_user_id, plugin_product_id, authorization_id)
+    user_authorized_at_ms INTEGER NOT NULL CHECK (user_authorized_at_ms > 0)
 );
 
 CREATE TABLE plugin_ready_candidates (
@@ -3482,8 +3467,7 @@ CREATE TABLE plugin_release_artifacts (
         AND instr('/' || managed_path || '/', '/./') = 0
         AND instr(managed_path, char(0)) = 0
     ),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    UNIQUE (owner_user_id, artifact_id, artifact_digest, manifest_digest)
+    created_at INTEGER NOT NULL CHECK (created_at >= 0)
 );
 
 CREATE TABLE "plugin_releases" (
@@ -3539,8 +3523,6 @@ CREATE TABLE "plugin_releases" (
         CHECK (json_valid(release_record_json)
                AND json_type(release_record_json) = 'object'),
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    UNIQUE (owner_user_id, release_id),
-    UNIQUE (owner_user_id, release_id, release_digest),
     CHECK (project_id IS NULL OR (
         length(project_id) = 36
         AND lower(project_id) = project_id
@@ -3661,8 +3643,7 @@ CREATE TABLE plugin_service_test_receipts (
         json_valid(receipt_json)
         AND json_type(receipt_json) = 'object'
     ),
-    issued_at_ms                        INTEGER NOT NULL CHECK (issued_at_ms > 0),
-    UNIQUE (owner_user_id, plugin_product_id, receipt_id)
+    issued_at_ms                        INTEGER NOT NULL CHECK (issued_at_ms > 0)
 );
 
 CREATE TABLE plugin_source_mutation_commits (
@@ -3725,8 +3706,7 @@ CREATE TABLE plugin_source_mutation_intents (
         next_build_generation = expected_build_generation + 1
     ),
     created_at                INTEGER NOT NULL CHECK (created_at > 0),
-    CHECK (expected_source_digest <> next_source_digest),
-    UNIQUE (owner_user_id, plugin_product_id, project_id)
+    CHECK (expected_source_digest <> next_source_digest)
 );
 
 CREATE TABLE plugin_surface_sessions (
@@ -3774,16 +3754,6 @@ CREATE TABLE plugin_surface_sessions (
             AND conversation_id GLOB '????????-????-7???-[89ab]???-????????????'
             AND replace(conversation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
         )
-    ),
-    UNIQUE (owner_user_id, plugin_product_id),
-    UNIQUE (owner_user_id, plugin_product_id, generation),
-    UNIQUE (
-        owner_user_id,
-        plugin_product_id,
-        capability_digest,
-        active_release_id,
-        active_release_digest,
-        active_release_epoch
     )
 );
 
@@ -4471,840 +4441,136 @@ INSERT INTO "schema_metadata" (singleton_key, data_generation, root_instance_id,
 
 INSERT INTO "system_settings" (id, singleton_key, language, notification_enabled, cron_notification_enabled, command_queue_enabled, save_upload_to_workspace, updated_at) VALUES (1, 'system', 'en-US', 1, 0, 0, 0, 1789741863859);
 
-CREATE INDEX idx_agent_bindings_preset
-ON agent_bindings(json_extract(agent_binding_json, '$.preset_revision_ref.preset_id'));
-
-CREATE INDEX idx_agent_deletion_audits_session_time
-    ON agent_deletion_audits(agent_session_id, recorded_at, audit_id);
-
-CREATE UNIQUE INDEX idx_agent_effects_resource_unsettled
-    ON agent_effects(owner_domain, resource_key)
-    WHERE state IN ('pending', 'unknown') AND resource_key IS NOT NULL;
-
-CREATE INDEX idx_agent_effects_session_turn
-    ON agent_effects(session_id, turn_id, created_at);
-
+-- Physical indexes are workload access paths, not a mirror of every logical reference.
+-- Keep each table within five total SQLite B-trees (including UNIQUE auto-indexes);
+-- the runtime schema contract below rejects budget regressions.
+CREATE INDEX idx_agent_bindings_preset ON agent_bindings(json_extract(agent_binding_json, '$.preset_revision_ref.preset_id'));
+CREATE INDEX idx_agent_deletion_audits_session_time ON agent_deletion_audits(agent_session_id, recorded_at, audit_id);
+CREATE UNIQUE INDEX idx_agent_effects_resource_unsettled ON agent_effects(owner_domain, resource_key) WHERE state IN ('pending', 'unknown') AND resource_key IS NOT NULL;
+CREATE INDEX idx_agent_effects_session_turn ON agent_effects(session_id, turn_id, created_at);
 CREATE INDEX idx_agent_events_correlation ON agent_events(session_id, correlation_id, seq);
-
 CREATE INDEX idx_agent_executions_owner_updated ON agent_executions(user_id, updated_at DESC);
-
 CREATE INDEX idx_agent_executions_status_lease ON agent_executions(status, lease_expires_at);
-
-CREATE INDEX idx_agent_executions_user_id ON agent_executions(user_id);
-
 CREATE INDEX idx_agent_messages_sequence ON agent_messages(session_id, first_seq, last_seq);
-
-CREATE INDEX idx_agent_metadata_agent_type ON agent_metadata(agent_type);
-
-CREATE INDEX idx_agent_metadata_backend ON agent_metadata(backend);
-
-CREATE INDEX idx_agent_metadata_sort_order ON agent_metadata(sort_order);
-
 CREATE INDEX idx_agent_payloads_session ON agent_payloads(session_id);
-
-CREATE INDEX idx_agent_preset_revisions_preset ON agent_preset_revisions(preset_id, revision_no);
-
-CREATE INDEX idx_agent_preset_revisions_created_by
-    ON agent_preset_revisions(created_by);
-
-CREATE INDEX idx_agent_presets_active ON agent_presets(preset_id) WHERE retired_at_ms IS NULL;
-
-CREATE INDEX idx_agent_presets_owner_active
-ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id)
-WHERE retired_at_ms IS NULL;
-
-CREATE INDEX idx_agent_presets_ui_plugin
-ON agent_presets(json_extract(display_json, '$.ui_binding.selection.plugin_id'));
-
-CREATE INDEX idx_agent_runtime_snapshots_revision
-ON agent_runtime_snapshots(
-  json_extract(content_json, '$.preset_revision_ref.preset_id'),
-  json_extract(content_json, '$.preset_revision_ref.revision'),
-  json_extract(content_json, '$.preset_revision_ref.revision_digest')
-);
-
-CREATE INDEX idx_agent_session_resources_session_kind
-    ON agent_session_resources(session_id, resource_kind, binding_id);
-
+CREATE INDEX idx_agent_presets_owner_active ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id) WHERE retired_at_ms IS NULL;
+CREATE INDEX idx_agent_presets_ui_plugin ON agent_presets(json_extract(display_json, '$.ui_binding.selection.plugin_id'));
+CREATE INDEX idx_agent_runtime_snapshots_revision ON agent_runtime_snapshots( json_extract(content_json, '$.preset_revision_ref.preset_id'), json_extract(content_json, '$.preset_revision_ref.revision'), json_extract(content_json, '$.preset_revision_ref.revision_digest') );
+CREATE INDEX idx_agent_session_resources_session_kind ON agent_session_resources(session_id, resource_kind, binding_id);
 CREATE INDEX idx_agent_sessions_owner_state ON agent_sessions(owner_ref_json, state);
-
 CREATE INDEX idx_agent_turns_session_state ON agent_turns(session_id, state, accepted_at);
-
-CREATE INDEX idx_attachments_requirement_id ON attachments(requirement_id);
-
-CREATE INDEX idx_channel_inbound_receipts_channel_plugin_id
-    ON channel_inbound_receipts(channel_plugin_id);
-
-CREATE INDEX idx_channel_inbound_receipts_conversation_id
-    ON channel_inbound_receipts(conversation_id);
-
-CREATE INDEX idx_channel_inbound_receipts_message_id
-    ON channel_inbound_receipts(message_id);
-
-CREATE INDEX idx_channel_inbound_receipts_status_updated
-    ON channel_inbound_receipts(status, updated_at);
-
-CREATE INDEX idx_channel_inbound_receipts_user_id
-    ON channel_inbound_receipts(user_id);
-
+CREATE INDEX idx_channel_inbound_receipts_channel_plugin_id ON channel_inbound_receipts(channel_plugin_id);
 CREATE INDEX idx_channel_pairing_codes_channel_plugin_id ON channel_pairing_codes(channel_plugin_id);
-
 CREATE INDEX idx_channel_plugins_companion_id ON channel_plugins(companion_id);
-
-CREATE INDEX idx_channel_session_bindings_plugin_id
-    ON channel_session_bindings(channel_plugin_id);
-
-CREATE INDEX idx_channel_session_bindings_session_id
-    ON channel_session_bindings(channel_session_id);
-
-CREATE INDEX idx_channel_session_bindings_user_id
-    ON channel_session_bindings(channel_user_id);
-
+CREATE INDEX idx_channel_session_bindings_user_id ON channel_session_bindings(channel_user_id);
 CREATE INDEX idx_channel_sessions_channel_plugin_id ON channel_sessions(channel_plugin_id);
-
 CREATE INDEX idx_channel_sessions_channel_user_id ON channel_sessions(channel_user_id);
-
 CREATE INDEX idx_channel_sessions_conversation_id ON channel_sessions(conversation_id);
-
 CREATE INDEX idx_channel_users_channel_plugin_id ON channel_users(channel_plugin_id);
-
-CREATE INDEX idx_client_preferences_provider_key
-    ON client_preferences(key);
-
-CREATE INDEX idx_conversation_execution_links_attempt_id ON conversation_execution_links(attempt_id);
-
-CREATE INDEX idx_conversation_execution_links_conversation_id ON conversation_execution_links(conversation_id);
-
-CREATE INDEX idx_conversation_execution_links_execution_id ON conversation_execution_links(execution_id);
-
-CREATE INDEX idx_conversation_execution_links_step_id ON conversation_execution_links(step_id);
-
-CREATE INDEX idx_cpp_conversation_state
-    ON channel_pending_prompts(conversation_id, state, id);
-
-CREATE INDEX idx_cpp_plugin_chat
-    ON channel_pending_prompts(channel_plugin_id, chat_id, state);
-
-CREATE INDEX idx_cpp_session
-    ON channel_pending_prompts(channel_session_id);
-
+CREATE INDEX idx_conversation_execution_links_conversation_id ON conversation_execution_links(conversation_id, relation, active, updated_at DESC);
+CREATE INDEX idx_conversation_execution_links_execution_id ON conversation_execution_links(execution_id, relation, active, step_id, attempt_id);
+CREATE INDEX idx_cpp_conversation_state ON channel_pending_prompts(conversation_id, state, id);
+CREATE INDEX idx_cpp_plugin_chat ON channel_pending_prompts(channel_plugin_id, chat_id, state);
+CREATE INDEX idx_cpp_session ON channel_pending_prompts(channel_session_id);
 CREATE INDEX idx_creation_tasks_conversation ON creation_tasks(conversation_id, submitted_at, creation_task_id) WHERE conversation_id IS NOT NULL;
-
-CREATE INDEX idx_creation_tasks_input_bindings_json ON creation_tasks(input_bindings);
-
-CREATE INDEX idx_creation_tasks_message ON creation_tasks(message_id) WHERE message_id IS NOT NULL;
-
-CREATE INDEX idx_creation_tasks_project_id ON creation_tasks(project_id);
-
-CREATE INDEX idx_creation_tasks_provider_id ON creation_tasks(provider_id);
-
-CREATE INDEX idx_creation_tasks_result_asset_ids_json ON creation_tasks(result_asset_ids);
-
-CREATE INDEX idx_creation_tasks_status ON creation_tasks(status);
-
-CREATE INDEX idx_creation_tasks_template_id ON creation_tasks(template_id);
-
-CREATE INDEX idx_creation_tasks_template_run_id ON creation_tasks(template_run_id);
-
-CREATE INDEX idx_creative_agent_proposal_receipts_assistant_message
-    ON creative_studio_agent_proposal_receipts(assistant_message_id);
-
-CREATE INDEX idx_creative_agent_proposal_receipts_project
-    ON creative_studio_agent_proposal_receipts(project_id);
-
-CREATE UNIQUE INDEX idx_creative_agent_sessions_conversation
-    ON creative_studio_agent_sessions(conversation_id);
-
-CREATE INDEX idx_creative_agent_sessions_owner
-    ON creative_studio_agent_sessions(owner_id);
-
-CREATE INDEX idx_creative_agent_sessions_project
-    ON creative_studio_agent_sessions(project_id);
-
-CREATE UNIQUE INDEX idx_creative_agent_sessions_session
-    ON creative_studio_agent_sessions(session_id);
-
-CREATE INDEX idx_creative_studio_projects_updated
-    ON creative_studio_projects(updated_at DESC, id DESC);
-
-CREATE INDEX idx_creative_studio_templates_category
-    ON creative_studio_templates(category, updated_at DESC, id DESC);
-
-CREATE INDEX idx_creative_studio_templates_updated
-    ON creative_studio_templates(updated_at DESC, id DESC);
-
-CREATE INDEX idx_creative_template_runs_status
-    ON creative_studio_template_runs(status, updated_at DESC, id DESC);
-
-CREATE INDEX idx_creative_template_runs_template_id
-    ON creative_studio_template_runs(template_id, updated_at DESC, id DESC);
-
+CREATE INDEX idx_creation_tasks_live ON creation_tasks(submitted_at, creation_task_id) WHERE status IN ('queued', 'running') AND deleted_at IS NULL;
+CREATE INDEX idx_creation_tasks_live_project ON creation_tasks(project_id, submitted_at, creation_task_id) WHERE status IN ('queued', 'running') AND node_id IS NOT NULL;
+CREATE INDEX idx_creation_tasks_live_provider ON creation_tasks(provider_id, model, submitted_at, creation_task_id) WHERE status IN ('queued', 'running');
+CREATE INDEX idx_creative_agent_proposal_receipts_project ON creative_studio_agent_proposal_receipts(project_id);
+CREATE UNIQUE INDEX idx_creative_agent_sessions_conversation ON creative_studio_agent_sessions(conversation_id);
+CREATE INDEX idx_creative_agent_sessions_project ON creative_studio_agent_sessions(project_id);
+CREATE UNIQUE INDEX idx_creative_agent_sessions_session ON creative_studio_agent_sessions(session_id);
+CREATE INDEX idx_creative_studio_projects_updated ON creative_studio_projects(updated_at DESC, id DESC);
+CREATE INDEX idx_creative_studio_templates_category ON creative_studio_templates(category, updated_at DESC, id DESC);
+CREATE INDEX idx_creative_studio_templates_updated ON creative_studio_templates(updated_at DESC, id DESC);
+CREATE INDEX idx_creative_template_runs_status ON creative_studio_template_runs(status, updated_at DESC, id DESC);
+CREATE INDEX idx_creative_template_runs_template_id ON creative_studio_template_runs(template_id, updated_at DESC, id DESC);
 CREATE INDEX idx_cron_job_runs_cron_job_id ON cron_job_runs(cron_job_id);
-
-CREATE INDEX idx_cron_jobs_conversation_id ON cron_jobs(conversation_id);
-
 CREATE INDEX idx_cron_jobs_next_run ON cron_jobs(enabled, next_run_at);
-
-CREATE INDEX idx_cron_jobs_nomi_provider_id
-    ON cron_jobs(
-        CASE
-            WHEN json_valid(agent_config) THEN json_extract(agent_config, '$.provider_id')
-            ELSE NULL
-        END
-    )
-    WHERE agent_type = 'nomi' AND agent_config IS NOT NULL;
-
-CREATE INDEX idx_cron_jobs_preset_id ON cron_jobs(preset_id);
-
-CREATE INDEX idx_cron_jobs_user_id ON cron_jobs(user_id);
-
-CREATE INDEX idx_cron_run_reservations_conversation_id
-    ON cron_run_reservations(conversation_id);
-
-CREATE INDEX idx_cron_run_reservations_cron_job_id
-    ON cron_run_reservations(cron_job_id);
-
-CREATE INDEX idx_cron_run_reservations_projection
-    ON cron_run_reservations(status, job_projection_state, created_at_ms);
-
-CREATE INDEX idx_cron_run_reservations_unsettled
-    ON cron_run_reservations(cron_job_id, updated_at_ms)
-    WHERE status = 'reserved';
-
-CREATE INDEX idx_cs_agent_capability_receipts_agent
-    ON cs_agent_capability_receipts(cs_agent_id, capability_id, created_at DESC);
-
-CREATE INDEX idx_cs_agent_capability_receipts_owner
-    ON cs_agent_capability_receipts(owner_user_id, created_at DESC);
-
-CREATE INDEX idx_cs_agents_knowledge_base_ids_json ON cs_agents(knowledge_base_ids);
-
-CREATE INDEX idx_cs_agents_provider_id ON cs_agents(provider_id);
-
+CREATE INDEX idx_cron_jobs_owner_conversation ON cron_jobs(user_id, conversation_id, created_at);
+CREATE INDEX idx_cron_run_reservations_cron_job_id ON cron_run_reservations(cron_job_id, status, created_at_ms, id);
+CREATE INDEX idx_cron_run_reservations_projection ON cron_run_reservations(status, job_projection_state, created_at_ms);
+CREATE INDEX idx_cs_agent_capability_receipts_agent ON cs_agent_capability_receipts(cs_agent_id, capability_id, created_at DESC);
 CREATE INDEX idx_cs_audit_agent_time ON cs_audit_events(cs_agent_id, created_at);
-
 CREATE INDEX idx_cs_channel_bindings_agent ON cs_channel_bindings(cs_agent_id);
-
 CREATE UNIQUE INDEX idx_cs_channel_bindings_plugin ON cs_channel_bindings(channel_plugin_id);
-
 CREATE INDEX idx_cs_dialogues_agent ON cs_dialogues(cs_agent_id, last_activity);
-
 CREATE INDEX idx_cs_dialogues_channel_user ON cs_dialogues(channel_user_id);
-
-CREATE UNIQUE INDEX idx_cs_dialogues_identity
-    ON cs_dialogues(channel_plugin_id, channel_user_id, chat_id);
-
-CREATE INDEX idx_cs_handoffs_agent_status
-    ON cs_handoffs(cs_agent_id, status, created_at DESC);
-
-CREATE INDEX idx_cs_handoffs_claimed_by
-    ON cs_handoffs(claimed_by, updated_at DESC)
-    WHERE claimed_by IS NOT NULL;
-
-CREATE INDEX idx_cs_handoffs_dialogue
-    ON cs_handoffs(cs_dialogue_id, created_at DESC);
-
-CREATE INDEX idx_cs_handoffs_requested_by
-    ON cs_handoffs(requested_by, created_at DESC);
-
-CREATE INDEX idx_cs_handoffs_updated_by
-    ON cs_handoffs(updated_by, updated_at DESC);
-
+CREATE UNIQUE INDEX idx_cs_dialogues_identity ON cs_dialogues(channel_plugin_id, channel_user_id, chat_id);
+CREATE INDEX idx_cs_handoffs_agent_status ON cs_handoffs(cs_agent_id, status, created_at DESC);
 CREATE INDEX idx_cs_messages_dialogue ON cs_messages(cs_dialogue_id, id);
-
 CREATE INDEX idx_cs_notes_agent ON cs_notes(cs_agent_id);
-
-CREATE INDEX idx_execution_attempts_execution_id ON agent_execution_attempts(execution_id);
-
-CREATE INDEX idx_execution_attempts_participant_id ON agent_execution_attempts(participant_id);
-
-CREATE INDEX idx_execution_attempts_step_id ON agent_execution_attempts(step_id);
-
-CREATE INDEX idx_execution_dependencies_blocked_step_id ON agent_execution_step_dependencies(blocked_step_id);
-
-CREATE INDEX idx_execution_dependencies_blocker_step_id ON agent_execution_step_dependencies(blocker_step_id);
-
-CREATE INDEX idx_execution_dependencies_execution_id ON agent_execution_step_dependencies(execution_id);
-
-CREATE INDEX idx_execution_events_actor_attempt_id ON agent_execution_events(actor_attempt_id);
-
-CREATE INDEX idx_execution_events_actor_conversation_id ON agent_execution_events(actor_conversation_id);
-
-CREATE INDEX idx_execution_events_actor_external_agent_id
-    ON agent_execution_events(actor_id)
-    WHERE actor_type = 'agent' AND actor_conversation_id IS NULL AND actor_id IS NOT NULL;
-
-CREATE INDEX idx_execution_events_actor_local_agent_id
-    ON agent_execution_events(actor_id)
-    WHERE actor_type = 'agent' AND actor_conversation_id IS NOT NULL AND actor_id IS NOT NULL;
-
-CREATE INDEX idx_execution_events_actor_user_id
-    ON agent_execution_events(actor_id)
-    WHERE actor_type = 'user' AND actor_id IS NOT NULL;
-
-CREATE INDEX idx_execution_events_attempt_id ON agent_execution_events(attempt_id);
-
-CREATE INDEX idx_execution_events_execution_id ON agent_execution_events(execution_id);
-
-CREATE INDEX idx_execution_events_on_behalf_of_user_id ON agent_execution_events(on_behalf_of_user_id);
-
-CREATE INDEX idx_execution_events_step_id ON agent_execution_events(step_id);
-
-CREATE INDEX idx_execution_events_unpublished ON agent_execution_events(published_at, id);
-
-CREATE INDEX idx_execution_participants_execution_id ON agent_execution_participants(execution_id);
-
-CREATE INDEX idx_execution_participants_preset_id ON agent_execution_participants(preset_id);
-
-CREATE INDEX idx_execution_participants_provider_id ON agent_execution_participants(provider_id);
-
-CREATE INDEX idx_execution_participants_source_agent_id ON agent_execution_participants(source_agent_id);
-
-CREATE INDEX idx_execution_steps_assigned_participant_id ON agent_execution_steps(assigned_participant_id);
-
-CREATE INDEX idx_execution_steps_execution_id ON agent_execution_steps(execution_id);
-
-CREATE INDEX idx_execution_templates_primary_participant_id ON agent_execution_templates(primary_participant_id);
-
+CREATE INDEX idx_execution_events_unpublished ON agent_execution_events(execution_id, sequence) WHERE published_at IS NULL;
+CREATE INDEX idx_execution_participants_execution_id ON agent_execution_participants(execution_id, retired_in_revision, participant_id);
+CREATE INDEX idx_execution_participants_provider_id ON agent_execution_participants(provider_id, retired_in_revision, execution_id);
+CREATE INDEX idx_execution_steps_execution_id ON agent_execution_steps(execution_id, superseded_in_revision, step_id);
 CREATE INDEX idx_execution_templates_user_id ON agent_execution_templates(user_id);
-
-CREATE INDEX idx_installation_identity_owner_user_id ON installation_identity(owner_user_id);
-
-CREATE INDEX idx_installation_role_bindings_provider_mount
-    ON installation_role_bindings(provider_mount_id);
-
 CREATE INDEX idx_knowledge_binding_bases_knowledge_base_id ON knowledge_binding_bases(knowledge_base_id);
-
-CREATE INDEX idx_knowledge_binding_bases_knowledge_binding_id
-    ON knowledge_binding_bases(knowledge_binding_id);
-
-CREATE INDEX idx_knowledge_entries_content_hash
-    ON knowledge_entries(knowledge_base_id, content_hash)
-    WHERE content_hash IS NOT NULL AND deleted_at IS NULL;
-
-CREATE INDEX idx_knowledge_entries_fs_identity
-    ON knowledge_entries(knowledge_base_id, fs_identity)
-    WHERE fs_identity IS NOT NULL AND deleted_at IS NULL;
-
-CREATE INDEX idx_knowledge_entries_knowledge_base_id
-    ON knowledge_entries(knowledge_base_id, parent_entry_id, deleted_at, name);
-
-CREATE INDEX idx_knowledge_entries_parent_entry_id
-    ON knowledge_entries(parent_entry_id, deleted_at);
-
-CREATE INDEX idx_knowledge_entry_provenance_derived_from_entry_id
-    ON knowledge_entry_provenance(derived_from_entry_id)
-    WHERE derived_from_entry_id IS NOT NULL;
-
-CREATE INDEX idx_knowledge_entry_provenance_source_item_id
-    ON knowledge_entry_provenance(knowledge_source_item_id, relationship, knowledge_entry_id);
-
-CREATE INDEX idx_knowledge_source_items_knowledge_source_id
-    ON knowledge_source_items(knowledge_source_id, state, ordinal, knowledge_source_item_id);
-
-CREATE INDEX idx_knowledge_sources_default_parent_entry_id
-    ON knowledge_sources(default_parent_entry_id)
-    WHERE default_parent_entry_id IS NOT NULL;
-
-CREATE INDEX idx_knowledge_sources_knowledge_base_id
-    ON knowledge_sources(knowledge_base_id, state, created_at, knowledge_source_id);
-
-CREATE INDEX idx_knowledge_tree_operations_knowledge_base_id
-    ON knowledge_tree_operations(knowledge_base_id, created_at, operation_id);
-
-CREATE INDEX idx_knowledge_tree_operations_pending_events
-    ON knowledge_tree_operations(event_status, committed_at, operation_id)
-    WHERE event_status = 'pending';
-
-CREATE INDEX idx_knowledge_tree_operations_recovery
-    ON knowledge_tree_operations(state, created_at, operation_id)
-    WHERE state <> 'committed';
-
-CREATE INDEX idx_mcp_servers_deleted_at ON mcp_servers(deleted_at);
-
-CREATE INDEX idx_mcp_servers_enabled ON mcp_servers(enabled);
-
-CREATE INDEX idx_nomi_remote_events_agent_session_id_seq
-    ON nomi_remote_events(agent_session_id, seq);
-
-CREATE INDEX idx_nomi_remote_sessions_agent_session_id
-    ON nomi_remote_sessions(agent_session_id);
-
-CREATE INDEX idx_nomi_remote_sessions_owner_open_key
-    ON nomi_remote_sessions(owner_user_id, open_idempotency_key);
-
-CREATE INDEX idx_nomi_remote_sessions_owner_user_id
-    ON nomi_remote_sessions(owner_user_id);
-
-CREATE INDEX idx_nomi_remote_sessions_remote_binding_id
-    ON nomi_remote_sessions(remote_binding_id);
-
-CREATE INDEX idx_nomi_wave1_memory_receipts_agent_session_id
-    ON nomi_wave1_memory_action_receipts(agent_session_id);
-
-CREATE INDEX idx_nomi_wave1_memory_receipts_orphan_sweep
-    ON nomi_wave1_memory_action_receipts(updated_at, agent_session_id);
-
-CREATE INDEX idx_nomi_wave1_memory_receipts_owner_user_id
-    ON nomi_wave1_memory_action_receipts(owner_user_id);
-
-CREATE INDEX idx_nomi_wave4_receipts_agent_session_id
-    ON nomi_wave4_action_receipts(agent_session_id);
-
-CREATE INDEX idx_nomi_wave4_receipts_orphan_sweep
-    ON nomi_wave4_action_receipts(updated_at, agent_session_id);
-
-CREATE INDEX idx_nomi_wave4_receipts_owner_user_id
-    ON nomi_wave4_action_receipts(owner_user_id);
-
-CREATE INDEX idx_plugin_artifacts_package_id
-    ON plugin_artifacts(package_id, package_version, artifact_id);
-
-CREATE INDEX idx_plugin_build_operation_lineage_operation_id
-    ON plugin_build_operation_lineage(operation_id);
-
-CREATE INDEX idx_plugin_build_operation_lineage_owner
-    ON plugin_build_operation_lineage(owner_user_id, plugin_product_id, started_at_ms DESC);
-
-CREATE INDEX idx_plugin_build_operation_lineage_plugin_product_id
-    ON plugin_build_operation_lineage(plugin_product_id);
-
-CREATE INDEX idx_plugin_build_operation_lineage_project
-    ON plugin_build_operation_lineage(project_id, owner_user_id, build_generation);
-
-CREATE INDEX idx_plugin_candidate_test_receipts_artifact_digest
-    ON plugin_candidate_test_receipts(artifact_digest);
-
-CREATE INDEX idx_plugin_candidate_test_receipts_artifact_id
-    ON plugin_candidate_test_receipts(artifact_id);
-
-CREATE INDEX idx_plugin_candidate_test_receipts_candidate_id
-    ON plugin_candidate_test_receipts(candidate_id);
-
-CREATE INDEX idx_plugin_catalog_publications_active_release_id
-    ON plugin_catalog_publications(active_release_id);
-
-CREATE INDEX idx_plugin_catalog_publications_owner_user_id
-    ON plugin_catalog_publications(owner_user_id);
-
-CREATE INDEX idx_plugin_catalog_publications_plugin_product_id
-    ON plugin_catalog_publications(plugin_product_id);
-
-CREATE INDEX idx_plugin_credential_binding_mutations_mount_id
-    ON plugin_credential_binding_mutations(mount_id);
-
-CREATE INDEX idx_plugin_credential_bindings_credential_id
-    ON plugin_credential_bindings(credential_id);
-
-CREATE INDEX idx_plugin_credential_bindings_owner_user_id
-    ON plugin_credential_bindings(owner_user_id);
-
-CREATE INDEX idx_plugin_credential_bindings_plugin_product_id
-    ON plugin_credential_bindings(plugin_product_id);
-
-CREATE INDEX idx_plugin_credential_bindings_product
-    ON plugin_credential_bindings(owner_user_id, plugin_product_id, slot_key);
-
-CREATE INDEX idx_plugin_deletion_intents_operation_id
-    ON plugin_deletion_intents(operation_id);
-
-CREATE INDEX idx_plugin_deletion_intents_owner_user_id
-    ON plugin_deletion_intents(owner_user_id);
-
-CREATE INDEX idx_plugin_deletion_intents_plugin_product_id
-    ON plugin_deletion_intents(plugin_product_id);
-
-CREATE INDEX idx_plugin_dependency_mutation_commits_intent_id
-    ON plugin_dependency_mutation_commits(intent_id);
-
-CREATE INDEX idx_plugin_dependency_mutation_commits_project_id
-    ON plugin_dependency_mutation_commits(project_id);
-
-CREATE INDEX idx_plugin_dependency_mutation_intents_owner_user_id
-    ON plugin_dependency_mutation_intents(owner_user_id);
-
-CREATE INDEX idx_plugin_dependency_mutation_intents_project_id
-    ON plugin_dependency_mutation_intents(project_id);
-
-CREATE INDEX idx_plugin_kv_owner_user_id
-    ON plugin_kv(owner_user_id);
-
-CREATE INDEX idx_plugin_kv_plugin_product_id
-    ON plugin_kv(plugin_product_id);
-
-CREATE INDEX idx_plugin_kv_product
-    ON plugin_kv(owner_user_id, plugin_product_id, namespace, key);
-
-CREATE INDEX idx_plugin_library_state_owner
-    ON plugin_library_state(owner_user_id, revision);
-
-CREATE INDEX idx_plugin_library_state_owner_user_id
-    ON plugin_library_state(owner_user_id);
-
-CREATE INDEX idx_plugin_mount_credential_bindings_credential_id
-    ON plugin_mount_credential_bindings(credential_id);
-
-CREATE INDEX idx_plugin_mount_credential_bindings_mount_id
-    ON plugin_mount_credential_bindings(mount_id, slot);
-
-CREATE INDEX idx_plugin_mount_kv_mount_id
-    ON plugin_mount_kv(mount_id, namespace, key);
-
-CREATE INDEX idx_plugin_mount_revisions_artifact_digest
-    ON plugin_mount_revisions(artifact_digest);
-
-CREATE INDEX idx_plugin_mount_revisions_artifact_id
-    ON plugin_mount_revisions(artifact_id);
-
-CREATE INDEX idx_plugin_mount_revisions_mount_id
-    ON plugin_mount_revisions(mount_id, revision);
-
-CREATE INDEX idx_plugin_mounts_current_revision_id
-    ON plugin_mounts(current_revision_id);
-
-CREATE INDEX idx_plugin_mounts_previous_revision_id
-    ON plugin_mounts(previous_revision_id);
-
-CREATE INDEX idx_plugin_product_documents_owner ON plugin_product_documents(owner_user_id);
-
-CREATE INDEX idx_plugin_products_active_release_id
-    ON plugin_products(active_release_id);
-
-CREATE INDEX idx_plugin_products_icon_asset_id
-    ON plugin_products(icon_asset_id);
-
-CREATE INDEX idx_plugin_products_owner
-    ON plugin_products(owner_user_id, updated_at DESC, id DESC);
-
-CREATE INDEX idx_plugin_products_owner_user_id
-    ON plugin_products(owner_user_id);
-
-CREATE INDEX idx_plugin_products_previous_release_id
-    ON plugin_products(previous_release_id);
-
-CREATE INDEX idx_plugin_products_ready_release_id
-    ON plugin_products(ready_release_id);
-
-CREATE INDEX idx_plugin_projects_auto_apply_mount_id
-    ON plugin_projects(auto_apply_mount_id);
-
-CREATE INDEX idx_plugin_projects_linked_mount_id
-    ON plugin_projects(linked_mount_id);
-
-CREATE INDEX idx_plugin_projects_owner
-    ON plugin_projects(owner_user_id, plugin_product_id, updated_at DESC);
-
-CREATE INDEX idx_plugin_projects_owner_user_id
-    ON plugin_projects(owner_user_id, project_id);
-
-CREATE INDEX idx_plugin_projects_plugin_product_id
-    ON plugin_projects(plugin_product_id);
-
-CREATE INDEX idx_plugin_projects_ready_candidate_id
-    ON plugin_projects(ready_candidate_id);
-
-CREATE INDEX idx_plugin_publish_authorizations_owner_user_id
-    ON plugin_publish_authorizations(owner_user_id);
-
-CREATE INDEX idx_plugin_publish_authorizations_plugin_product_id
-    ON plugin_publish_authorizations(plugin_product_id);
-
-CREATE INDEX idx_plugin_ready_candidates_artifact_digest
-    ON plugin_ready_candidates(artifact_digest);
-
-CREATE INDEX idx_plugin_ready_candidates_artifact_id
-    ON plugin_ready_candidates(artifact_id);
-
-CREATE INDEX idx_plugin_ready_candidates_origin_operation_id
-    ON plugin_ready_candidates(origin_operation_id);
-
-CREATE INDEX idx_plugin_ready_candidates_project_id
-    ON plugin_ready_candidates(project_id);
-
-CREATE INDEX idx_plugin_release_artifacts_owner
-    ON plugin_release_artifacts(owner_user_id, artifact_digest);
-
-CREATE INDEX idx_plugin_release_artifacts_owner_user_id
-    ON plugin_release_artifacts(owner_user_id);
-
-CREATE INDEX idx_plugin_releases_artifact_id
-    ON plugin_releases(artifact_id);
-
-CREATE INDEX idx_plugin_releases_origin_operation_id
-    ON plugin_releases(origin_operation_id);
-
-CREATE INDEX idx_plugin_releases_owner_user_id
-    ON plugin_releases(owner_user_id);
-
-CREATE INDEX idx_plugin_releases_plugin_product_id
-    ON plugin_releases(plugin_product_id);
-
-CREATE INDEX idx_plugin_releases_product
-    ON plugin_releases(owner_user_id, plugin_product_id, created_at DESC);
-
-CREATE INDEX idx_plugin_releases_project_id
-    ON plugin_releases(project_id);
-
-CREATE INDEX idx_plugin_releases_release_digest
-    ON plugin_releases(owner_user_id, plugin_product_id, release_digest);
-
-CREATE INDEX idx_plugin_service_test_receipts_current
-    ON plugin_service_test_receipts(
-        owner_user_id,
-        plugin_product_id,
-        release_id,
-        release_digest,
-        issued_at_ms DESC
-    );
-
-CREATE INDEX idx_plugin_service_test_receipts_owner_user_id
-    ON plugin_service_test_receipts(owner_user_id);
-
-CREATE INDEX idx_plugin_service_test_receipts_plugin_product_id
-    ON plugin_service_test_receipts(plugin_product_id);
-
-CREATE INDEX idx_plugin_service_test_receipts_release_id
-    ON plugin_service_test_receipts(release_id);
-
-CREATE INDEX idx_plugin_source_mutation_commits_intent_id
-    ON plugin_source_mutation_commits(intent_id);
-
-CREATE INDEX idx_plugin_source_mutation_commits_project_id
-    ON plugin_source_mutation_commits(project_id);
-
-CREATE INDEX idx_plugin_source_mutation_intents_owner_user_id
-    ON plugin_source_mutation_intents(owner_user_id);
-
-CREATE INDEX idx_plugin_source_mutation_intents_plugin_product_id
-    ON plugin_source_mutation_intents(plugin_product_id);
-
-CREATE INDEX idx_plugin_source_mutation_intents_project_id
-    ON plugin_source_mutation_intents(project_id);
-
-CREATE INDEX idx_plugin_surface_sessions_active_release_id
-    ON plugin_surface_sessions(active_release_id);
-
-CREATE INDEX idx_plugin_surface_sessions_capability_digest
-    ON plugin_surface_sessions(capability_digest);
-
-CREATE INDEX idx_plugin_surface_sessions_conversation_id
-    ON plugin_surface_sessions(conversation_id);
-
-CREATE INDEX idx_plugin_surface_sessions_owner_user_id
-    ON plugin_surface_sessions(owner_user_id);
-
-CREATE INDEX idx_plugin_surface_sessions_plugin_product_id
-    ON plugin_surface_sessions(plugin_product_id);
-
-CREATE INDEX idx_product_agent_selections_owner_user_id ON product_agent_selections(owner_user_id);
-
-CREATE INDEX idx_product_operations_plugin_mount_owner_id
-    ON product_operations(owner_id, started_at_ms, operation_id)
-    WHERE owner_kind = 'plugin_mount';
-
-CREATE INDEX idx_product_operations_plugin_owner_id
-    ON product_operations(owner_id, started_at_ms, operation_id)
-    WHERE owner_kind = 'plugin';
-
-CREATE INDEX idx_product_operations_plugin_project_owner_id
-    ON product_operations(owner_id, started_at_ms, operation_id)
-    WHERE owner_kind = 'plugin_project';
-
-CREATE INDEX idx_provider_connections_provider_id ON provider_connections(provider_id);
-
-CREATE INDEX idx_provider_model_capabilities_provider_model
-    ON provider_model_capabilities(provider_id, model);
-
-CREATE INDEX idx_provider_model_capabilities_task
-    ON provider_model_capabilities(task, provider_id, model);
-
-CREATE INDEX idx_provider_models_provider_id ON provider_models(provider_id);
-
-CREATE INDEX idx_providers_platform ON providers(platform);
-
-CREATE INDEX idx_remote_bindings_owner_user_id
-    ON remote_bindings(owner_user_id);
-
-CREATE INDEX idx_requirement_pre_effect_abandon_owner_conversation
-    ON requirement_pre_effect_abandon_guards(owner_conversation_id)
-    WHERE owner_conversation_id IS NOT NULL;
-
-CREATE INDEX idx_requirement_pre_effect_abandon_owner_terminal
-    ON requirement_pre_effect_abandon_guards(owner_terminal_id)
-    WHERE owner_terminal_id IS NOT NULL;
-
-CREATE UNIQUE INDEX idx_requirement_pre_effect_abandon_requirement_id
-    ON requirement_pre_effect_abandon_guards(requirement_id);
-
+CREATE INDEX idx_knowledge_entries_knowledge_base_id ON knowledge_entries(knowledge_base_id, parent_entry_id, deleted_at, name);
+CREATE INDEX idx_knowledge_entry_provenance_source_item_id ON knowledge_entry_provenance(knowledge_source_item_id, relationship, knowledge_entry_id);
+CREATE INDEX idx_knowledge_source_items_knowledge_source_id ON knowledge_source_items(knowledge_source_id, state, ordinal, knowledge_source_item_id);
+CREATE INDEX idx_knowledge_sources_default_parent_entry_id ON knowledge_sources(default_parent_entry_id) WHERE default_parent_entry_id IS NOT NULL;
+CREATE INDEX idx_knowledge_sources_knowledge_base_id ON knowledge_sources(knowledge_base_id, state, created_at, knowledge_source_id);
+CREATE INDEX idx_knowledge_tree_operations_knowledge_base_id ON knowledge_tree_operations(knowledge_base_id, created_at, operation_id);
+CREATE INDEX idx_knowledge_tree_operations_pending_events ON knowledge_tree_operations(event_status, committed_at, operation_id) WHERE event_status = 'pending';
+CREATE INDEX idx_knowledge_tree_operations_recovery ON knowledge_tree_operations(state, created_at, operation_id) WHERE state <> 'committed';
+CREATE INDEX idx_nomi_remote_sessions_remote_binding_id ON nomi_remote_sessions(remote_binding_id);
+CREATE INDEX idx_nomi_wave1_memory_receipts_agent_session_id ON nomi_wave1_memory_action_receipts(agent_session_id);
+CREATE INDEX idx_nomi_wave1_memory_receipts_orphan_sweep ON nomi_wave1_memory_action_receipts(updated_at, agent_session_id);
+CREATE INDEX idx_nomi_wave4_receipts_agent_session_id ON nomi_wave4_action_receipts(agent_session_id);
+CREATE INDEX idx_nomi_wave4_receipts_orphan_sweep ON nomi_wave4_action_receipts(updated_at, agent_session_id);
+CREATE INDEX idx_plugin_artifacts_package_id ON plugin_artifacts(package_id, package_version, artifact_id);
+CREATE INDEX idx_plugin_build_operation_lineage_owner ON plugin_build_operation_lineage(owner_user_id, plugin_product_id, started_at_ms DESC);
+CREATE INDEX idx_plugin_build_operation_lineage_project ON plugin_build_operation_lineage(project_id, owner_user_id, build_generation);
+CREATE INDEX idx_plugin_catalog_publications_active_release_id ON plugin_catalog_publications(active_release_id);
+CREATE INDEX idx_plugin_credential_bindings_credential_id ON plugin_credential_bindings(credential_id);
+CREATE INDEX idx_plugin_library_state_owner ON plugin_library_state(owner_user_id, revision);
+CREATE INDEX idx_plugin_mount_credential_bindings_credential_id ON plugin_mount_credential_bindings(credential_id);
+CREATE INDEX idx_plugin_mount_revisions_artifact_id ON plugin_mount_revisions(artifact_id);
+CREATE INDEX idx_plugin_products_owner ON plugin_products(owner_user_id, updated_at DESC, id DESC);
+CREATE INDEX idx_plugin_projects_owner ON plugin_projects(owner_user_id, plugin_product_id, updated_at DESC);
+CREATE INDEX idx_plugin_releases_artifact_id ON plugin_releases(artifact_id);
+CREATE INDEX idx_plugin_releases_origin_operation_id ON plugin_releases(origin_operation_id);
+CREATE INDEX idx_plugin_releases_product ON plugin_releases(owner_user_id, plugin_product_id, created_at DESC);
+CREATE INDEX idx_plugin_releases_release_digest ON plugin_releases(owner_user_id, plugin_product_id, release_digest);
+CREATE INDEX idx_plugin_service_test_receipts_current ON plugin_service_test_receipts( owner_user_id, plugin_product_id, release_id, release_digest, issued_at_ms DESC );
+CREATE INDEX idx_plugin_surface_sessions_conversation_id ON plugin_surface_sessions(conversation_id);
+CREATE INDEX idx_product_operations_plugin_mount_owner_id ON product_operations(owner_id, started_at_ms, operation_id) WHERE owner_kind = 'plugin_mount';
+CREATE INDEX idx_product_operations_plugin_owner_id ON product_operations(owner_id, started_at_ms, operation_id) WHERE owner_kind = 'plugin';
+CREATE INDEX idx_product_operations_plugin_project_owner_id ON product_operations(owner_id, started_at_ms, operation_id) WHERE owner_kind = 'plugin_project';
+CREATE INDEX idx_provider_model_capabilities_task ON provider_model_capabilities(task, provider_id, model);
+CREATE INDEX idx_requirement_pre_effect_abandon_owner_conversation ON requirement_pre_effect_abandon_guards(owner_conversation_id) WHERE owner_conversation_id IS NOT NULL;
+CREATE INDEX idx_requirement_pre_effect_abandon_owner_terminal ON requirement_pre_effect_abandon_guards(owner_terminal_id) WHERE owner_terminal_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_requirement_pre_effect_abandon_requirement_id ON requirement_pre_effect_abandon_guards(requirement_id);
 CREATE INDEX idx_requirement_tags_paused_requirement_id ON requirement_tags(paused_requirement_id);
-
-CREATE INDEX idx_requirements_owner_conversation_id ON requirements(owner_conversation_id);
-
-CREATE INDEX idx_requirements_owner_terminal_id ON requirements(owner_terminal_id);
-
-CREATE INDEX idx_requirements_status ON requirements(status);
-
 CREATE INDEX idx_requirements_tag_order ON requirements(tag, sort_seq);
-
-CREATE INDEX idx_ssh_hosts_status ON ssh_hosts(status);
-
 CREATE INDEX idx_ssh_hosts_user_id ON ssh_hosts(user_id);
-
 CREATE INDEX idx_tag_settings_webhook_id ON tag_settings(webhook_id);
-
-CREATE INDEX idx_template_participants_preset_id ON agent_execution_template_participants(preset_id);
-
-CREATE INDEX idx_template_participants_provider_id ON agent_execution_template_participants(provider_id);
-
-CREATE INDEX idx_template_participants_source_agent_id ON agent_execution_template_participants(source_agent_id);
-
-CREATE INDEX idx_template_participants_template_id ON agent_execution_template_participants(template_id);
-
-CREATE INDEX idx_terminal_scrollback_terminal_id ON terminal_scrollback(terminal_id);
-
-CREATE INDEX idx_terminal_sessions_idmm_decision_provider_id
-    ON terminal_sessions(json_extract(idmm, '$.decision_watch.bypass_model.provider_id'))
-    WHERE idmm IS NOT NULL;
-
-CREATE INDEX idx_terminal_sessions_idmm_fault_provider_id
-    ON terminal_sessions(json_extract(idmm, '$.fault_watch.bypass_model.provider_id'))
-    WHERE idmm IS NOT NULL;
-
+CREATE INDEX idx_template_participants_provider_id ON agent_execution_template_participants(provider_id, template_id);
+CREATE INDEX idx_template_participants_template_id ON agent_execution_template_participants(template_id, template_participant_id);
 CREATE INDEX idx_terminal_sessions_user_id ON terminal_sessions(user_id);
-
-CREATE INDEX idx_terminal_turn_admissions_requirement
-    ON terminal_turn_admissions(requirement_id, claim_generation);
-
-CREATE INDEX idx_terminal_turn_admissions_terminal_epoch
-    ON terminal_turn_admissions(terminal_id, pty_epoch);
-
-CREATE INDEX idx_workshop_assets_kind ON workshop_assets(kind);
-
-CREATE INDEX idx_workshop_assets_library ON workshop_assets(in_library);
-
-CREATE INDEX idx_workshop_assets_origin_canvas_id
-    ON workshop_assets(json_extract(origin, '$.canvas_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_conversation ON workshop_assets(json_extract(origin, '$.conversation_id'));
-
-CREATE INDEX idx_workshop_assets_origin_creation_task_id
-    ON workshop_assets(json_extract(origin, '$.creation_task_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_message ON workshop_assets(json_extract(origin, '$.message_id'));
-
-CREATE INDEX idx_workshop_assets_origin_node_id
-    ON workshop_assets(json_extract(origin, '$.node_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_project_id
-    ON workshop_assets(json_extract(origin, '$.project_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_provider_id
-    ON workshop_assets(json_extract(origin, '$.provider_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_template_id
-    ON workshop_assets(json_extract(origin, '$.template_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_template_run_id
-    ON workshop_assets(json_extract(origin, '$.template_run_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_origin_template_step_id
-    ON workshop_assets(json_extract(origin, '$.template_step_id'))
-    WHERE origin IS NOT NULL;
-
-CREATE INDEX idx_workshop_assets_pending_content_deletion
-    ON workshop_assets(deleted_at, asset_id)
-    WHERE deleted_at IS NOT NULL AND content_deleted_at IS NULL;
-
-CREATE UNIQUE INDEX uq_channel_plugins_type_bot_key
-    ON channel_plugins(type, bot_key) WHERE bot_key IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_cron_run_reservations_scheduled_occurrence
-    ON cron_run_reservations(cron_job_id, schedule_revision, planned_at_ms)
-    WHERE trigger_kind = 'scheduled';
-
-CREATE UNIQUE INDEX uq_cs_handoffs_active_dialogue
-    ON cs_handoffs(cs_dialogue_id)
-    WHERE status IN ('pending', 'claimed');
-
-CREATE UNIQUE INDEX uq_knowledge_bindings_target_companion_id
-    ON knowledge_bindings(target_companion_id)
-    WHERE target_kind = 'companion' AND target_companion_id IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_knowledge_bindings_target_conversation_id
-    ON knowledge_bindings(target_conversation_id)
-    WHERE target_kind = 'conversation' AND target_conversation_id IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_knowledge_bindings_target_terminal_id
-    ON knowledge_bindings(target_terminal_id)
-    WHERE target_kind = 'terminal' AND target_terminal_id IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_knowledge_bindings_target_workpath
-    ON knowledge_bindings(target_workpath)
-    WHERE target_kind = 'workpath' AND target_workpath IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_knowledge_entries_live_portable_path
-    ON knowledge_entries(knowledge_base_id, portable_rel_path)
-    WHERE deleted_at IS NULL;
-
-CREATE UNIQUE INDEX uq_knowledge_entries_live_rel_path
-    ON knowledge_entries(knowledge_base_id, rel_path)
-    WHERE deleted_at IS NULL;
-
-CREATE UNIQUE INDEX uq_knowledge_entry_provenance_entry_id
-    ON knowledge_entry_provenance(knowledge_entry_id);
-
-CREATE UNIQUE INDEX uq_knowledge_entry_provenance_managed_source_item
-    ON knowledge_entry_provenance(knowledge_source_item_id)
-    WHERE relationship = 'managed';
-
-CREATE UNIQUE INDEX uq_knowledge_source_items_live_normalized_url
-    ON knowledge_source_items(knowledge_source_id, normalized_url)
-    WHERE state <> 'removed';
-
-CREATE UNIQUE INDEX uq_knowledge_source_items_live_ordinal
-    ON knowledge_source_items(knowledge_source_id, ordinal)
-    WHERE state <> 'removed';
-
-CREATE UNIQUE INDEX uq_knowledge_sources_live_kind
-    ON knowledge_sources(knowledge_base_id, kind)
-    WHERE state <> 'removed';
-
-CREATE UNIQUE INDEX uq_requirements_active_conversation_owner
-    ON requirements(owner_conversation_id)
-    WHERE status = 'in_progress' AND owner_conversation_id IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_requirements_active_terminal_owner
-    ON requirements(owner_terminal_id)
-    WHERE status = 'in_progress' AND owner_terminal_id IS NOT NULL;
-
-CREATE UNIQUE INDEX uq_terminal_turn_admissions_exact_claim
-    ON terminal_turn_admissions(
-        terminal_id,
-        pty_epoch,
-        requirement_id,
-        claim_generation
-    );
-
-CREATE UNIQUE INDEX uq_terminal_turn_admissions_requirement_claim
-    ON terminal_turn_admissions(requirement_id, claim_generation);
-
-CREATE UNIQUE INDEX uq_workshop_assets_prompt_library_identity
-    ON workshop_assets(
-        json_extract(origin, '$.prompt_library_source'),
-        json_extract(origin, '$.prompt_library_id')
-    )
-    WHERE kind = 'text'
-      AND deleted_at IS NULL
-      AND json_type(origin, '$.prompt_library_source') = 'text'
-      AND json_type(origin, '$.prompt_library_id') = 'text';
-
+CREATE INDEX idx_workshop_assets_live_library_kind ON workshop_assets(in_library, kind, updated_at DESC, id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_workshop_assets_live_updated ON workshop_assets(updated_at DESC, id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX idx_workshop_assets_pending_content_deletion ON workshop_assets(deleted_at, asset_id) WHERE deleted_at IS NOT NULL AND content_deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_channel_plugins_type_bot_key ON channel_plugins(type, bot_key) WHERE bot_key IS NOT NULL;
+CREATE UNIQUE INDEX uq_cron_run_reservations_scheduled_occurrence ON cron_run_reservations(cron_job_id, schedule_revision, planned_at_ms) WHERE trigger_kind = 'scheduled';
+CREATE UNIQUE INDEX uq_cs_handoffs_active_dialogue ON cs_handoffs(cs_dialogue_id) WHERE status IN ('pending', 'claimed');
+CREATE UNIQUE INDEX uq_knowledge_bindings_target_companion_id ON knowledge_bindings(target_companion_id) WHERE target_kind = 'companion' AND target_companion_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_knowledge_bindings_target_conversation_id ON knowledge_bindings(target_conversation_id) WHERE target_kind = 'conversation' AND target_conversation_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_knowledge_bindings_target_terminal_id ON knowledge_bindings(target_terminal_id) WHERE target_kind = 'terminal' AND target_terminal_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_knowledge_bindings_target_workpath ON knowledge_bindings(target_workpath) WHERE target_kind = 'workpath' AND target_workpath IS NOT NULL;
+CREATE UNIQUE INDEX uq_knowledge_entries_live_portable_path ON knowledge_entries(knowledge_base_id, portable_rel_path) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_knowledge_entries_live_rel_path ON knowledge_entries(knowledge_base_id, rel_path) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX uq_knowledge_entry_provenance_entry_id ON knowledge_entry_provenance(knowledge_entry_id);
+CREATE UNIQUE INDEX uq_knowledge_entry_provenance_managed_source_item ON knowledge_entry_provenance(knowledge_source_item_id) WHERE relationship = 'managed';
+CREATE UNIQUE INDEX uq_knowledge_source_items_live_normalized_url ON knowledge_source_items(knowledge_source_id, normalized_url) WHERE state <> 'removed';
+CREATE UNIQUE INDEX uq_knowledge_source_items_live_ordinal ON knowledge_source_items(knowledge_source_id, ordinal) WHERE state <> 'removed';
+CREATE UNIQUE INDEX uq_knowledge_sources_live_kind ON knowledge_sources(knowledge_base_id, kind) WHERE state <> 'removed';
+CREATE UNIQUE INDEX uq_requirements_active_conversation_owner ON requirements(owner_conversation_id) WHERE status = 'in_progress' AND owner_conversation_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_requirements_active_terminal_owner ON requirements(owner_terminal_id) WHERE status = 'in_progress' AND owner_terminal_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_terminal_turn_admissions_exact_claim ON terminal_turn_admissions( terminal_id, pty_epoch, requirement_id, claim_generation );
+CREATE UNIQUE INDEX uq_terminal_turn_admissions_requirement_claim ON terminal_turn_admissions(requirement_id, claim_generation);
+CREATE UNIQUE INDEX uq_workshop_assets_prompt_library_identity ON workshop_assets( json_extract(origin, '$.prompt_library_source'), json_extract(origin, '$.prompt_library_id') ) WHERE kind = 'text' AND deleted_at IS NULL AND json_type(origin, '$.prompt_library_source') = 'text' AND json_type(origin, '$.prompt_library_id') = 'text';
 CREATE TRIGGER channel_inbound_receipts_identity_immutable
 BEFORE UPDATE OF
     operation_key,

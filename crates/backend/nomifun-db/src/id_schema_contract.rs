@@ -1,9 +1,11 @@
 //! Runtime assertions for the clean v3 database lineage.
 //!
 //! Product tables use local `INTEGER PRIMARY KEY AUTOINCREMENT` row identities.
-//! Cross-boundary identities live in explicitly named columns, while indexed
-//! logical links replace SQLite foreign keys. This module is the executable
-//! registry for that contract and provides a read-only orphan-audit skeleton.
+//! Cross-boundary identities live in explicitly named columns, while logical
+//! links replace SQLite foreign keys. Physical indexes are selected separately
+//! from query workloads instead of being required for every relationship.
+//! This module is the executable registry for those contracts and provides a
+//! read-only orphan-audit skeleton.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,6 +61,13 @@ pub(crate) const CANONICAL_AGENT_STORE_TABLES: &[&str] = &[
     "agent_session_heads",
     "agent_messages",
 ];
+
+/// Hard ceiling for product-owned SQLite B-trees on one table.
+///
+/// `PRAGMA index_list` includes UNIQUE auto-indexes, so this is a physical
+/// storage/write-amplification budget rather than a count of handwritten
+/// `CREATE INDEX` statements. FTS shadow tables are SQLite-owned and excluded.
+const MAX_INDEXES_PER_TABLE: usize = 5;
 
 pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "agent_execution_attempts",
@@ -477,7 +486,6 @@ pub(crate) struct LogicalReference {
     pub kind: LogicalReferenceKind,
     pub value_contract: LogicalReferenceValueContract,
     pub nullable: bool,
-    pub index_name: &'static str,
     pub delete_policy: DeletePolicy,
     pub rebuild_policy: RebuildPolicy,
     pub orphan_audit_policy: OrphanAuditPolicy,
@@ -530,7 +538,6 @@ pub(crate) struct JsonLogicalReference {
     pub parent_table: Option<&'static str>,
     pub parent_column: Option<&'static str>,
     pub value_contract: LogicalReferenceValueContract,
-    pub index_name: &'static str,
     pub delete_policy: DeletePolicy,
     pub rebuild_policy: RebuildPolicy,
     pub orphan_audit_policy: OrphanAuditPolicy,
@@ -538,7 +545,7 @@ pub(crate) struct JsonLogicalReference {
 
 macro_rules! json_text_ref {
     ($table:literal, $column:literal, $path:literal, $sql:literal =>
-     $parent_table:literal, $parent_column:literal, $index:literal, $delete:ident,
+     $parent_table:literal, $parent_column:literal, $delete:ident,
      $audit:ident) => {
         JsonLogicalReference {
             child_table: $table,
@@ -548,7 +555,6 @@ macro_rules! json_text_ref {
             parent_table: Some($parent_table),
             parent_column: Some($parent_column),
             value_contract: LogicalReferenceValueContract::CanonicalUuidV7,
-            index_name: $index,
             delete_policy: DeletePolicy::$delete,
             rebuild_policy: RebuildPolicy::PreserveBusinessId,
             orphan_audit_policy: OrphanAuditPolicy::$audit,
@@ -557,8 +563,7 @@ macro_rules! json_text_ref {
 }
 
 macro_rules! json_external_ref {
-    ($table:literal, $column:literal, $path:literal, $sql:literal, $index:literal,
-     $delete:ident) => {
+    ($table:literal, $column:literal, $path:literal, $sql:literal, $delete:ident) => {
         JsonLogicalReference {
             child_table: $table,
             child_column: $column,
@@ -570,7 +575,6 @@ macro_rules! json_external_ref {
             // but the identifier itself is still a NomiFun business ID and
             // must remain a canonical bare UUIDv7.
             value_contract: LogicalReferenceValueContract::CanonicalUuidV7,
-            index_name: $index,
             delete_policy: DeletePolicy::$delete,
             rebuild_policy: RebuildPolicy::ExternalOwner,
             orphan_audit_policy: OrphanAuditPolicy::ExternalOwner,
@@ -589,7 +593,7 @@ const fn default_orphan_audit_policy(delete_policy: DeletePolicy) -> OrphanAudit
 
 macro_rules! text_ref {
     ($child_table:literal, $child_column:literal => $parent_table:literal, $parent_column:literal,
-     $nullable:expr, $index:literal, $delete:ident) => {
+     $nullable:expr, $delete:ident) => {
         LogicalReference {
             child_table: $child_table,
             child_column: $child_column,
@@ -598,7 +602,6 @@ macro_rules! text_ref {
             kind: LogicalReferenceKind::Text,
             value_contract: LogicalReferenceValueContract::CanonicalUuidV7,
             nullable: $nullable,
-            index_name: $index,
             delete_policy: DeletePolicy::$delete,
             rebuild_policy: RebuildPolicy::PreserveBusinessId,
             orphan_audit_policy: default_orphan_audit_policy(DeletePolicy::$delete),
@@ -612,7 +615,7 @@ macro_rules! text_ref {
 
 macro_rules! opaque_text_ref {
     ($child_table:literal, $child_column:literal => $parent_table:literal, $parent_column:literal,
-     $nullable:expr, $index:literal, $delete:ident) => {
+     $nullable:expr, $delete:ident) => {
         LogicalReference {
             child_table: $child_table,
             child_column: $child_column,
@@ -621,7 +624,6 @@ macro_rules! opaque_text_ref {
             kind: LogicalReferenceKind::Text,
             value_contract: LogicalReferenceValueContract::Opaque,
             nullable: $nullable,
-            index_name: $index,
             delete_policy: DeletePolicy::$delete,
             rebuild_policy: RebuildPolicy::PreserveBusinessId,
             orphan_audit_policy: default_orphan_audit_policy(DeletePolicy::$delete),
@@ -635,7 +637,7 @@ macro_rules! opaque_text_ref {
 
 macro_rules! external_ref {
     ($child_table:literal, $child_column:literal, $kind:ident, $nullable:expr,
-     $value_contract:ident, $index:literal, $delete:ident) => {
+     $value_contract:ident, $delete:ident) => {
         LogicalReference {
             child_table: $child_table,
             child_column: $child_column,
@@ -644,7 +646,6 @@ macro_rules! external_ref {
             kind: LogicalReferenceKind::$kind,
             value_contract: LogicalReferenceValueContract::$value_contract,
             nullable: $nullable,
-            index_name: $index,
             delete_policy: DeletePolicy::$delete,
             rebuild_policy: RebuildPolicy::ExternalOwner,
             orphan_audit_policy: OrphanAuditPolicy::ExternalOwner,
@@ -657,116 +658,118 @@ macro_rules! external_ref {
 }
 
 /// Database and cross-store links owned by the application. Every entry names
-/// its required index, delete policy and restore/clone policy. Parentless
-/// entries are deliberate cross-store references; the database audit reports
-/// them as externally owned instead of pretending SQLite can verify them.
+/// its delete and restore/clone policy. Parentless entries are deliberate
+/// cross-store references; the database audit reports them as externally owned
+/// instead of pretending SQLite can verify them. Indexes are deliberately not
+/// part of this registry: relationship integrity and physical access paths are
+/// independent concerns.
 pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
-    external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, "idx_installation_role_bindings_provider_mount", KeepHistory),
-    text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, "idx_terminal_sessions_user_id", Cascade),
-    text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, "idx_ssh_hosts_user_id", Cascade),
-    text_ref!("plugin_product_documents", "owner_user_id" => "users", "user_id", false, "idx_plugin_product_documents_owner", Cascade),
-    text_ref!("plugin_library_state", "owner_user_id" => "users", "user_id", false, "idx_plugin_library_state_owner_user_id", Cascade),
-    text_ref!("plugin_products", "owner_user_id" => "users", "user_id", false, "idx_plugin_products_owner_user_id", Cascade),
-    text_ref!("plugin_products", "icon_asset_id" => "workshop_assets", "asset_id", true, "idx_plugin_products_icon_asset_id", SetNull),
-    text_ref!("plugin_products", "ready_release_id" => "plugin_releases", "release_id", true, "idx_plugin_products_ready_release_id", Restrict),
-    text_ref!("plugin_products", "active_release_id" => "plugin_releases", "release_id", true, "idx_plugin_products_active_release_id", Restrict),
-    text_ref!("plugin_products", "previous_release_id" => "plugin_releases", "release_id", true, "idx_plugin_products_previous_release_id", Restrict),
-    text_ref!("plugin_projects", "owner_user_id" => "users", "user_id", false, "idx_plugin_projects_owner_user_id", Cascade),
-    text_ref!("plugin_projects", "plugin_product_id" => "plugin_products", "plugin_product_id", true, "idx_plugin_projects_plugin_product_id", Cascade)
+    external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, KeepHistory),
+    text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, Cascade),
+    text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_product_documents", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_library_state", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_products", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_products", "icon_asset_id" => "workshop_assets", "asset_id", true, SetNull),
+    text_ref!("plugin_products", "ready_release_id" => "plugin_releases", "release_id", true, Restrict),
+    text_ref!("plugin_products", "active_release_id" => "plugin_releases", "release_id", true, Restrict),
+    text_ref!("plugin_products", "previous_release_id" => "plugin_releases", "release_id", true, Restrict),
+    text_ref!("plugin_projects", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_projects", "plugin_product_id" => "plugin_products", "plugin_product_id", true, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_source_mutation_intents", "owner_user_id" => "users", "user_id", false, "idx_plugin_source_mutation_intents_owner_user_id", Cascade),
-    text_ref!("plugin_source_mutation_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_source_mutation_intents_plugin_product_id", Restrict)
+    text_ref!("plugin_source_mutation_intents", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_source_mutation_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Restrict)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_source_mutation_intents", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_source_mutation_intents_project_id", Restrict)
+    text_ref!("plugin_source_mutation_intents", "project_id" => "plugin_projects", "project_id", false, Restrict)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
-    text_ref!("plugin_source_mutation_commits", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_source_mutation_commits_project_id", Restrict),
-    text_ref!("plugin_source_mutation_commits", "intent_id" => "plugin_source_mutation_intents", "intent_id", false, "idx_plugin_source_mutation_commits_intent_id", Cascade),
-    text_ref!("plugin_release_artifacts", "owner_user_id" => "users", "user_id", false, "idx_plugin_release_artifacts_owner_user_id", Cascade),
-    text_ref!("plugin_releases", "owner_user_id" => "users", "user_id", false, "idx_plugin_releases_owner_user_id", Cascade),
-    text_ref!("plugin_releases", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_releases_plugin_product_id", Restrict)
+    text_ref!("plugin_source_mutation_commits", "project_id" => "plugin_projects", "project_id", false, Restrict),
+    text_ref!("plugin_source_mutation_commits", "intent_id" => "plugin_source_mutation_intents", "intent_id", false, Cascade),
+    text_ref!("plugin_release_artifacts", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_releases", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_releases", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Restrict)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_releases", "artifact_id" => "plugin_release_artifacts", "artifact_id", false, "idx_plugin_releases_artifact_id", Restrict),
-    text_ref!("plugin_releases", "project_id" => "plugin_projects", "project_id", true, "idx_plugin_releases_project_id", Restrict)
+    text_ref!("plugin_releases", "artifact_id" => "plugin_release_artifacts", "artifact_id", false, Restrict),
+    text_ref!("plugin_releases", "project_id" => "plugin_projects", "project_id", true, Restrict)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
-    text_ref!("plugin_releases", "origin_operation_id" => "product_operations", "operation_id", false, "idx_plugin_releases_origin_operation_id", KeepHistory),
-    text_ref!("plugin_service_test_receipts", "owner_user_id" => "users", "user_id", false, "idx_plugin_service_test_receipts_owner_user_id", Cascade),
-    text_ref!("plugin_service_test_receipts", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_service_test_receipts_plugin_product_id", Cascade)
+    text_ref!("plugin_releases", "origin_operation_id" => "product_operations", "operation_id", false, KeepHistory),
+    text_ref!("plugin_service_test_receipts", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_service_test_receipts", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_service_test_receipts", "release_id" => "plugin_releases", "release_id", false, "idx_plugin_service_test_receipts_release_id", Restrict)
+    text_ref!("plugin_service_test_receipts", "release_id" => "plugin_releases", "release_id", false, Restrict)
         .with_aggregate_scope(
             "parent.owner_user_id = child.owner_user_id \
              AND parent.plugin_product_id = child.plugin_product_id",
         ),
-    text_ref!("plugin_credential_bindings", "owner_user_id" => "users", "user_id", false, "idx_plugin_credential_bindings_owner_user_id", Cascade),
-    text_ref!("plugin_credential_bindings", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_credential_bindings_plugin_product_id", Cascade)
+    text_ref!("plugin_credential_bindings", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_credential_bindings", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, "idx_plugin_credential_bindings_credential_id", KeepHistory),
-    text_ref!("plugin_deletion_intents", "owner_user_id" => "users", "user_id", false, "idx_plugin_deletion_intents_owner_user_id", Cascade),
-    text_ref!("plugin_deletion_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_deletion_intents_plugin_product_id", Cascade)
+    external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, KeepHistory),
+    text_ref!("plugin_deletion_intents", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_deletion_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.lifecycle = 'deleting'"),
-    text_ref!("plugin_deletion_intents", "operation_id" => "product_operations", "operation_id", false, "idx_plugin_deletion_intents_operation_id", Restrict)
+    text_ref!("plugin_deletion_intents", "operation_id" => "product_operations", "operation_id", false, Restrict)
         .with_aggregate_scope("parent.owner_kind = 'plugin' AND parent.owner_id = child.plugin_product_id AND parent.kind = 'plugin_permanent_delete'"),
-    text_ref!("plugin_kv", "owner_user_id" => "users", "user_id", false, "idx_plugin_kv_owner_user_id", Cascade),
-    text_ref!("plugin_kv", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_kv_plugin_product_id", Cascade)
+    text_ref!("plugin_kv", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_kv", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_build_operation_lineage", "owner_user_id" => "users", "user_id", false, "idx_plugin_build_operation_lineage_owner", KeepHistory),
-    text_ref!("plugin_build_operation_lineage", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_build_operation_lineage_plugin_product_id", KeepHistory)
+    text_ref!("plugin_build_operation_lineage", "owner_user_id" => "users", "user_id", false, KeepHistory),
+    text_ref!("plugin_build_operation_lineage", "plugin_product_id" => "plugin_products", "plugin_product_id", false, KeepHistory)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_build_operation_lineage", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_build_operation_lineage_project", KeepHistory)
+    text_ref!("plugin_build_operation_lineage", "project_id" => "plugin_projects", "project_id", false, KeepHistory)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
-    text_ref!("plugin_build_operation_lineage", "operation_id" => "product_operations", "operation_id", false, "idx_plugin_build_operation_lineage_operation_id", KeepHistory),
-    text_ref!("plugin_publish_authorizations", "owner_user_id" => "users", "user_id", false, "idx_plugin_publish_authorizations_owner_user_id", Cascade),
-    text_ref!("plugin_publish_authorizations", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_publish_authorizations_plugin_product_id", Cascade)
+    text_ref!("plugin_build_operation_lineage", "operation_id" => "product_operations", "operation_id", false, KeepHistory),
+    text_ref!("plugin_publish_authorizations", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_publish_authorizations", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_catalog_publications", "owner_user_id" => "users", "user_id", false, "idx_plugin_catalog_publications_owner_user_id", Cascade),
-    text_ref!("plugin_catalog_publications", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_catalog_publications_plugin_product_id", Cascade)
+    text_ref!("plugin_catalog_publications", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_catalog_publications", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_catalog_publications", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_catalog_publications_active_release_id", Restrict)
+    text_ref!("plugin_catalog_publications", "active_release_id" => "plugin_releases", "release_id", false, Restrict)
         .with_aggregate_scope(
             "parent.owner_user_id = child.owner_user_id \
              AND parent.plugin_product_id = child.plugin_product_id",
         ),
-    text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_plugin_surface_sessions_owner_user_id", Cascade),
-    text_ref!("plugin_surface_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_plugin_surface_sessions_conversation_id", Cascade)
+    text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_surface_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, Cascade)
         .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_user_id"),
-    text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, "idx_plugin_surface_sessions_plugin_product_id", Cascade)
+    text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, "idx_plugin_surface_sessions_active_release_id", Restrict)
+    text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, Restrict)
         .with_aggregate_scope(
             "parent.owner_user_id = child.owner_user_id \
              AND parent.plugin_product_id = child.plugin_product_id",
         ),
     // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
-    text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_turn_admissions_terminal_epoch", KeepHistory),
-    text_ref!("terminal_turn_admissions", "requirement_id" => "requirements", "requirement_id", false, "idx_terminal_turn_admissions_requirement", KeepHistory),
-    text_ref!("agent_execution_templates", "user_id" => "users", "user_id", false, "idx_execution_templates_user_id", Cascade),
-    text_ref!("agent_execution_templates", "primary_participant_id" => "agent_execution_template_participants", "template_participant_id", false, "idx_execution_templates_primary_participant_id", Restrict)
+    text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, KeepHistory),
+    text_ref!("terminal_turn_admissions", "requirement_id" => "requirements", "requirement_id", false, KeepHistory),
+    text_ref!("agent_execution_templates", "user_id" => "users", "user_id", false, Cascade),
+    text_ref!("agent_execution_templates", "primary_participant_id" => "agent_execution_template_participants", "template_participant_id", false, Restrict)
         .with_aggregate_scope("parent.template_id = child.execution_template_id"),
-    text_ref!("agent_executions", "user_id" => "users", "user_id", false, "idx_agent_executions_user_id", Cascade),
-    text_ref!("attachments", "requirement_id" => "requirements", "requirement_id", false, "idx_attachments_requirement_id", Cascade),
-    text_ref!("channel_inbound_receipts", "user_id" => "users", "user_id", true, "idx_channel_inbound_receipts_user_id", SetNull),
-    text_ref!("channel_inbound_receipts", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_inbound_receipts_channel_plugin_id", SetNull),
-    text_ref!("channel_inbound_receipts", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_channel_inbound_receipts_conversation_id", KeepHistory),
-    text_ref!("channel_inbound_receipts", "message_id" => "agent_events", "event_id", true, "idx_channel_inbound_receipts_message_id", KeepHistory),
-    text_ref!("channel_session_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_channel_session_bindings_plugin_id", Cascade),
-    text_ref!("channel_session_bindings", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_channel_session_bindings_user_id", Cascade),
-    text_ref!("channel_session_bindings", "channel_session_id" => "channel_sessions", "channel_session_id", false, "idx_channel_session_bindings_session_id", Cascade),
+    text_ref!("agent_executions", "user_id" => "users", "user_id", false, Cascade),
+    text_ref!("attachments", "requirement_id" => "requirements", "requirement_id", false, Cascade),
+    text_ref!("channel_inbound_receipts", "user_id" => "users", "user_id", true, SetNull),
+    text_ref!("channel_inbound_receipts", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, SetNull),
+    text_ref!("channel_inbound_receipts", "conversation_id" => "agent_sessions", "agent_session_id", true, KeepHistory),
+    text_ref!("channel_inbound_receipts", "message_id" => "agent_events", "event_id", true, KeepHistory),
+    text_ref!("channel_session_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, Cascade),
+    text_ref!("channel_session_bindings", "channel_user_id" => "channel_users", "channel_user_id", false, Cascade),
+    text_ref!("channel_session_bindings", "channel_session_id" => "channel_sessions", "channel_session_id", false, Cascade),
     // Busy-time prompt queue rows (spec D1) are short-lived operational
     // records; settled rows keep their historical scope even after the bot,
     // session, or conversation is deleted.
-    text_ref!("channel_pending_prompts", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cpp_plugin_chat", KeepHistory),
-    text_ref!("channel_pending_prompts", "channel_session_id" => "channel_sessions", "channel_session_id", false, "idx_cpp_session", KeepHistory),
-    text_ref!("channel_pending_prompts", "conversation_id" => "agent_sessions", "agent_session_id", false, "idx_cpp_conversation_state", KeepHistory),
-    text_ref!("channel_sessions", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_channel_sessions_channel_user_id", Cascade),
-    text_ref!("channel_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_channel_sessions_conversation_id", SetNull),
-    text_ref!("channel_sessions", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_sessions_channel_plugin_id", SetNull),
-    text_ref!("agent_execution_participants", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_participants_execution_id", Cascade),
-    text_ref!("agent_execution_participants", "source_agent_id" => "agent_metadata", "agent_id", false, "idx_execution_participants_source_agent_id", KeepHistory),
-    text_ref!("agent_execution_participants", "preset_id" => "agent_presets", "preset_id", true, "idx_execution_participants_preset_id", KeepHistory)
+    text_ref!("channel_pending_prompts", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, KeepHistory),
+    text_ref!("channel_pending_prompts", "channel_session_id" => "channel_sessions", "channel_session_id", false, KeepHistory),
+    text_ref!("channel_pending_prompts", "conversation_id" => "agent_sessions", "agent_session_id", false, KeepHistory),
+    text_ref!("channel_sessions", "channel_user_id" => "channel_users", "channel_user_id", false, Cascade),
+    text_ref!("channel_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, SetNull),
+    text_ref!("channel_sessions", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, SetNull),
+    text_ref!("agent_execution_participants", "execution_id" => "agent_executions", "execution_id", false, Cascade),
+    text_ref!("agent_execution_participants", "source_agent_id" => "agent_metadata", "agent_id", false, KeepHistory),
+    text_ref!("agent_execution_participants", "preset_id" => "agent_presets", "preset_id", true, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
-    text_ref!("agent_execution_participants", "provider_id" => "providers", "provider_id", true, "idx_execution_participants_provider_id", KeepHistory)
+    text_ref!("agent_execution_participants", "provider_id" => "providers", "provider_id", true, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::RequireParent)
         .with_child_predicate(
             "child.retired_in_revision IS NULL \
@@ -777,24 +780,24 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
                    AND execution.deleted_at IS NULL\
              )",
         ),
-    text_ref!("agent_execution_steps", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_steps_execution_id", Cascade),
-    text_ref!("agent_execution_steps", "assigned_participant_id" => "agent_execution_participants", "participant_id", true, "idx_execution_steps_assigned_participant_id", Restrict)
+    text_ref!("agent_execution_steps", "execution_id" => "agent_executions", "execution_id", false, Cascade),
+    text_ref!("agent_execution_steps", "assigned_participant_id" => "agent_execution_participants", "participant_id", true, Restrict)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("agent_execution_attempts", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_attempts_execution_id", Cascade),
-    text_ref!("agent_execution_attempts", "step_id" => "agent_execution_steps", "step_id", false, "idx_execution_attempts_step_id", Cascade)
+    text_ref!("agent_execution_attempts", "execution_id" => "agent_executions", "execution_id", false, Cascade),
+    text_ref!("agent_execution_attempts", "step_id" => "agent_execution_steps", "step_id", false, Cascade)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("agent_execution_attempts", "participant_id" => "agent_execution_participants", "participant_id", true, "idx_execution_attempts_participant_id", KeepHistory)
+    text_ref!("agent_execution_attempts", "participant_id" => "agent_execution_participants", "participant_id", true, KeepHistory)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("agent_execution_events", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_events_execution_id", Cascade),
-    text_ref!("agent_execution_events", "step_id" => "agent_execution_steps", "step_id", true, "idx_execution_events_step_id", KeepHistory)
+    text_ref!("agent_execution_events", "execution_id" => "agent_executions", "execution_id", false, Cascade),
+    text_ref!("agent_execution_events", "step_id" => "agent_execution_steps", "step_id", true, KeepHistory)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("agent_execution_events", "attempt_id" => "agent_execution_attempts", "attempt_id", true, "idx_execution_events_attempt_id", KeepHistory)
+    text_ref!("agent_execution_events", "attempt_id" => "agent_execution_attempts", "attempt_id", true, KeepHistory)
         .with_aggregate_scope(
             "parent.execution_id = child.execution_id AND parent.step_id = child.step_id",
         ),
-    text_ref!("agent_execution_events", "actor_id" => "users", "user_id", true, "idx_execution_events_actor_user_id", KeepHistory)
+    text_ref!("agent_execution_events", "actor_id" => "users", "user_id", true, KeepHistory)
         .with_child_predicate("child.actor_type = 'user'"),
-    text_ref!("agent_execution_events", "actor_id" => "agent_sessions", "agent_session_id", true, "idx_execution_events_actor_local_agent_id", KeepHistory)
+    text_ref!("agent_execution_events", "actor_id" => "agent_sessions", "agent_session_id", true, KeepHistory)
         .with_child_predicate(
             "child.actor_type = 'agent' AND child.actor_conversation_id IS NOT NULL",
         )
@@ -805,7 +808,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
         Text,
         true,
         CanonicalUuidV7,
-        "idx_execution_events_actor_external_agent_id",
         KeepHistory
     )
     .with_child_predicate(
@@ -813,162 +815,162 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
          AND child.actor_conversation_id IS NULL \
          AND child.actor_id IS NOT NULL",
     ),
-    text_ref!("agent_execution_events", "actor_conversation_id" => "agent_sessions", "agent_session_id", true, "idx_execution_events_actor_conversation_id", KeepHistory),
-    text_ref!("agent_execution_events", "actor_attempt_id" => "agent_execution_attempts", "attempt_id", true, "idx_execution_events_actor_attempt_id", KeepHistory)
+    text_ref!("agent_execution_events", "actor_conversation_id" => "agent_sessions", "agent_session_id", true, KeepHistory),
+    text_ref!("agent_execution_events", "actor_attempt_id" => "agent_execution_attempts", "attempt_id", true, KeepHistory)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("agent_execution_events", "on_behalf_of_user_id" => "users", "user_id", false, "idx_execution_events_on_behalf_of_user_id", KeepHistory),
-    text_ref!("agent_execution_template_participants", "template_id" => "agent_execution_templates", "execution_template_id", false, "idx_template_participants_template_id", Cascade),
-    text_ref!("agent_execution_template_participants", "source_agent_id" => "agent_metadata", "agent_id", false, "idx_template_participants_source_agent_id", Restrict),
-    text_ref!("agent_execution_template_participants", "preset_id" => "agent_presets", "preset_id", true, "idx_template_participants_preset_id", SetNull)
+    text_ref!("agent_execution_events", "on_behalf_of_user_id" => "users", "user_id", false, KeepHistory),
+    text_ref!("agent_execution_template_participants", "template_id" => "agent_execution_templates", "execution_template_id", false, Cascade),
+    text_ref!("agent_execution_template_participants", "source_agent_id" => "agent_metadata", "agent_id", false, Restrict),
+    text_ref!("agent_execution_template_participants", "preset_id" => "agent_presets", "preset_id", true, SetNull)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
-    text_ref!("agent_execution_template_participants", "provider_id" => "providers", "provider_id", true, "idx_template_participants_provider_id", Restrict),
-    text_ref!("conversation_execution_links", "conversation_id" => "agent_sessions", "agent_session_id", false, "idx_conversation_execution_links_conversation_id", KeepHistory),
-    text_ref!("conversation_execution_links", "execution_id" => "agent_executions", "execution_id", false, "idx_conversation_execution_links_execution_id", Cascade),
-    text_ref!("conversation_execution_links", "step_id" => "agent_execution_steps", "step_id", true, "idx_conversation_execution_links_step_id", KeepHistory)
+    text_ref!("agent_execution_template_participants", "provider_id" => "providers", "provider_id", true, Restrict),
+    text_ref!("conversation_execution_links", "conversation_id" => "agent_sessions", "agent_session_id", false, KeepHistory),
+    text_ref!("conversation_execution_links", "execution_id" => "agent_executions", "execution_id", false, Cascade),
+    text_ref!("conversation_execution_links", "step_id" => "agent_execution_steps", "step_id", true, KeepHistory)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("conversation_execution_links", "attempt_id" => "agent_execution_attempts", "attempt_id", true, "idx_conversation_execution_links_attempt_id", KeepHistory)
+    text_ref!("conversation_execution_links", "attempt_id" => "agent_execution_attempts", "attempt_id", true, KeepHistory)
         .with_aggregate_scope(
             "parent.execution_id = child.execution_id AND parent.step_id = child.step_id",
         ),
-    text_ref!("cron_jobs", "user_id" => "users", "user_id", false, "idx_cron_jobs_user_id", Cascade),
-    text_ref!("cron_jobs", "preset_id" => "agent_presets", "preset_id", true, "idx_cron_jobs_preset_id", SetNull)
+    text_ref!("cron_jobs", "user_id" => "users", "user_id", false, Cascade),
+    text_ref!("cron_jobs", "preset_id" => "agent_presets", "preset_id", true, SetNull)
         .with_frozen_projection_authority("child.agent_snapshot IS NOT NULL"),
-    text_ref!("cron_jobs", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_cron_jobs_conversation_id", Cascade),
-    text_ref!("cron_job_runs", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_job_runs_cron_job_id", Cascade),
-    text_ref!("cron_run_reservations", "cron_job_id" => "cron_jobs", "cron_job_id", false, "idx_cron_run_reservations_cron_job_id", Cascade),
-    text_ref!("cron_run_reservations", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_cron_run_reservations_conversation_id", SetNull),
-    external_ref!("channel_plugins", "companion_id", Text, true, CanonicalUuidV7, "idx_channel_plugins_companion_id", SetNull),
-    text_ref!("channel_users", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_users_channel_plugin_id", Cascade),
+    text_ref!("cron_jobs", "conversation_id" => "agent_sessions", "agent_session_id", true, Cascade),
+    text_ref!("cron_job_runs", "cron_job_id" => "cron_jobs", "cron_job_id", false, Cascade),
+    text_ref!("cron_run_reservations", "cron_job_id" => "cron_jobs", "cron_job_id", false, Cascade),
+    text_ref!("cron_run_reservations", "conversation_id" => "agent_sessions", "agent_session_id", true, SetNull),
+    external_ref!("channel_plugins", "companion_id", Text, true, CanonicalUuidV7, SetNull),
+    text_ref!("channel_users", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, Cascade),
     // ── customer-service domain (015) ────────────────────────────────
     // Provider/KB references keep history on parent deletion: the runtime
     // resolves them per turn and degrades gracefully to "model/KB missing".
-    text_ref!("cs_agents", "provider_id" => "providers", "provider_id", true, "idx_cs_agents_provider_id", KeepHistory),
-    text_ref!("cs_agent_capability_receipts", "owner_user_id" => "users", "user_id", false, "idx_cs_agent_capability_receipts_owner", KeepHistory),
-    text_ref!("cs_agent_capability_receipts", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_agent_capability_receipts_agent", Cascade),
-    text_ref!("cs_channel_bindings", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_channel_bindings_agent", Cascade),
-    text_ref!("cs_channel_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cs_channel_bindings_plugin", Cascade),
-    text_ref!("cs_dialogues", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_dialogues_agent", Cascade),
+    text_ref!("cs_agents", "provider_id" => "providers", "provider_id", true, KeepHistory),
+    text_ref!("cs_agent_capability_receipts", "owner_user_id" => "users", "user_id", false, KeepHistory),
+    text_ref!("cs_agent_capability_receipts", "cs_agent_id" => "cs_agents", "cs_agent_id", false, Cascade),
+    text_ref!("cs_channel_bindings", "cs_agent_id" => "cs_agents", "cs_agent_id", false, Cascade),
+    text_ref!("cs_channel_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, Cascade),
+    text_ref!("cs_dialogues", "cs_agent_id" => "cs_agents", "cs_agent_id", false, Cascade),
     // A dialogue transcript survives bot/visitor deletion as history.
-    text_ref!("cs_dialogues", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cs_dialogues_identity", KeepHistory),
-    text_ref!("cs_dialogues", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_cs_dialogues_channel_user", KeepHistory),
-    text_ref!("cs_messages", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, "idx_cs_messages_dialogue", Cascade),
-    text_ref!("cs_handoffs", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_handoffs_agent_status", Cascade),
-    text_ref!("cs_handoffs", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, "idx_cs_handoffs_dialogue", Cascade),
-    text_ref!("cs_handoffs", "requested_by" => "users", "user_id", false, "idx_cs_handoffs_requested_by", KeepHistory),
-    text_ref!("cs_handoffs", "claimed_by" => "users", "user_id", true, "idx_cs_handoffs_claimed_by", KeepHistory),
-    text_ref!("cs_handoffs", "updated_by" => "users", "user_id", false, "idx_cs_handoffs_updated_by", KeepHistory),
-    text_ref!("cs_notes", "cs_agent_id" => "cs_agents", "cs_agent_id", true, "idx_cs_notes_agent", Cascade),
+    text_ref!("cs_dialogues", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, KeepHistory),
+    text_ref!("cs_dialogues", "channel_user_id" => "channel_users", "channel_user_id", false, KeepHistory),
+    text_ref!("cs_messages", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, Cascade),
+    text_ref!("cs_handoffs", "cs_agent_id" => "cs_agents", "cs_agent_id", false, Cascade),
+    text_ref!("cs_handoffs", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, Cascade),
+    text_ref!("cs_handoffs", "requested_by" => "users", "user_id", false, KeepHistory),
+    text_ref!("cs_handoffs", "claimed_by" => "users", "user_id", true, KeepHistory),
+    text_ref!("cs_handoffs", "updated_by" => "users", "user_id", false, KeepHistory),
+    text_ref!("cs_notes", "cs_agent_id" => "cs_agents", "cs_agent_id", true, Cascade),
     // Audit events are retained after the agent is deleted; retention-days
     // cleanup is the only pruning authority.
-    text_ref!("cs_audit_events", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_audit_agent_time", KeepHistory),
+    text_ref!("cs_audit_events", "cs_agent_id" => "cs_agents", "cs_agent_id", false, KeepHistory),
     // Canonical Creative Studio task history survives project deletion, while
     // creation itself still locks and validates a live project row.
-    text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, "idx_creation_tasks_project_id", KeepHistory),
-    text_ref!("creation_tasks", "conversation_id" => "agent_sessions", "agent_session_id", true, "idx_creation_tasks_conversation", KeepHistory),
-    text_ref!("creation_tasks", "message_id" => "agent_events", "event_id", true, "idx_creation_tasks_message", KeepHistory)
+    text_ref!("creation_tasks", "project_id" => "creative_studio_projects", "project_id", true, KeepHistory),
+    text_ref!("creation_tasks", "conversation_id" => "agent_sessions", "agent_session_id", true, KeepHistory),
+    text_ref!("creation_tasks", "message_id" => "agent_events", "event_id", true, KeepHistory)
         .with_aggregate_scope("parent.session_id = child.conversation_id"),
-    text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, "idx_creation_tasks_template_id", KeepHistory),
-    text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, "idx_creation_tasks_template_run_id", KeepHistory)
+    text_ref!("creation_tasks", "template_id" => "creative_studio_templates", "template_id", true, KeepHistory),
+    text_ref!("creation_tasks", "template_run_id" => "creative_studio_template_runs", "template_run_id", true, KeepHistory)
         .with_aggregate_scope("parent.template_id = child.template_id"),
-    text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, "idx_creation_tasks_provider_id", Restrict),
-    text_ref!("creative_studio_template_runs", "template_id" => "creative_studio_templates", "template_id", false, "idx_creative_template_runs_template_id", KeepHistory),
-    text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_proposal_receipts_project", Cascade),
-    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "agent_events", "event_id", false, "idx_creative_agent_proposal_receipts_assistant_message", Restrict),
-    text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, "idx_creative_agent_sessions_owner", Restrict),
-    text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, "idx_creative_agent_sessions_project", Restrict),
-    text_ref!("creative_studio_agent_sessions", "conversation_id" => "agent_sessions", "agent_session_id", false, "idx_creative_agent_sessions_conversation", Restrict)
+    text_ref!("creation_tasks", "provider_id" => "providers", "provider_id", false, Restrict),
+    text_ref!("creative_studio_template_runs", "template_id" => "creative_studio_templates", "template_id", false, KeepHistory),
+    text_ref!("creative_studio_agent_proposal_receipts", "project_id" => "creative_studio_projects", "project_id", false, Cascade),
+    text_ref!("creative_studio_agent_proposal_receipts", "assistant_message_id" => "agent_events", "event_id", false, Restrict),
+    text_ref!("creative_studio_agent_sessions", "owner_id" => "users", "user_id", false, Restrict),
+    text_ref!("creative_studio_agent_sessions", "project_id" => "creative_studio_projects", "project_id", false, Restrict),
+    text_ref!("creative_studio_agent_sessions", "conversation_id" => "agent_sessions", "agent_session_id", false, Restrict)
         .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_id"),
     // Inactive Requirements follow SET_NULL when their aggregate is deleted.
     // Active/NeedsReview rows deliberately retain the typed owner as immutable
     // execution-history evidence after the parent is gone, so the live-parent
     // orphan audit applies only to rows for which deletion must clear it.
-    text_ref!("requirements", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, "idx_requirements_owner_conversation_id", SetNull)
+    text_ref!("requirements", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, SetNull)
         .with_child_predicate("child.status NOT IN ('in_progress', 'needs_review')"),
-    text_ref!("requirements", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, "idx_requirements_owner_terminal_id", SetNull)
+    text_ref!("requirements", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, SetNull)
         .with_child_predicate("child.status NOT IN ('in_progress', 'needs_review')"),
-    text_ref!("requirement_pre_effect_abandon_guards", "requirement_id" => "requirements", "requirement_id", false, "idx_requirement_pre_effect_abandon_requirement_id", Restrict),
-    text_ref!("requirement_pre_effect_abandon_guards", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, "idx_requirement_pre_effect_abandon_owner_conversation", Restrict),
-    text_ref!("requirement_pre_effect_abandon_guards", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, "idx_requirement_pre_effect_abandon_owner_terminal", Restrict),
-    external_ref!("knowledge_bindings", "target_workpath", Text, true, Opaque, "uq_knowledge_bindings_target_workpath", Cascade),
-    text_ref!("knowledge_bindings", "target_conversation_id" => "agent_sessions", "agent_session_id", true, "uq_knowledge_bindings_target_conversation_id", Cascade)
+    text_ref!("requirement_pre_effect_abandon_guards", "requirement_id" => "requirements", "requirement_id", false, Restrict),
+    text_ref!("requirement_pre_effect_abandon_guards", "owner_conversation_id" => "agent_sessions", "agent_session_id", true, Restrict),
+    text_ref!("requirement_pre_effect_abandon_guards", "owner_terminal_id" => "terminal_sessions", "terminal_id", true, Restrict),
+    external_ref!("knowledge_bindings", "target_workpath", Text, true, Opaque, Cascade),
+    text_ref!("knowledge_bindings", "target_conversation_id" => "agent_sessions", "agent_session_id", true, Cascade)
         .with_child_predicate("child.target_kind = 'conversation'"),
-    text_ref!("knowledge_bindings", "target_terminal_id" => "terminal_sessions", "terminal_id", true, "uq_knowledge_bindings_target_terminal_id", Cascade)
+    text_ref!("knowledge_bindings", "target_terminal_id" => "terminal_sessions", "terminal_id", true, Cascade)
         .with_child_predicate("child.target_kind = 'terminal'"),
-    external_ref!("knowledge_bindings", "target_companion_id", Text, true, CanonicalUuidV7, "uq_knowledge_bindings_target_companion_id", Cascade),
-    text_ref!("agent_execution_step_dependencies", "execution_id" => "agent_executions", "execution_id", false, "idx_execution_dependencies_execution_id", Cascade),
-    text_ref!("agent_execution_step_dependencies", "blocker_step_id" => "agent_execution_steps", "step_id", false, "idx_execution_dependencies_blocker_step_id", Cascade)
+    external_ref!("knowledge_bindings", "target_companion_id", Text, true, CanonicalUuidV7, Cascade),
+    text_ref!("agent_execution_step_dependencies", "execution_id" => "agent_executions", "execution_id", false, Cascade),
+    text_ref!("agent_execution_step_dependencies", "blocker_step_id" => "agent_execution_steps", "step_id", false, Cascade)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("agent_execution_step_dependencies", "blocked_step_id" => "agent_execution_steps", "step_id", false, "idx_execution_dependencies_blocked_step_id", Cascade)
+    text_ref!("agent_execution_step_dependencies", "blocked_step_id" => "agent_execution_steps", "step_id", false, Cascade)
         .with_aggregate_scope("parent.execution_id = child.execution_id"),
-    text_ref!("channel_pairing_codes", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, "idx_channel_pairing_codes_channel_plugin_id", Cascade),
-    text_ref!("knowledge_binding_bases", "knowledge_binding_id" => "knowledge_bindings", "knowledge_binding_id", false, "idx_knowledge_binding_bases_knowledge_binding_id", Cascade),
-    text_ref!("knowledge_binding_bases", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_binding_bases_knowledge_base_id", Cascade),
-    text_ref!("knowledge_entries", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_entries_knowledge_base_id", Cascade),
-    text_ref!("knowledge_entries", "parent_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_entries_parent_entry_id", Cascade)
+    text_ref!("channel_pairing_codes", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", true, Cascade),
+    text_ref!("knowledge_binding_bases", "knowledge_binding_id" => "knowledge_bindings", "knowledge_binding_id", false, Cascade),
+    text_ref!("knowledge_binding_bases", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, Cascade),
+    text_ref!("knowledge_entries", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, Cascade),
+    text_ref!("knowledge_entries", "parent_entry_id" => "knowledge_entries", "knowledge_entry_id", true, Cascade)
         .with_child_predicate("child.deleted_at IS NULL")
         .with_parent_predicate("parent.deleted_at IS NULL")
         .with_aggregate_scope("parent.knowledge_base_id = child.knowledge_base_id AND parent.kind = 'directory'"),
-    text_ref!("knowledge_sources", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_sources_knowledge_base_id", Cascade),
-    text_ref!("knowledge_sources", "default_parent_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_sources_default_parent_entry_id", SetNull)
+    text_ref!("knowledge_sources", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, Cascade),
+    text_ref!("knowledge_sources", "default_parent_entry_id" => "knowledge_entries", "knowledge_entry_id", true, SetNull)
         .with_parent_predicate("parent.deleted_at IS NULL")
         .with_aggregate_scope("parent.knowledge_base_id = child.knowledge_base_id AND parent.kind = 'directory'"),
-    text_ref!("knowledge_source_items", "knowledge_source_id" => "knowledge_sources", "knowledge_source_id", false, "idx_knowledge_source_items_knowledge_source_id", Cascade),
-    text_ref!("knowledge_entry_provenance", "knowledge_entry_id" => "knowledge_entries", "knowledge_entry_id", false, "uq_knowledge_entry_provenance_entry_id", KeepHistory),
-    text_ref!("knowledge_entry_provenance", "knowledge_source_item_id" => "knowledge_source_items", "knowledge_source_item_id", false, "idx_knowledge_entry_provenance_source_item_id", Cascade),
-    text_ref!("knowledge_entry_provenance", "derived_from_entry_id" => "knowledge_entries", "knowledge_entry_id", true, "idx_knowledge_entry_provenance_derived_from_entry_id", KeepHistory),
-    text_ref!("knowledge_tree_operations", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, "idx_knowledge_tree_operations_knowledge_base_id", Cascade),
-    text_ref!("provider_connections", "provider_id" => "providers", "provider_id", false, "idx_provider_connections_provider_id", Cascade),
-    text_ref!("provider_model_capabilities", "provider_id" => "providers", "provider_id", false, "idx_provider_model_capabilities_provider_model", Cascade),
-    text_ref!("provider_models", "provider_id" => "providers", "provider_id", false, "idx_provider_models_provider_id", Cascade),
-    text_ref!("requirement_tags", "paused_requirement_id" => "requirements", "requirement_id", true, "idx_requirement_tags_paused_requirement_id", SetNull),
-    text_ref!("tag_settings", "webhook_id" => "webhooks", "webhook_id", true, "idx_tag_settings_webhook_id", SetNull),
-    text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, "idx_installation_identity_owner_user_id", Restrict),
-    text_ref!("plugin_projects", "linked_mount_id" => "plugin_mounts", "mount_id", true, "idx_plugin_projects_linked_mount_id", SetNull),
-    text_ref!("plugin_projects", "auto_apply_mount_id" => "plugin_mounts", "mount_id", true, "idx_plugin_projects_auto_apply_mount_id", SetNull),
-    text_ref!("plugin_projects", "ready_candidate_id" => "plugin_ready_candidates", "candidate_id", true, "idx_plugin_projects_ready_candidate_id", SetNull),
-    text_ref!("plugin_dependency_mutation_intents", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_dependency_mutation_intents_project_id", Restrict),
-    text_ref!("plugin_dependency_mutation_intents", "owner_user_id" => "users", "user_id", false, "idx_plugin_dependency_mutation_intents_owner_user_id", Cascade),
-    text_ref!("plugin_dependency_mutation_commits", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_dependency_mutation_commits_project_id", Restrict),
-    text_ref!("plugin_dependency_mutation_commits", "intent_id" => "plugin_dependency_mutation_intents", "intent_id", false, "idx_plugin_dependency_mutation_commits_intent_id", Cascade),
-    text_ref!("plugin_ready_candidates", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_ready_candidates_project_id", Cascade),
-    text_ref!("plugin_ready_candidates", "origin_operation_id" => "product_operations", "operation_id", false, "idx_plugin_ready_candidates_origin_operation_id", KeepHistory),
-    text_ref!("plugin_ready_candidates", "artifact_id" => "plugin_artifacts", "artifact_id", false, "idx_plugin_ready_candidates_artifact_id", KeepHistory),
-    opaque_text_ref!("plugin_ready_candidates", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, "idx_plugin_ready_candidates_artifact_digest", KeepHistory),
-    text_ref!("plugin_candidate_test_receipts", "candidate_id" => "plugin_ready_candidates", "candidate_id", false, "idx_plugin_candidate_test_receipts_candidate_id", Cascade),
-    text_ref!("plugin_candidate_test_receipts", "artifact_id" => "plugin_artifacts", "artifact_id", false, "idx_plugin_candidate_test_receipts_artifact_id", KeepHistory),
-    opaque_text_ref!("plugin_candidate_test_receipts", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, "idx_plugin_candidate_test_receipts_artifact_digest", KeepHistory),
-    text_ref!("plugin_mount_revisions", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_mount_revisions_mount_id", Cascade),
-    text_ref!("plugin_mount_revisions", "artifact_id" => "plugin_artifacts", "artifact_id", false, "idx_plugin_mount_revisions_artifact_id", KeepHistory),
-    opaque_text_ref!("plugin_mount_revisions", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, "idx_plugin_mount_revisions_artifact_digest", KeepHistory),
-    text_ref!("plugin_mounts", "current_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, "idx_plugin_mounts_current_revision_id", Restrict),
-    text_ref!("plugin_mounts", "previous_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, "idx_plugin_mounts_previous_revision_id", Restrict),
-    text_ref!("plugin_credential_binding_mutations", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_credential_binding_mutations_mount_id", Cascade),
-    text_ref!("plugin_mount_credential_bindings", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_mount_credential_bindings_mount_id", Cascade),
-    external_ref!("plugin_mount_credential_bindings", "credential_id", Text, false, Opaque, "idx_plugin_mount_credential_bindings_credential_id", KeepHistory),
-    text_ref!("plugin_mount_kv", "mount_id" => "plugin_mounts", "mount_id", false, "idx_plugin_mount_kv_mount_id", Cascade),
-    text_ref!("product_operations", "owner_id" => "plugin_projects", "project_id", false, "idx_product_operations_plugin_project_owner_id", KeepHistory)
+    text_ref!("knowledge_source_items", "knowledge_source_id" => "knowledge_sources", "knowledge_source_id", false, Cascade),
+    text_ref!("knowledge_entry_provenance", "knowledge_entry_id" => "knowledge_entries", "knowledge_entry_id", false, KeepHistory),
+    text_ref!("knowledge_entry_provenance", "knowledge_source_item_id" => "knowledge_source_items", "knowledge_source_item_id", false, Cascade),
+    text_ref!("knowledge_entry_provenance", "derived_from_entry_id" => "knowledge_entries", "knowledge_entry_id", true, KeepHistory),
+    text_ref!("knowledge_tree_operations", "knowledge_base_id" => "knowledge_bases", "knowledge_base_id", false, Cascade),
+    text_ref!("provider_connections", "provider_id" => "providers", "provider_id", false, Cascade),
+    text_ref!("provider_model_capabilities", "provider_id" => "providers", "provider_id", false, Cascade),
+    text_ref!("provider_models", "provider_id" => "providers", "provider_id", false, Cascade),
+    text_ref!("requirement_tags", "paused_requirement_id" => "requirements", "requirement_id", true, SetNull),
+    text_ref!("tag_settings", "webhook_id" => "webhooks", "webhook_id", true, SetNull),
+    text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, Restrict),
+    text_ref!("plugin_projects", "linked_mount_id" => "plugin_mounts", "mount_id", true, SetNull),
+    text_ref!("plugin_projects", "auto_apply_mount_id" => "plugin_mounts", "mount_id", true, SetNull),
+    text_ref!("plugin_projects", "ready_candidate_id" => "plugin_ready_candidates", "candidate_id", true, SetNull),
+    text_ref!("plugin_dependency_mutation_intents", "project_id" => "plugin_projects", "project_id", false, Restrict),
+    text_ref!("plugin_dependency_mutation_intents", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_dependency_mutation_commits", "project_id" => "plugin_projects", "project_id", false, Restrict),
+    text_ref!("plugin_dependency_mutation_commits", "intent_id" => "plugin_dependency_mutation_intents", "intent_id", false, Cascade),
+    text_ref!("plugin_ready_candidates", "project_id" => "plugin_projects", "project_id", false, Cascade),
+    text_ref!("plugin_ready_candidates", "origin_operation_id" => "product_operations", "operation_id", false, KeepHistory),
+    text_ref!("plugin_ready_candidates", "artifact_id" => "plugin_artifacts", "artifact_id", false, KeepHistory),
+    opaque_text_ref!("plugin_ready_candidates", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
+    text_ref!("plugin_candidate_test_receipts", "candidate_id" => "plugin_ready_candidates", "candidate_id", false, Cascade),
+    text_ref!("plugin_candidate_test_receipts", "artifact_id" => "plugin_artifacts", "artifact_id", false, KeepHistory),
+    opaque_text_ref!("plugin_candidate_test_receipts", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
+    text_ref!("plugin_mount_revisions", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
+    text_ref!("plugin_mount_revisions", "artifact_id" => "plugin_artifacts", "artifact_id", false, KeepHistory),
+    opaque_text_ref!("plugin_mount_revisions", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
+    text_ref!("plugin_mounts", "current_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, Restrict),
+    text_ref!("plugin_mounts", "previous_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, Restrict),
+    text_ref!("plugin_credential_binding_mutations", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
+    text_ref!("plugin_mount_credential_bindings", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
+    external_ref!("plugin_mount_credential_bindings", "credential_id", Text, false, Opaque, KeepHistory),
+    text_ref!("plugin_mount_kv", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
+    text_ref!("product_operations", "owner_id" => "plugin_projects", "project_id", false, KeepHistory)
         .with_child_predicate("child.owner_kind = 'plugin_project'"),
-    text_ref!("product_operations", "owner_id" => "plugin_mounts", "mount_id", false, "idx_product_operations_plugin_mount_owner_id", KeepHistory)
+    text_ref!("product_operations", "owner_id" => "plugin_mounts", "mount_id", false, KeepHistory)
         .with_child_predicate("child.owner_kind = 'plugin_mount'"),
-    text_ref!("product_operations", "owner_id" => "plugin_products", "plugin_product_id", false, "idx_product_operations_plugin_owner_id", KeepHistory)
+    text_ref!("product_operations", "owner_id" => "plugin_products", "plugin_product_id", false, KeepHistory)
         .with_child_predicate("child.owner_kind = 'plugin'"),
-    text_ref!("terminal_scrollback", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_scrollback_terminal_id", Cascade),
-    text_ref!("remote_bindings", "owner_user_id" => "users", "user_id", false, "idx_remote_bindings_owner_user_id", Cascade),
-    text_ref!("nomi_remote_sessions", "owner_user_id" => "users", "user_id", false, "idx_nomi_remote_sessions_owner_user_id", Cascade),
-    text_ref!("nomi_remote_sessions", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_remote_sessions_agent_session_id", Cascade),
-    text_ref!("nomi_remote_sessions", "remote_binding_id" => "remote_bindings", "remote_binding_id", false, "idx_nomi_remote_sessions_remote_binding_id", KeepHistory)
+    text_ref!("terminal_scrollback", "terminal_id" => "terminal_sessions", "terminal_id", false, Cascade),
+    text_ref!("remote_bindings", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("nomi_remote_sessions", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("nomi_remote_sessions", "agent_session_id" => "agent_sessions", "agent_session_id", false, Cascade),
+    text_ref!("nomi_remote_sessions", "remote_binding_id" => "remote_bindings", "remote_binding_id", false, KeepHistory)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("nomi_remote_events", "agent_session_id" => "nomi_remote_sessions", "agent_session_id", false, "idx_nomi_remote_events_agent_session_id_seq", Cascade),
-    text_ref!("nomi_wave1_memory_action_receipts", "owner_user_id" => "users", "user_id", false, "idx_nomi_wave1_memory_receipts_owner_user_id", KeepHistory)
+    text_ref!("nomi_remote_events", "agent_session_id" => "nomi_remote_sessions", "agent_session_id", false, Cascade),
+    text_ref!("nomi_wave1_memory_action_receipts", "owner_user_id" => "users", "user_id", false, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    text_ref!("nomi_wave1_memory_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_wave1_memory_receipts_agent_session_id", KeepHistory)
+    text_ref!("nomi_wave1_memory_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    text_ref!("nomi_wave4_action_receipts", "owner_user_id" => "users", "user_id", false, "idx_nomi_wave4_receipts_owner_user_id", KeepHistory)
+    text_ref!("nomi_wave4_action_receipts", "owner_user_id" => "users", "user_id", false, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    text_ref!("nomi_wave4_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, "idx_nomi_wave4_receipts_agent_session_id", KeepHistory)
+    text_ref!("nomi_wave4_action_receipts", "agent_session_id" => "agent_sessions", "agent_session_id", false, KeepHistory)
         .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
-    opaque_text_ref!("agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_agent_preset_revisions_created_by", KeepHistory),
-    text_ref!("product_agent_selections", "owner_user_id" => "users", "user_id", false, "idx_product_agent_selections_owner_user_id", Cascade),
+    opaque_text_ref!("agent_preset_revisions", "created_by" => "users", "user_id", false, KeepHistory),
+    text_ref!("product_agent_selections", "owner_user_id" => "users", "user_id", false, Cascade),
 ];
 
 /// Stable JSON paths that carry Provider or business identifiers. The SQL for
@@ -980,126 +982,124 @@ pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
     json_text_ref!(
         "agent_presets", "display_json", "$.ui_binding.selection.plugin_id",
         "SELECT json_extract(display_json, '$.ui_binding.selection.plugin_id') AS value FROM agent_presets" =>
-        "plugin_products", "plugin_product_id", "idx_agent_presets_ui_plugin", KeepHistory, AllowMissingHistoricalParent
+        "plugin_products", "plugin_product_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "terminal_sessions", "idmm", "$.fault_watch.bypass_model.provider_id",
         "SELECT json_extract(idmm, '$.fault_watch.bypass_model.provider_id') AS value FROM terminal_sessions WHERE idmm IS NOT NULL" =>
-        "providers", "provider_id", "idx_terminal_sessions_idmm_fault_provider_id", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "terminal_sessions", "idmm", "$.decision_watch.bypass_model.provider_id",
         "SELECT json_extract(idmm, '$.decision_watch.bypass_model.provider_id') AS value FROM terminal_sessions WHERE idmm IS NOT NULL" =>
-        "providers", "provider_id", "idx_terminal_sessions_idmm_decision_provider_id", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "cron_jobs", "agent_config", "$.provider_id (agent_type=nomi)",
         "SELECT json_extract(agent_config, '$.provider_id') AS value FROM cron_jobs WHERE agent_type = 'nomi' AND agent_config IS NOT NULL" =>
-        "providers", "provider_id", "idx_cron_jobs_nomi_provider_id", Restrict, RequireParent
+        "providers", "provider_id", Restrict, RequireParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.provider_id",
         "SELECT json_extract(origin, '$.provider_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "providers", "provider_id", "idx_workshop_assets_origin_provider_id", KeepHistory, AllowMissingHistoricalParent
+        "providers", "provider_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.canvas_id",
         "SELECT json_extract(origin, '$.canvas_id') AS value FROM workshop_assets WHERE json_type(origin, '$.canvas_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.project_id') IS NULL" =>
-        "creative_studio_projects", "project_id", "idx_workshop_assets_origin_canvas_id", KeepHistory, AllowMissingHistoricalParent
+        "creative_studio_projects", "project_id", KeepHistory, AllowMissingHistoricalParent
     ),
     // `project_id` remains a wire/storage compatibility alias only for old
     // Canvas origins.
     json_text_ref!(
         "workshop_assets", "origin", "$.project_id",
         "SELECT json_extract(origin, '$.project_id') AS value FROM workshop_assets WHERE json_type(origin, '$.project_id') = 'text' AND json_type(origin, '$.node_id') = 'text' AND json_type(origin, '$.canvas_id') IS NULL" =>
-        "creative_studio_projects", "project_id", "idx_workshop_assets_origin_project_id", KeepHistory, AllowMissingHistoricalParent
+        "creative_studio_projects", "project_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.conversation_id",
         "SELECT json_extract(origin, '$.conversation_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "agent_sessions", "agent_session_id", "idx_workshop_assets_origin_conversation", KeepHistory, AllowMissingHistoricalParent
+        "agent_sessions", "agent_session_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.message_id",
         "SELECT json_extract(origin, '$.message_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "agent_events", "event_id", "idx_workshop_assets_origin_message", KeepHistory, AllowMissingHistoricalParent
+        "agent_events", "event_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.template_id",
         "SELECT json_extract(origin, '$.template_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "creative_studio_templates", "template_id", "idx_workshop_assets_origin_template_id", KeepHistory, AllowMissingHistoricalParent
+        "creative_studio_templates", "template_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.template_run_id",
         "SELECT json_extract(origin, '$.template_run_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "creative_studio_template_runs", "template_run_id", "idx_workshop_assets_origin_template_run_id", KeepHistory, AllowMissingHistoricalParent
+        "creative_studio_template_runs", "template_run_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_external_ref!(
         "workshop_assets", "origin", "$.template_step_id",
-        "SELECT json_extract(origin, '$.template_step_id') AS value FROM workshop_assets WHERE origin IS NOT NULL",
-        "idx_workshop_assets_origin_template_step_id", KeepHistory
+        "SELECT json_extract(origin, '$.template_step_id') AS value FROM workshop_assets WHERE origin IS NOT NULL", KeepHistory
     ),
     json_text_ref!(
         "workshop_assets", "origin", "$.creation_task_id",
         "SELECT json_extract(origin, '$.creation_task_id') AS value FROM workshop_assets WHERE origin IS NOT NULL" =>
-        "creation_tasks", "creation_task_id", "idx_workshop_assets_origin_creation_task_id", KeepHistory, AllowMissingHistoricalParent
+        "creation_tasks", "creation_task_id", KeepHistory, AllowMissingHistoricalParent
     ),
     json_external_ref!(
         "workshop_assets", "origin", "$.node_id",
-        "SELECT json_extract(origin, '$.node_id') AS value FROM workshop_assets WHERE origin IS NOT NULL",
-        "idx_workshop_assets_origin_node_id", KeepHistory
+        "SELECT json_extract(origin, '$.node_id') AS value FROM workshop_assets WHERE origin IS NOT NULL", KeepHistory
     ),
     json_text_ref!(
         "creation_tasks", "input_bindings", "$[].asset_id",
         "SELECT json_extract(item.value, '$.asset_id') AS value FROM creation_tasks, json_each(creation_tasks.input_bindings) item WHERE creation_tasks.input_bindings IS NOT NULL" =>
-        "workshop_assets", "asset_id", "idx_creation_tasks_input_bindings_json", Restrict, RequireParent
+        "workshop_assets", "asset_id", Restrict, RequireParent
     ),
     json_text_ref!(
         "creation_tasks", "result_asset_ids", "$[]",
         "SELECT item.value AS value FROM creation_tasks, json_each(creation_tasks.result_asset_ids) item" =>
-        "workshop_assets", "asset_id", "idx_creation_tasks_result_asset_ids_json", Restrict, RequireParent
+        "workshop_assets", "asset_id", Restrict, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.queue[].provider_id",
         "SELECT json_extract(item.value, '$.provider_id') AS value FROM client_preferences preference, json_each(preference.value, '$.queue') item WHERE preference.key = 'agent.model_failover' AND json_valid(preference.value)" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.config.bypass_model.provider_id (agent_session.idmm.*)",
         "SELECT json_extract(value, '$.config.bypass_model.provider_id') AS value FROM client_preferences WHERE key GLOB 'agent_session.idmm.*' AND json_valid(value) AND json_type(value, '$.config.bypass_model.provider_id') = 'text'" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.session_id (agent_session.idmm.*)",
         "SELECT json_extract(value, '$.session_id') AS value FROM client_preferences WHERE key GLOB 'agent_session.idmm.*' AND json_valid(value)" =>
-        "agent_sessions", "agent_session_id", "idx_client_preferences_provider_key", Cascade, RequireParent
+        "agent_sessions", "agent_session_id", Cascade, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$[].provider_id",
         "SELECT json_extract(item.value, '$.provider_id') AS value FROM client_preferences preference, json_each(preference.value) item WHERE preference.key = 'nomi.collaborationModels' AND json_valid(preference.value)" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.provider_id",
         "SELECT json_extract(value, '$.provider_id') AS value FROM client_preferences WHERE (key = 'nomi.defaultModel' OR key = 'knowledge.autogenModel' OR key = 'models.default.imageGeneration' OR key = 'models.default.imageEdit' OR key = 'models.default.vision' OR key = 'models.default.videoGeneration' OR key = 'models.default.musicGeneration' OR key = 'models.default.speechSynthesis' OR key = 'tools.speechToText' OR key = 'tools.textToSpeech' OR key LIKE 'channels.%.defaultModel') AND json_valid(value)" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.embedding.provider_id",
         "SELECT json_extract(value, '$.embedding.provider_id') AS value FROM client_preferences WHERE key = 'knowledge.retrieval' AND json_valid(value) AND json_extract(value, '$.embedding.mode') = 'remote'" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     json_text_ref!(
         "client_preferences", "value", "$.rerank.provider_id",
         "SELECT json_extract(value, '$.rerank.provider_id') AS value FROM client_preferences WHERE key = 'knowledge.retrieval' AND json_valid(value) AND json_extract(value, '$.rerank.mode') = 'remote'" =>
-        "providers", "provider_id", "idx_client_preferences_provider_key", SetNull, RequireParent
+        "providers", "provider_id", SetNull, RequireParent
     ),
     // Customer-service agents mount knowledge bases by ID; a deleted base
     // simply stops contributing hits, so history is allowed to keep the value.
     json_text_ref!(
         "cs_agents", "knowledge_base_ids", "$[]",
         "SELECT item.value AS value FROM cs_agents, json_each(cs_agents.knowledge_base_ids) item" =>
-        "knowledge_bases", "knowledge_base_id", "idx_cs_agents_knowledge_base_ids_json", KeepHistory, AllowMissingHistoricalParent
+        "knowledge_bases", "knowledge_base_id", KeepHistory, AllowMissingHistoricalParent
     )
 ];
 
@@ -1149,6 +1149,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_no_physical_foreign_keys(pool).await?;
     validate_no_triggers(pool).await?;
     validate_no_row_id_columns(pool).await?;
+    validate_index_budget(pool).await?;
 
     validate_business_id_registry(pool).await?;
     require_column(
@@ -1289,8 +1290,8 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
 }
 
 /// KEEP_HISTORY permits a removed product, not a reference to another owner.
-/// JSON references use the registry for identity/index/delete semantics and
-/// this aggregate check for restore/import scope validation.
+/// JSON references use the registry for identity/delete semantics and this
+/// aggregate check for restore/import scope validation.
 async fn validate_agent_ui_binding_scope(pool: &SqlitePool) -> Result<(), DbError> {
     let invalid: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM agent_presets preset JOIN plugin_products plugin
@@ -2417,6 +2418,30 @@ async fn validate_no_row_id_columns(pool: &SqlitePool) -> Result<(), DbError> {
     Ok(())
 }
 
+async fn validate_index_budget(pool: &SqlitePool) -> Result<(), DbError> {
+    for table in PRODUCT_TABLES
+        .iter()
+        .chain(CANONICAL_AGENT_STORE_TABLES.iter())
+    {
+        let sql = format!("PRAGMA index_list({})", quote_sqlite_identifier(table));
+        let rows = sqlx::query(&sql).fetch_all(pool).await?;
+        if rows.len() <= MAX_INDEXES_PER_TABLE {
+            continue;
+        }
+        let mut names = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("name").map_err(DbError::Query))
+            .collect::<Result<Vec<_>, _>>()?;
+        names.sort();
+        return Err(DbError::Init(format!(
+            "v3 schema table {table} exceeds the physical index budget: {} > {}; indexes={names:?}",
+            rows.len(),
+            MAX_INDEXES_PER_TABLE,
+        )));
+    }
+    Ok(())
+}
+
 async fn validate_business_id_registry(pool: &SqlitePool) -> Result<(), DbError> {
     let mut seen = BTreeSet::new();
     for (table, column) in UUIDV7_BUSINESS_COLUMNS {
@@ -2438,7 +2463,6 @@ async fn validate_business_id_registry(pool: &SqlitePool) -> Result<(), DbError>
 
 async fn validate_logical_reference_registry(pool: &SqlitePool) -> Result<(), DbError> {
     let mut seen_columns = BTreeSet::new();
-    let mut seen_indexes = BTreeSet::new();
     for reference in LOGICAL_REFERENCES {
         let key = (
             reference.child_table,
@@ -2454,13 +2478,6 @@ async fn validate_logical_reference_registry(pool: &SqlitePool) -> Result<(), Db
                 reference.child_table, reference.child_column, reference.child_predicate
             )));
         }
-        if !seen_indexes.insert(reference.index_name) {
-            return Err(DbError::Init(format!(
-                "logical-reference registry duplicates index {}",
-                reference.index_name
-            )));
-        }
-
         let expected_type = "TEXT";
         require_column(
             pool,
@@ -2468,13 +2485,6 @@ async fn validate_logical_reference_registry(pool: &SqlitePool) -> Result<(), Db
             reference.child_column,
             expected_type,
             !reference.nullable,
-        )
-        .await?;
-        require_index_prefix(
-            pool,
-            reference.index_name,
-            reference.child_table,
-            reference.child_column,
         )
         .await?;
         if reference.value_contract == LogicalReferenceValueContract::CanonicalUuidV7 {
@@ -2538,7 +2548,6 @@ async fn validate_json_logical_reference_registry(pool: &SqlitePool) -> Result<(
             false,
         )
         .await?;
-        require_index_on_table(pool, reference.index_name, reference.child_table).await?;
         let expected_type = "TEXT";
         if let (Some(parent_table), Some(parent_column)) =
             (reference.parent_table, reference.parent_column)
@@ -3061,56 +3070,6 @@ async fn require_uuidv7_check(pool: &SqlitePool, table: &str, column: &str) -> R
                 "v3 business ID {table}.{column} is missing UUIDv7 CHECK fragment {fragment}"
             )));
         }
-    }
-    Ok(())
-}
-
-async fn require_index_prefix(
-    pool: &SqlitePool,
-    index_name: &str,
-    table: &str,
-    column: &str,
-) -> Result<(), DbError> {
-    let actual_table: Option<String> = sqlx::query_scalar(
-        "SELECT tbl_name FROM sqlite_schema WHERE type = 'index' AND name = ?",
-    )
-    .bind(index_name)
-    .fetch_optional(pool)
-    .await?;
-    if actual_table.as_deref() != Some(table) {
-        return Err(DbError::Init(format!(
-            "logical reference {table}.{column} requires index {index_name}"
-        )));
-    }
-    let sql = format!("PRAGMA index_info({})", quote_sqlite_identifier(index_name));
-    let rows = sqlx::query(&sql).fetch_all(pool).await?;
-    let first = rows
-        .iter()
-        .min_by_key(|row| row.try_get::<i64, _>("seqno").unwrap_or(i64::MAX))
-        .and_then(|row| row.try_get::<String, _>("name").ok());
-    if first.as_deref() != Some(column) {
-        return Err(DbError::Init(format!(
-            "logical reference index {index_name} must start with {table}.{column}"
-        )));
-    }
-    Ok(())
-}
-
-async fn require_index_on_table(
-    pool: &SqlitePool,
-    index_name: &str,
-    table: &str,
-) -> Result<(), DbError> {
-    let actual_table: Option<String> = sqlx::query_scalar(
-        "SELECT tbl_name FROM sqlite_schema WHERE type = 'index' AND name = ?",
-    )
-    .bind(index_name)
-    .fetch_optional(pool)
-    .await?;
-    if actual_table.as_deref() != Some(table) {
-        return Err(DbError::Init(format!(
-            "JSON logical reference on {table} requires index {index_name}"
-        )));
     }
     Ok(())
 }

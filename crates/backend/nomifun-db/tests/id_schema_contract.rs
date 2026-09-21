@@ -102,16 +102,16 @@ async fn schema_metadata_matches_the_agent_store_manifest() {
 }
 
 #[tokio::test]
-async fn canonical_preset_indexes_cover_owner_ui_revision_and_snapshot_lookups() {
+async fn canonical_preset_indexes_cover_only_the_workload_access_paths() {
     let database = init_database_memory().await.unwrap();
     let indexes: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM sqlite_schema WHERE type = 'index' AND name IN (\
             'idx_agent_presets_owner_active', 'idx_agent_presets_ui_plugin', \
-            'idx_agent_preset_revisions_created_by', 'idx_agent_bindings_preset', \
-            'idx_agent_runtime_snapshots_revision') ORDER BY name",
+            'idx_agent_bindings_preset', 'idx_agent_runtime_snapshots_revision') \
+         ORDER BY name",
     )
     .fetch_all(database.pool())
     .await
     .unwrap();
-    assert_eq!(indexes.len(), 5);
+    assert_eq!(indexes.len(), 4);
 }

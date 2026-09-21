@@ -12,8 +12,6 @@ use tracing::{info, warn};
 
 use crate::error::DbError;
 
-mod legacy_agent_cutover;
-
 /// Maximum number of connections in the pool.
 const MAX_CONNECTIONS: u32 = 5;
 
@@ -22,16 +20,6 @@ const BUSY_TIMEOUT_MS: u64 = 5000;
 
 static DB_MIGRATOR: Migrator = sqlx::migrate!();
 const CANONICAL_BASELINE_MIGRATION_VERSION: i64 = 1;
-
-/// Compatibility result for a persisted sqlx migration lineage.
-///
-/// The single canonical baseline is current. The exact authenticated final
-/// pre-UARC lineage is upgradeable through the one-time Agent clean cut.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MigrationLineageStatus {
-    Current,
-    UpgradeRequired,
-}
 
 /// Wraps a SQLite connection pool with lifecycle management.
 #[derive(Clone, Debug)]
@@ -186,22 +174,12 @@ async fn validate_restorable_database_contract(pool: &SqlitePool) -> Result<(), 
 
 /// Require the complete migration lineage shipped with this build.
 ///
-/// Backup and restore artifacts must already be Current; they are preservation
+/// Backup and restore artifacts must already be current; they are preservation
 /// boundaries and must not be mutated as part of validation.
 pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(), DbError> {
-    match inspect_supported_migration_lineage(pool).await? {
-        MigrationLineageStatus::Current => Ok(()),
-        MigrationLineageStatus::UpgradeRequired => Err(DbError::Init(
-            "database migration lineage is a supported prefix but is not fully upgraded".into(),
-        )),
-    }
-}
-
-/// Validate the canonical one-row lineage or the exact authenticated cutover
-/// source. Unknown versions, edited checksums and schema drift fail closed.
-pub async fn inspect_supported_migration_lineage(
-    pool: &SqlitePool,
-) -> Result<MigrationLineageStatus, DbError> {
+    // Validate the exact canonical one-row lineage. Unknown versions, edited
+    // checksums and historical prefixes fail closed without mutating the
+    // dataset.
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
     if expected
         .first()
@@ -218,19 +196,9 @@ pub async fn inspect_supported_migration_lineage(
             .fetch_all(pool)
             .await
             .map_err(DbError::Query)?;
-    if rows.is_empty() {
+    if rows.len() != expected.len() {
         return Err(DbError::Init(format!(
-            "database migration lineage must begin with embedded migration {}",
-            CANONICAL_BASELINE_MIGRATION_VERSION,
-        )));
-    }
-    if legacy_agent_cutover::is_authenticated_lineage(&rows)? {
-        legacy_agent_cutover::validate_schema_on_pool(pool).await?;
-        return Ok(MigrationLineageStatus::UpgradeRequired);
-    }
-    if rows.len() > expected.len() {
-        return Err(DbError::Init(format!(
-            "database migration lineage contains {} rows but this binary embeds only {}",
+            "database migration lineage contains {} rows but this binary requires exactly {}",
             rows.len(),
             expected.len(),
         )));
@@ -250,11 +218,7 @@ pub async fn inspect_supported_migration_lineage(
             )));
         }
     }
-    Ok(if rows.len() == expected.len() {
-        MigrationLineageStatus::Current
-    } else {
-        MigrationLineageStatus::UpgradeRequired
-    })
+    Ok(())
 }
 
 /// Initialize a file-backed SQLite database.
@@ -489,9 +453,6 @@ fn require_quick_check_ok(rows: Vec<String>) -> Result<(), DbError> {
 /// pass sees the row that the winner committed, checksum matches (same
 /// shipped binary), and the migration is treated as already applied.
 async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
-    if legacy_agent_cutover::adopt_and_cut_over(conn, &DB_MIGRATOR).await? {
-        return Ok(());
-    }
     let mut retried_unique_conflict = false;
 
     loop {

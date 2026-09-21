@@ -781,6 +781,7 @@ fn invalid_disk_id(field: &str, value: &str, error: impl std::fmt::Display) -> A
 /// removes any non-v3 dataset before this crate starts, so this crate creates
 /// only the current schema and never transforms existing rows.
 const STORE_VERSION: i64 = 3;
+const MAX_INDEXES_PER_TABLE: usize = 5;
 
 #[derive(Debug, Clone, Copy)]
 struct ColumnContract {
@@ -1261,6 +1262,29 @@ async fn validate_named_indexes(pool: &SqlitePool) -> Result<(), AppError> {
         return Err(AppError::Internal(format!(
             "companion store index set is not the exact v3 baseline: expected {expected_names:?}, found {actual_names_set:?}"
         )));
+    }
+
+    // Count UNIQUE auto-indexes as well as named indexes. The side store owns
+    // these tables, so exceeding the same physical B-tree budget as the main
+    // database is schema drift rather than a harmless implementation detail.
+    for table in BASELINE_TABLES {
+        let rows = sqlx::query("SELECT name FROM pragma_index_list(?) ORDER BY name")
+            .bind(table.name)
+            .fetch_all(pool)
+            .await
+            .map_err(db_err)?;
+        if rows.len() > MAX_INDEXES_PER_TABLE {
+            let names = rows
+                .iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect::<Vec<_>>();
+            return Err(AppError::Internal(format!(
+                "companion store table {} exceeds the physical index budget: {} > {}; indexes={names:?}",
+                table.name,
+                rows.len(),
+                MAX_INDEXES_PER_TABLE,
+            )));
+        }
     }
 
     for contract in BASELINE_INDEXES {

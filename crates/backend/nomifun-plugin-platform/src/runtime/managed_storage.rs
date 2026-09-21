@@ -653,6 +653,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                         )
                         .map_err(database_error)?;
                 }
+                validate_private_database_index_budget(&transaction)?;
                 transaction
                     .execute(
                         &format!(
@@ -2615,6 +2616,7 @@ fn open_private_database(
              );"
         ))
         .map_err(database_error)?;
+    validate_private_database_index_budget(&connection)?;
     let authorization = Arc::new(SqliteAuthorizationState {
         allow_schema: AtomicBool::new(false),
         allow_transactions: AtomicBool::new(false),
@@ -2622,6 +2624,41 @@ fn open_private_database(
     });
     install_authorizer(&connection, Arc::clone(&authorization));
     Ok((connection, authorization))
+}
+
+const MAX_INDEXES_PER_PLUGIN_TABLE: usize = 5;
+
+fn validate_private_database_index_budget(
+    connection: &Connection,
+) -> PluginRuntimePlatformResult<()> {
+    let table_names = connection
+        .prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
+        .map_err(database_error)?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
+
+    for table_name in table_names
+        .into_iter()
+        .filter(|table_name| is_user_table_name(table_name))
+    {
+        let index_names = connection
+            .prepare("SELECT name FROM pragma_index_list(?1) ORDER BY name")
+            .map_err(database_error)?
+            .query_map([&table_name], |row| row.get::<_, String>(0))
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if index_names.len() > MAX_INDEXES_PER_PLUGIN_TABLE {
+            return Err(PluginRuntimePlatformError::InvalidDatabaseRequest(format!(
+                "plugin table {table_name} exceeds the physical index budget: {} > {}; indexes={index_names:?}",
+                index_names.len(),
+                MAX_INDEXES_PER_PLUGIN_TABLE,
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn install_authorizer(
@@ -3151,5 +3188,38 @@ fn ensure_not_canceled(
         Err(PluginRuntimePlatformError::Canceled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod index_budget_tests {
+    use super::*;
+
+    #[test]
+    fn private_database_rejects_a_sixth_index_on_one_table() {
+        let connection = Connection::open_in_memory().expect("in-memory plugin database");
+        connection
+            .execute_batch(
+                "CREATE TABLE records (
+                    id INTEGER PRIMARY KEY,
+                    a TEXT, b TEXT, c TEXT, d TEXT, e TEXT, f TEXT
+                 );
+                 CREATE INDEX records_a ON records(a);
+                 CREATE INDEX records_b ON records(b);
+                 CREATE INDEX records_c ON records(c);
+                 CREATE INDEX records_d ON records(d);
+                 CREATE INDEX records_e ON records(e);",
+            )
+            .expect("five indexes");
+        validate_private_database_index_budget(&connection).expect("five-index budget");
+
+        connection
+            .execute_batch("CREATE INDEX records_f ON records(f)")
+            .expect("sixth index");
+        assert!(matches!(
+            validate_private_database_index_budget(&connection),
+            Err(PluginRuntimePlatformError::InvalidDatabaseRequest(message))
+                if message.contains("records") && message.contains("6 > 5")
+        ));
     }
 }
