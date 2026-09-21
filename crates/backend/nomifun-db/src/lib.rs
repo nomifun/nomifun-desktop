@@ -13,8 +13,7 @@ pub use installation_role_bindings::{load_installation_role_bindings, put_instal
 pub use plugin_product_documents::PluginProductDocuments;
 
 pub use database::{
-    Database, MigrationLineageStatus, init_database, init_database_memory,
-    init_database_memory_with_owner, inspect_supported_migration_lineage,
+    Database, init_database, init_database_memory, init_database_memory_with_owner,
     open_database_for_backup, validate_current_migration_lineage,
 };
 pub use agent_store_reset::{AgentDataResetReport, reset_agent_data};

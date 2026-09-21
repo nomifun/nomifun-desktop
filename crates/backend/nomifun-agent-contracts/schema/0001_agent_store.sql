@@ -156,10 +156,6 @@ CREATE TABLE agent_presets (
     CHECK (current_stable_revision IS NULL OR current_stable_revision >= 1)
 ) STRICT;
 
-CREATE INDEX idx_agent_presets_active
-    ON agent_presets(preset_id)
-    WHERE retired_at_ms IS NULL;
-
 CREATE INDEX idx_agent_presets_owner_active
     ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id)
     WHERE retired_at_ms IS NULL;
@@ -183,9 +179,6 @@ CREATE TABLE agent_preset_revisions (
     FOREIGN KEY (preset_id) REFERENCES agent_presets (preset_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;
-
-CREATE INDEX idx_agent_preset_revisions_created_by
-    ON agent_preset_revisions(created_by);
 
 CREATE TABLE agent_preset_contribution_locks (
     revision_id TEXT NOT NULL,
@@ -633,16 +626,8 @@ CREATE INDEX idx_providers_platform
     ON providers (platform, sort_order, created_at, id);
 CREATE INDEX idx_provider_models_provider
     ON provider_models (provider_id, sort_order, id);
-CREATE INDEX idx_provider_connections_provider
-    ON provider_connections (provider_id, role);
-CREATE INDEX idx_provider_model_capabilities_provider_model
-    ON provider_model_capabilities (provider_id, model);
 CREATE INDEX idx_provider_model_capabilities_task
     ON provider_model_capabilities (task, provider_id, model);
-CREATE INDEX idx_client_preferences_key
-    ON client_preferences (key);
-CREATE INDEX idx_agent_preset_revisions_preset
-    ON agent_preset_revisions (preset_id, revision_no);
 CREATE INDEX idx_agent_sessions_owner_state
     ON agent_sessions (owner_ref_json, state);
 CREATE INDEX idx_agent_deletion_audits_session_time

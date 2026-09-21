@@ -166,6 +166,32 @@ mod tests {
     }
 
     #[test]
+    fn every_table_stays_within_the_physical_index_budget() {
+        const MAX_INDEXES_PER_TABLE: usize = 5;
+
+        let database = Connection::open_in_memory().expect("in-memory SQLite");
+        database
+            .execute_batch(AGENT_STORE_BASELINE_SQL)
+            .expect("Agent Store baseline");
+
+        for (table, _, _, _) in TABLES {
+            let quoted_table = table.replace('"', "\"\"");
+            let sql = format!("PRAGMA index_list(\"{quoted_table}\")");
+            let names = database
+                .prepare(&sql)
+                .expect("index-list query")
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("index-list rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("index names");
+            assert!(
+                names.len() <= MAX_INDEXES_PER_TABLE,
+                "{table} exceeds the {MAX_INDEXES_PER_TABLE}-index budget: {names:?}"
+            );
+        }
+    }
+
+    #[test]
     fn schema_contract_contains_no_legacy_table() {
         let lowercase = AGENT_STORE_BASELINE_SQL.to_ascii_lowercase();
         for table in FORBIDDEN_TABLE_NAMES {

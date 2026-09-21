@@ -328,35 +328,25 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         });
     }
 
-    let migration_status = match nomifun_db::inspect_supported_migration_lineage(pool).await {
-        Ok(status) => status,
-        Err(error) => {
-            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database migration lineage is not a supported embedded prefix: {error}"
-            )));
-        }
-    };
-    // The full ID registry describes the latest embedded schema. A valid older
-    // migration prefix necessarily lacks later tables/columns, so defer the
-    // complete contract until init_database applies the missing suffix. The
-    // baseline identity checks below still authenticate the dataset before any
-    // writable open.
-    if migration_status == nomifun_db::MigrationLineageStatus::Current {
-        if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
-            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database does not satisfy the complete v3 ID schema contract: {error}"
-            )));
-        }
-        if let Err(error) = nomifun_db::validate_id_data_contract(pool).await {
-            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database does not satisfy the complete v3 ID data contract: {error}"
-            )));
-        }
-        if let Err(error) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await {
-            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database does not satisfy the canonical Agent Store schema contract: {error}"
-            )));
-        }
+    if let Err(error) = nomifun_db::validate_current_migration_lineage(pool).await {
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+            "database migration lineage is not the exact canonical baseline: {error}"
+        )));
+    }
+    if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+            "database does not satisfy the complete v3 ID schema contract: {error}"
+        )));
+    }
+    if let Err(error) = nomifun_db::validate_id_data_contract(pool).await {
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+            "database does not satisfy the complete v3 ID data contract: {error}"
+        )));
+    }
+    if let Err(error) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await {
+        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+            "database does not satisfy the canonical Agent Store schema contract: {error}"
+        )));
     }
 
     for (table, column, declared_type, not_null, primary_key) in [
@@ -506,10 +496,9 @@ async fn prepare_v3_data_layer(config: &AppConfig) -> Result<V3DataLayerState> {
     // it is deliberately non-destructive when a database file exists.  The
     // app probe below is the only authority allowed to classify/retire that
     // database. Receipt-valid databases still have to prove a supported
-    // embedded migration prefix plus the baseline installation identity
-    // contract. Fully migrated databases additionally prove the complete
-    // schema/data contract here; supported prefixes prove it after
-    // init_database applies the missing suffix.
+    // exact embedded baseline plus the complete schema/data and installation
+    // identity contracts. Historical prefixes are preserved for an explicit
+    // reset; startup never mutates them in place.
     match nomifun_common::factory_reset::prepare_v3_dataset(
         &config.data_dir,
         &config.work_dir,
