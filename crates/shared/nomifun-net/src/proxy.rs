@@ -142,6 +142,37 @@ pub(crate) fn domain_uses_detected_proxy(url: &url::Url) -> bool {
         && !domain_excluded_from_proxy(host, &exclusions)
 }
 
+/// Whether this host has an interface configured inside the RFC 2544 Fake-IP
+/// range.
+///
+/// Clash/Mihomo TUN mode intentionally leaves the OS HTTP/SOCKS proxy switches
+/// disabled, but assigns `198.18/15` to a virtual adapter and returns addresses
+/// from that range for public DNS names. In that configuration the explicit
+/// proxy detector above is necessarily false. Treating the DNS answer as an
+/// ordinary private target breaks provider artifact downloads; accepting the
+/// address directly would weaken SSRF protection.
+///
+/// Interface ownership is the cross-platform signal; it avoids brittle VPN
+/// product or adapter-name matching. This signal only admits the existing
+/// public-HTTPS-DNS recovery path. The recovered addresses are still required
+/// to be public and are pinned into a proxy-free client; the Fake-IP address
+/// itself is never connected to.
+pub(crate) fn fake_ip_interface_active() -> bool {
+    if_addrs::get_if_addrs().is_ok_and(|interfaces| {
+        interfaces
+            .into_iter()
+            .any(|interface| is_fake_ip_interface_address(interface.ip()))
+    })
+}
+
+fn is_fake_ip_interface_address(ip: std::net::IpAddr) -> bool {
+    let std::net::IpAddr::V4(ip) = ip else {
+        return false;
+    };
+    let [first, second, _, _] = ip.octets();
+    first == 198 && matches!(second, 18 | 19)
+}
+
 // Domain-only NO_PROXY semantics used by reqwest: exact names, leading-dot
 // domains, subdomains and '*'. IP/CIDR entries cannot match a domain; literals
 // are deliberately rejected above before this helper is used.
@@ -167,6 +198,28 @@ mod fake_dns_proxy_tests {
         assert!(!domain_excluded_from_proxy("example.com.evil.test", "example.com"));
         assert!(!domain_excluded_from_proxy("cdn.example.com", "10.0.0.0/8,127.0.0.1,localhost"));
         assert!(!domain_uses_detected_proxy(&url::Url::parse("https://198.18.0.12/").unwrap()));
+    }
+
+    #[test]
+    fn fake_ip_recovery_requires_host_interface_ownership() {
+        for address in ["198.18.0.1", "198.19.255.254"] {
+            assert!(
+                is_fake_ip_interface_address(address.parse().unwrap()),
+                "{address}"
+            );
+        }
+        for address in [
+            "198.17.255.255",
+            "198.20.0.0",
+            "10.0.0.1",
+            "127.0.0.1",
+            "::1",
+        ] {
+            assert!(
+                !is_fake_ip_interface_address(address.parse().unwrap()),
+                "{address}"
+            );
+        }
     }
 }
 

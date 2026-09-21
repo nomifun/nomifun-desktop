@@ -17,10 +17,13 @@ const enMessages = JSON.parse(
 ) as Record<string, Record<string, string> | string>;
 
 describe('turn live step strip', () => {
-  test('appends the live step to the display list on both return paths', () => {
+  test('appends the live step after turn decoration and before creation results', () => {
     expect(messageListSource.includes("import { planTurnLiveStep } from './turnLiveStepModel'")).toBe(true);
-    expect(messageListSource.includes('const liveStepForDisclosures = buildTurnLiveStep(disclosureItems)')).toBe(true);
-    expect(messageListSource.includes('const liveStep = buildTurnLiveStep(withDeliverables)')).toBe(true);
+    expect(messageListSource.includes('const liveStep = buildTurnLiveStep(decoratedItems)')).toBe(true);
+    expect(messageListSource.includes('if (liveStep) decoratedItems = [...decoratedItems, liveStep]')).toBe(true);
+    expect(messageListSource.indexOf('const liveStep = buildTurnLiveStep(decoratedItems)')).toBeLessThan(
+      messageListSource.indexOf('const creationTaskPlacements = creationTaskPlacementAfterIndices')
+    );
     expect(messageListSource.includes("data-testid='turn-live-step'")).toBe(true);
   });
 

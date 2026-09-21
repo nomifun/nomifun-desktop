@@ -4,9 +4,10 @@
 //! resolved addresses must be public, and the validated addresses are pinned
 //! into a fresh, proxy-free reqwest client for that hop. This makes URL
 //! validation and the connection use the same DNS answer.
-//! A configured proxy may synthesize 198.18/15 DNS answers. Only for those
-//! domain answers, public HTTPS DNS can recover real addresses; they undergo
-//! the same checks and direct pinning. Reserved ranges never become targets.
+//! A configured proxy or recognized Fake-IP tunnel may synthesize 198.18/15
+//! DNS answers. Only for those domain answers, public HTTPS DNS can recover
+//! real addresses; they undergo the same checks and direct pinning. Reserved
+//! ranges never become targets.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -450,11 +451,16 @@ async fn resolve_validated(
             format!("DNS resolution returned no addresses for {host}"),
         ));
     }
+    let has_fake_ip_answer = addrs.iter().any(|address| fake_ip(address.ip()));
     validate_dns_with_recovery(
         host,
         addrs,
         allow_private,
-        public_dns.is_none() && !allow_private && crate::proxy::domain_uses_detected_proxy(url),
+        public_dns.is_none()
+            && !allow_private
+            && has_fake_ip_answer
+            && (crate::proxy::domain_uses_detected_proxy(url)
+                || crate::proxy::fake_ip_interface_active()),
         || recover_public_dns(host, port),
     )
     .await
@@ -672,7 +678,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[tokio::test]
-    async fn fake_dns_recovery_requires_proxy_and_preserves_public_pins() {
+    async fn fake_dns_recovery_requires_an_admitted_egress_and_preserves_public_pins() {
         let initial = vec!["198.18.0.12:443".parse().unwrap()];
         let expected = vec![
             "8.8.8.8:443".parse().unwrap(),

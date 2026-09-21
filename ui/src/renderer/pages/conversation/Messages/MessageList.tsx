@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ConversationCreationTaskCards } from '@/renderer/creation/ConversationCreationTasks';
+import {
+  ConversationCreationTaskCards,
+  useConversationCreationTaskOwnerMessageIds,
+} from '@/renderer/creation/ConversationCreationTasks';
 import type {
   IMessageText,
   IMessageToolCall,
@@ -72,6 +75,7 @@ import TurnDeliverablesCard from './components/TurnDeliverablesCard';
 import { isSupersededPlanToolFailure } from './planToolVisibility';
 import type { MessageId } from '@/common/types/ids';
 import { ExplicitToolRetryReceiptIndex } from './toolRetryReceiptModel';
+import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
 
 type SourceMessageId = MessageId;
 
@@ -150,13 +154,22 @@ type ITurnLiveStepVO = {
   sourceMessageIds: SourceMessageId[];
   created_at: number;
 };
+type ITurnCreationTasksVO = {
+  type: 'turn_creation_tasks';
+  id: string;
+  turn_id: MessageId;
+  message_id: MessageId;
+  sourceMessageIds: SourceMessageId[];
+  created_at: number;
+};
 type IProcessedItem =
   | IRenderableItem
   | ITurnProcessDisclosureVO
   | IProcessReceiptVO
   | ITurnDeliverablesVO
   | ITurnActionsVO
-  | ITurnLiveStepVO;
+  | ITurnLiveStepVO
+  | ITurnCreationTasksVO;
 
 type ConversationLocationState = {
   targetMessageId?: MessageId;
@@ -170,7 +183,8 @@ const getProcessedItemSourceMessageIds = (item: IProcessedItem): SourceMessageId
       item.type === 'process_receipt' ||
       item.type === 'turn_deliverables' ||
       item.type === 'turn_actions' ||
-      item.type === 'turn_live_step')
+      item.type === 'turn_live_step' ||
+      item.type === 'turn_creation_tasks')
   ) {
     return item.sourceMessageIds;
   }
@@ -210,6 +224,7 @@ const getProcessedItemCreatedAt = (item: IProcessedItem): number => {
       'turn_deliverables',
       'turn_actions',
       'turn_live_step',
+      'turn_creation_tasks',
     ].includes(item.type)
   ) {
     // `includes` doesn't narrow the union, so `created_at` is still typed
@@ -684,6 +699,7 @@ const MessageList: React.FC<{
   const list = useMessageList();
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
+  const creationTaskOwnerMessageIds = useConversationCreationTaskOwnerMessageIds();
   useAutoPreviewOfficeFiles(conversationContext);
   const workspaceRoots = useMemo(
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
@@ -878,6 +894,14 @@ const MessageList: React.FC<{
       activeTurnId: conversationContext?.activeTurnId,
       activeRequestMessageId: conversationContext?.activeRequestMessageId,
     });
+    const creationOwnerMessageIdByTurn = new Map<MessageId, MessageId>();
+    for (const entry of modelInput) {
+      if (!entry.turnId || entry.role !== 'user') continue;
+      const ownerMessageId = entry.sourceMessageIds?.find(messageId =>
+        creationTaskOwnerMessageIds.has(messageId)
+      );
+      if (ownerMessageId) creationOwnerMessageIdByTurn.set(entry.turnId, ownerMessageId);
+    }
 
     const disclosureItems = buildTurnDisclosureItems(modelInput, {
       tailClosed: conversationContext?.isProcessing !== true,
@@ -1028,11 +1052,6 @@ const MessageList: React.FC<{
     }
 
     const deliverablesByTurn = collectTurnDeliverables(candidates, { workspaceRoots, turnGates });
-    const liveStepForDisclosures = buildTurnLiveStep(disclosureItems);
-    if (deliverablesByTurn.size === 0) {
-      return liveStepForDisclosures ? [...disclosureItems, liveStepForDisclosures] : disclosureItems;
-    }
-
     const turnIdByAnchorId = new Map<string, MessageId | undefined>();
     for (const entry of modelInput) turnIdByAnchorId.set(entry.id, entry.turnId);
     const finalAssistantTextByTurn = new Map<MessageId, IMessageText>();
@@ -1048,6 +1067,8 @@ const MessageList: React.FC<{
       if ('type' in entry && entry.type === 'process_receipt') return undefined;
       if ('type' in entry && entry.type === 'turn_deliverables') return entry.turn_id;
       if ('type' in entry && entry.type === 'turn_actions') return entry.turn_id;
+      if ('type' in entry && entry.type === 'turn_live_step') return entry.msg_id;
+      if ('type' in entry && entry.type === 'turn_creation_tasks') return entry.turn_id;
       return turnIdByAnchorId.get(getProcessedItemAnchorId(entry));
     };
 
@@ -1057,44 +1078,71 @@ const MessageList: React.FC<{
       if (turnId && deliverablesByTurn.has(turnId)) lastIndexByTurn.set(turnId, index);
     });
 
-    const withDeliverables: IProcessedItem[] = [];
-    disclosureItems.forEach((entry, index) => {
-      withDeliverables.push(entry);
-      const turnId = getDisplayItemTurnId(entry);
-      if (!turnId || lastIndexByTurn.get(turnId) !== index) return;
-      const items = deliverablesByTurn.get(turnId);
-      if (!items) return;
-      withDeliverables.push({
-        type: 'turn_deliverables',
-        id: `turn-deliverables-${turnId}`,
-        turn_id: turnId,
-        items,
-        sourceMessageIds: Array.from(
-          new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
-        ),
+    let decoratedItems: IProcessedItem[] = disclosureItems;
+    if (deliverablesByTurn.size > 0) {
+      const withDeliverables: IProcessedItem[] = [];
+      disclosureItems.forEach((entry, index) => {
+        withDeliverables.push(entry);
+        const turnId = getDisplayItemTurnId(entry);
+        if (!turnId || lastIndexByTurn.get(turnId) !== index) return;
+        const items = deliverablesByTurn.get(turnId);
+        if (!items) return;
+        withDeliverables.push({
+          type: 'turn_deliverables',
+          id: `turn-deliverables-${turnId}`,
+          turn_id: turnId,
+          items,
+          sourceMessageIds: Array.from(
+            new Set(items.flatMap((item) => item.sources.flatMap((source) => source.sourceMessageIds)))
+          ),
+          created_at: getProcessedItemCreatedAt(entry),
+        });
+        const actionMessage = finalAssistantTextByTurn.get(turnId);
+        const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
+        if (actionMessage) {
+          withDeliverables.push({
+            type: 'turn_actions',
+            id: `turn-actions-${turnId}`,
+            turn_id: turnId,
+            message: actionMessage,
+            sourceMessageIds: actionMessageId ? [actionMessageId] : [],
+            created_at: actionMessage.created_at ?? getProcessedItemCreatedAt(entry),
+          });
+        }
+      });
+      decoratedItems = withDeliverables;
+    }
+
+    const liveStep = buildTurnLiveStep(decoratedItems);
+    if (liveStep) decoratedItems = [...decoratedItems, liveStep];
+
+    const creationTaskPlacements = creationTaskPlacementAfterIndices(
+      decoratedItems.map(getDisplayItemTurnId),
+      creationOwnerMessageIdByTurn
+    );
+    if (creationTaskPlacements.size === 0) return decoratedItems;
+
+    const withCreationTasks: IProcessedItem[] = [];
+    decoratedItems.forEach((entry, index) => {
+      withCreationTasks.push(entry);
+      const placement = creationTaskPlacements.get(index);
+      if (!placement) return;
+      withCreationTasks.push({
+        type: 'turn_creation_tasks',
+        id: `turn-creation-tasks-${placement.turnId}`,
+        turn_id: placement.turnId,
+        message_id: placement.messageId,
+        sourceMessageIds: [placement.messageId],
         created_at: getProcessedItemCreatedAt(entry),
       });
-      const actionMessage = finalAssistantTextByTurn.get(turnId);
-      const actionMessageId = actionMessage ? getMessageBusinessIdentity(actionMessage) : undefined;
-      if (actionMessage) {
-        withDeliverables.push({
-          type: 'turn_actions',
-          id: `turn-actions-${turnId}`,
-          turn_id: turnId,
-          message: actionMessage,
-          sourceMessageIds: actionMessageId ? [actionMessageId] : [],
-          created_at: actionMessage.created_at ?? getProcessedItemCreatedAt(entry),
-        });
-      }
     });
-
-    const liveStep = buildTurnLiveStep(withDeliverables);
-    return liveStep ? [...withDeliverables, liveStep] : withDeliverables;
+    return withCreationTasks;
   }, [
     conversationContext?.activeRequestMessageId,
     conversationContext?.activeTurnId,
     conversationContext?.isProcessing,
     conversationContext?.stopNotice,
+    creationTaskOwnerMessageIds,
     processedList,
     t,
     workspaceRoots,
@@ -1354,6 +1402,9 @@ const MessageList: React.FC<{
         </div>
       );
     }
+    if ('type' in item && item.type === 'turn_creation_tasks') {
+      return <ConversationCreationTaskCards messageId={item.message_id} />;
+    }
     if ('type' in item && item.type === 'turn_actions') {
       return (
         <div
@@ -1447,7 +1498,7 @@ const MessageList: React.FC<{
             <div ref={handleColumnRef} className={contentStyles.column} data-testid='message-list-content' style={{ overflowAnchor: 'none' }}>
               <div className='h-10px' />
               {displayList.map((item, index) => (
-                <React.Fragment key={item.id}>{renderItem(index, item)}{'position' in item && item.position === 'right' && 'msg_id' in item && item.msg_id ? <ConversationCreationTaskCards messageId={item.msg_id} /> : null}</React.Fragment>
+                <React.Fragment key={item.id}>{renderItem(index, item)}</React.Fragment>
               ))}
               <div className='h-20px' />
             </div>

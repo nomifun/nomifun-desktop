@@ -822,8 +822,8 @@ pub(crate) async fn run_turn(
                 .await;
             }
 
-            let mut external_calls = 0usize;
-            let mut effectful = false;
+            let mut long_horizon_calls = 0usize;
+            let mut long_horizon_effect = false;
             let mut explicit_continuation = false;
             let mut explicit_plan = false;
             for call_id in &step.call_order {
@@ -837,20 +837,11 @@ pub(crate) async fn run_turn(
                         )
                     })?;
                 if let Some(tool) = request.tool_plan.binding(&call.name) {
-                    external_calls = external_calls.saturating_add(1);
-                    effectful |= !matches!(tool.effect_class, AgentEffectClass::ReadOnly);
-                } else if matches!(
-                    call.name.as_str(),
-                    crate::remote_resources::LIST
-                        | crate::remote_resources::READ
-                        | crate::remote_resources::TEMPLATES
-                ) {
-                    external_calls = external_calls.saturating_add(1);
-                    // Opening a remote resource can start a connection or
-                    // local stdio owner even when the requested operation is a read.
-                    effectful = true;
-                } else if call.name == crate::context_resources::TOOL_NAME {
-                    external_calls = external_calls.saturating_add(1);
+                    if crate::execution_policy::requires_task_ledger(tool) {
+                        long_horizon_calls = long_horizon_calls.saturating_add(1);
+                        long_horizon_effect |=
+                            !matches!(tool.effect_class, AgentEffectClass::ReadOnly);
+                    }
                 } else if call.name == crate::task_continuation::TOOL_NAME {
                     explicit_continuation = true;
                 } else if call.name == crate::planning::TOOL_NAME {
@@ -872,7 +863,7 @@ pub(crate) async fn run_turn(
                     )
                     .await?;
             }
-            let multi_step = adaptive.observe_external_batch(external_calls);
+            let multi_step = adaptive.observe_external_batch(long_horizon_calls);
             if explicit_continuation {
                 adaptive
                     .activate(
@@ -891,7 +882,7 @@ pub(crate) async fn run_turn(
                         event_sink.as_ref(),
                     )
                     .await?;
-            } else if effectful {
+            } else if long_horizon_effect {
                 adaptive
                     .activate(
                         crate::adaptive::LONG_HORIZON_MODULES,
@@ -983,8 +974,7 @@ pub(crate) async fn run_turn(
                         if attempted && binding.action_id.as_ref() == "workspace.files/read" && state.work_status.running_processes.is_empty() {
                             patch_recovery.observe_read(call, &result);
                         }
-                        if (attempted && (!matches!(binding.effect_class, crate::AgentEffectClass::ReadOnly)
-                            || binding.capability_id.as_ref() == "workspace.process"))
+                        if (attempted && crate::execution_policy::affects_workspace(binding))
                             || !state.work_status.running_processes.is_empty()
                         {
                             // Failed calls may have partial effects too.
@@ -1576,7 +1566,12 @@ async fn invoke_tool_calls(
             let cleanup = matches!(binding.action_id.as_ref(),
                 "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
             if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
-            else if !cleanup && !matches!(binding.effect_class, AgentEffectClass::ReadOnly) { execution_plan.effect_gate() }
+            else if !cleanup
+                && crate::execution_policy::requires_task_ledger(binding)
+                && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+            {
+                execution_plan.effect_gate()
+            }
             else { None }
         })
     });
@@ -1735,8 +1730,9 @@ async fn invoke_tool_calls(
             }
             patch_recovery.persist(event_sink).await?;
         }
-        if patch_call.is_none() && (invocation.binding.capability_id.as_ref() == "workspace.process"
-            || !matches!(invocation.binding.effect_class, crate::AgentEffectClass::ReadOnly)) {
+        if patch_call.is_none()
+            && crate::execution_policy::affects_workspace(&invocation.binding)
+        {
             patch_recovery.invalidate_observations();
             patch_recovery.persist(event_sink).await?;
         }
@@ -2166,6 +2162,17 @@ mod tests {
         .unwrap()
     }
 
+    fn atomic_media_plan() -> AgentToolPlan {
+        AgentToolPlan::new([tool_binding(
+            "generate_image",
+            "creation.media",
+            "creation.media/image",
+            AgentEffectClass::ExternalUncertainEffect,
+            false,
+        )])
+        .unwrap()
+    }
+
     #[test]
     fn frozen_tool_surface_never_advertises_capability_activation() {
         let mut request = request();
@@ -2393,6 +2400,11 @@ mod tests {
                 "incomplete_reasons":[], "files_scanned":1, "files_skipped":0,
                 "source_bytes_read":13, "notice":"No matches in the fixture file."}),
             "workspace.files/write" => json!({"path":args["path"], "written":true}),
+            "creation.media/image" => json!({
+                "creation_task_id":"0190f5fe-7c00-7a00-8000-000000000001",
+                "status":"queued",
+                "result_asset_ids":[]
+            }),
             other => panic!("unexpected fixture capability: {other}"),
         };
         AgentToolResult::text(invocation.call.call_id, value.to_string(), false)
@@ -2788,6 +2800,68 @@ mod tests {
         assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
             matches!(part, ChatContentPart::ToolResult { call_id: id, is_error: false, .. } if id == &call_id)));
         assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn atomic_media_submission_does_not_activate_coding_ledger() {
+        let call_id = ToolCallId::from("create-image");
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                vec![
+                    Ok(ChatModelEvent::ToolCallCompleted {
+                        call: ChatToolCall {
+                            call_id: call_id.clone(),
+                            name: "generate_image".into(),
+                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
+                                "prompt":"a cat"
+                            })),
+                            provider_metadata: None,
+                        },
+                    }),
+                    Ok(ChatModelEvent::Completed {
+                        finish_reason: ChatFinishReason::ToolCalls,
+                    }),
+                ],
+                text_step("submitted"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                atomic_media_plan(),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output_text, "submitted");
+        assert_eq!(result.model_steps, 2);
+        assert_eq!(result.tool_call_count, 1);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert!(!request.input.tools.iter().any(|tool| {
+                matches!(
+                    tool.name.as_str(),
+                    crate::planning::TOOL_NAME | crate::completion::TOOL_NAME
+                )
+            }));
+            assert!(!request
+                .input
+                .instructions
+                .iter()
+                .any(|instruction| instruction.contains("Long-horizon execution policy")));
+        }
+        assert!(requests[1]
+            .input
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|part| matches!(part,
+                ChatContentPart::ToolResult { call_id: id, is_error: false, .. }
+                    if id == &call_id)));
     }
 
     #[tokio::test]
