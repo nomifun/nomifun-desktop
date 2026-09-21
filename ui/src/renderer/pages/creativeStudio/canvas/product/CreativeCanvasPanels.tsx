@@ -13,6 +13,7 @@ import {
   Pic,
   Redo,
   Robot,
+  Timeline,
   Undo,
   VideoTwo,
   Voice,
@@ -46,6 +47,7 @@ const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasUserNodeKind, string> = {
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
+  timeline: 'creativeStudio.canvas.nodeKinds.timeline',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
@@ -55,6 +57,7 @@ const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasUserNodeKind, string> = {
   panorama: '全景图',
   video: '视频',
   audio: '音频',
+  timeline: '时间线',
   group: '分组',
 };
 
@@ -83,6 +86,8 @@ function nodeKindIcon(kind: CreativeCanvasUserNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
+    case 'timeline':
+      return <Timeline {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }
@@ -123,6 +128,8 @@ export function creativeCanvasNodeDisplayName(
         : nodeKindLabel('video', t);
     case 'audio':
       return compactText(node.data.title) || nodeKindLabel('audio', t);
+    case 'timeline':
+      return compactText(node.data.title) || nodeKindLabel('timeline', t);
     case 'group':
       return (
         compactText(node.data.title) ||
@@ -533,6 +540,32 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasUserNode; memberCount: 
           />
         </>
       );
+    case 'timeline':
+      return (
+        <>
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
+            })}
+            value={node.data.title}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.clipCount', {
+              defaultValue: '片段',
+            })}
+            value={t('creativeStudio.canvas.values.clipCount', {
+              count: node.data.clips.length,
+              defaultValue: '{{count}} 个片段',
+            })}
+          />
+          <PropertyRow
+            label={t('creativeStudio.canvas.properties.muted', {
+              defaultValue: '静音',
+            })}
+            value={booleanValue(node.data.muted, t)}
+          />
+        </>
+      );
     case 'group':
       return (
         <>
@@ -938,6 +971,42 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
                     },
                   },
                   'volume'
+                )
+              }
+            />
+          </PropertyEditorField>
+        </>
+      );
+    case 'timeline':
+      return (
+        <>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.title', {
+              defaultValue: '标题',
+            })}
+          >
+            <input
+              value={node.data.title}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, title: event.currentTarget.value } },
+                  'title'
+                )
+              }
+            />
+          </PropertyEditorField>
+          <PropertyEditorField
+            label={t('creativeStudio.canvas.properties.muted', {
+              defaultValue: '静音',
+            })}
+          >
+            <input
+              type='checkbox'
+              checked={node.data.muted}
+              onChange={(event) =>
+                onUpdate(
+                  { ...node, data: { ...node.data, muted: event.currentTarget.checked } },
+                  'muted'
                 )
               }
             />

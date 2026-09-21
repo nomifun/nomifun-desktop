@@ -1,0 +1,37 @@
+.dialog :global(.arco-modal-content) {
+  padding: 0;
+  overflow: hidden;
+}
+
+.dialog :global(.arco-modal-header) {
+  box-sizing: border-box;
+  height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.dialog :global(.arco-modal-title) {
+  font-size: 14px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.dialog :global(.arco-modal-body) {
+  padding: 0;
+}
+
+.content {
+  box-sizing: border-box;
+  width: 100%;
+  height: min(680px, calc(100vh - 120px));
+  min-height: 360px;
+  overflow: hidden;
+  background: var(--color-bg-2);
+}
+
+.content > * {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}

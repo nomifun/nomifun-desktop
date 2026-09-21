@@ -17,6 +17,9 @@ import type { CreativeCanvasNodeKind } from '../../domain/schema';
 import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import CreativeNodeFrame from './CreativeNodeFrame';
 import CreativeVideoNodeMedia from './CreativeVideoNodeMedia';
+import CreativeTimelineNode, {
+  type CreativeTimelineAssetPresentation,
+} from './CreativeTimelineNode';
 import type {
   CreativeNodeAssetPresentation,
   CreativeNodeOfKind,
@@ -406,6 +409,14 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
   textEditing?: boolean;
   onTextChange?: (text: string) => void;
   onTextEditingComplete?: () => void;
+  timelineAssets?: ReadonlyMap<string, CreativeTimelineAssetPresentation>;
+  onTimelineChange?: (
+    data: CreativeNodeOfKind<'timeline'>['data'],
+    mergeKey?: string
+  ) => void;
+  onTimelineDelete?: () => void;
+  onTimelineRequestAssets?: (popupContainer: HTMLElement | null) => void;
+  onTimelineUploadFiles?: (files: readonly File[]) => void | Promise<void>;
 };
 
 /** User-facing views for persisted canvas nodes; task-record configs stay headless. */
@@ -428,6 +439,18 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
       return <CreativeVideoNode {...props} node={node} asset={props.asset} />;
     case 'audio':
       return <CreativeAudioNode {...props} node={node} asset={props.asset} />;
+    case 'timeline':
+      return (
+        <CreativeTimelineNode
+          {...props}
+          node={node}
+          assets={props.timelineAssets ?? new Map()}
+          onChange={props.onTimelineChange}
+          onDelete={props.onTimelineDelete}
+          onRequestAssets={props.onTimelineRequestAssets}
+          onUploadFiles={props.onTimelineUploadFiles}
+        />
+      );
     case 'panorama':
       return <CreativePanoramaNode {...props} node={node} asset={props.asset} preview={props.panoramaPreview} />;
     case 'config':
@@ -443,5 +466,6 @@ export const CREATIVE_NODE_VIEW_KINDS = [
   'text',
   'video',
   'audio',
+  'timeline',
   'group',
 ] as const satisfies readonly Exclude<CreativeCanvasNodeKind, 'config'>[];

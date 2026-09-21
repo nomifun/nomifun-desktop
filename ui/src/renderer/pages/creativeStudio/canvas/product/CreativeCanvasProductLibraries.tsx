@@ -7,17 +7,17 @@
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativePromptPicker from '../../components/CreativePromptPicker';
 import {
   CreativeAssetPickerContent,
-  creativeAssetClient,
   isCreativeAssetDeleted,
   type CreativeAsset,
   type CreativeAssetKind,
   type UseCreativeAssetsResult,
 } from '../../assets';
 import {
-  createNomiPromptLibraryPort,
-  PromptLibrarySidebar,
+  toPromptLibrarySelection,
+  type PromptLibraryPort,
   type PromptLibrarySelection,
 } from '../../prompts';
 import styles from './CreativeCanvasProductLibraries.module.css';
@@ -29,6 +29,7 @@ export interface CreativeCanvasProductAssetLibraryProps {
   search: string;
   kind: CreativeCanvasAssetKindFilter;
   selectedIds: ReadonlySet<string>;
+  acceptedKinds?: readonly CreativeAssetKind[];
   disabled?: boolean;
   onSearchChange(value: string): void;
   onKindChange(value: CreativeCanvasAssetKindFilter): void;
@@ -56,6 +57,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
   search,
   kind,
   selectedIds,
+  acceptedKinds = ALL_ASSET_KINDS,
   disabled = false,
   onSearchChange,
   onKindChange,
@@ -79,7 +81,7 @@ export const CreativeCanvasProductAssetLibrary: React.FC<
       <CreativeAssetPickerContent
         open
         assets={state.assets}
-        acceptedKinds={ALL_ASSET_KINDS}
+        acceptedKinds={acceptedKinds}
         selectedIds={[...selectedIds]}
         loading={state.loading}
         loadingMore={state.loadingMore}
@@ -117,6 +119,7 @@ export interface CreativeCanvasProductPromptLibraryProps {
   locale: string;
   enabled?: boolean;
   selectedId?: string | null;
+  port?: PromptLibraryPort;
   onSelect?(id: string): void;
   onCopy(selection: PromptLibrarySelection): void;
 }
@@ -124,28 +127,18 @@ export interface CreativeCanvasProductPromptLibraryProps {
 /** Production prompt adapter: presets and text assets are loaded by the real port. */
 export const CreativeCanvasProductPromptLibrary: React.FC<
   CreativeCanvasProductPromptLibraryProps
-> = ({ locale, enabled = true, selectedId, onSelect, onCopy }) => {
-  const { t } = useTranslation();
-  const port = useMemo(
-    () => createNomiPromptLibraryPort({ locale, assets: creativeAssetClient }),
-    [locale]
-  );
-
-  return (
-    <div className={styles.promptPanel} data-product-prompt-library>
-      <PromptLibrarySidebar
-        port={port}
-        enabled={enabled}
-        title={t('creativeStudio.canvas.promptLibrary', {
-          defaultValue: '提示词库',
-        })}
-        description={t('creativeStudio.canvas.promptLibraryDescription', {
-          defaultValue: '来自 NomiFun 预设与文本素材',
-        })}
-        selectedId={selectedId}
-        onSelect={(item) => onSelect?.(item.id)}
-        onCopy={onCopy}
-      />
-    </div>
-  );
-};
+> = ({ locale, enabled = true, selectedId, port, onSelect, onCopy }) => (
+  <div className={styles.promptPanel} data-product-prompt-library>
+    <CreativePromptPicker
+      port={port}
+      locale={locale}
+      enabled={enabled}
+      selectedId={selectedId}
+      applyLabel='复制提示词'
+      onSelect={(item) => {
+        onSelect?.(item.id);
+        onCopy(toPromptLibrarySelection(item));
+      }}
+    />
+  </div>
+);

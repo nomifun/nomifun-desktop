@@ -47,6 +47,8 @@ export interface CreativeCanvasChromeProps {
   leftView: CreativeCanvasLeftView;
   /** Resource libraries use one shared modal instead of occupying the canvas rail. */
   resourceView: CreativeCanvasResourceView | null;
+  /** Mount the resource modal inside this element while the Canvas owns fullscreen. */
+  resourceDialogPopupContainer?: HTMLElement | null;
   rightView: CreativeCanvasRightView | null;
   /** Current persisted width of the right panel, in CSS pixels. */
   rightPanelWidth?: number;
@@ -81,6 +83,7 @@ export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
   'panorama',
   'video',
   'audio',
+  'timeline',
   'group',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
@@ -89,6 +92,7 @@ export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
   'image',
   'video',
   'audio',
+  'timeline',
   'panorama',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 

@@ -860,6 +860,7 @@
       "image": "Image",
       "panorama": "Panorama",
       "text": "Text",
+      "timeline": "Timeline",
       "video": "Video"
     },
     "nodes": {
@@ -912,6 +913,36 @@
         "seek": "Video progress",
         "unmute": "Unmute"
       }
+    },
+    "timeline": {
+      "addAssets": "Add media to timeline",
+      "assetUnavailable": "Asset unavailable",
+      "assetsAdded": "Added {{count}} asset(s) to the timeline.",
+      "cancelExport": "Cancel export",
+      "close": "Delete timeline node",
+      "clipLabel": "{{title}}, duration {{duration}}",
+      "defaultTitle": "Timeline {{ordinal}}",
+      "exitFullscreen": "Exit fullscreen editor",
+      "export": "Export composed video",
+      "exportErrors": {
+        "assetUnavailable": "The timeline contains unavailable media and cannot be exported.",
+        "audioUnsupported": "This browser cannot mix video audio into the export.",
+        "failed": "Timeline composition failed. Try again.",
+        "mediaLoadFailed": "Export media could not be loaded. Check the assets and try again.",
+        "unsupported": "This browser does not support timeline recording."
+      },
+      "exporting": "Composing {{percent}}%",
+      "fullscreen": "Fullscreen editor",
+      "mute": "Mute audio",
+      "noCompatibleAssets": "Timelines support image and video assets only.",
+      "pause": "Pause",
+      "play": "Play",
+      "previewEmpty": "Move the playhead to preview media",
+      "removeClip": "Remove clip",
+      "trimEnd": "Trim clip end",
+      "trimStart": "Trim clip start",
+      "unmute": "Enable audio",
+      "uploading": "Uploading {{count}} timeline asset(s)…"
     },
     "notices": {
       "agentApplyReloadFailed": "The Agent proposal could not be applied, and the remote canvas could not be reloaded.",
@@ -1003,6 +1034,7 @@
       "autoplay": "Autoplay",
       "capability": "Capability",
       "caption": "Caption",
+      "clipCount": "Clips",
       "collapsed": "Collapsed",
       "color": "Color",
       "content": "Content",
@@ -1140,6 +1172,7 @@
       "rejectedFiles": "{{count}} file(s) could not be imported ({{fileName}}: {{reason}})."
     },
     "values": {
+      "clipCount": "{{count}} clips",
       "itemCount": "{{count}} items",
       "milliseconds": "{{value}} ms",
       "no": "No",
@@ -1213,7 +1246,8 @@
       },
       "summary": "{{count}} templates",
       "title": "Templates",
-      "uncategorized": "Uncategorized"
+      "uncategorized": "Uncategorized",
+      "workspaceDescription": "Run templates and insert their results directly into the current canvas."
     },
     "zoom": {
       "resetView": "Reset view",

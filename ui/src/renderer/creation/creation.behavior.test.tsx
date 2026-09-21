@@ -194,6 +194,13 @@ describe('conversation creation admission and draft behavior', () => {
     const automatic = buildCreationRequest(draft, 'cat', presetId, [], { ...model, model: 'gpt-image-1', label: 'GPT Image', protocol: 'openai.images' });
     expect(automatic.params.size).toBeUndefined();
     expect(automatic.params.width).toBeUndefined();
+    const agnes = { providerId, model: 'agnes-video-v2.0', label: 'Agnes Video', protocol: 'agnes.video_jobs' };
+    expect(creationParameterPolicy(agnes).video.seconds).toEqual([5, 10, 15]);
+    draft.mode = 'video'; draft.models.video = { providerId, model: agnes.model }; draft.parameters.video = { seconds: 15 };
+    expect(buildCreationRequest(draft, 'waves', presetId, [], agnes).params.seconds).toBe(15);
+    draft.mode = 'music'; draft.models.music = { providerId, model: 'music-3.0' }; draft.parameters.music = { instrumental: true, seconds: 120 };
+    const music = buildCreationRequest(draft, 'warm piano', presetId, [], { providerId, model: 'music-3.0', label: 'Music 3.0', protocol: 'minimax.music' });
+    expect(music.params.seconds).toBe(120);
   });
 
   test('generation model recommendation uses an exact configured default or a sole candidate', () => {

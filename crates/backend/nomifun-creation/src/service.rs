@@ -204,7 +204,7 @@ fn param_str(params: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `params.seconds` for video generation: absent → `None`; a JSON number or a
+/// `params.seconds` for media generation: absent → `None`; a JSON number or a
 /// numeric string (both accepted by the retired openai_video adapter) →
 /// `Some(u32)`; anything else present-but-unparseable is a typed local
 /// `invalid_params` (the old code forwarded garbage to the provider; failing
@@ -221,6 +221,25 @@ fn param_seconds(params: &Value) -> Result<Option<u32>, CreationError> {
         .ok_or_else(|| {
             CreationError::new("invalid_params", "params.seconds must be a non-negative integer")
         })
+}
+
+/// MiniMax does not expose a strict duration field for music generation. Keep
+/// the user's explicit selection useful by expressing it as an approximate
+/// composition target while preserving the original value in the task params.
+fn music_prompt(params: &Value) -> Result<String, CreationError> {
+    let prompt = param_prompt(params);
+    let Some(seconds) = param_seconds(params)? else {
+        return Ok(prompt);
+    };
+    if !matches!(seconds, 60 | 120 | 180 | 240 | 300 | 360) {
+        return Err(CreationError::new(
+            "invalid_params",
+            "music params.seconds must be one of 60, 120, 180, 240, 300, or 360",
+        ));
+    }
+    Ok(format!(
+        "{prompt}\n\n[Target duration: approximately {seconds} seconds.]"
+    ))
 }
 
 fn param_text_max_tokens(params: &Value) -> Result<u32, CreationError> {
@@ -355,11 +374,11 @@ fn cap_to_task_request(
             ));
         }
         MediaCapability::Music => TaskRequest::MusicGeneration(MusicGenRequest {
-            prompt: param_prompt(params),
+            prompt: music_prompt(params)?,
             lyrics: param_str(params, "lyrics"),
             instrumental: params.get("instrumental").and_then(Value::as_bool).unwrap_or(true),
             format: param_str(params, "format"),
-            extra: request_extra(params, &["prompt", "lyrics", "instrumental", "format"]),
+            extra: request_extra(params, &["prompt", "lyrics", "instrumental", "format", "seconds"]),
         }),
         MediaCapability::Tts => TaskRequest::SpeechSynthesis(TtsRequest {
             text: param_prompt(params),
@@ -4221,10 +4240,10 @@ mod tests {
             }
             _ => panic!("tts must map to SpeechSynthesis"),
         }
-        let music = json!({"prompt":"Warm piano", "instrumental":false, "lyrics":"A new day", "format":"mp3", "_nomifun_creation_request":{"private":"receipt"}});
+        let music = json!({"prompt":"Warm piano", "instrumental":false, "lyrics":"A new day", "format":"mp3", "seconds":120, "_nomifun_creation_request":{"private":"receipt"}});
         match cap_to_task_request(MediaCapability::Music, &music, vec![]).unwrap() {
             TaskRequest::MusicGeneration(r) => {
-                assert_eq!(r.prompt, "Warm piano");
+                assert_eq!(r.prompt, "Warm piano\n\n[Target duration: approximately 120 seconds.]");
                 assert_eq!(r.lyrics.as_deref(), Some("A new day"));
                 assert!(!r.instrumental);
                 assert_eq!(r.format.as_deref(), Some("mp3"));
@@ -4232,6 +4251,12 @@ mod tests {
             }
             _ => panic!("music must map to MusicGeneration rather than speech"),
         }
+        let invalid_music = json!({"prompt":"Warm piano", "seconds":90});
+        let Err(error) = cap_to_task_request(MediaCapability::Music, &invalid_music, vec![]) else {
+            panic!("music duration must use a supported composer choice");
+        };
+        assert_eq!(error.kind, "invalid_params");
+        assert!(error.message.contains("music params.seconds"));
         let Err(text_error) = cap_to_task_request(MediaCapability::Text, &params, vec![]) else {
             panic!("text must never map to a media invocation request");
         };
