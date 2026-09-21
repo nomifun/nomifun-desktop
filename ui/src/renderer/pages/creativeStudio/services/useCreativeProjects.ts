@@ -5,28 +5,23 @@
  */
 
 import { useCallback } from 'react';
-import useSWR, { type SWRConfiguration } from 'swr';
+import useSWR,{ type SWRConfiguration } from 'swr';
 import type {
-  CreateCreativeProjectRequest,
-  CreativeProjectDetail,
-  CreativeProjectDocument,
-  CreativeProjectSummary,
+CreativeProjectDetail,
+CreativeProjectDocument,
+CreativeProjectSummary
 } from '../domain';
 import {
-  creativeProjectRepository,
-  type CreativeProjectRepository,
+creativeProjectRepository,
+type CreativeProjectRepository,
 } from './projectRepository';
 
-/** @deprecated Legacy cache isolated from canonical Canvas-shaped values. */
-export const CREATIVE_PROJECTS_SWR_KEY =
-  'creative-studio/legacy-project-adapter/v1';
-
-export const creativeProjectDetailKey = (projectId: string): readonly [string, string] => [
+const creativeProjectDetailKey = (projectId: string): readonly [string, string] => [
   'creative-studio/project/v1',
   projectId,
 ];
 
-export const CREATIVE_PROJECT_SWR_OPTIONS: SWRConfiguration = {
+const CREATIVE_PROJECT_SWR_OPTIONS: SWRConfiguration = {
   revalidateOnFocus: false,
   shouldRetryOnError: false,
 };
@@ -47,68 +42,6 @@ export function upsertCreativeProjectSummary(
     ...(projects ?? []).filter((candidate) => candidate.projectId !== project.projectId),
     project,
   ]);
-}
-
-export interface CreativeProjectsState {
-  projects: CreativeProjectSummary[];
-  isLoading: boolean;
-  error: Error | undefined;
-  refresh(): Promise<CreativeProjectSummary[] | undefined>;
-  create(request?: CreateCreativeProjectRequest): Promise<CreativeProjectSummary>;
-  rename(projectId: string, title: string): Promise<CreativeProjectSummary>;
-  remove(projectId: string): Promise<void>;
-}
-
-/** @deprecated Legacy hook for canvas/editor modules not migrated yet. */
-export function useCreativeProjects(
-  repository: CreativeProjectRepository = creativeProjectRepository
-): CreativeProjectsState {
-  const { data, error, isLoading, mutate } = useSWR<CreativeProjectSummary[], Error>(
-    CREATIVE_PROJECTS_SWR_KEY,
-    () => repository.list(),
-    CREATIVE_PROJECT_SWR_OPTIONS
-  );
-
-  const create = useCallback(
-    async (request: CreateCreativeProjectRequest = {}) => {
-      const project = await repository.create(request);
-      await mutate((current) => upsertCreativeProjectSummary(current, project), { revalidate: false });
-      return project;
-    },
-    [mutate, repository]
-  );
-
-  const rename = useCallback(
-    async (projectId: string, title: string) => {
-      const project = await repository.rename(projectId, title);
-      await mutate((current) => upsertCreativeProjectSummary(current, project), { revalidate: false });
-      return project;
-    },
-    [mutate, repository]
-  );
-
-  const remove = useCallback(
-    async (projectId: string) => {
-      await repository.remove(projectId);
-      await mutate(
-        (current) => (current ?? []).filter((project) => project.projectId !== projectId),
-        { revalidate: false }
-      );
-    },
-    [mutate, repository]
-  );
-
-  const refresh = useCallback(() => mutate(), [mutate]);
-
-  return {
-    projects: sortCreativeProjectSummaries(data ?? []),
-    isLoading,
-    error,
-    refresh,
-    create,
-    rename,
-    remove,
-  };
 }
 
 export interface CreativeProjectState {

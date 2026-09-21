@@ -48,7 +48,7 @@ export type NomiCreativeStudioAgentSessionResolver = (
   input: NomiCreativeStudioAgentSessionResolutionInput
 ) => Promise<NomiCreativeStudioAgentSessionResolution>;
 
-export type NomiConversationRuntimeAuthority = 'idle' | 'processing' | 'unknown';
+type NomiConversationRuntimeAuthority = 'idle' | 'processing' | 'unknown';
 
 export interface NomiCreativeStudioConversationSnapshot {
   conversationId: ConversationId;

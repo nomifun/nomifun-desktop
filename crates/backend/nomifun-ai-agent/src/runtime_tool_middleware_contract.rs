@@ -1,6 +1,4 @@
 //! Host-owned gates for one outer tool invocation. Middleware only returns a decision.
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -61,118 +59,6 @@ pub trait ToolCallMiddleware: Send + Sync {
     fn label(&self) -> &str;
 }
 
-/// Check the complete input before redaction as well; masking must not turn an
-/// oversized argument into a silently accepted gate input.
-pub(crate) fn input(
-    invocation_id: &str,
-    tool_call_id: &str,
-    tool_name: &str,
-    arguments: &Value,
-) -> Result<BeforeToolInput, String> {
-    let mut input = BeforeToolInput {
-        phase: "before_tool",
-        invocation_id: invocation_id.to_owned(),
-        tool_call_id: tool_call_id.to_owned(),
-        tool_name: tool_name.to_owned(),
-        arguments: arguments.clone(),
-        redacted: false,
-    };
-    check_input_size(&input)?;
-    redact_arguments(&mut input.arguments, &mut input.redacted);
-    check_input_size(&input)?;
-    Ok(input)
-}
-
-fn check_input_size(input: &BeforeToolInput) -> Result<(), String> {
-    if serde_json::to_vec(input)
-        .map_err(|_| "before_tool input encoding failed")?
-        .len()
-        > MAX_INPUT_BYTES
-    {
-        return Err("before_tool input exceeds 256 KiB; target tool was not executed".into());
-    }
-    Ok(())
-}
-
-fn sensitive_key(key: &str) -> bool {
-    let normalized: String = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
-    matches!(
-        normalized.as_str(),
-        "authorization"
-            | "proxyauthorization"
-            | "cookie"
-            | "setcookie"
-            | "password"
-            | "passwd"
-            | "secret"
-            | "clientsecret"
-            | "apikey"
-            | "accesskey"
-            | "accesskeyid"
-            | "secretaccesskey"
-            | "token"
-            | "accesstoken"
-            | "refreshtoken"
-            | "idtoken"
-            | "privatekey"
-            | "credentials"
-    ) || normalized.ends_with("password")
-        || normalized.ends_with("secret")
-        || normalized.ends_with("token")
-        || normalized.ends_with("apikey")
-}
-
-fn redact_arguments(value: &mut Value, redacted: &mut bool) {
-    match value {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                if sensitive_key(key) {
-                    *value = Value::String("[REDACTED]".into());
-                    *redacted = true;
-                } else {
-                    redact_arguments(value, redacted);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                redact_arguments(value, redacted);
-            }
-        }
-        Value::String(text) => {
-            let safe = nomi_redact::redact_secrets_owned(text.clone());
-            *redacted |= safe != *text;
-            *text = safe;
-        }
-        _ => {}
-    }
-}
-
-pub(crate) async fn apply(
-    middleware: &[Arc<dyn ToolCallMiddleware>],
-    input: BeforeToolInput,
-    stopped: impl Fn() -> bool,
-) -> Result<BeforeToolDecision, String> {
-    for entry in middleware {
-        if stopped() {
-            return Err("before_tool chain stopped after an earlier gate failure".into());
-        }
-        let decision = entry
-            .before_tool(input.clone())
-            .await
-            .map_err(|_| "before_tool service failed; target tool was not executed".to_owned())?;
-        decision.validate()?;
-        if matches!(decision, BeforeToolDecision::Deny { .. }) {
-            return Ok(decision);
-        }
-    }
-    Ok(BeforeToolDecision::Allow {})
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,24 +83,5 @@ mod tests {
             .is_err()
         );
         assert!(decode_decision(&vec![b' '; MAX_OUTPUT_BYTES + 1]).is_err());
-    }
-    #[test]
-    fn recursive_redaction_preserves_business_arguments_without_truncation() {
-        let raw = serde_json::json!({"nested": [{"api_key":"sensitive", "quantity":7}], "password":"hidden", "destination":"office"});
-        let safe = input("invocation", "call", "business", &raw).unwrap();
-        assert!(safe.redacted);
-        assert_eq!(safe.arguments["nested"][0]["api_key"], "[REDACTED]");
-        assert_eq!(safe.arguments["nested"][0]["quantity"], 7);
-        assert_eq!(safe.arguments["destination"], "office");
-        assert_eq!(raw["password"], "hidden");
-        assert!(
-            input(
-                "i",
-                "c",
-                "t",
-                &serde_json::json!({"password":"x".repeat(MAX_INPUT_BYTES)})
-            )
-            .is_err()
-        );
     }
 }

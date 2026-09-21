@@ -85,7 +85,7 @@ export const LARGE_TEXT_VIEWER_RENDER_LIMIT = 20_000;
  * their source files directly. Shared by the toolbar's snapshot/history buttons
  * and by `usePreviewHistory`, which must not even build a target for the rest.
  */
-export const PREVIEW_HISTORY_CONTENT_TYPES: ReadonlySet<PreviewContentType> = new Set<PreviewContentType>([
+const PREVIEW_HISTORY_CONTENT_TYPES: ReadonlySet<PreviewContentType> = new Set<PreviewContentType>([
   'markdown',
   'html',
   'code',

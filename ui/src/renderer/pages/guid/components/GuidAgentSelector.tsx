@@ -16,7 +16,7 @@ import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import { isConversationAgentTemplate } from '@/renderer/components/agent/conversationAgentCatalog';
 import styles from './GuidAgentSelector.module.css';
 
-export const DEFAULT_VISIBLE_PERSONAL_AGENTS = 3;
+const DEFAULT_VISIBLE_PERSONAL_AGENTS = 3;
 
 export type GuidAgentSelectorProps = {
   presets: ExecutableAgentPreset[];

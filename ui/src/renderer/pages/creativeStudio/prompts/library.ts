@@ -88,7 +88,7 @@ function nullableHttpsUrl(value: unknown, field: string): string | null {
   return url.toString();
 }
 
-export function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
+function parsePromptLibraryItem(value: unknown): PromptLibraryItem {
   const item = record(value);
   return {
     id: text(item.id, 'id', 255),

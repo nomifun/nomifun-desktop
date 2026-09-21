@@ -50,6 +50,13 @@ const PROVIDER_NAME_MAX_BYTES: usize = 64;
 const PROVIDER_NAME_HASH_HEX_BYTES: usize = 20;
 const MAX_INITIAL_CAPABILITY_CONTEXT_BYTES: usize = 64 * 1024;
 
+fn gateway_delegate_provider_name() -> String {
+    nomi_mcp::tool_proxy::canonical_mcp_display_name(
+        nomifun_api_types::GatewayMcpConfig::SERVER_NAME,
+        "nomi_delegate",
+    )
+}
+
 /// Capability shapes actually consumed by the Nomi managed-Plugin adapter.
 /// Catalog availability uses the same predicate as runtime materialization;
 /// declaring a kind in a Package alone does not make it executable by Nomi.
@@ -1345,17 +1352,6 @@ impl NomiPluginToolSession {
         }
         Ok(None)
     }
-    pub(crate) fn media_creation_provider_names(&self) -> std::collections::HashSet<String> {
-        self.actions.iter().filter(|action| is_builtin_creation(&action.identity)
-            && action.action_id().as_ref() != "creation.media/text")
-            .map(|action| action.provider_name.clone()).collect()
-    }
-
-    pub(crate) fn with_creation_receipt_sink(mut self, sink: Arc<crate::capability::backend_output_sink::BackendOutputSink>, conversation_id: String) -> Self {
-        self.invoker = Arc::new(NomiCreationReceiptInvoker { delegate: self.invoker.clone(), sink, conversation_id });
-        self
-    }
-
     pub fn execution_constraints(&self) -> nomifun_api_types::ExecutionConstraints {
         self.execution_constraints
     }
@@ -1366,7 +1362,7 @@ impl NomiPluginToolSession {
     pub fn constrain_tool_policy(&self, allowed: &mut Vec<String>, deferred: &mut Vec<String>) {
         let ceiling = self.execution_constraints;
         let allowed_name = |name: &str| {
-            if ceiling.exclude_delegation && name == crate::subagent_gateway::gateway_delegate_provider_name() {
+            if ceiling.exclude_delegation && name == gateway_delegate_provider_name() {
                 return false;
             }
             ceiling.allows_nomi_tool(name)
@@ -1376,12 +1372,6 @@ impl NomiPluginToolSession {
         allowed.retain(|name| allowed_name(name));
         deferred.retain(|name| allowed.contains(name));
     }
-
-    pub(crate) fn has_frozen_mcp_tools(&self) -> bool {
-        self.actions.iter().any(|action| action.identity.resolved_capability.contribution_lock.source_kind == ContributionSourceKind::McpBinding)
-    }
-
-    pub(crate) fn has_hosted_mcp_resources(&self) -> bool { self.mcp_resources.is_some() }
 
     fn with_mcp_resources(mut self, resources: crate::nomi_resources::NomiMcpResources) -> Result<Self, NomiPluginToolError> {
         let bindings = self.target_resource_bindings.iter()
@@ -1544,14 +1534,6 @@ impl NomiPluginToolSession {
             return Err(NomiPluginToolError::Contract("selected Skills already installed".into()));
         }
         self.selected_skills = Some(skills);
-        Ok(self)
-    }
-
-    pub(crate) fn with_context_image_policy(mut self, supports_image: bool) -> Result<Self, nomifun_common::AppError> {
-        // The host has already intersected exact model support with the frozen
-        // exact primary-model ImageInput support. There is no runtime activation grant.
-        if let Some(resources) = &self.mcp_resources { resources.bind_image_policy(supports_image)?; }
-        if let Some(skills) = &mut self.selected_skills { skills.image_policy(supports_image); }
         Ok(self)
     }
 
@@ -3138,32 +3120,6 @@ fn conversation_creation_schema(mut schema: Value) -> Value {
     schema
 }
 
-struct NomiCreationReceiptInvoker {
-    delegate: Arc<dyn NomiPluginToolInvoker>,
-    sink: Arc<crate::capability::backend_output_sink::BackendOutputSink>,
-    conversation_id: String,
-}
-
-#[async_trait]
-impl NomiPluginToolInvoker for NomiCreationReceiptInvoker {
-    async fn preflight(&self, request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
-        self.delegate.preflight(request).await
-    }
-
-    async fn invoke(&self, request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
-        let scope = if is_builtin_creation(&request.identity) {
-            Some(self.sink.native_creation_task_scope(&self.conversation_id).map_err(NomiPluginToolError::Contract)?)
-        } else { None };
-        let output = self.delegate.invoke(request).await?;
-        if let Some(scope) = scope {
-            let task_id = output.0.get("creation_task_id").and_then(Value::as_str)
-                .ok_or_else(|| NomiPluginToolError::Contract("creation host returned no durable task identity".into()))?;
-            self.sink.register_native_creation_task(&scope, task_id).map_err(NomiPluginToolError::Contract)?;
-        }
-        Ok(output)
-    }
-}
-
 struct KernelNomiPluginToolInvoker {
     creation_turn: Arc<NomiCreationTurnContext>,
     kernel: Arc<KernelRegistry>,
@@ -3824,98 +3780,6 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod dynamic_error_tests {
     use super::*;
-
-    #[tokio::test]
-    async fn creation_receipt_preflight_preserves_authorization_without_executing() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize};
-
-        struct AdmissionOnly {
-            expected: NomiPluginToolInvocation,
-            denied: AtomicBool,
-            calls: AtomicUsize,
-        }
-
-        #[async_trait]
-        impl NomiPluginToolInvoker for AdmissionOnly {
-            async fn preflight(&self, request: NomiPluginToolInvocation) -> Result<(), NomiPluginToolError> {
-                assert_eq!(request, self.expected, "preflight must retain exact invocation authority and input");
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                if self.denied.load(Ordering::SeqCst) {
-                    Err(NomiPluginToolError::Contract("admission denied".into()))
-                } else {
-                    Ok(())
-                }
-            }
-
-            async fn invoke(&self, _request: NomiPluginToolInvocation) -> Result<StrictJsonValue, NomiPluginToolError> {
-                panic!("preflight must never execute a tool");
-            }
-        }
-
-        let digest = "a".repeat(64);
-        let request = NomiPluginToolInvocation {
-            identity: NomiPluginToolActionIdentity {
-                resolved_snapshot_ref: ResolvedSnapshotRef {
-                    snapshot_id: uuid::Uuid::now_v7().to_string().into(),
-                    snapshot_digest: digest.clone().into(),
-                },
-                resolved_capability: serde_json::from_value(serde_json::json!({
-                    "capability": {"id": "creation.media", "version": "1.0.0"},
-                    "source_package": {"id": "nomifun.creation", "version": "1.0.0"},
-                    "contribution_id": "module:creation.media",
-                    "contribution_lock": {
-                        "source_kind": ContributionSourceKind::PlatformBuiltin,
-                        "source_identity": "platform-builtin:creation.media",
-                        "contribution_id": "module:creation.media",
-                        "contract_digest": digest,
-                    },
-                    "resolved_source": {
-                        "source_kind": PluginSourceKind::ManagedLocal,
-                        "source_identity": "platform-builtin:creation.media",
-                        "source_digest": digest,
-                    },
-                    "target_artifact_digest": digest,
-                    "schema_digest": digest,
-                    "dependency_path": ["creation.media"],
-                    "required_runtime_features": [],
-                })).unwrap(),
-                action: CapabilityActionDescriptor {
-                    action_id: "creation.media/image".into(),
-                    input_schema: format!("schema://creation.media/image/input@1#{digest}").into(),
-                    output_schema: format!("schema://creation.media/image/output@1#{digest}").into(),
-                    effect_class: EffectClass::Pure,
-                    presentation: ToolPresentationKind::FunctionTool,
-                },
-                input_schema_digest: digest.into(),
-            },
-            turn_id: "canonical-agent-turn".into(),
-            operation_id: "receipt-preflight-operation".into(),
-            idempotency_key: "receipt-preflight-key".into(),
-            correlation_id: "receipt-preflight-correlation".into(),
-            input: StrictJsonValue(serde_json::json!({"prompt": "a cat"})),
-        };
-        assert_eq!(request.turn_id().as_ref(), "canonical-agent-turn");
-        assert_ne!(request.turn_id(), request.operation_id());
-        assert!(is_builtin_creation(&request.identity));
-        let delegate = Arc::new(AdmissionOnly {
-            expected: request.clone(),
-            denied: AtomicBool::new(false),
-            calls: AtomicUsize::new(0),
-        });
-        let (events, _receiver) = tokio::sync::broadcast::channel(1);
-        // No admitted output turn: attempting to reserve a creation receipt
-        // during preflight would fail even when the delegate allows the call.
-        let invoker = NomiCreationReceiptInvoker {
-            delegate: delegate.clone(),
-            sink: Arc::new(crate::capability::backend_output_sink::BackendOutputSink::new(events)),
-            conversation_id: uuid::Uuid::now_v7().to_string(),
-        };
-        invoker.preflight(request.clone()).await.unwrap();
-        delegate.denied.store(true, Ordering::SeqCst);
-        assert!(matches!(invoker.preflight(request).await,
-            Err(NomiPluginToolError::Contract(message)) if message == "admission denied"));
-        assert_eq!(delegate.calls.load(Ordering::SeqCst), 2);
-    }
 
     #[test]
     fn restricted_workspace_policy_grants_exact_actions_not_whole_modules() {

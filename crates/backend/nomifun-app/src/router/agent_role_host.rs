@@ -3,8 +3,6 @@
 //! Conversation Browser uses its native Workspace owner. An unbound v2
 //! provider fails closed.
 
-#![allow(dead_code)]
-
 use std::fmt;
 #[cfg(feature = "computer-use")]
 use std::sync::Arc;
@@ -335,15 +333,6 @@ mod computer {
         pub input: serde_json::Value,
     }
 
-    impl ComputerObserve {
-        pub(crate) fn accessibility() -> Self {
-            Self {
-                action_id: nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
-                input: serde_json::json!({"action":"observe"}),
-            }
-        }
-    }
-
     #[derive(Clone, Debug, PartialEq)]
     pub(crate) struct ComputerInput {
         pub action: String,
@@ -662,11 +651,12 @@ mod computer {
 }
 
 #[cfg(feature = "computer-use")]
-#[allow(unused_imports)]
 pub(crate) use computer::{
     ComputerInput, ComputerLaunch, ComputerObserve, ComputerRoleHost, ComputerRoleOperation,
-    ComputerRoleResult, ComputerToolPort,
 };
+
+#[cfg(all(test, feature = "computer-use"))]
+use computer::ComputerToolPort;
 
 #[cfg(feature = "computer-use")]
 pub(crate) struct ComputerRoleInvoker {
@@ -1009,7 +999,10 @@ mod tests {
 
     #[cfg(feature = "computer-use")]
     fn computer_observe() -> ComputerObserve {
-        ComputerObserve::accessibility()
+        ComputerObserve {
+            action_id: nomi_computer::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+            input: serde_json::json!({"action":"observe"}),
+        }
     }
 
     #[test]

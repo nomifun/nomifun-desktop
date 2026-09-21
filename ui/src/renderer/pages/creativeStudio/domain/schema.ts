@@ -10,7 +10,7 @@ import type { ModelTask } from '@/common/config/storage';
 export const CREATIVE_STUDIO_DOCUMENT_SCHEMA = 'nomifun.creative-studio/v1' as const;
 
 /** New documents never share a schema or a fallback reader with the retired workshop. */
-export type CreativeStudioDocumentSchema = typeof CREATIVE_STUDIO_DOCUMENT_SCHEMA;
+type CreativeStudioDocumentSchema = typeof CREATIVE_STUDIO_DOCUMENT_SCHEMA;
 
 export type CreativeCanvasBackground = 'dots' | 'lines' | 'blank';
 
@@ -57,7 +57,7 @@ export type CreativeGenerationStatus =
   | 'failed'
   | 'canceled';
 
-export type CreativeJsonPrimitive = string | number | boolean | null;
+type CreativeJsonPrimitive = string | number | boolean | null;
 export type CreativeJsonValue =
   | CreativeJsonPrimitive
   | CreativeJsonValue[]
@@ -214,7 +214,7 @@ export interface CreativeAudioComposerDraft {
   format: 'mp3' | 'wav';
 }
 
-export type CreativeTimelineClipKind = 'image' | 'video';
+type CreativeTimelineClipKind = 'image' | 'video';
 
 /** One durable image/video edit on a timeline track. Times are milliseconds. */
 export interface CreativeTimelineClip {
@@ -251,7 +251,7 @@ export interface CreativeCanvasNodeDataByKind {
   group: CreativeGroupNodeData;
 }
 
-export interface CreativeCanvasNodeBase<K extends CreativeCanvasNodeKind> {
+interface CreativeCanvasNodeBase<K extends CreativeCanvasNodeKind> {
   id: string;
   type: K;
   position: CreativePoint;
@@ -373,7 +373,7 @@ export interface CreativeProjectDetail {
   document: CreativeProjectDocument;
 }
 
-export interface CreativeProjectAgentKickoff {
+interface CreativeProjectAgentKickoff {
   prompt: string;
   model: CreativeChatModelReference;
 }
@@ -399,10 +399,6 @@ export interface CreativeProjectListResponse {
 export interface CreativeProjectResponse {
   project: CreativeProjectSummary;
 }
-
-export interface CreativeProjectDetailResponse extends CreativeProjectDetail {}
-
-export type SaveCreativeProjectResponse = CreativeProjectResponse;
 
 export const DEFAULT_CREATIVE_STUDIO_PANELS: CreativeStudioPanelState = {
   left: { open: false, width: 280, activeView: 'canvas' },

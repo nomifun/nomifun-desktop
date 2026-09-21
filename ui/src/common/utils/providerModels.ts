@@ -20,7 +20,7 @@ import type {
   ProviderModelResponse,
 } from '@/common/types/provider/providerModel';
 
-export const modelOf = (
+const modelOf = (
   provider: Pick<IProvider, 'models'> | undefined,
   model: string
 ): ProviderModelResponse | undefined => provider?.models.find((row) => row.model === model);
@@ -70,7 +70,7 @@ export const capabilitySupportsTechnicalCapability = (
   );
 
 /** Strip response-only health/timestamps when saving a complete model. */
-export const toProviderModelCapabilityInput = (
+const toProviderModelCapabilityInput = (
   capability: ProviderModelCapabilityResponse
 ): ProviderModelCapabilityInput => ({
   task: capability.task,

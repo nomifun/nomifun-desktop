@@ -1,23 +1,22 @@
 import type {
-  AgentPresetId,
-  AgentResolvedSnapshot,
+AgentPresetId,
+AgentResolvedSnapshot,
 } from '@/common/types/agentPlatform';
 import type {
-  AgentId,
-  ExecutionTemplateId,
-  ExecutionTemplateParticipantId,
-  ConversationId,
-  ProviderId,
+AgentId,
+ConversationId,
+ExecutionTemplateId,
+ExecutionTemplateParticipantId,
+ProviderId,
 } from '@/common/types/ids';
 import type {
-  TAdaptationPolicy,
-  TAgentExecution,
-  TDecisionPolicy,
-  TDelegationPolicy,
-  TExecutionModelRef,
-  TParticipantCapability,
-  TParticipantConstraints,
-  TPlannedExecutionStep,
+TAdaptationPolicy,
+TDecisionPolicy,
+TDelegationPolicy,
+TExecutionModelRef,
+TParticipantCapability,
+TParticipantConstraints,
+TPlannedExecutionStep
 } from './agentExecutionTypes';
 
 export type TAgentExecutionTemplate = {
@@ -56,7 +55,7 @@ export type TAgentExecutionTemplateDetail = TAgentExecutionTemplate & {
   participants: TAgentExecutionTemplateParticipant[];
 };
 
-export type TAgentExecutionTemplateParticipantInput = {
+type TAgentExecutionTemplateParticipantInput = {
   source_agent_id?: AgentId;
   preset_id?: AgentPresetId;
   agent_snapshot?: AgentResolvedSnapshot;
@@ -102,5 +101,3 @@ export type TCreateExecutionFromTemplate = {
   lead_model?: TExecutionModelRef;
   steps?: TPlannedExecutionStep[];
 };
-
-export type TCreatedExecutionFromTemplate = TAgentExecution;

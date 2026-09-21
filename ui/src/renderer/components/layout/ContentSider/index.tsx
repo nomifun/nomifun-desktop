@@ -9,9 +9,8 @@ import classNames from 'classnames';
 import styles from './ContentSider.module.css';
 
 export { useContentSiderCollapse } from './useContentSiderCollapse';
-export type { ContentSiderCollapseState } from './useContentSiderCollapse';
 
-export interface ContentSiderProps {
+interface ContentSiderProps {
   /** Expanded panel width in px. */
   width?: number;
   /**

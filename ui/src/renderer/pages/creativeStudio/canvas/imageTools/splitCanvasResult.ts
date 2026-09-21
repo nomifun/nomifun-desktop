@@ -11,8 +11,8 @@ import type {
 } from "../../domain";
 import { translateCreativeImageTool } from "./imageToolI18n";
 
-export const CREATIVE_IMAGE_SPLIT_NODE_GAP = 16;
-export const CREATIVE_IMAGE_SPLIT_ORIGIN_GAP = 96;
+const CREATIVE_IMAGE_SPLIT_NODE_GAP = 16;
+const CREATIVE_IMAGE_SPLIT_ORIGIN_GAP = 96;
 const SPLIT_GRID_ROW_GAP = 40;
 
 export interface CreativeImageSplitCanvasLayout {

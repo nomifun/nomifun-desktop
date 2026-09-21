@@ -10,25 +10,22 @@ use nomifun_engine_core::{
     EngineResourceImageRead, EngineResourceQuery, EngineResourceRead, EngineToolResult,
 };
 use serde_json::{Value, json};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-/// Bound once by Nomi runtime construction, never by tool JSON. The platform
-/// resource adapter keeps the same handle and independently checks it before
-/// remote IO and after image preparation. Unbound/unsupported/unselected denies.
-#[derive(Default)]
+/// Bound by Nomi runtime construction, never by tool JSON. The platform
+/// resource adapter keeps the same immutable handle and independently checks
+/// it before remote IO and after image preparation.
 pub struct NomiResourceImageAuthority {
-    policy: OnceLock<bool>,
+    supports_image: bool,
 }
 
 impl NomiResourceImageAuthority {
-    fn bind(&self, supports_image: bool) -> Result<(), AppError> {
-        self.policy
-            .set(supports_image)
-            .map_err(|_| AppError::Conflict("Nomi resource image policy is already bound".into()))
+    pub fn new(supports_image: bool) -> Self {
+        Self { supports_image }
     }
 
     pub fn ensure_active(&self) -> Result<(), AppError> {
-        if self.policy.get() != Some(&true) {
+        if !self.supports_image {
             return Err(AppError::Conflict("Nomi resource image requires host-confirmed exact-model image support".into()));
         }
         Ok(())
@@ -65,25 +62,6 @@ pub trait NomiMcpResourceInvoker: Send + Sync {
         Err(AppError::Conflict(
             "Nomi resource images are unavailable from this host".into(),
         ))
-    }
-}
-
-#[cfg(test)]
-mod image_authority_tests {
-    use super::*;
-
-    #[test]
-    fn image_authority_is_fail_closed_and_bound_once_without_activation() {
-        let denied = NomiResourceImageAuthority::default();
-        assert!(denied.ensure_active().is_err());
-        denied.bind(false).unwrap();
-        assert!(denied.ensure_active().is_err());
-        assert!(denied.bind(true).is_err());
-
-        let enabled = NomiResourceImageAuthority::default();
-        enabled.bind(true).unwrap();
-        enabled.ensure_active().unwrap();
-        assert!(enabled.bind(false).is_err());
     }
 }
 
@@ -137,7 +115,7 @@ impl NomiMcpResources {
         mut self,
         authority: Arc<NomiResourceImageAuthority>,
     ) -> Result<Self, AppError> {
-        if self.image_authority.is_some() || authority.policy.get().is_some() {
+        if self.image_authority.is_some() {
             return Err(AppError::Conflict(
                 "Nomi resource image authority must be installed once before runtime construction"
                     .into(),
@@ -145,16 +123,6 @@ impl NomiMcpResources {
         }
         self.image_authority = Some(authority);
         Ok(self)
-    }
-
-    pub(crate) fn bind_image_policy(
-        &self,
-        supports_image: bool,
-    ) -> Result<(), AppError> {
-        if let Some(authority) = &self.image_authority {
-            authority.bind(supports_image)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn tools(

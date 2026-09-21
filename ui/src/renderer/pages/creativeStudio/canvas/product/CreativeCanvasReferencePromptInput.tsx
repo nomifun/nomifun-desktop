@@ -37,7 +37,7 @@ export interface CreativeCanvasReferencePromptChange {
   mentions: CreativeCanvasPromptMentionBinding[];
 }
 
-export type CreativeCanvasPromptMentionIssueCode =
+type CreativeCanvasPromptMentionIssueCode =
   | 'disconnected'
   | 'reference_disabled'
   | 'text_changed';
@@ -48,7 +48,7 @@ export interface CreativeCanvasPromptMentionIssue {
   reason?: string;
 }
 
-export interface CreativeCanvasReferencePromptLabels {
+interface CreativeCanvasReferencePromptLabels {
   input: string;
   insertReference: string;
   connectedReferences: string;
@@ -62,7 +62,7 @@ export interface CreativeCanvasReferencePromptLabels {
   referenceMentionLabel: (ordinal: number) => string;
 }
 
-export interface CreativeCanvasReferencePromptInputProps {
+interface CreativeCanvasReferencePromptInputProps {
   value: string;
   mentions: readonly CreativeCanvasPromptMentionBinding[];
   /** Pass only references directly connected to the active generation node. */

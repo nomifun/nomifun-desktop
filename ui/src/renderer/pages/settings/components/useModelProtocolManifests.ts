@@ -26,14 +26,14 @@ const EMPTY_MANIFESTS: ModelProtocolManifestMap = {};
  * for model-id input, so typing a model never reloads or temporarily hides the
  * manifest.
  */
-export interface UseModelProtocolManifestsOptions {
+interface UseModelProtocolManifestsOptions {
   preset?: string;
   tasks: readonly ModelTask[];
   bootstrapTask?: ModelTask;
   baseUrlHint?: string;
 }
 
-export const useModelProtocolManifests = ({
+const useModelProtocolManifests = ({
   preset,
   tasks,
   bootstrapTask,

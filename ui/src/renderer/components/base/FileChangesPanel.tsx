@@ -27,7 +27,7 @@ export interface FileChangeItem {
 /**
  * 文件变更面板属性 / File changes panel props
  */
-export interface FileChangesPanelProps {
+interface FileChangesPanelProps {
   /** 面板标题 / Panel title */
   title: string;
   /** 文件变更列表 / File changes list */

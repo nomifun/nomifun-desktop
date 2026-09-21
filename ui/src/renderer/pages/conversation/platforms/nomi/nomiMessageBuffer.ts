@@ -1,7 +1,7 @@
 export const MAX_NOMI_MESSAGE_BUFFER_ENTRIES = 128;
 export const MAX_NOMI_MESSAGE_BUFFER_BYTES = 2 * 1024 * 1024;
 export const MAX_NOMI_MESSAGE_BUFFER_ENTRY_BYTES = 512 * 1024;
-export const MAX_NOMI_PROCESSED_CRON_IDS = 256;
+const MAX_NOMI_PROCESSED_CRON_IDS = 256;
 export const MAX_NOMI_PENDING_POST_PROCESSES = 128;
 
 const encoder = new TextEncoder();

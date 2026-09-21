@@ -7,7 +7,7 @@
 import type { ConversationId } from '@/common/types/ids';
 
 export type ConversationExecutionMode = 'new_conversation' | 'existing' | 'specified';
-export type BackendExecutionMode = Exclude<ConversationExecutionMode, 'specified'>;
+type BackendExecutionMode = Exclude<ConversationExecutionMode, 'specified'>;
 
 export type CronConversationTarget =
   | {

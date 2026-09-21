@@ -1,16 +1,14 @@
-import type {
-  AgentCatalogResponse,
-  AgentPresetDocument,
-  AgentPresetDraft,
-  CapabilityId,
-  CapabilitySelection,
-  ExactCatalogRef,
-  OfficialPresetTemplate,
-  SkillCatalogItem,
-} from './contracts';
 import { createDefaultIdmmConfig } from '../idmm';
+import type {
+AgentPresetDocument,
+AgentPresetDraft,
+CapabilityId,
+CapabilitySelection,
+ExactCatalogRef,
+SkillCatalogItem
+} from './contracts';
 
-export function canonicalizeDraftValue(value: unknown): unknown {
+function canonicalizeDraftValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalizeDraftValue);
   if (value && typeof value === 'object') {
     return Object.fromEntries(
@@ -22,7 +20,7 @@ export function canonicalizeDraftValue(value: unknown): unknown {
   return value;
 }
 
-export const draftFingerprint = (draft: AgentPresetDraft): string =>
+const draftFingerprint = (draft: AgentPresetDraft): string =>
   JSON.stringify(canonicalizeDraftValue(draft));
 
 export const isDraftDirty = (
@@ -49,22 +47,6 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
 const selection = (capability: ExactCatalogRef<'capability'>): CapabilitySelection => ({
   capability,
   action_allowlist: [],
-});
-
-export const draftFromOfficialTemplate = (
-  presetId: AgentPresetDraft['preset_id'],
-  template: OfficialPresetTemplate,
-  displayName: string
-): AgentPresetDraft => ({
-  preset_id: presetId,
-  display_name: displayName,
-  source_template_key: template.template_key,
-  document: {
-    ...createEmptyAgentPresetDocument(),
-    enabled_capabilities: structuredClone(template.seed.enabled_capabilities),
-
-    skill_bindings: template.seed.skill_bindings,
-  },
 });
 
 export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft => {
@@ -123,7 +105,7 @@ export function toggleSkill(
   };
 }
 
-export function selectedCapabilityIds(document: AgentPresetDocument): Set<CapabilityId> {
+function selectedCapabilityIds(document: AgentPresetDocument): Set<CapabilityId> {
   return new Set(
     document.enabled_capabilities.map(
       (item) => item.capability.id
@@ -139,17 +121,4 @@ export function missingSkillCapabilities(
   return skill.required_capabilities
     .map((item) => item.id)
     .filter((id) => !selected.has(id));
-}
-
-export function requiredResourceKinds(
-  document: AgentPresetDocument,
-  catalog: AgentCatalogResponse
-): string[] {
-  const selected = selectedCapabilityIds(document);
-  const kinds = new Set<string>();
-  for (const capability of catalog.capabilities) {
-    if (!selected.has(capability.capability.id)) continue;
-    capability.required_resource_kinds.forEach((kind) => kinds.add(kind));
-  }
-  return [...kinds].sort();
 }

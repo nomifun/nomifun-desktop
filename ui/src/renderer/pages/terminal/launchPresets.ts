@@ -11,7 +11,7 @@
  */
 
 /** Sentinel meaning "the platform login shell" — resolved server-side. */
-export const SHELL_SENTINEL = '$SHELL';
+const SHELL_SENTINEL = '$SHELL';
 
 export type TerminalPresetId = 'shell' | 'claude' | 'codex' | 'gemini';
 

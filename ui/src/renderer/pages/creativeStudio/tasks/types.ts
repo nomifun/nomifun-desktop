@@ -5,7 +5,6 @@
  */
 
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
-import { parseCreationTaskId } from '@/common/types/ids';
 import { uuidv7 } from '@/common/utils/uuidv7';
 
 import type { CreativeJsonObject } from '../domain/schema';
@@ -72,10 +71,6 @@ export interface CreateCreativeTaskInput extends CreativeTaskIdentity {
 
 export function createCreativeTaskIdempotencyKey(): string {
   return uuidv7();
-}
-
-export function parseCreativeTaskIdempotencyKey(value: unknown): string {
-  return String(parseCreationTaskId(value));
 }
 
 export interface CreativeTaskError {
@@ -193,7 +188,6 @@ export function isCanvasNodeTaskOwner(
 ): owner is Extract<CreativeTaskOwner, { kind: 'canvas_node' }> {
   return owner.kind === 'canvas_node';
 }
-
 
 export function sameCreativeTaskOwner(
   left: CreativeTaskOwner,

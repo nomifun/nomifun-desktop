@@ -65,16 +65,6 @@ const HEADLINE_KEYS: Record<ProviderHealthCheckErrorKind, { key: string; fallbac
   unknown: { key: 'settings.health.unknown', fallback: '失败原因未能归类' },
 };
 
-/** Does this failure prove the endpoint address itself is correct? */
-export const endpointConfirmedByFailure = (
-  kind: ProviderHealthCheckErrorKind | null | undefined
-): boolean =>
-  kind === 'unauthorized' ||
-  kind === 'forbidden' ||
-  kind === 'model_unavailable' ||
-  kind === 'insufficient_quota' ||
-  kind === 'rate_limited';
-
 export const healthFailureHeadline = (
   t: Translate,
   result: Pick<ProviderHealthCheckResponse, 'error_kind' | 'http_status'>

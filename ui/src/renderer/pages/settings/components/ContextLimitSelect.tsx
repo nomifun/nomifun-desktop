@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 
 const DEFAULT_CONTEXT_LIMIT_VALUE = 'default';
 
-export const CONTEXT_WINDOW_OPTIONS = [
+const CONTEXT_WINDOW_OPTIONS = [
   {
     value: DEFAULT_CONTEXT_LIMIT_VALUE,
     labelKey: 'settings.contextLimitDefaultOption',
@@ -17,7 +17,7 @@ export const CONTEXT_WINDOW_OPTIONS = [
   { value: 1_000_000, defaultLabel: '1M' },
 ] as const;
 
-export const formatContextLimit = (tokens: number): string => {
+const formatContextLimit = (tokens: number): string => {
   if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
   if (tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}k`;
   return new Intl.NumberFormat().format(tokens);

@@ -84,7 +84,7 @@ export function normalizeCreativeImageCrop(
   };
 }
 
-export function creativeImageCropAspectRatio(
+function creativeImageCropAspectRatio(
   aspect: CreativeImageCropAspect,
 ): number | null {
   switch (aspect) {

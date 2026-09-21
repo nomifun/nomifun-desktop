@@ -56,7 +56,7 @@ export const CAPACITY_MB_MAX = 512;
 /** Counters move as events stream in; refresh lightly while the page is open. */
 const STATS_POLL_MS = 15_000;
 
-export type StorageState = 'loading' | 'ready' | 'error';
+type StorageState = 'loading' | 'ready' | 'error';
 
 /**
  * What 一键全关 actually achieved. It is deliberately a value rather than a thrown
@@ -64,7 +64,7 @@ export type StorageState = 'loading' | 'ready' | 'error';
  * companion profiles), so "it failed" is not one outcome but two, and the section
  * needs to say which — see `disableAll` below.
  */
-export interface DisableAllOutcome {
+interface DisableAllOutcome {
   /** Collection off AND every companion stopped learning. */
   complete: boolean;
   /** Collection is off. True even when the learning half failed. */

@@ -14,7 +14,7 @@ import type { ExecutionId } from '@/common/types/ids';
 import { useEffect, useRef, useState } from 'react';
 
 /** Public re-exports so consumers don't reach into the wire-type module. */
-export type LeadThinkingPhase = TAgentExecutionLeadThinkingPhase;
+type LeadThinkingPhase = TAgentExecutionLeadThinkingPhase;
 
 /**
  * Render state for the lead participant's live planning stream.

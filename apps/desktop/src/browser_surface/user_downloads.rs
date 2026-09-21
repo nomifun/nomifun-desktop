@@ -886,35 +886,6 @@ pub(crate) async fn install(
 }
 
 /// Read-only conformance probes; never exposed to renderer IPC or Agent tools.
-pub(crate) async fn inspect_native(
-    view: &tauri::Webview,
-) -> Result<Vec<serde_json::Value>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let label = view.label().to_owned();
-    view.with_webview(move |_| {
-        let handles = REGISTRATIONS.with(|entries| {
-            entries.borrow().get(&label).map(|entry| entry.downloads.iter().map(|(id, native)| (id.clone(), native.clone(), entry.control.clone())).collect::<Vec<_>>()).unwrap_or_default()
-        });
-        let rows = handles.into_iter().map(|(id, native, control)| {
-                let mut state = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
-                let mut reason = COREWEBVIEW2_DOWNLOAD_INTERRUPT_REASON_NONE;
-                let mut resumable = windows::core::BOOL::default();
-                let mut received = 0;
-                unsafe {
-                    native.operation.State(&mut state)?;
-                    native.operation.InterruptReason(&mut reason)?;
-                    native.operation.CanResume(&mut resumable)?;
-                    native.operation.BytesReceived(&mut received)?;
-                }
-                let job = control.jobs.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|job| job.id==id).cloned();
-                Ok(serde_json::json!({"state":state.0,"reason":reason.0,"can_resume":resumable.as_bool(),"received":received,"job":job.map(|job|serde_json::json!({"started":job.started.load(Ordering::Acquire),"cancelled":job.cancel.is_cancelled(),"cancelling_native":job.cancelling_native.load(Ordering::Acquire),"native_terminal":*job.native.borrow(),"cleanup":*job.done.borrow()}))}))
-            }).collect::<windows::core::Result<Vec<_>>>().map_err(|e| e.to_string());
-        let _ = tx.send(rows);
-    }).map_err(|e| e.to_string())?;
-    rx.await.map_err(|e| e.to_string())?
-}
-
-/// Read-only conformance probes; never exposed to renderer IPC or Agent tools.
 pub(crate) async fn inspect(
     view: &tauri::Webview,
 ) -> Result<(Option<NativeFilePicker>, usize, usize, usize), String> {

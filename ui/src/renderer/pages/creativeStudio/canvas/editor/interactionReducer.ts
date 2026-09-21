@@ -10,7 +10,7 @@ import type {
   CanvasResizeGesture,
 } from '../interactions';
 
-export type CanvasPointerGesture =
+type CanvasPointerGesture =
   | {
       kind: 'pan';
       pointerId: number;

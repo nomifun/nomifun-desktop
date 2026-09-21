@@ -1,4 +1,4 @@
-export interface RequirementTagSummary {
+interface RequirementTagSummary {
   tag: string;
   done: number;
   total: number;

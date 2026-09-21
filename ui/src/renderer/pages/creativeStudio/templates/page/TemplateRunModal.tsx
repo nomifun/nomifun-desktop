@@ -24,7 +24,7 @@ import {
   templateFallbackError,
 } from '../templateI18n';
 
-export interface CreativeTemplateRunRequest {
+interface CreativeTemplateRunRequest {
   template: CreativeTemplateDefinitionV1;
   inputs: CreativeTemplateInputValue[];
   referenceAssetIds: string[];
@@ -34,7 +34,7 @@ export interface CreativeTemplateRunnerPort {
   start(request: CreativeTemplateRunRequest): Promise<void>;
 }
 
-export interface TemplateRunModalProps {
+interface TemplateRunModalProps {
   template: CreativeTemplateDefinitionV1 | null;
   runner?: CreativeTemplateRunnerPort;
   onClose: () => void;

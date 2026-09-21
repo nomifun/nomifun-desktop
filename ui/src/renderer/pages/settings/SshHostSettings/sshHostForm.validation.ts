@@ -9,7 +9,7 @@ export type SshAuthType = 'password' | 'key' | 'certificate' | 'agent';
 
 /** The masked sentinel the server returns for a stored secret. A field still
  *  equal to this on update means "unchanged; do not resend". */
-export const SSH_SECRET_MASK = '***';
+const SSH_SECRET_MASK = '***';
 
 /** Editable form values for the add/edit-host form. */
 export type SshHostFormValues = {

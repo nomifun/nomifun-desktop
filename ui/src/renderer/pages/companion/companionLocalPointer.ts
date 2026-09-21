@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type CompanionPointerBackend = 'appkit' | 'win32' | 'x11';
-export type CompanionUnsupportedPointerBackend = 'wayland' | 'other';
+type CompanionPointerBackend = 'appkit' | 'win32' | 'x11';
+type CompanionUnsupportedPointerBackend = 'wayland' | 'other';
 
 export type CompanionLocalPointerSample =
   | {

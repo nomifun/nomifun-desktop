@@ -14,7 +14,7 @@ import styles from './CreativeImageTools.module.css';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 
-export interface CreativeImagePreviewDialogProps {
+interface CreativeImagePreviewDialogProps {
   node: ImageNode;
   resolveAsset(node: ImageNode): Promise<CreativeAsset>;
   onClose(): void;

@@ -14,7 +14,7 @@ import {
   type CreativeTemplateValidationErrorCode,
 } from '../domain';
 
-export const CREATIVE_STUDIO_TEMPLATES_ENDPOINT = '/api/creative-studio/templates';
+const CREATIVE_STUDIO_TEMPLATES_ENDPOINT = '/api/creative-studio/templates';
 
 export type CreativeTemplateHttpRequest = (
   method: string,
@@ -22,7 +22,7 @@ export type CreativeTemplateHttpRequest = (
   body?: unknown
 ) => Promise<unknown>;
 
-export interface SaveCreativeTemplateRequest {
+interface SaveCreativeTemplateRequest {
   expectedRevision: string;
   template: CreativeTemplateDefinitionV1;
 }
@@ -110,7 +110,7 @@ function exactObject(
   return record;
 }
 
-export function parseTemplateDefinition(
+function parseTemplateDefinition(
   value: unknown,
   path = '$.template'
 ): CreativeTemplateDefinitionV1 {

@@ -9,7 +9,7 @@ import type { ProviderCredentials } from '@/common/types/provider/providerApi';
 import { parseApiKeyList } from '@/common/utils/apiKeys';
 
 export type BedrockAuthMethod = NonNullable<IProvider['bedrock_config']>['auth_method'];
-export type ProviderCredentialSaveMode = 'create' | 'update';
+type ProviderCredentialSaveMode = 'create' | 'update';
 
 export interface ProviderCredentialsDraft {
   isBedrock: boolean;

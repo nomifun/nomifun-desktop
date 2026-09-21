@@ -72,7 +72,7 @@ export interface ImageGenerationSettings {
 const localizedOptionLabel = (key: string, defaultValue: string): string =>
   getI18n()?.t(key, { defaultValue }) ?? defaultValue;
 
-export const DEFAULT_IMAGE_GENERATION_ASPECT_RATIOS: readonly ImageGenerationAspectRatioOption[] = [
+const DEFAULT_IMAGE_GENERATION_ASPECT_RATIOS: readonly ImageGenerationAspectRatioOption[] = [
   { value: '1:1', label: '1:1', width: 1024, height: 1024, requestSize: '1024x1024' },
   { value: '3:2', label: '3:2', width: 1536, height: 1024, requestSize: '1536x1024' },
   { value: '2:3', label: '2:3', width: 1024, height: 1536, requestSize: '1024x1536' },
@@ -125,14 +125,6 @@ export function imageGenerationResolutionLabel(
     return localizedOptionLabel('creativeStudio.image.settings.standardResolution', '标准');
   }
   return /^\d+$/.test(resolution) ? `${resolution} px` : resolution;
-}
-
-export function imageGenerationResolutionOptionLabel(
-  option: ImageGenerationAspectRatioOption
-): string {
-  const dimensions = imageGenerationSizeDimensionsLabel(option);
-  const resolution = imageGenerationResolutionLabel(option);
-  return dimensions ? `${resolution} · ${dimensions}` : resolution;
 }
 
 export function imageGenerationAspectRatioChoices(

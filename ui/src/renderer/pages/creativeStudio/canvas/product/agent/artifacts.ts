@@ -13,14 +13,14 @@ export const CREATIVE_CANVAS_AGENT_ARTIFACT_KIND =
   'nomifun.creative-studio.canvas-ops/v1' as const;
 export const MAX_CREATIVE_CANVAS_AGENT_ARTIFACT_JSON_BYTES = 262_144;
 
-export interface CreativeCanvasAgentTextData {
+interface CreativeCanvasAgentTextData {
   text: string;
   format: 'plain' | 'markdown';
   fontSize: number;
   textAlign: 'left' | 'center' | 'right';
 }
 
-export type CreativeCanvasAgentTextDataPatch = Partial<CreativeCanvasAgentTextData>;
+type CreativeCanvasAgentTextDataPatch = Partial<CreativeCanvasAgentTextData>;
 
 /**
  * Closed, non-destructive Agent mutation wire. The server owns durable IDs,

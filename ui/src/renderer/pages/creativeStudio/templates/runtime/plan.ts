@@ -177,7 +177,7 @@ function inputAssets(inputs: readonly CreativeTemplateInputValue[], variableIds:
   return assets;
 }
 
-export function imageReferenceAssetIds(
+function imageReferenceAssetIds(
   run: CreativeTemplateRunAggregateV1,
   step: CreativeTemplateGenerateImagesStep
 ): string[] {

@@ -6,8 +6,8 @@ export type CreationMode = 'image' | 'video' | 'music';
 export type CreationCapability = 't2i' | 'i2i' | 'inpaint' | 't2v' | 'i2v' | 'music' | 'tts';
 export type CreationInput = { asset_id: string; kind: 'image' | 'video' | 'audio' | 'text'; role: 'reference' | 'mask' | 'first_frame' | 'last_frame' | 'video' | 'audio' };
 export type CreationParameters = Record<string, string | number | boolean | null>;
-export interface CreationReference extends CreationInput { title: string; url?: string }
-export interface GenerationModel { providerId: ProviderId; model: string }
+interface CreationReference extends CreationInput { title: string; url?: string }
+interface GenerationModel { providerId: ProviderId; model: string }
 export interface CreationDraft {
   mode: CreationMode | null;
   lastMode: CreationMode;

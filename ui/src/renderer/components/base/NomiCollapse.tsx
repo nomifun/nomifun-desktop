@@ -11,7 +11,7 @@ import React, { useMemo, useState } from 'react';
 /**
  * 可折叠面板组件属性 / Collapsible panel component props
  */
-export interface NomiCollapseProps {
+interface NomiCollapseProps {
   children: React.ReactNode;
   /** 额外的类名 / Additional class name */
   className?: string;
@@ -34,7 +34,7 @@ export interface NomiCollapseProps {
 /**
  * 可折叠面板子项属性 / Collapsible panel item props
  */
-export interface NomiCollapseItemProps {
+interface NomiCollapseItemProps {
   /** 唯一标识符 / Unique identifier */
   name: string;
   /** 面板标题 / Panel header */

@@ -15,7 +15,7 @@ import type { TFunction } from 'i18next';
  * Returns an i18n'd active status label for a conversation.
  * Prefers runtime.state, falls back to conversation.status, then idle.
  */
-export const conversationActiveLabel = (c: TChatConversation, t: TFunction): string => {
+const conversationActiveLabel = (c: TChatConversation, t: TFunction): string => {
   if (c.runtime?.state) {
     return t(`conversation.hoverCard.runtime.${c.runtime.state}`);
   }

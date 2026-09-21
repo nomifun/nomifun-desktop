@@ -9,7 +9,7 @@ import classNames from 'classnames';
 import { Close } from '@icon-park/react';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 
-export interface ContentAsideProps {
+interface ContentAsideProps {
   /** Panel heading. */
   title: React.ReactNode;
   /** Optional one-line context under the title. */

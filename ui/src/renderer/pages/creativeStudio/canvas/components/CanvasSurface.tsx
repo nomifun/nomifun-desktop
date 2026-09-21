@@ -14,22 +14,22 @@ import styles from './CanvasSurface.module.css';
 
 export type CanvasBackgroundMode = 'dots' | 'lines' | 'blank';
 export type CanvasInteractionTool = 'select' | 'pan';
-export const DEFAULT_CANVAS_GRID_STEP = 32;
+const DEFAULT_CANVAS_GRID_STEP = 32;
 
-export interface CanvasSurfaceViewport {
+interface CanvasSurfaceViewport {
   x: number;
   y: number;
   zoom: number;
 }
 
-export interface CanvasSelectionRect {
+interface CanvasSelectionRect {
   x: number;
   y: number;
   width: number;
   height: number;
 }
 
-export interface CanvasSurfaceProps
+interface CanvasSurfaceProps
   extends Omit<React.HTMLAttributes<HTMLDivElement>, 'children' | 'onDoubleClick'> {
   viewport: CanvasSurfaceViewport;
   backgroundMode?: CanvasBackgroundMode;

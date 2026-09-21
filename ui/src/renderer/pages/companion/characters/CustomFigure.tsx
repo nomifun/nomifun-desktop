@@ -35,7 +35,7 @@ import { registerAlphaMask, unregisterAlphaMask, buildAlphaSampler } from '../co
  *  - head-and-shoulders (size ≤ BUST_MAX_SIZE): <img> cropped to headBox.
  */
 
-export interface CustomFigureProps {
+interface CustomFigureProps {
   /** Image URL of the transparent full-body cutout. */
   src: string;
   /** Image aspect (width / height). */

@@ -18,10 +18,7 @@ use nomifun_agent_contracts::{
 use nomifun_ai_agent::{
     NomiHostDynamicToolError, NomiHostDynamicToolInvocation, NomiHostDynamicToolInvoker,
 };
-use nomifun_robot::capability::{
-    ROBOT_ACTION_IDS, ROBOT_MODULE_ID, RobotAction, RobotModuleAvailability,
-    module_availability,
-};
+use nomifun_robot::capability::{ROBOT_ACTION_IDS, ROBOT_MODULE_ID, RobotAction};
 use nomifun_robot::effect_ledger::{
     RobotEffectAdmission, RobotEffectKey, RobotEffectLedger, RobotEffectRequest,
 };
@@ -319,36 +316,6 @@ impl RobotModuleOwner {
             Err(error) if error.is_runtime_unavailable() => Ok(None),
             Err(error) => Err(error),
         }
-    }
-
-    pub(crate) async fn availability(
-        &self,
-        principal_id: &str,
-        binding: &TypedResourceBinding,
-    ) -> Result<RobotModuleAvailability, RobotModuleError> {
-        self.ensure_installation_owner(principal_id)?;
-        self.validate_binding(binding, principal_id)?;
-        let robot = self.load_bound_robot(binding).await?;
-        let advertised_actions = self
-            .tools
-            .tools(&robot.robot_id)
-            .await
-            .into_iter()
-            .map(|tool| nomifun_robot::tool_registry::tool_action(&tool.device_name))
-            .collect();
-        let connected = match self.tools.connection_id(&robot.robot_id).await {
-            Some(connection_id) => {
-                self.registry
-                    .connection_matches(&robot.robot_id, &connection_id)
-                    .await
-            }
-            None => false,
-        };
-        Ok(module_availability(
-            &robot,
-            connected,
-            &advertised_actions,
-        ))
     }
 
     /// Produce recent camera context only under the exact `robot/vision`
@@ -1220,44 +1187,6 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code.as_ref(), ROBOT_OFFLINE);
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn availability_is_truthful_for_permission_and_offline_state() {
-        let fixture = fixture(RobotPermissions::default()).await;
-        let available = fixture
-            .owner
-            .availability("owner", &fixture.binding)
-            .await
-            .unwrap();
-        assert_eq!(available.module_id, ROBOT_MODULE_ID);
-        assert_eq!(
-            available.action(RobotAction::Display).unwrap().state,
-            nomifun_robot::capability::RobotAvailabilityState::Available
-        );
-        assert_eq!(
-            available.action(RobotAction::Motion).unwrap().state,
-            nomifun_robot::capability::RobotAvailabilityState::PermissionDenied
-        );
-        fixture.owner.tools.detach("robot-1").await;
-        let offline = fixture
-            .owner
-            .availability("owner", &fixture.binding)
-            .await
-            .unwrap();
-        assert_eq!(
-            offline.action(RobotAction::Display).unwrap().state,
-            nomifun_robot::capability::RobotAvailabilityState::Offline
-        );
-        assert!(
-            offline
-                .action(RobotAction::Display)
-                .unwrap()
-                .guidance
-                .as_deref()
-                .unwrap()
-                .contains("Connect")
-        );
     }
 
     #[test]

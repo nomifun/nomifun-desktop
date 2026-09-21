@@ -6,7 +6,7 @@ const STANDALONE_WORKBENCH_DRAFT_VERSION = 1 as const;
 
 export type LegacyDraftKind = 'image' | 'video';
 
-export interface LegacyImageParameters {
+interface LegacyImageParameters {
   interfaceMode: 'images' | 'responses';
   quality: 'auto' | 'high' | 'medium' | 'low';
   width: number | null;
@@ -15,7 +15,7 @@ export interface LegacyImageParameters {
   count: number;
 }
 
-export interface LegacyVideoParameters {
+interface LegacyVideoParameters {
   resolution: '720p' | '1080p';
   aspect: '16:9' | '9:16' | '1:1' | 'auto';
   duration: '5' | '10';
@@ -29,24 +29,23 @@ interface LegacySessionDraftBase {
   referenceAssetIds: string[];
 }
 
-export interface LegacyImageDraft
+interface LegacyImageDraft
   extends LegacySessionDraftBase {
   workbenchKind: 'image';
   layout: 'side' | 'bottom';
   parameters: LegacyImageParameters;
 }
 
-export interface LegacyVideoDraft
+interface LegacyVideoDraft
   extends LegacySessionDraftBase {
   workbenchKind: 'video';
   layout: 'side' | 'bottom';
   parameters: LegacyVideoParameters;
 }
 
-export type LegacySessionDraft =
+type LegacySessionDraft =
   | LegacyImageDraft
   | LegacyVideoDraft;
-
 
 const MAX_MODEL_LENGTH = 512;
 const MAX_ASPECT_RATIO_LENGTH = 32;
@@ -254,25 +253,24 @@ const parseVideoDraft = (value: unknown): LegacyVideoDraft | null => {
   };
 };
 
-export function parseLegacyCreationDraft(
+function parseLegacyCreationDraft(
   workbenchKind: 'image',
   value: unknown
 ): LegacyImageDraft | null;
-export function parseLegacyCreationDraft(
+function parseLegacyCreationDraft(
   workbenchKind: 'video',
   value: unknown
 ): LegacyVideoDraft | null;
-export function parseLegacyCreationDraft(
+function parseLegacyCreationDraft(
   workbenchKind: LegacyDraftKind,
   value: unknown
 ): LegacySessionDraft | null;
-export function parseLegacyCreationDraft(
+function parseLegacyCreationDraft(
   workbenchKind: LegacyDraftKind,
   value: unknown
 ): LegacySessionDraft | null {
   return workbenchKind === 'image' ? parseImageDraft(value) : parseVideoDraft(value);
 }
-
 
 export type LegacyCreationDraft = LegacySessionDraft & { source: string };
 export type LegacyDraftStorage = Pick<Storage, 'getItem' | 'removeItem'>;

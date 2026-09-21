@@ -58,7 +58,7 @@ const iconProps = {
   strokeWidth: 3,
 };
 
-export interface CreativeTimelineNodeProps
+interface CreativeTimelineNodeProps
   extends CreativeNodePresentationProps<'timeline'> {
   assets: ReadonlyMap<string, CreativeTimelineAssetPresentation>;
   onChange?(data: CreativeTimelineNodeData, mergeKey?: string): void;

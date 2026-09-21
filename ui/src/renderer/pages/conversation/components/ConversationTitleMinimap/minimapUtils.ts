@@ -18,12 +18,12 @@ import {
 } from './minimapTypes';
 import type { MinimapVisualStyle, TurnPreviewItem } from './minimapTypes';
 
-export const isTransparentColor = (value: string) => {
+const isTransparentColor = (value: string) => {
   const normalized = value.replace(/\s+/g, '').toLowerCase();
   return normalized === 'transparent' || normalized === 'rgba(0,0,0,0)';
 };
 
-export const readChatSurfaceBackground = () => {
+const readChatSurfaceBackground = () => {
   if (typeof document === 'undefined') return defaultVisualStyle.background;
   const selectors = ['.chat-layout-header', '.layout-content.bg-1', '.arco-layout-content.bg-1', '.bg-1'];
   for (const selector of selectors) {
@@ -83,7 +83,7 @@ export const getPanelWidth = () => {
   return Math.max(Math.min(PANEL_MIN_WIDTH, viewportCap), target);
 };
 
-export const isTextMessage = (message: TMessage): message is IMessageText => {
+const isTextMessage = (message: TMessage): message is IMessageText => {
   return message.type === 'text' && typeof message.content?.content === 'string';
 };
 
@@ -94,9 +94,9 @@ export const truncate = (value: string, maxLen = MAX_LINE_LEN) => {
   return `${value.slice(0, maxLen - 1)}…`;
 };
 
-export const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-export const buildSearchSnippet = (text: string, keyword: string, maxLen = MAX_LINE_LEN) => {
+const buildSearchSnippet = (text: string, keyword: string, maxLen = MAX_LINE_LEN) => {
   if (!keyword) return truncate(text, maxLen);
   const lowerText = text.toLowerCase();
   const lowerKeyword = keyword.toLowerCase();
@@ -132,7 +132,7 @@ export const renderHighlightedText = (text: string, keyword: string, maxLen = MA
   );
 };
 
-export const toChineseNumeral = (num: number): string => {
+const toChineseNumeral = (num: number): string => {
   if (!Number.isFinite(num) || num <= 0) return '';
   const digits = ['零', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
   if (num < 10) return digits[num];
@@ -145,7 +145,7 @@ export const toChineseNumeral = (num: number): string => {
   return String(num);
 };
 
-export const buildIndexSearchTokens = (index: number) => {
+const buildIndexSearchTokens = (index: number) => {
   const arabic = String(index);
   const chinese = toChineseNumeral(index);
   return [arabic, `#${arabic}`, `第${arabic}`, chinese, chinese ? `第${chinese}` : ''].filter(Boolean);

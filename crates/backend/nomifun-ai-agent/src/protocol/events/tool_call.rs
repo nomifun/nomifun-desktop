@@ -7,7 +7,7 @@ use crate::artifact_store::PersistedArtifact;
 /// Enforce the shared tool-name/arguments artifact contract at the normalized
 /// runtime boundary. This is intentionally backend-agnostic: external runtimes
 /// must not bypass the same minimum-count and MIME
-/// rules merely because they did not run through `BackendOutputSink`.
+/// rules merely because they came from a different runtime adapter.
 pub fn validate_completed_artifact_contract(data: &ToolCallEventData) -> Result<(), String> {
     if data.status != ToolCallStatus::Completed {
         return Ok(());

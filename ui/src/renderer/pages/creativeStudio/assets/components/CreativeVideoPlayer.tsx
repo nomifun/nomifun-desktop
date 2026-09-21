@@ -18,7 +18,7 @@ import CreativeVideoMedia from './CreativeVideoMedia';
 
 import styles from './CreativeVideoPlayer.module.css';
 
-export interface CreativeVideoPlayerProps {
+interface CreativeVideoPlayerProps {
   src: string;
   poster?: string;
   label: string;

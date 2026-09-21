@@ -31,7 +31,7 @@ export interface ExecutionModelPoolSelection {
   range: string[];
 }
 
-export interface ExecutionPlanEditorProps {
+interface ExecutionPlanEditorProps {
   /** Controlled intent text. */
   value: string;
   onChange: (value: string) => void;

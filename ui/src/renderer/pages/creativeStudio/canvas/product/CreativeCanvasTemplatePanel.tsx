@@ -26,7 +26,7 @@ import type {
 import type { CreativeTemplateRuntimeSnapshot } from '../../templates/runtime';
 import styles from './CreativeCanvasTemplatePanel.module.css';
 
-export interface CreativeCanvasTemplatePanelProps {
+interface CreativeCanvasTemplatePanelProps {
   templates: readonly CreativeTemplateDefinitionV1[];
   runtime: CreativeTemplateRuntimeSnapshot;
   loading: boolean;

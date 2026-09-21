@@ -1,7 +1,7 @@
 import type { SessionTarget } from '@/common/types/ids';
 
 export const WORKSPACE_TOGGLE_EVENT = 'nomifun-workspace-toggle';
-export const WORKSPACE_STATE_EVENT = 'nomifun-workspace-state';
+const WORKSPACE_STATE_EVENT = 'nomifun-workspace-state';
 export const WORKSPACE_HAS_FILES_EVENT = 'nomifun-workspace-has-files';
 
 export interface WorkspaceStateDetail {

@@ -15,7 +15,7 @@ export interface PreviewToolbarExtras {
   right?: ReactNode;
 }
 
-export interface PreviewToolbarExtrasContextValue {
+interface PreviewToolbarExtrasContextValue {
   setExtras: (extras: PreviewToolbarExtras | null) => void;
 }
 

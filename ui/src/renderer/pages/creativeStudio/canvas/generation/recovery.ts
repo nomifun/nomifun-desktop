@@ -13,7 +13,7 @@ import {
 import type { CanvasGenerationResumeRequest } from "./types";
 import { GenerationError } from "./types";
 
-export function canvasOutputKindForTask(
+function canvasOutputKindForTask(
   task: CreativeCreationModelTask,
 ): "image" | "video" | "audio" {
   if (task === "image_generation" || task === "image_edit") return "image";

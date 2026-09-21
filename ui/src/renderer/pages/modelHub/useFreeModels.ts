@@ -14,8 +14,8 @@ import { PROVIDERS_SWR_KEY } from '@/renderer/hooks/agent/useModelProviderList';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import useSWR, { mutate as mutateGlobal, type KeyedMutator, type SWRConfiguration } from 'swr';
 
-export const FREE_MODEL_SERVICE_SWR_KEY = 'model-services/free/status';
-export const FREE_MODEL_HEALTH_SWR_KEY = 'model-services/free/health';
+const FREE_MODEL_SERVICE_SWR_KEY = 'model-services/free/status';
+const FREE_MODEL_HEALTH_SWR_KEY = 'model-services/free/health';
 
 const STATUS_SWR_OPTIONS: SWRConfiguration<ManagedModelServiceStatus, Error> = {
   revalidateOnFocus: false,

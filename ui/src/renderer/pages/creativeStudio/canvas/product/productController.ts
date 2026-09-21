@@ -30,9 +30,9 @@ export interface CreativeCanvasProductPanelViews {
 }
 
 export const CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH = 280;
-export const CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH = 390;
-export const CREATIVE_CANVAS_RIGHT_PANEL_MIN_WIDTH = 320;
-export const CREATIVE_CANVAS_RIGHT_PANEL_MAX_WIDTH = 560;
+const CREATIVE_CANVAS_SOURCE_AGENT_PANEL_WIDTH = 390;
+const CREATIVE_CANVAS_RIGHT_PANEL_MIN_WIDTH = 320;
+const CREATIVE_CANVAS_RIGHT_PANEL_MAX_WIDTH = 560;
 
 export function clampCreativeCanvasRightPanelWidth(width: number): number {
   return Math.round(
@@ -166,7 +166,7 @@ export function canLeaveCreativeCanvasAfterFlush(
   return result.status === 'noop' || result.status === 'saved';
 }
 
-export const creativeCanvasRevisionConflictMessage = (): string =>
+const creativeCanvasRevisionConflictMessage = (): string =>
   creativeStudioProductText(
     'creativeStudio.canvas.save.revisionConflict',
     '远端画布已更新，本地更改未覆盖。'

@@ -8,7 +8,7 @@
  * New API 网关平台标识
  * New API gateway platform identifier
  */
-export const NEW_API_PLATFORM_ID = 'new-api';
+const NEW_API_PLATFORM_ID = 'new-api';
 
 /**
  * 检查平台是否为 New API 网关类型

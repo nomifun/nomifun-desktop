@@ -26,7 +26,7 @@ import type {
 } from '@/common/types/pluginRuntimePlatform';
 
 export type PluginRuntimeReleaseStage = 'draft' | 'ready' | 'active';
-export type PluginRuntimeWorkflowStepState =
+type PluginRuntimeWorkflowStepState =
   | 'done'
   | 'active'
   | 'blocked'
@@ -447,27 +447,6 @@ export function pluginRuntimeCanOpenSurface(workshop: PluginRuntimeWorkshop): bo
   );
 }
 
-export function pluginRuntimeSurfaceMatchesWorkshop(
-  descriptor: PluginRuntimeSurfaceLaunchDescriptor,
-  workshop: PluginRuntimeWorkshop
-): boolean {
-  const active = workshop.plugin.releases.active;
-  return Boolean(
-    pluginRuntimeCanOpenSurface(workshop) &&
-      active &&
-      descriptor.plugin_id === workshop.plugin.plugin_id &&
-      descriptor.release_id === active.release_id &&
-      descriptor.expected_release_digest === active.release_digest &&
-      descriptor.active_release_epoch ===
-        workshop.plugin.releases.active_release_epoch &&
-      descriptor.surface_session_id.trim().length > 0 &&
-      Number.isSafeInteger(descriptor.surface_generation) &&
-      descriptor.surface_generation > 0 &&
-      descriptor.surface_capability.trim().length > 0 &&
-      descriptor.kind === workshop.plugin.kind
-  );
-}
-
 export function pluginRuntimeSurfaceAssetPath(
   descriptor: PluginRuntimeSurfaceLaunchDescriptor
 ): string | null {
@@ -503,18 +482,4 @@ export function shortPluginRuntimeIdentity(
   if (!value) return '—';
   if (value.length <= edgeLength * 2 + 1) return value;
   return `${value.slice(0, edgeLength)}…${value.slice(-edgeLength)}`;
-}
-
-export function formatPluginRuntimeTimestamp(
-  value: number,
-  locale: string
-): string {
-  if (!Number.isFinite(value)) return '—';
-  return new Intl.DateTimeFormat(locale, {
-    year: 'numeric',
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(value));
 }

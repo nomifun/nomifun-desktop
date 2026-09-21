@@ -6,12 +6,9 @@
 
 export { default as CreativeCanvasEditor } from './CreativeCanvasEditor';
 export type {
-  CreativeCanvasEdgeRenderContext,
-  CreativeCanvasEditorContext,
+
   CreativeCanvasEditorHandle,
-  CreativeCanvasEditorProps,
-  CreativeCanvasEditorSlot,
-  CreativeCanvasNodeRenderContext,
+
 } from './CreativeCanvasEditor';
 export * from './casSaveController';
 export * from './editorModel';

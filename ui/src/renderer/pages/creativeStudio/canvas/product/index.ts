@@ -5,10 +5,3 @@
  */
 
 export { default } from './CreativeCanvasProductRoute';
-export { default as CreativeCanvasProductRoute } from './CreativeCanvasProductRoute';
-export {
-  hasCreativeCanvasProductBeforeLeave,
-  registerCreativeCanvasProductBeforeLeave,
-  requestCreativeCanvasProductBeforeLeave,
-} from './beforeLeave';
-export type { CreativeCanvasProductBeforeLeave } from './beforeLeave';

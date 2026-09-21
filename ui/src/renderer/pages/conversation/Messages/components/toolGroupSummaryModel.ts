@@ -52,7 +52,7 @@ export interface ToolReceiptDetailRow {
   attempts?: ToolReceiptAttemptRow[];
 }
 
-export interface ToolReceiptAttemptRow {
+interface ToolReceiptAttemptRow {
   key: string;
   attemptNo: number;
   state: TurnDisclosureProcessState;
@@ -71,7 +71,7 @@ interface ToolRetryGroup {
  * Collapse only a complete explicit retry chain. Legacy calls and malformed,
  * ambiguous, or out-of-order metadata fail closed as independent rows.
  */
-export const groupExplicitToolRetries = (tools: NormalizedToolCall[]): ToolRetryGroup[] => {
+const groupExplicitToolRetries = (tools: NormalizedToolCall[]): ToolRetryGroup[] => {
   const groups: ToolRetryGroup[] = [];
   const openGroups = new Map<string, ToolRetryGroup>();
 

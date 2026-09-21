@@ -6,7 +6,7 @@
 
 import { DEFAULT_WORKPATH_KEY, workpathKey } from './workpathKey';
 
-export const PROJECT_WORKPATHS_STORAGE_KEY = 'nomifun:session-list-project-workpaths';
+const PROJECT_WORKPATHS_STORAGE_KEY = 'nomifun:session-list-project-workpaths';
 const PROJECT_WORKPATHS_CHANGED_EVENT = 'nomifun:session-list-project-workpaths-changed';
 
 const readProjectWorkpaths = (): string[] => {

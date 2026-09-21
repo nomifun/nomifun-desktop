@@ -2269,22 +2269,6 @@ dependencies = [
 
 [[package]]
 name = "curve25519-dalek"
-version = "4.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97fb8b7c4503de7d6ae7b42ab72a5a59857b4c937ec27a3d4539dba95b5ab2be"
-dependencies = [
- "cfg-if",
- "cpufeatures 0.2.17",
- "curve25519-dalek-derive",
- "digest 0.10.7",
- "fiat-crypto 0.2.9",
- "rustc_version",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "curve25519-dalek"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5eed333089e2e1c1ac8c6c0398e5e2497b4c9926ca6d0365ed1e099afa5bc23"
@@ -2293,7 +2277,7 @@ dependencies = [
  "cpufeatures 0.3.0",
  "curve25519-dalek-derive",
  "digest 0.11.3",
- "fiat-crypto 0.3.0",
+ "fiat-crypto",
  "rand_core 0.10.1",
  "rustc_version",
  "subtle",
@@ -2844,16 +2828,6 @@ dependencies = [
 
 [[package]]
 name = "ed25519"
-version = "2.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
-dependencies = [
- "pkcs8 0.10.2",
- "signature 2.2.0",
-]
-
-[[package]]
-name = "ed25519"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29fcf32e6c73d1079f83ab4d782de2d81620346a5f38c6237a86a22f8368980a"
@@ -2864,27 +2838,12 @@ dependencies = [
 
 [[package]]
 name = "ed25519-dalek"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
-dependencies = [
- "curve25519-dalek 4.1.3",
- "ed25519 2.2.3",
- "rand_core 0.6.4",
- "serde",
- "sha2 0.10.9",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "ed25519-dalek"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ebaa1a2bf1290ab3bfe5a7b771d050ebffab2711c19a81691c683a5144a25de"
 dependencies = [
- "curve25519-dalek 5.0.0",
- "ed25519 3.0.0",
+ "curve25519-dalek",
+ "ed25519",
  "rand_core 0.10.1",
  "serde",
  "sha2 0.11.0",
@@ -3146,12 +3105,6 @@ dependencies = [
  "rand_core 0.10.1",
  "subtle",
 ]
-
-[[package]]
-name = "fiat-crypto"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "fiat-crypto"
@@ -5845,7 +5798,6 @@ dependencies = [
 name = "nomi-ssh"
 version = "0.7.6"
 dependencies = [
- "async-trait",
  "futures-util",
  "regex",
  "russh",
@@ -5921,7 +5873,6 @@ dependencies = [
  "http-body-util",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
- "nomifun-agent-session",
  "nomifun-api-types",
  "serde",
  "serde_json",
@@ -5960,7 +5911,6 @@ dependencies = [
 name = "nomifun-agent-domain-wave2"
 version = "0.7.6"
 dependencies = [
- "async-trait",
  "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave1",
@@ -5976,7 +5926,6 @@ dependencies = [
 name = "nomifun-agent-domain-wave3"
 version = "0.7.6"
 dependencies = [
- "async-trait",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "serde",
@@ -6085,16 +6034,13 @@ dependencies = [
  "async-trait",
  "axum",
  "base64 0.22.1",
- "chrono",
  "crossterm",
  "dashmap",
  "dirs 6.0.0",
- "ed25519-dalek 2.2.0",
  "flate2",
  "fs2",
  "futures",
  "futures-util",
- "getrandom 0.2.17",
  "hex",
  "image",
  "is-terminal",
@@ -6102,7 +6048,6 @@ dependencies = [
  "nomi-browser-engine",
  "nomi-config",
  "nomi-mcp",
- "nomi-memory",
  "nomi-process-runtime",
  "nomi-protocol",
  "nomi-providers",
@@ -6112,7 +6057,6 @@ dependencies = [
  "nomi-types",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave1",
- "nomifun-agent-domain-wave4",
  "nomifun-agent-kernel",
  "nomifun-agent-runtime",
  "nomifun-api-types",
@@ -6127,7 +6071,6 @@ dependencies = [
  "nomifun-js-kernel-adapter",
  "nomifun-js-runtime",
  "nomifun-knowledge",
- "nomifun-mcp",
  "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-realtime",
@@ -6136,19 +6079,15 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "rusqlite",
- "rustls",
  "same-file",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "sys-locale",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tokio-tungstenite 0.26.2",
  "tokio-util",
- "toml 0.8.2",
  "tracing",
  "tracing-subscriber",
  "ts-rs",
@@ -6194,10 +6133,8 @@ dependencies = [
  "junction",
  "nomi-browser-engine",
  "nomi-computer",
- "nomi-config",
  "nomi-process-runtime",
  "nomi-redact",
- "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",
  "nomifun-agent-control-plane",
@@ -6464,7 +6401,6 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
- "nomifun-conversation",
  "nomifun-db",
  "nomifun-knowledge",
  "nomifun-model-invoke",
@@ -6629,7 +6565,6 @@ dependencies = [
  "nomifun-app",
  "nomifun-browser-macos",
  "nomifun-browser-platform",
- "nomifun-common",
  "nomifun-runtime",
  "objc2",
  "objc2-app-kit",
@@ -7039,7 +6974,6 @@ dependencies = [
  "axum",
  "futures",
  "http-body-util",
- "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-common",
@@ -8120,7 +8054,7 @@ checksum = "d17b851e6b3e378ab4ecb07fa2ed23f4d15f075735f8fec9fa1e7bdce5f8301f"
 dependencies = [
  "ecdsa",
  "elliptic-curve",
- "fiat-crypto 0.3.0",
+ "fiat-crypto",
  "primefield",
  "primeorder",
  "sha2 0.11.0",
@@ -9363,13 +9297,13 @@ dependencies = [
  "cipher 0.5.2",
  "crypto-bigint",
  "ctr 0.10.1",
- "curve25519-dalek 5.0.0",
+ "curve25519-dalek",
  "data-encoding",
  "delegate",
  "der 0.8.1",
  "digest 0.11.3",
  "ecdsa",
- "ed25519-dalek 3.0.0",
+ "ed25519-dalek",
  "elliptic-curve",
  "enum_dispatch",
  "flate2",
@@ -10727,7 +10661,7 @@ dependencies = [
  "argon2",
  "bcrypt-pbkdf",
  "ctutils",
- "ed25519-dalek 3.0.0",
+ "ed25519-dalek",
  "hex",
  "hmac 0.13.0",
  "p256",
@@ -11050,15 +10984,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "sys-locale"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
-dependencies = [
- "libc",
 ]
 
 [[package]]

@@ -19,7 +19,6 @@ serde_json.workspace = true
 # browser-use: likewise, the desktop host is where a managed/connected Chromium
 # is sane (the in-process self-hosted CDP engine).
 nomifun-app = { workspace = true, features = ["computer-use", "browser-use"] }
-nomifun-common.workspace = true
 nomifun-runtime.workspace = true
 nomifun-browser-platform.workspace = true
 nomi-browser-engine.workspace = true

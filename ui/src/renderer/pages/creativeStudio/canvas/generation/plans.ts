@@ -72,7 +72,7 @@ function canvasTaskOwner(input: CanvasPlanBase): CreativeTaskOwner {
   return { kind: "canvas_node", canvasId: input.canvasId, nodeId: input.nodeId };
 }
 
-export type CanvasImageOperation =
+type CanvasImageOperation =
   | CanvasGenerationTaskOperation<"image_generation", "t2i">
   | CanvasGenerationTaskOperation<"image_edit", "i2i" | "inpaint">;
 

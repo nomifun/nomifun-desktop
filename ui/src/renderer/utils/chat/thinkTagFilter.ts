@@ -55,29 +55,3 @@ export function hasThinkTags(content: string): boolean {
   }
   return /<\s*\/?\s*think(?:ing)?\s*>/i.test(content);
 }
-
-/**
- * Filter think tags from message content object
- * Handles various message content structures
- * @param content - The message content (string or object)
- * @returns Filtered content
- */
-export function filterMessageContent(content: any): any {
-  // Handle string content
-  if (typeof content === 'string') {
-    return hasThinkTags(content) ? stripThinkTags(content) : content;
-  }
-
-  // Handle object with content property
-  if (content && typeof content === 'object' && 'content' in content) {
-    const innerContent = content.content;
-    if (typeof innerContent === 'string' && hasThinkTags(innerContent)) {
-      return {
-        ...content,
-        content: stripThinkTags(innerContent),
-      };
-    }
-  }
-
-  return content;
-}

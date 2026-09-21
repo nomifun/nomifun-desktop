@@ -5,32 +5,16 @@
  */
 
 export {
-  CREATIVE_STUDIO_TEMPLATES_ENDPOINT,
-  CreativeTemplateContractError,
-  createCreativeTemplateApi,
-  creativeTemplateApi,
-  isCreativeTemplateContractError,
-  parseTemplateDefinition,
-} from './templateApi';
-export type {
-  CreativeTemplateApi,
-  CreativeTemplateHttpRequest,
-  SaveCreativeTemplateRequest,
-} from './templateApi';
-export {
-  CreativeTemplateRepositoryError,
-  createCreativeTemplateRepository,
+
   creativeTemplateRepository,
-  isCreativeTemplateRepositoryError,
-  toCreativeTemplateRepositoryError,
+
 } from './templateRepository';
 export type {
   CreativeTemplateRepository,
-  CreativeTemplateRepositoryErrorKind,
+
 } from './templateRepository';
 export {
-  CREATIVE_STUDIO_TEMPLATE_RUNS_ENDPOINT,
-  createCreativeTemplateRunApi,
+
   creativeTemplateRunApi,
 } from './templateRunApi';
 export type {

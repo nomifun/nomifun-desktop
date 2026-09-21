@@ -256,7 +256,7 @@ function validateVariable(value: unknown, path: string): CreativeTemplateValidat
   return null;
 }
 
-export function validateTemplateOutput(value: unknown, path = '$.output'): CreativeTemplateValidationError | null {
+function validateTemplateOutput(value: unknown, path = '$.output'): CreativeTemplateValidationError | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return issue('invalid-value', path, 'expected an output plan');
   const kind = (value as UnknownRecord).kind;
   const keys = kind === 'single-image' ? ['kind'] : kind === 'multi-image-series' ? ['kind', 'targetCount', 'concurrency', 'reviewRequired'] : null;

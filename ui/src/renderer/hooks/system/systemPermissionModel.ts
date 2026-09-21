@@ -70,7 +70,7 @@ export const systemPermissionEntry = (
 ): SystemPermissionEntry | undefined =>
   status?.permissions.find((permission) => permission.kind === kind);
 
-export const permissionStateIsReady = (state: SystemPermissionState | undefined): boolean =>
+const permissionStateIsReady = (state: SystemPermissionState | undefined): boolean =>
   state === 'granted' || state === 'not_required';
 
 export const permissionEntryIsReady = (entry: SystemPermissionEntry | undefined): boolean =>

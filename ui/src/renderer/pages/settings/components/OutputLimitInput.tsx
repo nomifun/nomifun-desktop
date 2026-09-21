@@ -23,7 +23,7 @@ export const OUTPUT_LIMIT_PRESETS = [
   131_072,
 ] as const;
 
-export const OUTPUT_LIMIT_UNIT_MULTIPLIERS = {
+const OUTPUT_LIMIT_UNIT_MULTIPLIERS = {
   tokens: 1,
   k: 1_000,
   m: 1_000_000,
@@ -65,7 +65,7 @@ export const displayValueFromOutputLimit = (
   return normalized === undefined ? undefined : normalized / OUTPUT_LIMIT_UNIT_MULTIPLIERS[unit];
 };
 
-export const formatOutputLimit = (value: number): string => new Intl.NumberFormat().format(value);
+const formatOutputLimit = (value: number): string => new Intl.NumberFormat().format(value);
 
 const isOutputLimitPreset = (value: number | undefined): boolean =>
   value !== undefined && (OUTPUT_LIMIT_PRESETS as readonly number[]).includes(value);

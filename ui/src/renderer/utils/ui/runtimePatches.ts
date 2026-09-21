@@ -181,7 +181,7 @@ const patchConsole = () => {
   }
 };
 
-export const applyRuntimePatches = () => {
+const applyRuntimePatches = () => {
   if (typeof window === 'undefined') {
     return;
   }
@@ -192,3 +192,5 @@ export const applyRuntimePatches = () => {
 };
 
 applyRuntimePatches();
+
+export {};

@@ -91,7 +91,6 @@ export type KnowledgeBaseId = EntityId<'knowledge-base'>;
 export type KnowledgeEntryId = EntityId<'knowledge-entry'>;
 export type KnowledgeSourceId = EntityId<'knowledge-source'>;
 export type KnowledgeSourceItemId = EntityId<'knowledge-source-item'>;
-export type KnowledgeBindingId = EntityId<'knowledge-binding'>;
 export type ProviderId = EntityId<'provider'>;
 export type AgentId = EntityId<'agent'>;
 export type AgentPresetId = EntityId<'agent-preset'>;
@@ -206,18 +205,10 @@ export const parseKnowledgeSourceId = (value: unknown): KnowledgeSourceId =>
   parseEntityId('knowledge-source', value);
 export const parseKnowledgeSourceItemId = (value: unknown): KnowledgeSourceItemId =>
   parseEntityId('knowledge-source-item', value);
-export const parseKnowledgeBindingId = (value: unknown): KnowledgeBindingId =>
-  parseEntityId('knowledge-binding', value);
 export const parseProviderId = (value: unknown): ProviderId => parseEntityId('provider', value);
 export const parseAgentId = (value: unknown): AgentId => parseEntityId('agent', value);
 export const parseAgentPresetId = (value: unknown): AgentPresetId =>
   parseEntityId('agent-preset', value);
-export const parseAgentSessionId = (value: unknown): AgentSessionId =>
-  parseEntityId('agent-session', value);
-export const parseRemoteBindingId = (value: unknown): RemoteBindingId =>
-  parseEntityId('remote-binding', value);
-export const parseResolvedSnapshotId = (value: unknown): ResolvedSnapshotId =>
-  parseEntityId('resolved-snapshot', value);
 export const parseMessageId = (value: unknown): MessageId => parseEntityId('message', value);
 export const parseCronJobId = (value: unknown): CronJobId => parseEntityId('cron-job', value);
 export const parseCronJobRunId = (value: unknown): CronJobRunId =>

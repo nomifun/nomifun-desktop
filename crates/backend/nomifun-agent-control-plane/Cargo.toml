@@ -7,7 +7,6 @@ license.workspace = true
 [dependencies]
 nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
-nomifun-agent-session.workspace = true
 nomifun-api-types.workspace = true
 async-trait.workspace = true
 axum.workspace = true

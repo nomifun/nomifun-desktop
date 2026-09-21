@@ -25,7 +25,7 @@ import type {
   CreativeAssetVariant,
 } from './types';
 
-export const CREATIVE_ASSET_PAGE_SIZE = 40;
+const CREATIVE_ASSET_PAGE_SIZE = 40;
 
 export interface UseCreativeAssetsOptions {
   enabled?: boolean;

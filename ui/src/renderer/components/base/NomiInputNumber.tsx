@@ -13,7 +13,7 @@ import React from 'react';
 const widthUnitsOf = (value: string): number =>
   Array.from(value).reduce((total, character) => total + ((character.codePointAt(0) ?? 0) > 0xff ? 2 : 1), 0);
 
-export interface NomiInputNumberProps extends InputNumberProps {
+interface NomiInputNumberProps extends InputNumberProps {
   contentFit?: boolean;
   contentMinUnits?: number;
   contentMaxUnits?: number;

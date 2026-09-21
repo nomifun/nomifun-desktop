@@ -58,7 +58,7 @@ const EMPTY_PROTOCOL_PREFERENCES: Readonly<Partial<Record<ModelTask, string>>> =
  * Detect protocol/auth/root for untouched Custom and New API task drafts.
  * Credentials never enter SWR's global cache key; only a local revision does.
  */
-export const useProviderAutoConfiguration = ({
+const useProviderAutoConfiguration = ({
   enabled = true,
   platform,
   baseUrl,

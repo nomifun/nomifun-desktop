@@ -2,7 +2,7 @@ import { httpGet, httpPost, withResponseMap } from './httpBridge';
 import { parsePluginRuntimeId } from '../types/ids';
 import type { PluginRuntimeWorkshop } from '../types/pluginRuntimePlatform';
 
-export interface PluginRuntimeCollection {
+interface PluginRuntimeCollection {
   id: string;
   name: string;
 }

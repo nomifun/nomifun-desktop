@@ -48,7 +48,7 @@ pub(crate) fn adapter(
     ))
     .map_err(failure)?;
     let server_ids = resource_server_ids(&compiled);
-    let image_authority = Arc::new(NomiResourceImageAuthority::default());
+    let image_authority = Arc::new(NomiResourceImageAuthority::new(route_image_input));
     NomiMcpResources::new(
         Arc::new(ResourceOwner {
             kernel,

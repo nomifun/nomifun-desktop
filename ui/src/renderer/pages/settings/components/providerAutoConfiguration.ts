@@ -36,12 +36,12 @@ const ANTHROPIC_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> =
 
 const EMPTY_PROTOCOL_BY_TASK: Readonly<Partial<Record<ModelTask, string>>> = {};
 
-export type ProviderAutoConfigurationConfidence =
+type ProviderAutoConfigurationConfidence =
   | 'verified'
   | 'endpoint_confirmed'
   | 'fallback';
 
-export interface ProviderAutoConfigurationCandidate {
+interface ProviderAutoConfigurationCandidate {
   descriptor: ProtocolDescriptor;
   authScheme: string;
 }

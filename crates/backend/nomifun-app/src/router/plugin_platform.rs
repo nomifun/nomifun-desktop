@@ -3089,7 +3089,7 @@ export async function activate() {
                     if text.contains("Exact package reference")
             )));
             session.with_selected_skills(nomifun_ai_agent::nomi_skills::NomiSelectedSkills::new(
-                skills.instructions, skills.resources,
+                skills.instructions, skills.resources, false,
             ).unwrap()).unwrap()
                 .with_verified_skill_commands(kernel, compiled, skills.commands).unwrap()
         } else { session }

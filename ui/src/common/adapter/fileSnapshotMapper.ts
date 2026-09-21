@@ -6,7 +6,7 @@
 
 import type { CompareResult, FileChangeInfo, FileChangeOperation } from '@/common/types/platform/fileSnapshot';
 
-export type RawFileChange = {
+type RawFileChange = {
   file_path: string;
   relative_path: string;
   operation: FileChangeOperation;

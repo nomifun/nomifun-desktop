@@ -64,7 +64,7 @@ const PREVIEW_COUNT = 3;
  * is promoted by prepending the seconds field `0`; shorter forms are padded
  * with `*` (and `0` for seconds).
  */
-export function splitExpr(expr: string): string[] {
+function splitExpr(expr: string): string[] {
   let parts = (expr || '').trim().split(/\s+/).filter(Boolean);
   if (parts.length === 5) parts = ['0', ...parts];
   while (parts.length < 6) parts.push(parts.length === 0 ? '0' : '*');
@@ -72,7 +72,7 @@ export function splitExpr(expr: string): string[] {
 }
 
 /** True when the expression fires more than once per minute (seconds ≠ `0`). */
-export function isSubMinute(expr: string): boolean {
+function isSubMinute(expr: string): boolean {
   const [seconds] = splitExpr(expr);
   return seconds.trim() !== '0';
 }
@@ -115,7 +115,7 @@ export function validateCronExpression(expr: string, tz?: string, count = PREVIE
   }
 }
 
-export interface CronExpressionBuilderProps {
+interface CronExpressionBuilderProps {
   value: string;
   onChange: (expr: string) => void;
   /** IANA timezone used for the next-run preview (defaults to the local zone). */

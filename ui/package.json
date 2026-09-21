@@ -23,7 +23,6 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@floating-ui/react": "^0.27.16",
     "@icon-park/react": "^1.4.2",
-    "@monaco-editor/react": "^4.7.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-dialog": "^2",

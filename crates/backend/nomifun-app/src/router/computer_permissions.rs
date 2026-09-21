@@ -43,10 +43,12 @@ fn app_label() -> String {
 #[serde(rename_all = "snake_case")]
 pub(super) enum SystemPermissionState {
     Granted,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Denied,
     NotDetermined,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Restricted,
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    #[cfg_attr(any(target_os = "macos", not(feature = "computer-use")), allow(dead_code))]
     NotRequired,
     Unknown,
 }

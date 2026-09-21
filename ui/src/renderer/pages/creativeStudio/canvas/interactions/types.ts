@@ -18,7 +18,7 @@ export type CanvasNodeOpenMode =
   | 'preview-media'
   | 'inspect-group';
 
-export type CanvasDropImportKind = 'image' | 'video';
+type CanvasDropImportKind = 'image' | 'video';
 
 /**
  * Effects which belong to the product shell rather than the canonical canvas

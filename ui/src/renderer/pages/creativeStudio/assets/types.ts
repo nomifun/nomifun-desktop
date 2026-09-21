@@ -33,9 +33,9 @@ export interface CreativeAssetOrigin {
   licenseUrl?: string;
 }
 
-export type CreativePromptLibrarySource = 'catalog';
+type CreativePromptLibrarySource = 'catalog';
 
-export interface CreativeCatalogPromptAssetOrigin {
+interface CreativeCatalogPromptAssetOrigin {
   promptLibrarySource: 'catalog';
   promptLibraryId: string;
   promptCatalogId: string;
@@ -44,7 +44,7 @@ export interface CreativeCatalogPromptAssetOrigin {
   licenseUrl?: string;
 }
 
-export type CreativePromptAssetOrigin = CreativeCatalogPromptAssetOrigin;
+type CreativePromptAssetOrigin = CreativeCatalogPromptAssetOrigin;
 
 /** Product-facing asset shape. Backend snake_case is contained in api.ts/client.ts. */
 export interface CreativeAsset {

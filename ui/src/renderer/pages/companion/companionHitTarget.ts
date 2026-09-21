@@ -6,7 +6,7 @@
 
 import { getAlphaMask } from './companionHitMask';
 
-export interface CompanionHitStyle {
+interface CompanionHitStyle {
   pointerEvents?: string;
   visibility?: string;
   display?: string;

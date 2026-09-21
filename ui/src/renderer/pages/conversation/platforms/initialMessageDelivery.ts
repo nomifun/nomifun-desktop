@@ -102,7 +102,7 @@ const defaultAuthorityDeps: InitialMessageAuthorityDeps = {
     }),
 };
 
-export const quarantineInitialMessageDelivery = (
+const quarantineInitialMessageDelivery = (
   storage: InitialMessageStorage,
   storageKey: string,
   idempotencyKey: string

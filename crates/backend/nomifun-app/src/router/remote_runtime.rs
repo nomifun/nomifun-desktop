@@ -28,7 +28,6 @@ pub(crate) struct RemoteDetachedMutationRegistry {
 #[derive(Default)]
 struct DetachedMutationRegistryState {
     active: BTreeSet<String>,
-    abort_handles: BTreeMap<String, tokio::task::AbortHandle>,
     closed: bool,
 }
 
@@ -44,7 +43,7 @@ pub(crate) enum RemoteDetachedMutationAdmissionError {
 #[derive(Clone)]
 #[must_use = "dropping the permit releases the Remote mutation slot"]
 pub(crate) struct RemoteDetachedMutationPermit {
-    lease: Arc<RemoteDetachedMutationLease>,
+    _lease: Arc<RemoteDetachedMutationLease>,
 }
 
 struct RemoteDetachedMutationLease {
@@ -96,7 +95,7 @@ impl RemoteDetachedMutationRegistry {
         drop(state);
 
         Ok(RemoteDetachedMutationPermit {
-            lease: Arc::new(RemoteDetachedMutationLease {
+            _lease: Arc::new(RemoteDetachedMutationLease {
                 registry: self.clone(),
                 key,
                 slot: Some(slot),
@@ -125,40 +124,10 @@ impl RemoteDetachedMutationRegistry {
         Arc::clone(&self.changed)
     }
 
-    fn register_abort_handle(&self, key: &str, handle: tokio::task::AbortHandle) {
-        let mut state = self.lock_state();
-        if state.closed || !state.active.contains(key) {
-            drop(state);
-            handle.abort();
-            return;
-        }
-        state.abort_handles.insert(key.to_owned(), handle);
-    }
-
-    pub(crate) fn abort_active_tasks(&self) {
-        let handles = self
-            .lock_state()
-            .abort_handles
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        for handle in handles {
-            handle.abort();
-        }
-    }
-
     fn lock_state(&self) -> std::sync::MutexGuard<'_, DetachedMutationRegistryState> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-impl RemoteDetachedMutationPermit {
-    pub(crate) fn register_abort_handle(&self, handle: tokio::task::AbortHandle) {
-        self.lease
-            .registry
-            .register_abort_handle(&self.lease.key, handle);
     }
 }
 
@@ -170,7 +139,6 @@ impl Drop for RemoteDetachedMutationLease {
         drop(self.slot.take());
         let mut state = self.registry.lock_state();
         let removed = state.active.remove(&self.key);
-        state.abort_handles.remove(&self.key);
         drop(state);
         if removed {
             self.registry.changed.notify_waiters();
@@ -334,7 +302,6 @@ impl NomiCoreRemoteRuntimeCoordinator {
                         mutations = ?remaining_mutations,
                         "Nomi-core Remote tasks did not quiesce before shutdown timeout"
                     );
-                    self.detached_mutations.abort_active_tasks();
                     let abort_handles = {
                         let registry = self.lock_tasks();
                         registry.abort_handles.values().cloned().collect::<Vec<_>>()

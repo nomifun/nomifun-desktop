@@ -4,18 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
-import { MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type {
-  EndpointRootShape,
-  ModelProtocolManifestResponse,
-  ProtocolDescriptor,
-  ProtocolEndpointDescriptor,
-  ProtocolRecommendation,
+EndpointRootShape,
+ModelProtocolManifestResponse,
+ProtocolDescriptor,
+ProtocolEndpointDescriptor
 } from '@/common/types/provider/modelProtocolManifest';
-import type { ProviderModelCapabilityInput as CanonicalProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
 import type { ProviderConnectionInput as CanonicalProviderConnectionInput } from '@/common/types/provider/providerConnection';
+import type { ProviderModelCapabilityInput as CanonicalProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
 
 /** The endpoint fields owned by a task capability on the wire. */
 export const CAPABILITY_ENDPOINT_FIELDS = [
@@ -33,9 +32,7 @@ export const isCapabilityEndpointField = (value: string): value is CapabilityEnd
 /** UI code consumes the backend-owned manifest types without redefining them. */
 export type CapabilityEndpointDescriptor = ProtocolEndpointDescriptor;
 export type CapabilityProtocolDescriptor = ProtocolDescriptor;
-export type CapabilityProtocolRecommendation = ProtocolRecommendation;
 export type ModelProtocolManifest = ModelProtocolManifestResponse;
-export type CapabilityRootShape = EndpointRootShape;
 
 export type ModelProtocolManifestMap = Partial<Record<ModelTask, ModelProtocolManifest>>;
 
@@ -820,7 +817,7 @@ export const validateModelDefinition = (
 const optionalTrimmed = (value: string): string | undefined => value.trim() || undefined;
 
 /** Serialize one complete task capability for the canonical full-save request. */
-export const capabilityInputFromDraft = (
+const capabilityInputFromDraft = (
   capability: ModelCapabilityDraft
 ): ProviderModelCapabilityInput | undefined => {
   const providerParams = parseProviderParams(capability.providerParamsJson);

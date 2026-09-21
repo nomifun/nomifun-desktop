@@ -79,10 +79,10 @@ export const getMcpConfigurationFields = (transport: IMcpServerTransport): strin
   return [...fields];
 };
 
-export const needsMcpApiConfiguration = (transport: IMcpServerTransport): boolean =>
+const needsMcpApiConfiguration = (transport: IMcpServerTransport): boolean =>
   getMcpConfigurationFields(transport).length > 0;
 
-export const hasMcpApiConfigurationInput = (transport: IMcpServerTransport): boolean => {
+const hasMcpApiConfigurationInput = (transport: IMcpServerTransport): boolean => {
   if (transport.type === 'stdio') {
     return hasSensitiveRecordKey(transport.env);
   }
@@ -90,7 +90,7 @@ export const hasMcpApiConfigurationInput = (transport: IMcpServerTransport): boo
   return hasSensitiveUrlQuery(transport.url) || hasSensitiveRecordKey(transport.headers);
 };
 
-export const getMcpUrlTransportUrl = (transport: IMcpServerTransport): string | null => {
+const getMcpUrlTransportUrl = (transport: IMcpServerTransport): string | null => {
   if (transport.type === 'http' || transport.type === 'sse' || transport.type === 'streamable_http') {
     return transport.url;
   }

@@ -4,43 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+ImageGenerationInterfaceMode,
+ImageGenerationQuality,
+ImageGenerationSettings,
+} from '@renderer/creation/parameters/image';
 import type { CreativeAsset } from '../../assets';
 import type {
-  CreativeCanvasConnection,
-  CreativeCanvasNode,
-  CreativeImagePromptMention,
-  CreativeProjectDocument,
-  CreativeSize,
+CreativeCanvasConnection,
+CreativeCanvasNode,
+CreativeImagePromptMention,
+CreativeProjectDocument,
+CreativeSize,
 } from '../../domain';
 import type {
-  CreativeModelCatalogSnapshot,
-  CreativeModelOption,
-  CreativeModelSelectionRef,
+CreativeModelCatalogSnapshot,
+CreativeModelSelectionRef
 } from '../../models';
 import {
-  isCanvasNodeTaskOwner,
-  type CreativeTask,
-  type CreativeTaskReference,
+isCanvasNodeTaskOwner,
+type CreativeTask,
+type CreativeTaskReference,
 } from '../../tasks';
-import type {
-  ImageGenerationInterfaceMode,
-  ImageGenerationQuality,
-  ImageGenerationSettings,
-} from '@renderer/creation/parameters/image';
-import { prepareCanvasImageRun, canvasResumeRequestsFromDocument, type GenerationReferences, type CanvasGenerationResumeRequest, type PreparedCanvasGenerationRun } from '../generation';
+import { canvasResumeRequestsFromDocument,prepareCanvasImageRun,type CanvasGenerationResumeRequest,type GenerationReferences,type PreparedCanvasGenerationRun } from '../generation';
 
-import { validateCanvasConnection, type CanvasState } from '../core';
+import { validateCanvasConnection,type CanvasState } from '../core';
+import { creativeStudioProductText } from './i18n';
 import {
-  canvasTaskResultPosition,
-  nextCanvasImageTaskPosition,
+canvasTaskResultPosition,
+nextCanvasImageTaskPosition,
 } from './imageTaskCanvasLayout';
 import {
-  createCreativeCanvasProductNode,
-  CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
+createCreativeCanvasProductNode,
+CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
-import { creativeStudioProductText } from './i18n';
 
-export const CREATIVE_IMAGE_COMPOSE_OPERATION = 'image-node-compose';
+const CREATIVE_IMAGE_COMPOSE_OPERATION = 'image-node-compose';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
@@ -229,34 +228,6 @@ export function latestCanvasImageComposeConfig(
       node.data.operation?.sourceNodeId === sourceNodeId
   );
   return matches.at(-1) ?? null;
-}
-
-export function preferredCanvasImageComposeModel(
-  options: readonly CreativeModelOption[],
-  previous: CreativeModelSelectionRef | null,
-  source: CreativeAsset | null
-): CreativeModelSelectionRef | null {
-  const match = (candidate: CreativeModelSelectionRef | null) =>
-    candidate
-      ? (options.find(
-          (option) =>
-            option.providerId === candidate.providerId &&
-            option.model === candidate.model
-        ) ?? null)
-      : null;
-  const retained = match(previous);
-  if (retained) return { providerId: retained.providerId, model: retained.model };
-  const origin =
-    source?.origin?.providerId && source.origin.model
-      ? match({
-          providerId:
-            source.origin.providerId as CreativeModelSelectionRef['providerId'],
-          model: source.origin.model,
-        })
-      : null;
-  if (origin) return { providerId: origin.providerId, model: origin.model };
-  const only = options.length === 1 ? options[0] : null;
-  return only ? { providerId: only.providerId, model: only.model } : null;
 }
 
 export function prepareCanvasImageCompose(input: {

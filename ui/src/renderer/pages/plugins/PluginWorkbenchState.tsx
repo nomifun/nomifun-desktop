@@ -5,13 +5,10 @@
  */
 
 import type {
-  PluginCandidateTestStatus,
-  PluginCompatibility,
-  PluginLifecycle,
-  PluginProjectSourceState,
+PluginLifecycle
 } from '@/common/types/pluginPlatform';
-import { Button, Spin } from '@arco-design/web-react';
-import { Attention, CloseOne, Plug, Refresh } from '@icon-park/react';
+import { Button,Spin } from '@arco-design/web-react';
+import { Attention,CloseOne,Plug,Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PluginLoadFailure } from './pluginWorkbenchModel';
@@ -53,61 +50,6 @@ export const PluginLifecycleBadge: React.FC<{ lifecycle: PluginLifecycle }> = ({
     error: 'danger',
   };
   return <StatusBadge label={labels[lifecycle]} tone={tones[lifecycle]} />;
-};
-
-export const PluginSourceBadge: React.FC<{ source: PluginProjectSourceState }> = ({
-  source,
-}) => {
-  const { t } = useTranslation();
-  const labels: Record<PluginProjectSourceState, string> = {
-    empty: t('pluginWorkbench.sourceState.empty'),
-    editable: t('pluginWorkbench.sourceState.editable'),
-    runtime_only: t('pluginWorkbench.sourceState.runtimeOnly'),
-  };
-  const tones: Record<PluginProjectSourceState, BadgeTone> = {
-    empty: 'muted',
-    editable: 'success',
-    runtime_only: 'info',
-  };
-  return <StatusBadge label={labels[source]} tone={tones[source]} />;
-};
-
-export const PluginCompatibilityBadge: React.FC<{
-  compatibility: PluginCompatibility;
-}> = ({ compatibility }) => {
-  const { t } = useTranslation();
-  const labels: Record<PluginCompatibility, string> = {
-    compatible: t('pluginWorkbench.compatibility.compatible'),
-    breaking: t('pluginWorkbench.compatibility.breaking'),
-    unknown: t('pluginWorkbench.compatibility.unknown'),
-  };
-  const tones: Record<PluginCompatibility, BadgeTone> = {
-    compatible: 'success',
-    breaking: 'danger',
-    unknown: 'warning',
-  };
-  return <StatusBadge label={labels[compatibility]} tone={tones[compatibility]} />;
-};
-
-export const PluginTestBadge: React.FC<{ status: PluginCandidateTestStatus }> = ({
-  status,
-}) => {
-  const { t } = useTranslation();
-  const labels: Record<PluginCandidateTestStatus, string> = {
-    not_run: t('pluginWorkbench.testStatus.notRun'),
-    passed: t('pluginWorkbench.testStatus.passed'),
-    failed: t('pluginWorkbench.testStatus.failed'),
-    needs_test_input: t('pluginWorkbench.testStatus.needsInput'),
-    stale: t('pluginWorkbench.testStatus.stale'),
-  };
-  const tones: Record<PluginCandidateTestStatus, BadgeTone> = {
-    not_run: 'muted',
-    passed: 'success',
-    failed: 'danger',
-    needs_test_input: 'warning',
-    stale: 'warning',
-  };
-  return <StatusBadge label={labels[status]} tone={tones[status]} />;
 };
 
 interface PluginStatePanelProps {

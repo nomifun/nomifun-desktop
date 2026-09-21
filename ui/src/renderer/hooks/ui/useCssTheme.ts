@@ -32,7 +32,7 @@ import { useTranslation } from 'react-i18next';
  */
 
 /** A theme that carries a `cover` image gets a background-image CSS block appended. */
-export const ensureBackgroundCss = <T extends { cover?: string; css: string }>(theme: T): T => {
+const ensureBackgroundCss = <T extends { cover?: string; css: string }>(theme: T): T => {
   if (
     theme.cover &&
     (!theme.css || !theme.css.includes(BACKGROUND_BLOCK_START) || backgroundCssBlockNeedsUpgrade(theme.css))
@@ -42,7 +42,7 @@ export const ensureBackgroundCss = <T extends { cover?: string; css: string }>(t
   return theme;
 };
 
-export const normalizeUserThemes = (themes: ICssTheme[]): { normalized: ICssTheme[]; updated: boolean } => {
+const normalizeUserThemes = (themes: ICssTheme[]): { normalized: ICssTheme[]; updated: boolean } => {
   let updated = false;
   const normalized = themes.map((theme) => {
     const next = ensureBackgroundCss(theme);
@@ -62,7 +62,7 @@ const dispatchCustomCssUpdated = (css: string) => {
  * grid stay consistent without a remount.
  */
 const CSS_THEMES_CHANGED_EVENT = 'nomifun:css-themes-changed';
-export const notifyCssThemesChanged = (): void => {
+const notifyCssThemesChanged = (): void => {
   window.dispatchEvent(new CustomEvent(CSS_THEMES_CHANGED_EVENT));
 };
 
@@ -76,7 +76,7 @@ let applyQueue: Promise<void> = Promise.resolve();
  * IPC/storage failure it recovers UI state unconditionally from what is actually
  * persisted (re-dispatching `custom-css-updated` so every listener re-syncs).
  */
-export const applyCssThemeRaw = (css: string, themeId: string): Promise<void> => {
+const applyCssThemeRaw = (css: string, themeId: string): Promise<void> => {
   const task = async () => {
     try {
       await Promise.all([configService.set('customCss', css), configService.set('css.activeThemeId', themeId)]);

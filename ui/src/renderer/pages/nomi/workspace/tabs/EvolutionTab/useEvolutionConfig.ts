@@ -37,7 +37,7 @@ import type { CompanionId } from '@/common/types/ids';
 export type EvolutionLearnConfig = ICompanionLearnConfig;
 
 /** Skill-generation settings (技能生成). Thresholds stay internal to the tab. */
-export type EvolutionEvolveConfig = ICompanionEvolveConfig;
+type EvolutionEvolveConfig = ICompanionEvolveConfig;
 
 export interface EvolutionConfigHandle {
   learn: EvolutionLearnConfig | null;

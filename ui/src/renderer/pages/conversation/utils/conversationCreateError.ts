@@ -8,16 +8,16 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { parseError } from '@/common/utils';
 import type { TFunction } from 'i18next';
 
-export type WorkspacePathErrorCode =
+type WorkspacePathErrorCode =
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
   | 'WORKSPACE_DIRECTORY_UNAVAILABLE'
   | 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE';
 
-export type ConversationCreateErrorCode =
+type ConversationCreateErrorCode =
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED'
   | 'WORKSPACE_DIRECTORY_UNAVAILABLE';
-export type ConversationRuntimeWorkspaceErrorCode =
+type ConversationRuntimeWorkspaceErrorCode =
   | 'WORKSPACE_PATH_EDGE_WHITESPACE_RUNTIME_UNSUPPORTED'
   | 'WORKSPACE_DIRECTORY_RUNTIME_UNAVAILABLE';
 
@@ -98,12 +98,12 @@ const getWorkspacePathErrorPayload = (error: unknown): EmbeddedBackendErrorPaylo
   return getEmbeddedBackendErrorPayload(error);
 };
 
-export const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {
+const getWorkspacePathFromErrorDetails = (error: unknown): string | undefined => {
   const payload = getWorkspacePathErrorPayload(error);
   return getWorkspacePathFromDetails(payload?.details);
 };
 
-export const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathErrorCode | undefined => {
+const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathErrorCode | undefined => {
   const payload = getWorkspacePathErrorPayload(error);
   if (payload) {
     const mappedCode = payload.code ? BACKEND_ERROR_CODE_MAP[payload.code] : undefined;
@@ -115,14 +115,14 @@ export const normalizeWorkspacePathErrorCode = (error: unknown): WorkspacePathEr
   return undefined;
 };
 
-export const normalizeConversationCreateErrorCode = (error: unknown): ConversationCreateErrorCode | undefined => {
+const normalizeConversationCreateErrorCode = (error: unknown): ConversationCreateErrorCode | undefined => {
   const code = normalizeWorkspacePathErrorCode(error);
   return code === 'WORKSPACE_PATH_EDGE_WHITESPACE_UNSUPPORTED' || code === 'WORKSPACE_DIRECTORY_UNAVAILABLE'
     ? code
     : undefined;
 };
 
-export const normalizeConversationRuntimeWorkspaceErrorCode = (
+const normalizeConversationRuntimeWorkspaceErrorCode = (
   error: unknown
 ): ConversationRuntimeWorkspaceErrorCode | undefined => {
   const code = normalizeWorkspacePathErrorCode(error);

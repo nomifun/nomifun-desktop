@@ -20,14 +20,12 @@ pub mod requirement_tools;
 pub mod runtime_output;
 pub mod session_control_tools;
 pub mod ssh_backend;
-pub mod subagent_tools;
 pub mod engine_sdk;
 mod engine_tasks;
 pub mod engine_effect_scope;
 pub mod model_attachments;
 pub mod nomi_skills;
 pub mod nomi_resources;
-pub mod capability;
 pub mod cc_switch;
 pub mod factory;
 pub mod image_generation;
@@ -46,7 +44,6 @@ pub(crate) mod services;
 pub mod runtime_sessions;
 pub mod terminal_title_completer;
 pub mod types;
-mod subagent_gateway;
 #[path = "web_search_provider.rs"]
 pub mod web_search;
 #[cfg(feature = "browser-use")]
@@ -65,12 +62,6 @@ pub use session_control_tools::{
     AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
     AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
     AgentForkTool, SessionControlSink,
-};
-pub use subagent_tools::{
-    SUBAGENT_SEND_OUTCOME_UNKNOWN_CODE, SUBAGENT_SEND_TOOL_NAME, SUBAGENT_WAIT_TOOL_NAME,
-    DelegationHandleRecordingTool, HostSubagentChild, HostSubagentResult,
-    ParentScopedSubagentRegistry, SubagentHandle, SubagentHost, SubagentRunState,
-    SubagentSendTool, SubagentWaitTool,
 };
 pub use nomi_config;
 pub use nomi_types;

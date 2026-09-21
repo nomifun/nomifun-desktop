@@ -28,7 +28,7 @@ import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
 import type { PluginMountBusyAction } from './PluginLibraryView';
 import PluginConfigurationDialog from './PluginConfigurationDialog';
-import type { PluginProjectBusyAction } from './PluginWorkshopView';
+import type { PluginProjectBusyAction } from './pluginWorkbenchModel';
 import { pluginRuntimeSetEnabledRequest } from './runtime/model';
 import { pluginRuntimeProduct, type PluginRuntimeDraft, type PluginRuntimeWorkspace } from '@/common/adapter/pluginRuntimeProductBridge';
 import { emptyItem, updatePluginRuntimeWorkspace, PLUGIN_LIBRARY_CHANGED, libraryChanged } from './runtime/libraryState';
@@ -761,7 +761,6 @@ const PluginWorkbenchPage: React.FC = () => {
     t,
   ]);
 
-
   const toggleProductItem = useCallback(async (item: PluginProductItem, enabled: boolean) => {
     if ((!item.mount && !item.runtime) || homeBusyMountId) return;
     setHomeBusyMountId(item.key);
@@ -806,7 +805,6 @@ const PluginWorkbenchPage: React.FC = () => {
     setActiveTab('library');
     if (searchParams.has('plugin')) { const next = new URLSearchParams(searchParams); next.delete('plugin'); next.delete('tab'); setSearchParams(next, {replace: true}); }
   }, [setActiveTab, searchParams, setSearchParams]);
-
 
   return (
     <HubPageShell

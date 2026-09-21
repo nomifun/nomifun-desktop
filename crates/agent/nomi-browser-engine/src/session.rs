@@ -100,8 +100,6 @@ pub(crate) enum SessionAdmission { Admitted, Rejected }
 /// 周期标志位。`crashed`/`closed` 是粘性的：一旦置位，该 session 上的 [`SessionRegistry::send_*`]
 /// 立即短路返错，且所有挂起回调被 drain 失败（详见 [`SessionRegistry::fail_session`]）。
 pub struct Session {
-    /// CDP sessionId（根 session = `ROOT_SESSION`）。
-    pub session_id: String,
     /// target 类型（`page` / `iframe` / `service_worker` / `browser`…），来自
     /// `attachedToTarget` 的 `targetInfo.type`；根 session 为 `browser`。
     pub target_type: String,
@@ -116,9 +114,8 @@ pub struct Session {
 }
 
 impl Session {
-    fn new(session_id: impl Into<String>, target_type: impl Into<String>) -> Self {
+    fn new(target_type: impl Into<String>) -> Self {
         Self {
-            session_id: session_id.into(),
             target_type: target_type.into(),
             target_id: None,
             callbacks: HashMap::new(),
@@ -535,7 +532,7 @@ impl SessionRegistry {
         let (fatal, _initial_receiver) = watch::channel(None);
         sessions.insert(
             ROOT_SESSION.to_string(),
-            Session::new(ROOT_SESSION, "browser"),
+            Session::new("browser"),
         );
         Self {
             inner: Mutex::new(RegistryInner {
@@ -577,7 +574,7 @@ impl SessionRegistry {
             self.poison_connection_locked(&mut state, TransportError::Protocol(format!("live CDP session limit exceeded ({MAX_LIVE_SESSIONS})")));
             return;
         }
-        state.sessions.insert(session_id.clone(), Session::new(session_id, target_type));
+        state.sessions.insert(session_id, Session::new(target_type));
     }
 
     /// Record the full attach envelope before publishing its event. Parent and
@@ -613,7 +610,7 @@ impl SessionRegistry {
             return SessionAdmission::Rejected;
         }
         state.clear_dead_session(&session_id);
-        let session = state.sessions.entry(session_id.clone()).or_insert_with(|| Session::new(&session_id, target_type));
+        let session = state.sessions.entry(session_id.clone()).or_insert_with(|| Session::new(target_type));
         session.target_id = Some(target_id.clone());
         session.closed = false;
         session.crashed = false;

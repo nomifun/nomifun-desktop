@@ -42,7 +42,7 @@ export interface CreativeTemplateRunCenterPort {
   retry(run: CreativeTemplateRunAggregateV1): Promise<unknown>;
 }
 
-export interface TemplateRunCenterProps {
+interface TemplateRunCenterProps {
   port: CreativeTemplateRunCenterPort;
 }
 

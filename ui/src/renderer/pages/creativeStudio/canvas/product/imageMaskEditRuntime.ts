@@ -372,12 +372,3 @@ export function waitForCanvasImageMaskEditAdmission(input: {
     );
   });
 }
-
-export function canvasImageMaskEditTaskFromSnapshot(
-  snapshot: CanvasGenerationRuntimeSnapshot,
-  taskId: string
-): CreativeTask | null {
-  return (
-    snapshot.entries.find((entry) => entry.task.taskId === taskId)?.task ?? null
-  );
-}

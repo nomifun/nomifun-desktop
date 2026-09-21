@@ -64,7 +64,7 @@ export function resolveCanvasDoubleClick(
   });
 }
 
-export function toggleCanvasNodeLock(
+function toggleCanvasNodeLock(
   state: CanvasState,
   nodeId: string,
   at?: number

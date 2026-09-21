@@ -9,7 +9,7 @@ import type { InputProps, RefInputType } from '@arco-design/web-react/es/Input';
 import classNames from 'classnames';
 import React from 'react';
 
-export interface NomiInputProps extends InputProps {
+interface NomiInputProps extends InputProps {
   /** Shrink the field to its visible value while keeping practical bounds. */
   contentFit?: boolean;
   contentMinWidth?: React.CSSProperties['minWidth'];

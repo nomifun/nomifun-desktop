@@ -20,9 +20,3 @@ export const Color = {
     success: '#00b42a',
   },
 } as const;
-
-export const Size = {
-  IconSize: {
-    normal: 16,
-  },
-} as const;

@@ -22,7 +22,7 @@ export const creativeAssetKindIcon = (kind: CreativeAssetKind, size = 20): React
   }
 };
 
-export interface CreativeMediaPreviewProps {
+interface CreativeMediaPreviewProps {
   kind: CreativeAssetKind;
   /** Original media URL. A video/audio URL is never used as an image source. */
   src?: string | null;

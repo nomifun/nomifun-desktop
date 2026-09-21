@@ -17,11 +17,4 @@ import { createContentSiderChannel } from '@/renderer/components/layout/ContentS
 
 export const sessionSiderChannel = createContentSiderChannel('session');
 export const SESSION_SIDER_TOGGLE_EVENT = sessionSiderChannel.toggleEvent;
-export const SESSION_SIDER_STATE_EVENT = sessionSiderChannel.stateEvent;
-
-export interface SessionSiderStateDetail {
-  collapsed: boolean;
-}
-
-export const dispatchSessionSiderToggleEvent = sessionSiderChannel.dispatchToggle;
 export const dispatchSessionSiderStateEvent = sessionSiderChannel.dispatchState;

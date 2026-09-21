@@ -35,7 +35,7 @@ import {
 } from './nodeFactory';
 import { creativeStudioProductText } from './i18n';
 
-export const CREATIVE_VIDEO_COMPOSE_OPERATION = 'video-node-compose';
+const CREATIVE_VIDEO_COMPOSE_OPERATION = 'video-node-compose';
 
 type VideoNode = Extract<CreativeCanvasNode, { type: 'video' }>;
 type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
@@ -70,7 +70,7 @@ export type CanvasVideoComposeMode =
   | { kind: 'i2v'; assetIds: string[] }
   | { kind: 'unsupported'; message: string };
 
-export const DEFAULT_CANVAS_VIDEO_COMPOSE_SETTINGS: CanvasVideoComposeSettings = {
+const DEFAULT_CANVAS_VIDEO_COMPOSE_SETTINGS: CanvasVideoComposeSettings = {
   model: null,
   resolution: '1080p',
   aspectRatio: '16:9',

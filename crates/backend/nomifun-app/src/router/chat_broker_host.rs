@@ -1174,10 +1174,6 @@ impl Drop for AttemptCredentialGuard {
 }
 
 impl ConnectionCredentialLeaseRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     fn register_encrypted(
         &self,
         credential_ref: ProviderCredentialRef,
@@ -1892,7 +1888,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelling_provider_open_releases_only_its_credential_lease() {
-        let registry = ConnectionCredentialLeaseRegistry::new();
+        let registry = ConnectionCredentialLeaseRegistry::default();
         for handle in ["cancelled-attempt", "other-attempt"] {
             registry.leases.write().unwrap().insert(handle.to_owned(), RegisteredLease {
                 auth_scheme: "bearer".to_owned(),
@@ -2169,7 +2165,7 @@ mod tests {
     #[test]
     fn invalid_chat_auth_is_rejected_before_registry_mutation() {
         let route = convert_chat_route_candidate(&candidate()).unwrap();
-        let registry = ConnectionCredentialLeaseRegistry::new();
+        let registry = ConnectionCredentialLeaseRegistry::default();
         let error = register_route_credential(
             &registry,
             &route,

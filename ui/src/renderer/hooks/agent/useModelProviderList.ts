@@ -21,13 +21,13 @@ export const PROVIDERS_SWR_KEY = 'providers';
 
 // Provider config is local application state. Keep it stable after the initial
 // load and refresh only through explicit mutate() calls after CRUD operations.
-export const PROVIDERS_SWR_OPTIONS: SWRConfiguration<IProvider[], Error> = {
+const PROVIDERS_SWR_OPTIONS: SWRConfiguration<IProvider[], Error> = {
   revalidateOnFocus: false,
   revalidateOnReconnect: false,
   shouldRetryOnError: false,
 };
 
-export const fetchProviders = async (): Promise<IProvider[]> => {
+const fetchProviders = async (): Promise<IProvider[]> => {
   return (await ipcBridge.mode.listProviders.invoke()) ?? [];
 };
 

@@ -4,17 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type CreativeStudioTemplateId = string;
-export type CreativeTemplateVariableId = string;
-export type CreativePromptTemplateId = string;
-export type CreativeStudioTemplateStepId = string;
-export type CreativeStudioTemplateRunId = string;
-export type CreativeTemplatePromptDraftId = string;
-export type CreativeTemplateAssetId = string;
-export type CreativeTemplateTaskId = string;
-export type CreativeTemplateHistoryReferenceId = string;
+type CreativeStudioTemplateId = string;
+type CreativeTemplateVariableId = string;
+type CreativePromptTemplateId = string;
+type CreativeStudioTemplateStepId = string;
+type CreativeStudioTemplateRunId = string;
+type CreativeTemplatePromptDraftId = string;
+type CreativeTemplateAssetId = string;
+type CreativeTemplateTaskId = string;
+type CreativeTemplateHistoryReferenceId = string;
 
-export type CreativeTemplateVisibility = 'private' | 'public';
+type CreativeTemplateVisibility = 'private' | 'public';
 
 /** Typed, user-facing catalog information. There is no opaque metadata bag. */
 export interface CreativeTemplateMetadata {
@@ -35,7 +35,7 @@ interface CreativeTemplateVariableBase {
   required: boolean;
 }
 
-export interface CreativeTemplateTextVariable extends CreativeTemplateVariableBase {
+interface CreativeTemplateTextVariable extends CreativeTemplateVariableBase {
   type: 'text' | 'multiline-text';
   defaultValue: string | null;
   placeholder: string;
@@ -43,7 +43,7 @@ export interface CreativeTemplateTextVariable extends CreativeTemplateVariableBa
   maxLength: number;
 }
 
-export interface CreativeTemplateNumberVariable extends CreativeTemplateVariableBase {
+interface CreativeTemplateNumberVariable extends CreativeTemplateVariableBase {
   type: 'number';
   defaultValue: number | null;
   minimum: number | null;
@@ -51,23 +51,23 @@ export interface CreativeTemplateNumberVariable extends CreativeTemplateVariable
   step: number | null;
 }
 
-export interface CreativeTemplateBooleanVariable extends CreativeTemplateVariableBase {
+interface CreativeTemplateBooleanVariable extends CreativeTemplateVariableBase {
   type: 'boolean';
   defaultValue: boolean;
 }
 
-export interface CreativeTemplateChoiceVariable extends CreativeTemplateVariableBase {
+interface CreativeTemplateChoiceVariable extends CreativeTemplateVariableBase {
   type: 'choice';
   defaultValue: string | null;
   options: string[];
 }
 
-export interface CreativeTemplateImageVariable extends CreativeTemplateVariableBase {
+interface CreativeTemplateImageVariable extends CreativeTemplateVariableBase {
   type: 'image';
   defaultAssetId: CreativeTemplateAssetId | null;
 }
 
-export interface CreativeTemplateImageSeriesVariable extends CreativeTemplateVariableBase {
+interface CreativeTemplateImageSeriesVariable extends CreativeTemplateVariableBase {
   type: 'image-series';
   defaultAssetIds: CreativeTemplateAssetId[];
   minItems: number;
@@ -108,7 +108,7 @@ interface CreativeTemplateStepBase {
   enabled: boolean;
 }
 
-export interface CreativeTemplateRenderPromptStep extends CreativeTemplateStepBase {
+interface CreativeTemplateRenderPromptStep extends CreativeTemplateStepBase {
   kind: 'render-template';
   templateId: CreativePromptTemplateId;
 }
@@ -119,7 +119,7 @@ export interface CreativeTemplateDraftPromptsStep extends CreativeTemplateStepBa
   planning: CreativeTemplatePromptPlanningSettings;
 }
 
-export interface CreativeTemplateTextModelBinding {
+interface CreativeTemplateTextModelBinding {
   providerId: string;
   model: string;
   task: 'chat';
@@ -132,19 +132,19 @@ export interface CreativeTemplatePromptPlanningSettings {
   maxTokens: number;
 }
 
-export type CreativeTemplatePromptSource =
+type CreativeTemplatePromptSource =
   | { kind: 'template'; templateId: CreativePromptTemplateId }
   | { kind: 'prompt-drafts'; stepId: CreativeStudioTemplateStepId };
 
 export type CreativeTemplateImageTask = 'image_generation' | 'image_edit';
 
-export interface CreativeTemplateImageModelBinding {
+interface CreativeTemplateImageModelBinding {
   providerId: string;
   model: string;
   task: CreativeTemplateImageTask;
 }
 
-export type CreativeTemplateImageQuality = 'auto' | 'high' | 'medium' | 'low';
+type CreativeTemplateImageQuality = 'auto' | 'high' | 'medium' | 'low';
 
 /** Provider-neutral settings persisted with the template definition. */
 export interface CreativeTemplateImageGenerationSettings {
@@ -162,7 +162,7 @@ export interface CreativeTemplateGenerateImagesStep extends CreativeTemplateStep
   generation: CreativeTemplateImageGenerationSettings;
 }
 
-export interface CreativeTemplateRecordHistoryStep extends CreativeTemplateStepBase {
+interface CreativeTemplateRecordHistoryStep extends CreativeTemplateStepBase {
   kind: 'record-history';
   sourceStepIds: CreativeStudioTemplateStepId[];
 }
@@ -201,7 +201,7 @@ export interface CreativeTemplateRunRequest {
   referenceAssetIds: CreativeTemplateAssetId[];
 }
 
-export type CreativeTemplatePromptDraftStatus = 'pending-review' | 'approved' | 'rejected';
+type CreativeTemplatePromptDraftStatus = 'pending-review' | 'approved' | 'rejected';
 
 export interface CreativeTemplatePromptDraft {
   id: CreativeTemplatePromptDraftId;
@@ -225,7 +225,7 @@ export type CreativeTemplateRunStatus =
   | 'failed'
   | 'cancelled';
 
-export interface CreativeTemplateRunFailure {
+interface CreativeTemplateRunFailure {
   code: string;
   message: string;
 }

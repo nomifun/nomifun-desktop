@@ -16,7 +16,7 @@ export interface KnowledgePreviewRelocation {
   new_prefix: string;
 }
 
-export function replaceKnowledgePreviewPathPrefix(
+function replaceKnowledgePreviewPathPrefix(
   path: string,
   oldPrefix: string,
   newPrefix: string,

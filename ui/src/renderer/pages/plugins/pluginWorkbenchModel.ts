@@ -24,7 +24,21 @@ import type {
   UninstallPluginRequest,
 } from '@/common/types/pluginPlatform';
 
-export type PluginLoadFailureKind = 'unavailable' | 'error';
+type PluginLoadFailureKind = 'unavailable' | 'error';
+
+export type PluginProjectBusyAction =
+  | 'create'
+  | 'import'
+  | 'edit'
+  | 'dependencies'
+  | 'auto_apply'
+  | 'share'
+  | 'build'
+  | 'test'
+  | 'apply'
+  | 'delete'
+  | 'cancel_operation'
+  | null;
 
 export interface PluginLoadFailure {
   kind: PluginLoadFailureKind;
@@ -45,7 +59,7 @@ export const EMPTY_TEST_INPUT_DIGEST =
 
 export type PluginApplyTargetSelection = 'initial_install' | 'existing_mount';
 
-export function isPluginDigest(value: string): boolean {
+function isPluginDigest(value: string): boolean {
   return /^[0-9a-f]{64}$/i.test(value.trim());
 }
 

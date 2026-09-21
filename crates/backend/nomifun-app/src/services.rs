@@ -1171,21 +1171,6 @@ impl AppServices {
         Ok(self)
     }
 
-    pub(crate) async fn has_valid_boot_reconciliation_authority(
-        &self,
-    ) -> anyhow::Result<bool> {
-        let Some(authority) = self._boot_reconciliation_authority.as_ref() else {
-            return Ok(false);
-        };
-        Ok(authority.protects_data_dir(&self.data_dir)?
-            && authority
-                .protects_database(
-                    &self.database,
-                    &self.data_dir.join("nomifun-backend.db"),
-                )
-                .await?)
-    }
-
     /// Replace the process-local Agent runtime registry after construction.
     ///
     /// Primarily used by tests to inject mock implementations.

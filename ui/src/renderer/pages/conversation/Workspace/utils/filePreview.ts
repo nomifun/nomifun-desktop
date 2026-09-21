@@ -7,7 +7,7 @@
 /**
  * Set of file extensions that support in-app preview
  */
-export const PREVIEW_SUPPORTED_EXTENSIONS: Set<string> = new Set([
+const PREVIEW_SUPPORTED_EXTENSIONS: Set<string> = new Set([
   // Markdown formats
   'md',
   'markdown',

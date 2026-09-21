@@ -34,7 +34,7 @@ export function absoluteToRelativePath(absolutePath: string, workspace: string):
 
 // ── Backend → Frontend ─────────────────────────────────────────────────
 
-export function fromBackendFsEntry(item: RawFsEntry, workspace: string, parentRelPath: string): IDirOrFile {
+function fromBackendFsEntry(item: RawFsEntry, workspace: string, parentRelPath: string): IDirOrFile {
   const ws = stripTrailingSlash(workspace);
   const name = item.name || '';
   const isDir = item.type === 'directory';

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type UpdaterInstallReason =
+type UpdaterInstallReason =
   | 'app_bundle_not_found'
   | 'app_translocation'
   | 'mounted_volume'
@@ -54,15 +54,14 @@ export function isInstallNotAttempted(error: unknown): boolean {
   return message.startsWith(INSTALL_NOT_ATTEMPTED_ERROR);
 }
 
+type UpdaterPostCleanupFailurePhase = 'install' | 'relaunch';
 
-export type UpdaterPostCleanupFailurePhase = 'install' | 'relaunch';
-
-export interface UpdaterPostCleanupFailure {
+interface UpdaterPostCleanupFailure {
   phase: UpdaterPostCleanupFailurePhase;
   error: unknown;
 }
 
-export type UpdaterFatalExit = (failure: UpdaterPostCleanupFailure) => Promise<never>;
+type UpdaterFatalExit = (failure: UpdaterPostCleanupFailure) => Promise<never>;
 
 export interface InstallUpdateDependencies {
   getContext: () => Promise<UpdaterInstallContext>;

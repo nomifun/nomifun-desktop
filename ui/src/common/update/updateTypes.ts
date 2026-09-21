@@ -28,7 +28,7 @@ export interface UpdateCheckRequest {
 }
 
 // Shared status payloads emitted by the Tauri updater adapter.
-export type AutoUpdateStatusType =
+type AutoUpdateStatusType =
   | 'checking'
   | 'available'
   | 'not-available'
@@ -40,7 +40,7 @@ export type AutoUpdateStatusType =
 
 export type AutoUpdateInstallPhase = 'preparing' | 'installing';
 
-export interface AutoUpdateProgress {
+interface AutoUpdateProgress {
   bytesPerSecond: number;
   percent: number;
   transferred: number;

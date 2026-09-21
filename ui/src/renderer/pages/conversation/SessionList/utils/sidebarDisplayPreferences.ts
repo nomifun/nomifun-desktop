@@ -6,7 +6,7 @@
 
 export type SidebarDisplayPreset = 'compact' | 'balanced' | 'detailed' | 'custom';
 export type WorkpathNameMode = 'compressed' | 'folder' | 'full' | 'folderWithPath';
-export type SessionMetaMode = 'none' | 'age';
+type SessionMetaMode = 'none' | 'age';
 
 export type SidebarDisplayPreferences = {
   preset: SidebarDisplayPreset;

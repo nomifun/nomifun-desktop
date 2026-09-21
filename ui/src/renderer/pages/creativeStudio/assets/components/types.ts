@@ -36,7 +36,7 @@ export type CreativeAssetLibraryState = Pick<
   | 'loadMore'
 >;
 
-export type CreativeAssetUploadStatus = 'uploading' | 'completed' | 'error';
+type CreativeAssetUploadStatus = 'uploading' | 'completed' | 'error';
 
 export interface CreativeAssetUploadItem {
   id: string;

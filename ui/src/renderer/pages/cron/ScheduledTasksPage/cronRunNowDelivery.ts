@@ -10,7 +10,7 @@ type CronRunNowStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 const deliveriesInFlight = new Set<string>();
 
-export const cronRunNowStorageKey = (cronJobId: CronJobId): string =>
+const cronRunNowStorageKey = (cronJobId: CronJobId): string =>
   `nomifun:cron-run-now:v1:${cronJobId}`;
 
 const parseDelivery = (

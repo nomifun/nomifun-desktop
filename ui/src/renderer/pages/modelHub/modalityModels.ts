@@ -71,7 +71,7 @@ export interface ModalityProviderGroup {
   models: ModalityModelRow[];
 }
 
-export const matchingCapability = (
+const matchingCapability = (
   model: ProviderModelResponse,
   spec: ModalitySpec
 ): ProviderModelCapabilityResponse | undefined =>

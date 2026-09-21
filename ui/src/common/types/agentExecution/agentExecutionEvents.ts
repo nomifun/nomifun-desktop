@@ -8,7 +8,7 @@ export type TAgentExecutionChangedEvent = {
 };
 
 export type TAgentExecutionLeadThinkingPhase = 'planning' | 'adjust';
-export type TAgentExecutionLeadThinkingKind = 'reasoning' | 'text';
+type TAgentExecutionLeadThinkingKind = 'reasoning' | 'text';
 
 export type TAgentExecutionLeadThinkingEvent = {
   execution_id: ExecutionId;

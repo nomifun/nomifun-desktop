@@ -108,5 +108,3 @@ export const useOpenSshSession = () => {
     [current_model, navigate, t]
   );
 };
-
-export default useOpenSshSession;

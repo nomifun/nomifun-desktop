@@ -90,7 +90,7 @@ export type CronMessageMeta = {
   triggered_at: number;
 };
 
-export type KnowledgeWritebackStatus =
+type KnowledgeWritebackStatus =
   | 'started'
   | 'extracting'
   | 'writing'
@@ -102,12 +102,12 @@ export type KnowledgeWritebackStatus =
   | 'disabled'
   | 'interrupted';
 
-export type KnowledgeWritebackFile = {
+type KnowledgeWritebackFile = {
   kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
 };
 
-export type KnowledgeWritebackFailure = {
+type KnowledgeWritebackFailure = {
   kb_id?: KnowledgeBaseId | null;
   rel_path?: string | null;
   error?: string;
@@ -153,9 +153,9 @@ export type IMessageText = IMessage<
   }
 >;
 
-export type AgentErrorOwnership = 'nomifun' | 'user_agent' | 'user_llm_provider' | 'unknown_upstream';
+type AgentErrorOwnership = 'nomifun' | 'user_agent' | 'user_llm_provider' | 'unknown_upstream';
 
-export type AgentErrorResolutionKind =
+type AgentErrorResolutionKind =
   | 'retry'
   | 'wait_for_current_response'
   | 'start_new_session'
@@ -171,9 +171,9 @@ export type AgentErrorResolutionKind =
   | 'reduce_context'
   | 'send_feedback';
 
-export type AgentErrorResolutionTarget = 'provider_settings' | 'agent_settings' | 'new_conversation' | 'feedback';
+type AgentErrorResolutionTarget = 'provider_settings' | 'agent_settings' | 'new_conversation' | 'feedback';
 
-export type AgentErrorResolution = {
+type AgentErrorResolution = {
   kind: AgentErrorResolutionKind;
   target?: AgentErrorResolutionTarget;
 };
@@ -189,7 +189,7 @@ export type AgentStreamErrorInfo = {
   resolution?: AgentErrorResolution;
 };
 
-export type TruncatedTurnFailureCode = 'output_truncated' | 'turn_requests_exhausted';
+type TruncatedTurnFailureCode = 'output_truncated' | 'turn_requests_exhausted';
 
 export type TruncatedTurnRecovery = {
   kind: 'continue_truncated';
@@ -458,7 +458,7 @@ const TERMINAL_KNOWLEDGE_WRITEBACK_STATUSES = new Set<KnowledgeWritebackStatus>(
   'interrupted',
 ]);
 
-export const preferKnowledgeWritebackState = (
+const preferKnowledgeWritebackState = (
   existing: KnowledgeWritebackState | undefined,
   incoming: KnowledgeWritebackState | undefined
 ): KnowledgeWritebackState | undefined => {
@@ -528,7 +528,7 @@ const isResponseTextData = (data: unknown): data is ResponseTextData =>
   'content' in data &&
   !Array.isArray(data);
 
-export const isTextContentReplacement = (content: IMessageText['content'] | undefined): boolean =>
+const isTextContentReplacement = (content: IMessageText['content'] | undefined): boolean =>
   content?.replace === true;
 
 export const mergeTextMessageContent = (
@@ -599,13 +599,13 @@ export type IMessageThinking = IMessage<
 >;
 
 // Available commands advertised by the agent runtime.
-export type AvailableCommand = {
+type AvailableCommand = {
   name: string;
   description: string;
   hint?: string;
 };
 
-export type IMessageAvailableCommands = IMessage<
+type IMessageAvailableCommands = IMessage<
   'available_commands',
   {
     commands: AvailableCommand[];
@@ -655,7 +655,7 @@ const AGENT_ERROR_RESOLUTION_TARGETS = new Set<AgentErrorResolutionTarget>([
   'feedback',
 ]);
 
-export const normalizeAgentErrorResolution = (value: unknown): AgentErrorResolution | undefined => {
+const normalizeAgentErrorResolution = (value: unknown): AgentErrorResolution | undefined => {
   if (!isObject(value) || typeof value.kind !== 'string') {
     return undefined;
   }

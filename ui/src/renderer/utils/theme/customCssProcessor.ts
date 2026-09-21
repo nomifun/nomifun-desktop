@@ -188,7 +188,7 @@ export const addImportantToAll = (css: string): string => {
  * @param css - 处理后的 CSS 字符串
  * @returns 带注释的 CSS 字符串
  */
-export const wrapCustomCss = (css: string): string => {
+const wrapCustomCss = (css: string): string => {
   if (!css || !css.trim()) {
     return '';
   }

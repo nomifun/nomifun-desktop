@@ -209,16 +209,6 @@ impl RequirementService {
         }
     }
 
-    /// Workspace-mutating half of conversation AutoWork attachment staging.
-    #[cfg(test)]
-    pub(crate) async fn activate_attachment_plan(
-        &self,
-        plan: &crate::attachments::PromptAttachmentPlan,
-    ) -> Result<(), AppError> {
-        self.activate_attachment_plan_with_operation_lease(plan, Arc::new(()))
-            .await
-    }
-
     pub(crate) async fn activate_attachment_plan_with_operation_lease(
         &self,
         plan: &crate::attachments::PromptAttachmentPlan,
