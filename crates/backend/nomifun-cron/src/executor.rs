@@ -22,7 +22,7 @@ use crate::prompt::{
     build_new_conversation_with_skill_prompt,
 };
 use crate::session_port::{
-    CronRuntimePreparationRequest, CronScheduledSessionLookup,
+    CronRuntimePreparationRequest, CronScheduledSessionLookup, CronSessionAgentBinding,
     CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
     CronSessionProjection, CronTurnDelivery, CronTurnDeliveryQuery, CronTurnMessage,
     CronTurnReceiptQuery, CronTurnReceiptState, CronTurnReconciliation,
@@ -285,10 +285,13 @@ impl JobExecutor {
             .map_err(CronError::App)
     }
 
-    /// Bind a canonical Session to its owning Cron job.
+    /// Validate the durable relation between a canonical Session and its Cron
+    /// job before the Cron repository commits a lazy job binding.
     ///
-    /// The Session owner validates and persists the relation. Cron never
-    /// updates the Session storage row directly.
+    /// Canonical AgentSession no longer stores a second Cron-owned relation.
+    /// The Session adapter validates either the already-bound job row or the
+    /// exact reserved run that created this Session; the Cron repository then
+    /// atomically settles that run and persists the continuing-session link.
     pub async fn bind_cron_job_to_conversation(
         &self,
         owner_id: &str,
@@ -427,13 +430,10 @@ impl JobExecutor {
         };
 
         let creation_key = format!("cron:{run_id}:conversation");
-        let snapshot = job
-            .agent_config
-            .as_ref()
-            .and_then(|config| config.agent_snapshot.clone());
+        let agent_binding = cron_session_agent_binding(job)?;
         let session = self
             .sessions
-            .create_idempotent(&job.user_id, req, snapshot, &creation_key)
+            .create_idempotent(&job.user_id, req, agent_binding, &creation_key)
             .await
             .map_err(CronError::from_conversation_create)?;
         let CronSessionHandle {
@@ -589,6 +589,7 @@ impl JobExecutor {
                     runtime: CronTurnRuntimePreparation {
                         overlay: CronTurnRuntimeOverlay {
                             cron_job_id: job.cron_job_id.clone(),
+                            cron_job_run_id: run_id.to_owned(),
                         },
                         clear_context,
                     },
@@ -1253,6 +1254,44 @@ fn build_conversation_extra(
     serde_json::Value::Object(extra)
 }
 
+fn cron_session_agent_binding(job: &CronJob) -> Result<CronSessionAgentBinding, CronError> {
+    let config = job.agent_config.as_ref().ok_or_else(|| {
+        CronError::InvalidAgentConfig(format!(
+            "cron job {} has no Agent configuration for a new Session",
+            job.cron_job_id
+        ))
+    })?;
+    if let Some(snapshot) = config.agent_snapshot.clone() {
+        return Ok(CronSessionAgentBinding::Frozen(snapshot));
+    }
+    let model_only = job.agent_type == AgentType::Nomi.serde_name()
+        && {
+            config.agent_snapshot.is_none()
+                && config.preset_id.is_none()
+                && config.preset_revision.is_none()
+                && config.backend.is_none()
+                && config.cli_path.is_none()
+                && config.custom_agent_id.is_none()
+                && config.config_options.is_none()
+                && config
+                    .provider_id
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && config
+                    .model
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+        };
+    if model_only {
+        Ok(CronSessionAgentBinding::ModelOnly)
+    } else {
+        Err(CronError::InvalidAgentConfig(format!(
+            "cron job {} cannot create an AgentSession without a frozen Agent binding",
+            job.cron_job_id
+        )))
+    }
+}
+
 fn schedule_description_text(schedule: &crate::types::CronSchedule) -> String {
     match schedule {
         crate::types::CronSchedule::At { at_ms, description } => {
@@ -1272,5 +1311,79 @@ fn schedule_description_text(schedule: &crate::types::CronSchedule) -> String {
             Some(tz) => format!("{expr} ({tz})"),
             None => expr.clone(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod model_only_binding_tests {
+    use super::*;
+    use crate::types::{CreatedBy, CronAgentConfig, CronSchedule, ExecutionMode};
+
+    const JOB_ID: &str = "0190f5fe-7c00-7a00-8000-000000000101";
+    const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000102";
+    const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000103";
+
+    fn job(execution_mode: ExecutionMode) -> CronJob {
+        CronJob {
+            cron_job_id: JOB_ID.to_owned(),
+            user_id: OWNER_ID.to_owned(),
+            name: "Model-only schedule".to_owned(),
+            enabled: true,
+            schedule_revision: 1,
+            schedule: CronSchedule::Every {
+                every_ms: 60_000,
+                description: None,
+            },
+            message: "run".to_owned(),
+            execution_mode,
+            agent_config: Some(CronAgentConfig {
+                backend: None,
+                name: "Nomi".to_owned(),
+                cli_path: None,
+                custom_agent_id: None,
+                preset_id: None,
+                preset_revision: None,
+                agent_snapshot: None,
+                model: Some("test-model".to_owned()),
+                provider_id: Some(PROVIDER_ID.to_owned()),
+                config_options: None,
+                workspace: None,
+                clear_context_each_run: false,
+            }),
+            conversation_id: None,
+            conversation_title: None,
+            agent_type: AgentType::Nomi.serde_name().to_owned(),
+            created_by: CreatedBy::User,
+            skill_content: None,
+            description: None,
+            created_at: 1,
+            updated_at: 1,
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            run_count: 0,
+            retry_count: 0,
+            max_retries: 3,
+        }
+    }
+
+    #[test]
+    fn both_lazy_session_modes_request_host_materialized_model_only_bindings() {
+        for execution_mode in [ExecutionMode::NewConversation, ExecutionMode::Existing] {
+            assert_eq!(
+                cron_session_agent_binding(&job(execution_mode)).unwrap(),
+                CronSessionAgentBinding::ModelOnly
+            );
+        }
+    }
+
+    #[test]
+    fn non_model_only_legacy_config_is_not_silently_reinterpreted() {
+        let mut job = job(ExecutionMode::NewConversation);
+        job.agent_config.as_mut().unwrap().custom_agent_id =
+            Some("0190f5fe-7c00-7a00-8000-000000000104".to_owned());
+        let error = cron_session_agent_binding(&job).unwrap_err();
+        assert!(error.to_string().contains("frozen Agent binding"));
     }
 }
