@@ -167,6 +167,8 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
         title={selectedLabel}
         aria-label={selectedLabel}
         data-testid='guid-agent-selector'
+        data-agent-identity
+        data-agent-name={selectedLabel}
         {...getReferenceProps()}
       >
         <Robot theme='outline' size={18} fill='currentColor' />

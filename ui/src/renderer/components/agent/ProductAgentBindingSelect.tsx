@@ -4,8 +4,9 @@ import type { TProviderWithModel } from '@/common/config/storage';
 import type { OfficialPresetKey, ProductAgentOptions, ProductAgentSelection } from '@/common/types/agentPlatform';
 import { parseCompanionId } from '@/common/types/ids';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
-import { Button, Dropdown, Menu, Message, Select, Spin, Tooltip } from '@arco-design/web-react';
-import { Down, Robot } from '@icon-park/react';
+import { AgentIdentityBadge, AgentLogoIcon } from './AgentBadge';
+import { Button, Dropdown, Menu, Message, Select, Tooltip } from '@arco-design/web-react';
+import { Down } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
@@ -96,12 +97,28 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     }
   };
 
-  if (error) return <div role='alert'>
-    {t('agentSettings.productBinding.loadFailed')}
+  if (error) return <div role='alert' className='inline-flex min-w-0 items-center gap-8px'>
+    <AgentIdentityBadge
+      backend='nomi'
+      name={t('agent.identity.unavailable', { defaultValue: 'Unavailable' })}
+      compact
+    />
+    <span>{t('agentSettings.productBinding.loadFailed')}</span>
     <Button size='mini' onClick={() => void mutate()}>{t('agentSettings.actions.retry')}</Button>
   </div>;
-  if (isLoading || !data) return <Spin size={14} />;
+  if (isLoading || !data) {
+    return (
+      <AgentIdentityBadge
+        backend='nomi'
+        loading
+        compact
+      />
+    );
+  }
   const selected = data.options.find((option) => productSelectionValue(option.selection) === productSelectionValue(data.selection));
+  const selectedName = selected
+    ? nameFor(selected)
+    : t('agentSettings.productBinding.unavailableAgent');
   if (compact) return (
     <Tooltip content={t('agentSettings.productBinding.companionHint')}>
       <span className='inline-flex min-w-0'>
@@ -121,10 +138,12 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
       }>
         <Button size='small' shape='round' loading={saving} disabled={disabled || saving}
           className='sendbox-model-btn header-model-btn nomi-sendbox-agent-btn min-w-0'
-          aria-label={`${t('agentSettings.productBinding.label')}: ${selected ? nameFor(selected) : t('agentSettings.productBinding.unavailableAgent')}`}>
+          aria-label={`${t('agentSettings.productBinding.label')}: ${selectedName}`}
+          data-agent-identity
+          data-agent-name={selectedName}>
           <span className='flex items-center gap-6px min-w-0'>
-            <Robot theme='outline' size={14} />
-            <span className='sendbox-responsive-label truncate'>{selected ? nameFor(selected) : t('agentSettings.productBinding.unavailableAgent')}</span>
+            <AgentLogoIcon backend='nomi' agent_name={selectedName} />
+            <span className='sendbox-responsive-label truncate'>{selectedName}</span>
             <Down theme='outline' size={12} className='sendbox-responsive-chevron' />
           </span>
         </Button>
@@ -132,7 +151,8 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
       </span>
     </Tooltip>
   );
-  return <div className='flex flex-col gap-6px' style={{ maxWidth: 300 }}>
+  return <div className='flex min-w-0 flex-col gap-6px' style={{ maxWidth: 300 }}>
+    <AgentIdentityBadge backend='nomi' name={selectedName} />
     <Select value={productSelectionValue(data.selection)} loading={saving} disabled={disabled || saving}
       onChange={(next: string) => void change(next)} style={{ width: 230, maxWidth: '100%' }}
       aria-label={t('agentSettings.productBinding.label')}>

@@ -1,5 +1,5 @@
 import type { ConversationId } from '@/common/types/ids';
-import { AgentLogoIcon } from '@/renderer/components/agent/AgentBadge';
+import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 import { conversationTarget } from '@/common/types/ids';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
 import type { AgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
@@ -345,11 +345,13 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
           leading={
             props.headerLeading ??
             ((backend || preset) && (
-              <AgentLogoIcon
+              <AgentIdentityBadge
                 backend={backend}
                 agent_name={display_name}
+                name={display_name}
                 agentLogo={preset?.logo}
                 agentLogoIsEmoji={preset?.isEmoji}
+                className='max-w-180px'
               />
             ))
           }

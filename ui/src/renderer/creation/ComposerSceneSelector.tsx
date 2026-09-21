@@ -9,10 +9,14 @@ const icons = { chat: MessageOne, image: AddPicture, video: VideoTwo, music: Mus
 
 /** Shared scene navigation stays beside the Agent while configuration changes below. */
 export function ComposerSceneHeader({ agent }: { agent?: ReactNode }) {
+  const { t } = useTranslation();
   const creation = useCreationComposer();
   if (!agent && !creation) return null;
   return <div className={styles.header} data-composer-scene-header>
-    {agent && <div className={styles.agent}>{agent}</div>}
+    {agent && <div className={styles.agent} data-agent-entry>
+      <span className={styles.agentLabel}>{t('agent.identity.label', { defaultValue: '使用 Agent' })}</span>
+      {agent}
+    </div>}
     {creation && <ComposerSceneSelector />}
   </div>;
 }

@@ -34,6 +34,14 @@
   "sendbox": {
     "placeholder": "发送消息到 {{backend}}..."
   },
+  "identity": {
+    "label": "使用 Agent",
+    "shortLabel": "Agent",
+    "ariaLabel": "{{label}}：{{name}}",
+    "loading": "正在加载…",
+    "unknown": "未指定",
+    "unavailable": "不可用"
+  },
   "status": {
     "connecting": "正在连接 {{agent}}...",
     "connected": "已连接到 {{agent}}",
