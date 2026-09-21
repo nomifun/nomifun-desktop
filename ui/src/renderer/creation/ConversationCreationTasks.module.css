@@ -13,7 +13,14 @@
 .imageResult::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 56px; max-height: 100%; border-radius: 0 0 8px 8px; background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, .45)); opacity: 0; pointer-events: none; }
 .imageResult:hover::after, .imageResult:focus-within::after { opacity: 1; }
 .image { display: block; width: 100%; border-radius: 8px; background: var(--bg-1); overflow: hidden; }
-.image img { width: 100%; height: auto; max-height: 240px; border-radius: 8px; }
+.previewTrigger { display: block; width: 100%; box-sizing: border-box; padding: 0; border: 0; border-radius: 8px; background: transparent; cursor: zoom-in; }
+.previewTrigger:hover { box-shadow: 0 0 0 1px var(--color-border-3); }
+.previewTrigger:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.previewTrigger .image { width: 100%; height: auto; max-height: 240px; border-radius: 8px; object-fit: contain; }
+.previewModal { width: min(820px, calc(100vw - 96px)); }
+.previewModal :global(.arco-modal-content) { display: flex; align-items: center; justify-content: center; overflow: auto; }
+.previewStage { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 240px; max-height: min(620px, calc(100vh - 200px)); overflow: auto; border-radius: 10px; background: var(--color-fill-1); }
+.previewStage img { display: block; max-width: 100%; max-height: min(620px, calc(100vh - 200px)); object-fit: contain; }
 .actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .imageResult .actions { position: absolute; z-index: 1; left: 6px; bottom: 6px; margin: 0; gap: 2px; opacity: 0; pointer-events: none; }
 .imageResult:hover .actions, .imageResult:focus-within .actions { opacity: 1; pointer-events: auto; }

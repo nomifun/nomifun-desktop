@@ -1283,10 +1283,13 @@ impl CreationService {
         Ok(())
     }
 
-    /// Boot reconciliation ("running ⟺ active executor" invariant). Async tasks that
-    /// have a remote job id are RESUMED (their poll loop restarts); every other
-    /// live task (queued, or running with no remote handle) is converged to
-    /// `failed(interrupted)`. Returns the count settled as failed.
+    /// Boot reconciliation ("running ⟺ active executor" invariant). Queued
+    /// tasks are safe to restart because the worker persists `running` before
+    /// invoking a provider. Running async tasks that have a durable remote job
+    /// id resume their poll loop. A running task without a remote handle is
+    /// ambiguous (the provider invocation may already have happened), so only
+    /// that state is converged to `failed(interrupted)`. Returns the count
+    /// settled as failed.
     pub async fn reconcile_on_boot(self: &Arc<Self>) -> Result<usize, AppError> {
         let all_rows = self.repo.list_all_tasks().await?;
         let manifests = self.verify_artifact_manifests(&all_rows).await?;
@@ -1347,8 +1350,11 @@ impl CreationService {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_string);
-            if row.status == TaskStatus::Running.as_str() && remote.is_some() {
-                let prepared = (|| -> Result<(MediaCapability, Value, usize), CreationError> {
+            let restart_queued = row.status == TaskStatus::Queued.as_str();
+            let resume_remote = row.status == TaskStatus::Running.as_str() && remote.is_some();
+            if restart_queued || resume_remote {
+                let prepared =
+                    (|| -> Result<(MediaCapability, Value, usize, Vec<CreationInput>), CreationError> {
                     let capability = MediaCapability::parse(&row.capability).ok_or_else(|| {
                         CreationError::new(
                             "unsupported_capability",
@@ -1362,10 +1368,28 @@ impl CreationService {
                         )
                     })?;
                     let required_count = required_artifact_count(capability, &params)?;
-                    Ok((capability, params, required_count))
+                    let inputs = if restart_queued {
+                        let raw = row.input_bindings.as_deref().ok_or_else(|| {
+                            CreationError::new(
+                                "invalid_inputs",
+                                "queued task has no durable input bindings and cannot be restarted safely",
+                            )
+                        })?;
+                        serde_json::from_str::<Vec<CreationInput>>(raw).map_err(|error| {
+                            CreationError::new(
+                                "invalid_inputs",
+                                format!("persisted task input bindings are invalid JSON: {error}"),
+                            )
+                        })?
+                    } else {
+                        // A submitted remote job already consumed its inputs;
+                        // the resumed worker only polls the durable handle.
+                        Vec::new()
+                    };
+                    Ok((capability, params, required_count, inputs))
                 })();
                 match prepared {
-                    Ok((capability, params, required_artifact_count)) => {
+                    Ok((capability, params, required_artifact_count, inputs)) => {
                         self.spawn(WorkerJob {
                             conversation_id: row.conversation_id,
                             message_id: row.message_id,
@@ -1380,7 +1404,7 @@ impl CreationService {
                             capability,
                             params,
                             required_artifact_count,
-                            inputs: Vec::new(), // inputs already consumed at submit; poll needs none
+                            inputs,
                             submitted_at: row.submitted_at,
                             remote_task_id: remote,
                         });
@@ -1400,7 +1424,7 @@ impl CreationService {
 
             let err = CreationError::new(
                 "interrupted",
-                "task did not survive a restart (no active executor); settled at boot",
+                "provider execution was interrupted before a durable remote handle was recorded; retry is required to avoid duplicate output",
             );
             match self.write_failed(&row.creation_task_id, &err).await {
                 Ok(()) => settled += 1,
@@ -3667,8 +3691,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 2);
-        assert_eq!(svc.get_task(&queued_id).await.unwrap().status, "failed");
+        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 1);
+        let restarted = wait_terminal(&svc, &queued_id).await;
+        assert_eq!(restarted.status, "succeeded");
         assert_eq!(svc.get_task(&running_id).await.unwrap().status, "failed");
         assert!(!sink.contains(&queued_asset));
         assert!(!sink.contains(&running_asset));
@@ -3676,7 +3701,7 @@ mod tests {
 
         // Re-running complete-inventory recovery is idempotent.
         assert_eq!(svc.reconcile_on_boot().await.unwrap(), 0);
-        assert_eq!(sink.live_count(), 0);
+        assert_eq!(sink.live_count(), 1, "the restarted task's committed output remains");
     }
 
     #[tokio::test]
@@ -3714,16 +3739,9 @@ mod tests {
         );
         assert!(tracked.contains(&asset_id));
 
-        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 1);
-        assert_eq!(
-            svc.repo
-                .get_task(&creation_task_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .status,
-            "failed"
-        );
+        assert_eq!(svc.reconcile_on_boot().await.unwrap(), 0);
+        let restarted = wait_terminal(&svc, &creation_task_id).await;
+        assert_eq!(restarted.status, "succeeded");
         assert!(!tracked.contains(&asset_id));
     }
 
@@ -3930,9 +3948,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_settles_queued_and_resumes_running_with_remote() {
-        // Build a service whose adapter completes on the first poll, so a resumed
-        // running-with-remote task reaches succeeded.
+    async fn reconcile_restarts_queued_and_remote_jobs_but_settles_uncertain_running() {
+        // Build a service whose adapter completes on the first poll. Both a
+        // never-started queued task and a running task with a durable remote
+        // handle can safely continue after boot.
         let adapter = MockAdapter::with(
             "openai.videos",
             vec![ModelTask::VideoGeneration],
@@ -3940,11 +3959,11 @@ mod tests {
         );
         let h = harness(adapter, "openai").await;
         let repo = &h.svc.repo;
-        let queued_id = create_test_task(&h.svc, &h.provider_id, "t2i", "{}").await;
+        let queued_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
         let running_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
         let resume_id = create_test_task(&h.svc, &h.provider_id, "t2v", "{}").await;
 
-        // (a) a queued leftover → should become failed(interrupted)
+        // (a) a queued leftover → restarted from its durable request
 
         // (b) a running task WITHOUT remote → failed(interrupted)
         repo.update_task(&running_id, UpdateCreationTaskParams { status: Some("running"), ..Default::default() })
@@ -3971,13 +3990,10 @@ mod tests {
         .unwrap();
 
         let settled = h.svc.reconcile_on_boot().await.unwrap();
-        assert_eq!(settled, 2, "queued + running-without-remote settle as failed");
+        assert_eq!(settled, 1, "only running-without-remote is ambiguous");
 
-        assert_eq!(h.svc.get_task(&queued_id).await.unwrap().status, "failed");
-        assert_eq!(
-            h.svc.get_task(&queued_id).await.unwrap().error.unwrap()["kind"],
-            "interrupted"
-        );
+        let restarted = wait_terminal(&h.svc, &queued_id).await;
+        assert_eq!(restarted.status, "succeeded");
         assert_eq!(h.svc.get_task(&running_id).await.unwrap().status, "failed");
 
         // resumed one completes via its poll loop

@@ -1,6 +1,6 @@
-import { createContext, useContext, type ReactNode, useState } from 'react';
+import { createContext, useContext, useMemo, type ReactNode, useState } from 'react';
 import useSWR from 'swr';
-import { Alert, Image, Message, Tooltip } from '@arco-design/web-react';
+import { Alert, Button, Message, Modal, Tooltip } from '@arco-design/web-react';
 import { Close, Download, EditTwo, Refresh, VideoTwo } from '@icon-park/react';
 import type { ConversationId, MessageId } from '@/common/types/ids';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
@@ -38,6 +38,22 @@ export function ConversationCreationTaskCards({ messageId }: { messageId: Messag
   const tasks = useContext(TaskContext);
   const items = tasks?.data?.filter(task => task.owner.message_id === messageId) || [];
   return items.length ? <div className={styles.cards}>{items.map(task => <TaskCard key={task.creation_task_id} task={task} refresh={() => tasks?.mutate()} />)}</div> : null;
+}
+
+export function useConversationCreationTaskOwnerMessageIds(): ReadonlySet<MessageId> {
+  const tasks = useContext(TaskContext);
+  const ownerMessageIds = Array.from(
+    new Set((tasks?.data ?? []).map(task => task.owner.message_id))
+  ).sort();
+  const ownerMessageIdKey = ownerMessageIds.join('\0');
+  return useMemo(
+    () => new Set<MessageId>(
+      ownerMessageIdKey
+        ? ownerMessageIdKey.split('\0').map(messageId => messageId as MessageId)
+        : []
+    ),
+    [ownerMessageIdKey]
+  );
 }
 
 function TaskCard({ task, refresh }: { task: ConversationCreationTask; refresh(): unknown }) {
@@ -82,7 +98,7 @@ function ResultAsset({ id, onRecall }: { id: string; onRecall(mode: CreationMode
   if (!asset) return <span>加载素材…</span>;
   if (asset.deletedAt) return <span>此素材已删除</span>;
   return <div className={`${styles.result}${asset.kind === 'image' ? ` ${styles.imageResult}` : ''}`}>
-    {asset.kind === 'image' ? <Image className={styles.image} src={asset.originalUrl} alt={asset.title} /> : asset.kind === 'video' ? <video controls preload='metadata' src={asset.originalUrl} /> : asset.kind === 'audio' ? <audio controls preload='metadata' src={asset.originalUrl} /> : <p>{asset.textContent}</p>}
+    {asset.kind === 'image' ? <ConversationImagePreview src={asset.originalUrl} title={asset.title} /> : asset.kind === 'video' ? <video controls preload='metadata' src={asset.originalUrl} /> : asset.kind === 'audio' ? <audio controls preload='metadata' src={asset.originalUrl} /> : <p>{asset.textContent}</p>}
     <div className={styles.actions}>
       <Tooltip content='下载' mini trigger={['hover', 'focus']}><a className={styles.action} href={asset.originalUrl} download={asset.title} aria-label='下载'><Download size={16} fill='currentColor' /></a></Tooltip>
       {asset.kind === 'image' && <>
@@ -91,4 +107,34 @@ function ResultAsset({ id, onRecall }: { id: string; onRecall(mode: CreationMode
       </>}
     </div>
   </div>;
+}
+
+export function ConversationImagePreview({ src, title }: { src: string; title: string }) {
+  const [visible, setVisible] = useState(false);
+  const close = () => setVisible(false);
+  return <>
+    <button type='button' className={styles.previewTrigger} aria-label={`预览图片：${title}`} onClick={() => setVisible(true)}>
+      <img className={styles.image} src={src} alt={title} />
+    </button>
+    <Modal
+      visible={visible}
+      title='图片预览'
+      aria-label='图片预览'
+      className={styles.previewModal}
+      getPopupContainer={() => document.body}
+      alignCenter
+      autoFocus
+      focusLock
+      closable
+      maskClosable
+      escToExit
+      unmountOnExit
+      onCancel={close}
+      footer={<Button aria-label='关闭图片预览' onClick={close}>关闭</Button>}
+    >
+      <div className={styles.previewStage}>
+        <img src={src} alt={title} draggable={false} />
+      </div>
+    </Modal>
+  </>;
 }

@@ -36,6 +36,14 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('<React.Fragment key={getProcessedItemAnchorId(item) || index}>')).toBe(false);
   });
 
+  test('places conversation creation cards at the end of their canonical turn', () => {
+    expect(source.includes('useConversationCreationTaskOwnerMessageIds')).toBe(true);
+    expect(source.includes('creationTaskPlacementAfterIndices')).toBe(true);
+    expect(source.includes("type: 'turn_creation_tasks'")).toBe(true);
+    expect(source.includes('<ConversationCreationTaskCards messageId={item.message_id} />')).toBe(true);
+    expect(source.includes("'position' in item && item.position === 'right'")).toBe(false);
+  });
+
   test('does not reuse legacy process cards inside receipt expansion', () => {
     expect(source.includes('renderProcessTraceItem(')).toBe(true);
     expect(source.includes('processItem,\n            \'list\',\n            workspaceRoots,')).toBe(true);

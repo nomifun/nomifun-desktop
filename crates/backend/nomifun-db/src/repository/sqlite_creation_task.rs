@@ -352,40 +352,65 @@ fn validate_idempotent_creative_task(
     Ok(())
 }
 
-/// The concrete column values written by both the unconditional and conditional
-/// update paths — `params` merged over the current row (`Some` replaces, `None`
-/// keeps; inner `Option` distinguishes "set NULL" from "keep").
-struct MergedTaskUpdate {
-    status: String,
-    error: Option<String>,
-    result_asset_ids: String,
-    remote_task_id: Option<String>,
-    attempt: i64,
-    started_at: Option<i64>,
-    finished_at: Option<i64>,
-}
-
-fn merge_update_fields(existing: &CreationTaskRow, params: &UpdateCreationTaskParams<'_>) -> MergedTaskUpdate {
-    MergedTaskUpdate {
-        status: params.status.unwrap_or(&existing.status).to_string(),
-        error: match params.error {
-            Some(e) => e.map(str::to_string),
-            None => existing.error.clone(),
-        },
-        result_asset_ids: params.result_asset_ids.unwrap_or(&existing.result_asset_ids).to_string(),
-        remote_task_id: match params.remote_task_id {
-            Some(r) => r.map(str::to_string),
-            None => existing.remote_task_id.clone(),
-        },
-        attempt: params.attempt.unwrap_or(existing.attempt),
-        started_at: match params.started_at {
-            Some(s) => s,
-            None => existing.started_at,
-        },
-        finished_at: match params.finished_at {
-            Some(f) => f,
-            None => existing.finished_at,
-        },
+impl SqliteCreationTaskRepository {
+    /// One-statement partial update. SQLite DEFERRED transactions that read a
+    /// row and then upgrade to a writer can fail immediately with `SQLITE_BUSY`
+    /// when another writer commits between those operations, even with a busy
+    /// timeout. Keeping the compare-and-set and returned row in one UPDATE lets
+    /// SQLite wait for the writer and removes that upgrade race entirely.
+    async fn update_task_fields(
+        &self,
+        creation_task_id: &str,
+        params: UpdateCreationTaskParams<'_>,
+        live_only: bool,
+    ) -> Result<Option<CreationTaskRow>, DbError> {
+        let result_asset_ids = params
+            .result_asset_ids
+            .map(canonicalize_result_asset_ids)
+            .transpose()?;
+        let sql = if live_only {
+            "UPDATE creation_tasks SET \
+                status = CASE WHEN ? THEN ? ELSE status END, \
+                error = CASE WHEN ? THEN ? ELSE error END, \
+                result_asset_ids = CASE WHEN ? THEN ? ELSE result_asset_ids END, \
+                remote_task_id = CASE WHEN ? THEN ? ELSE remote_task_id END, \
+                attempt = CASE WHEN ? THEN ? ELSE attempt END, \
+                started_at = CASE WHEN ? THEN ? ELSE started_at END, \
+                finished_at = CASE WHEN ? THEN ? ELSE finished_at END \
+             WHERE creation_task_id = ? AND status IN ('queued', 'running') \
+             RETURNING *"
+        } else {
+            "UPDATE creation_tasks SET \
+                status = CASE WHEN ? THEN ? ELSE status END, \
+                error = CASE WHEN ? THEN ? ELSE error END, \
+                result_asset_ids = CASE WHEN ? THEN ? ELSE result_asset_ids END, \
+                remote_task_id = CASE WHEN ? THEN ? ELSE remote_task_id END, \
+                attempt = CASE WHEN ? THEN ? ELSE attempt END, \
+                started_at = CASE WHEN ? THEN ? ELSE started_at END, \
+                finished_at = CASE WHEN ? THEN ? ELSE finished_at END \
+             WHERE creation_task_id = ? \
+             RETURNING *"
+        };
+        let row = sqlx::query_as::<_, CreationTaskDbRow>(sql)
+            .bind(params.status.is_some())
+            .bind(params.status)
+            .bind(params.error.is_some())
+            .bind(params.error.flatten())
+            .bind(params.result_asset_ids.is_some())
+            .bind(result_asset_ids.as_deref())
+            .bind(params.remote_task_id.is_some())
+            .bind(params.remote_task_id.flatten())
+            .bind(params.attempt.is_some())
+            .bind(params.attempt)
+            .bind(params.started_at.is_some())
+            .bind(params.started_at.flatten())
+            .bind(params.finished_at.is_some())
+            .bind(params.finished_at.flatten())
+            .bind(creation_task_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(DbError::from_asset_reference_guard)?;
+        row.map(TryInto::try_into).transpose()
     }
 }
 
@@ -796,52 +821,11 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         params: UpdateCreationTaskParams<'_>,
     ) -> Result<CreationTaskRow, DbError> {
         validate_creation_task_id(creation_task_id)?;
-        let mut tx = self.pool.begin().await?;
-        let existing = sqlx::query_as::<_, CreationTaskDbRow>(
-            "SELECT * FROM creation_tasks WHERE creation_task_id = ?",
-        )
-            .bind(creation_task_id)
-            .fetch_optional(&mut *tx)
+        self.update_task_fields(creation_task_id, params, false)
             .await?
             .ok_or_else(|| {
                 DbError::NotFound(format!("creation task '{creation_task_id}' not found"))
-            })?
-            .try_into()?;
-
-        let mut m = merge_update_fields(&existing, &params);
-        m.result_asset_ids = canonicalize_result_asset_ids(&m.result_asset_ids)?;
-
-        let result = sqlx::query(
-            "UPDATE creation_tasks SET status = ?, error = ?, result_asset_ids = ?, remote_task_id = ?, \
-             attempt = ?, started_at = ?, finished_at = ? WHERE creation_task_id = ?",
-        )
-        .bind(&m.status)
-        .bind(&m.error)
-        .bind(&m.result_asset_ids)
-        .bind(&m.remote_task_id)
-        .bind(m.attempt)
-        .bind(m.started_at)
-        .bind(m.finished_at)
-        .bind(creation_task_id)
-        .execute(&mut *tx)
-        .await.map_err(DbError::from_asset_reference_guard)?;
-        if result.rows_affected() != 1 {
-            return Err(DbError::NotFound(format!(
-                "creation task '{creation_task_id}' not found"
-            )));
-        }
-        tx.commit().await?;
-
-        Ok(CreationTaskRow {
-            status: m.status,
-            error: m.error,
-            result_asset_ids: m.result_asset_ids,
-            remote_task_id: m.remote_task_id,
-            attempt: m.attempt,
-            started_at: m.started_at,
-            finished_at: m.finished_at,
-            ..existing
-        })
+            })
     }
 
     async fn update_task_if_live(
@@ -850,41 +834,10 @@ impl ICreationTaskRepository for SqliteCreationTaskRepository {
         params: UpdateCreationTaskParams<'_>,
     ) -> Result<bool, DbError> {
         validate_creation_task_id(creation_task_id)?;
-        let mut tx = self.pool.begin().await?;
-        let Some(existing) = sqlx::query_as::<_, CreationTaskDbRow>(
-            "SELECT * FROM creation_tasks WHERE creation_task_id = ?",
-        )
-        .bind(creation_task_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        else {
-            return Ok(false); // unknown id → treat as "not live"
-        };
-        let existing: CreationTaskRow = existing.try_into()?;
-        let mut m = merge_update_fields(&existing, &params);
-        m.result_asset_ids = canonicalize_result_asset_ids(&m.result_asset_ids)?;
-
-        // The `WHERE ... status IN ('queued','running')` predicate is the
-        // compare-and-set: if a concurrent cancel wrote a terminal status
-        // between our read and this write, zero rows match and we do not
-        // overwrite it.
-        let res = sqlx::query(
-            "UPDATE creation_tasks SET status = ?, error = ?, result_asset_ids = ?, remote_task_id = ?, \
-             attempt = ?, started_at = ?, finished_at = ? \
-             WHERE creation_task_id = ? AND status IN ('queued', 'running')",
-        )
-        .bind(&m.status)
-        .bind(&m.error)
-        .bind(&m.result_asset_ids)
-        .bind(&m.remote_task_id)
-        .bind(m.attempt)
-        .bind(m.started_at)
-        .bind(m.finished_at)
-        .bind(creation_task_id)
-        .execute(&mut *tx)
-        .await.map_err(DbError::from_asset_reference_guard)?;
-        tx.commit().await?;
-        Ok(res.rows_affected() > 0)
+        Ok(self
+            .update_task_fields(creation_task_id, params, true)
+            .await?
+            .is_some())
     }
 
     async fn set_remote_task_id_if_live(
@@ -926,9 +879,15 @@ mod tests {
     };
     use nomifun_common::{WorkshopAssetId, generate_id};
     use std::sync::Arc;
+    use std::time::Duration;
 
     async fn repo() -> (SqliteCreationTaskRepository, crate::Database, String) {
-        let db = init_database_memory().await.unwrap();
+        repo_over(init_database_memory().await.unwrap()).await
+    }
+
+    async fn repo_over(
+        db: crate::Database,
+    ) -> (SqliteCreationTaskRepository, crate::Database, String) {
         let provider_id = ProviderId::new().into_string();
         sqlx::query(
             "INSERT INTO providers \
@@ -1897,6 +1856,59 @@ mod tests {
             .await
             .unwrap();
         assert!(!applied3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn live_update_waits_for_concurrent_writer_without_upgrade_race() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = crate::init_database(&directory.path().join("creation-contention.db"))
+            .await
+            .unwrap();
+        let (repo, db, provider_id) = repo_over(database).await;
+        let creation_task_id = generate_id();
+        create_project_task(&repo, &db, &creation_task_id, &provider_id).await;
+
+        // Hold the database write lock on a separate pool connection. The old
+        // implementation first SELECTed the row in a DEFERRED transaction and
+        // then tried to upgrade that snapshot to a writer; SQLite rejected that
+        // upgrade immediately with SQLITE_BUSY instead of honoring busy_timeout.
+        let mut writer = db.pool().begin().await.unwrap();
+        sqlx::query(
+            "UPDATE creation_tasks SET attempt = attempt WHERE creation_task_id = ?",
+        )
+        .bind(&creation_task_id)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+
+        let concurrent_repo = repo.clone();
+        let concurrent_id = creation_task_id.clone();
+        let update = tokio::spawn(async move {
+            concurrent_repo
+                .update_task_if_live(
+                    &concurrent_id,
+                    UpdateCreationTaskParams {
+                        status: Some("running"),
+                        started_at: Some(Some(1)),
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!update.is_finished(), "the competing writer should wait for the lock");
+        writer.commit().await.unwrap();
+
+        let applied = tokio::time::timeout(Duration::from_secs(6), update)
+            .await
+            .expect("conditional update should finish within SQLite busy_timeout")
+            .expect("update task should not panic")
+            .expect("one-statement update should not fail with SQLITE_BUSY");
+        assert!(applied);
+        let row = repo.get_task(&creation_task_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "running");
+        assert_eq!(row.started_at, Some(1));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

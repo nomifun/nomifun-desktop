@@ -107,15 +107,12 @@ impl AgentWorkStatus {
         // Only attempted invocations enter this method. Even failed/uncertain
         // mutations can have partial effects; engine-only deferrals cannot.
         let process = binding.capability_id.as_ref() == "workspace.process";
-        if !process
-            && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
-        {
+        let workspace_effect = crate::execution_policy::affects_workspace(binding)
+            && !matches!(binding.effect_class, AgentEffectClass::ReadOnly);
+        if !process && workspace_effect {
             self.invalidate_workspace_observation();
         }
-        if !process
-            && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
-            && !result.is_error
-        {
+        if !process && workspace_effect && !result.is_error {
             self.successful_workspace_mutations =
                 self.successful_workspace_mutations.saturating_add(1);
         }
