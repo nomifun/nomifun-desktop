@@ -10,6 +10,7 @@ import {
   Delete,
   Download,
   FullScreen,
+  Loading,
   OffScreen,
   Pause,
   Pic,
@@ -29,6 +30,12 @@ import { useTranslation } from 'react-i18next';
 
 import type { CreativeTimelineNodeData } from '../../domain';
 import CreativeNodeFrame from './CreativeNodeFrame';
+import {
+  downloadTimelineComposition,
+  exportTimelineComposition,
+  TimelineExportError,
+  type CreativeTimelineAssetPresentation,
+} from './timelineExport';
 import type { CreativeNodePresentationProps } from './types';
 import {
   moveTimelineClip,
@@ -42,6 +49,8 @@ import {
 } from './timelineModel';
 import styles from './CreativeTimelineNode.module.css';
 
+export type { CreativeTimelineAssetPresentation } from './timelineExport';
+
 const iconProps = {
   theme: 'outline' as const,
   size: 15,
@@ -49,21 +58,12 @@ const iconProps = {
   strokeWidth: 3,
 };
 
-export interface CreativeTimelineAssetPresentation {
-  assetId: string;
-  kind: 'image' | 'video';
-  title: string;
-  src: string;
-  thumbnailSrc?: string | null;
-  deleted?: boolean;
-}
-
 export interface CreativeTimelineNodeProps
   extends CreativeNodePresentationProps<'timeline'> {
   assets: ReadonlyMap<string, CreativeTimelineAssetPresentation>;
   onChange?(data: CreativeTimelineNodeData, mergeKey?: string): void;
   onDelete?(): void;
-  onRequestAssets?(): void;
+  onRequestAssets?(popupContainer: HTMLElement | null): void;
   onUploadFiles?(files: readonly File[]): void | Promise<void>;
 }
 
@@ -83,9 +83,6 @@ const formatTime = (milliseconds: number): string => {
     .toString()
     .padStart(2, '0')}`;
 };
-
-const safeFileName = (value: string): string =>
-  value.trim().replace(/[\\/:*?"<>|]+/g, '-').slice(0, 120) || 'timeline';
 
 const hasDraggedFiles = (dataTransfer: DataTransfer): boolean =>
   Array.from(dataTransfer.types).includes('Files');
@@ -116,11 +113,16 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
   const previewVideoRef = useRef<HTMLVideoElement>(null);
   const gestureRef = useRef<ClipGesture | null>(null);
   const animationRef = useRef<number | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
+  const exportSequenceRef = useRef(0);
+  const lastExportPercentRef = useRef(-1);
   const currentTimeRef = useRef(0);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [exportProgress, setExportProgress] = useState<number | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const totalDurationMs = useMemo(
     () => timelineDurationMs(node.data.clips),
@@ -227,6 +229,15 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
   }, []);
 
+  useEffect(
+    () => () => {
+      exportSequenceRef.current += 1;
+      exportAbortRef.current?.abort();
+      exportAbortRef.current = null;
+    },
+    []
+  );
+
   const beginGesture = (
     event: React.PointerEvent<HTMLElement>,
     clipId: string,
@@ -301,27 +312,69 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     }
   };
 
-  const exportTimeline = () => {
-    const payload = {
-      schema: 'nomifun.timeline/v1',
-      title: node.data.title,
-      muted: node.data.muted,
-      durationMs: totalDurationMs,
-      clips: node.data.clips.map((clip) => ({
-        ...clip,
-        assetTitle: assets.get(clip.assetId)?.title ?? null,
-      })),
-    };
-    const url = URL.createObjectURL(
-      new Blob([`${JSON.stringify(payload, null, 2)}\n`], {
-        type: 'application/json',
-      })
-    );
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `${safeFileName(node.data.title)}.nomifun-timeline.json`;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 0);
+  const exportTimeline = async () => {
+    if (exportAbortRef.current) {
+      exportAbortRef.current.abort();
+      return;
+    }
+    if (node.data.clips.length === 0 || totalDurationMs <= 0) return;
+
+    const sequence = ++exportSequenceRef.current;
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    lastExportPercentRef.current = 0;
+    setPlaying(false);
+    setExportError(null);
+    setExportProgress(0);
+    try {
+      const result = await exportTimelineComposition({
+        data: structuredClone(node.data),
+        assets: new Map(assets),
+        signal: controller.signal,
+        onProgress: (progress) => {
+          const percent = Math.round(progress * 100);
+          if (
+            exportSequenceRef.current === sequence &&
+            lastExportPercentRef.current !== percent
+          ) {
+            lastExportPercentRef.current = percent;
+            setExportProgress(percent / 100);
+          }
+        },
+      });
+      if (exportSequenceRef.current !== sequence || controller.signal.aborted) return;
+      downloadTimelineComposition(result, node.data.title);
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+        return;
+      }
+      const code = error instanceof TimelineExportError ? error.code : null;
+      const message = code === 'asset-unavailable'
+        ? t('creativeStudio.canvas.timeline.exportErrors.assetUnavailable', {
+            defaultValue: '时间线包含不可用素材，无法导出。',
+          })
+        : code === 'recording-unsupported' || code === 'render-unsupported'
+          ? t('creativeStudio.canvas.timeline.exportErrors.unsupported', {
+              defaultValue: '当前浏览器不支持合成录制。',
+            })
+          : code === 'audio-unsupported'
+            ? t('creativeStudio.canvas.timeline.exportErrors.audioUnsupported', {
+                defaultValue: '当前浏览器无法混合视频原声。',
+              })
+            : code === 'media-load-failed'
+              ? t('creativeStudio.canvas.timeline.exportErrors.mediaLoadFailed', {
+                  defaultValue: '导出素材加载失败，请检查素材后重试。',
+                })
+              : t('creativeStudio.canvas.timeline.exportErrors.failed', {
+                  defaultValue: '合成导出失败，请重试。',
+                });
+      setExportError(message);
+    } finally {
+      if (exportSequenceRef.current === sequence) {
+        exportAbortRef.current = null;
+        setExportProgress(null);
+      }
+    }
   };
 
   const removeSelectedClip = () => {
@@ -330,7 +383,15 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     setSelectedClipId(null);
   };
 
+  const requestAssets = () => {
+    onRequestAssets?.(
+      document.fullscreenElement === rootRef.current ? rootRef.current : null
+    );
+  };
+
   const title = node.data.title || t('creativeStudio.canvas.nodeKinds.timeline');
+  const exporting = exportProgress !== null;
+  const exportPercent = Math.round((exportProgress ?? 0) * 100);
   const frameActions = onDelete ? (
     <button
       type='button'
@@ -469,19 +530,38 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
             <button
               type='button'
               className={styles.iconButton}
-              aria-label={t('creativeStudio.canvas.timeline.export', {
-                defaultValue: '导出时间线',
-              })}
-              title={t('creativeStudio.canvas.timeline.export', {
-                defaultValue: '导出时间线',
-              })}
+              disabled={!exporting && totalDurationMs <= 0}
+              aria-label={exporting
+                ? t('creativeStudio.canvas.timeline.cancelExport', {
+                    defaultValue: '取消导出',
+                  })
+                : t('creativeStudio.canvas.timeline.export', {
+                    defaultValue: '导出合成视频',
+                  })}
+              title={exporting
+                ? t('creativeStudio.canvas.timeline.exporting', {
+                    percent: exportPercent,
+                    defaultValue: '正在合成 {{percent}}%',
+                  })
+                : t('creativeStudio.canvas.timeline.export', {
+                    defaultValue: '导出合成视频',
+                  })}
               onClick={(event) => {
                 event.stopPropagation();
-                exportTimeline();
+                void exportTimeline();
               }}
             >
-              <Download {...iconProps} />
+              {exporting ? (
+                <Loading className={styles.spin} {...iconProps} />
+              ) : (
+                <Download {...iconProps} />
+              )}
             </button>
+            {exporting ? (
+              <span className={styles.exportProgress} aria-live='polite'>
+                {exportPercent}%
+              </span>
+            ) : null}
             <button
               type='button'
               className={styles.iconButton}
@@ -519,6 +599,12 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
           </div>
         </div>
 
+        {exportError ? (
+          <div className={styles.exportError} role='alert'>
+            {exportError}
+          </div>
+        ) : null}
+
         <div className={styles.trackShell}>
           <div className={styles.trackLabel} aria-hidden='true'>
             {node.data.muted ? <VolumeMute {...iconProps} /> : <VolumeUp {...iconProps} />}
@@ -549,7 +635,7 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
                   disabled={node.locked || !onRequestAssets}
                   onClick={(event) => {
                     event.stopPropagation();
-                    onRequestAssets?.();
+                    requestAssets();
                   }}
                 >
                   <Add {...iconProps} />
@@ -706,7 +792,7 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
                   })}
                   onClick={(event) => {
                     event.stopPropagation();
-                    onRequestAssets?.();
+                    requestAssets();
                   }}
                 >
                   <Add {...iconProps} />
