@@ -209,13 +209,18 @@ type Props = {
   actionIds?: ReadonlySet<string> | readonly string[];
   value: AgentResourceSelectionValue;
   onChange: (value: AgentResourceSelectionValue) => void;
-  onAvailabilityChange?: (ready: boolean) => void;
+  /**
+   * Reports only session-admission readiness. Live environment state (for
+   * example OS grants or a selected device going offline) stays advisory and
+   * is handled by the affected tool surface or at actual invocation time.
+   */
+  onAdmissionReadinessChange?: (ready: boolean) => void;
   disabled?: boolean;
   loadInventory?: AgentResourceInventoryLoader;
   onNavigateToResource?: (route: string) => void;
 };
 
-const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [], companionBindings = false, capabilityIds, actionIds = [], value, onChange, onAvailabilityChange, disabled = false, loadInventory = loadAgentResourceInventory, onNavigateToResource }) => {
+const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [], companionBindings = false, capabilityIds, actionIds = [], value, onChange, onAdmissionReadinessChange, disabled = false, loadInventory = loadAgentResourceInventory, onNavigateToResource }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const requiredKey = [...requiredKinds].sort().join('\u0000');
@@ -325,25 +330,30 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const selectedRobot = value.robot
     ? (inventory.options.robot ?? []).find((option) => option.value === value.robot)
     : undefined;
-  const selectedResourcesAvailable = !value.robot || selectedRobot?.selectable === true;
+  const selectedRuntimeResourcesAvailable = !value.robot || selectedRobot?.selectable === true;
   const requiredFields = requiredAgentResourcePickerKinds(
     [...required].filter((kind) => {
       const pickerKind = kind === 'companion_memory' ? 'companion' : kind;
       return !optional.has(pickerKind as UserAgentResourceKind);
     })
   );
-  const pendingBlocksLaunch = [...pending].some((kind) =>
-    requiredFields.includes(kind)
-      || (kind === 'mcp_server' ? selectedMcpResourceIds(value).length > 0 : Boolean(value[kind]))
-  );
-  const liveResourcesReady = !pendingBlocksLaunch && selectedResourcesAvailable && computerReady;
-  const displayedMissingCount = missingChoiceCount
-    + (value.robot && !selectedResourcesAvailable ? 1 : 0)
+  const pendingBlocksLaunch = [...pending].some((kind) => requiredFields.includes(kind));
+  // A Session needs its required bindings to be resolved, but it does not need
+  // every granted capability's current environment to be healthy. Keeping
+  // those axes separate lets ordinary chat continue while the affected tool
+  // surface stays absent or reports an actionable error at invocation time.
+  const sessionResourcesReady = !pendingBlocksLaunch;
+  const runtimeIssueCount = (value.robot && !selectedRuntimeResourcesAvailable ? 1 : 0)
     + (needsComputerPermissionCheck && !computerPermissions.loading && !computerReady ? 1 : 0);
+  const resourceStatusKey = resolution.missingKinds.length || !sessionResourcesReady
+    ? 'agentSettings.resources.missingCount'
+    : runtimeIssueCount > 0
+      ? 'agentSettings.resources.runtimeUnavailableCount'
+      : 'agentSettings.resources.ready';
   useEffect(() => {
-    onAvailabilityChange?.(liveResourcesReady);
-    return () => onAvailabilityChange?.(false);
-  }, [liveResourcesReady, onAvailabilityChange]);
+    onAdmissionReadinessChange?.(sessionResourcesReady);
+    return () => onAdmissionReadinessChange?.(false);
+  }, [onAdmissionReadinessChange, sessionResourcesReady]);
 
   const showComputerSetup = needsComputerPermissionCheck
     && !computerPermissions.loading
@@ -411,7 +421,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   };
   return <section className={styles.picker} aria-label={t('agentSettings.resources.pickerTitle')}>
     <div className={styles.header}><div className={styles.headerCopy}><strong>{t('agentSettings.resources.pickerTitle')}</strong><span>{t(companionBindings ? 'agentSettings.resources.companionBindingHint' : 'agentSettings.resources.pickerHint')}</span></div>
-      <span className={`${styles.status} ${!resolution.missingKinds.length && liveResourcesReady ? styles.statusReady : ''}`}>{t(resolution.missingKinds.length || !liveResourcesReady ? 'agentSettings.resources.missingCount' : 'agentSettings.resources.ready', { count: displayedMissingCount })}</span>
+      <span className={`${styles.status} ${!resolution.missingKinds.length && sessionResourcesReady && runtimeIssueCount === 0 ? styles.statusReady : ''}`}>{t(resourceStatusKey, { count: resourceStatusKey === 'agentSettings.resources.runtimeUnavailableCount' ? runtimeIssueCount : missingChoiceCount })}</span>
     </div>
     <div className={styles.fields}>
       {showComputerSetup && <div className={styles.field}>

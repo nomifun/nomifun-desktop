@@ -487,6 +487,7 @@ export type I18nKey =
   | 'agentSettings.resources.robotPhases.listening'
   | 'agentSettings.resources.robotPhases.offline'
   | 'agentSettings.resources.robotPhases.speaking'
+  | 'agentSettings.resources.runtimeUnavailableCount'
   | 'agentSettings.resources.selectAria'
   | 'agentSettings.resources.selectDependency'
   | 'agentSettings.resources.selectPlaceholder'

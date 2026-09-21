@@ -402,8 +402,8 @@
   "systemPermissions": {
     "label": "系统权限",
     "title": "此 Agent 需要系统权限",
-    "missing": "当前缺少：{{permissions}}。开启后返回本会话，NomiFun 会自动重新检测。",
-    "checkFailed": "暂时无法确认此 Agent 所需的系统权限，请前往权限中心检查。",
+    "missing": "当前缺少：{{permissions}}。普通对话不受影响；相关电脑操作在授权前不可用，返回本会话后会自动复检。",
+    "checkFailed": "暂时无法确认此 Agent 所需的系统权限。普通对话不受影响，调用电脑操作前请前往权限中心检查。",
     "later": "稍后",
     "openSettings": "去开启"
   },

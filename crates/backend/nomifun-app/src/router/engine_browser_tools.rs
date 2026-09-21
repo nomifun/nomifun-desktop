@@ -207,6 +207,15 @@ impl BrowserRoleOwner {
         let Some(capability) = compiled.resolved_capability(&capability_id) else {
             return Ok(());
         };
+        if !compiled
+            .capability_resources_bound(&capability_id)
+            .map_err(|error| browser_lifecycle_error(error.to_string()))?
+        {
+            // Browser is an enhancement surface. Keep its frozen capability
+            // grant, but do not open lifecycle authority until this Session has
+            // one concrete, server-resolved Browser resource.
+            return Ok(());
+        }
         let policy = compiled.policy(&capability_id).ok_or_else(|| {
             browser_lifecycle_error("Browser Module has no compiled authority policy")
         })?;
