@@ -146,6 +146,19 @@
         },
         {
           "capability": {
+            "id": "creation.media",
+            "version": "1.0.0"
+          },
+          "action_allowlist": [
+            "creation.media/audio",
+            "creation.media/image",
+            "creation.media/image_edit",
+            "creation.media/music",
+            "creation.media/video"
+          ]
+        },
+        {
+          "capability": {
             "id": "agent.tool-discovery",
             "version": "1.0.0"
           },
@@ -545,6 +558,7 @@
         "browser",
         "computer",
         "file_operations",
+        "generation",
         "knowledge",
         "project_memory",
         "requirements",
@@ -560,6 +574,7 @@
         "automation.schedule",
         "browser",
         "computer",
+        "creation.media",
         "knowledge",
         "project.memory",
         "requirements",

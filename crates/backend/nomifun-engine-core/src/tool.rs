@@ -154,6 +154,38 @@ impl EngineToolPlan {
             .collect()
     }
 
+    /// Return the exact model-facing name for one canonical Capability Action.
+    ///
+    /// Product routers use this only to narrow an already-compiled Session
+    /// surface for the current turn. It never scans the registry or grants an
+    /// Action that was absent from the immutable plan.
+    pub fn model_name_for_action(&self, capability_id: &str, action_id: &str) -> Option<&str> {
+        self.bindings
+            .values()
+            .find(|binding| {
+                binding.capability_id.as_ref() == capability_id
+                    && binding.action_id.as_ref() == action_id
+            })
+            .map(|binding| binding.model_name.as_str())
+    }
+
+    /// Project this immutable plan down to one already-admitted Action.
+    /// Missing Actions produce an empty plan; callers must not synthesize a
+    /// binding or fall back to a similarly named tool.
+    pub fn for_action(&self, capability_id: &str, action_id: &str) -> Self {
+        Self {
+            bindings: self
+                .bindings
+                .iter()
+                .filter(|(_, binding)| {
+                    binding.capability_id.as_ref() == capability_id
+                        && binding.action_id.as_ref() == action_id
+                })
+                .map(|(name, binding)| (name.clone(), binding.clone()))
+                .collect(),
+        }
+    }
+
     /// Projection only; the platform invoker independently checks the live generation.
     pub fn for_active_capabilities(&self, active: &BTreeSet<CapabilityId>) -> Self {
         Self {
@@ -413,5 +445,23 @@ mod tests {
             result.validate_for(&ToolCallId::from("expected")),
             Err(EngineToolError::ToolInvocation(_))
         ));
+    }
+
+    #[test]
+    fn exact_action_projection_never_expands_the_tool_plan() {
+        let digest = input_schema_digest(&definition().input_schema).unwrap();
+        let plan = EngineToolPlan::new([binding_with_digest(digest)]).unwrap();
+        assert_eq!(
+            plan.model_name_for_action("workspace.files", "workspace.files/read"),
+            Some("read_file")
+        );
+        assert_eq!(
+            plan.for_action("workspace.files", "workspace.files/read"),
+            plan
+        );
+        assert!(
+            plan.for_action("creation.media", "creation.media/image")
+                .is_empty()
+        );
     }
 }

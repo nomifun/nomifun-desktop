@@ -179,6 +179,7 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
             model: Some(model),
             title: Some("Not started".into()),
             resource_selections: Vec::new(),
+            workspace: None,
         },
     )
     .await;

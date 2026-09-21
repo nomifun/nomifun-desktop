@@ -18,19 +18,31 @@ pub fn default_model_preference_key(task: ModelTask) -> Option<&'static str> {
     })
 }
 
-fn choose_model(default: Option<ModelRef>, mut candidates: Vec<ModelRef>) -> Result<ModelRef, InvokeError> {
-    if let Some(selected) = default {
-        if candidates.iter().any(|candidate| candidate.provider_id == selected.provider_id && candidate.model == selected.model) {
-            return Ok(selected);
-        }
-        return Err(InvokeError::config("The configured default model is unavailable for this task; update its default in model settings"));
+fn model_management_link(task: ModelTask) -> &'static str {
+    match task {
+        ModelTask::ImageGeneration => "nomifun://model-management/image",
+        ModelTask::ImageEdit => "nomifun://model-management/image-edit",
+        ModelTask::VideoGeneration => "nomifun://model-management/video",
+        ModelTask::MusicGeneration => "nomifun://model-management/music",
+        ModelTask::SpeechSynthesis => "nomifun://model-management/tts",
+        ModelTask::Chat => "nomifun://model-management/chat",
+        _ => "nomifun://model-management/models",
     }
-    if candidates.len() == 1 { return Ok(candidates.remove(0)); }
-    Err(InvokeError::config(if candidates.is_empty() {
-        "No enabled model supports this generation task; configure one in model settings"
-    } else {
-        "Several models support this generation task; choose its exact default in model settings"
-    }))
+}
+
+fn choose_model(task: ModelTask, default: Option<ModelRef>, candidates: Vec<ModelRef>) -> Result<ModelRef, InvokeError> {
+    let link = model_management_link(task);
+    let selected = default.ok_or_else(|| {
+        InvokeError::config(if candidates.is_empty() {
+            format!("No enabled model supports this generation task; configure one in [Model Management]({link})")
+        } else {
+            format!("Automatic generation requires an exact user-selected default for this task; choose it in [Model Management]({link})")
+        })
+    })?;
+    if candidates.iter().any(|candidate| candidate.provider_id == selected.provider_id && candidate.model == selected.model) {
+        return Ok(selected);
+    }
+    Err(InvokeError::config(format!("The configured default model is unavailable for this task; update its default in [Model Management]({link})")))
 }
 
 impl ModelInvokeService {
@@ -78,7 +90,7 @@ impl ModelInvokeService {
     ) -> Result<ResolvedTaskConfig, InvokeError> {
         let default = self.configured_task_default(task, Some(preferences)).await?;
         let candidates = self.available_task_models(task).await?;
-        let selected = choose_model(default, candidates)?;
+        let selected = choose_model(task, default, candidates)?;
         self.resolve_task_config(&selected, task).await
     }
 }
@@ -88,11 +100,18 @@ mod tests {
     use super::*;
     fn model(name: &str) -> ModelRef { ModelRef { provider_id: "provider".into(), model: name.into() } }
     #[test]
-    fn defaults_are_exact_and_ambiguous_inventory_never_chooses_by_order() {
-        assert_eq!(choose_model(None, vec![model("only")]).unwrap().model, "only");
-        assert!(choose_model(None, vec![model("first"), model("second")]).is_err());
-        assert!(choose_model(Some(model("removed")), vec![model("only")]).is_err());
-        assert_eq!(choose_model(Some(model("second")), vec![model("first"), model("second")]).unwrap().model, "second");
+    fn defaults_are_exact_and_automatic_routes_never_infer_user_intent() {
+        assert!(choose_model(ModelTask::ImageGeneration, None, vec![model("only")]).is_err());
+        assert!(choose_model(ModelTask::ImageGeneration, None, vec![model("first"), model("second")]).is_err());
+        assert!(choose_model(ModelTask::ImageGeneration, Some(model("removed")), vec![model("only")]).is_err());
+        assert_eq!(choose_model(ModelTask::ImageGeneration, Some(model("second")), vec![model("first"), model("second")]).unwrap().model, "second");
+    }
+
+    #[test]
+    fn automatic_default_errors_include_the_exact_model_management_route() {
+        let error = choose_model(ModelTask::VideoGeneration, None, vec![model("video")])
+            .unwrap_err();
+        assert!(error.message.contains("nomifun://model-management/video"));
     }
     #[test]
     fn music_and_speech_have_distinct_defaults() {

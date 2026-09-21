@@ -1920,6 +1920,7 @@ mod tests {
                 config_revision_digest: DigestHex::from("a".repeat(64)),
                 credential_ref: "credential-a".into(),
                 features: features.into_iter().collect(),
+                activation_features: BTreeSet::new(),
             },
             failovers: Vec::new(),
         }

@@ -50,13 +50,14 @@ type GenerationDefaultModel = NonNullable<
   ConfigKeyMap['models.default.imageGeneration']
 >;
 
-export type GenerationDefaultPreferenceKey = 'models.default.imageGeneration' | 'models.default.imageEdit' | 'models.default.videoGeneration' | 'models.default.musicGeneration' | 'models.default.speechSynthesis';
-const taskForDefault = {
-  'models.default.imageGeneration': 'image_generation',
-  'models.default.imageEdit': 'image_edit',
-  'models.default.videoGeneration': 'video_generation',
-  'models.default.musicGeneration': 'music_generation',
-  'models.default.speechSynthesis': 'speech_synthesis',
+export type GenerationDefaultPreferenceKey = 'models.default.imageGeneration' | 'models.default.imageEdit' | 'models.default.vision' | 'models.default.videoGeneration' | 'models.default.musicGeneration' | 'models.default.speechSynthesis';
+const specForDefault = {
+  'models.default.imageGeneration': { task: 'image_generation', traits: [] },
+  'models.default.imageEdit': { task: 'image_edit', traits: [] },
+  'models.default.vision': { task: 'chat', traits: ['vision_input', 'function_calling'] },
+  'models.default.videoGeneration': { task: 'video_generation', traits: [] },
+  'models.default.musicGeneration': { task: 'music_generation', traits: [] },
+  'models.default.speechSynthesis': { task: 'speech_synthesis', traits: [] },
 } as const;
 interface GenerationDefaultControlProps {
   preferenceKey: GenerationDefaultPreferenceKey;
@@ -67,7 +68,8 @@ const GenerationDefaultControl: React.FC<
 > = ({ preferenceKey }) => {
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage({ maxCount: 1 });
-  const { groups, isLoading } = useModelsForTask(taskForDefault[preferenceKey]);
+  const spec = specForDefault[preferenceKey];
+  const { groups, isLoading } = useModelsForTask(spec.task, [...spec.traits]);
   const [defaultModel, setDefaultModel] =
     useState<GenerationDefaultModel | null>(
       () => configService.get(preferenceKey) ?? null,
@@ -113,10 +115,12 @@ const GenerationDefaultControl: React.FC<
             if (!queue.isLatest(generation)) return;
             setDefaultModel(configService.get(preferenceKey) ?? null);
             console.error(
-              '[ModalityModels] Failed to save the default image model:',
+              '[ModalityModels] Failed to save the default task model:',
               error,
             );
-            message.error(t('settings.modelHub.creation.defaultSaveFailed'));
+            message.error(t(preferenceKey === 'models.default.vision'
+              ? 'settings.modelHub.modality.visionDefaultSaveFailed'
+              : 'settings.modelHub.creation.defaultSaveFailed'));
           },
           onLatestSettled: (generation) => {
             if (queue.isLatest(generation)) setIsSavingDefault(false);
@@ -131,28 +135,41 @@ const GenerationDefaultControl: React.FC<
   const hasCandidates = groups.some((group) => group.models.length > 0);
   const noCandidates = !isLoading && !hasCandidates;
   const description = isLoading
-    ? t('settings.modelHub.creation.defaultLoading')
+    ? t(preferenceKey === 'models.default.vision'
+        ? 'settings.modelHub.modality.visionDefaultLoading'
+        : 'settings.modelHub.creation.defaultLoading')
     : noCandidates
-      ? t('settings.modelHub.creation.defaultNoModels')
+      ? t(preferenceKey === 'models.default.vision'
+          ? 'settings.modelHub.modality.visionDefaultNoModels'
+          : 'settings.modelHub.creation.defaultNoModels')
       : defaultModel
-        ? t('settings.modelHub.creation.defaultHint')
-        : t('settings.modelHub.creation.defaultUnset');
+        ? t(preferenceKey === 'models.default.vision'
+            ? 'settings.modelHub.modality.visionDefaultHint'
+            : 'settings.modelHub.creation.defaultHint')
+        : t(preferenceKey === 'models.default.vision'
+            ? 'settings.modelHub.modality.visionDefaultUnset'
+            : 'settings.modelHub.creation.defaultUnset');
 
   return (
     <div className='mt-14px'>
       {messageContext}
       <NomiSettingList>
         <NomiSettingRow
-          title={t('settings.modelHub.creation.defaultTitle')}
+          title={t(preferenceKey === 'models.default.vision'
+            ? 'settings.modelHub.modality.visionDefaultTitle'
+            : 'settings.modelHub.creation.defaultTitle')}
           description={description}
           controls={
             <div className='flex min-w-0 flex-wrap items-center justify-end gap-8px'>
               <TaskModelSelect
-                task={taskForDefault[preferenceKey]}
+                task={spec.task}
+                traits={[...spec.traits]}
                 size='small'
                 disabled={noCandidates || isSavingDefault}
                 value={defaultModel}
-                emptyHint={t('settings.modelHub.creation.defaultNoModels')}
+                emptyHint={t(preferenceKey === 'models.default.vision'
+                  ? 'settings.modelHub.modality.visionDefaultNoModels'
+                  : 'settings.modelHub.creation.defaultNoModels')}
                 onChange={({ provider_id, model }) =>
                   void persistDefault({ provider_id, model })
                 }

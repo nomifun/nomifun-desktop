@@ -90,6 +90,12 @@ pub struct ChatRouteCandidate {
     pub config_revision_digest: DigestHex,
     pub credential_ref: String,
     pub features: BTreeSet<ChatRouteFeature>,
+    /// Features that must be required by the current request before this
+    /// candidate participates. Empty candidates are ordinary primary/failover
+    /// routes; an ImageInput-only auxiliary route cannot become a text-chat
+    /// failover merely because it is present in the same immutable record.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub activation_features: BTreeSet<ChatRouteFeature>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -115,6 +121,9 @@ impl ChatRouteRecord {
         }
 
         let mut identities = BTreeSet::new();
+        if !self.primary.activation_features.is_empty() {
+            return Err(ChatRouteRecordError::PrimaryRouteCannotBeConditional);
+        }
         for candidate in std::iter::once(&self.primary).chain(self.failovers.iter()) {
             candidate.validate()?;
             if !identities.insert((
@@ -190,6 +199,9 @@ impl ChatRouteCandidate {
         }
         if !self.features.contains(&ChatRouteFeature::TextOutput) {
             return Err(ChatRouteRecordError::MissingTextOutput);
+        }
+        if !self.features.is_superset(&self.activation_features) {
+            return Err(ChatRouteRecordError::ActivationFeatureNotSupported);
         }
         Ok(())
     }
@@ -333,6 +345,10 @@ pub enum ChatRouteRecordError {
     InvalidDigest,
     #[error("route record does not advertise text output")]
     MissingTextOutput,
+    #[error("primary route cannot require request activation features")]
+    PrimaryRouteCannotBeConditional,
+    #[error("route activation features are not supported by the candidate")]
+    ActivationFeatureNotSupported,
     #[error("route record JSON is invalid: {0}")]
     InvalidJson(String),
 }
@@ -412,6 +428,7 @@ mod tests {
                 ChatRouteFeature::TextInput,
                 ChatRouteFeature::TextOutput,
             ]),
+            activation_features: BTreeSet::new(),
         }
     }
 
@@ -510,6 +527,33 @@ mod tests {
         assert_eq!(
             resolve_exact_chat_route_record(vec![row.clone(), row], &key()),
             Err(ChatRouteLookupError::DuplicateRows)
+        );
+    }
+
+    #[test]
+    fn conditional_routes_must_be_non_primary_and_support_their_activation_features() {
+        let mut conditional = record();
+        conditional.failovers[0]
+            .features
+            .insert(ChatRouteFeature::ImageInput);
+        conditional.failovers[0]
+            .activation_features
+            .insert(ChatRouteFeature::ImageInput);
+        assert!(conditional.validate().is_ok());
+
+        conditional.primary.activation_features.insert(ChatRouteFeature::TextInput);
+        assert_eq!(
+            conditional.validate(),
+            Err(ChatRouteRecordError::PrimaryRouteCannotBeConditional)
+        );
+
+        let mut unsupported = record();
+        unsupported.failovers[0]
+            .activation_features
+            .insert(ChatRouteFeature::ImageInput);
+        assert_eq!(
+            unsupported.validate(),
+            Err(ChatRouteRecordError::ActivationFeatureNotSupported)
         );
     }
 }

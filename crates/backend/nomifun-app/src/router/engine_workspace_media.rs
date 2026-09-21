@@ -16,7 +16,7 @@ pub(super) struct WorkspaceMediaTools {
     pub inner: Arc<dyn EngineToolInvoker>,
     pub snapshot: Arc<CompiledSnapshot>,
     pub active: Arc<SessionCapabilityState>,
-    pub primary_image_input: bool,
+    pub route_image_input: bool,
 }
 
 fn error(message: &str) -> EngineToolError {
@@ -29,12 +29,12 @@ impl WorkspaceMediaTools {
             .active
             .snapshot()
             .map_err(|_| error("Image capability state is unavailable"))?;
-        if !self.primary_image_input
+        if !self.route_image_input
             || active.generation != generation
             || active.resolved_snapshot_ref != *self.snapshot.snapshot_ref()
         {
             return Err(error(
-                "Workspace image read requires the exact primary model route's ImageInput feature; no pixels returned",
+                "Workspace image read requires an eligible exact model route with ImageInput; no pixels returned",
             ));
         }
         Ok(())

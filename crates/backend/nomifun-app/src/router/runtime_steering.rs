@@ -237,7 +237,7 @@ impl ConversationRuntimeHost {
         if turn.steering.seen.len() >= 16 {
             return Err(error("turn steering limit reached (16 inputs)"));
         }
-        let vision_active = self.primary_image_input;
+        let vision_active = self.route_image_input;
         // Keep the same inbox lock as tool admission and finish: no tool may
         // race past an input while the platform is preparing its attachments.
         // This is read-only, bounded local preparation, not a new tool grant.

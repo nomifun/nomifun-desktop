@@ -437,7 +437,7 @@ mod tests {
     }
 
     async fn configured_media_models(pool: &nomifun_db::SqlitePool) -> std::collections::BTreeMap<&'static str, (String, String)> {
-        use nomifun_db::{CreateProviderParams, IProviderRepository, NewProviderModel, NewProviderModelCapability};
+        use nomifun_db::{CreateProviderParams, IClientPreferenceRepository, IProviderRepository, NewProviderModel, NewProviderModelCapability};
         let providers = nomifun_db::SqliteProviderRepository::new(pool.clone());
         let encrypted = nomifun_common::encrypt_string(r#"{"api_keys":["host-test-key"]}"#, &[0; 32]).unwrap();
         let mut result = std::collections::BTreeMap::new();
@@ -456,6 +456,23 @@ mod tests {
                 }, &NewProviderModel { model: &model, enabled: true, sort_order: 0, description: None,
                     capabilities: &[NewProviderModelCapability { task, protocol, traits: "[]", connection_role: "default", provider_params: "{}", ..Default::default() }],
                 }, &[]).await.unwrap();
+            let preference_key = match task {
+                "image_generation" => "models.default.imageGeneration",
+                "image_edit" => "models.default.imageEdit",
+                "video_generation" => "models.default.videoGeneration",
+                "music_generation" => "models.default.musicGeneration",
+                "speech_synthesis" => "models.default.speechSynthesis",
+                _ => unreachable!(),
+            };
+            let preference = serde_json::json!({
+                "provider_id": &provider_id,
+                "model": &model,
+            })
+            .to_string();
+            nomifun_db::SqliteClientPreferenceRepository::new(pool.clone())
+                .upsert_batch(&[(preference_key, preference.as_str())])
+                .await
+                .unwrap();
             result.insert(action, (provider_id, model));
         }
         result

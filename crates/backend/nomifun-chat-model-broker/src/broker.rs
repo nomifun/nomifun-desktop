@@ -196,7 +196,8 @@ impl ChatModelBroker {
                 )
                 .with_route(route.model_route_id.clone()));
             };
-            if !route.features.is_superset(&required)
+            if !required.is_superset(&route.activation_features)
+                || !route.features.is_superset(&required)
                 || !adapter.features().is_superset(&required)
                 || request.input.messages.iter().any(|message| message.content.iter().any(|part|
                     matches!(part, crate::ChatContentPart::ProviderReasoning { block } if !block.matches_route(route))))

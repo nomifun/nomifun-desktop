@@ -353,6 +353,14 @@
       "ChatRouteCandidate": {
         "additionalProperties": false,
         "properties": {
+          "activation_features": {
+            "description": "Features that must be required by the current request before this\ncandidate participates. Empty candidates are ordinary primary/failover\nroutes; an ImageInput-only auxiliary route cannot become a text-chat\nfailover merely because it is present in the same immutable record.",
+            "items": {
+              "$ref": "#/$defs/ChatRouteFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "config_revision_digest": {
             "type": "string"
           },
@@ -892,6 +900,14 @@
       "ChatRouteCandidate": {
         "additionalProperties": false,
         "properties": {
+          "activation_features": {
+            "description": "Features that must be required by the current request before this\ncandidate participates. Empty candidates are ordinary primary/failover\nroutes; an ImageInput-only auxiliary route cannot become a text-chat\nfailover merely because it is present in the same immutable record.",
+            "items": {
+              "$ref": "#/$defs/ChatRouteFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "config_revision_digest": {
             "type": "string"
           },
@@ -1312,6 +1328,14 @@
       "ChatRouteCandidate": {
         "additionalProperties": false,
         "properties": {
+          "activation_features": {
+            "description": "Features that must be required by the current request before this\ncandidate participates. Empty candidates are ordinary primary/failover\nroutes; an ImageInput-only auxiliary route cannot become a text-chat\nfailover merely because it is present in the same immutable record.",
+            "items": {
+              "$ref": "#/$defs/ChatRouteFeature"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "config_revision_digest": {
             "type": "string"
           },

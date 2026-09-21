@@ -64,6 +64,37 @@ Task selection is explicit. The runtime does not infer image or video support
 from a model name, and it does not silently use a same-named model from another
 provider.
 
+## Capability routing inside a conversation
+
+The General Agent is preset with image generation, image editing, video
+generation, speech synthesis, and music generation Actions. An explicit
+creation request in an ordinary conversation uses only the user's exact default
+for that task:
+
+| Conversation need | Exact default key | Required capability |
+| --- | --- | --- |
+| Image understanding | `models.default.vision` | One Chat capability declaring both `vision_input` and `function_calling` |
+| Image generation | `models.default.imageGeneration` | `image_generation` |
+| Image editing | `models.default.imageEdit` | `image_edit` |
+| Video generation | `models.default.videoGeneration` | `video_generation` |
+| Music generation | `models.default.musicGeneration` | `music_generation` |
+| Speech synthesis | `models.default.speechSynthesis` | `speech_synthesis` |
+
+Automatic media Actions never infer user intent from model order, model names,
+or a sole remaining candidate. Without an exact default, the conversation asks
+the user to choose one in Model Management. Professional creation surfaces may
+still select another compatible model for one explicit task.
+
+The vision model is frozen into new conversations as a conditional Chat
+candidate. It participates only when the current request actually requires
+image input, so it cannot become an ordinary text-chat failover. A primary Chat
+model that already supports vision remains the direct route.
+
+The model capability catalog and routing authority are separate layers. Tasks
+and route-critical traits require positive evidence before automatic routing;
+transport compatibility attempts or runtime failures never promote an unknown
+model into an image, vision, or tool route.
+
 Creative Studio persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task
 cannot change those facts.

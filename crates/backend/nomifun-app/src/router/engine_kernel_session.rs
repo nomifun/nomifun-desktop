@@ -134,7 +134,8 @@ pub struct EngineKernelSession {
     workspace: String,
     git_root: Option<std::path::PathBuf>,
     process_selected: bool,
-    primary_image_input: bool,
+    route_image_input: bool,
+    creation_turn_root: super::engine_creation_tools::CreationTurnRoot,
     compiled: Arc<CompiledSnapshot>,
     active: Arc<SessionCapabilityState>,
     kernel: Arc<KernelRegistry>,
@@ -229,7 +230,7 @@ impl EngineKernelSession {
                 super::nomi_core_wave2::canonical_workspace_root(std::path::Path::new(&workspace))
             })
             .transpose()?;
-        let primary_image_input = snapshot
+        let route_image_input = snapshot
             .content
             .chat_route_identity
             .as_ref()
@@ -241,10 +242,11 @@ impl EngineKernelSession {
                     .get(&route.model_task)
             })
             .is_some_and(|record| {
-                record
-                    .primary
-                    .features
-                    .contains(&nomifun_agent_contracts::ChatRouteFeature::ImageInput)
+                std::iter::once(&record.primary)
+                    .chain(record.failovers.iter())
+                    .any(|candidate| candidate.features.contains(
+                        &nomifun_agent_contracts::ChatRouteFeature::ImageInput,
+                    ))
             });
         if process_selected {
             let indices = binding
@@ -287,7 +289,8 @@ impl EngineKernelSession {
             constraints,
             workspace,
             process_selected,
-            primary_image_input,
+            route_image_input,
+            creation_turn_root: Arc::new(Mutex::new(None)),
             active: Arc::new(SessionCapabilityState::new(&compiled)),
             compiled,
             kernel: assembly.kernel.clone(),
@@ -717,11 +720,18 @@ impl EngineKernelSession {
             plan.clone(),
         )
         .map_err(failure)?;
+        let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(
+            super::engine_creation_tools::ConversationCreationTools {
+                inner: Arc::new(invoker),
+                session_id: self.session_id.clone(),
+                turn_root: self.creation_turn_root.clone(),
+            },
+        );
         let invoker = super::engine_workspace_media::WorkspaceMediaTools {
-            inner: Arc::new(invoker),
+            inner: invoker,
             snapshot: self.compiled.clone(),
             active: self.active.clone(),
-            primary_image_input: self.primary_image_input,
+            route_image_input: self.route_image_input,
         };
         let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(invoker);
         let invoker = match self.robot_tools.get().and_then(Option::as_ref) {
@@ -812,6 +822,11 @@ impl EngineKernelSession {
             cleanup: None,
             resource_operations: Default::default(),
         });
+        *self
+            .creation_turn_root
+            .lock()
+            .map_err(|_| failure("creation turn identity lock poisoned"))? =
+            Some(receipt.root_message_id().to_owned());
         #[cfg(feature = "browser-use")]
         self.browser.open_turn(
             &self.principal,
@@ -956,7 +971,15 @@ impl EngineKernelSession {
                 done
             }
         };
-        done.await.map_err(failure)
+        done.await.map_err(failure)?;
+        let mut creation_root = self
+            .creation_turn_root
+            .lock()
+            .map_err(|_| failure("creation turn identity lock poisoned"))?;
+        if creation_root.as_deref() == Some(root_message_id) {
+            *creation_root = None;
+        }
+        Ok(())
     }
 
     /// Final release cannot be mistaken for a fresh successful release after
@@ -1015,7 +1038,12 @@ impl EngineKernelSession {
                 done
             }
         };
-        done.await.map_err(failure)
+        done.await.map_err(failure)?;
+        *self
+            .creation_turn_root
+            .lock()
+            .map_err(|_| failure("creation turn identity lock poisoned"))? = None;
+        Ok(())
     }
 }
 

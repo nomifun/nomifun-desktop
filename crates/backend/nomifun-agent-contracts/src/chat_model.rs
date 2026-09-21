@@ -168,6 +168,8 @@ pub struct ResolvedChatRoute {
     pub config_revision_digest: DigestHex,
     pub credential_ref: ProviderCredentialRef,
     pub features: BTreeSet<ChatModelFeature>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub activation_features: BTreeSet<ChatModelFeature>,
 }
 
 impl ResolvedChatRoute {
@@ -187,6 +189,9 @@ impl ResolvedChatRoute {
         if !self.features.contains(&ChatModelFeature::TextOutput) {
             return Err(ChatContractError::RouteMissingTextOutput);
         }
+        if !self.features.is_superset(&self.activation_features) {
+            return Err(ChatContractError::RouteActivationFeatureUnsupported);
+        }
         Ok(())
     }
 }
@@ -205,6 +210,9 @@ impl ResolvedChatRouteSet {
         selection: &ChatRouteSelection,
     ) -> Result<(), ChatContractError> {
         self.primary.validate()?;
+        if !self.primary.activation_features.is_empty() {
+            return Err(ChatContractError::PrimaryRouteConditional);
+        }
         selection
             .validate()
             .map_err(|error| ChatContractError::InvalidRouteIdentity(error.to_string()))?;
@@ -994,6 +1002,10 @@ pub enum ChatContractError {
     DuplicateRouteCandidate,
     #[error("resolved route does not support text output")]
     RouteMissingTextOutput,
+    #[error("primary resolved route cannot be conditional")]
+    PrimaryRouteConditional,
+    #[error("resolved route activation features are not supported by that route")]
+    RouteActivationFeatureUnsupported,
 }
 
 fn validate_natural_key(

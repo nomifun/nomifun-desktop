@@ -625,6 +625,11 @@ impl IProviderRepository for SqliteProviderRepository {
                 OR key = 'knowledge.autogenModel' \
                 OR key = 'knowledge.retrieval' \
                 OR key = 'models.default.imageGeneration' \
+                OR key = 'models.default.imageEdit' \
+                OR key = 'models.default.vision' \
+                OR key = 'models.default.videoGeneration' \
+                OR key = 'models.default.musicGeneration' \
+                OR key = 'models.default.speechSynthesis' \
                 OR key = 'tools.speechToText' \
                 OR key = 'tools.textToSpeech' \
                 OR key LIKE 'channels.%.defaultModel'",
