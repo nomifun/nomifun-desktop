@@ -2348,6 +2348,7 @@ export type I18nKey =
   | 'creativeStudio.canvas.templates.summary'
   | 'creativeStudio.canvas.templates.title'
   | 'creativeStudio.canvas.templates.uncategorized'
+  | 'creativeStudio.canvas.templates.workspaceDescription'
   | 'creativeStudio.canvas.toolbar.deleteSelection'
   | 'creativeStudio.canvas.toolbar.group'
   | 'creativeStudio.canvas.toolbar.ungroup'

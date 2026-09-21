@@ -1213,7 +1213,8 @@
       },
       "summary": "{{count}} templates",
       "title": "Templates",
-      "uncategorized": "Uncategorized"
+      "uncategorized": "Uncategorized",
+      "workspaceDescription": "Run templates and insert their results directly into the current canvas."
     },
     "zoom": {
       "resetView": "Reset view",

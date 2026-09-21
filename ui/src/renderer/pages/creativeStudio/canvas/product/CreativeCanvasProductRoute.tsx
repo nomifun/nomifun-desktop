@@ -4600,6 +4600,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     void copyText(selection.prompt)
       .then(() => {
         setSelectedPromptId(selection.id);
+        handleResourceViewChange(null);
         setNotice(
           t('creativeStudio.canvas.notices.promptCopied', {
             title: selection.title,
@@ -4614,7 +4615,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           })
         );
       });
-  }, []);
+  }, [handleResourceViewChange, t]);
 
   const selection = useMemo(
     () => creativeCanvasProductSelectionCapabilities(canvasState),

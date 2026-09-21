@@ -1,6 +1,6 @@
-import { useState } from 'react';
-import { Message, Popover } from '@arco-design/web-react';
-import { Down, ImageFiles, PageTemplate, Brain } from '@icon-park/react';
+import { lazy, Suspense, useState } from 'react';
+import { Message, Popover, Switch } from '@arco-design/web-react';
+import { BookOpen, Brain, Down, ImageFiles, PageTemplate } from '@icon-park/react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
@@ -15,11 +15,66 @@ import { useGenerationModel } from './useGenerationModel';
 import type { CreationMode, CreationParameters } from './types';
 import { inputsForMode } from './types';
 import styles from './CreationControls.module.css';
-import { creationCount, creationMaxCount, creationParameterPolicy, creationVideoSizeOptions, normalizeCreationParameters } from './parameterPolicy';
+import {
+  CREATION_MUSIC_DURATION_OPTIONS,
+  creationCount,
+  creationMaxCount,
+  creationMusicDuration,
+  creationParameterPolicy,
+  creationVideoSizeOptions,
+  normalizeCreationParameters,
+} from './parameterPolicy';
 import ImageSizePicker from './parameters/ImageSizePicker';
 import { imageGenerationAspectRatioValue, imageGenerationResolutionLabel } from './parameters/image';
 
 const modeLabels = { image: '图像创作', video: '视频创作', music: '音乐创作' };
+const CreationResourceDialog = lazy(() => import('./CreationResourceDialog'));
+type PromptChoice = { id: string; title: string; prompt: string };
+
+export function DurationPicker({
+  label,
+  values,
+  value,
+  disabled = false,
+  automatic,
+  onAutomaticChange,
+  onChange,
+}: {
+  label: string;
+  values: readonly number[];
+  value: number;
+  disabled?: boolean;
+  automatic?: boolean;
+  onAutomaticChange?: (automatic: boolean) => void;
+  onChange(value: number): void;
+}) {
+  const selectedIndex = Math.max(0, values.indexOf(value));
+  return <fieldset className={`${styles.parameterGroup} ${styles.durationPicker}`}>
+    <legend>{label}</legend>
+    {onAutomaticChange && <label className={styles.automaticDuration}>
+      <span>智能时长</span>
+      <Switch size='small' checked={automatic} disabled={disabled} aria-label='智能时长' onChange={onAutomaticChange} />
+    </label>}
+    <div className={styles.durationRow} data-disabled={disabled || automatic || undefined}>
+      <div className={styles.durationScale}>
+        <input
+          type='range'
+          min={0}
+          max={Math.max(0, values.length - 1)}
+          step={1}
+          value={selectedIndex}
+          aria-label={`选择${label}`}
+          disabled={disabled || automatic || values.length < 2}
+          onInput={event => onChange(values[Number(event.currentTarget.value)] ?? values[0])}
+        />
+        <div className={styles.durationTicks} aria-hidden='true'>
+          {values.map(option => <span key={option}>{option}</span>)}
+        </div>
+      </div>
+      <output className={styles.durationValue} aria-live='polite'>{value}<span>s</span></output>
+    </div>
+  </fieldset>;
+}
 
 export function CreationReferences({ startIndex = 0 }: { startIndex?: number }) {
   const creation = useCreationComposer();
@@ -59,15 +114,33 @@ export default function CreationControls({ prompt, onPromptChange, files = [] }:
 }
 
 function Controls({ prompt, onPromptChange, files, creation }: { prompt: string; onPromptChange(value: string): void; files: readonly string[]; creation: NonNullable<ReturnType<typeof useCreationComposer>> }) {
-  const navigate = useNavigate();
+  const { i18n } = useTranslation();
   const { draft, update } = creation;
   const mode = draft.mode || draft.lastMode;
   const model = useGenerationModel(creation, files);
   const picker = useCreativeAssetPickerDialog();
   const [busy, setBusy] = useState(false);
+  const [resourceDialogView, setResourceDialogView] = useState<'prompts' | 'templates' | null>(null);
+  const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
   const params = draft.parameters[mode];
   const parameterPolicy = creationParameterPolicy(model.selected);
   const setParam = (key: string, value: string | number | boolean) => update(current => ({ ...current, parameters: { ...current.parameters, [mode]: { ...current.parameters[mode], [key]: value } } }));
+  const clearParam = (key: string) => update(current => {
+    const next = { ...current.parameters[mode] };
+    delete next[key];
+    return { ...current, parameters: { ...current.parameters, [mode]: next } };
+  });
+  const openResourceDialog = (view: 'prompts' | 'templates') => {
+    setResourceDialogView(view);
+  };
+  const applyPrompt = (item: PromptChoice) => {
+    const selectedPrompt = item.prompt.trim();
+    if (!selectedPrompt) return;
+    onPromptChange(prompt.trim() ? `${prompt.trimEnd()}\n${selectedPrompt}` : selectedPrompt);
+    setSelectedPromptId(item.id);
+    setResourceDialogView(null);
+    Message.success(`已添加提示词“${item.title}”`);
+  };
   const pickAssets = async () => {
     try {
       const ids = await picker.pick({ title: '资产库', acceptedKinds: mode === 'music' ? ['text'] : ['image', 'text'], initialSelectedIds: mode === 'music' ? [] : draft.references.filter(ref => ref.kind === 'image').map(ref => ref.asset_id) });
@@ -92,10 +165,19 @@ function Controls({ prompt, onPromptChange, files, creation }: { prompt: string;
   const videoSizeSummary = videoSize && videoSize.value !== 'auto'
     ? `${imageGenerationAspectRatioValue(videoSize)} · ${imageGenerationResolutionLabel(videoSize)}`
     : params.size || '自动';
+  const videoDurationOptions = parameterPolicy.video.seconds.length > 0
+    ? parameterPolicy.video.seconds
+    : [5, 10, 15];
+  const videoSeconds = parameterPolicy.video.seconds.includes(Number(params.seconds))
+    ? Number(params.seconds)
+    : videoDurationOptions[0];
+  const selectedMusicSeconds = creationMusicDuration(params.seconds);
+  const musicSeconds = selectedMusicSeconds ?? 120;
+  const musicSmartDuration = selectedMusicSeconds === undefined;
   const summary = mode === 'image'
     ? [selectedSize?.value === 'auto' ? '自动' : selectedSize ? imageGenerationAspectRatioValue(selectedSize) : '比例', selectedSize && selectedSize.value !== 'auto' ? imageGenerationResolutionLabel(selectedSize) : null, `${count} 张`].filter(Boolean).join(' · ')
-    : mode === 'video' ? `${videoSizeSummary} · ${params.seconds ? `${params.seconds}s` : '自动时长'} · ${count} 个`
-    : params.instrumental === false ? '带歌词' : '纯音乐';
+    : mode === 'video' ? `${videoSizeSummary} · ${model.selected && parameterPolicy.video.seconds.length > 0 ? `${videoSeconds}s` : '自动时长'} · ${count} 个`
+    : `${params.instrumental === false ? '带歌词' : '纯音乐'} · ${musicSmartDuration ? '智能时长' : `${musicSeconds}s`}`;
   const parameterPanel = <div className={styles.parameterPanel} data-testid='creation-parameter-panel'>
     {mode === 'image' && <ImageSizePicker options={sizes} value={selectedSize?.value || ''} disabled={!model.selected} onChange={size => {
       update(current => ({ ...current, parameters: { ...current.parameters, image: { ...current.parameters.image, aspect: size.value, size: size.requestSize || '', width: size.width, height: size.height } } }));
@@ -109,13 +191,29 @@ function Controls({ prompt, onPromptChange, files, creation }: { prompt: string;
           return { ...current, parameters: { ...current.parameters, video } };
         });
       }} /> : parameterPolicy.video.sizes.length > 0 && field('分辨率', 'size', parameterPolicy.video.sizes)}
-      {parameterPolicy.video.seconds.length > 0 && field('时长（秒）', 'seconds', parameterPolicy.video.seconds)}
+      {(!model.selected || parameterPolicy.video.seconds.length > 0) && <DurationPicker
+        label='视频时长'
+        values={videoDurationOptions}
+        value={videoSeconds}
+        disabled={!model.selected || parameterPolicy.video.seconds.length === 0}
+        onChange={value => setParam('seconds', value)}
+      />}
     </>}
     {mode !== 'music' && <fieldset className={styles.parameterGroup}><legend>生成数量</legend><div className={styles.quantityOptions}>
       {Array.from({ length: creationMaxCount(mode, model.selected) }, (_, i) => i + 1).map(value => <button type='button' key={value} aria-pressed={count === value} disabled={!model.selected} onClick={() => setParam('count', value)}>{value}</button>)}
     </div></fieldset>}
     {mode === 'image' && parameterPolicy.qualities.length > 0 && field('质量', 'quality', parameterPolicy.qualities)}
     {mode === 'music' && <>
+      <DurationPicker
+        label='音乐时长'
+        values={CREATION_MUSIC_DURATION_OPTIONS}
+        value={musicSeconds}
+        disabled={!model.selected}
+        automatic={musicSmartDuration}
+        onAutomaticChange={automatic => automatic ? clearParam('seconds') : setParam('seconds', musicSeconds)}
+        onChange={value => setParam('seconds', value)}
+      />
+      <p className={styles.durationHint}>关闭智能时长后，所选时长会作为创作目标，成品可能略有差异。</p>
       <fieldset className={styles.parameterGroup}><legend>音乐类型</legend><div className={styles.quantityOptions}>
         <button type='button' aria-pressed={params.instrumental !== false} onClick={() => setParam('instrumental', true)}>纯音乐</button>
         <button type='button' aria-pressed={params.instrumental === false} onClick={() => setParam('instrumental', false)}>带歌词</button>
@@ -124,13 +222,23 @@ function Controls({ prompt, onPromptChange, files, creation }: { prompt: string;
     </>}
     <div className={styles.panelActions}>
       <button type='button' className={styles.button} disabled={busy} onClick={() => void pickAssets()}><ImageFiles size={15} />资产库</button>
-      <button type='button' className={styles.button} onClick={() => navigate('/asset-library/templates')}><PageTemplate size={15} />模板工作台</button>
+      <button type='button' className={styles.button} aria-haspopup='dialog' onClick={() => openResourceDialog('templates')}><PageTemplate size={15} />模板工作台</button>
+      {mode !== 'music' && <button type='button' className={styles.button} aria-haspopup='dialog' onClick={() => openResourceDialog('prompts')}><BookOpen size={15} />提示词</button>}
     </div>
   </div>;
-  return <span className={styles.controls}>
-    <Popover trigger='click' position='top' className={styles.parameterPopover} style={{ maxWidth: 'none' }} content={parameterPanel}><button type='button' className={styles.button} aria-label={`生成参数：${summary}`}><span className={styles.summaryShape} aria-hidden='true' /><span className='sendbox-responsive-label'>{summary}</span><Down size={12} className='sendbox-responsive-chevron' /></button></Popover>
-    {picker.dialog}
-  </span>;
+  return <>
+    <span className={styles.controls}>
+      <Popover key={resourceDialogView || 'parameters'} trigger='click' position='top' className={styles.parameterPopover} style={{ maxWidth: 'none' }} content={parameterPanel}><button type='button' className={styles.button} aria-label={`生成参数：${summary}`}><span className={styles.summaryShape} aria-hidden='true' /><span className='sendbox-responsive-label'>{summary}</span><Down size={12} className='sendbox-responsive-chevron' /></button></Popover>
+      {picker.dialog}
+    </span>
+    {resourceDialogView && <Suspense fallback={null}><CreationResourceDialog
+      view={resourceDialogView}
+      locale={i18n.resolvedLanguage ?? i18n.language}
+      selectedPromptId={selectedPromptId}
+      onPromptSelect={applyPrompt}
+      onClose={() => setResourceDialogView(null)}
+    /></Suspense>}
+  </>;
 }
 
 /** Model selection stays in the same trailing toolbar position as the chat model. */

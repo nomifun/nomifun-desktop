@@ -31,7 +31,7 @@ import {
   Voice,
   Workbench,
 } from '@icon-park/react';
-import { Modal, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import classNames from 'classnames';
 import React, {
   useCallback,
@@ -41,6 +41,7 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeResourceDialog from '../../components/CreativeResourceDialog';
 import styles from './CreativeCanvasChrome.module.css';
 import CreativeCanvasTitle from './CreativeCanvasTitle';
 import {
@@ -324,31 +325,25 @@ export const CreativeCanvasResourceDialog: React.FC<
 > = ({ view, content, onClose }) => {
   const { t } = useTranslation();
   if (!view) return null;
+  const title =
+    view === 'prompts'
+      ? '选择提示词'
+      : view === 'templates'
+        ? t('creativeStudio.templates.workspace.title', {
+            defaultValue: '模板工作台',
+          })
+        : t(LEFT_LABEL_KEYS.assets);
 
   return (
-    <Modal
-      visible
-      title={t(LEFT_LABEL_KEYS[view])}
-      footer={null}
-      className={styles.resourceDialog}
-      style={{
-        width: 860,
-        maxWidth: 'calc(100vw - 48px)',
-      }}
-      autoFocus={false}
-      focusLock
-      maskClosable
-      escToExit
-      unmountOnExit
-      onCancel={onClose}
+    <CreativeResourceDialog
+      kind={view}
+      title={title}
+      scope='canvas'
+      contentClassName={styles.canvasResourceContent}
+      onClose={onClose}
     >
-      <div
-        className={styles.resourceDialogContent}
-        data-canvas-resource-dialog={view}
-      >
-        {content}
-      </div>
-    </Modal>
+      {content}
+    </CreativeResourceDialog>
   );
 };
 

@@ -69,6 +69,48 @@ describe('PromptLibrarySurface', () => {
     expect(html.includes('灵感提示')).toBe(true);
   });
 
+  test('supports a bounded picker view without the large tag facet', () => {
+    const html = render({
+      variant: 'sidebar',
+      items: [ITEM, { ...ITEM, id: 'prompt-two', title: '第二条提示词', tags: ['隐藏标签'] }],
+      showTagFilters: false,
+      visibleItemLimit: 1,
+      selectionHint: '点击卡片使用',
+    });
+    expect(html.includes('data-prompt-library-item="prompt-one"')).toBe(true);
+    expect(html.includes('data-prompt-library-item="prompt-two"')).toBe(false);
+    expect(html.includes('隐藏标签')).toBe(false);
+    expect(html.includes('点击卡片使用')).toBe(true);
+  });
+
+  test('renders the prompt picker as image cards without a repeated header', () => {
+    const html = render({
+      variant: 'sidebar',
+      items: [{ ...ITEM, coverUrl: 'https://example.com/prompt-cover.jpg' }],
+      showHeader: false,
+      showTagFilters: false,
+      cardPresentation: 'visual-picker',
+      applyLabel: '使用提示词',
+    });
+    const css = readFileSync(new URL('./PromptLibrary.module.css', import.meta.url), 'utf8');
+
+    expect(html.includes('data-card-presentation="visual-picker"')).toBe(true);
+    expect(html.includes('<header')).toBe(false);
+    expect(html.includes('src="https://example.com/prompt-cover.jpg"')).toBe(true);
+    expect(html.includes('data-prompt-card-action="activate"')).toBe(true);
+    expect(html.includes('data-prompt-card-action="apply"')).toBe(true);
+    expect(
+      /\.visualPicker\.sidebar \.grid\s*\{[\s\S]*?grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\);/.test(
+        css
+      )
+    ).toBe(true);
+    expect(/\.visualCard\s*\{[\s\S]*?aspect-ratio:\s*3 \/ 4;/.test(css)).toBe(true);
+    expect(/\.visualOverlay\s*\{[\s\S]*?background:\s*rgb\(0 0 0 \/ 78%\);/.test(css)).toBe(true);
+    expect(/\.visualOverlay p\s*\{[\s\S]*?-webkit-line-clamp:\s*3;/.test(css)).toBe(true);
+    expect(css.includes(".visualCard[data-active='true'] .visualOverlay")).toBe(true);
+    expect(css.includes('.visualCard:hover .visualOverlay')).toBe(false);
+  });
+
   test('aligns sidebar typography and controls with sibling canvas tool panels', () => {
     const css = readFileSync(new URL('./PromptLibrary.module.css', import.meta.url), 'utf8');
 
