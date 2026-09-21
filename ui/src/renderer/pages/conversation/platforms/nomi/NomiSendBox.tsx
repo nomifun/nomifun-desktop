@@ -133,6 +133,8 @@ const NomiSendBox: React.FC<{
    * uses this to surface its task-requirement control inside the participant conversation.
    */
   extraRightTools?: React.ReactNode;
+  /** False for product surfaces that currently support chat only. */
+  creationEnabled?: boolean;
 }> = ({
   conversation_id,
   modelSelection,
@@ -144,6 +146,7 @@ const NomiSendBox: React.FC<{
   modelSelectionDisabled,
   collaboratorSelectorNode,
   extraRightTools,
+  creationEnabled = true,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
   const { t } = useTranslation();
@@ -205,7 +208,8 @@ const NomiSendBox: React.FC<{
     typeof tokenUsage?.context_tokens === 'number';
 
   const { atPath, uploadFile, setAtPath, setUploadFile, content, setContent } = useSendBoxDraft(conversation_id);
-  const creation = useCreationComposer();
+  const creationContext = useCreationComposer();
+  const creation = creationEnabled ? creationContext : null;
   const generation = useGenerationModel(creation, collectSelectedFiles(uploadFile, atPath));
   const [creationSubmitting, setCreationSubmitting] = useState(false);
   const creationSubmittingRef = useRef(false);
@@ -824,7 +828,7 @@ const NomiSendBox: React.FC<{
                 </ComposerToolRail>
               : undefined
         }
-        prefix={<ComposerSceneHeader agent={agentSelectorNode} />}
+        prefix={<ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
         showPinnedPlan
         value={content}

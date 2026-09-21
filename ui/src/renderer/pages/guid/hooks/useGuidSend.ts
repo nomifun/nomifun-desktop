@@ -34,7 +34,6 @@ import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 import type { GuidCollaborationConfig } from './useGuidCollaboration';
 import { creationDraftStorageKey, emptyCreationDraft } from '@/renderer/creation/useCreationDraft';
-import { prepareCompanionConversation, sendCompanionLaunchMessage } from './companionLaunch';
 import {
   WorkspaceDirectoryUnavailableError,
   validateExistingWorkspaceDirectory,
@@ -173,18 +172,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     endPending,
   } = deps;
   const sendingRef = useRef(false);
-  const isCompanion = selection.kind === 'template' && selection.templateKey === 'companion.default';
 
   const handleSend = useCallback(async () => {
-    if (isCompanion) {
-      if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
-      const conversation = await prepareCompanionConversation(resourceSelections, current_model);
-      await sendCompanionLaunchMessage(conversation.id, input, files);
-      seedConversationCache(conversation);
-      emitter.emit('chat.history.refresh');
-      await navigate(`/conversation/${conversation.id}`);
-      return;
-    }
     const entryPlan = planGuidEntry(input, autoWork);
     if (!current_model) throw new Error('MODEL_REQUIRED');
     if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
@@ -305,7 +294,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     seedConversationCache(conversation);
     await navigate(`/conversation/${conversationId}`);
   }, [
-    isCompanion,
     applyAdvancedConfig,
     autoWork,
     current_model,
@@ -326,7 +314,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const launch = useCallback(() => {
     if (loading || sendingRef.current) return;
     if (!resourceResolutionReady) return;
-    if (!current_model && !isCompanion) {
+    if (!current_model) {
       Message.warning(t('conversation.noModelConfigured'));
       return;
     }
@@ -376,7 +364,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         endPending?.();
       });
   }, [
-    isCompanion,
     autoWork,
     beginPending,
     endPending,
@@ -410,7 +397,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           selectedPreset.preset_id === selection.presetId &&
           resourceResolutionReady
       );
-  const hasLaunchTarget = hasAgentLaunchTarget && (isCompanion || Boolean(current_model));
+  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(current_model);
   const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
   const sendMessageHandler = useCallback(() => launch(), [launch]);
 

@@ -12,11 +12,10 @@ import {
   type OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
 
-/**
- * Customer Service owns a dedicated visitor-facing conversation ingress. Its
- * Agent is configured and consumed there, not launched from a user's ordinary
- * Conversation composer.
- */
+/** Product-owned Agents have their own canonical conversation ingress. */
+export const COMPANION_TEMPLATE_KEY =
+  'companion.default' satisfies OfficialPresetKey;
+
 export const CUSTOMER_SERVICE_TEMPLATE_KEY =
   'customer-service.default' satisfies OfficialPresetKey;
 
@@ -24,6 +23,7 @@ export const isConversationAgentTemplateKey = (
   value: string,
 ): value is OfficialPresetKey =>
   OFFICIAL_PRESET_KEYS.includes(value as OfficialPresetKey)
+  && value !== COMPANION_TEMPLATE_KEY
   && value !== CUSTOMER_SERVICE_TEMPLATE_KEY;
 
 export const isConversationAgentTemplate = (

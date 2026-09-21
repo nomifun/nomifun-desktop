@@ -47,7 +47,7 @@ describe('GuidPage advanced controls', () => {
 
     expect(source.includes("presetCapabilityIds.has('agent.collaboration')")).toBe(true);
     expect(source.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
-    expect(source.includes('!isCompanionAgent && collaborationEnabled && <ComposerToolRail')).toBe(true);
+    expect(source.includes('collaborationEnabled && <ComposerToolRail')).toBe(true);
     expect(source.includes('disabled={advancedConfig.autoWork.enabled}')).toBe(true);
   });
 
@@ -75,13 +75,14 @@ describe('GuidPage advanced controls', () => {
     expect(capabilityHook.includes('requiredResourceKindsForDocument')).toBe(true);
     expect(capabilityHook.includes('document.runtime_policy?.idmm')).toBe(true);
     expect(page.includes('presetCapabilities.idmm')).toBe(true);
-    expect(page.includes('const idmmControlEnabled = !isCompanionAgent')).toBe(true);
+    expect(page.includes('const idmmControlEnabled = presetResourceResolutionReady;')).toBe(true);
+    expect(page.includes('isCompanionAgent')).toBe(false);
   });
 
   test('shows a visible error when selected Preset capabilities cannot be resolved', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
 
-    expect(page.includes("import { Alert, Button, ConfigProvider } from '@arco-design/web-react';")).toBe(
+    expect(page.includes("import { Alert, ConfigProvider } from '@arco-design/web-react';")).toBe(
       true
     );
     expect(

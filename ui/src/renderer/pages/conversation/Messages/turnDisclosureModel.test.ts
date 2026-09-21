@@ -503,6 +503,32 @@ describe('buildTurnDisclosureItems', () => {
     expect(firstDisclosure.endAt).toBe(3000);
   });
 
+  test('places delayed persisted process rows before each turn final answer instead of stacking them at the tail', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
+        item('final-1', 'assistant', { turnId: TURN_1, createdAt: 2000 }),
+        item('user-2', 'user', { turnId: TURN_2, createdAt: 3000 }),
+        item('final-2', 'assistant', { turnId: TURN_2, createdAt: 4000 }),
+        item('persisted-process-1', 'process', { turnId: TURN_1, createdAt: 1500 }),
+        item('persisted-process-2', 'process', { turnId: TURN_2, createdAt: 3500 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      'user-1',
+      DISCLOSURE_1,
+      'final-1',
+      'user-2',
+      DISCLOSURE_2,
+      'final-2',
+    ]);
+    const disclosures = result.filter((entry) => entry.type === 'turn_disclosure');
+    expect(disclosures).toHaveLength(2);
+    expect(new Set(disclosures.map((entry) => entry.turnId))).toEqual(new Set([TURN_1, TURN_2]));
+  });
+
   test('selects final assistant content across non-contiguous fragments of the same turn', () => {
     const result = buildTurnDisclosureItems(
       [

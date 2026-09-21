@@ -549,6 +549,18 @@ impl EngineKernelSession {
         {
             return Ok(None);
         }
+        if !self
+            .compiled
+            .target_resource_bindings
+            .iter()
+            .any(|binding| binding.resource_kind.as_ref() == "robot")
+        {
+            // The Companion preset grants Robot capability so a device can be
+            // attached later, but chat itself does not require one. Absence is
+            // therefore no live context; a present-but-invalid binding still
+            // fails closed in the exact validation below.
+            return Ok(None);
+        }
         let resources = self
             .compiled
             .target_resource_bindings

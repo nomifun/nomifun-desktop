@@ -66,6 +66,78 @@ const textContent = (message: TMessage): string => {
 };
 
 describe('mergeFetchedMessagesForConversation', () => {
+  test('orders a newest-first initial history page chronologically before rendering', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const oldest = baseMessage({
+      id: 'oldest',
+      msg_id: 'oldest',
+      conversation_id: conversationId,
+      position: 'right',
+      created_at: 1000,
+      content: { content: 'first' },
+    });
+    const middle = baseMessage({
+      id: 'middle',
+      msg_id: 'middle',
+      conversation_id: conversationId,
+      created_at: 2000,
+      content: { content: 'second' },
+    });
+    const newest = baseMessage({
+      id: 'newest',
+      msg_id: 'newest',
+      conversation_id: conversationId,
+      created_at: 3000,
+      content: { content: 'third' },
+    });
+
+    const merged = mergeFetchedMessagesForConversation(
+      [],
+      fetchedMessages([newest, middle, oldest]),
+      conversationId
+    );
+
+    expect(merged.map((message) => message.id)).toEqual(['oldest', 'middle', 'newest']);
+  });
+
+  test('hydrates one durable turn summary over its matching live Agent status', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('turn-summary-root');
+    const streamId = messageId('turn-summary-stream');
+    const liveStatus = baseMessage({
+      id: 'live-turn-summary',
+      msg_id: streamId,
+      turn_id: turnId,
+      conversation_id: conversationId,
+      type: 'agent_status',
+      position: 'center',
+      status: 'work',
+      created_at: 1500,
+      content: { backend: 'nomi', status: 'preparing', agent_name: 'Nomi' },
+    });
+    const durableStatus = fetchedMessage(baseMessage({
+      id: 'durable-turn-summary',
+      msg_id: streamId,
+      turn_id: turnId,
+      conversation_id: conversationId,
+      type: 'agent_status',
+      position: 'center',
+      status: 'finish',
+      created_at: 1000,
+      content: { backend: 'nomi', status: 'prepared', agent_name: 'Nomi', turn_summary: true },
+    }));
+
+    const merged = mergeFetchedMessagesForConversation(
+      [liveStatus],
+      [durableStatus],
+      conversationId
+    );
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.message_id).toBe(durableStatus.message_id);
+    expect(merged[0]?.content).toEqual(durableStatus.content);
+  });
+
   test('hydrates distinct thinking and agent-status rows into one owning turn disclosure', () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
     const turnId = messageId('persisted-process-root');

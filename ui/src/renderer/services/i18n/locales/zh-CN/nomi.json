@@ -178,6 +178,7 @@
     "personaTitle": "角色介绍",
     "modelSection": "模型配置",
     "modelSectionHint": "决定它用哪个模型思考与回应",
+    "fixedAgentHint": "桌面、IM 和机器人入口共用官方“伙伴” Agent；渠道和机器人均为可选连接。",
     "mainChatModel": "主对话模型",
     "modelMissing": "还没有为 {{companionName}} 配置聊天模型，它暂时无法学习和聊天。",
     "fallbackChatModel": "备用对话模型",
@@ -362,6 +363,8 @@
   },
   "chat": {
     "modelSaveFailed": "对话模型保存失败，请重试",
+    "fixedAgentAria": "固定 Agent：{{agent}}",
+    "fixedAgentHint": "伙伴会话固定使用官方“伙伴” Agent。",
     "skillsScopeHint": "用于后续新建伙伴会话的默认技能；已有 AgentSession 保留冻结的技能快照。",
     "mcpScopeHint": "请在启动前选择 MCP 服务；精确资源会冻结到新建的伙伴会话中。",
     "mcpFrozenHint": "当前伙伴会话的 MCP 资源已冻结；如需更改，请在 Agent 工作台配置后新建会话。",

@@ -9,13 +9,19 @@ import { describe, expect, test } from 'bun:test';
 
 const cssSource = readFileSync(new URL('./messages.css', import.meta.url), 'utf8');
 const disclosureSource = readFileSync(new URL('./components/TurnProcessDisclosure.tsx', import.meta.url), 'utf8');
+const processTraceSource = readFileSync(new URL('./components/ProcessTraceItem.tsx', import.meta.url), 'utf8');
 const messageListSource = readFileSync(new URL('./MessageList.tsx', import.meta.url), 'utf8');
+type MessagesLocale = Record<string, unknown> & {
+  turnProcessed: string;
+  turnCanceled: string;
+  processReceipt: Record<string, string>;
+};
 const zhMessages = JSON.parse(
   readFileSync(new URL('../../../services/i18n/locales/zh-CN/messages.json', import.meta.url), 'utf8')
-) as Record<string, string>;
+) as MessagesLocale;
 const enMessages = JSON.parse(
   readFileSync(new URL('../../../services/i18n/locales/en-US/messages.json', import.meta.url), 'utf8')
-) as Record<string, string>;
+) as MessagesLocale;
 
 const cssRuleFor = (selector: string) => {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -66,6 +72,15 @@ describe('turn process disclosure content layout', () => {
     expect(zhMessages.turnCanceled.includes('{{duration}}')).toBe(true);
     expect(enMessages.turnProcessed.includes('{{duration}}')).toBe(true);
     expect(enMessages.turnCanceled.includes('{{duration}}')).toBe(true);
+  });
+
+  test('labels a durable turn summary as completed processing rather than a prepared next action', () => {
+    expect(zhMessages.processReceipt.turnSummaryCompleted).toBe('本轮处理已完成');
+    expect(enMessages.processReceipt.turnSummaryCompleted).toBe('Turn processing completed');
+    expect(messageListSource.includes('item.content.turn_summary')).toBe(true);
+    expect(messageListSource.includes('messages.processReceipt.turnSummaryCompleted')).toBe(true);
+    expect(processTraceSource.includes('item.content.turn_summary')).toBe(true);
+    expect(processTraceSource.includes('messages.processReceipt.turnSummaryCompleted')).toBe(true);
   });
 
   test('does not render an empty disclosure body before process rows arrive', () => {

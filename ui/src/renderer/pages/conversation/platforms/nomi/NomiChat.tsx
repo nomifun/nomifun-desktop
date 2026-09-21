@@ -46,6 +46,8 @@ const NomiChat: React.FC<{
   extraRightTools?: React.ReactNode;
   /** Only Sessions frozen with creation.media own generation task history. */
   creationTasksEnabled?: boolean;
+  /** Product-owned chat surfaces can explicitly suppress media creation scenes. */
+  creationEnabled?: boolean;
 }> = ({
   conversation_id,
   workspace,
@@ -65,6 +67,7 @@ const NomiChat: React.FC<{
   collaboratorSelectorNode,
   extraRightTools,
   creationTasksEnabled = false,
+  creationEnabled = true,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
@@ -128,6 +131,7 @@ const NomiChat: React.FC<{
               modelSelectionDisabled={modelSelectionDisabled}
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
+              creationEnabled={creationEnabled}
               turnActivity={turnActivity}
             />
           )}

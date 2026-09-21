@@ -126,6 +126,8 @@ describe('Guid workbench Agent launch behavior', () => {
     );
 
     expect(send.includes("selection.kind === 'default'")).toBe(false);
+    expect(send.includes('prepareCompanionConversation')).toBe(false);
+    expect(send.includes('sendCompanionLaunchMessage')).toBe(false);
     expect(send.includes('ipcBridge.conversation.create.invoke')).toBe(false);
     expect(send.includes('current_model')).toBe(true);
     expect(send.includes('provider_id: current_model.id')).toBe(true);
@@ -172,6 +174,17 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(officialLaunch).toMatch(
       /if \(!editor\.preset\.current_stable_revision\) \{\s*throw new Error\('AGENT_PRESET_REQUIRED'\);\s*\}\s*return editor\.preset as ExecutableAgentPreset;/
     );
+  });
+
+  test('routes Companion through its product-owned conversation instead of Guid resources', () => {
+    const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
+    const catalog = readSource(
+      new URL('../../components/agent/conversationAgentCatalog.ts', import.meta.url)
+    );
+
+    expect(catalog.includes("value !== COMPANION_TEMPLATE_KEY")).toBe(true);
+    expect(page.includes('isCompanionAgent')).toBe(false);
+    expect(page.includes('companionBindings=')).toBe(false);
   });
 
   test('Agent launch submits Agent identity, title, model, and narrow product resource selections', () => {
