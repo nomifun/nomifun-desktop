@@ -19,6 +19,7 @@ export interface CreativeResourceDialogProps {
   children: React.ReactNode;
   scope?: CreativeResourceDialogScope;
   contentClassName?: string;
+  popupContainer?: HTMLElement | null;
   onClose(): void;
 }
 
@@ -29,6 +30,7 @@ const CreativeResourceDialog: React.FC<CreativeResourceDialogProps> = ({
   children,
   scope,
   contentClassName,
+  popupContainer,
   onClose,
 }) => (
   <Modal
@@ -42,6 +44,7 @@ const CreativeResourceDialog: React.FC<CreativeResourceDialogProps> = ({
     maskClosable
     escToExit
     unmountOnExit
+    getPopupContainer={popupContainer ? () => popupContainer : undefined}
     onCancel={onClose}
   >
     <div

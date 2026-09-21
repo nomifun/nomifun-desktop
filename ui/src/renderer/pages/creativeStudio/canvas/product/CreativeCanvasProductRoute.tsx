@@ -957,6 +957,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
   const [resourceDialogView, setResourceDialogView] =
     useState<CreativeCanvasResourceView | null>(null);
+  const [resourceDialogPopupContainer, setResourceDialogPopupContainer] =
+    useState<HTMLElement | null>(null);
   const [timelineAssetTargetId, setTimelineAssetTargetId] = useState<string | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -1282,6 +1284,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     panelsRef.current = defaultPanels;
     setPanels(defaultPanels);
     setResourceDialogView(null);
+    setResourceDialogPopupContainer(null);
     setTimelineAssetTargetId(null);
     hydratedPanelsRef.current = null;
     canvasStateRef.current = null;
@@ -1416,7 +1419,10 @@ const CreativeCanvasProductRoute: React.FC = () => {
   }, []);
 
   const handleResourceViewChange = useCallback(
-    (view: CreativeCanvasResourceView | null) => {
+    (
+      view: CreativeCanvasResourceView | null,
+      popupContainer: HTMLElement | null = null
+    ) => {
       if (view === null || view === 'assets') {
         setSelectedAssetIds(new Set());
       }
@@ -1425,6 +1431,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setAssetKind('all');
       }
       if (view !== 'assets') setTimelineAssetTargetId(null);
+      setResourceDialogPopupContainer(view === null ? null : popupContainer);
       setResourceDialogView(view);
       if (view !== null && panelsRef.current.left.open) {
         persistPanels(withCreativeCanvasLeftPanelOpen(panelsRef.current, false));
@@ -4586,9 +4593,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const openTimelineAssetLibrary = useCallback(
-    (nodeId: string) => {
+    (nodeId: string, popupContainer: HTMLElement | null) => {
       setTimelineAssetTargetId(nodeId);
-      handleResourceViewChange('assets');
+      handleResourceViewChange('assets', popupContainer);
     },
     [handleResourceViewChange]
   );
@@ -4894,6 +4901,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         leftOpen={panels.left.open && panelViews.left === 'canvas'}
         leftView={panelViews.left}
         resourceView={resourceDialogView}
+        resourceDialogPopupContainer={resourceDialogPopupContainer}
         rightView={panelViews.right}
         rightPanelWidth={panels.right.width}
         bottomView={panelViews.bottom}
@@ -4963,6 +4971,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               src: asset.originalUrl,
                               thumbnailSrc: asset.thumbnailUrl,
                               deleted: isCreativeAssetDeleted(asset),
+                              width: asset.width,
+                              height: asset.height,
+                              mimeType: asset.mimeType,
                             },
                           ]];
                         })
@@ -5033,7 +5044,8 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       }
                       onTimelineRequestAssets={
                         node.type === 'timeline'
-                          ? () => openTimelineAssetLibrary(node.id)
+                          ? (popupContainer) =>
+                              openTimelineAssetLibrary(node.id, popupContainer)
                           : undefined
                       }
                       onTimelineUploadFiles={

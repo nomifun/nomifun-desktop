@@ -320,13 +320,14 @@ export const CreativeCanvasBackgroundMenu: React.FC<CreativeCanvasBackgroundMenu
 export interface CreativeCanvasResourceDialogProps {
   view: CreativeCanvasResourceView | null;
   content?: React.ReactNode;
+  popupContainer?: HTMLElement | null;
   onClose(): void;
 }
 
 /** One presentation contract for the three canvas resource libraries. */
 export const CreativeCanvasResourceDialog: React.FC<
   CreativeCanvasResourceDialogProps
-> = ({ view, content, onClose }) => {
+> = ({ view, content, popupContainer, onClose }) => {
   const { t } = useTranslation();
   if (!view) return null;
   const title =
@@ -344,6 +345,7 @@ export const CreativeCanvasResourceDialog: React.FC<
       title={title}
       scope='canvas'
       contentClassName={styles.canvasResourceContent}
+      popupContainer={popupContainer}
       onClose={onClose}
     >
       {content}
@@ -909,6 +911,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       <CreativeCanvasResourceDialog
         view={props.resourceView}
         content={resourceSlot}
+        popupContainer={props.resourceDialogPopupContainer}
         onClose={() => props.onResourceViewChange(null)}
       />
     </section>

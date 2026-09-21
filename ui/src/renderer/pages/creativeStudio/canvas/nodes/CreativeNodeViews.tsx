@@ -415,7 +415,7 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
     mergeKey?: string
   ) => void;
   onTimelineDelete?: () => void;
-  onTimelineRequestAssets?: () => void;
+  onTimelineRequestAssets?: (popupContainer: HTMLElement | null) => void;
   onTimelineUploadFiles?: (files: readonly File[]) => void | Promise<void>;
 };
 

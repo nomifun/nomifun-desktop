@@ -12,6 +12,7 @@ import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeTimelineNode, {
   type CreativeTimelineAssetPresentation,
 } from './CreativeTimelineNode';
+import { downloadTimelineComposition } from './timelineExport';
 import type { CreativeNodeOfKind } from './types';
 
 const timelineNode = (): CreativeNodeOfKind<'timeline'> => ({
@@ -135,7 +136,33 @@ describe('CreativeTimelineNode interactions', () => {
     expect(dropped.map((file) => file.name)).toEqual(['scene.png']);
   });
 
-  test('exports a downloadable NomiFun timeline manifest', () => {
+  test('passes the fullscreen root as the asset-dialog portal container', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(document, 'fullscreenElement');
+    let popupContainer: HTMLElement | null = null;
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={{ ...timelineNode(), data: { ...timelineNode().data, clips: [] } }}
+        assets={new Map()}
+        placement='contained'
+        onRequestAssets={(container) => { popupContainer = container; }}
+      />
+    ));
+    const root = view.container.querySelector<HTMLElement>('[data-timeline-node]');
+    if (!root) throw new Error('timeline root fixture missing');
+    Object.defineProperty(document, 'fullscreenElement', {
+      configurable: true,
+      value: root,
+    });
+    try {
+      fireEvent.click(view.getByRole('button', { name: '添加素材到时间线' }));
+      expect(popupContainer).toBe(root);
+    } finally {
+      if (descriptor) Object.defineProperty(document, 'fullscreenElement', descriptor);
+      else delete (document as unknown as Record<string, unknown>).fullscreenElement;
+    }
+  });
+
+  test('downloads a composed video result with the timeline title', () => {
     const originalCreateObjectUrl = URL.createObjectURL;
     const originalRevokeObjectUrl = URL.revokeObjectURL;
     const originalAnchorClick = HTMLAnchorElement.prototype.click;
@@ -146,13 +173,17 @@ describe('CreativeTimelineNode interactions', () => {
       download = { href: this.href, fileName: this.download };
     };
     try {
-      const view = render(withCanvasTestI18n(
-        <CreativeTimelineNode node={timelineNode()} assets={assets} placement='contained' />
-      ));
-      fireEvent.click(view.getByRole('button', { name: '导出时间线' }));
+      downloadTimelineComposition({
+        blob: new Blob(['video'], { type: 'video/mp4' }),
+        mimeType: 'video/mp4',
+        extension: 'mp4',
+        width: 1280,
+        height: 720,
+        durationMs: 5_000,
+      }, '时间线1');
       expect(download).toEqual({
         href: 'blob:timeline-export',
-        fileName: '时间线1.nomifun-timeline.json',
+        fileName: '时间线1.mp4',
       });
     } finally {
       URL.createObjectURL = originalCreateObjectUrl;

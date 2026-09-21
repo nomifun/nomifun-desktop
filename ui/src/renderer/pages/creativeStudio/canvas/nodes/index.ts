@@ -25,6 +25,23 @@ export type {
   CreativeTimelineNodeProps,
 } from './CreativeTimelineNode';
 export {
+  buildTimelineExportPlan,
+  downloadTimelineComposition,
+  exportTimelineComposition,
+  selectTimelineExportFormat,
+  selectTimelineExportMimeType,
+  timelineExportSize,
+  TimelineExportError,
+} from './timelineExport';
+export type {
+  TimelineCompositionExportOptions,
+  TimelineCompositionExportResult,
+  TimelineExportErrorCode,
+  TimelineExportFormat,
+  TimelineExportPlan,
+  TimelineExportPlanClip,
+} from './timelineExport';
+export {
   appendTimelineClips,
   moveTimelineClip,
   removeTimelineClip,
