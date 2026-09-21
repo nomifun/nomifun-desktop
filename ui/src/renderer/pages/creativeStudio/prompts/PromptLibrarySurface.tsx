@@ -30,6 +30,12 @@ export interface PromptLibrarySurfaceProps {
   selectedId?: string | null;
   /** Optional source namespace for controlled selections with colliding IDs. */
   selectedSource?: PromptLibraryItem['source'] | null;
+  showTagFilters?: boolean;
+  showHeader?: boolean;
+  visibleItemLimit?: number;
+  selectionHint?: string;
+  cardPresentation?: 'default' | 'visual-picker';
+  applyLabel?: string;
   onRetry?: () => void;
   onSelect?: (item: PromptLibraryItem) => void;
   onCopy?: (selection: PromptLibrarySelection) => void;
@@ -99,10 +105,89 @@ const StateView: React.FC<{
 const PromptCard: React.FC<{
   item: PromptLibraryItem;
   selected: boolean;
+  active?: boolean;
+  presentation?: 'default' | 'visual-picker';
+  selectionHint?: string;
+  applyLabel?: string;
+  onActivate?: () => void;
+  onApply?: () => void;
   onSelect: () => void;
   onCopy?: () => void;
-}> = ({ item, selected, onSelect, onCopy }) => {
+}> = ({
+  item,
+  selected,
+  active = false,
+  presentation = 'default',
+  selectionHint,
+  applyLabel,
+  onActivate,
+  onApply,
+  onSelect,
+  onCopy,
+}) => {
   const { t } = useTranslation();
+  const [coverFailed, setCoverFailed] = useState(false);
+  const hasCover = Boolean(item.coverUrl && !coverFailed);
+
+  if (presentation === 'visual-picker') {
+    const description = item.description || item.prompt;
+    return (
+      <article
+        className={classNames(styles.card, styles.visualCard, selected && styles.selected)}
+        data-prompt-library-item={item.id}
+        data-active={active || undefined}
+        role='listitem'
+      >
+        <button
+          type='button'
+          className={styles.visualCardButton}
+          data-prompt-card-action='activate'
+          aria-pressed={active}
+          aria-label={t('creativeStudio.prompts.selectPrompt', {
+            defaultValue: 'Select prompt: {{title}}',
+            title: item.title,
+          })}
+          onClick={onActivate}
+        >
+          {hasCover ? (
+            <img
+              className={styles.visualCover}
+              src={item.coverUrl!}
+              alt={item.title}
+              loading='lazy'
+              decoding='async'
+              referrerPolicy='no-referrer'
+              onError={() => setCoverFailed(true)}
+            />
+          ) : (
+            <span className={styles.visualFallback}>
+              <FileText theme='outline' size={28} fill='currentColor' />
+              <strong>{item.title}</strong>
+              <span>{description}</span>
+            </span>
+          )}
+        </button>
+        {item.category ? <span className={styles.visualCategory}>{item.category}</span> : null}
+        <div className={styles.visualOverlay} aria-hidden={!active}>
+          <h3>{item.title}</h3>
+          <p>{description}</p>
+          <button
+            type='button'
+            className={styles.visualApplyButton}
+            data-prompt-card-action='apply'
+            tabIndex={active ? 0 : -1}
+            onClick={onApply}
+          >
+            {applyLabel ||
+              t('creativeStudio.prompts.selectPrompt', {
+                defaultValue: 'Use prompt',
+                title: item.title,
+              })}
+          </button>
+        </div>
+      </article>
+    );
+  }
 
   return (
     <article
@@ -152,14 +237,15 @@ const PromptCard: React.FC<{
       </button>
       <footer className={styles.cardFooter}>
         <span>
-          {item.knowledgeBaseIds.length > 0
-            ? t('creativeStudio.prompts.relatedKnowledgeBases', {
-                defaultValue: '{{count}} linked knowledge bases',
-                count: item.knowledgeBaseIds.length,
-              })
-            : t('creativeStudio.prompts.copyForReuse', {
-                defaultValue: 'Copy for flexible reuse',
-              })}
+          {selectionHint ??
+            (item.knowledgeBaseIds.length > 0
+              ? t('creativeStudio.prompts.relatedKnowledgeBases', {
+                  defaultValue: '{{count}} linked knowledge bases',
+                  count: item.knowledgeBaseIds.length,
+                })
+              : t('creativeStudio.prompts.copyForReuse', {
+                  defaultValue: 'Copy for flexible reuse',
+                }))}
         </span>
         {onCopy ? (
           <button
@@ -192,6 +278,12 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   description,
   selectedId,
   selectedSource,
+  showTagFilters = true,
+  showHeader = true,
+  visibleItemLimit,
+  selectionHint,
+  cardPresentation = 'default',
+  applyLabel,
   onRetry,
   onSelect,
   onCopy,
@@ -201,10 +293,18 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
   const [category, setCategory] = useState<string | null | undefined>(undefined);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [localSelectedKey, setLocalSelectedKey] = useState<string | null>(null);
+  const [activeVisualKey, setActiveVisualKey] = useState<string | null>(null);
   const facets = useMemo(() => promptLibraryFacets(items), [items]);
   const filteredItems = useMemo(
     () => filterPromptLibraryItems(items, { query, category, tags: selectedTags }),
     [category, items, query, selectedTags]
+  );
+  const visibleItems = useMemo(
+    () =>
+      visibleItemLimit && visibleItemLimit > 0
+        ? filteredItems.slice(0, visibleItemLimit)
+        : filteredItems,
+    [filteredItems, visibleItemLimit]
   );
   const hasFilters = Boolean(query.trim() || category !== undefined || selectedTags.length > 0);
   const resolvedTitle =
@@ -238,6 +338,15 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
     });
   }, [facets]);
 
+  useEffect(() => {
+    if (
+      activeVisualKey &&
+      !filteredItems.some((item) => promptLibraryItemKey(item) === activeVisualKey)
+    ) {
+      setActiveVisualKey(null);
+    }
+  }, [activeVisualKey, filteredItems]);
+
   const reset = useCallback(() => {
     setQuery('');
     setCategory(undefined);
@@ -262,50 +371,77 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
 
   return (
     <section
-      className={classNames(styles.surface, variant === 'page' ? styles.page : styles.sidebar)}
+      className={classNames(
+        styles.surface,
+        variant === 'page' ? styles.page : styles.sidebar,
+        cardPresentation === 'visual-picker' && styles.visualPicker
+      )}
       data-prompt-library={variant}
+      data-card-presentation={cardPresentation}
     >
       <div className={styles.inner}>
-        <header className={styles.header}>
-          <div>
-            <h2 className={styles.title}>{resolvedTitle}</h2>
-            <p className={styles.description}>{resolvedDescription}</p>
-          </div>
-          {onRetry ? (
-            <button
-              type='button'
-              className={styles.refreshButton}
-              aria-label={t('creativeStudio.prompts.refresh', {
-                defaultValue: 'Refresh prompts',
-              })}
-              disabled={refreshing}
-              onClick={onRetry}
-            >
-              <Refresh
-                theme='outline'
-                size={15}
-                fill='currentColor'
-                className={refreshing ? styles.spinning : undefined}
-              />
-            </button>
-          ) : null}
-        </header>
+        {showHeader ? (
+          <header className={styles.header}>
+            <div>
+              <h2 className={styles.title}>{resolvedTitle}</h2>
+              <p className={styles.description}>{resolvedDescription}</p>
+            </div>
+            {onRetry ? (
+              <button
+                type='button'
+                className={styles.refreshButton}
+                aria-label={t('creativeStudio.prompts.refresh', {
+                  defaultValue: 'Refresh prompts',
+                })}
+                disabled={refreshing}
+                onClick={onRetry}
+              >
+                <Refresh
+                  theme='outline'
+                  size={15}
+                  fill='currentColor'
+                  className={refreshing ? styles.spinning : undefined}
+                />
+              </button>
+            ) : null}
+          </header>
+        ) : null}
 
         <div className={styles.toolbar}>
-          <label className={styles.searchField}>
-            <Search theme='outline' size={15} fill='currentColor' aria-hidden='true' />
-            <input
-              type='search'
-              value={query}
-              aria-label={t('creativeStudio.prompts.search', {
-                defaultValue: 'Search prompts',
-              })}
-              placeholder={t('creativeStudio.prompts.searchPlaceholder', {
-                defaultValue: 'Search titles, content, or tags',
-              })}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          </label>
+          <div className={styles.searchRow}>
+            <label className={styles.searchField}>
+              <Search theme='outline' size={15} fill='currentColor' aria-hidden='true' />
+              <input
+                type='search'
+                value={query}
+                aria-label={t('creativeStudio.prompts.search', {
+                  defaultValue: 'Search prompts',
+                })}
+                placeholder={t('creativeStudio.prompts.searchPlaceholder', {
+                  defaultValue: 'Search titles, content, or tags',
+                })}
+                onChange={(event) => setQuery(event.target.value)}
+              />
+            </label>
+            {!showHeader && onRetry ? (
+              <button
+                type='button'
+                className={styles.refreshButton}
+                aria-label={t('creativeStudio.prompts.refresh', {
+                  defaultValue: 'Refresh prompts',
+                })}
+                disabled={refreshing}
+                onClick={onRetry}
+              >
+                <Refresh
+                  theme='outline'
+                  size={15}
+                  fill='currentColor'
+                  className={refreshing ? styles.spinning : undefined}
+                />
+              </button>
+            ) : null}
+          </div>
 
           <div className={styles.facetRow}>
             <span className={styles.facetLabel}>
@@ -346,7 +482,7 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
             </div>
           </div>
 
-          {facets.tags.length > 0 ? (
+          {showTagFilters && facets.tags.length > 0 ? (
             <div className={styles.facetRow}>
               <span className={styles.facetLabel}>
                 {t('creativeStudio.prompts.tags', { defaultValue: 'Tags' })}
@@ -445,16 +581,26 @@ export const PromptLibrarySurface: React.FC<PromptLibrarySurfaceProps> = ({
               ) : null}
             </div>
             <div className={styles.grid} role='list'>
-              {filteredItems.map((item) => (
+              {visibleItems.map((item) => (
                 <PromptCard
                   key={promptLibraryItemKey(item)}
                   item={item}
+                  presentation={cardPresentation}
+                  active={activeVisualKey === promptLibraryItemKey(item)}
+                  selectionHint={selectionHint}
+                  applyLabel={applyLabel}
                   selected={
                     selectedId === undefined
                       ? promptLibraryItemKey(item) === localSelectedKey
                       : item.id === selectedId &&
                         (selectedSource == null || item.source === selectedSource)
                   }
+                  onActivate={() =>
+                    setActiveVisualKey((current) =>
+                      current === promptLibraryItemKey(item) ? null : promptLibraryItemKey(item)
+                    )
+                  }
+                  onApply={() => select(item)}
                   onSelect={() => select(item)}
                   onCopy={onCopy ? () => copy(item) : undefined}
                 />

@@ -14,7 +14,7 @@ import { useGuidCreation } from './useGuidCreation';
 import { creationDraftStorageKey } from './useCreationDraft';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
 import { CreationComposerContext } from './CreationComposerContext';
-import CreationControls, { CreationModelSelector } from './CreationControls';
+import CreationControls, { CreationModelSelector, DurationPicker } from './CreationControls';
 import ComposerSceneSelector from './ComposerSceneSelector';
 import creationMessages from '@/renderer/services/i18n/locales/zh-CN/creation.json';
 import { emptyCreationDraft } from './useCreationDraft';
@@ -31,6 +31,37 @@ beforeEach(() => {
 afterEach(() => { cleanup(); assetList.mockRestore(); });
 const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-000000000105');
 const presetId = parseAgentPresetId('0190f5fe-7c00-7a00-8000-000000000104');
+
+test('duration picker exposes exact video choices and updates the selected value', () => {
+  function Harness() {
+    const [value, setValue] = useState(5);
+    return <DurationPicker label='视频时长' values={[5, 10, 15]} value={value} onChange={setValue} />;
+  }
+  const page = render(<Harness />);
+  const group = page.getByRole('group', { name: '视频时长' });
+  expect([...group.querySelectorAll('[aria-hidden="true"] span')].map(item => item.textContent)).toEqual(['5', '10', '15']);
+  const slider = within(group).getByRole('slider', { name: '选择视频时长' }) as HTMLInputElement;
+  slider.value = '2';
+  fireEvent.input(slider);
+  expect(group.querySelector('output')?.textContent).toBe('15s');
+});
+
+test('music duration stays on smart mode until the user enables the slider', () => {
+  function Harness() {
+    const [automatic, setAutomatic] = useState(true);
+    const [value, setValue] = useState(120);
+    return <DurationPicker label='音乐时长' values={[60, 120, 180, 240, 300, 360]} value={value} automatic={automatic} onAutomaticChange={setAutomatic} onChange={setValue} />;
+  }
+  const page = render(<Harness />);
+  const group = page.getByRole('group', { name: '音乐时长' });
+  const slider = within(group).getByRole('slider', { name: '选择音乐时长' }) as HTMLInputElement;
+  expect(slider.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(within(group).getByRole('switch', { name: '智能时长' }));
+  expect(slider.hasAttribute('disabled')).toBe(false);
+  slider.value = '3';
+  fireEvent.input(slider);
+  expect(group.querySelector('output')?.textContent).toBe('240s');
+});
 
 test.each(['image', 'video'] as const)('%s quantity offers at most four and submits a capped count', async mode => {
   const protocol = mode === 'video' ? 'agnes.video_jobs' : 'openai.images';

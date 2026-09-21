@@ -1213,7 +1213,8 @@
       },
       "summary": "{{count}} 个模板",
       "title": "模板",
-      "uncategorized": "未分类"
+      "uncategorized": "未分类",
+      "workspaceDescription": "运行模板，并将结果直接插入当前画布。"
     },
     "zoom": {
       "resetView": "重置视图",
