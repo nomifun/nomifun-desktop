@@ -95,24 +95,11 @@ fn convert_chat_route_candidate(
         ChatRouteProtocol::Bedrock => ChatProtocol::Bedrock,
         ChatRouteProtocol::Vertex => ChatProtocol::Vertex,
     };
-    let features = candidate
-        .features
+    let features = candidate.features.iter().map(convert_route_feature).collect();
+    let activation_features = candidate
+        .activation_features
         .iter()
-        .map(|feature| match feature {
-            ChatRouteFeature::TextInput => ChatModelFeature::TextInput,
-            ChatRouteFeature::ImageInput => ChatModelFeature::ImageInput,
-            ChatRouteFeature::AudioInput => ChatModelFeature::AudioInput,
-            ChatRouteFeature::TextOutput => ChatModelFeature::TextOutput,
-            ChatRouteFeature::AudioOutput => ChatModelFeature::AudioOutput,
-            ChatRouteFeature::ToolCalls => ChatModelFeature::ToolCalls,
-            ChatRouteFeature::Reasoning => ChatModelFeature::Reasoning,
-            ChatRouteFeature::ReasoningSignature => ChatModelFeature::ReasoningSignature,
-            ChatRouteFeature::PromptCache => ChatModelFeature::PromptCache,
-            ChatRouteFeature::StructuredOutput => ChatModelFeature::StructuredOutput,
-            ChatRouteFeature::ProviderRoundState => ChatModelFeature::ProviderRoundState,
-            ChatRouteFeature::NativeResponsesItems => ChatModelFeature::NativeResponsesItems,
-            ChatRouteFeature::WebSearch => ChatModelFeature::WebSearch,
-        })
+        .map(convert_route_feature)
         .collect();
     let route = ResolvedChatRoute {
         model_route_id: candidate.model_route_id.clone(),
@@ -124,11 +111,30 @@ fn convert_chat_route_candidate(
         config_revision_digest: candidate.config_revision_digest.clone(),
         credential_ref: ProviderCredentialRef::from(candidate.credential_ref.clone()),
         features,
+        activation_features,
     };
     route
         .validate()
         .map_err(|error| ChatBrokerHostError::InvalidRouteRecord(error.to_string()))?;
     Ok(route)
+}
+
+fn convert_route_feature(feature: &ChatRouteFeature) -> ChatModelFeature {
+    match feature {
+        ChatRouteFeature::TextInput => ChatModelFeature::TextInput,
+        ChatRouteFeature::ImageInput => ChatModelFeature::ImageInput,
+        ChatRouteFeature::AudioInput => ChatModelFeature::AudioInput,
+        ChatRouteFeature::TextOutput => ChatModelFeature::TextOutput,
+        ChatRouteFeature::AudioOutput => ChatModelFeature::AudioOutput,
+        ChatRouteFeature::ToolCalls => ChatModelFeature::ToolCalls,
+        ChatRouteFeature::Reasoning => ChatModelFeature::Reasoning,
+        ChatRouteFeature::ReasoningSignature => ChatModelFeature::ReasoningSignature,
+        ChatRouteFeature::PromptCache => ChatModelFeature::PromptCache,
+        ChatRouteFeature::StructuredOutput => ChatModelFeature::StructuredOutput,
+        ChatRouteFeature::ProviderRoundState => ChatModelFeature::ProviderRoundState,
+        ChatRouteFeature::NativeResponsesItems => ChatModelFeature::NativeResponsesItems,
+        ChatRouteFeature::WebSearch => ChatModelFeature::WebSearch,
+    }
 }
 
 /// Detailed, safe errors returned by the app-side route and lease boundary.
@@ -1562,6 +1568,7 @@ mod tests {
                 ChatRouteFeature::TextInput,
                 ChatRouteFeature::TextOutput,
             ]),
+            activation_features: BTreeSet::new(),
         }
     }
 

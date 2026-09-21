@@ -82,6 +82,7 @@ fn provider_preference_kind(key: &str) -> Option<ProviderPreferenceKind> {
         // retained under the model-owned key.
         IMAGE_GENERATION_DEFAULT_MODEL_KEY
         | "models.default.imageEdit"
+        | "models.default.vision"
         | "models.default.videoGeneration"
         | "models.default.musicGeneration"
         | "models.default.speechSynthesis" => Some(ProviderPreferenceKind::CanonicalModelObject),

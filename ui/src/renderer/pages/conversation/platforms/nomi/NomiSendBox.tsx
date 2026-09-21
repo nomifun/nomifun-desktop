@@ -72,6 +72,7 @@ import { useGenerationModel } from '@/renderer/creation/useGenerationModel';
 import { buildCreationRequest, creationAttempt, acknowledgeCreationAttempt } from '@/renderer/creation/submission';
 import { creationTasksKey, submitCreation } from '@/renderer/creation/client';
 import { mutate as mutateSWR } from 'swr';
+import { useConfig } from '@/renderer/hooks/config/useConfig';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -152,6 +153,7 @@ const NomiSendBox: React.FC<{
   const { t } = useTranslation();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
+  const [defaultVisionModel] = useConfig('models.default.vision');
 
   const {
     data: providerGraph,
@@ -167,6 +169,7 @@ const NomiSendBox: React.FC<{
           !isProviderGraphLoading && !providerGraphError && Array.isArray(providerGraph),
         providerId: current_model?.id,
         model: current_model?.use_model,
+        visionModel: defaultVisionModel,
       });
       if (decision.allowed) return true;
       Message.warning(
@@ -181,6 +184,7 @@ const NomiSendBox: React.FC<{
     [
       current_model?.id,
       current_model?.use_model,
+      defaultVisionModel,
       isProviderGraphLoading,
       providerGraph,
       providerGraphError,

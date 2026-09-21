@@ -72,14 +72,16 @@ const decision = ({
   model = 'same-model',
   files = ['C:/tmp/photo.PNG'],
   providerGraphResolved = true,
+  visionModel,
 }: {
   providers: IProvider[];
   providerId?: string;
   model?: string;
   files?: string[];
   providerGraphResolved?: boolean;
+  visionModel?: { provider_id: string; model: string };
 }) =>
-  evaluateNomiVisionSend({ providers, providerId, model, files, providerGraphResolved });
+  evaluateNomiVisionSend({ providers, providerId, model, files, providerGraphResolved, visionModel });
 
 describe('Nomi image-send capability guard', () => {
   test('allows images only when the exact provider/model Chat capability declares vision_input', () => {
@@ -112,6 +114,30 @@ describe('Nomi image-send capability guard', () => {
 
     expect(
       decision({ providers: [selected, otherProvider, otherModel], model: 'gpt-4o' })
+    ).toEqual({ allowed: false, reason: 'vision_not_supported' });
+  });
+
+  test('allows an explicitly configured exact vision route without promoting the primary model', () => {
+    expect(
+      decision({
+        providers: [
+          provider({ id: 'provider-a', model: 'text-only' }),
+          provider({ id: 'provider-b', model: 'vision', chatTraits: ['vision_input', 'function_calling'] }),
+        ],
+        model: 'text-only',
+        visionModel: { provider_id: 'provider-b', model: 'vision' },
+      })
+    ).toEqual({ allowed: true });
+
+    expect(
+      decision({
+        providers: [
+          provider({ id: 'provider-a', model: 'text-only' }),
+          provider({ id: 'provider-b', model: 'vision-only', chatTraits: ['vision_input'] }),
+        ],
+        model: 'text-only',
+        visionModel: { provider_id: 'provider-b', model: 'vision-only' },
+      })
     ).toEqual({ allowed: false, reason: 'vision_not_supported' });
   });
 

@@ -31,19 +31,32 @@ export const evaluateNomiVisionSend = ({
   providerGraphResolved,
   providerId,
   model,
+  visionModel,
 }: {
   files: readonly string[];
   providers: readonly IProvider[];
   providerGraphResolved: boolean;
   providerId?: string;
   model?: string;
+  visionModel?: { provider_id: string; model: string };
 }): NomiVisionSendDecision => {
   if (!containsImageAttachment(files)) return { allowed: true };
   if (!providerGraphResolved) return { allowed: false, reason: 'capability_unavailable' };
 
-  const provider = providers.find((candidate) => candidate.id === providerId);
-  const chatCapability = model ? capabilityOf(provider, model, 'chat') : undefined;
-  return chatCapability?.traits.includes('vision_input')
+  const supportsVision = (
+    candidateProviderId?: string,
+    candidateModel?: string,
+    requireToolCalls = false,
+  ) => {
+    const provider = providers.find((candidate) => candidate.id === candidateProviderId);
+    const chatCapability = candidateModel
+      ? capabilityOf(provider, candidateModel, 'chat')
+      : undefined;
+    return chatCapability?.traits.includes('vision_input') === true
+      && (!requireToolCalls || chatCapability.traits.includes('function_calling'));
+  };
+  return supportsVision(providerId, model)
+    || supportsVision(visionModel?.provider_id, visionModel?.model, true)
     ? { allowed: true }
     : { allowed: false, reason: 'vision_not_supported' };
 };

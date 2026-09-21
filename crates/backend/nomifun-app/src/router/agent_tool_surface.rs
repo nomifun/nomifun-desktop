@@ -129,6 +129,11 @@ pub(super) async fn compile(
                 .resolve(selected, &action.input_schema)
                 .await
                 .map_err(error)?;
+            let schema = super::engine_creation_tools::conversation_creation_schema(
+                selected.capability.id.as_ref(),
+                action.action_id.as_ref(),
+                schema,
+            );
             if !concrete_object_schema(&schema.0, true) {
                 return Err(error(format!(
                     "{} action {} has no strict canonical tool schema",

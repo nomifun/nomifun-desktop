@@ -148,6 +148,19 @@
           },
           {
             "capability": {
+              "id": "creation.media",
+              "version": "1.0.0"
+            },
+            "action_allowlist": [
+              "creation.media/audio",
+              "creation.media/image",
+              "creation.media/image_edit",
+              "creation.media/music",
+              "creation.media/video"
+            ]
+          },
+          {
+            "capability": {
               "id": "agent.tool-discovery",
               "version": "1.0.0"
             },
@@ -547,6 +560,7 @@
           "browser",
           "computer",
           "file_operations",
+          "generation",
           "knowledge",
           "project_memory",
           "requirements",
@@ -562,6 +576,7 @@
           "automation.schedule",
           "browser",
           "computer",
+          "creation.media",
           "knowledge",
           "project.memory",
           "requirements",
@@ -727,5 +742,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "ef67c86183a8c42ea4c23b9a0acbaa119019e347f7a6685daf4db7f6a95fb864"
+  "payload_digest": "37f993a043f22f8ef44a6b07d1b3d61cec1b61c96336ac3ae4fea566b4930f4e"
 }

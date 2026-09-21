@@ -90,6 +90,7 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
             ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
             ("requirements", &["requirements/claim", "requirements/read", "requirements/status", "requirements/write"]),
+            ("creation.media", &["creation.media/audio", "creation.media/image", "creation.media/image_edit", "creation.media/music", "creation.media/video"]),
             ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
         (OfficialPresetKey::CodingCodex, actions(&[

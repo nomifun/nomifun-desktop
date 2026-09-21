@@ -57,6 +57,29 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 任务选择是显式的。运行时不会只凭模型名猜测图片或视频能力，也不会静默使用
 另一个 provider 的同名模型。
 
+## 会话内能力路由
+
+通用 Agent 预置了图像生成、图像编辑、视频生成、语音合成和音乐生成 Action。
+普通会话遇到明确的即时创作请求时，只会调用对应任务的用户默认模型：
+
+| 会话需求 | 精确默认键 | 必需能力 |
+| --- | --- | --- |
+| 看图/识图 | `models.default.vision` | 同一 Chat 能力同时声明 `vision_input` 与 `function_calling` |
+| 生成图片 | `models.default.imageGeneration` | `image_generation` |
+| 编辑图片 | `models.default.imageEdit` | `image_edit` |
+| 生成视频 | `models.default.videoGeneration` | `video_generation` |
+| 生成音乐 | `models.default.musicGeneration` | `music_generation` |
+| 语音合成 | `models.default.speechSynthesis` | `speech_synthesis` |
+
+自动媒体 Action 不按模型排序、名称或“只有一个候选”猜测用户意图；没有精确默认值时会要求用户
+先在模型页面选择。专业创作界面仍可为一次显式任务单独选择其它兼容模型。
+
+视觉模型作为条件 Chat 候选冻结进新会话：只有当前请求实际包含图片时才参与路由，不会在普通文字
+对话失败后冒充通用故障转移模型。主模型本身具备视觉能力时仍直接使用主模型。
+
+模型能力目录与路由授权是两层：目录中的任务/关键 trait 必须有明确正向声明，才能进入自动路由；
+运行时对传输兼容性的尝试或失败观察不能把一个未知模型自动提升为生图、识图或工具模型。
+
 创意工坊会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
 的媒体操作持久化。复用同一个幂等任务重试时，不能更换这些事实。
 

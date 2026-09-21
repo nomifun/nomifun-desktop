@@ -231,6 +231,7 @@ fn route(protocol: ChatProtocol, id: &str, revision: u64) -> ResolvedChatRoute {
         config_revision_digest: DigestHex("a".repeat(64)),
         credential_ref: ProviderCredentialRef(format!("credential-ref-{id}")),
         features: protocol_features(protocol),
+        activation_features: BTreeSet::new(),
     }
 }
 
@@ -1135,6 +1136,59 @@ async fn unsupported_features_do_not_claim_the_operation() {
         assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
         assert_eq!(gate.calls.load(Ordering::Acquire), 0);
         assert_eq!(transport.calls(), 0);
+    }
+}
+
+#[tokio::test]
+async fn conditional_vision_route_is_used_only_for_image_requests() {
+    let mut primary = route(ChatProtocol::Anthropic, "primary-text", 1);
+    primary.features.remove(&ChatModelFeature::ImageInput);
+    let mut vision = route(ChatProtocol::Anthropic, "vision-only", 1);
+    vision.features.insert(ChatModelFeature::ImageInput);
+    vision
+        .activation_features
+        .insert(ChatModelFeature::ImageInput);
+
+    for wants_image in [false, true] {
+        let mut request = basic_request(&primary);
+        if wants_image {
+            request.input.messages[0].content.push(ChatContentPart::Image {
+                media_type: "image/png".into(),
+                data_base64: "aA==".into(),
+            });
+        }
+        let transport = ScriptedTransport::new([TransportScript::Frames(successful_frames(
+            "conditional-route",
+            "ok",
+        ))]);
+        let transports = transport_map([(
+            ChatProtocol::Anthropic,
+            provider_transport(&transport),
+        )]);
+        let broker = broker(
+            StaticCausalityGate::allow(),
+            ResolvedChatRouteSet {
+                primary: primary.clone(),
+                failovers: vec![vision.clone()],
+            },
+            Arc::new(StaticCredentialStore { mismatch: false }),
+            &transports,
+            BrokerRetryPolicy::default(),
+        );
+        let output = broker
+            .open_stream(request)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        let route_id = output
+            .iter()
+            .find_map(|item| item.as_ref().ok().map(|event| event.route_id.as_ref()))
+            .unwrap();
+        assert_eq!(
+            route_id,
+            if wants_image { "vision-only" } else { "primary-text" }
+        );
     }
 }
 

@@ -33,11 +33,12 @@ export type ConfigKeyMap = {
   // generators (autogen / description.generate / description.polish). Empty
   // value = let the backend fall back to its own default completer model.
   'knowledge.autogenModel': { provider_id: ProviderId; model: string } | undefined;
-  // Install-wide default for the native image-generation task. Missing means
-  // the backend may choose from the available image models (for example by
-  // round-robin); there is no separate tool enable switch.
+  // Install-wide exact defaults for automatic media tasks. Missing means an
+  // ordinary conversation must ask the user to configure a default; only the
+  // explicit creation UI may offer/choose another candidate for that request.
   'models.default.imageGeneration': { provider_id: ProviderId; model: string } | undefined;
   'models.default.imageEdit': { provider_id: ProviderId; model: string } | undefined;
+  'models.default.vision': { provider_id: ProviderId; model: string } | undefined;
   'models.default.videoGeneration': { provider_id: ProviderId; model: string } | undefined;
   'models.default.musicGeneration': { provider_id: ProviderId; model: string } | undefined;
   'models.default.speechSynthesis': { provider_id: ProviderId; model: string } | undefined;

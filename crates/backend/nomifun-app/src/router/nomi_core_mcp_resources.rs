@@ -36,7 +36,7 @@ pub(crate) fn adapter(
     host: Arc<NomiCoreWave2Host>,
     principal: PrincipalRef,
     session: AgentSessionId,
-    primary_image_input: bool,
+    route_image_input: bool,
     constraints: nomifun_api_types::ExecutionConstraints,
 ) -> Result<NomiMcpResources, AppError> {
     validate(&kernel, &compiled, &principal)?;
@@ -57,7 +57,7 @@ pub(crate) fn adapter(
             host,
             principal,
             session,
-            primary_image_input,
+            route_image_input,
             constraints,
             image_authority: image_authority.clone(),
             serial: tokio::sync::Mutex::new(()),
@@ -101,7 +101,7 @@ struct ResourceOwner {
     host: Arc<NomiCoreWave2Host>,
     principal: PrincipalRef,
     session: AgentSessionId,
-    primary_image_input: bool,
+    route_image_input: bool,
     constraints: nomifun_api_types::ExecutionConstraints,
     image_authority: Arc<NomiResourceImageAuthority>,
     serial: tokio::sync::Mutex<()>,
@@ -155,7 +155,7 @@ impl ResourceOwner {
     fn admit_image(&self, generation: Option<u64>) -> Result<(), AppError> {
         self.image_authority.ensure_active()?;
         let active = frozen_state(&self.compiled, &self.active)?;
-        if !self.primary_image_input
+        if !self.route_image_input
             || generation.is_some_and(|generation| active.generation != generation)
         {
             return Err(failure(

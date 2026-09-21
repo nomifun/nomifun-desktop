@@ -50,7 +50,11 @@ impl DefaultChatRouteResolver for NomiCoreDefaultChatRouteResolver {
         _owner: &UserId,
     ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
         let preferences = SqliteClientPreferenceRepository::new(self.pool.clone())
-            .get_by_keys(&["nomi.defaultModel", "agent.model_failover"])
+            .get_by_keys(&[
+                "nomi.defaultModel",
+                "models.default.vision",
+                "agent.model_failover",
+            ])
             .await
             .map_err(|_| unavailable())?;
         let selected = preferences
@@ -67,11 +71,23 @@ impl DefaultChatRouteResolver for NomiCoreDefaultChatRouteResolver {
             .find(|preference| preference.key == "agent.model_failover")
             .and_then(|preference| serde_json::from_str(&preference.value).ok())
             .unwrap_or_default();
-        if let Some(route) = self.resolve_route(selected.as_ref(), &failover).await? {
+        let vision = preferences
+            .iter()
+            .find(|preference| preference.key == "models.default.vision")
+            .and_then(|preference| {
+                serde_json::from_str::<nomifun_api_types::AgentChatModelSelectionDto>(
+                    &preference.value,
+                )
+                .ok()
+            });
+        if let Some(route) = self
+            .resolve_route(selected.as_ref(), &failover, vision.as_ref())
+            .await?
+        {
             return Ok(Some(route));
         }
         if selected.is_some() {
-            return self.resolve_route(None, &failover).await;
+            return self.resolve_route(None, &failover, vision.as_ref()).await;
         }
         Ok(None)
     }
@@ -86,7 +102,14 @@ impl DefaultChatRouteResolver for NomiCoreDefaultChatRouteResolver {
         );
         let failover =
             nomifun_conversation::model_failover::get_global_failover_config(&preferences).await;
-        self.resolve_route(Some(model), &failover).await
+        let vision = preferences
+            .get_by_keys(&["models.default.vision"])
+            .await
+            .map_err(|_| unavailable())?
+            .into_iter()
+            .find(|preference| preference.key == "models.default.vision")
+            .and_then(|preference| serde_json::from_str(&preference.value).ok());
+        self.resolve_route(Some(model), &failover, vision.as_ref()).await
     }
 }
 
@@ -95,6 +118,7 @@ impl NomiCoreDefaultChatRouteResolver {
         &self,
         selected: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
         failover: &ModelFailoverConfig,
+        vision: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
     ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
         let providers = SqliteProviderRepository::new(self.pool.clone())
             .list()
@@ -150,6 +174,9 @@ impl NomiCoreDefaultChatRouteResolver {
         let desired_models = selected.map(|selected| {
             let primary = (selected.provider_id.clone(), selected.model.clone());
             let mut desired = BTreeSet::from([primary.clone()]);
+            if let Some(vision) = vision {
+                desired.insert((vision.provider_id.clone(), vision.model.clone()));
+            }
             if failover.enabled {
                 let max_switches = failover
                     .max_switches
@@ -248,6 +275,7 @@ impl NomiCoreDefaultChatRouteResolver {
                 config_revision_digest,
                 credential_ref: format!("nomi-core-chat-credential-{}", Uuid::now_v7()),
                 features,
+                activation_features: BTreeSet::new(),
             });
         }
 
@@ -287,6 +315,19 @@ impl NomiCoreDefaultChatRouteResolver {
                         ordered.push(candidate);
                         added += 1;
                     }
+                }
+            }
+            if let Some(vision) = vision {
+                let key = (vision.provider_id.clone(), vision.model.clone());
+                if key != (selected_key.0.to_owned(), selected_key.1.to_owned())
+                    && let Some(mut candidate) = by_key.remove(&key)
+                    && candidate.features.contains(&ChatRouteFeature::ImageInput)
+                    && candidate.features.contains(&ChatRouteFeature::ToolCalls)
+                {
+                    candidate
+                        .activation_features
+                        .insert(ChatRouteFeature::ImageInput);
+                    ordered.push(candidate);
                 }
             }
             candidates = ordered;
@@ -395,9 +436,21 @@ mod tests {
         model: &str,
         sort_order: i64,
     ) {
+        create_chat_provider_with_traits(pool, provider_id, platform, model, sort_order, "[]")
+            .await;
+    }
+
+    async fn create_chat_provider_with_traits(
+        pool: &SqlitePool,
+        provider_id: &str,
+        platform: &str,
+        model: &str,
+        sort_order: i64,
+        traits: &str,
+    ) {
         let capabilities = [NewProviderModelCapability {
             task: "chat",
-            traits: "[]",
+            traits,
             protocol: "openai.chat_text",
             connection_role: "default",
             provider_params: "{}",
@@ -506,5 +559,46 @@ mod tests {
         assert_eq!(route.failovers.len(), 1);
         assert_eq!(route.failovers[0].provider_id, backup_provider);
         assert_eq!(route.failovers[0].model, "reserve");
+    }
+
+    #[tokio::test]
+    async fn explicit_vision_default_is_conditional_not_a_plain_chat_failover() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let primary_provider = "0190f5fe-7c00-7a00-8abc-000000000041";
+        let vision_provider = "0190f5fe-7c00-7a00-8abc-000000000042";
+        create_chat_provider(database.pool(), primary_provider, "primary", "text", 0).await;
+        create_chat_provider_with_traits(
+            database.pool(),
+            vision_provider,
+            "vision",
+            "vision-tools",
+            1,
+            r#"["vision_input","function_calling"]"#,
+        )
+        .await;
+        let chat = serde_json::json!({"provider_id":primary_provider,"model":"text"}).to_string();
+        let vision = serde_json::json!({"provider_id":vision_provider,"model":"vision-tools"}).to_string();
+        SqliteClientPreferenceRepository::new(database.pool().clone())
+            .upsert_batch(&[
+                ("nomi.defaultModel", chat.as_str()),
+                ("models.default.vision", vision.as_str()),
+            ])
+            .await
+            .unwrap();
+
+        let route = NomiCoreDefaultChatRouteResolver::new(database.pool().clone())
+            .resolve_default_chat_route(&UserId::from("test-owner"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(route.primary.model, "text");
+        assert_eq!(route.failovers.len(), 1);
+        assert_eq!(route.failovers[0].model, "vision-tools");
+        assert_eq!(
+            route.failovers[0].activation_features,
+            BTreeSet::from([ChatRouteFeature::ImageInput])
+        );
+        assert!(route.failovers[0].features.contains(&ChatRouteFeature::ImageInput));
+        assert!(route.failovers[0].features.contains(&ChatRouteFeature::ToolCalls));
     }
 }

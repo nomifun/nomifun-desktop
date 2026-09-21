@@ -98,12 +98,12 @@ impl EngineKernelSession {
 
     fn admit_mcp_image(&self, generation: u64) -> Result<(), AppError> {
         let active = self.active.snapshot().map_err(failure)?;
-        if !self.primary_image_input
+        if !self.route_image_input
             || active.generation != generation
             || active.resolved_snapshot_ref != *self.compiled.snapshot_ref()
         {
             return Err(failure(
-                "resource image requires primary model ImageInput in the exact generation",
+                "resource image requires an eligible exact model route with ImageInput in the current generation",
             ));
         }
         Ok(())

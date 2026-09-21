@@ -13,6 +13,7 @@ const VisionModelsContent: React.FC = () => (
     modality='vision'
     titleKey='settings.modelHub.modality.visionTitle'
     subtitleKey='settings.modelHub.modality.visionSubtitle'
+    defaultModelPreferenceKey='models.default.vision'
   />
 );
 

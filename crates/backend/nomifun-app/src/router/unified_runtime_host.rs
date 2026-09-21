@@ -225,6 +225,8 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
+                    include_str!("engine_creation_tools.rs"),
+                    include_str!("automatic_creation_route.rs"),
                     include_str!("workspace_file_read.rs"),
                     include_str!("engine_history.rs")
                 )
@@ -263,8 +265,9 @@ pub(crate) fn factory(
                 .clone()
                 .ok_or_else(|| error("snapshot has no exact Chat route"))?;
             let session_id = AgentSessionId::from(options.conversation_id.clone());
-            let primary_image_input = admitted.revision().payload.chat_route_records.get(&route.model_task)
-                .is_some_and(|record| record.primary.features.contains(&ChatRouteFeature::ImageInput));
+            let route_image_input = admitted.revision().payload.chat_route_records.get(&route.model_task)
+                .is_some_and(|record| std::iter::once(&record.primary).chain(record.failovers.iter())
+                    .any(|candidate| candidate.features.contains(&ChatRouteFeature::ImageInput)));
             let resources = session_host.open_kernel_session(&admitted)?;
             let compiled = resources.compiled().clone();
             let active = resources.active_state().clone();
@@ -313,7 +316,7 @@ pub(crate) fn factory(
                 engine_binding: engine_binding.clone(),
                 snapshot_ref: compiled.snapshot_ref().clone(),
                 route,
-                primary_image_input,
+                route_image_input,
                 full_plan,
                 compiled: compiled.clone(),
                 capability_port: Arc::new(capabilities::HostPort(weak.clone())),
@@ -358,7 +361,7 @@ struct ConversationRuntimeHost {
     engine_binding: EngineBinding,
     snapshot_ref: ResolvedSnapshotRef,
     route: ChatRouteSelection,
-    primary_image_input: bool,
+    route_image_input: bool,
     full_plan: AgentToolPlan,
     compiled: Arc<nomifun_agent_kernel::CompiledSnapshot>,
     capability_port: Arc<capabilities::HostPort>,
@@ -532,12 +535,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let capabilities = self.capability_state.snapshot().map_err(error)?;
         // Owner-projected authority, not a model assertion. Activation returns
         // an updated projection only after its generation is durably committed.
-        let context_image_input = self.primary_image_input;
+        let context_image_input = self.route_image_input;
         let current_content = super::runtime_attachments::prepare(
             message,
             receipt,
             &response.extra,
-            self.primary_image_input,
+            self.route_image_input,
         )
         .await?;
         // Supply a bounded canonical candidate window, not a model-context
@@ -592,6 +595,25 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if !message.inject_skills.is_empty() {
             instructions.push(format!("For this accepted request, the user explicitly requested these already-selected Skills: {}", serde_json::to_string(&message.inject_skills).map_err(error)?));
         }
+        let mut turn_plan = self
+            .full_plan
+            .for_active_capabilities(&capabilities.active);
+        let automatic_creation_route =
+            super::automatic_creation_route::classify(&message.content).filter(|route| {
+                turn_plan
+                    .model_name_for_action(
+                        super::engine_creation_tools::CREATION_CAPABILITY_ID,
+                        route.action_id(),
+                    )
+                    .is_some()
+            });
+        if let Some(route) = automatic_creation_route.as_ref() {
+            turn_plan = turn_plan.for_action(
+                super::engine_creation_tools::CREATION_CAPABILITY_ID,
+                route.action_id(),
+            );
+            instructions.push(route.instruction().to_owned());
+        }
         let request = ChatModelRequest {
             contract_version: CHAT_MODEL_CONTRACT_VERSION.into(),
             causality: ChatCausality {
@@ -620,7 +642,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         };
         let mut request = AgentTurnRequest::new(
             request,
-            self.full_plan.for_active_capabilities(&capabilities.active),
+            turn_plan,
             self.principal.clone(),
             capabilities.generation,
         ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
