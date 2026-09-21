@@ -20,7 +20,6 @@ pub(crate) fn requires_task_ledger(binding: &AgentToolBinding) -> bool {
             | "workspace.process"
             | "workspace.artifacts"
             | "ssh"
-            | "agent.collaboration"
             | "requirements"
             | "plugin.development"
     )
@@ -42,6 +41,15 @@ pub(crate) fn affects_workspace(binding: &AgentToolBinding) -> bool {
         }
         _ => false,
     }
+}
+
+/// A successful collaboration handoff transfers completion ownership to the
+/// durable AgentExecution. The parent turn must stop after the accepted
+/// single-call batch so it cannot poll, create sibling Executions, or publish
+/// a speculative answer ahead of the authoritative terminal projection.
+pub(crate) fn completes_turn_on_success(binding: &AgentToolBinding) -> bool {
+    binding.capability_id.as_ref() == "agent.collaboration"
+        && matches!(binding.action_id.as_ref(), "agent/delegate" | "agent/fork")
 }
 
 #[cfg(test)]
@@ -95,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_and_coordination_keep_long_horizon_accounting() {
+    fn workspace_keeps_long_horizon_accounting_but_delegation_owns_its_plan() {
         let workspace = binding("workspace.files", "workspace.files/write");
         assert!(requires_task_ledger(&workspace));
         assert!(affects_workspace(&workspace));
@@ -116,7 +124,16 @@ mod tests {
         assert!(affects_workspace(&process_poll));
 
         let delegation = binding("agent.collaboration", "agent/delegate");
-        assert!(requires_task_ledger(&delegation));
+        // AgentExecution is already the durable plan, scheduler, completion
+        // ledger, and terminal-report owner. Requiring a second parent-turn
+        // plan blocks the first delegation call and later competes with the
+        // authoritative synthesis report.
+        assert!(!requires_task_ledger(&delegation));
         assert!(!affects_workspace(&delegation));
+        assert!(completes_turn_on_success(&delegation));
+
+        let fork = binding("agent.collaboration", "agent/fork");
+        assert!(completes_turn_on_success(&fork));
+        assert!(!completes_turn_on_success(&workspace));
     }
 }

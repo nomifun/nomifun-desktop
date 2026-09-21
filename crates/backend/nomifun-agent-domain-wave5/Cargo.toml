@@ -10,4 +10,5 @@ nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
 serde_json.workspace = true
 
 [dev-dependencies]
+jsonschema.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

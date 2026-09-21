@@ -105,7 +105,9 @@ impl ConversationEffects for ProductionConversationEffects {
             .unwrap_or("执行已结束，但没有生成汇总。");
         // The persisted terminal summary is already the synthesis/sole
         // business output selected by the scheduler. Project it as the final
-        // assistant message; never feed it back through the lead model.
+        // assistant message; never feed it back through the lead model. Do not
+        // cancel by Session identity here: the original delegation turn may
+        // have ended and a later user turn may now own the active slot.
         self.session
             .project_assistant_message_idempotent(
                 owner_id,

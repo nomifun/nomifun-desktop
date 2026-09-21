@@ -77,6 +77,9 @@ fn safe_message_for(code: &str) -> &'static str {
         "ROBOT_EFFECT_OUTCOME_UNKNOWN" => {
             "The physical effect outcome is unknown; do not retry automatically."
         }
+        "AGENT_EXECUTION_ALREADY_ACTIVE" => {
+            "This conversation already has an active AgentExecution. Do not start sibling collaboration calls; put all independent tasks in one agent/delegate request with strategy=parallel and use synthesize=true when a downstream Agent must combine them."
+        }
         _ if code.contains("NOT_FOUND") => "The requested capability resource was not found.",
         _ if code.contains("TIMEOUT") => "The capability operation timed out.",
         _ if code.contains("UNAVAILABLE") || code.contains("OFFLINE") => {
@@ -142,6 +145,20 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
         assert_eq!(payload["code"], "INVALID_PAYLOAD");
         assert_eq!(payload["message"], "The capability request is invalid.");
+        assert!(!result.content.contains("sk-secret"));
+    }
+
+    #[test]
+    fn active_execution_conflict_exposes_parallel_recovery_without_diagnostics() {
+        let error = NomiPluginToolError::Kernel(KernelError::capability_execution_failed(
+            "AGENT_EXECUTION_ALREADY_ACTIVE",
+            "sqlite /private/data.db; api_key=sk-secret",
+        ));
+        let result = model_safe_tool_error(&error);
+        let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(payload["code"], "AGENT_EXECUTION_ALREADY_ACTIVE");
+        assert!(payload["message"].as_str().unwrap().contains("strategy=parallel"));
+        assert!(!result.content.contains("sqlite"));
         assert!(!result.content.contains("sk-secret"));
     }
 

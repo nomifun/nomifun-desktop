@@ -135,6 +135,7 @@ pub const WAVE5_INVALID_REQUEST: &str = "WAVE5_INVALID_REQUEST";
 pub const WAVE5_ACTION_OPERATION_MISMATCH: &str = "WAVE5_ACTION_OPERATION_MISMATCH";
 pub const WAVE5_RESOURCE_BINDING_INVALID: &str = "WAVE5_RESOURCE_BINDING_INVALID";
 pub const WAVE5_EFFECT_OUTCOME_UNKNOWN: &str = "WAVE5_EFFECT_OUTCOME_UNKNOWN";
+pub const AGENT_EXECUTION_ALREADY_ACTIVE: &str = "AGENT_EXECUTION_ALREADY_ACTIVE";
 const WAVE5_INVALID_RESPONSE: &str = "WAVE5_INVALID_RESPONSE";
 
 /// Kernel-authorized invocation context projected to the application owner.
@@ -1267,7 +1268,7 @@ const MODULES: &[ModuleSpec] = &[
     ModuleSpec {
         id: AGENT_COLLABORATION_MODULE_ID,
         display_name: "Agent Collaboration",
-        description: "Delegate work or fork an Agent session through AgentExecution.",
+        description: "Create one persistent AgentExecution. For parallel fan-out, call agent/delegate exactly once with {\"strategy\":\"parallel\",\"tasks\":[{\"name\":\"upstream-a\",\"prompt\":\"...\"},{\"name\":\"upstream-b\",\"prompt\":\"...\"}],\"synthesize\":true}. The field is tasks (plural) and must be a JSON array; synthesize is a JSON boolean, never a string. true adds one downstream Agent that receives every upstream result. For one automatically planned goal use {\"strategy\":\"planned\",\"goal\":\"...\"}. Use agent/fork only for one isolated delegated Agent; never issue sibling collaboration calls concurrently.",
         actions: AGENT_COLLABORATION_ACTIONS,
     },
     ModuleSpec {
@@ -1878,7 +1879,79 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
             serde_json::json!({"cron_job_id": string()}),
             &["cron_job_id"],
         ),
-        AGENT_DELEGATE_ACTION_ID | AGENT_FORK_ACTION_ID => strict_object_schema(
+        AGENT_DELEGATE_ACTION_ID => StrictJsonValue(serde_json::json!({
+            "type": "object",
+            "oneOf": [
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "strategy": {
+                            "type":"string",
+                            "const":"planned",
+                            "description":"Use the literal planned for one goal that the execution planner should decompose."
+                        },
+                        "goal": {
+                            "type":"string",
+                            "minLength":1,
+                            "maxLength":65536,
+                            "description":"Complete objective for the execution planner."
+                        }
+                    },
+                    "required": ["strategy", "goal"]
+                },
+                {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "strategy": {
+                            "type":"string",
+                            "const":"parallel",
+                            "description":"Use the literal parallel for explicit fan-out."
+                        },
+                        "tasks": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 16,
+                            "description": "Plural tasks: a JSON array of independent upstream Agent tasks. Never send a singular task field.",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "name": {
+                                        "type":"string",
+                                        "minLength":1,
+                                        "description":"Short unique display name for this upstream Agent."
+                                    },
+                                    "prompt": {
+                                        "type":"string",
+                                        "minLength":1,
+                                        "description":"Complete task prompt for this upstream Agent."
+                                    },
+                                    "role": {
+                                        "type":["string","null"],
+                                        "description":"Optional descriptive focus; it never grants tools."
+                                    },
+                                    "tool_policy": {
+                                        "type":"string",
+                                        "enum":["full","read_only","read_shell"],
+                                        "default":"full"
+                                    }
+                                },
+                                "required": ["name", "prompt"]
+                            }
+                        },
+                        "synthesize": {
+                            "type":"boolean",
+                            "default":false,
+                            "description":"JSON boolean. true creates one downstream read-only Agent that depends on and receives every task result; do not encode it as a string."
+                        }
+                    },
+                    "required": ["strategy", "tasks"]
+                }
+            ]
+        })),
+        AGENT_FORK_ACTION_ID => strict_object_schema(
             serde_json::json!({
                 "goal": {"type":"string","minLength":1,"maxLength":65536}
             }),
@@ -2357,6 +2430,56 @@ mod tests {
             schema.0["properties"].as_object().unwrap().keys().cloned().collect::<BTreeSet<_>>(),
             BTreeSet::from(["question".to_owned()])
         );
+    }
+
+    #[test]
+    fn delegate_schema_accepts_one_parallel_fanout_with_optional_synthesis() {
+        let schema = action_input_schema_for(AGENT_DELEGATE_ACTION_ID).unwrap();
+        let validator = jsonschema::options()
+            .build(&schema.0)
+            .expect("agent/delegate schema must compile");
+
+        assert!(validator.is_valid(&serde_json::json!({
+            "strategy": "planned",
+            "goal": "plan a dependency graph"
+        })));
+        assert!(validator.is_valid(&serde_json::json!({
+            "strategy": "parallel",
+            "tasks": [
+                {"name": "upstream-a", "prompt": "produce A"},
+                {
+                    "name": "upstream-b",
+                    "prompt": "produce B",
+                    "role": "critic",
+                    "tool_policy": "read_only"
+                }
+            ],
+            "synthesize": true
+        })));
+        for invalid in [
+            serde_json::json!({"goal":"new Snapshots require an explicit strategy"}),
+            serde_json::json!({"strategy":"parallel","tasks":[]}),
+            serde_json::json!({
+                "strategy":"parallel",
+                "tasks":[{"name":"upstream","prompt":"work"}],
+                "goal":"mixed variants are forbidden"
+            }),
+            serde_json::json!({
+                "strategy":"parallel",
+                "tasks":[{"name":"upstream","prompt":"work","tool_policy":"admin"}]
+            }),
+        ] {
+            assert!(!validator.is_valid(&invalid), "unexpectedly accepted {invalid}");
+        }
+
+        let fork = action_input_schema_for(AGENT_FORK_ACTION_ID).unwrap();
+        let fork_validator = jsonschema::options()
+            .build(&fork.0)
+            .expect("agent/fork schema must compile");
+        assert!(!fork_validator.is_valid(&serde_json::json!({
+            "strategy":"parallel",
+            "tasks":[{"name":"upstream","prompt":"work"}]
+        })));
     }
 
     #[test]

@@ -15,4 +15,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 nomifun-db.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
