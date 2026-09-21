@@ -18,9 +18,9 @@ import { useTranslation } from 'react-i18next';
 
 import styles from './CanvasZoomControls.module.css';
 
-export type CanvasZoomBackground = 'dots' | 'lines' | 'blank';
+type CanvasZoomBackground = 'dots' | 'lines' | 'blank';
 
-export interface CanvasZoomControlLabels {
+interface CanvasZoomControlLabels {
   zoomOut: string;
   zoomIn: string;
   zoomSlider: string;

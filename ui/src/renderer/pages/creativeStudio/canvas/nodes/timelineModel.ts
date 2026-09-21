@@ -9,10 +9,10 @@ import type {
   CreativeTimelineNodeData,
 } from '../../domain';
 
-export const TIMELINE_DEFAULT_CLIP_DURATION_MS = 5_000;
-export const TIMELINE_MIN_CLIP_DURATION_MS = 500;
-export const TIMELINE_DEFAULT_SCALE_MS = 30_000;
-export const TIMELINE_MAX_DURATION_MS = 86_400_000;
+const TIMELINE_DEFAULT_CLIP_DURATION_MS = 5_000;
+const TIMELINE_MIN_CLIP_DURATION_MS = 500;
+const TIMELINE_DEFAULT_SCALE_MS = 30_000;
+const TIMELINE_MAX_DURATION_MS = 86_400_000;
 
 export interface TimelineInsertAsset {
   id: string;

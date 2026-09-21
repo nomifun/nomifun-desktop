@@ -14,8 +14,8 @@ import type {
   CreativeTaskReference,
 } from "../../tasks";
 
-export type CanvasGenerationKind = "image" | "video" | "audio";
-export type CanvasGenerationModelTask = Exclude<CreativeCreationModelTask, "music_generation" | "chat">;
+type CanvasGenerationKind = "image" | "video" | "audio";
+type CanvasGenerationModelTask = Exclude<CreativeCreationModelTask, "music_generation" | "chat">;
 
 export interface CanvasGenerationTaskOperation<
   TTask extends CreativeCreationModelTask = CreativeCreationModelTask,
@@ -59,14 +59,14 @@ export interface CanvasGenerationRuntimeEntry {
 }
 
 /** A create request can fail before the backend allocates a task id. */
-export interface CanvasGenerationSubmissionFailure {
+interface CanvasGenerationSubmissionFailure {
   order: number;
   input: CreateCreativeTaskInput;
   outputKind: Exclude<CreativeAssetKind, "text">;
   error: Error;
 }
 
-export type CanvasGenerationRuntimeState =
+type CanvasGenerationRuntimeState =
   | "idle"
   | "submitting"
   | "recovering"
@@ -96,6 +96,5 @@ export interface CanvasGenerationResumeRequest {
   retryReferences?: readonly CreativeAsset[];
 }
 
-
-export type { GenerationReferences, GenerationReferenceBinding } from "@renderer/creation/references";
+export type { GenerationReferences,  } from "@renderer/creation/references";
 export { GenerationError } from "@renderer/creation/generationError";

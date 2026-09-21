@@ -6,31 +6,30 @@
 
 import type { CanvasCommand } from './commands';
 import {
-  cloneCanvasDocument,
-  copyCanvasFragment,
-  expandCanvasNodeIds,
-  findCanvasGraphNode,
-  groupCanvasNodes,
-  ungroupCanvasNodes,
+cloneCanvasDocument,
+copyCanvasFragment,
+findCanvasGraphNode,
+groupCanvasNodes,
+ungroupCanvasNodes
 } from './document';
-import { graphNodeIntersectsRect, normalizeSelectionRect } from './geometry';
+import { graphNodeIntersectsRect,normalizeSelectionRect } from './geometry';
 import { validateCanvasConnection } from './graph';
 import { canvasMediaNodeSize } from './mediaNodeSize';
 import type {
-  CanvasDocument,
-  CanvasHistoryMeta,
-  CanvasSelection,
-  CanvasState,
+CanvasDocument,
+CanvasHistoryMeta,
+CanvasSelection,
+CanvasState,
 } from './types';
 import {
-  DEFAULT_CANVAS_VIEWPORT,
-  EMPTY_CANVAS_DOCUMENT,
-  EMPTY_CANVAS_SELECTION,
+DEFAULT_CANVAS_VIEWPORT,
+EMPTY_CANVAS_DOCUMENT,
+EMPTY_CANVAS_SELECTION,
 } from './types';
-import { normalizeCanvasViewport, panViewport, zoomViewportAtPoint } from './viewport';
+import { normalizeCanvasViewport,panViewport,zoomViewportAtPoint } from './viewport';
 
 export const CANVAS_HISTORY_LIMIT = 50;
-export const CANVAS_HISTORY_MERGE_MS = 180;
+const CANVAS_HISTORY_MERGE_MS = 180;
 
 const emptySelection = (): CanvasSelection => ({
   ...EMPTY_CANVAS_SELECTION,
@@ -516,9 +515,4 @@ export function canUndoCanvas(state: CanvasState): boolean {
 
 export function canRedoCanvas(state: CanvasState): boolean {
   return state.history.future.length > 0;
-}
-
-/** Utility for controllers that need group-expanded ids before starting a gesture. */
-export function selectedCanvasNodeIds(state: CanvasState): Set<string> {
-  return expandCanvasNodeIds(state.document, state.selection.nodeIds);
 }

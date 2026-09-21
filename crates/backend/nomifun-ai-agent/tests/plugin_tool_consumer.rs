@@ -39,7 +39,7 @@ use nomifun_agent_contracts::{
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CapabilityContextContributionFactory,
     CapabilityContextContributionRequest, CapabilityHandler,
-    CapabilityInvocationContext, CompileRequest, CompiledSnapshot, CompilerEnvironment,
+    CapabilityInvocationContext, CompileRequest, CompilerEnvironment,
     ContextContributionResult, InMemoryPluginStatePersistence, KernelError,
     KernelRegistry, MaterializationPolicy, PluginRegistration,
     PluginStatePersistence,
@@ -50,7 +50,6 @@ use nomifun_ai_agent::{
     NomiHostDynamicToolInvoker, NomiPluginProductToolInvoker,
     NomiPluginProductToolInvocation, NomiPluginProductToolSchemaResolver,
     NomiPlatformBuiltinToolAdmission,
-    NomiPlatformBuiltinContextAdmission,
     NomiPlatformBuiltinToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver,
 };
@@ -1767,34 +1766,4 @@ async fn plugin_product_unknown_effect_fences_atomic_hosted_binding() {
         scope.settle_turn().await.unwrap();
         assert!(scope.begin_turn().is_err(), "unknown effects must retire the Session");
     }
-}
-async fn restricted_session(
-    kernel: Arc<KernelRegistry>, compiled: CompiledSnapshot, schemas: Arc<SchemaMap>,
-) -> nomifun_ai_agent::NomiPluginToolSession {
-    use nomifun_ai_agent::plugin_tools::{NomiPlatformBuiltinLifecycleAdmission,
-        NomiPlatformBuiltinLifecycleInvocation, NomiPlatformBuiltinLifecycleInvoker};
-    struct Never;
-    #[async_trait]
-    impl NomiPlatformBuiltinLifecycleInvoker for Never {
-        async fn activate(&self, _: NomiPlatformBuiltinLifecycleInvocation) -> Result<StrictJsonValue, String> {
-            panic!("restricted Session must not activate lifecycle extensions")
-        }
-    }
-    let registry = kernel.snapshot().unwrap();
-    let tools = NomiPlatformBuiltinToolAdmission::from_registry(
-        &registry, BTreeSet::new(), BTreeSet::new(), schemas.clone(),
-    ).unwrap();
-    let context = NomiPlatformBuiltinContextAdmission::from_registry(
-        &registry, BTreeSet::new(), BTreeSet::new(),
-    ).unwrap();
-    let lifecycle = NomiPlatformBuiltinLifecycleAdmission::from_registry(
-        &registry, BTreeSet::new(), BTreeSet::new(), Arc::new(Never),
-    ).unwrap();
-    KernelNomiPluginToolSession::materialize_for_execution(
-        kernel, Arc::new(compiled), owner(), SESSION.into(), format!("session:{SESSION}").into(),
-        schemas, Arc::new(tools), Arc::new(context), Arc::new(lifecycle),
-        nomifun_api_types::ExecutionConstraints {
-            tool_scope: nomifun_common::AgentToolPolicy::ReadOnly, ..Default::default()
-        },
-    ).await.unwrap()
 }

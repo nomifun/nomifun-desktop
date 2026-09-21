@@ -64,7 +64,7 @@ export class TimelineExportError extends Error {
   }
 }
 
-export interface TimelineExportPlanClip {
+interface TimelineExportPlanClip {
   clip: CreativeTimelineClip;
   asset: CreativeTimelineAssetPresentation;
 }

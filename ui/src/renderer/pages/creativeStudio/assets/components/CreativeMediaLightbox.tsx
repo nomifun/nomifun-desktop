@@ -14,7 +14,7 @@ import imageLightboxStyles from '@/renderer/components/media/ImageLightbox.modul
 import CreativeVideoPlayer from './CreativeVideoPlayer';
 import styles from './CreativeMediaLightbox.module.css';
 
-export interface CreativeMediaLightboxProps {
+interface CreativeMediaLightboxProps {
   kind: 'image' | 'video';
   src: string;
   posterSrc?: string | null;

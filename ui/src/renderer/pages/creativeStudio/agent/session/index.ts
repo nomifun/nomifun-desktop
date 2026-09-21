@@ -9,7 +9,7 @@ export {
   createCreativeStudioAgentSessionResolver,
 } from "./controller";
 export {
-  CREATIVE_STUDIO_AGENT_SESSION_BACKEND_GAP,
+
   CreativeStudioAgentSessionBackendUnavailableError,
   createFailClosedCreativeStudioAgentSessionPort,
 } from "./failClosedPort";
@@ -22,5 +22,5 @@ export {
   CreativeStudioAgentSessionResolutionError,
   type CreativeStudioAgentSessionPersistencePort,
   type CreativeStudioAgentSessionPersistenceRequest,
-  type CreativeStudioAgentSessionResolutionErrorCode,
+
 } from "./types";

@@ -35,7 +35,7 @@ export const isYesterday = (day: DayKey): boolean => day === dayjs().subtract(1,
 /** `HH:mm` for a message timestamp. */
 export const formatClock = (createdAtMs: number): string => dayjs(createdAtMs).format('HH:mm');
 
-export type HistoryRole = 'user' | 'companion';
+type HistoryRole = 'user' | 'companion';
 
 /** One renderable line of history. Deliberately lossy — this is a reader, not the chat. */
 export interface HistoryEntry {

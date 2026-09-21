@@ -23,6 +23,7 @@ impl NomiSelectedSkills {
     pub fn new(
         instructions: Vec<String>,
         resources: Arc<BTreeMap<String, EngineContextResource>>,
+        supports_image: bool,
     ) -> Result<Self, NomiPluginToolError> {
         let fail = |s: &str| NomiPluginToolError::Contract(s.into());
         if instructions.len() > 16
@@ -84,7 +85,7 @@ impl NomiSelectedSkills {
         Ok(Self {
             prompt,
             resources,
-            supports_image: false,
+            supports_image,
         })
     }
 
@@ -93,9 +94,6 @@ impl NomiSelectedSkills {
     }
     pub(crate) fn has_resources(&self) -> bool {
         !self.resources.is_empty()
-    }
-    pub(crate) fn image_policy(&mut self, supports_image: bool) {
-        self.supports_image = supports_image;
     }
 }
 
@@ -222,7 +220,7 @@ mod hook_preflight_tests {
 
     #[tokio::test]
     async fn selected_resource_preflight_checks_exact_identity_and_image_authority() {
-        let mut tool = NomiSelectedSkills::new(Vec::new(), Arc::new(BTreeMap::from([
+        let tool = NomiSelectedSkills::new(Vec::new(), Arc::new(BTreeMap::from([
             ("text".into(), EngineContextResource {
                 label: "Text".into(), provenance: "selected".into(),
                 content: EngineContextContent::Text { text: "private resource body".into() },
@@ -231,14 +229,23 @@ mod hook_preflight_tests {
                 label: "Image".into(), provenance: "selected".into(),
                 content: EngineContextContent::Image { media_type: "image/png".into(), data_base64: "AA==".into() },
             }),
-        ]))).unwrap();
+        ])), false).unwrap();
         let context = ToolExecutionContext::from_scoped_tool_call("preflight", "selected-skills");
         tool.preflight_hook(&json!({"id":"text"}), &context).await.unwrap();
         assert!(tool.preflight_hook(&json!({"id":"other"}), &context).await.is_err());
         assert!(tool.preflight_hook(&json!({"id":"text","offset":999}), &context).await.is_err());
         assert!(tool.preflight_hook(&json!({"id":"image"}), &context).await.is_err());
-        tool.image_policy(true);
-        tool.preflight_hook(&json!({"id":"image"}), &context).await.unwrap();
-        assert!(tool.preflight_hook(&json!({"id":"image","offset":0}), &context).await.is_err());
+        let image_tool = NomiSelectedSkills::new(Vec::new(), Arc::clone(&tool.resources), true)
+            .unwrap();
+        image_tool
+            .preflight_hook(&json!({"id":"image"}), &context)
+            .await
+            .unwrap();
+        assert!(
+            image_tool
+                .preflight_hook(&json!({"id":"image","offset":0}), &context)
+                .await
+                .is_err()
+        );
     }
 }

@@ -31,12 +31,12 @@ import type {
  * Conversation source type - identifies where the conversation was created
  * 会话来源类型 - 标识会话创建的来源
  */
-export type ConversationSource = 'nomifun' | 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | (string & {});
+type ConversationSource = 'nomifun' | 'telegram' | 'lark' | 'dingtalk' | 'weixin' | 'wecom' | (string & {});
 
-export type TChatConversationStatus = 'pending' | 'running' | 'finished';
-export type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running';
+type TChatConversationStatus = 'pending' | 'running' | 'finished';
+type TConversationRuntimeStateKind = 'idle' | 'starting' | 'running';
 
-export type TConversationRuntimeSummary = {
+type TConversationRuntimeSummary = {
   state: TConversationRuntimeStateKind;
   can_send_message: boolean;
   has_runtime: boolean;
@@ -144,10 +144,6 @@ export type TChatConversation = IChatConversation<
   }
 >;
 
-export type IChatConversationRefer = {
-  'chat.history': TChatConversation[];
-};
-
 /**
  * 统一多模态能力词表 —— ts-rs 生成契约的 re-export（生成源
  * crates/backend/nomifun-api-types/src/model_task.rs，由
@@ -198,26 +194,26 @@ export type TProviderWithModel = Omit<IProvider, 'models'> & {
 };
 
 // MCP Server Configuration Types
-export interface IMcpServerTransportStdio {
+interface IMcpServerTransportStdio {
   type: 'stdio';
   command: string;
   args?: string[];
   env?: Record<string, string>;
 }
 
-export interface IMcpServerTransportSSE {
+interface IMcpServerTransportSSE {
   type: 'sse';
   url: string;
   headers?: Record<string, string>;
 }
 
-export interface IMcpServerTransportHTTP {
+interface IMcpServerTransportHTTP {
   type: 'http';
   url: string;
   headers?: Record<string, string>;
 }
 
-export interface IMcpServerTransportStreamableHTTP {
+interface IMcpServerTransportStreamableHTTP {
   type: 'streamable_http';
   url: string;
   headers?: Record<string, string>;
@@ -261,7 +257,7 @@ export interface IConversationMcpStatus {
   reason?: string;
 }
 
-export interface IMcpTool {
+interface IMcpTool {
   name: string;
   description?: string;
   input_schema?: unknown;

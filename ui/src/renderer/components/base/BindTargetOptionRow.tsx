@@ -9,7 +9,7 @@ import { useTranslation } from 'react-i18next';
 
 import PathText from '@renderer/components/base/PathText';
 
-export interface BindTargetOptionRowProps {
+interface BindTargetOptionRowProps {
   /** Primary label — the terminal / conversation name (id fallback at call site). */
   title: string;
   /** Right-aligned dimmed badge — terminal status or conversation backend/type. */

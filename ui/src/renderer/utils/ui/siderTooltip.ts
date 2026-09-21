@@ -5,7 +5,7 @@ import type { TooltipProps } from '@arco-design/web-react';
  * 这样在收起/关闭侧边栏时 tooltip 会随侧边栏一起隐藏，避免残留在屏幕遮挡内容。
  * See: https://github.com/nomifun/nomifun-app/issues/987
  */
-export const getSiderPopupContainer = (_node: HTMLElement): Element =>
+const getSiderPopupContainer = (_node: HTMLElement): Element =>
   document.querySelector('.layout-sider') || document.body;
 
 const SIDER_TOOLTIP_CLASS = 'sider-tooltip-popup';

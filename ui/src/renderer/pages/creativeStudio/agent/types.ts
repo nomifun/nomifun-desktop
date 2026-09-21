@@ -21,29 +21,29 @@ interface CreativeStudioAgentMessageBase {
   text: string;
 }
 
-export interface CreativeStudioAgentUserMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentUserMessage extends CreativeStudioAgentMessageBase {
   role: 'user';
   status: 'complete';
 }
 
-export interface CreativeStudioAgentCompleteMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentCompleteMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'complete';
 }
 
-export interface CreativeStudioAgentRunningMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentRunningMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'running';
   activityLabel?: string;
 }
 
-export interface CreativeStudioAgentFailedMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentFailedMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'failed';
   errorMessage: string;
 }
 
-export interface CreativeStudioAgentStoppedMessage extends CreativeStudioAgentMessageBase {
+interface CreativeStudioAgentStoppedMessage extends CreativeStudioAgentMessageBase {
   role: 'assistant';
   status: 'stopped';
 }
@@ -77,7 +77,7 @@ export interface CreativeStudioAgentSkillOption {
   description: string;
 }
 
-export type CreativeStudioAgentProposalState =
+type CreativeStudioAgentProposalState =
   | 'ready'
   | 'applying'
   | 'applied'

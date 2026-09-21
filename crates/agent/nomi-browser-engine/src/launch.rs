@@ -32,16 +32,6 @@ pub enum BrowserHostLaunchMode {
     Headful,
 }
 
-impl BrowserHostLaunchMode {
-    pub const fn from_headful(headful: bool) -> Self {
-        if headful { Self::Headful } else { Self::Headless }
-    }
-
-    pub const fn is_headful(self) -> bool {
-        matches!(self, Self::Headful)
-    }
-}
-
 /// 轮询 DevToolsActivePort 文件的最长等待（chrome 冷启 + 端口监听就绪）。仅 Windows ws 路径用。
 #[cfg(windows)]
 const PORT_FILE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -80,12 +70,6 @@ pub struct Launched {
 }
 
 impl Launched {
-    /// Read-only completion receipt for this exact managed process tree.
-    /// Observers cannot signal the process or take profile cleanup authority.
-    pub fn exit_receipt(&self) -> Option<nomi_process_runtime::ChildProcessCleanup> {
-        self.cleanup.process.as_ref().and_then(|process|process.cleanup_receipt())
-    }
-
     fn new(transport: LaunchTransport, cleanup: CommittedLaunchGuard) -> Self {
         Self {
             transport: Some(transport),
@@ -161,6 +145,7 @@ impl LaunchedProcessGuard {
     pub(crate) fn ephemeral_profile_path(&self) -> Option<&Path> {
         self.cleanup.cleanup_user_data_dir.as_deref()
     }
+    #[cfg(any(test, feature = "conformance"))]
     pub fn child_mut(&mut self) -> &mut tokio::process::Child {
         self.cleanup.process_mut().child_mut()
     }
@@ -712,6 +697,7 @@ impl PostStopReconcileCell {
 /// `retained` is the hard ownership bound: it includes queued, executing and
 /// delayed exact process/profile authorities. A saturated relay backpressures
 /// the dropping caller before accepting another authority.
+#[cfg(any(test, feature = "conformance"))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BrowserCleanupRelayMetrics {
     pub capacity: usize,
@@ -1161,6 +1147,7 @@ fn decrement_failure_injection(counter: &std::sync::atomic::AtomicUsize) -> bool
         .is_ok()
 }
 
+#[cfg(any(test, feature = "conformance"))]
 pub fn browser_cleanup_relay_metrics() -> BrowserCleanupRelayMetrics {
     use std::sync::atomic::Ordering;
 
@@ -2343,6 +2330,7 @@ fn filtered_extra_chrome_args(extra: &str) -> Vec<String> {
 /// **Unix**：`--remote-debugging-pipe`,经 fd3/fd4 即时连（无端口轮询；浏览器在父死/管道 EOF 时
 /// 自退）;**Windows**：`--remote-debugging-port=0` + 轮询 DevToolsActivePort 拿端口/ws 路径。
 /// `force_headless` 由调用方按 display 算好。
+#[cfg(any(test, feature = "conformance"))]
 pub async fn launch_chrome(
     config: &LaunchConfig,
     force_headless: bool,
@@ -2419,6 +2407,7 @@ fn prepare_profile_directory_for_launch(
     std::fs::create_dir_all(&config.user_data_dir).map_err(|_| safe_profile_prepare_error())
 }
 
+#[cfg(any(test, feature = "conformance"))]
 pub(crate) async fn launch_chrome_with_cleanup_profile(
     config: &LaunchConfig,
     force_headless: bool,

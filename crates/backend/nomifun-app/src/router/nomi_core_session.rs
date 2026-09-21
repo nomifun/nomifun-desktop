@@ -2511,7 +2511,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         })?;
         let plugin_session = if skills.ids.is_empty() { plugin_session } else {
             plugin_session.with_selected_skills(nomifun_ai_agent::nomi_skills::NomiSelectedSkills::new(
-                skills.instructions, skills.resources,
+                skills.instructions, skills.resources, resource_image_model,
             ).map_err(|error| AppError::Conflict(error.to_string()))?)
                 .map_err(|error| AppError::Conflict(error.to_string()))?
         };

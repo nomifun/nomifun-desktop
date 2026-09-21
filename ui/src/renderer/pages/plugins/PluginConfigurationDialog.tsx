@@ -37,7 +37,7 @@ import {
 } from './pluginConfigurationModel';
 import styles from './PluginWorkbenchPage.module.css';
 
-export interface PluginConfigurationDialogProps {
+interface PluginConfigurationDialogProps {
   visible: boolean;
   detail: PluginDetail | null;
   loading: boolean;

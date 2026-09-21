@@ -4,23 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo, useRef } from 'react';
-import { useTranslation } from 'react-i18next';
-import { Message } from '@arco-design/web-react';
-import { DndContext, PointerSensor, closestCenter, useSensor, useSensors } from '@dnd-kit/core';
-import { SortableContext, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
-import type { DragEndEvent } from '@dnd-kit/core';
-import { CSS } from '@dnd-kit/utilities';
-import classNames from 'classnames';
-import { Delete, Drag, Pic, Plus } from '@icon-park/react';
-import { ipcBridge } from '@/common';
-import ContentSider from '@/renderer/components/layout/ContentSider';
-import InstantHoverTooltip from '@/renderer/components/base/InstantHoverTooltip';
-import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
-import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
-import type { CompanionMood } from '@renderer/pages/companion/characters';
 import type { ICompanionWithStatus } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
+import InstantHoverTooltip from '@/renderer/components/base/InstantHoverTooltip';
+import ContentSider from '@/renderer/components/layout/ContentSider';
+import type { DragEndEvent } from '@dnd-kit/core';
+import { DndContext,PointerSensor,closestCenter,useSensor,useSensors } from '@dnd-kit/core';
+import { SortableContext,useSortable,verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
+import { Delete,Drag,Pic,Plus } from '@icon-park/react';
+import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
+import type { CompanionMood } from '@renderer/pages/companion/characters';
+import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
+import classNames from 'classnames';
+import React,{ useCallback,useMemo,useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface CompanionRowProps {
   companion: ICompanionWithStatus;
@@ -134,7 +132,7 @@ const CompanionRow: React.FC<CompanionRowProps> = ({
   );
 };
 
-export interface CompanionSidebarProps {
+interface CompanionSidebarProps {
   companions: ICompanionWithStatus[];
   selectedId: CompanionId | null;
   /** True while the 形象库 view owns the workspace. */
@@ -308,18 +306,3 @@ const CompanionSidebar: React.FC<CompanionSidebarProps> = ({
 };
 
 export default CompanionSidebar;
-
-/** Delete one companion after a danger confirm. Shared by the sidebar and 其他. */
-export const confirmDeleteCompanion = async (
-  companion: { companion_id: CompanionId; name: string },
-  t: (key: string, options?: Record<string, unknown>) => string,
-  onDeleted: (companionId: CompanionId) => void
-): Promise<void> => {
-  try {
-    await ipcBridge.companion.deleteCompanion.invoke({ companion_id: companion.companion_id });
-    Message.success(t('nomi.settings.deleted', { companionName: companion.name }));
-    onDeleted(companion.companion_id);
-  } catch (error) {
-    Message.error(String(error));
-  }
-};

@@ -23,11 +23,11 @@ import type {
 /** Durable canvas identities are canonical, lowercase, bare UUIDv7 values. */
 export const createCanvasId: CanvasIdFactory = () => uuidv7();
 
-export function cloneCanvasNode<T extends CanvasNode>(node: T): T {
+function cloneCanvasNode<T extends CanvasNode>(node: T): T {
   return structuredClone(node);
 }
 
-export function cloneCanvasEdge(edge: CanvasEdge): CanvasEdge {
+function cloneCanvasEdge(edge: CanvasEdge): CanvasEdge {
   return structuredClone(edge);
 }
 
@@ -36,14 +36,6 @@ export function cloneCanvasDocument(document: CanvasDocument): CanvasDocument {
     nodes: document.nodes.map(cloneCanvasNode),
     connections: document.connections.map(cloneCanvasEdge),
   };
-}
-
-export function cloneCanvasClipboard(clipboard: CanvasClipboard): CanvasClipboard {
-  return cloneCanvasDocument(clipboard);
-}
-
-export function getCanvasGraphNodes(document: CanvasDocument): CanvasGraphNode[] {
-  return [...document.nodes];
 }
 
 export function getCanvasGroups(document: CanvasDocument): CanvasGroup[] {
@@ -57,7 +49,7 @@ export function findCanvasGraphNode(
   return document.nodes.find((node) => node.id === id);
 }
 
-export function isCanvasGroup(node: CanvasGraphNode): node is CanvasGroup {
+function isCanvasGroup(node: CanvasGraphNode): node is CanvasGroup {
   return node.type === 'group';
 }
 
@@ -173,7 +165,7 @@ export function ungroupCanvasNodes(
 }
 
 /** Expand selected groups to their members for move/copy operations. */
-export function expandCanvasNodeIds(
+function expandCanvasNodeIds(
   document: CanvasDocument,
   selectedIds: readonly string[]
 ): Set<string> {

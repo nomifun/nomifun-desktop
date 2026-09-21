@@ -26,7 +26,6 @@
         "@dnd-kit/utilities": "^3.2.2",
         "@floating-ui/react": "^0.27.16",
         "@icon-park/react": "^1.4.2",
-        "@monaco-editor/react": "^4.7.0",
         "@tauri-apps/api": "^2",
         "@tauri-apps/plugin-autostart": "^2",
         "@tauri-apps/plugin-dialog": "^2",
@@ -269,10 +268,6 @@
     "@marijn/find-cluster-break": ["@marijn/find-cluster-break@1.0.2", "https://registry.npmmirror.com/@marijn/find-cluster-break/-/find-cluster-break-1.0.2.tgz", {}, "sha512-l0h88YhZFyKdXIFNfSWpyjStDjGHwZ/U7iobcK1cQQD8sejsONdQtTVU+1wVN1PBw40PiiHB1vA5S7VTfQiP9g=="],
 
     "@mermaid-js/parser": ["@mermaid-js/parser@1.1.1", "https://registry.npmmirror.com/@mermaid-js/parser/-/parser-1.1.1.tgz", { "dependencies": { "@chevrotain/types": "~11.1.1" } }, "sha512-VuHdsYMK1bT6X2JbcAaWAhugTRvRBRyuZgd+c22swUeI9g/ntaxF7CY7dYarhZovofCbUNO0G7JesfmNtjYOCw=="],
-
-    "@monaco-editor/loader": ["@monaco-editor/loader@1.7.0", "https://registry.npmmirror.com/@monaco-editor/loader/-/loader-1.7.0.tgz", { "dependencies": { "state-local": "^1.0.6" } }, "sha512-gIwR1HrJrrx+vfyOhYmCZ0/JcWqG5kbfG7+d3f/C1LXk2EvzAbHSg3MQ5lO2sMlo9izoAZ04shohfKLVT6crVA=="],
-
-    "@monaco-editor/react": ["@monaco-editor/react@4.7.0", "https://registry.npmmirror.com/@monaco-editor/react/-/react-4.7.0.tgz", { "dependencies": { "@monaco-editor/loader": "^1.5.0" }, "peerDependencies": { "monaco-editor": ">= 0.25.0 < 1", "react": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0", "react-dom": "^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0" } }, "sha512-cyzXQCtO47ydzxpQtCGSQGOC8Gk3ZUeBXFAxD+CWXYFo5OqZyZUonFl0DwUlTyAfRHntBfw2p3w4s9R6oe1eCA=="],
 
     "@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.1.4", "https://registry.npmmirror.com/@napi-rs/wasm-runtime/-/wasm-runtime-1.1.4.tgz", { "dependencies": { "@tybys/wasm-util": "^0.10.1" }, "peerDependencies": { "@emnapi/core": "^1.7.1", "@emnapi/runtime": "^1.7.1" } }, "sha512-3NQNNgA1YSlJb/kMH1ildASP9HW7/7kYnRI2szWJaofaS1hWmbGI4H+d3+22aGzXXN9IJ+n+GiFVcGipJP18ow=="],
 
@@ -1038,8 +1033,6 @@
 
     "mlly": ["mlly@1.8.2", "https://registry.npmmirror.com/mlly/-/mlly-1.8.2.tgz", { "dependencies": { "acorn": "^8.16.0", "pathe": "^2.0.3", "pkg-types": "^1.3.1", "ufo": "^1.6.3" } }, "sha512-d+ObxMQFmbt10sretNDytwt85VrbkhhUA/JBGm1MPaWJ65Cl4wOgLaB1NYvJSZ0Ef03MMEU/0xpPMXUIQ29UfA=="],
 
-    "monaco-editor": ["monaco-editor@0.55.1", "https://registry.npmmirror.com/monaco-editor/-/monaco-editor-0.55.1.tgz", { "dependencies": { "dompurify": "3.2.7", "marked": "14.0.0" } }, "sha512-jz4x+TJNFHwHtwuV9vA9rMujcZRb0CEilTEwG2rRSpe/A7Jdkuj8xPKttCgOh+v/lkHy7HsZ64oj+q3xoAFl9A=="],
-
     "mrmime": ["mrmime@2.0.1", "https://registry.npmmirror.com/mrmime/-/mrmime-2.0.1.tgz", {}, "sha512-Y3wQdFg2Va6etvQ5I82yUhGdsKrcYox6p7FfL1LbK2J4V01F9TGlepTIhnK24t7koZibmg82KGglhA1XK5IsLQ=="],
 
     "ms": ["ms@2.1.3", "https://registry.npmmirror.com/ms/-/ms-2.1.3.tgz", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
@@ -1190,8 +1183,6 @@
 
     "space-separated-tokens": ["space-separated-tokens@2.0.2", "https://registry.npmmirror.com/space-separated-tokens/-/space-separated-tokens-2.0.2.tgz", {}, "sha512-PEGlAwrG8yXGXRjW32fGbg66JAlOAwbObuqVoJpv/mRgoWDQfgH1wDPvtzWyUSNAXBGSk8h755YDbbcEy3SH2Q=="],
 
-    "state-local": ["state-local@1.0.7", "https://registry.npmmirror.com/state-local/-/state-local-1.0.7.tgz", {}, "sha512-HTEHMNieakEnoe33shBYcZ7NX83ACUjCu8c40iOGEZsngj9zRnkqS9j1pqQPXwobB0ZcVTk27REb7COQ0UR59w=="],
-
     "string-width": ["string-width@4.2.3", "https://registry.npmmirror.com/string-width/-/string-width-4.2.3.tgz", { "dependencies": { "emoji-regex": "^8.0.0", "is-fullwidth-code-point": "^3.0.0", "strip-ansi": "^6.0.1" } }, "sha512-wKyQRQpjJ0sIp62ErSZdGsjMJWsap5oRNihHhu6G7JVO/9jIB6UyevL+tXuOqrng8j/cxKTWyWUwvSTriiZz/g=="],
 
     "stringify-entities": ["stringify-entities@4.0.4", "https://registry.npmmirror.com/stringify-entities/-/stringify-entities-4.0.4.tgz", { "dependencies": { "character-entities-html4": "^2.0.0", "character-entities-legacy": "^3.0.0" } }, "sha512-IwfBptatlO+QCJUo19AqvrPNqlVMpW9YEL2LIVY+Rpv2qsjCGxaDLNRgeGsQWJhfItebuJhsGSLjaBbNSQ+ieg=="],
@@ -1323,10 +1314,6 @@
     "d3-sankey/d3-shape": ["d3-shape@1.3.7", "https://registry.npmmirror.com/d3-shape/-/d3-shape-1.3.7.tgz", { "dependencies": { "d3-path": "1" } }, "sha512-EUkvKjqPFUAZyOlhY5gzCxCeI0Aep04LwIRpsZ/mLFelJiUfnK56jo5JMDSE7yyP2kLSb6LtF+S5chMk7uqPqw=="],
 
     "lowlight/highlight.js": ["highlight.js@10.7.3", "https://registry.npmmirror.com/highlight.js/-/highlight.js-10.7.3.tgz", {}, "sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A=="],
-
-    "monaco-editor/dompurify": ["dompurify@3.2.7", "https://registry.npmmirror.com/dompurify/-/dompurify-3.2.7.tgz", { "optionalDependencies": { "@types/trusted-types": "^2.0.7" } }, "sha512-WhL/YuveyGXJaerVlMYGWhvQswa7myDG17P7Vu65EWC05o8vfeNbvNf4d/BOvH99+ZW+LlQsc1GDKMa1vNK6dw=="],
-
-    "monaco-editor/marked": ["marked@14.0.0", "https://registry.npmmirror.com/marked/-/marked-14.0.0.tgz", { "bin": { "marked": "bin/marked.js" } }, "sha512-uIj4+faQ+MgHgwUW1l2PsPglZLOLOT1uErt06dAPtx2kjteLAkbsd/0FiYg/MGS+i7ZKLb7w2WClxHkzOOuryQ=="],
 
     "parse-entities/@types/unist": ["@types/unist@2.0.11", "https://registry.npmmirror.com/@types/unist/-/unist-2.0.11.tgz", {}, "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA=="],
 

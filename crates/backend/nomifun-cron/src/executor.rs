@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nomifun_ai_agent::AgentRegistry;
 use nomifun_agent_contracts::AgentSessionId;
 use nomifun_api_types::CreateConversationRequest;
 use nomifun_common::{
@@ -12,7 +11,6 @@ use nomifun_common::{
 use nomifun_common::paths::{
     WorkspaceDirectoryCheck, canonical_existing_workspace_directory,
 };
-use nomifun_realtime::UserEventSink;
 use tracing::{error, info, warn};
 
 use crate::busy_guard::CronBusyGuard;
@@ -85,35 +83,21 @@ pub struct JobExecutor {
     authoritative_user_id: Arc<str>,
     sessions: Arc<dyn CronSessionPort>,
     busy_guard: Arc<CronBusyGuard>,
-    _work_dir: PathBuf,
     data_dir: PathBuf,
-    /// Retained only to keep the executor's injection contract stable for the
-    /// application assembly; no cron code path reads the catalog any more. The
-    /// agent-metadata lookups that used it existed to resolve a per-job
-    /// external agent, and the native executor is the only agent type left.
-    #[allow(dead_code)]
-    agent_registry: Arc<AgentRegistry>,
 }
 
 impl JobExecutor {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         authoritative_user_id: Arc<str>,
         sessions: Arc<dyn CronSessionPort>,
         busy_guard: Arc<CronBusyGuard>,
-        work_dir: PathBuf,
         data_dir: PathBuf,
-        _user_events: Arc<dyn UserEventSink>,
-        agent_registry: Arc<AgentRegistry>,
     ) -> Self {
-        let _ = &_user_events;
         Self {
             authoritative_user_id,
             sessions,
             busy_guard,
-            _work_dir: work_dir,
             data_dir,
-            agent_registry,
         }
     }
 
@@ -454,18 +438,6 @@ impl JobExecutor {
         );
 
         Ok(conversation_id)
-    }
-
-    #[cfg(test)]
-    async fn execute_inner(
-        &self,
-        job: &CronJob,
-        conversation_id: &str,
-        saved_skill: Option<&SavedSkillContext>,
-    ) -> ExecutionResult {
-        let run_id = nomifun_common::CronJobRunId::new().into_string();
-        self.execute_inner_with_run_id(job, &run_id, conversation_id, saved_skill)
-            .await
     }
 
     async fn execute_inner_with_run_id(

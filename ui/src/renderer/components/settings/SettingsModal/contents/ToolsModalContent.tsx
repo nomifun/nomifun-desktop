@@ -5,18 +5,17 @@
  */
 
 import type { IMcpServer } from '@/common/config/storage';
-import { getAgents } from '@/renderer/hooks/agent/useAgents';
-import { Message, Button, Dropdown, Menu, Modal } from '@arco-design/web-react';
-import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { Down, Plus } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useTranslation } from 'react-i18next';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
-import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
-import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
-import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
-import { useMcpServers, useMcpConnection, useMcpModal, useMcpServerCRUD, useMcpOAuth } from '@/renderer/hooks/mcp';
+import { getAgents } from '@/renderer/hooks/agent/useAgents';
+import { useMcpConnection,useMcpModal,useMcpOAuth,useMcpServerCRUD } from '@/renderer/hooks/mcp';
 import { mcpServerUiKey } from '@/renderer/hooks/mcp/mcpUiKey';
+import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
+import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
+import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
+import { Button,Dropdown,Menu,Message,Modal } from '@arco-design/web-react';
+import { Down,Plus } from '@icon-park/react';
+import React,{ useCallback,useEffect,useMemo,useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 type MessageInstance = Required<ReturnType<typeof Message.useMessage>[0]>;
 
@@ -265,20 +264,6 @@ const ModalMcpManagementSection: React.FC<{
   );
 };
 
-const ToolsModalContent: React.FC = () => {
-  const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
-  const { mcpServers, saveMcpServers, setMcpServers } = useMcpServers();
-  return (
-    <ToolsModalContentWithState
-      mcpMessage={mcpMessage}
-      mcpMessageContext={mcpMessageContext}
-      mcpServers={mcpServers}
-      saveMcpServers={saveMcpServers}
-      setMcpServers={setMcpServers}
-    />
-  );
-};
-
 /**
  * State-injected variant so hosts that already own the MCP server state (e.g.
  * the /mcp hub page with its market tabs) can share one `useMcpServers`
@@ -313,5 +298,3 @@ export const ToolsModalContentWithState: React.FC<{
     </div>
   );
 };
-
-export default ToolsModalContent;

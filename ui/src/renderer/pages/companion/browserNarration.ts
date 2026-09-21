@@ -10,7 +10,7 @@ import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
  * P3-N1 桌宠气泡浏览器动作 narration。
  *
  * 会话内嵌 `Browser` 工具经标准 `tool_call` 通道上桌宠气泡，
- * 但流式事件里 `description` 恒为 `None`（见 backend_output_sink），气泡过去只能压
+ * 但流式事件里的 `description` 可能为空，气泡过去只能压
  * 通用占位 `usingTools`，把具体动作（navigate/click/type…）和参数（url/ref/text）全
  * 丢弃。本模块复用裁决 ⑧——参照后端 `BrowserTool::describe`（tool.rs:1160）的人读
  * narration，在前端按 v2 `operation` 及嵌套的 `action.action` 合成一条

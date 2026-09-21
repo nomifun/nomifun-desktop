@@ -19,7 +19,7 @@ export interface GeomSize {
 export const clamp = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), Math.max(lo, hi));
 
 /** Intersection area of two rects (0 when disjoint). */
-export const overlapArea = (a: GeomRect, b: GeomRect): number =>
+const overlapArea = (a: GeomRect, b: GeomRect): number =>
   Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x)) *
   Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
 

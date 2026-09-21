@@ -83,17 +83,3 @@ export function connectCanvasNodes(
     },
   };
 }
-
-export function incomingCanvasEdges(
-  document: CanvasDocument,
-  nodeId: string
-): CanvasEdge[] {
-  return document.connections.filter((edge) => edge.targetNodeId === nodeId);
-}
-
-export function outgoingCanvasEdges(
-  document: CanvasDocument,
-  nodeId: string
-): CanvasEdge[] {
-  return document.connections.filter((edge) => edge.sourceNodeId === nodeId);
-}

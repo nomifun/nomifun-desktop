@@ -6,8 +6,6 @@
 
 import type { ConversationId, PreviewSnapshotId } from '@/common/types/ids';
 
-export type { PreviewSnapshotId };
-
 export type PreviewContentType =
   | 'markdown'
   | 'diff'
@@ -43,8 +41,4 @@ export interface PreviewUrlResponse {
   url: string;
   capability?: string;
   error?: string;
-}
-
-export interface RemoteImageFetchRequest {
-  url: string;
 }

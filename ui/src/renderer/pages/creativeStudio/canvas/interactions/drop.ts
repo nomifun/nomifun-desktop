@@ -11,7 +11,7 @@ import {
 import { clientToCanvas, type CanvasPoint, type CanvasViewport } from '../core';
 import type { CanvasIntegrationIntent } from './types';
 
-export interface CanvasDropImportRejection {
+interface CanvasDropImportRejection {
   file: File;
   reason: CreativeAssetUploadRejection;
 }

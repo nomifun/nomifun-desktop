@@ -20,7 +20,7 @@ import styles from './PluginWorkbenchPage.module.css';
 
 type ShareSource = 'ready_candidate' | 'current_mount';
 
-export interface PluginShareExportDialogProps {
+interface PluginShareExportDialogProps {
   visible: boolean;
   detail: PluginProjectDetail | null;
   linkedMount?: PluginSummary;

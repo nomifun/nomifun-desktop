@@ -14,7 +14,7 @@ import { useTranslation } from 'react-i18next';
 import type { PluginLoadFailure } from './pluginWorkbenchModel';
 import styles from './PluginWorkbenchPage.module.css';
 
-export interface PluginDependencyDialogProps {
+interface PluginDependencyDialogProps {
   visible: boolean;
   detail: PluginProjectDetail | null;
   loading: boolean;

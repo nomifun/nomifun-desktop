@@ -1,6 +1,6 @@
 import type { AgentResourceSelection } from '@/common/types/agentPlatform';
 
-export const AUTOMATIC_AGENT_RESOURCE_IDS: Readonly<Record<string, string>> = {
+const AUTOMATIC_AGENT_RESOURCE_IDS: Readonly<Record<string, string>> = {
   workspace: 'default-workspace',
   project_memory: 'default-project-memory',
   process_session: 'managed-process-session',
@@ -11,7 +11,7 @@ export const AUTOMATIC_AGENT_RESOURCE_IDS: Readonly<Record<string, string>> = {
   scheduler: 'installation-scheduler',
 };
 
-export const USER_AGENT_RESOURCE_KINDS = [
+const USER_AGENT_RESOURCE_KINDS = [
   'companion',
   'customer',
   'knowledge_base',
@@ -29,7 +29,7 @@ export const USER_AGENT_RESOURCE_KINDS = [
  * desktop; its live OS permissions narrow Computer actions at invocation time
  * without becoming a Session admission prerequisite.
  */
-export const OPTIONAL_UNBOUND_AGENT_RESOURCE_KINDS = [
+const OPTIONAL_UNBOUND_AGENT_RESOURCE_KINDS = [
   'knowledge_base',
   'channel',
   'robot',
@@ -50,7 +50,7 @@ export type AgentResourceSelectionValue = Partial<Record<UserAgentResourceKind, 
 export const selectedMcpResourceIds = (value: AgentResourceSelectionValue): string[] =>
   [...new Set((value.mcp_servers ?? (value.mcp_server ? [value.mcp_server] : [])).filter(Boolean))];
 
-export const hasFrozenMcpTools = (capabilities: Iterable<string>): boolean =>
+const hasFrozenMcpTools = (capabilities: Iterable<string>): boolean =>
   [...capabilities].some((id) => /^nomi\.mcp\.v1\.[0-9a-f]{64}$/.test(id));
 
 /** Other unmapped consumers still require one exact server on the backend. */
@@ -63,7 +63,7 @@ export type AgentResourceSelectionResolution = {
   missingKinds: string[];
 };
 
-export const pickerKindForResourceKind = (kind: string): UserAgentResourceKind | undefined => {
+const pickerKindForResourceKind = (kind: string): UserAgentResourceKind | undefined => {
   const normalized = kind === 'companion_memory' ? 'companion' : kind;
   return (USER_AGENT_RESOURCE_KINDS as readonly string[]).includes(normalized)
     ? normalized as UserAgentResourceKind

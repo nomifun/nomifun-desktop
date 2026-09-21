@@ -191,16 +191,3 @@ impl EngineEffectScope {
         Ok(())
     }
 }
-
-pub(crate) async fn settle_optional(
-    scope: Option<&Arc<EngineEffectScope>>,
-) -> Result<(), AppError> {
-    match scope {
-        Some(scope) => {
-            tokio::time::timeout(std::time::Duration::from_secs(10), scope.settle_turn())
-                .await
-                .map_err(|_| failure())?
-        }
-        None => Ok(()),
-    }
-}

@@ -13,7 +13,7 @@ import { creativeAssetClient } from './client';
 import { CreativeAssetDeletedError, subscribeCreativeAssetDeletion } from './assetDeletion';
 import { useCreativeAssets } from './useCreativeAssets';
 
-export interface CreativeAssetPickerRequest {
+interface CreativeAssetPickerRequest {
   acceptedKinds: readonly CreativeAssetKind[];
   initialSelectedIds?: readonly string[];
   selectionLimit?: number;

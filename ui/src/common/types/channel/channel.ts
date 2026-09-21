@@ -19,10 +19,10 @@ export type ChannelOwnerDomain = 'companion' | 'customer_service';
  * value. Unknown or missing wire values must fail closed to `disabled` via
  * {@link normalizeGroupAccessMode}.
  */
-export const GROUP_ACCESS_MODES = ['all_members', 'allowlist', 'disabled'] as const;
+const GROUP_ACCESS_MODES = ['all_members', 'allowlist', 'disabled'] as const;
 export type GroupAccessMode = (typeof GROUP_ACCESS_MODES)[number];
 
-export const DEFAULT_GROUP_ACCESS_MODE: GroupAccessMode = 'disabled';
+const DEFAULT_GROUP_ACCESS_MODE: GroupAccessMode = 'disabled';
 
 export function normalizeGroupAccessMode(value: unknown): GroupAccessMode {
   return typeof value === 'string' && (GROUP_ACCESS_MODES as readonly string[]).includes(value)

@@ -63,7 +63,7 @@ export const isSkillGranted = (
   name: string
 ): boolean => !config.disabled_auto.includes(name) && (autoNames.has(name) || config.enabled.includes(name));
 
-export const grantedSkillNames = (
+const grantedSkillNames = (
   config: ICompanionSkillConfig,
   autoNames: ReadonlySet<string>,
   catalogNames: readonly string[]

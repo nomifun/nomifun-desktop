@@ -1,13 +1,7 @@
 /** Exact NomiFun catalog coordinate for the `speech_synthesis` task. */
-export interface SpeechGenerationModelIdentity {
+interface SpeechGenerationModelIdentity {
   providerId: string;
   model: string;
-}
-
-export interface SpeechGenerationOption {
-  value: string;
-  label: string;
-  disabled?: boolean;
 }
 
 /**
@@ -29,10 +23,4 @@ export interface SpeechGenerationFieldSupport {
   speed: boolean;
   instructions: boolean;
   references: boolean;
-}
-
-export interface SpeechGenerationSpeedRange {
-  min: number;
-  max: number;
-  step: number;
 }

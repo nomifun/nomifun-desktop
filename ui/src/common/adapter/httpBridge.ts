@@ -1104,29 +1104,6 @@ function scheduleWsReconnect(): void {
   }, delay);
 }
 
-/**
- * Whether the shared realtime WebSocket is currently OPEN. This is nominal
- * socket state only: a half-open socket the OS has not surfaced yet still
- * reports OPEN here. Consumers gating fallback polling on realtime health
- * must combine this with `wsLastActivityAt` — readyState alone would disable
- * the poll in exactly the wedged case it exists for.
- */
-export function isWsConnected(): boolean {
-  return ws != null && ws.readyState === WebSocket.OPEN;
-}
-
-/**
- * Timestamp of the most recent inbound frame (server heartbeat pings
- * included) or successful open on the shared realtime WebSocket; `null`
- * before the first connection. The backend heartbeats every active
- * connection at least every 30s, so unlike `readyState` this only keeps
- * advancing while the peer is actually delivering data — a wedged half-open
- * socket goes silent here long before the OS reports the close.
- */
-export function wsLastActivityAt(): number | null {
-  return wsLastActivityAtMs;
-}
-
 // ---------------------------------------------------------------------------
 // Emitter factory (same shape as bridge.buildEmitter)
 // ---------------------------------------------------------------------------
@@ -1191,16 +1168,6 @@ export function wsMappedEmitter<Params = undefined, Raw = Params>(
         callback(mapped);
       });
     },
-    emit: (() => {}) as EmitterLike<Params>['emit'],
-  };
-}
-
-/**
- * Stub emitter for events not yet implemented in the backend.
- */
-export function stubEmitter<Params = undefined>(_name: string): EmitterLike<Params> {
-  return {
-    on: () => () => {},
     emit: (() => {}) as EmitterLike<Params>['emit'],
   };
 }

@@ -24,9 +24,9 @@ export const safeDecodeUriComponent = (value: string): string => {
 
 export const isFileUri = (value: string): boolean => /^file:/i.test(value);
 
-export const isWindowsDriveAbsolutePath = (value: string): boolean => WINDOWS_DRIVE_ABSOLUTE_RE.test(value);
+const isWindowsDriveAbsolutePath = (value: string): boolean => WINDOWS_DRIVE_ABSOLUTE_RE.test(value);
 
-export const isWindowsUncPath = (value: string): boolean =>
+const isWindowsUncPath = (value: string): boolean =>
   WINDOWS_UNC_RE.test(value) || WINDOWS_EXTENDED_UNC_RE.test(value);
 
 export const isAbsoluteLocalPath = (value: string): boolean =>

@@ -81,5 +81,3 @@ export function useCompanionWindowsSync(): void {
     };
   }, []);
 }
-
-export default useCompanionWindowsSync;

@@ -130,8 +130,6 @@ pub(crate) struct ResolvedProviderFields {
     pub base_url: Option<String>,
     pub compat_overrides: NomiCompatOverrides,
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
-    pub context_limit: Option<i64>,
-    pub output_limit: Option<i64>,
     pub supports_web_search: bool,
 }
 
@@ -402,8 +400,6 @@ async fn resolve_provider_fields_at_revision(
         base_url,
         compat_overrides,
         bedrock_config,
-        context_limit: task.context_limit,
-        output_limit: task.output_limit,
         supports_web_search: task.traits.contains(&ModelTrait::WebSearch),
     })
 }
@@ -951,7 +947,6 @@ mod provider_resolution_tests {
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
         assert_eq!(fields.compat_overrides.max_tokens_field.as_deref(), Some("max_completion_tokens"));
         assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
-        assert_eq!(fields.context_limit, Some(131_072));
         assert_eq!(fields.compat_overrides.supports_image, Some(false));
         assert!(!fields.supports_web_search);
     }

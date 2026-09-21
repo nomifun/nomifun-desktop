@@ -49,7 +49,7 @@ import type {
 import { createCreativeAssetLibraryLabels } from './types';
 import styles from './CreativeAssetLibrary.module.css';
 
-export interface CreativeAssetLibraryProps {
+interface CreativeAssetLibraryProps {
   state: CreativeAssetLibraryState;
   search: string;
   kind: CreativeAssetKindFilter;

@@ -11,7 +11,6 @@ futures-util.workspace = true
 zeroize.workspace = true
 tokio.workspace = true
 tokio-util = { workspace = true, features = ["codec", "io", "rt"] }
-async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 regex.workspace = true

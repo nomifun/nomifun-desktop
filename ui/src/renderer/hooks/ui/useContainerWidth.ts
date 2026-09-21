@@ -60,5 +60,3 @@ export function useContainerWidth<T extends HTMLElement = HTMLDivElement>(
 
   return { ref, width };
 }
-
-export default useContainerWidth;

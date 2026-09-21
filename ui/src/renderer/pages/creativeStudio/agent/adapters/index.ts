@@ -6,18 +6,14 @@
 
 export {
   createNomiCreativeStudioAgentChatPort,
-  NomiCreativeStudioAgentBindingError,
-  NomiCreativeStudioAgentRuntimeError,
+
 } from './NomiCreativeStudioAgentChatPort';
 export { serializeCreativeStudioAgentHistory } from './history';
-export { createNomiCreativeStudioAgentTransport } from './nomiTransport';
 export type {
-  NomiConversationRuntimeAuthority,
-  NomiCreativeStudioAgentPortOptions,
+
   NomiCreativeStudioAgentSessionBinding,
   NomiCreativeStudioAgentSessionResolution,
   NomiCreativeStudioAgentSessionResolutionInput,
   NomiCreativeStudioAgentSessionResolver,
-  NomiCreativeStudioAgentTransport,
-  NomiCreativeStudioConversationSnapshot,
+
 } from './types';

@@ -12,14 +12,14 @@ import type {
 } from '@/common/types/pluginPlatform';
 
 export type PluginConfigScalar = string | number | boolean;
-export type PluginConfigFieldKind =
+type PluginConfigFieldKind =
   | 'string'
   | 'number'
   | 'integer'
   | 'boolean'
   | 'enum';
 
-export type PluginConfigSchemaIssueCode =
+type PluginConfigSchemaIssueCode =
   | 'root_not_object'
   | 'root_type_unsupported'
   | 'properties_not_object'
@@ -43,7 +43,7 @@ export interface PluginConfigSchemaIssue {
   keyword?: string;
 }
 
-export interface PluginConfigEnumOption {
+interface PluginConfigEnumOption {
   id: string;
   label: string;
   value: PluginConfigScalar;
@@ -74,7 +74,7 @@ export interface PluginConfigurationEditorModel {
 
 export type PluginCredentialDraftAction = 'keep' | 'bind' | 'unbind';
 
-export interface PluginCredentialDraft {
+interface PluginCredentialDraft {
   action: PluginCredentialDraftAction;
   credentialId: string;
 }
@@ -84,7 +84,7 @@ export interface PluginConfigurationDraft {
   credentials: Record<string, PluginCredentialDraft>;
 }
 
-export type PluginConfigurationDraftIssueCode =
+type PluginConfigurationDraftIssueCode =
   | 'required'
   | 'invalid_type'
   | 'integer_required'

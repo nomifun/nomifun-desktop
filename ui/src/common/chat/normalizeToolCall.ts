@@ -6,7 +6,7 @@ import { normalizeToolGroupStatus } from './toolGroupStatus';
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
 export type NormalizedToolNotExecutedReason = 'invalid_arguments';
 
-export interface NormalizedToolRetry {
+interface NormalizedToolRetry {
   retryGroupId: string;
   attemptNo: number;
   retryOfCallId?: string;
@@ -248,16 +248,4 @@ export function normalizeToolMessages(messages: ToolMessage[]): NormalizedToolCa
       return undefined;
     })
     .filter((item): item is NormalizedToolCall => item !== undefined);
-}
-
-export function hasRunningToolMessages(messages: ToolMessage[]): boolean {
-  return messages.some((m) => {
-    if (m.type === 'tool_group') {
-      return Array.isArray(m.content) && m.content.some((t) => toNormalizedToolGroupStatus(t.status) === 'running');
-    }
-    if (m.type === 'tool_call') {
-      return normalizeToolCallStatus(m.content?.status) === 'running';
-    }
-    return false;
-  });
 }

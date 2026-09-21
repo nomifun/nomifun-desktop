@@ -10,7 +10,7 @@ import React from 'react';
 import type { CreativeAssetLibraryLabels, CreativeAssetUploadItem } from './types';
 import styles from './CreativeAssetLibrary.module.css';
 
-export interface CreativeAssetUploadQueueProps {
+interface CreativeAssetUploadQueueProps {
   items: readonly CreativeAssetUploadItem[];
   labels: CreativeAssetLibraryLabels;
   onCancel?: (uploadId: string) => void;

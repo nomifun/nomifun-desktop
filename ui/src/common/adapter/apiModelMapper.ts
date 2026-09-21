@@ -21,40 +21,15 @@ import {
   parseProviderId,
 } from '../types/ids';
 
-export type ApiProviderWithModel = {
+type ApiProviderWithModel = {
   provider_id: string;
   model: string;
   use_model?: string;
 };
 
-function hasCompleteModelIdentity(
-  model?: TProviderWithModel
-): model is TProviderWithModel & { id: string; use_model: string } {
-  return Boolean(
-    model &&
-    typeof model.id === 'string' &&
-    model.id.trim().length > 0 &&
-    typeof model.use_model === 'string' &&
-    model.use_model.trim().length > 0
-  );
-}
-
-// ── Frontend → Backend ──────────────────────────────────────────────────
-
-export function toApiModel(m: TProviderWithModel): ApiProviderWithModel {
-  return {
-    provider_id: m.id,
-    model: m.use_model,
-  };
-}
-
-export function toApiModelOptional(m?: TProviderWithModel): ApiProviderWithModel | undefined {
-  return hasCompleteModelIdentity(m) ? toApiModel(m) : undefined;
-}
-
 // ── Backend → Frontend ──────────────────────────────────────────────────
 
-export function fromApiModel(raw: ApiProviderWithModel): TProviderWithModel {
+function fromApiModel(raw: ApiProviderWithModel): TProviderWithModel {
   return {
     id: parseProviderId(raw.provider_id),
     platform: '',
@@ -71,7 +46,7 @@ function fromApiModelOptional(raw?: ApiProviderWithModel | null): TProviderWithM
 }
 
 /** ConversationResponse 顶层置顶字段（conversations 表真列，服务端维护 pinned_at）。 */
-export type ApiConversationPinnedFields = {
+type ApiConversationPinnedFields = {
   pinned?: boolean | null;
   /** 毫秒时间戳；未置顶时服务端省略该 key */
   pinned_at?: number | null;
@@ -79,7 +54,7 @@ export type ApiConversationPinnedFields = {
 
 /** First-class Conversation collaboration authoring reference. It is never
  * read from or mirrored into `extra`. */
-export type ApiConversationExecutionTemplateFields = {
+type ApiConversationExecutionTemplateFields = {
   execution_template_id?: string | null;
 };
 

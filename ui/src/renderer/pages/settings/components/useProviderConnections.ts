@@ -10,7 +10,7 @@ import { ipcBridge } from '@/common';
 import type { ProviderConnectionResponse } from '@/common/types/provider/providerConnection';
 import type { ProviderId } from '@/common/types/ids';
 
-export const providerConnectionsSwrKey = (providerId: ProviderId) => `provider-connections:${providerId}`;
+const providerConnectionsSwrKey = (providerId: ProviderId) => `provider-connections:${providerId}`;
 
 const SWR_OPTIONS: SWRConfiguration<ProviderConnectionResponse[], Error> = {
   revalidateOnFocus: false,

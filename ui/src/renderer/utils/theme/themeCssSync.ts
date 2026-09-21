@@ -5,7 +5,7 @@ import {
 } from '@renderer/pages/settings/DisplaySettings/backgroundUtils';
 import { DEFAULT_THEME_ID, PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets';
 
-export const CSS_SYNC_RECENT_UPDATE_WINDOW_MS = 2000;
+const CSS_SYNC_RECENT_UPDATE_WINDOW_MS = 2000;
 
 type ComputeCssSyncDecisionParams = {
   savedCss: string;

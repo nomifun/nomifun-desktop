@@ -3,7 +3,7 @@ import { CreativeAssetDeletedError, isCreativeAssetDeleted, type CreativeAsset, 
 import type { CreativeTaskInputRole } from '@renderer/pages/creativeStudio/tasks';
 import { GenerationError } from './generationError';
 
-export interface GenerationReferenceBinding {
+interface GenerationReferenceBinding {
   assetId: string;
   kind: CreativeAssetKind;
   role: CreativeTaskInputRole;

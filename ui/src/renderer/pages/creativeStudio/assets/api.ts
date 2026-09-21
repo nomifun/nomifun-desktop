@@ -30,7 +30,7 @@ export interface WorkshopAssetDto {
   deleted_at?: number | null;
 }
 
-export interface WorkshopAssetListDto {
+interface WorkshopAssetListDto {
   items: WorkshopAssetDto[];
   total: number;
 }
@@ -54,7 +54,7 @@ export interface WorkshopAssetUploadMetadata {
   in_library?: boolean;
 }
 
-export interface WorkshopTextAssetInput {
+interface WorkshopTextAssetInput {
   kind: 'text';
   title: string;
   text_content: string;
@@ -79,7 +79,7 @@ export interface WorkshopAssetPatch {
   in_library?: boolean;
 }
 
-export interface WorkshopPromptAssetIdentity {
+interface WorkshopPromptAssetIdentity {
   prompt_library_source: 'catalog';
   prompt_library_id: string;
 }

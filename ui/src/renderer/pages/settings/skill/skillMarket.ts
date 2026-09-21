@@ -2,7 +2,6 @@ import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBr
 
 export const SKILL_MARKET_SOURCES: SkillMarketSource[] = ['clawhub', 'loophub', 'skillhub'];
 export const MCP_MARKET_SOURCES: SkillMarketSource[] = ['skillhub_mcp', 'mcpworld'];
-export const PLUGIN_MARKET_SOURCES: SkillMarketSource[] = ['clawhub_plugins'];
 
 const MARKET_SOURCE_LABELS: Record<SkillMarketSource, string> = {
   clawhub: 'ClawHub',
@@ -53,7 +52,7 @@ const MAX_NAME_LENGTH = 96;
 const MAX_DESCRIPTION_LENGTH = 220;
 const MAX_COMMAND_LENGTH = 320;
 
-export const isSkillMarketSource = (value: unknown): value is SkillMarketSource =>
+const isSkillMarketSource = (value: unknown): value is SkillMarketSource =>
   value === 'clawhub' ||
   value === 'skillhub' ||
   value === 'loophub' ||

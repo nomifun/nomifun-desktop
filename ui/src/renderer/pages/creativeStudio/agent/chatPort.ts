@@ -41,7 +41,7 @@ export interface CreativeStudioAgentChatPort {
     | Promise<AsyncIterable<CreativeStudioAgentTurnEvent>>;
 }
 
-export type CreativeStudioAgentTurnStatus =
+type CreativeStudioAgentTurnStatus =
   | { state: 'running' }
   | { state: 'completed' }
   | { state: 'stopped' }
@@ -54,7 +54,7 @@ export interface CreativeStudioAgentTurnObserver {
 
 export type CreativeStudioAgentTurnOutcome = Exclude<CreativeStudioAgentTurnStatus, { state: 'running' }>;
 
-export class CreativeStudioAgentBusyError extends Error {
+class CreativeStudioAgentBusyError extends Error {
   constructor() {
     super('Creative Studio Agent already has an active turn');
     this.name = 'CreativeStudioAgentBusyError';
@@ -68,7 +68,7 @@ export class CreativeStudioAgentProtocolError extends Error {
   }
 }
 
-export class CreativeStudioAgentRemoteError extends Error {
+class CreativeStudioAgentRemoteError extends Error {
   readonly code?: string;
   readonly retryable: boolean;
 

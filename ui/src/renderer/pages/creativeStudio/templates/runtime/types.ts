@@ -28,7 +28,7 @@ export interface ReviewCreativeTemplateDraft {
   reviewNote?: string | null;
 }
 
-export type CreativeTemplateRunActivityState =
+type CreativeTemplateRunActivityState =
   | 'submitting'
   | 'executing'
   | 'awaiting-review'

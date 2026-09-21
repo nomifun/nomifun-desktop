@@ -13,7 +13,7 @@ import type { CharacterDeskSpec, CharacterMeta, CustomFigureMeta } from './types
 export type {
   CharacterDeskSpec,
   CharacterMeta,
-  CharacterProps,
+
   CustomFigureMeta,
   CompanionActivity,
   CompanionMood,

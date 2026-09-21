@@ -23,7 +23,7 @@ export interface CreativeCanvasContextMenuState {
   selectedEdgeCount?: number;
 }
 
-export interface CreativeCanvasCreateNodeMenuState {
+interface CreativeCanvasCreateNodeMenuState {
   clientPosition: CanvasPoint;
 }
 

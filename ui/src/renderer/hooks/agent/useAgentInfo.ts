@@ -20,11 +20,11 @@ export interface AgentInfo {
   revision?: number;
 }
 
-export function resolveAgentPresetId(conversation: TChatConversation): AgentPresetId | null {
+function resolveAgentPresetId(conversation: TChatConversation): AgentPresetId | null {
   return conversation.preset_id ?? null;
 }
 
-export function resolveAgentSnapshot(conversation: TChatConversation): AgentResolvedSnapshot | null {
+function resolveAgentSnapshot(conversation: TChatConversation): AgentResolvedSnapshot | null {
   const value = conversation.agent_snapshot;
   if (!value || typeof value !== 'object') return null;
   const candidate = value as Partial<AgentResolvedSnapshot>;
@@ -33,7 +33,7 @@ export function resolveAgentSnapshot(conversation: TChatConversation): AgentReso
     : null;
 }
 
-export function resolveAgentDisplayName(
+function resolveAgentDisplayName(
   conversation: TChatConversation,
   snapshot: AgentResolvedSnapshot | null,
 ): string {

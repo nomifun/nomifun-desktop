@@ -62,7 +62,7 @@ export interface CanvasImageTaskRuntimeBridgeHandle {
   snapshot(): CanvasGenerationRuntimeSnapshot;
 }
 
-export interface CanvasImageTaskRuntimeBridgeProps {
+interface CanvasImageTaskRuntimeBridgeProps {
   projectId: string;
   initialDocument: CreativeProjectDocument;
   editorRef: React.RefObject<CreativeCanvasEditorHandle | null>;

@@ -11,7 +11,6 @@
 //! unchanged.
 
 use async_trait::async_trait;
-use nomi_types::message::ContentBlock;
 
 /// The server-owned facts for the user turn currently crossing the provider
 /// boundary. Contributors receive text and attachment metadata, never image
@@ -25,34 +24,6 @@ pub struct TurnContext {
     pub text: String,
     pub image_media_types: Vec<String>,
     pub cs_dialogue_id: Option<String>,
-}
-
-impl TurnContext {
-    pub(crate) fn from_user_content(
-        turn_id: &str,
-        source_message_id: &str,
-        content: &[ContentBlock],
-        cs_dialogue_id: Option<String>,
-    ) -> Self {
-        let mut text = Vec::new();
-        let mut image_media_types = Vec::new();
-        for block in content {
-            match block {
-                ContentBlock::Text { text: value } => text.push(value.as_str()),
-                ContentBlock::Image { media_type, .. } => {
-                    image_media_types.push(media_type.clone());
-                }
-                _ => {}
-            }
-        }
-        Self {
-            turn_id: turn_id.to_owned(),
-            source_message_id: source_message_id.to_owned(),
-            text: text.join("\n"),
-            image_media_types,
-            cs_dialogue_id,
-        }
-    }
 }
 
 /// Stable host-context key populated by the customer-service transport. The
@@ -160,27 +131,4 @@ mod tests {
         assert_eq!(merge_pre_turn_context("S".into(), contributions), "S\n\nalpha\n\nbeta");
     }
 
-    #[test]
-    fn turn_context_keeps_text_and_image_metadata_but_not_image_bytes() {
-        let turn = TurnContext::from_user_content(
-            "turn-1",
-            "source-1",
-            &[
-                ContentBlock::Text {
-                    text: "hello".to_owned(),
-                },
-                ContentBlock::Image {
-                    media_type: "image/png".to_owned(),
-                    data: "sensitive-base64".to_owned(),
-                },
-            ],
-            Some("dialogue-1".to_owned()),
-        );
-        assert_eq!(turn.turn_id, "turn-1");
-        assert_eq!(turn.source_message_id, "source-1");
-        assert_eq!(turn.text, "hello");
-        assert_eq!(turn.image_media_types, ["image/png"]);
-        assert_eq!(turn.cs_dialogue_id.as_deref(), Some("dialogue-1"));
-        assert!(!format!("{turn:?}").contains("sensitive-base64"));
-    }
 }

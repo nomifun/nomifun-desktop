@@ -133,7 +133,7 @@ export function toUpdateProviderRequest(input: UpdateProviderRequest): UpdatePro
  * OpenAI-compatible gateway's `context_length`); it is absent, never null, when
  * the provider says nothing.
  */
-export interface FetchedModelInfo {
+interface FetchedModelInfo {
   id: string;
   name?: string | null;
   tasks?: ModelTask[];
@@ -157,6 +157,5 @@ export interface FetchModelsAnonymousRequest {
   try_fix?: boolean;
 }
 
-export type { ProviderHealthCheckErrorKind } from '@/common/protocolBindings/ProviderHealthCheckErrorKind';
 export type { ProviderHealthCheckRequest } from '@/common/protocolBindings/ProviderHealthCheckRequest';
 export type { ProviderHealthCheckResponse } from '@/common/protocolBindings/ProviderHealthCheckResponse';

@@ -10,7 +10,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeCanvasConnection, CreativeCanvasNode } from '../../domain/schema';
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
-import CanvasEdgeLayer from './CanvasEdgeLayer';
 import CanvasMiniMap from './CanvasMiniMap';
 import {
   buildCanvasConnectionBezier,
@@ -82,36 +81,6 @@ describe('Creative Studio canonical graph views', () => {
     expect(fallback.target.side).toBe('left');
   });
 
-  test('renders visible and hit paths with controlled semantic edge states', () => {
-    const missing: CreativeCanvasConnection = {
-      ...connection,
-      id: 'missing-edge',
-      targetNodeId: 'missing-node',
-    };
-    const html = renderToStaticMarkup(
-      withCanvasTestI18n(
-        <CanvasEdgeLayer
-          nodes={[sourceNode, targetNode]}
-          connections={[connection, missing]}
-          stateByConnectionId={{
-            [connection.id]: { selected: true, upstream: true, error: true, highlighted: true },
-          }}
-          onSelectConnection={() => undefined}
-        />
-      )
-    );
-
-    expect(html.includes('data-canvas-edge-layer="true"')).toBe(true);
-    expect(html.includes('data-connection-id="edge-1"')).toBe(true);
-    expect(html.includes('data-connection-id="missing-edge"')).toBe(false);
-    expect(html.includes('data-edge-selected="true"')).toBe(true);
-    expect(html.includes('data-edge-upstream="true"')).toBe(true);
-    expect(html.includes('data-edge-error="true"')).toBe(true);
-    expect(html.includes('data-edge-highlighted="true"')).toBe(true);
-    expect((html.match(/<path/g) ?? []).length).toBe(2);
-    expect(html.includes('role="button"')).toBe(true);
-  });
-
   test('projects canonical nodes and the visible viewport into a reversible minimap', () => {
     const viewport = { x: -200, y: -100, zoom: 2 };
     const viewportSize = { width: 1000, height: 600 };
@@ -171,9 +140,8 @@ describe('Creative Studio canonical graph views', () => {
 
   test('remains a headless canonical geometry layer', () => {
     const geometrySource = readFileSync(new URL('./geometry.ts', import.meta.url), 'utf8');
-    const edgeSource = readFileSync(new URL('./CanvasEdgeLayer.tsx', import.meta.url), 'utf8');
     const miniMapSource = readFileSync(new URL('./CanvasMiniMap.tsx', import.meta.url), 'utf8');
-    const sources = `${geometrySource}\n${edgeSource}\n${miniMapSource}`;
+    const sources = `${geometrySource}\n${miniMapSource}`;
 
     expect(geometrySource.includes("from '../../domain/schema'")).toBe(true);
     expect(sources.includes('useState')).toBe(false);
@@ -181,7 +149,5 @@ describe('Creative Studio canonical graph views', () => {
     expect(sources.includes('localStorage')).toBe(false);
     expect(sources.includes('fetch(')).toBe(false);
     expect(sources.includes('CreativeProjectDocument')).toBe(false);
-    expect(edgeSource.includes('<svg')).toBe(true);
-    expect(edgeSource.includes('@icon-park')).toBe(false);
   });
 });

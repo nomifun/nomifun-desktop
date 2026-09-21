@@ -31,7 +31,7 @@ function fileNode(
   };
 }
 
-export function sortKnowledgeTreeNodes(nodes: IKnowledgeTreeEntry[]): IKnowledgeTreeEntry[] {
+function sortKnowledgeTreeNodes(nodes: IKnowledgeTreeEntry[]): IKnowledgeTreeEntry[] {
   return nodes
     .map((node) => (node.children ? { ...node, children: sortKnowledgeTreeNodes(node.children) } : node))
     .sort((a, b) => {
@@ -167,17 +167,6 @@ export function preserveKnowledgeTreeChildren(
     });
 
   return preserve(nextNodes);
-}
-
-export function firstKnowledgeFilePath(nodes: IKnowledgeTreeEntry[]): string | null {
-  for (const node of nodes) {
-    if (node.is_file) return node.rel_path;
-    if (node.children?.length) {
-      const found = firstKnowledgeFilePath(node.children);
-      if (found) return found;
-    }
-  }
-  return null;
 }
 
 export function parentDirOfKnowledgePath(relPath: string | null): string {

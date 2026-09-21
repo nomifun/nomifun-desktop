@@ -11,7 +11,7 @@ import type {
 } from '../../domain';
 import type { CanvasState } from '../core';
 
-export type CanvasImageReferenceNodeKind = Extract<
+type CanvasImageReferenceNodeKind = Extract<
   CreativeCanvasNodeKind,
   'image' | 'panorama'
 >;
@@ -50,7 +50,7 @@ export interface CanvasTextReference {
   text: string;
 }
 
-export type CanvasImageReferenceIssue =
+type CanvasImageReferenceIssue =
   | { code: 'source_text_empty'; connectionId: string; sourceNodeId: string }
   | {
       code: 'target_node_missing';
@@ -349,7 +349,7 @@ export interface AuthoredCanvasImagePromptMention {
   tokenText: string;
 }
 
-export type CanvasImagePromptCompilationIssue =
+type CanvasImagePromptCompilationIssue =
   | {
       code: 'mention_range_invalid';
       mentionIndex: number;

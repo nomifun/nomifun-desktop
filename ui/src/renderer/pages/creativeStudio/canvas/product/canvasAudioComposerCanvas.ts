@@ -33,7 +33,7 @@ import {
 } from './nodeFactory';
 import { creativeStudioProductText } from './i18n';
 
-export const CREATIVE_AUDIO_COMPOSE_OPERATION = 'audio-node-compose';
+const CREATIVE_AUDIO_COMPOSE_OPERATION = 'audio-node-compose';
 
 type AudioNode = Extract<CreativeCanvasNode, { type: 'audio' }>;
 type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;
@@ -63,7 +63,7 @@ export interface PreparedCanvasAudioCompose {
   plan: PreparedCanvasGenerationRun;
 }
 
-export const DEFAULT_CANVAS_AUDIO_COMPOSE_SETTINGS: CanvasAudioComposeSettings = {
+const DEFAULT_CANVAS_AUDIO_COMPOSE_SETTINGS: CanvasAudioComposeSettings = {
   model: null,
   voice: '',
   format: 'mp3',
@@ -109,7 +109,7 @@ const MINIMAL_AUDIO_COMPOSE_PROFILE = profile(false, false);
  * Unknown protocols deliberately receive prompt-only requests. The first
  * canvas slice never sends speed, instructions, or reference audio.
  */
-export const CANVAS_AUDIO_COMPOSE_PROTOCOL_PROFILES: Readonly<
+const CANVAS_AUDIO_COMPOSE_PROTOCOL_PROFILES: Readonly<
   Record<string, CanvasAudioComposeProtocolProfile>
 > = {
   'openai.audio_speech': profile(true, true),

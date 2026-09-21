@@ -7,14 +7,11 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::middleware::{from_fn, from_fn_with_state};
+use axum::middleware::from_fn;
 use axum::routing::get;
 use axum::{Json, Router};
 use nomifun_api_types::ApiResponse;
-use nomifun_auth::{
-    AuthState, InstanceOwnerState, auth_middleware, require_instance_owner_middleware,
-    require_local_trust_middleware,
-};
+use nomifun_auth::require_local_trust_middleware;
 use nomifun_common::AppError;
 use nomifun_db::IInstanceTokenRepository;
 
@@ -86,25 +83,5 @@ pub fn instance_token_routes(state: InstanceTokenRouterState) -> Router {
     Router::new()
         .route("/api/webui/access-token", get(status).post(mint).delete(revoke))
         .route_layer(from_fn(require_local_trust_middleware))
-        .with_state(state)
-}
-
-/// Installation-token management for authenticated standalone Web hosts.
-///
-/// Desktop keeps the local-trust variant above so its own webview can manage
-/// the token without a login. A network Web host has no local-trust secret and
-/// must instead require the authenticated installation owner.
-pub fn instance_token_routes_authenticated(
-    state: InstanceTokenRouterState,
-    auth_state: AuthState,
-    owner_state: InstanceOwnerState,
-) -> Router {
-    Router::new()
-        .route("/api/webui/access-token", get(status).post(mint).delete(revoke))
-        .route_layer(from_fn_with_state(
-            owner_state,
-            require_instance_owner_middleware,
-        ))
-        .route_layer(from_fn_with_state(auth_state, auth_middleware))
         .with_state(state)
 }

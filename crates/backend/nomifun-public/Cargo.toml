@@ -8,7 +8,6 @@ repository.workspace = true
 [dependencies]
 # Remote MCP operations are injected by the Conversation-backed host.
 # This crate does not own a second session store or an Engine implementation.
-nomifun-agent-contracts.workspace = true
 nomifun-api-types.workspace = true
 # Instance API token validation and installation-owner authentication.
 nomifun-auth.workspace = true

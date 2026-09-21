@@ -13,7 +13,7 @@ import { useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import useSWR from 'swr';
 
-export interface FetchedModelOption {
+interface FetchedModelOption {
   label: string;
   value: string;
   displayName?: string;
@@ -27,7 +27,7 @@ export interface FetchedModelOption {
   contextLimit?: number;
 }
 
-export interface UseModeModelListOptions {
+interface UseModeModelListOptions {
   platform: string;
   /** Existing providers use the server-side encrypted credentials. */
   providerId?: ProviderId;

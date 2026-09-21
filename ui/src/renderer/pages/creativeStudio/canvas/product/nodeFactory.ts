@@ -49,7 +49,7 @@ export const CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES = {
 
 /** Repeated insertions move by this many client pixels, independent of zoom. */
 export const CREATIVE_CANVAS_PRODUCT_CASCADE_STEP = 28;
-export const CREATIVE_CANVAS_PRODUCT_CASCADE_SLOTS = 8;
+const CREATIVE_CANVAS_PRODUCT_CASCADE_SLOTS = 8;
 
 const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
   image: {
@@ -197,7 +197,7 @@ const cascadeSlot = (requested: number): number => {
  * expressed in client pixels, so zoom never turns a 28px insertion offset into
  * an unexpectedly large or tiny screen jump.
  */
-export function creativeCanvasProductNodePosition(
+function creativeCanvasProductNodePosition(
   state: CreativeCanvasProductState,
   viewportSize: CreativeSize,
   nodeSize: CreativeSize,

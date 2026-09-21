@@ -132,15 +132,6 @@ impl AgentRuntimeState {
         }
     }
 
-    /// Crate-private accessor for the broadcast sender, exposed so
-    /// managers can clone it where a `broadcast::Sender<..>` clone is
-    /// needed directly (e.g. passing into an SDK builder). Prefer
-    /// `emit` / `emit_finish` / `emit_error` for event emission.
-    #[allow(dead_code)]
-    pub(crate) fn event_sender(&self) -> broadcast::Sender<AgentStreamEvent> {
-        self.event_tx.clone()
-    }
-
     // State transitions and event emission are centralized here.
 
     pub fn bump_activity(&self) {

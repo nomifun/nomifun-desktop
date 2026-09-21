@@ -14,7 +14,7 @@ import type { WriteFileResult } from './types';
 
 export { parseDiff, type FileChangeInfo } from '@/renderer/utils/file/diffUtils';
 
-export interface MessageFileChangesProps {
+interface MessageFileChangesProps {
   writeFileChanges?: WriteFileResult[];
   className?: string;
   diffsChanges?: FileChangeInfo[];

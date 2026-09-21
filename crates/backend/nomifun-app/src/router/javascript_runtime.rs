@@ -579,7 +579,6 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
     }
 }
 
-#[allow(dead_code)]
 async fn validate_foundation(
     foundation_root: &Path,
     host_root: &Path,

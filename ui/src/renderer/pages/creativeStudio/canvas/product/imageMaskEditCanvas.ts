@@ -35,7 +35,7 @@ import {
   nextCanvasImageTaskPosition,
 } from './imageTaskCanvasLayout';
 
-export const CREATIVE_IMAGE_MASK_EDIT_OPERATION = 'image-mask-edit';
+const CREATIVE_IMAGE_MASK_EDIT_OPERATION = 'image-mask-edit';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 type ConfigNode = Extract<CreativeCanvasNode, { type: 'config' }>;

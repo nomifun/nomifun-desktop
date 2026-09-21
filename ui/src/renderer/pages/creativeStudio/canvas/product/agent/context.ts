@@ -10,24 +10,24 @@ import type {
   CreativeProjectDocument,
 } from '../../../domain';
 
-export const CREATIVE_CANVAS_AGENT_CONTEXT_KIND =
+const CREATIVE_CANVAS_AGENT_CONTEXT_KIND =
   'nomifun.creative-studio.canvas-context' as const;
-export const CREATIVE_CANVAS_AGENT_CONTEXT_VERSION = 1 as const;
-export const CREATIVE_CANVAS_AGENT_TURN_KIND =
+const CREATIVE_CANVAS_AGENT_CONTEXT_VERSION = 1 as const;
+const CREATIVE_CANVAS_AGENT_TURN_KIND =
   'nomifun.creative-studio.planning-turn' as const;
 export const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_NODES = 32;
-export const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_CONNECTIONS = 64;
+const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_CONNECTIONS = 64;
 export const MAX_CREATIVE_CANVAS_AGENT_CONTEXT_TEXT_CHARS = 2_000;
-export const MAX_CREATIVE_CANVAS_AGENT_MODEL_INPUT_CHARS = 262_144;
+const MAX_CREATIVE_CANVAS_AGENT_MODEL_INPUT_CHARS = 262_144;
 
-export type CreativeCanvasAgentContextValue =
+type CreativeCanvasAgentContextValue =
   | string
   | number
   | boolean
   | null
   | string[];
 
-export interface CreativeCanvasAgentContextNode {
+interface CreativeCanvasAgentContextNode {
   id: string;
   type: CreativeCanvasNode['type'];
   selected: boolean;
@@ -39,7 +39,7 @@ export interface CreativeCanvasAgentContextNode {
   details: Record<string, CreativeCanvasAgentContextValue>;
 }
 
-export interface CreativeCanvasAgentContextConnection {
+interface CreativeCanvasAgentContextConnection {
   id: string;
   sourceNodeId: string;
   targetNodeId: string;

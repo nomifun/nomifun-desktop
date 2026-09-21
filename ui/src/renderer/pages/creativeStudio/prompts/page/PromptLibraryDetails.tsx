@@ -19,7 +19,7 @@ export type PromptCopyState = 'idle' | 'copying' | 'copied' | 'failed';
 export type PromptSaveState = 'idle' | 'saving' | 'saved' | 'failed';
 export type PromptRemoveState = 'idle' | 'removing' | 'removed' | 'failed';
 
-export interface PromptLibraryDetailsProps {
+interface PromptLibraryDetailsProps {
   item: PromptLibraryItem | null;
   locale: string;
   copyState: PromptCopyState;
@@ -188,7 +188,7 @@ export const PromptLibraryDetailsContent: React.FC<PromptLibraryDetailsContentPr
   );
 };
 
-export const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
+const PromptLibraryDetails: React.FC<PromptLibraryDetailsProps> = ({
   item,
   locale,
   copyState,

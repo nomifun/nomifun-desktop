@@ -30,7 +30,7 @@ export const PRESET_THEME_NAME_KEYS = {
 
 export type PresetThemeNameKey = (typeof PRESET_THEME_NAME_KEYS)[keyof typeof PRESET_THEME_NAME_KEYS];
 
-export const getPresetThemeNameKey = (themeId: string): PresetThemeNameKey | undefined => {
+const getPresetThemeNameKey = (themeId: string): PresetThemeNameKey | undefined => {
   if (!Object.prototype.hasOwnProperty.call(PRESET_THEME_NAME_KEYS, themeId)) return undefined;
   return PRESET_THEME_NAME_KEYS[themeId as keyof typeof PRESET_THEME_NAME_KEYS];
 };

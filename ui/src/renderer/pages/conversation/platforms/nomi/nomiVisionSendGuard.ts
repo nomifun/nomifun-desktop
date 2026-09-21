@@ -15,7 +15,7 @@ export type NomiVisionSendDecision =
   | { allowed: true }
   | { allowed: false; reason: 'capability_unavailable' | 'vision_not_supported' };
 
-export const containsImageAttachment = (files: readonly string[]): boolean =>
+const containsImageAttachment = (files: readonly string[]): boolean =>
   files.some((file) => {
     const lower = file.toLowerCase();
     return imageExts.some((extension) => lower.endsWith(extension));

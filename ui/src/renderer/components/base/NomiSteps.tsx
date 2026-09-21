@@ -12,7 +12,7 @@ import React from 'react';
 /**
  * 步骤条组件属性 / Steps component props
  */
-export interface NomiStepsProps extends StepsProps {
+interface NomiStepsProps extends StepsProps {
   /** 额外的类名 / Additional class name */
   className?: string;
 }

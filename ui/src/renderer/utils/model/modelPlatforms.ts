@@ -13,7 +13,7 @@ const buildLogoAssetUrl = (path: string): string =>
  * Stable runtime provider family. The preset `value` is intentionally separate:
  * several commercial plans share one runtime family but have different manifests.
  */
-export type PlatformType =
+type PlatformType =
   | 'gemini'
   | 'gemini-vertex-ai'
   | 'anthropic'
@@ -274,9 +274,4 @@ export const getProviderLogo = ({
   return MODEL_PLATFORMS.find((item) => item.name.toLowerCase() === normalizedName && item.logo)?.logo ?? null;
 };
 
-export const isGeminiPlatform = (platform: PlatformType): boolean =>
-  platform === 'gemini' || platform === 'gemini-vertex-ai';
-
 export const isCustomOption = (value: string): boolean => value === 'custom';
-
-export { isNewApiPlatform } from '@/common/utils/platformConstants';

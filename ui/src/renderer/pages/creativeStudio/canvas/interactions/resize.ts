@@ -50,18 +50,18 @@ export interface UpdateCanvasResizeResult {
   node: CanvasGraphNode | null;
 }
 
-export const SOURCE_CANVAS_MIN_NODE_SIZE: CanvasSize = {
+const SOURCE_CANVAS_MIN_NODE_SIZE: CanvasSize = {
   width: 220,
   height: 160,
 };
 
 /** Text can collapse to the compact blue-frame height without affecting media. */
-export const SOURCE_CANVAS_MIN_TEXT_NODE_SIZE: CanvasSize = {
+const SOURCE_CANVAS_MIN_TEXT_NODE_SIZE: CanvasSize = {
   width: 220,
   height: 88,
 };
 
-export const SOURCE_CANVAS_MIN_TIMELINE_NODE_SIZE: CanvasSize = {
+const SOURCE_CANVAS_MIN_TIMELINE_NODE_SIZE: CanvasSize = {
   width: 480,
   height: 128,
 };

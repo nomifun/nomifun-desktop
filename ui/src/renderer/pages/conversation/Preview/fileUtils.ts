@@ -10,7 +10,7 @@ import type { PreviewContentType } from '@/common/types/office/preview';
  * 文件扩展名到内容类型的映射配置
  * Mapping configuration from file extensions to content types
  */
-export const FILE_EXTENSION_MAP: Record<PreviewContentType, readonly string[]> = {
+const FILE_EXTENSION_MAP: Record<PreviewContentType, readonly string[]> = {
   markdown: ['md', 'markdown', 'mdown', 'mkd'],
   html: ['html', 'htm'],
   pdf: ['pdf'],
@@ -37,7 +37,7 @@ export const FILE_EXTENSION_MAP: Record<PreviewContentType, readonly string[]> =
  * getFileExtension('image.PNG') // => 'png'
  * ```
  */
-export const getFileExtension = (file_path: string): string => {
+const getFileExtension = (file_path: string): string => {
   if (!file_path) return '';
 
   const lastDotIndex = file_path.lastIndexOf('.');
@@ -79,17 +79,6 @@ export const getContentTypeByExtension = (file_path: string): PreviewContentType
 
   // 未找到匹配的扩展名，默认为 code / No matching extension found, default to code
   return 'code';
-};
-
-/**
- * 检查文件是否为图片类型
- * Check if file is an image type
- *
- * @param file_path - 文件路径 / File path
- * @returns 是否为图片 / Whether it's an image
- */
-export const isImageFile = (file_path: string): boolean => {
-  return getContentTypeByExtension(file_path) === 'image';
 };
 
 /**

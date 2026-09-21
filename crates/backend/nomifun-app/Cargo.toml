@@ -157,8 +157,6 @@ qqbot = ["nomifun-channel/qqbot"]
 computer-use = [
     "nomifun-ai-agent/computer-use",
     "dep:nomi-computer",
-    "dep:nomi-config",
-    "dep:nomi-tools",
     "dep:nomi-types",
 ]
 # Browser-automation tools (desktop host enables this; web/server hosts do not).
@@ -268,8 +266,6 @@ nomi-computer = { workspace = true, optional = true }
 # Browser v2 native contracts and isolated page execution, without the old facade.
 nomi-browser-engine = { workspace = true, optional = true }
 nomifun-browser-platform = { workspace = true, optional = true }
-nomi-config = { workspace = true, optional = true }
-nomi-tools = { workspace = true, optional = true }
 nomi-types = { workspace = true, optional = true }
 
 # The in-process macOS desktop backend is the only authority that can report

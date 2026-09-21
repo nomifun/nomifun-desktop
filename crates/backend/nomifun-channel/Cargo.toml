@@ -3,6 +3,10 @@ name = "nomifun-channel"
 version.workspace = true
 edition.workspace = true
 
+[package.metadata.cargo-machete]
+# Package name uses a hyphen while Rust imports the crate as `md5`.
+ignored = ["md-5"]
+
 [features]
 default = []
 telegram = ["dep:reqwest", "dep:nomifun-runtime"]

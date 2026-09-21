@@ -1,6 +1,6 @@
 import type { IMcpServerTransport } from '@/common/config/storage';
 
-export type McpJsonImportErrorKey =
+type McpJsonImportErrorKey =
   | 'settings.mcpJsonFormatError'
   | 'settings.mcpJsonBareServerError'
   | 'settings.mcpJsonUrlRequiredError'

@@ -43,7 +43,7 @@ export function getPathSeparator(targetPath: string): string {
  * 在树中查找节点（通过 relativePath）
  * Find node in tree by relativePath
  */
-export function findNodeByKey(list: IDirOrFile[], key: string): IDirOrFile | null {
+function findNodeByKey(list: IDirOrFile[], key: string): IDirOrFile | null {
   for (const item of list) {
     if (item.relativePath === key) return item;
     if (item.children && item.children.length > 0) {
@@ -124,7 +124,7 @@ export function replacePathInList(keys: string[], oldPath: string, newPath: stri
  * 递归更新子节点路径（用于重命名后更新整棵树）
  * Recursively update children paths (for tree update after rename)
  */
-export function updateChildrenPaths(
+function updateChildrenPaths(
   children: IDirOrFile[] | undefined,
   oldFullPrefix: string,
   newFullPrefix: string,

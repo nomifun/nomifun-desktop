@@ -26,7 +26,7 @@ export const CAPABILITY_COLORS = {
   brand: 'var(--brand)',
 } as const;
 
-export interface CapabilityIconProps {
+interface CapabilityIconProps {
   /** Icon element rendered with `fill='currentColor'` — the colour is applied on the wrapper span. */
   icon: React.ReactNode;
   /** Wrapper colour, normally one of `CAPABILITY_COLORS`. */

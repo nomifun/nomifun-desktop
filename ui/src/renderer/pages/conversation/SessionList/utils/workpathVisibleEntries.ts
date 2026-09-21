@@ -9,7 +9,7 @@ import type { ConversationId, TerminalId } from '@/common/types/ids';
 
 export const WORKPATH_COLLAPSED_SESSION_LIMIT = 5;
 
-export type VisibleWorkpathKindMeta = {
+type VisibleWorkpathKindMeta = {
   hasOverflow: boolean;
   hiddenCount: number;
 };

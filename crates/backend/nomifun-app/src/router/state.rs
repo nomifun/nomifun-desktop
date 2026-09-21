@@ -1770,10 +1770,7 @@ pub fn build_cron_state(
         services.authoritative_user_id.clone(),
         cron_sessions,
         busy_guard,
-        services.work_dir.clone(),
         services.data_dir.clone(),
-        services.event_bus.clone(),
-        services.agent_registry.clone(),
     ));
 
     let tick_service_ref: Arc<CronServiceTickRef> = Arc::new(CronServiceTickRef::default());

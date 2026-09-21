@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type SkillSource = 'builtin' | 'custom';
+type SkillSource = 'builtin' | 'custom';
 
 export type SkillInfo = {
   name: string;
@@ -17,18 +17,4 @@ export type SkillInfo = {
   source: SkillSource;
   audience_tags?: string[];
   scenario_tags?: string[];
-};
-
-export type PendingSkill = {
-  path: string;
-  name: string;
-  description: string;
-};
-
-export type BuiltinAutoSkill = {
-  name: string;
-  description: string;
-  name_i18n?: Record<string, string>;
-  description_i18n?: Record<string, string>;
-  location?: string;
 };
