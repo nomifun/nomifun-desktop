@@ -5,6 +5,7 @@ import { Alert, Button, Input, Modal, Spin } from '@arco-design/web-react';
 import { ArrowLeft, Send, PreviewOpen } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
+import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 import { parsePluginRuntimeId } from '@/common/types/ids';
 import {
   pluginRuntimeProduct,
@@ -416,6 +417,11 @@ export default function PluginRuntimeCreatorPage({
           <div className={styles.hero}>
             <h1>{t('pluginRuntime.product.hero')}</h1>
             <p>{t('pluginRuntime.product.heroHint')}</p>
+            <AgentIdentityBadge
+              backend='nomi'
+              name={t('pluginRuntime.product.agentName', { defaultValue: 'General Agent' })}
+              className='mb-12px w-fit'
+            />
             {modelNotice}
             {errorNotice}
             {composer}
@@ -500,6 +506,11 @@ export default function PluginRuntimeCreatorPage({
           {t('pluginRuntime.product.back')}
         </Button>
         <h1>{draft?.name || initial.name || t('pluginRuntime.product.untitled')}</h1>
+        <AgentIdentityBadge
+          backend='nomi'
+          name={t('pluginRuntime.product.agentName', { defaultValue: 'General Agent' })}
+          compact
+        />
         <span className={styles.muted} role='status'>
           {t(
             savePending.current
@@ -581,7 +592,7 @@ export default function PluginRuntimeCreatorPage({
                 >
                   {message.role === 'assistant' && (
                     <strong>
-                      Nomi
+                      {t('pluginRuntime.product.agentName', { defaultValue: 'General Agent' })}
                       <br />
                     </strong>
                   )}

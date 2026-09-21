@@ -154,7 +154,14 @@ const CreativeStudioAgentPanel: React.FC<CreativeStudioAgentPanelProps> = (props
           </span>
         </div>
         <div className={styles.headerActions}>
-          {props.agentSelector}
+          {props.agentSelector ? (
+            <div className={styles.agentEntry} data-agent-entry>
+              <span className={styles.agentEntryLabel}>
+                {t('agent.identity.label', { defaultValue: 'Using Agent' })}
+              </span>
+              {props.agentSelector}
+            </div>
+          ) : null}
           <Tooltip
             content={
               props.view === 'history'

@@ -373,6 +373,21 @@ mod tests {
     use super::*;
     use nomifun_db::{CreateProviderParams, NewProviderModel, NewProviderModelCapability};
 
+    #[test]
+    fn stepfun_reasoning_profile_materializes_a_lossless_tool_route() {
+        let (_, traits) = nomifun_api_types::infer_catalog_tasks_and_traits(
+            "stepfun-plan",
+            "step-3.7-flash",
+        );
+        let features = features_for(&serde_json::to_string(&traits).unwrap()).unwrap();
+
+        assert!(features.contains(&ChatRouteFeature::TextInput));
+        assert!(features.contains(&ChatRouteFeature::TextOutput));
+        assert!(features.contains(&ChatRouteFeature::ImageInput));
+        assert!(features.contains(&ChatRouteFeature::ToolCalls));
+        assert!(features.contains(&ChatRouteFeature::Reasoning));
+    }
+
     async fn create_chat_provider(
         pool: &SqlitePool,
         provider_id: &str,

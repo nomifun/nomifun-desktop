@@ -376,6 +376,12 @@ const ChatConversation: React.FC<{
       <ExecutionProvider conversation={conversation}>
         <ExecutionConversationLayout
           title={conversation.name}
+          backend={conversation.type}
+          agent_name={
+            (conversation.extra as { agent_name?: string } | undefined)?.agent_name
+              || conversation.agent_snapshot?.preset_name
+              || t('agent.identity.unknown', { defaultValue: 'Unspecified' })
+          }
           conversation_id={conversation.id}
           hideAdvancedControls
           disableRename
