@@ -5996,6 +5996,7 @@ dependencies = [
 name = "nomifun-agent-domain-wave5"
 version = "0.7.6"
 dependencies = [
+ "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "serde_json",
@@ -6071,6 +6072,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "uuid",

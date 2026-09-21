@@ -377,6 +377,59 @@ async fn main_database_pool_is_the_same_canonical_agent_store() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_session_creation_waits_for_the_sqlite_writer_and_both_succeed() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database(&directory.path().join("parallel-sessions.db"))
+        .await
+        .unwrap();
+    let store = AgentSessionStore::from_pool(database.pool().clone())
+        .await
+        .unwrap();
+
+    // Hold the SQLite writer lock while both Session opens reach their write
+    // boundary. BEGIN IMMEDIATE must wait here; the previous deferred BEGIN
+    // read the idempotency index first and then failed its lock upgrade.
+    let mut writer = database.pool().begin().await.unwrap();
+    sqlx::query("UPDATE users SET updated_at = updated_at")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+
+    let first_store = store.clone();
+    let first = tokio::spawn(async move {
+        first_store
+            .create_session(create_request(live_session(session_id()), "parallel-first"))
+            .await
+    });
+    let second_store = store.clone();
+    let second = tokio::spawn(async move {
+        second_store
+            .create_session(create_request(live_session(session_id()), "parallel-second"))
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!first.is_finished());
+    assert!(!second.is_finished());
+    writer.commit().await.unwrap();
+
+    let first = tokio::time::timeout(std::time::Duration::from_secs(6), first)
+        .await
+        .expect("first Session open should honor SQLite busy_timeout")
+        .expect("first Session task should not panic")
+        .expect("first Session should be created");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(6), second)
+        .await
+        .expect("second Session open should honor SQLite busy_timeout")
+        .expect("second Session task should not panic")
+        .expect("second Session should be created");
+    assert_ne!(first.session.agent_session_id, second.session.agent_session_id);
+    assert!(!first.duplicate);
+    assert!(!second.duplicate);
+    database.close().await;
+}
+
 #[tokio::test]
 async fn session_resource_bindings_are_frozen_with_the_session_and_cannot_change_owner() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();

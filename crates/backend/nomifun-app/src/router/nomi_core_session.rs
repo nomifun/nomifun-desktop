@@ -1326,6 +1326,29 @@ impl NomiCoreSessionOwner {
         ))
     }
 
+    /// Realtime delivery for an already-finalized assistant projection (for
+    /// example the terminal AgentExecution synthesis). It is intentionally not
+    /// attached to a model turn and has no later finish frame; `stream_complete`
+    /// tells renderers to append it without raising busy/processing state.
+    fn canonical_projected_assistant_wire_event(
+        session_id: &AgentSessionId,
+        message_id: &str,
+        content: &str,
+    ) -> WebSocketMessage<Value> {
+        WebSocketMessage::new(
+            "message.stream",
+            json!({
+                "conversation_id": session_id,
+                "msg_id": message_id,
+                "type": "content",
+                "data": { "content": content },
+                "hidden": false,
+                "stream_complete": true,
+                "created_at": now_ms(),
+            }),
+        )
+    }
+
     fn canonical_turn_completed_wire_event(
         session_id: &AgentSessionId,
         root_message_id: &str,
@@ -3966,7 +3989,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
         self.canonical
             .store()
             .append_event(&nomifun_agent_contracts::SessionEventAppend {
-                agent_session_id: session_id,
+                agent_session_id: session_id.clone(),
                 event_id: nomifun_agent_contracts::EventId::from(message_id.clone()),
                 producer_id: nomifun_agent_contracts::EventProducerId::from("session_api"),
                 idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(key),
@@ -3992,6 +4015,14 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             })
             .await
             .map_err(agent_session_store_error)?;
+        self.user_events.send_to_user(
+            owner_id,
+            Self::canonical_projected_assistant_wire_event(
+                &session_id,
+                &message_id,
+                content,
+            ),
+        );
         Ok(message_id)
     }
 }
@@ -4872,6 +4903,25 @@ mod session_boundary_tests {
         assert_eq!(second.data["turn_id"], root_message_id);
         assert_eq!(second.data["type"], "content");
         assert_eq!(second.data["data"]["content"], "reply");
+    }
+
+    #[test]
+    fn finalized_assistant_projection_is_realtime_without_reopening_a_turn() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let message_id = "0190f5fe-7c00-7a00-8abc-012345678913";
+        let wire = NomiCoreSessionOwner::canonical_projected_assistant_wire_event(
+            &session_id,
+            message_id,
+            "terminal synthesis",
+        );
+
+        assert_eq!(wire.name, "message.stream");
+        assert_eq!(wire.data["conversation_id"], SESSION_ID);
+        assert_eq!(wire.data["msg_id"], message_id);
+        assert_eq!(wire.data["type"], "content");
+        assert_eq!(wire.data["data"]["content"], "terminal synthesis");
+        assert_eq!(wire.data["stream_complete"], true);
+        assert!(wire.data.get("turn_id").is_none());
     }
 
     #[test]

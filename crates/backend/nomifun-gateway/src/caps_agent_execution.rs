@@ -10,7 +10,7 @@ use std::sync::Arc;
 use nomifun_api_types::{
     AddExecutionStepsRequest, AdjustAgentExecutionRequest, ConfigureExecutionStepRequest,
     ConversationResponse, CreateAgentExecutionRequest, CreateExecutionFromTemplateRequest,
-    ExecutionModelPool, ExecutionModelRef, ExecutionStepProfile, PlannedExecutionStep,
+    ExecutionModelPool, ExecutionModelRef, PlannedExecutionStep,
     ReassignExecutionStepRequest,
     RenameAgentExecutionRequest, ReplanAgentExecutionRequest, AgentResolvedSnapshot,
     RetryExecutionStepRequest, SteerExecutionStepRequest, UpdateExecutionStepRequest,
@@ -19,8 +19,7 @@ use nomifun_api_types::{
 use nomifun_common::{
     AdaptationPolicy, AgentDelegationTask, AgentExecutionActor, AgentExecutionId,
     AgentExecutionReceipt, AgentExecutionStatus,
-    AgentStepMode, AgentToolPolicy, DecisionPolicy, DelegationPolicy, ExecutionStepKind,
-    StepFailurePolicy,
+    DecisionPolicy, DelegationPolicy, ParallelDelegationRequest, ParallelDelegationStrategy,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -542,64 +541,15 @@ fn explicit_plan(
     steps: Vec<AgentDelegationTask>,
     synthesize: bool,
 ) -> Result<Vec<PlannedExecutionStep>, String> {
-    if steps.is_empty() || steps.len() > MAX_EXPLICIT_STEPS {
-        return Err(format!(
-            "parallel delegation requires 1-{MAX_EXPLICIT_STEPS} steps"
-        ));
-    }
-    for (index, step) in steps.iter().enumerate() {
-        step.validate()
-            .map_err(|error| format!("parallel task {index}: {error}"))?;
-    }
-    let mut planned: Vec<PlannedExecutionStep> = steps
-        .into_iter()
-        .map(|step| PlannedExecutionStep {
-            title: step.name,
-            spec: step.prompt,
-            profile: Some(ExecutionStepProfile {
-                kind: "general".to_owned(),
-                needs_vision: false,
-                needs_web_search: false,
-                needs_long_context: false,
-                needs_high_reasoning: false,
-                bulk: true,
-            }),
-            kind: ExecutionStepKind::Agent,
-            agent_mode: Some(AgentStepMode::Normal),
-            depends_on: Vec::new(),
-            // Explicit fan-out describes work, not a participant cardinality.
-            // The router assigns every node inside the inherited model/preset
-            // authority, including plans with more steps than participants.
-            participant_index: None,
-            assignment_rationale: Some("explicit parallel delegation".to_owned()),
-            role: step.role,
-            tool_policy: step.tool_policy,
-            fanout_group: Some("explicit".to_owned()),
-            control_policy: None,
-            failure_policy: StepFailurePolicy::FailExecution,
-        })
-        .collect();
-    if synthesize {
-        planned.push(PlannedExecutionStep {
-            title: "Synthesize results".to_owned(),
-            spec: "Synthesize all upstream results into one coherent answer for the goal."
-                .to_owned(),
-            profile: None,
-            kind: ExecutionStepKind::Agent,
-            agent_mode: Some(AgentStepMode::Synthesis),
-            depends_on: (0..planned.len()).collect(),
-            participant_index: None,
-            assignment_rationale: Some("synthesis".to_owned()),
-            // Role is prompt/routing/display context; tool authority is the
-            // separate typed policy below.
-            role: Some("synthesis".to_owned()),
-            tool_policy: AgentToolPolicy::ReadOnly,
-            fanout_group: None,
-            control_policy: None,
-            failure_policy: StepFailurePolicy::FailExecution,
-        });
-    }
-    Ok(planned)
+    nomifun_agent_execution::AgentExecutionEngine::materialize_parallel_delegation(
+        ParallelDelegationRequest {
+            strategy: ParallelDelegationStrategy::Parallel,
+            tasks: steps,
+            synthesize,
+        },
+    )
+    .map(|(_, steps)| steps)
+    .map_err(|error| error.to_string())
 }
 
 fn delegate_receipt(
@@ -1195,6 +1145,7 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
 mod tests {
     use super::*;
     use crate::registry::{Registry, Surface};
+    use nomifun_common::{AgentStepMode, AgentToolPolicy};
 
     const ATTEMPT_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";

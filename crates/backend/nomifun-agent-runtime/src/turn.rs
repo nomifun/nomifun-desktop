@@ -953,11 +953,17 @@ pub(crate) async fn run_turn(
                 Err(error) => return Err(error),
             };
             tool_call_count = tool_call_count.saturating_add(results.len() as u32);
+            let single_call_batch = step.call_order.len() == 1;
+            let mut terminal_collaboration_accepted = false;
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
                     if let Some(binding) = request.tool_plan.binding(&call.name) {
                         let attempted = dispatch.attempted(&expected_call_id)?;
+                        terminal_collaboration_accepted |= single_call_batch
+                            && attempted
+                            && !result.is_error
+                            && crate::execution_policy::completes_turn_on_success(binding);
                         if attempted {
                             state.work_status.observe(
                                 binding,
@@ -1039,6 +1045,57 @@ pub(crate) async fn run_turn(
                 event_sink.emit(AgentEngineEvent::PlanUpdated {
                     plan: state.execution_plan.clone(),
                 }).await?;
+            }
+            if terminal_collaboration_accepted
+                && !adaptive.task_ledger()
+                && state.work_status.running_processes.is_empty()
+                && !patch_recovery.pending()
+            {
+                // `take(..., true)` is the terminal fence: when it returns
+                // empty, the host atomically closes steering for this turn.
+                // A separate `has_pending` check would leave a race in which
+                // a newly accepted steer is acknowledged after completion and
+                // then never incorporated.
+                let terminal_inputs = match &request.input_port {
+                    Some(port) => port.take(&model_request.causality, true).await?,
+                    None => Vec::new(),
+                };
+                if terminal_inputs.is_empty() {
+                    let finish_reason = ChatFinishReason::Completed;
+                    let result = AgentTurnResult {
+                        agent_session_id,
+                        turn_operation_id,
+                        model_steps,
+                        output_text,
+                        reasoning_text,
+                        tool_call_count,
+                        provider_round_id,
+                        terminal: AgentTurnTerminal::Completed { finish_reason },
+                    };
+                    event_sink
+                        .emit(AgentEngineEvent::TurnCompleted {
+                            model_steps,
+                            finish_reason,
+                        })
+                        .await?;
+                    return Ok(result);
+                }
+                crate::steering::incorporate(
+                    terminal_inputs,
+                    &mut model_request,
+                    &mut retained_inputs,
+                    &mut steering_receipts,
+                )?;
+                completion_review_used = false;
+                adaptive
+                    .activate(
+                        crate::adaptive::LEDGER_MODULES,
+                        crate::AgentRuntimeActivationReason::Steering,
+                        event_sink.as_ref(),
+                    )
+                    .await?;
+                state.execution_plan.needs_replan = true;
+                state.completion.invalidate();
             }
             if let Some(round_id) = step.provider_round_id {
                 model_request.input.provider_round_parent = Some(round_id);
@@ -2173,6 +2230,31 @@ mod tests {
         .unwrap()
     }
 
+    fn collaboration_plan(include_fork: bool) -> AgentToolPlan {
+        let delegate = tool_binding(
+            "delegate",
+            "agent.collaboration",
+            "agent/delegate",
+            AgentEffectClass::ManagedEffect,
+            false,
+        );
+        if include_fork {
+            AgentToolPlan::new([
+                delegate,
+                tool_binding(
+                    "fork",
+                    "agent.collaboration",
+                    "agent/fork",
+                    AgentEffectClass::ManagedEffect,
+                    false,
+                ),
+            ])
+            .unwrap()
+        } else {
+            AgentToolPlan::new([delegate]).unwrap()
+        }
+    }
+
     #[test]
     fn frozen_tool_surface_never_advertises_capability_activation() {
         let mut request = request();
@@ -2405,6 +2487,10 @@ mod tests {
                 "status":"queued",
                 "result_asset_ids":[]
             }),
+            "agent/delegate" | "agent/fork" => json!({
+                "execution_id":"0190f5fe-7c00-7a00-8000-000000000002",
+                "status":"planning"
+            }),
             other => panic!("unexpected fixture capability: {other}"),
         };
         AgentToolResult::text(invocation.call.call_id, value.to_string(), false)
@@ -2462,6 +2548,23 @@ mod tests {
         }
     }
 
+    struct FailingCollaborationTool;
+
+    #[async_trait]
+    impl AgentToolInvoker for FailingCollaborationTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            Ok(AgentToolResult::text(
+                invocation.call.call_id,
+                "delegation rejected",
+                true,
+            ))
+        }
+    }
+
     struct BlockingTool {
         started: Arc<Notify>,
     }
@@ -2475,6 +2578,11 @@ mod tests {
 
     #[derive(Debug)]
     struct OneSteer {
+        input: std::sync::Mutex<Option<crate::AgentSteeringInput>>,
+    }
+
+    #[derive(Debug)]
+    struct TerminalFenceSteer {
         input: std::sync::Mutex<Option<crate::AgentSteeringInput>>,
     }
 
@@ -2493,6 +2601,30 @@ mod tests {
             _causality: &ChatCausality,
         ) -> Result<bool, AgentEngineError> {
             Ok(self.input.lock().unwrap().is_some())
+        }
+    }
+
+    #[async_trait]
+    impl crate::AgentInputPort for TerminalFenceSteer {
+        async fn take(
+            &self,
+            _causality: &ChatCausality,
+            close_if_empty: bool,
+        ) -> Result<Vec<crate::AgentSteeringInput>, AgentEngineError> {
+            if close_if_empty {
+                Ok(self.input.lock().unwrap().take().into_iter().collect())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        async fn has_pending(
+            &self,
+            _causality: &ChatCausality,
+        ) -> Result<bool, AgentEngineError> {
+            // Simulate a steer accepted after the dispatch gate but before
+            // the terminal `take(..., true)` fence.
+            Ok(false)
         }
     }
 
@@ -2800,6 +2932,244 @@ mod tests {
         assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
             matches!(part, ChatContentPart::ToolResult { call_id: id, is_error: false, .. } if id == &call_id)));
         assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn successful_single_collaboration_handoff_completes_without_another_model_step() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-1",
+                    "delegate",
+                    json!({"strategy":"parallel","tasks":[{"name":"a","prompt":"A"}]}),
+                ),
+                text_step("must not be generated after the handoff"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                collaboration_plan(false),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.model_steps, 1);
+        assert_eq!(result.tool_call_count, 1);
+        assert_eq!(result.output_text, "");
+        assert!(matches!(
+            result.terminal,
+            AgentTurnTerminal::Completed {
+                finish_reason: ChatFinishReason::Completed
+            }
+        ));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn accepted_steer_is_incorporated_before_collaboration_handoff_closes_the_turn() {
+        let plan = control_step(
+            "plan-after-delegate",
+            crate::planning::TOOL_NAME,
+            json!({
+                "explanation":"Account for the accepted correction.",
+                "plan":[{"step":"response","status":"completed"}],
+                "requirements":[
+                    {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                    {"id":"steer","description":"Explain too","source":{"input":1,"quote":"also explain"}}
+                ]
+            }),
+        );
+        let completion = control_step(
+            "completion-after-delegate",
+            crate::completion::TOOL_NAME,
+            json!({
+                "summary":"The accepted correction was incorporated.",
+                "criteria":[{"step":"response","requirement_ids":["original","steer"],
+                    "disposition":"unverified","evidence_call_ids":[],
+                    "rationale":"No further external observation was required."}]
+            }),
+        );
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-before-steer",
+                    "delegate",
+                    json!({"strategy":"planned","goal":"work"}),
+                ),
+                plan,
+                completion,
+                text_step("steered after handoff"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(TerminalFenceSteer {
+            input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+                receipt_operation_id: "steer-receipt-after-delegate".into(),
+                message_id: "steer-message-after-delegate".into(),
+                text: "also explain".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                image_count: 0,
+                prepared_images: Vec::new(),
+            })),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(
+                AgentTurnRequest::new(
+                    request(),
+                    collaboration_plan(false),
+                    principal(),
+                    0,
+                )
+                .with_input_port(port),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.model_steps, 4);
+        assert!(result.output_text.contains("steered after handoff"));
+        assert_eq!(model.requests.lock().unwrap().len(), 4);
+        assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn collaboration_handoff_cannot_bypass_an_active_completion_ledger() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-with-ledger",
+                    "delegate",
+                    json!({"strategy":"planned","goal":"work"}),
+                ),
+                control_step(
+                    "plan-with-ledger",
+                    crate::planning::TOOL_NAME,
+                    json!({
+                        "explanation":"Account for both accepted inputs.",
+                        "plan":[{"step":"response","status":"completed"}],
+                        "requirements":[
+                            {"id":"original","description":"Inspect","source":{"input":0,"quote":"inspect"}},
+                            {"id":"steer","description":"Explain too","source":{"input":1,"quote":"also explain"}}
+                        ]
+                    }),
+                ),
+                control_step(
+                    "completion-with-ledger",
+                    crate::completion::TOOL_NAME,
+                    json!({
+                        "summary":"Both accepted inputs were accounted for.",
+                        "criteria":[{"step":"response","requirement_ids":["original","steer"],
+                            "disposition":"unverified","evidence_call_ids":[],
+                            "rationale":"The delegated result remains owned by AgentExecution."}]
+                    }),
+                ),
+                text_step("ledger closed"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let port = Arc::new(OneSteer {
+            input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
+                receipt_operation_id: "steer-receipt-before-delegate".into(),
+                message_id: "steer-message-before-delegate".into(),
+                text: "also explain".into(),
+                files: Vec::new(),
+                inject_skills: Vec::new(),
+                image_count: 0,
+                prepared_images: Vec::new(),
+            })),
+        });
+        let result = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(
+                AgentTurnRequest::new(
+                    request(),
+                    collaboration_plan(false),
+                    principal(),
+                    0,
+                )
+                .with_input_port(port),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.model_steps, 4);
+        assert!(result.output_text.contains("ledger closed"));
+        assert_eq!(model.requests.lock().unwrap().len(), 4);
+        assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_or_mixed_collaboration_batches_do_not_force_turn_completion() {
+        let failed = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "delegate-failed",
+                    "delegate",
+                    json!({"strategy":"planned","goal":"work"}),
+                ),
+                text_step("recovered from rejection"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let failed_result = open_session(failed.clone(), Arc::new(FailingCollaborationTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                collaboration_plan(false),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(failed_result.model_steps, 2);
+        assert_eq!(failed_result.output_text, "recovered from rejection");
+        assert_eq!(failed.requests.lock().unwrap().len(), 2);
+
+        let mixed_step = vec![
+            Ok(ChatModelEvent::ToolCallCompleted {
+                call: ChatToolCall {
+                    call_id: "delegate-mixed".into(),
+                    name: "delegate".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(
+                        json!({"strategy":"planned","goal":"work"}),
+                    ),
+                    provider_metadata: None,
+                },
+            }),
+            Ok(ChatModelEvent::ToolCallCompleted {
+                call: ChatToolCall {
+                    call_id: "fork-mixed".into(),
+                    name: "fork".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(
+                        json!({"goal":"other work"}),
+                    ),
+                    provider_metadata: None,
+                },
+            }),
+            Ok(ChatModelEvent::Completed {
+                finish_reason: ChatFinishReason::ToolCalls,
+            }),
+        ];
+        let mixed = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![mixed_step, text_step("mixed batch reviewed")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mixed_result = open_session(mixed.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                request(),
+                collaboration_plan(true),
+                principal(),
+                0,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(mixed_result.model_steps, 2);
+        assert_eq!(mixed_result.output_text, "mixed batch reviewed");
+        assert_eq!(mixed_result.tool_call_count, 2);
+        assert_eq!(mixed.requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

@@ -16,7 +16,8 @@ use nomifun_api_types::{
     AgentExecutionTemplateParticipantInput, AnswerExecutionDecisionRequest,
     ConfigureExecutionStepRequest, ConversationResponse, CreateAgentExecutionRequest,
     CreateAgentExecutionTemplateRequest, CreateExecutionFromTemplateRequest, ExecutionModelPool,
-    ExecutionParticipant, ExecutionStep, PlannedExecution, PlannedExecutionStep,
+    ExecutionParticipant, ExecutionStep, ExecutionStepProfile, PlannedExecution,
+    PlannedExecutionStep,
     ReassignExecutionStepRequest, RenameAgentExecutionRequest, ReplanAgentExecutionRequest,
     AgentResolvedSnapshot, RetryExecutionStepRequest,
     SteerExecutionStepRequest, UpdateExecutionStepRequest, VersionedAgentExecutionCommand,
@@ -28,7 +29,7 @@ use nomifun_common::{
     ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, MAX_AGENT_EXECUTION_MODELS,
     MAX_AGENT_EXECUTION_PARALLELISM, MAX_AGENT_EXECUTION_PARTICIPANTS,
     MAX_AGENT_EXECUTION_STEPS, NOMI_AGENT_ID, ParticipantAssignmentSource, ProviderId,
-    RequirementId, StepFailurePolicy,
+    ParallelDelegationRequest, RequirementId, StepFailurePolicy,
     generate_id, now_ms,
 };
 use nomifun_db::{
@@ -2835,6 +2836,90 @@ impl AgentExecutionEngine {
 }
 
 impl AgentExecutionEngine {
+    /// Materialize the shared `strategy=parallel` request into one explicit
+    /// AgentExecution DAG. Every task is an independent root; optional
+    /// synthesis is one read-only downstream Agent blocked on every root.
+    pub fn materialize_parallel_delegation(
+        request: ParallelDelegationRequest,
+    ) -> Result<(String, Vec<PlannedExecutionStep>), AppError> {
+        request.validate().map_err(AppError::BadRequest)?;
+        let goal = format!(
+            "Complete the delegated work: {}",
+            request
+                .tasks
+                .iter()
+                .map(|task| task.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let mut steps = request
+            .tasks
+            .into_iter()
+            .map(|task| PlannedExecutionStep {
+                title: task.name,
+                spec: task.prompt,
+                profile: Some(ExecutionStepProfile {
+                    kind: "general".to_owned(),
+                    needs_vision: false,
+                    needs_web_search: false,
+                    needs_long_context: false,
+                    needs_high_reasoning: false,
+                    bulk: true,
+                }),
+                kind: ExecutionStepKind::Agent,
+                agent_mode: Some(nomifun_common::AgentStepMode::Normal),
+                depends_on: Vec::new(),
+                participant_index: None,
+                assignment_rationale: Some("explicit parallel delegation".to_owned()),
+                role: task.role,
+                tool_policy: task.tool_policy,
+                fanout_group: Some("explicit".to_owned()),
+                control_policy: None,
+                failure_policy: StepFailurePolicy::FailExecution,
+            })
+            .collect::<Vec<_>>();
+        if request.synthesize {
+            let depends_on = (0..steps.len()).collect();
+            steps.push(PlannedExecutionStep {
+                title: "Synthesize results".to_owned(),
+                spec: "Synthesize all upstream results into one coherent answer for the goal."
+                    .to_owned(),
+                profile: None,
+                kind: ExecutionStepKind::Agent,
+                agent_mode: Some(nomifun_common::AgentStepMode::Synthesis),
+                depends_on,
+                participant_index: None,
+                assignment_rationale: Some("synthesis".to_owned()),
+                role: Some("synthesis".to_owned()),
+                tool_policy: nomifun_common::AgentToolPolicy::ReadOnly,
+                fanout_group: None,
+                control_policy: None,
+                failure_policy: StepFailurePolicy::FailExecution,
+            });
+        }
+        Ok((goal, steps))
+    }
+
+    /// Create one aggregate from a native parallel delegation request. This
+    /// is the in-process Agent Capability path corresponding to the Gateway's
+    /// `nomi_delegate(strategy=parallel)` contract.
+    pub async fn collaborate_parallel_from_session(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+        request: ParallelDelegationRequest,
+    ) -> Result<AgentExecution, AppError> {
+        let (goal, steps) = Self::materialize_parallel_delegation(request)?;
+        self.collaborate_with_plan_from_session(
+            owner_id,
+            agent_session_id,
+            goal,
+            Some(steps),
+            None,
+        )
+        .await
+    }
+
     /// Product `agent.collaboration` boundary. A calling Attempt appends work
     /// to its exact aggregate; an ordinary AgentSession creates one aggregate
     /// whose lead keeps the frozen Session Snapshot and exact resolved model.
@@ -2844,6 +2929,25 @@ impl AgentExecutionEngine {
         agent_session_id: &str,
         goal: String,
         single_step: bool,
+    ) -> Result<AgentExecution, AppError> {
+        let steps = single_step.then(|| vec![collaboration_step(&goal)]);
+        self.collaborate_with_plan_from_session(
+            owner_id,
+            agent_session_id,
+            goal,
+            steps,
+            single_step.then_some(1),
+        )
+        .await
+    }
+
+    async fn collaborate_with_plan_from_session(
+        &self,
+        owner_id: &str,
+        agent_session_id: &str,
+        goal: String,
+        steps: Option<Vec<PlannedExecutionStep>>,
+        max_parallel: Option<i64>,
     ) -> Result<AgentExecution, AppError> {
         canonical_id::<ConversationId>("agent_session_id", agent_session_id)?;
         let goal = non_empty("goal", goal)?;
@@ -2864,7 +2968,6 @@ impl AgentExecutionEngine {
                 AppError::Internal("active Attempt link has no Attempt identity".into())
             })?;
             let actor = AgentExecutionActor::agent(agent_session_id, Some(attempt_id));
-            let steps = single_step.then(|| vec![collaboration_step(&goal)]);
             return self
                 .delegate_from_attempt(
                     owner_id,
@@ -2914,10 +3017,10 @@ impl AgentExecutionEngine {
                     delegation_policy: nomifun_common::DelegationPolicy::Automatic,
                     adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
                     decision_policy: DecisionPolicy::Automatic,
-                    max_parallel: single_step.then_some(1),
+                    max_parallel,
                     lead_conversation_id: Some(agent_session_id.to_owned()),
                     lead_model: Some(lead_model),
-                    steps: single_step.then(|| vec![collaboration_step(&goal)]),
+                    steps,
                 },
                 participants,
                 None,
@@ -4131,7 +4234,7 @@ fn explicit_cancel_payload() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutomationExecutionSource, InitialPlanningCommand,
+        AgentExecutionEngine, AutomationExecutionSource, InitialPlanningCommand,
         attempt_delegation_operation_id, automation_cancellation_replay_safe,
         explicit_cancel_payload, is_automation_cancel_cas_conflict,
         is_automation_outcome_unknown_error,
@@ -4139,7 +4242,11 @@ mod tests {
         validate_automation_source, validate_max_parallel,
     };
     use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
-    use nomifun_common::MAX_AGENT_EXECUTION_PARALLELISM;
+    use nomifun_common::{
+        AgentDelegationTask, AgentStepMode, AgentToolPolicy,
+        MAX_AGENT_EXECUTION_PARALLELISM, ParallelDelegationRequest,
+        ParallelDelegationStrategy,
+    };
 
     const PROVIDER_A: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const PROVIDER_OVERRIDE: &str = "0190f5fe-7c00-7a00-8000-000000000002";
@@ -4178,6 +4285,39 @@ mod tests {
         );
         assert!(validate_max_parallel(Some(0)).is_err());
         assert!(validate_max_parallel(Some(MAX_AGENT_EXECUTION_PARALLELISM + 1)).is_err());
+    }
+
+    #[test]
+    fn parallel_delegation_materializes_two_roots_and_one_read_only_join() {
+        let (goal, steps) = AgentExecutionEngine::materialize_parallel_delegation(
+            ParallelDelegationRequest {
+                strategy: ParallelDelegationStrategy::Parallel,
+                tasks: vec![
+                    AgentDelegationTask {
+                        name: "upstream-a".to_owned(),
+                        prompt: "produce A".to_owned(),
+                        role: Some("technical".to_owned()),
+                        tool_policy: AgentToolPolicy::Full,
+                    },
+                    AgentDelegationTask {
+                        name: "upstream-b".to_owned(),
+                        prompt: "produce B".to_owned(),
+                        role: Some("ethics".to_owned()),
+                        tool_policy: AgentToolPolicy::ReadOnly,
+                    },
+                ],
+                synthesize: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(goal, "Complete the delegated work: upstream-a, upstream-b");
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].depends_on.is_empty());
+        assert!(steps[1].depends_on.is_empty());
+        assert_eq!(steps[2].depends_on, vec![0, 1]);
+        assert_eq!(steps[2].agent_mode, Some(AgentStepMode::Synthesis));
+        assert_eq!(steps[2].tool_policy, AgentToolPolicy::ReadOnly);
     }
 
     #[test]

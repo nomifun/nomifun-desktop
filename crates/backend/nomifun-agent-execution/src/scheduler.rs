@@ -3608,6 +3608,7 @@ mod tests {
     struct HarnessAttemptRunner {
         mode: HarnessRunnerMode,
         calls: Arc<Mutex<Vec<String>>>,
+        briefs: Arc<Mutex<Vec<(String, String)>>>,
         workspace_dirs: Arc<Mutex<Vec<Option<String>>>>,
         completed_successes: Arc<AtomicUsize>,
         active: Arc<AtomicUsize>,
@@ -3624,6 +3625,7 @@ mod tests {
                     downstream_started_too_early: Arc::new(AtomicBool::new(false)),
                 },
                 calls: Arc::new(Mutex::new(Vec::new())),
+                briefs: Arc::new(Mutex::new(Vec::new())),
                 workspace_dirs: Arc::new(Mutex::new(Vec::new())),
                 completed_successes: Arc::new(AtomicUsize::new(0)),
                 active: Arc::new(AtomicUsize::new(0)),
@@ -3639,6 +3641,7 @@ mod tests {
                     failed_step: failed_step.to_owned(),
                 },
                 calls: Arc::new(Mutex::new(Vec::new())),
+                briefs: Arc::new(Mutex::new(Vec::new())),
                 workspace_dirs: Arc::new(Mutex::new(Vec::new())),
                 completed_successes: Arc::new(AtomicUsize::new(0)),
                 active: Arc::new(AtomicUsize::new(0)),
@@ -3654,6 +3657,7 @@ mod tests {
                     remaining_failures: Arc::new(AtomicUsize::new(1)),
                 },
                 calls: Arc::new(Mutex::new(Vec::new())),
+                briefs: Arc::new(Mutex::new(Vec::new())),
                 workspace_dirs: Arc::new(Mutex::new(Vec::new())),
                 completed_successes: Arc::new(AtomicUsize::new(0)),
                 active: Arc::new(AtomicUsize::new(0)),
@@ -3691,6 +3695,15 @@ mod tests {
                 .lock()
                 .expect("harness workspace log is not poisoned")
                 .clone()
+        }
+
+        fn brief_for(&self, title: &str) -> Option<String> {
+            self.briefs
+                .lock()
+                .expect("harness brief log is not poisoned")
+                .iter()
+                .find(|(step, _)| step == title)
+                .map(|(_, brief)| brief.clone())
         }
 
         fn max_active(&self) -> usize {
@@ -3738,7 +3751,7 @@ mod tests {
             _delegation_depth: i64,
             _decision_policy: DecisionPolicy,
             _attempt_creation_key: &str,
-            _brief: &str,
+            brief: &str,
             _step_spec: &str,
             _timeout: Duration,
             on_started: crate::attempt_runner::AttemptStarted,
@@ -3747,6 +3760,10 @@ mod tests {
                 .lock()
                 .expect("harness workspace log is not poisoned")
                 .push(workspace_dir.map(str::to_owned));
+            self.briefs
+                .lock()
+                .expect("harness brief log is not poisoned")
+                .push((step_title.to_owned(), brief.to_owned()));
             let conversation_id = nomifun_common::ConversationId::new().into_string();
             let owner_id = self
                 .owner_id
@@ -4216,6 +4233,11 @@ mod tests {
             !downstream_guard.downstream_started_too_early(),
             "downstream work started before both blockers completed"
         );
+        let downstream_brief = downstream_guard
+            .brief_for("downstream")
+            .expect("downstream brief was recorded");
+        assert!(downstream_brief.contains("- upstream-a: completed upstream-a"));
+        assert!(downstream_brief.contains("- upstream-b: completed upstream-b"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

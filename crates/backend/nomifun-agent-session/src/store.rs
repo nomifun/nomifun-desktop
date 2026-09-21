@@ -324,7 +324,13 @@ impl AgentSessionStore {
         }
 
         let opening_payload = opening_payload(&request)?;
-        let mut tx = self.pool.begin().await?;
+        // Session creation reads the idempotency key before inserting several
+        // lifecycle rows. A deferred transaction can lose the writer race
+        // after that read and fail immediately with SQLITE_BUSY instead of
+        // honoring busy_timeout. Parallel AgentExecution roots create child
+        // Sessions concurrently, so acquire the writer lock before replay
+        // validation and serialize this short atomic boundary.
+        let mut tx = self.begin_write_transaction().await?;
         if let Some(existing) = event_by_producer_key_tx(
             &mut tx,
             request.producer_id.as_ref(),

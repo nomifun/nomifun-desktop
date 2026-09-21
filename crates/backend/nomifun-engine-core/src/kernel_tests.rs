@@ -338,6 +338,22 @@ mod tests {
     }
 
     #[test]
+    fn active_execution_error_exposes_only_the_safe_parallel_recovery() {
+        let error = kernel_error(KernelError::capability_execution_failed(
+            "AGENT_EXECUTION_ALREADY_ACTIVE",
+            "private sqlite path and api_key=secret",
+        ));
+        let EngineToolError::CapabilityKernel { code, message } = error else {
+            panic!("typed capability failure changed error class");
+        };
+        assert_eq!(code, "AGENT_EXECUTION_ALREADY_ACTIVE");
+        assert!(message.contains("strategy=parallel"));
+        assert!(message.contains("synthesize=true"));
+        assert!(!message.contains("sqlite"));
+        assert!(!message.contains("api_key"));
+    }
+
+    #[test]
     fn session_enabled_set_is_frozen_and_snapshot_copies_cannot_expand_it() {
         let fixture = kernel_fixture();
         let original = fixture.active.snapshot().unwrap();
