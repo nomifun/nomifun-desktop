@@ -104,7 +104,7 @@ describe('Agent resource picker', () => {
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
       requiredKinds={['robot']} optionalKinds={['robot']} capabilityIds={['robot']}
       actionIds={['robot/vision']} value={{}} onChange={() => undefined}
-      onAvailabilityChange={(ready) => states.push(ready)}
+      onAdmissionReadinessChange={(ready) => states.push(ready)}
       loadInventory={async () => ({ options: { robot: [] }, errors: {} })}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
@@ -209,12 +209,12 @@ describe('Agent resource picker', () => {
     fireEvent.click(select);
     const offline = await screen.findByText('Offline bot');
     expect(offline.closest('.arco-select-option-disabled')).toBeTruthy();
-    expect(screen.getByText(/Offline — connect this device before starting/)).toBeTruthy();
+    expect(screen.getByText(/Offline — Robot actions are unavailable/)).toBeTruthy();
     fireEvent.click(screen.getByText('Ready bot'));
     await waitFor(() => expect(screen.getByTestId('robot-selection').textContent).toBe('ready'));
   });
 
-  test('retains a selected Robot that goes offline while reporting launch unavailable', async () => {
+  test('retains a selected Robot that goes offline without blocking the Agent session', async () => {
     const states: boolean[] = [];
     const robotInventory: AgentResourceInventory = { options: { robot: [
       { value: 'offline', label: 'Offline bot', selectable: false, robotPhase: 'offline',
@@ -223,13 +223,14 @@ describe('Agent resource picker', () => {
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
       requiredKinds={['robot']} capabilityIds={['robot']} actionIds={['robot/vision']}
       value={{ robot: 'offline' }} onChange={() => { throw new Error('live status must not erase the binding'); }}
-      onAvailabilityChange={(ready) => states.push(ready)} loadInventory={async () => robotInventory}
+      onAdmissionReadinessChange={(ready) => states.push(ready)} loadInventory={async () => robotInventory}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(screen.getByRole('combobox', { name: 'Select Robot' }).textContent).toContain('Offline bot'));
-    await waitFor(() => expect(states.at(-1)).toBe(false));
+    await waitFor(() => expect(states.at(-1)).toBe(true));
+    expect(screen.getByText(en.resources.runtimeUnavailableCount.replace('{{count}}', '1'))).toBeTruthy();
   });
 
-  test('checks automatic Computer permissions before allowing launch and links to Settings', async () => {
+  test('keeps missing Computer permissions advisory and links to Settings', async () => {
     const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockResolvedValue({
       platform: 'macos', app_label: 'NomiFun', permissions: [
         { kind: 'microphone', state: 'granted', can_request: false, can_open_settings: true, requires_restart_after_grant: false, capabilities: ['voice_input'] },
@@ -242,14 +243,28 @@ describe('Agent resource picker', () => {
     const Location = () => <span data-testid='location'>{useLocation().pathname}{useLocation().search}</span>;
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><AgentResourcePicker
       requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe']}
-      value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
+      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
     /><Location /></MemoryRouter></I18nextProvider>);
-    await waitFor(() => expect(states.at(-1)).toBe(false));
+    await waitFor(() => expect(states.at(-1)).toBe(true));
     expect(permissions).toHaveBeenCalledTimes(1);
     expect(screen.getByText(en.resources.computerPermissionNeeded)).toBeTruthy();
     expect(screen.queryByText(en.resources.pickerTitle)).toBeNull();
     fireEvent.click(screen.getByText(en.resources.configure));
     await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/settings/permissions?tab=computer-use'));
+  });
+
+  test('does not block the Agent when Computer permission status cannot be checked', async () => {
+    const permissions = spyOn(ipcBridge.systemPermissions.get, 'invoke').mockRejectedValue(
+      new Error('permission service unavailable')
+    );
+    restores.push(() => permissions.mockRestore());
+    const states: boolean[] = [];
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/input']}
+      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(states.at(-1)).toBe(true));
+    expect(await screen.findByText(en.resources.computerCheckFailed)).toBeTruthy();
   });
 
   test('does not probe or block a launch-only Computer capability', async () => {
@@ -258,7 +273,7 @@ describe('Agent resource picker', () => {
     const states: boolean[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
       requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/launch']}
-      value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
+      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
     expect(permissions).not.toHaveBeenCalled();
@@ -276,7 +291,7 @@ describe('Agent resource picker', () => {
     const states: boolean[] = [];
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
       requiredKinds={['computer']} capabilityIds={['computer']} actionIds={['computer/observe', 'computer/a11y.observe']}
-      value={{}} onChange={() => undefined} onAvailabilityChange={(ready) => states.push(ready)}
+      value={{}} onChange={() => undefined} onAdmissionReadinessChange={(ready) => states.push(ready)}
     /></MemoryRouter></I18nextProvider>);
     await waitFor(() => expect(states.at(-1)).toBe(true));
     expect(permissions).toHaveBeenCalledTimes(1);

@@ -64,6 +64,53 @@ impl BrowserRuntimeFactory for CatalogGateBrowserFactory {
     }
 }
 
+#[tokio::test]
+async fn general_agent_compiles_when_browser_is_attachable_but_not_yet_connected() {
+    let root = tempfile::tempdir().expect("allocate isolated product root");
+    let database = nomifun_db::init_database_memory()
+        .await
+        .expect("initialize product database");
+    let mut services = AppServices::from_config(
+        database,
+        &AppConfig {
+            data_dir: root.path().join("data"),
+            work_dir: root.path().join("work"),
+            auth_policy: AuthPolicy::TrustLocalToken,
+            local_trust_secret: Some(Arc::from(LOCAL_TRUST_SECRET)),
+            ..AppConfig::default()
+        },
+    )
+    .await
+    .expect("compose product services");
+    assert!(services.browser_resources.is_none());
+    services.attached_chrome = Some(nomifun_app::AttachedChromeProviderService::new());
+    let model = seed_search_and_vision_ready_chat_route(
+        &services.database,
+        &services.encryption_key,
+    )
+    .await;
+    let (states, _channel_components) = build_module_states(&services).await;
+    let router = create_router_with_states(&services, states);
+
+    let editor: AgentPresetEditorResponse = post_data(
+        &router,
+        "/api/agent-presets/from-template/assistant.general",
+        &CreateAgentPresetFromTemplateRequest {
+            model: Some(model),
+            reuse_existing: false,
+            display_name: "Attachable Browser general Agent".into(),
+            description: None,
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+        },
+    )
+    .await;
+    assert_eq!(
+        editor.revision.expect("general Agent revision").reference.revision,
+        1
+    );
+}
+
 #[test]
 fn official_preset_action_safety_matrix_is_exact() {
     fn actions(

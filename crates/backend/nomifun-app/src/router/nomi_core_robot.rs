@@ -82,6 +82,10 @@ impl RobotModuleError {
     fn owner_mismatch(message: impl Into<String>) -> Self {
         Self::new(ROBOT_RESOURCE_OWNER_MISMATCH, message, false)
     }
+
+    fn is_runtime_unavailable(&self) -> bool {
+        self.code == ROBOT_OFFLINE && self.retry_safe
+    }
 }
 
 impl std::fmt::Display for RobotModuleError {
@@ -294,6 +298,27 @@ impl RobotModuleOwner {
             invoker,
             revocation: revoked,
         })
+    }
+
+    /// Resolve the live Robot surface without turning a disconnected device
+    /// into an Agent-wide failure. Frozen authority and bindings remain intact;
+    /// a later turn can publish the tools after the device reconnects. Contract,
+    /// ownership and other non-recoverable failures still fail closed.
+    pub(crate) async fn resolve_session_tools_if_available(
+        self: &Arc<Self>,
+        principal: &PrincipalRef,
+        agent_session_id: &AgentSessionId,
+        binding: &TypedResourceBinding,
+        allowed_actions: &BTreeSet<ActionId>,
+    ) -> Result<Option<ResolvedRobotSessionTools>, RobotModuleError> {
+        match self
+            .resolve_session_tools(principal, agent_session_id, binding, allowed_actions)
+            .await
+        {
+            Ok(resolved) => Ok(Some(resolved)),
+            Err(error) if error.is_runtime_unavailable() => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) async fn availability(
@@ -1076,6 +1101,25 @@ mod tests {
                 | nomifun_robot::capability::ROBOT_MOTION_ACTION_ID
         )));
         assert_eq!(module_capability_id().as_ref(), ROBOT_MODULE_ID);
+    }
+
+    #[tokio::test]
+    async fn offline_robot_omits_its_tool_surface_without_blocking_the_agent() {
+        let fixture = fixture(permissions()).await;
+        fixture.owner.tools.detach("robot-1").await;
+        let tools = fixture
+            .owner
+            .resolve_session_tools_if_available(
+                &principal(),
+                &AgentSessionId::from("session-1"),
+                &fixture.binding,
+                &BTreeSet::from([ActionId::from(
+                    nomifun_robot::capability::ROBOT_MOTION_ACTION_ID,
+                )]),
+            )
+            .await
+            .unwrap();
+        assert!(tools.is_none());
     }
 
     #[tokio::test]

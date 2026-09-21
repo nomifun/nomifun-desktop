@@ -55,7 +55,7 @@ describe('system permission product model', () => {
     expect(computerPermissionKindsForActions(['browser/observe'])).toEqual(['screen_recording', 'accessibility']);
   });
 
-  test('blocks a Computer launch gate until every required live grant is ready', () => {
+  test('reports action-time Computer readiness without deciding Session admission', () => {
     expect(computerPermissionsReady(status('granted', 'granted'), [])).toBe(true);
     expect(computerPermissionsReady(status('not_determined', 'granted'), [])).toBe(false);
     expect(computerPermissionsReady(status('granted', 'not_determined'), ['computer/observe'])).toBe(false);

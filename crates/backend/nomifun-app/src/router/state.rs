@@ -641,9 +641,15 @@ async fn build_nomi_core_agent_api_state(
     #[cfg(feature = "browser-use")]
     let installation_role_bindings = {
         let mut bindings = installation_role_bindings;
+        // Provider ownership and live resource readiness are separate facts.
+        // A dev host without packaged CEF can still own the Attached Chrome
+        // provider contract; an unavailable concrete Browser resource then
+        // narrows the tool surface instead of invalidating the whole Agent.
+        let browser_provider_owned = services.browser_resources.is_some()
+            || services.attached_chrome.is_some();
         bindings.extend(crate::browser_workspace_provider::installation_binding(
             &materialized,
-            services.browser_resources.is_some(),
+            browser_provider_owned,
         )?);
         bindings
     };

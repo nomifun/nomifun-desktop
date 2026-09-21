@@ -2446,55 +2446,60 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                         .to_owned(),
                 ));
             };
-            let resolved = owner
-                .resolve_session_tools(
+            match owner
+                .resolve_session_tools_if_available(
                     &principal,
                     &session_id,
                     robot_binding,
                     &policy.allowed_actions,
                 )
                 .await
-                .map_err(|error| AppError::Conflict(error.to_string()))?;
-            let mut provider_actions = BTreeMap::new();
-            let descriptors = resolved
-                .descriptors
-                .iter()
-                .map(|descriptor| {
-                    if provider_actions
-                        .insert(
-                            descriptor.provider_name.clone(),
-                            descriptor.action_id.clone(),
-                        )
-                        .is_some()
-                    {
-                        return Err(AppError::Conflict(format!(
-                            "Nomi Robot Module published duplicate provider tool {}",
-                            descriptor.provider_name
-                        )));
-                    }
-                    Ok(nomifun_ai_agent::NomiHostDynamicToolDescriptor {
-                        capability_id: robot_module_id.clone(),
-                        provider_name: descriptor.provider_name.clone(),
-                        description: descriptor.description.clone(),
-                        input_schema: descriptor.input_schema.clone(),
-                        effect_class: if descriptor.action_id.as_ref()
-                            == nomifun_robot::capability::ROBOT_VISION_ACTION_ID
-                        {
-                            EffectClass::ReadSensitive
-                        } else {
-                            EffectClass::Physical
-                        },
-                        deferred: false,
-                    })
-                })
-                .collect::<Result<Vec<_>, AppError>>()?;
-            let provider_actions = Arc::new(provider_actions);
-            Some((descriptors, Arc::new(super::hosted_effect_receipts::RobotReceiptInvoker {
-                    receipts: self.hosted_effects.clone(), user: principal.principal_id.clone(),
-                    session: session_id.as_ref().to_owned(),
-                    provider_actions,
-                    delegate: Arc::clone(&resolved.invoker),
-                }) as Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>))
+                .map_err(|error| AppError::Conflict(error.to_string()))?
+            {
+                None => None,
+                Some(resolved) => {
+                    let mut provider_actions = BTreeMap::new();
+                    let descriptors = resolved
+                        .descriptors
+                        .iter()
+                        .map(|descriptor| {
+                            if provider_actions
+                                .insert(
+                                    descriptor.provider_name.clone(),
+                                    descriptor.action_id.clone(),
+                                )
+                                .is_some()
+                            {
+                                return Err(AppError::Conflict(format!(
+                                    "Nomi Robot Module published duplicate provider tool {}",
+                                    descriptor.provider_name
+                                )));
+                            }
+                            Ok(nomifun_ai_agent::NomiHostDynamicToolDescriptor {
+                                capability_id: robot_module_id.clone(),
+                                provider_name: descriptor.provider_name.clone(),
+                                description: descriptor.description.clone(),
+                                input_schema: descriptor.input_schema.clone(),
+                                effect_class: if descriptor.action_id.as_ref()
+                                    == nomifun_robot::capability::ROBOT_VISION_ACTION_ID
+                                {
+                                    EffectClass::ReadSensitive
+                                } else {
+                                    EffectClass::Physical
+                                },
+                                deferred: false,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, AppError>>()?;
+                    let provider_actions = Arc::new(provider_actions);
+                    Some((descriptors, Arc::new(super::hosted_effect_receipts::RobotReceiptInvoker {
+                            receipts: self.hosted_effects.clone(), user: principal.principal_id.clone(),
+                            session: session_id.as_ref().to_owned(),
+                            provider_actions,
+                            delegate: Arc::clone(&resolved.invoker),
+                        }) as Arc<dyn nomifun_ai_agent::NomiHostDynamicToolInvoker>))
+                }
+            }
         };
         let plugin_product_actions = if constraints.restricted() { Vec::new() } else {
             KernelNomiPluginToolSession::materialize_plugin_product_actions(

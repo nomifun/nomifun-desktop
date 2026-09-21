@@ -93,7 +93,7 @@ const GuidPage: React.FC = () => {
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
-  const [selectedResourcesAvailable, setSelectedResourcesAvailable] = useState(false);
+  const [resourcePickerReady, setResourcePickerReady] = useState(false);
 
   useEffect(() => {
     void import('@renderer/pages/conversation');
@@ -219,7 +219,7 @@ const GuidPage: React.FC = () => {
   const collaborationLaunchConfigured = collaborationEnabled
     && shouldStartGuidCollaboration(collaboration.config);
   const resourceSelectionsReady = presetResourceResolutionReady
-    && selectedResourcesAvailable
+    && resourcePickerReady
     && resourceSelectionResolution.missingKinds.length === 0;
   // A workspace chosen before the Agent target (for example from a project
   // drawer's "new conversation" action) is explicit user intent. Keep that
@@ -739,7 +739,7 @@ const GuidPage: React.FC = () => {
               actionIds={presetActionIds}
               value={resourceSelectionValue}
               onChange={setResourceSelectionValue}
-              onAvailabilityChange={setSelectedResourcesAvailable}
+              onAdmissionReadinessChange={setResourcePickerReady}
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />}
 

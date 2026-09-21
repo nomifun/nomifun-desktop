@@ -76,7 +76,7 @@ export const permissionStateIsReady = (state: SystemPermissionState | undefined)
 export const permissionEntryIsReady = (entry: SystemPermissionEntry | undefined): boolean =>
   permissionStateIsReady(entry?.state);
 
-/** Exact Computer gates for the frozen actions; launch alone needs neither. */
+/** Exact action-time Computer prerequisites; `computer/launch` needs neither. */
 export const computerPermissionKindsForActions = (
   actionIds: Iterable<string>
 ): Array<'accessibility' | 'screen_recording'> => {

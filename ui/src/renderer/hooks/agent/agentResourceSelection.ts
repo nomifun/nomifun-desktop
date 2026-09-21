@@ -25,8 +25,9 @@ export const USER_AGENT_RESOURCE_KINDS = [
 /**
  * Enhancement resources may be absent from a Session. Their capability grant
  * remains frozen, but resource-backed Actions are materialized only when the
- * concrete target is selected. Computer is intentionally excluded: once the
- * local desktop is bound its OS permissions are a hard launch prerequisite.
+ * concrete target is selected. Computer is automatically bound to the local
+ * desktop; its live OS permissions narrow Computer actions at invocation time
+ * without becoming a Session admission prerequisite.
  */
 export const OPTIONAL_UNBOUND_AGENT_RESOURCE_KINDS = [
   'knowledge_base',

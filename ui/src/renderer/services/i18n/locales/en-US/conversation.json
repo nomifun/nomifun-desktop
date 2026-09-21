@@ -402,8 +402,8 @@
   "systemPermissions": {
     "label": "System permissions",
     "title": "This Agent needs system access",
-    "missing": "Missing: {{permissions}}. Return to this conversation after granting access and NomiFun will re-check automatically.",
-    "checkFailed": "NomiFun could not verify the system permissions required by this Agent. Check the permission center.",
+    "missing": "Missing: {{permissions}}. Regular chat still works; affected Computer actions remain unavailable until access is granted, then NomiFun re-checks automatically.",
+    "checkFailed": "NomiFun could not verify the system permissions required by this Agent. Regular chat still works; check the permission center before invoking Computer actions.",
     "later": "Later",
     "openSettings": "Grant access"
   },

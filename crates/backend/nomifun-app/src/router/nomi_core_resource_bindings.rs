@@ -41,15 +41,16 @@ const MAX_RESOURCE_FIELD_BYTES: usize = 512;
 // Enhancement Modules remain part of the frozen Agent grant even when a
 // concrete target is absent. Session materialization omits their resource-
 // backed Actions until a target is selected. Identity/infrastructure resources
-// and Computer remain mandatory; a bound Computer also retains its live OS
-// permission gate.
-const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 6] = [
+// and Computer remain mandatory. Live Browser/Computer environment checks are
+// action-time facts and never grant authority by themselves.
+const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 7] = [
     "knowledge_base",
     "channel",
     "robot",
     "canvas",
     "plugin",
     "ssh_host",
+    "browser",
 ];
 
 type FrozenActionAllowlists = BTreeMap<String, BTreeSet<ActionId>>;
@@ -108,6 +109,10 @@ impl ResourceSelectionResolutionError {
             reason,
             json!({ "resource_kind": kind, "resource_id": id }),
         )
+    }
+
+    fn is_runtime_unavailable(&self) -> bool {
+        self.code == "RESOURCE_SELECTION_UNAVAILABLE"
     }
 }
 
@@ -381,7 +386,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                     operations.insert("invoke".to_owned());
                 }
             }
-            let resolved = authority
+            let resolved = match authority
                 .resolve(ResourceAuthorityRequest {
                     owner_id: owner_id.to_owned(),
                     resource_id: resource_id.clone(),
@@ -389,7 +394,23 @@ impl NomiCoreResourceBindingResolverRegistry {
                     selected_capability_ids: resource_capabilities,
                     selections_by_kind: selections_by_kind.clone(),
                 })
-                .await?;
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(error)
+                    if OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind.as_str())
+                        && error.is_runtime_unavailable() =>
+                {
+                    tracing::info!(
+                        resource_kind = %kind,
+                        resource_id = %resource_id,
+                        reason = %error.message(),
+                        "optional Agent resource environment is unavailable; continuing without its binding"
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !operations.is_subset(&resolved.allowed_operations) {
                 return Err(ResourceSelectionResolutionError::new(
                     "RESOURCE_OPERATION_NOT_ALLOWED",
@@ -1404,6 +1425,24 @@ mod tests {
         }
     }
 
+    struct UnavailableAuthority {
+        kind: &'static str,
+    }
+
+    #[async_trait]
+    impl NomiCoreResourceAuthority for UnavailableAuthority {
+        async fn resolve(
+            &self,
+            request: ResourceAuthorityRequest,
+        ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
+            Err(ResourceSelectionResolutionError::unavailable(
+                self.kind,
+                &request.resource_id,
+                "fixture environment is not ready",
+            ))
+        }
+    }
+
     fn registry(kind: &str, operations: &[&str]) -> NomiCoreResourceBindingResolverRegistry {
         NomiCoreResourceBindingResolverRegistry::from_authorities([(
             kind.to_owned(),
@@ -1567,6 +1606,11 @@ mod tests {
             ("canvas", "creative.workshop", "creative.workshop/canvas.read"),
             ("plugin", "plugin.development", "plugin.development/read"),
             ("ssh_host", nomifun_agent_domain_wave2::SSH_MODULE_ID, "ssh/exec"),
+            (
+                "browser",
+                nomifun_agent_domain_wave2::BROWSER_MODULE_ID,
+                "browser/observe",
+            ),
         ] {
             let bindings = registry(kind, &[])
                 .resolve_selected(
@@ -1583,6 +1627,34 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{kind} must be optional: {}", error.message()));
             assert!(bindings.is_empty(), "{kind} must remain unbound");
         }
+    }
+
+    #[tokio::test]
+    async fn unavailable_optional_environment_omits_only_its_resource_binding() {
+        let browser = nomifun_agent_domain_wave2::BROWSER_MODULE_ID.to_owned();
+        let resolver = NomiCoreResourceBindingResolverRegistry::from_authorities([(
+            "browser".to_owned(),
+            Arc::new(UnavailableAuthority { kind: "browser" })
+                as Arc<dyn NomiCoreResourceAuthority>,
+        )])
+        .unwrap();
+        let bindings = resolver
+            .resolve_selected(
+                "owner-1",
+                &[AgentResourceSelectionDto {
+                    resource_kind: "browser".into(),
+                    resource_id: "managed-browser".into(),
+                }],
+                &BTreeSet::from([browser.clone()]),
+                &BTreeMap::from([(
+                    browser,
+                    BTreeSet::from([ActionId::from("browser/observe")]),
+                )]),
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(bindings.is_empty());
     }
 
     #[tokio::test]
@@ -1935,7 +2007,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_module_requires_one_server_resolved_resource_binding() {
+    async fn browser_module_can_wait_for_one_server_resolved_resource_binding() {
         let capabilities = BTreeSet::from([
             nomifun_agent_domain_wave2::BROWSER_MODULE_ID.to_owned(),
         ]);
@@ -1953,11 +2025,11 @@ mod tests {
             Some(BTreeSet::from([ResourceKind::from("browser")]))
         );
         let registry = registry("browser", &["observe", "navigate"]);
-        let missing = registry
+        let unbound = registry
             .resolve_selected("owner-1", &[], &capabilities, &actions, &[])
             .await
-            .unwrap_err();
-        assert_eq!(missing.code(), "RESOURCE_SELECTION_REQUIRED");
+            .unwrap();
+        assert!(unbound.is_empty());
         let bindings = registry
             .resolve_selected(
                 "owner-1",
