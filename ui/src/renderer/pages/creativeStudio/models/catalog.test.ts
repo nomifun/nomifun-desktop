@@ -126,7 +126,7 @@ describe('Creative Studio model catalog', () => {
       buildCreativeModelGroups(providers, {
         capability: 'task',
         task: 'image_generation',
-        traits: ['audio_output'],
+        traits: ['web_search'],
       })
     ).toEqual([]);
   });

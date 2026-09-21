@@ -186,6 +186,7 @@ pub(crate) async fn persist_probe_outcome(
         error_kind: response.error_kind,
         http_status: response.http_status,
         attempted_url: response.attempted_url.clone(),
+        unsupported_technical_capabilities: Vec::new(),
     };
     let json = match serde_json::to_string(&health) {
         Ok(json) => json,

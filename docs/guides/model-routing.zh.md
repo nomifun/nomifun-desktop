@@ -25,7 +25,7 @@ provider 目录还为多种服务提供预设和协议 profile。
 
 OpenAI-compatible 或其它已登记协议可以使用自定义 base URL，连接云端网关、
 私有 endpoint，或 Ollama、vLLM 等本地/自托管服务。只登记 endpoint 真实支持的
-能力；健康请求成功不等于所有媒体、工具调用或流式操作都兼容。
+任务与内容输入能力；健康请求成功不等于所有媒体或技术操作都兼容。
 
 每个模型的基本配置步骤：
 
@@ -52,10 +52,22 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 | 语音合成（TTS） | 伙伴、设备与 Canvas 音频节点 |
 | 图片生成 / 编辑 | 创意工坊 Canvas 与 Image Workbench |
 | 视频生成 | 创意工坊 Canvas 与 Video Workbench |
+| 音乐生成 | 会话创作与 Creative Studio |
 | Embedding / Rerank | 检索与知识工作流 |
 
 任务选择是显式的。运行时不会只凭模型名猜测图片或视频能力，也不会静默使用
 另一个 provider 的同名模型。
+
+Chat 卡片里由用户维护的细化能力只有：识图、视频理解、音频输入与模型内置联网搜索。
+工具调用、推理和流式传输不是用户勾选项：Chat 模型初始按支持处理，运行时只有在
+400/422 的完整 provider 错误对象用机器字段明确指出不支持对应参数/能力时，才会记录
+负向观察。鉴权失败、权限失败、限流、额度不足、超时、网络故障、5xx 与自然语言错误
+文案都不会降级能力。
+
+负向观察同时写入 capability 的持久化健康数据与进程内路由缓存。后续路由会移除已确认
+不支持的工具调用/推理能力；流式被确认不支持后改走有界的单次 JSON 响应。修改模型的
+调用配置或连接会清除旧观察，以便新配置重新从乐观状态验证。Realtime 始终是独立的
+`realtime_conversation` 任务与协议，不再作为 Chat trait。
 
 ## 会话内能力路由
 
@@ -64,7 +76,7 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 
 | 会话需求 | 精确默认键 | 必需能力 |
 | --- | --- | --- |
-| 看图/识图 | `models.default.vision` | 同一 Chat 能力同时声明 `vision_input` 与 `function_calling` |
+| 看图/识图 | `models.default.vision` | 同一 Chat 能力声明 `vision_input`，且没有已确认的“工具调用不支持”观察 |
 | 生成图片 | `models.default.imageGeneration` | `image_generation` |
 | 编辑图片 | `models.default.imageEdit` | `image_edit` |
 | 生成视频 | `models.default.videoGeneration` | `video_generation` |
@@ -77,8 +89,10 @@ provider 凭据保存在本地配置中。任何云端 provider 仍会按自己�
 视觉模型作为条件 Chat 候选冻结进新会话：只有当前请求实际包含图片时才参与路由，不会在普通文字
 对话失败后冒充通用故障转移模型。主模型本身具备视觉能力时仍直接使用主模型。
 
-模型能力目录与路由授权是两层：目录中的任务/关键 trait 必须有明确正向声明，才能进入自动路由；
-运行时对传输兼容性的尝试或失败观察不能把一个未知模型自动提升为生图、识图或工具模型。
+模型能力目录与路由授权是两层：创作任务和多模态输入必须有明确正向声明，才能进入自动
+路由；工具调用、推理与流式默认可用，但确定性负向观察会收窄后续路由。任何技术能力的
+乐观默认都不会把 Chat 模型提升为生图、视频、音乐、TTS 或 ASR 模型；自动创作仍只调用
+用户明确选择的对应任务默认模型。
 
 创意工坊会把精确的 `{ providerId, model, task, capability }` 身份随每次已接纳
 的媒体操作持久化。复用同一个幂等任务重试时，不能更换这些事实。

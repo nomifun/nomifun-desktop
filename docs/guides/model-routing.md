@@ -29,8 +29,8 @@ profiles for many services.
 An OpenAI-compatible or otherwise registered protocol can use a custom base URL
 to reach a cloud gateway, a private endpoint, or a local/self-hosted service
 such as Ollama or vLLM. Register only capabilities the endpoint actually
-supports. A successful health request does not prove that every media, tool, or
-streaming operation is compatible.
+supports. A successful health request does not prove that every media or
+technical operation is compatible.
 
 For each model:
 
@@ -58,11 +58,29 @@ The managed model catalog can represent these task families:
 | Speech synthesis (TTS) | Companions, devices, and Canvas audio nodes |
 | Image generation / editing | Creative Studio Canvas and Image Workbench |
 | Video generation | Creative Studio Canvas and Video Workbench |
+| Music generation | Conversation creation and Creative Studio |
 | Embedding / reranking | Retrieval and knowledge workflows |
 
 Task selection is explicit. The runtime does not infer image or video support
 from a model name, and it does not silently use a same-named model from another
 provider.
+
+The only user-authored refinements on a Chat capability are image understanding,
+video understanding, audio input, and provider-native web search. Tool calling,
+reasoning, and streaming are not checkboxes. Chat models start optimistic for
+those technical capabilities. The runtime records a negative observation only
+when a complete provider error object returns HTTP 400/422 and its
+machine-readable fields explicitly identify the unsupported parameter or
+feature. Authentication/permission failures, rate limits, quota, timeouts,
+network faults, 5xx responses, and natural-language diagnostic text never
+downgrade a capability.
+
+Negative observations are written both to the capability's durable health JSON
+and to the process-local route cache. Later routes remove confirmed unsupported
+tool/reasoning features; a confirmed streaming limitation uses a bounded single
+JSON response. Changing invocation or connection configuration clears the old
+observation so the new configuration starts optimistic again. Realtime remains
+the independent `realtime_conversation` task and protocol, never a Chat trait.
 
 ## Capability routing inside a conversation
 
@@ -73,7 +91,7 @@ for that task:
 
 | Conversation need | Exact default key | Required capability |
 | --- | --- | --- |
-| Image understanding | `models.default.vision` | One Chat capability declaring both `vision_input` and `function_calling` |
+| Image understanding | `models.default.vision` | One Chat capability declaring `vision_input`, with no confirmed tool-calling limitation |
 | Image generation | `models.default.imageGeneration` | `image_generation` |
 | Image editing | `models.default.imageEdit` | `image_edit` |
 | Video generation | `models.default.videoGeneration` | `video_generation` |
@@ -90,10 +108,12 @@ candidate. It participates only when the current request actually requires
 image input, so it cannot become an ordinary text-chat failover. A primary Chat
 model that already supports vision remains the direct route.
 
-The model capability catalog and routing authority are separate layers. Tasks
-and route-critical traits require positive evidence before automatic routing;
-transport compatibility attempts or runtime failures never promote an unknown
-model into an image, vision, or tool route.
+The model capability catalog and routing authority are separate layers.
+Creation tasks and multimodal inputs require positive evidence before automatic
+routing. Tool calling, reasoning, and streaming are optimistic until conclusive
+negative evidence narrows later routes. That optimism can never promote a Chat
+model into image/video/music/TTS/ASR generation: automatic creation still uses
+only the user's explicit default for the exact task.
 
 Creative Studio persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task

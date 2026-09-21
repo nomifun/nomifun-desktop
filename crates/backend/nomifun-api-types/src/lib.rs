@@ -167,7 +167,10 @@ pub use model_protocol::{
     ProtocolEndpointDescriptor, ProtocolEndpointPurpose, ProtocolExecutorKind,
     ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,
 };
-pub use model_task::{ModelTask, ModelTrait, infer_catalog_tasks_and_traits};
+pub use model_task::{
+    ModelTask, ModelTechnicalCapability, ModelTrait, infer_catalog_tasks_and_traits,
+    parse_persisted_model_traits,
+};
 pub use plugin_runtime::*;
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,

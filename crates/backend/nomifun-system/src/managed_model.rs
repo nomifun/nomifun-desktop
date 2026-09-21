@@ -580,6 +580,7 @@ impl ManagedModelService {
             error_kind: None,
             http_status: None,
             attempted_url: None,
+            unsupported_technical_capabilities: Vec::new(),
         };
         let json = match serde_json::to_string(&health) {
             Ok(json) => json,

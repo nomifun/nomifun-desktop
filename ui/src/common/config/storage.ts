@@ -152,10 +152,12 @@ export type IChatConversationRefer = {
  * 统一多模态能力词表 —— ts-rs 生成契约的 re-export（生成源
  * crates/backend/nomifun-api-types/src/model_task.rs，由
  * `cargo test -p nomifun-api-types` 重新生成到 @/common/protocolBindings/）。
- * ModelTask 决定端点/请求体；ModelTrait 是同一任务内的细化（主要修饰 chat）。
+ * ModelTask 决定端点/请求体；ModelTrait 只表示用户声明的 Chat 内容输入/搜索能力。
+ * 工具调用、推理和流式传输由运行时的 ModelTechnicalCapability 观察管理。
  */
 export type { ModelTask } from '@/common/protocolBindings/ModelTask';
 export type { ModelTrait } from '@/common/protocolBindings/ModelTrait';
+export type { ModelTechnicalCapability } from '@/common/protocolBindings/ModelTechnicalCapability';
 
 /** 权威 per-model 能力档案（键 (provider_id, model)）。 */
 export interface IProvider {

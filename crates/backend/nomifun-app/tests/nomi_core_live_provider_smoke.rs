@@ -429,7 +429,7 @@ async fn configure_stepfun(
                 "sort_order": 0,
                 "capabilities": [{
                     "task": "chat",
-                    "traits": ["function_calling", "reasoning", "streaming"],
+                    "traits": [],
                     "protocol": "openai.chat_text",
                     "connection_role": "default",
                     "provider_params": {"temperature": 0.0},

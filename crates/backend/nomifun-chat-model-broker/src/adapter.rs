@@ -35,6 +35,7 @@ pub struct ProviderWireRequest {
     pub connection_config_ref: ConnectionConfigRef,
     pub config_revision_digest: DigestHex,
     pub credential_ref: ProviderCredentialRef,
+    pub route_features: BTreeSet<ChatModelFeature>,
     pub body: Value,
 }
 
@@ -130,6 +131,7 @@ pub fn protocol_features(protocol: ChatProtocol) -> BTreeSet<ChatModelFeature> {
         Feature::TextOutput,
         Feature::ToolCalls,
         Feature::Reasoning,
+        Feature::Streaming,
     ]);
     match protocol {
         ChatProtocol::Anthropic => {
@@ -262,6 +264,7 @@ impl AdapterCore {
             connection_config_ref: route.connection_config_ref.clone(),
             config_revision_digest: route.config_revision_digest.clone(),
             credential_ref: route.credential_ref.clone(),
+            route_features: route.features.clone(),
             body,
         })
     }

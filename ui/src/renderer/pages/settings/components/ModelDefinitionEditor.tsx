@@ -1275,35 +1275,35 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             )}
 
             {/*
-              Traits stay visible without expanding the card: they describe what
-              the model can do, which is the same kind of question as the task
-              itself, and they are cheap to answer. Everything below — protocol,
-              URLs, connection role, token ceilings — is transport detail that
-              already has a working default.
+              Only user-declared Chat input/search abilities stay visible.
+              Tool calling, reasoning and streaming are runtime-managed and
+              realtime is already an independent task/protocol.
             */}
-            <div
-              hidden={focusedCallConfigTask !== undefined}
-              className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
-              data-capability-traits={capability.task}
-            >
-              <div className='text-12px text-t-secondary'>
-                {t('settings.modelTraitsLabel', { defaultValue: '能力细化（traits）' })}
+            {capability.task === 'chat' && (
+              <div
+                hidden={focusedCallConfigTask !== undefined}
+                className='space-y-6px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
+                data-capability-traits={capability.task}
+              >
+                <div className='text-12px text-t-secondary'>
+                  {t('settings.modelTraitsLabel', { defaultValue: '内容理解与搜索能力' })}
+                </div>
+                <Select
+                  mode='multiple'
+                  value={capability.traits}
+                  options={MODEL_TRAIT_ORDER.map((trait) => ({
+                    value: trait,
+                    label: t(`settings.modelTrait.${trait}`, { defaultValue: trait }),
+                  }))}
+                  onChange={(traits: ModelTrait[]) =>
+                    updateCapability(capability.task, {
+                      traits: MODEL_TRAIT_ORDER.filter((trait) => (traits ?? []).includes(trait)),
+                    })
+                  }
+                  triggerProps={{ getPopupContainer: () => document.body }}
+                />
               </div>
-              <Select
-                mode='multiple'
-                value={capability.traits}
-                options={MODEL_TRAIT_ORDER.map((trait) => ({
-                  value: trait,
-                  label: t(`settings.modelTrait.${trait}`, { defaultValue: trait }),
-                }))}
-                onChange={(traits: ModelTrait[]) =>
-                  updateCapability(capability.task, {
-                    traits: MODEL_TRAIT_ORDER.filter((trait) => (traits ?? []).includes(trait)),
-                  })
-                }
-                triggerProps={{ getPopupContainer: () => document.body }}
-              />
-            </div>
+            )}
 
             <div
               id={detailsId}

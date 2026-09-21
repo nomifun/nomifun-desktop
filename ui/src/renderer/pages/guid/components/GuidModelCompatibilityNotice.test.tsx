@@ -22,7 +22,7 @@ test('names the current model and every missing capability, then exposes both re
       <GuidModelCompatibilityNotice
         modelLabel='普通聊天模型'
         providerLabel='测试供应商'
-        missingTraits={['function_calling', 'vision_input']}
+        missingCapabilities={['function_calling', 'reasoning']}
         compatibleModelCount={2}
         canConfigureCurrentModel
         onChooseCompatibleModel={() => actions.push('choose')}
@@ -34,11 +34,11 @@ test('names the current model and every missing capability, then exposes both re
   expect(page.getByText('普通聊天模型')).toBeTruthy();
   expect(page.getByText(/测试供应商/)).toBeTruthy();
   expect(page.getByText('工具调用')).toBeTruthy();
-  expect(page.getByText('视觉输入')).toBeTruthy();
+  expect(page.getByText('推理')).toBeTruthy();
   expect(page.getByText(/输入、附件、项目与 Agent 选择都已保留/)).toBeTruthy();
 
   fireEvent.click(page.getByRole('button', { name: '选择兼容模型（2）' }));
-  fireEvent.click(page.getByRole('button', { name: '检查当前模型配置' }));
+  fireEvent.click(page.getByRole('button', { name: '检查模型与协议配置' }));
   expect(actions).toEqual(['choose', 'configure']);
 });
 
@@ -48,7 +48,7 @@ test('disables the empty compatible-model path and routes managed models to the 
       <GuidModelCompatibilityNotice
         modelLabel='托管模型'
         providerLabel='NomiFun'
-        missingTraits={['function_calling']}
+        missingCapabilities={['function_calling']}
         compatibleModelCount={0}
         canConfigureCurrentModel={false}
         onChooseCompatibleModel={() => undefined}

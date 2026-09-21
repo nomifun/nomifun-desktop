@@ -124,6 +124,10 @@ pub enum ChatModelFeature {
     ProviderRoundState,
     NativeResponsesItems,
     WebSearch,
+    /// Whether this route can use the provider's incremental response mode.
+    /// Unlike semantic request features, a request does not require this:
+    /// routes with a negative observation fall back to one bounded JSON reply.
+    Streaming,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -887,6 +891,10 @@ pub struct ChatModelError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_id: Option<ModelRouteId>,
     pub semantic_output_committed: bool,
+    /// Conclusive provider evidence for host-managed capability downgrade.
+    /// This is never inferred from diagnostic prose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported_feature: Option<ChatModelFeature>,
 }
 
 impl ChatModelError {
@@ -903,6 +911,7 @@ impl ChatModelError {
             provider_status: None,
             route_id: None,
             semantic_output_committed: false,
+            unsupported_feature: None,
         }
     }
 

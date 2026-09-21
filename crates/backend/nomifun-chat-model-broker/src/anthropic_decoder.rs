@@ -53,6 +53,12 @@ impl AnthropicDecoder {
     ) -> Option<Result<Vec<ChatModelEvent>, ChatModelError>> {
         let named = frame.event.trim().to_ascii_lowercase();
         let declared = frame.data.get("type").and_then(Value::as_str);
+        if named == "json"
+            && declared == Some("message")
+            && frame.data.get("role").and_then(Value::as_str) == Some("assistant")
+        {
+            return Some(self.decode_complete_message(&frame.data));
+        }
         let kind = if matches!(named.as_str(), "message" | "json") {
             declared.unwrap_or(&named)
         } else {
@@ -96,6 +102,67 @@ impl AnthropicDecoder {
             )));
         }
         Some(self.decode_native(kind, &frame.data))
+    }
+
+    fn decode_complete_message(
+        &mut self,
+        message: &Value,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        if self.started || self.terminal {
+            return Err(invalid("Duplicate complete Anthropic response"));
+        }
+        let id = identity(message, "id")?;
+        let usage = field(message, "usage")?;
+        let content = field(message, "content")?
+            .as_array()
+            .ok_or_else(|| invalid("Complete Anthropic content is not an array"))?;
+        let stop_reason = field(message, "stop_reason")?
+            .as_str()
+            .ok_or_else(|| invalid("Complete Anthropic response lacks a stop reason"))?;
+        let mut events = self.decode_native(
+            "message_start",
+            &serde_json::json!({
+                "type": "message_start",
+                "message": {
+                    "id": id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "stop_reason": null,
+                    "usage": usage,
+                }
+            }),
+        )?;
+        for (index, block) in content.iter().enumerate() {
+            events.extend(self.decode_native(
+                "content_block_start",
+                &serde_json::json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": block,
+                }),
+            )?);
+            events.extend(self.decode_native(
+                "content_block_stop",
+                &serde_json::json!({
+                    "type": "content_block_stop",
+                    "index": index,
+                }),
+            )?);
+        }
+        events.extend(self.decode_native(
+            "message_delta",
+            &serde_json::json!({
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": null},
+                "usage": usage,
+            }),
+        )?);
+        events.extend(self.decode_native(
+            "message_stop",
+            &serde_json::json!({"type": "message_stop"}),
+        )?);
+        Ok(events)
     }
 
     fn ping(
@@ -510,4 +577,44 @@ fn index(value: &Value) -> Result<u64, ChatModelError> {
     field(value, "index")?
         .as_u64()
         .ok_or_else(|| invalid("Invalid Anthropic content block index"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_json_message_is_projected_through_the_native_lifecycle() {
+        let mut decoder = AnthropicDecoder::default();
+        let events = decoder
+            .decode(&ProviderWireFrame {
+                event: "json".into(),
+                data: serde_json::json!({
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "hello"},
+                        {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "x"}}
+                    ],
+                    "stop_reason": "tool_use",
+                    "usage": {"input_tokens": 3, "output_tokens": 4}
+                }),
+            })
+            .expect("complete JSON response is handled")
+            .unwrap();
+        assert!(matches!(events.first(), Some(ChatModelEvent::ResponseStarted { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatModelEvent::OutputTextDelta { text } if text == "hello"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatModelEvent::ToolCallCompleted { call } if call.name == "search"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls })
+        ));
+    }
 }

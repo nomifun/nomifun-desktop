@@ -6,7 +6,12 @@
 
 /** Readers and request mappers for the one authoritative nested model shape. */
 
-import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
+import type {
+  IProvider,
+  ModelTask,
+  ModelTechnicalCapability,
+  ModelTrait,
+} from '@/common/config/storage';
 import type {
   CapabilityHealth,
   ProviderModelCapabilityInput,
@@ -41,13 +46,28 @@ export const modelNamesOf = (provider: Pick<IProvider, 'models'>): string[] =>
 export const modelSupportsTask = (
   model: ProviderModelResponse,
   task: ModelTask,
-  requiredTraits: readonly ModelTrait[] = []
+  requiredTraits: readonly ModelTrait[] = [],
+  requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = []
 ): boolean => {
   const capability = model.capabilities.find((item) => item.task === task);
   return Boolean(
-    capability && requiredTraits.every((trait) => capability.traits.includes(trait))
+    capability &&
+      requiredTraits.every((trait) => capability.traits.includes(trait)) &&
+      requiredTechnicalCapabilities.every(
+        (technical) =>
+          !capability.health?.unsupported_technical_capabilities?.includes(technical)
+      )
   );
 };
+
+export const capabilitySupportsTechnicalCapability = (
+  capability: ProviderModelCapabilityResponse | undefined,
+  technical: ModelTechnicalCapability
+): boolean =>
+  Boolean(
+    capability &&
+      !capability.health?.unsupported_technical_capabilities?.includes(technical)
+  );
 
 /** Strip response-only health/timestamps when saving a complete model. */
 export const toProviderModelCapabilityInput = (

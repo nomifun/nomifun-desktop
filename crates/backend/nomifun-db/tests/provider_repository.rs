@@ -569,6 +569,121 @@ async fn stale_health_probe_cannot_overwrite_a_newer_invocation_graph() {
 }
 
 #[tokio::test]
+async fn technical_capability_downgrade_is_durable_preserved_by_probes_and_revision_fenced() {
+    let db = init_database_memory().await.unwrap();
+    SqliteProviderRepository::new(db.pool().clone())
+        .create(
+            provider_params(Some(PROVIDER_ID)),
+            &model("chat", &CHAT_CAPABILITIES),
+            &[],
+        )
+        .await
+        .unwrap();
+    let capabilities = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+
+    assert!(
+        capabilities
+            .mark_technical_capability_unsupported(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                "function_calling",
+            )
+            .await
+            .unwrap()
+    );
+    let stored = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(stored.health.as_deref().unwrap()).unwrap();
+    assert_eq!(health["status"], "unknown");
+    assert_eq!(
+        health["unsupported_technical_capabilities"],
+        serde_json::json!(["function_calling"])
+    );
+
+    assert!(
+        capabilities
+            .set_health(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                Some(r#"{"status":"healthy","latency":25}"#),
+            )
+            .await
+            .unwrap()
+    );
+    let probed = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(probed.health.as_deref().unwrap()).unwrap();
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(
+        health["unsupported_technical_capabilities"],
+        serde_json::json!(["function_calling"])
+    );
+
+    assert!(
+        capabilities
+            .set_health(PROVIDER_ID, 0, "chat", "chat", None)
+            .await
+            .unwrap()
+    );
+    let cleared_probe = capabilities
+        .get(PROVIDER_ID, "chat", "chat")
+        .await
+        .unwrap()
+        .unwrap();
+    let health: serde_json::Value =
+        serde_json::from_str(cleared_probe.health.as_deref().unwrap()).unwrap();
+    assert_eq!(health["status"], "unknown");
+    assert_eq!(
+        health["unsupported_technical_capabilities"],
+        serde_json::json!(["function_calling"])
+    );
+    assert!(cleared_probe.health_checked_at.is_none());
+
+    let changed_capabilities = [NewProviderModelCapability {
+        endpoint: Some("/v2/chat/completions"),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("chat", &changed_capabilities))
+        .await
+        .unwrap();
+    assert!(
+        !capabilities
+            .mark_technical_capability_unsupported(
+                PROVIDER_ID,
+                0,
+                "chat",
+                "chat",
+                "streaming",
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        capabilities
+            .get(PROVIDER_ID, "chat", "chat")
+            .await
+            .unwrap()
+            .unwrap()
+            .health
+            .is_none(),
+        "model configuration changes reset negative observations"
+    );
+}
+
+#[tokio::test]
 async fn model_save_persists_distinct_async_route_endpoints() {
     let db = init_database_memory().await.unwrap();
     SqliteProviderRepository::new(db.pool().clone())

@@ -36,4 +36,17 @@ pub trait IProviderModelCapabilityRepository: Send + Sync {
         task: &str,
         health_json: Option<&str>,
     ) -> Result<bool, DbError>;
+
+    /// Record conclusive provider evidence that one host-managed Chat
+    /// capability is unsupported. Missing observations mean optimistic
+    /// support. The provider revision fence prevents a late response from an
+    /// old endpoint/model configuration from poisoning the replacement.
+    async fn mark_technical_capability_unsupported(
+        &self,
+        provider_id: &str,
+        expected_config_revision: i64,
+        model: &str,
+        task: &str,
+        capability: &str,
+    ) -> Result<bool, DbError>;
 }

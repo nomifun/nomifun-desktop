@@ -6408,6 +6408,7 @@ dependencies = [
  "async-trait",
  "futures",
  "nomifun-agent-contracts",
+ "nomifun-net",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

@@ -69,7 +69,7 @@ async fn body_json(response: axum::response::Response) -> Value {
 fn chat_capability() -> Value {
     json!({
         "task": "chat",
-        "traits": ["streaming"],
+        "traits": [],
         "protocol": "openai.chat_text",
         "connection_role": "default",
         "provider_params": {}
@@ -138,7 +138,7 @@ async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
         .oneshot(request(
             "PUT",
             "/api/provider-models",
-            Some(save(json!(["streaming", "function_calling"]))),
+            Some(save(json!(["vision_input", "web_search"]))),
         ))
         .await
         .unwrap();
@@ -156,7 +156,7 @@ async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
         .unwrap();
     assert_eq!(
         resolved.traits,
-        vec![ModelTrait::Streaming, ModelTrait::FunctionCalling]
+        vec![ModelTrait::VisionInput, ModelTrait::WebSearch]
     );
 }
 

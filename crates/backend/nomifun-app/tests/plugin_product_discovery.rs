@@ -248,7 +248,7 @@ async fn published_discovery_is_consumed_by_nomi_and_conflicts_are_rejected_befo
         "platform": "stepfun-plan", "name": "Discovery model", "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": {"api_keys":["test-only"]}, "enabled": true,
         "initial_model": {"model":"step-3.7-flash", "enabled":true, "capabilities":[{
-            "task":"chat", "traits":["function_calling","streaming"], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
+            "task":"chat", "traits":[], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
         }]}
     })).await;
     let preset = data(

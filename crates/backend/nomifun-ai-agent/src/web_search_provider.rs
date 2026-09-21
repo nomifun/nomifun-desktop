@@ -248,7 +248,7 @@ impl CatalogSearchProvider {
         let mut candidates = Vec::new();
         for capability in capabilities {
             if capability.task != "chat" || capability.protocol != "openai.responses"
-                || !serde_json::from_str::<Vec<nomifun_api_types::ModelTrait>>(&capability.traits)
+                || !nomifun_api_types::parse_persisted_model_traits(&capability.traits)
                     .is_ok_and(|traits| traits.contains(&nomifun_api_types::ModelTrait::WebSearch)) {
                 continue;
             }

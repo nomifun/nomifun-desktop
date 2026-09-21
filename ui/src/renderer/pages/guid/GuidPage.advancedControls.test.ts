@@ -100,17 +100,16 @@ describe('GuidPage advanced controls', () => {
   test('blocks a tool-using Agent before launch when the selected model cannot call tools', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const notice = readSource(new URL('./components/GuidModelCompatibilityNotice.tsx', import.meta.url));
-    const modelSelection = readSource(new URL('./hooks/useGuidModelSelection.ts', import.meta.url));
 
     expect(page.includes('selectedAgentRequiresToolCalls = presetActionIds.size > 0')).toBe(true);
     expect(page.includes("? ['function_calling']")).toBe(true);
-    expect(page.includes('const missingModelTraits = requiredModelTraits.filter(')).toBe(true);
+    expect(page.includes('const missingTechnicalCapabilities = requiredTechnicalCapabilities.filter(')).toBe(true);
+    expect(page.includes('capabilitySupportsTechnicalCapability(currentModelCapability, technical)')).toBe(true);
     expect(page.includes('selectedAgentModelCompatible')).toBe(true);
     expect(page.includes('<GuidModelCompatibilityNotice')).toBe(true);
     expect(page.includes('modelCapabilityConfigurationRoute(currentModel.id, currentModel.use_model)')).toBe(true);
     expect(page.includes('onChooseCompatibleModel={() => setModelPickerOpen(true)}')).toBe(true);
-    expect(notice.includes('missingTraits.map((trait)')).toBe(true);
-    expect(notice.includes("t(`settings.modelTrait.${trait}`)")).toBe(true);
-    expect(modelSelection.includes("capabilityOf(provider, current_model.use_model, 'chat')?.traits")).toBe(true);
+    expect(notice.includes('missingCapabilities.map((capability)')).toBe(true);
+    expect(notice.includes("t(`settings.modelTechnicalCapability.${capability}`)")).toBe(true);
   });
 });

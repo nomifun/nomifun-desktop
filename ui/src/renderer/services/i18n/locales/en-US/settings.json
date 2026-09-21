@@ -1431,7 +1431,8 @@
       "taskRealtime": "Realtime",
       "taskEmbedding": "Embedding",
       "taskRerank": "Rerank",
-      "traitVision": "Vision"
+      "traitVision": "Vision",
+      "functionCallingUnsupported": "Tool calling confirmed unsupported"
     },
     "provider": {
       "title": "Providers & keys",
@@ -1705,14 +1706,14 @@
     "vision_input": "Vision input",
     "video_input": "Video input",
     "audio_input": "Audio input",
-    "audio_output": "Audio output",
-    "realtime": "Realtime session",
-    "streaming": "Streaming",
-    "function_calling": "Function calling",
-    "reasoning": "Reasoning",
     "web_search": "Web search"
   },
-  "modelTraitsLabel": "Traits",
+  "modelTechnicalCapability": {
+    "function_calling": "Tool calling",
+    "reasoning": "Reasoning",
+    "streaming": "Streaming"
+  },
+  "modelTraitsLabel": "Understanding & search",
   "modelAdvanced": {
     "trigger": "Advanced",
     "title": "Advanced settings",

@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { MODEL_TASK_ORDER } from '@/common/modelCapabilities';
+import { MODEL_TASK_ORDER, MODEL_TRAIT_ORDER } from '@/common/modelCapabilities';
 import type { ModelTask } from '@/common/protocolBindings/ModelTask';
 import { createInstance } from 'i18next';
 import React from 'react';
@@ -347,7 +347,7 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(disclosure.includes('w-full')).toBe(false);
   });
 
-  test('keeps traits answerable without expanding a capability card', () => {
+  test('shows only user-authored Chat understanding and search traits', () => {
     const html = render({
       model: 'step-ready',
       capabilities: [
@@ -355,13 +355,34 @@ describe('unified model definition editor rendering and interactions', () => {
       ],
     });
 
-    // Traits describe what the model can do — the same kind of question as the
-    // task itself. They must sit outside the collapsed transport details.
+    // Runtime-managed tool/reasoning/streaming state is intentionally absent.
     expect(html.includes('data-capability-traits="chat"')).toBe(true);
     expect(html.indexOf('data-capability-traits="chat"')).toBeLessThan(
       html.indexOf('data-capability-details="chat"')
     );
     expect(html.includes('data-capability-expanded="false"')).toBe(true);
+    expect(html.includes('内容理解与搜索能力')).toBe(true);
+    expect(MODEL_TRAIT_ORDER).toEqual([
+      'vision_input',
+      'video_input',
+      'audio_input',
+      'web_search',
+    ]);
+    for (const internal of ['工具调用', '推理', '流式传输', '实时会话']) {
+      expect(html.includes(internal)).toBe(false);
+    }
+
+    const realtimeHtml = render({
+      model: 'realtime-model',
+      capabilities: [
+        {
+          ...emptyCapabilityDraft('realtime_conversation'),
+          transportSource: 'persisted' as const,
+          protocol: 'stepfun.realtime_s2s',
+        },
+      ],
+    });
+    expect(realtimeHtml.includes('data-capability-traits')).toBe(false);
   });
 
   test('groups both token ceilings under one heading', () => {

@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    ExecutionModelPool, ExecutionModelRef, ModelTask, ModelTrait, ParticipantCapability,
-    AgentResolvedSnapshot,
+    AgentResolvedSnapshot, CapabilityHealth, ExecutionModelPool, ExecutionModelRef, ModelTask,
+    ModelTechnicalCapability, ModelTrait, ParticipantCapability, parse_persisted_model_traits,
 };
 use nomifun_common::{
     AppError, MAX_AGENT_EXECUTION_MODELS, ProviderId, NOMI_AGENT_ID,
@@ -46,32 +46,20 @@ fn project_chat_traits(
     provider_id: &str,
     model: &str,
     traits_json: &str,
+    health_json: Option<&str>,
 ) -> Result<ChatTraitProjection, AppError> {
-    let traits: Vec<ModelTrait> = serde_json::from_str(traits_json).map_err(|error| {
+    let traits = parse_persisted_model_traits(traits_json).map_err(|error| {
         AppError::Internal(format!(
             "stored Chat capability traits for {provider_id}/{model} are invalid: {error}"
         ))
     })?;
     let mut modalities = Vec::new();
-    let mut function_calling = false;
-    let mut reasoning = false;
     let mut web_search = false;
     for model_trait in traits {
         let modality = match model_trait {
             ModelTrait::VisionInput => Some("vision"),
             ModelTrait::VideoInput => Some("video"),
             ModelTrait::AudioInput => Some("audio_input"),
-            ModelTrait::AudioOutput => Some("audio_output"),
-            ModelTrait::Realtime => Some("realtime"),
-            ModelTrait::Streaming => Some("streaming"),
-            ModelTrait::FunctionCalling => {
-                function_calling = true;
-                None
-            }
-            ModelTrait::Reasoning => {
-                reasoning = true;
-                None
-            }
             ModelTrait::WebSearch => {
                 web_search = true;
                 None
@@ -83,10 +71,20 @@ fn project_chat_traits(
             modalities.push(modality.to_owned());
         }
     }
+    let unsupported = health_json
+        .map(serde_json::from_str::<CapabilityHealth>)
+        .transpose()
+        .map_err(|error| {
+            AppError::Internal(format!(
+                "stored Chat capability health for {provider_id}/{model} is invalid: {error}"
+            ))
+        })?
+        .map(|health| health.unsupported_technical_capabilities)
+        .unwrap_or_default();
     Ok(ChatTraitProjection {
         modalities,
-        function_calling,
-        reasoning,
+        function_calling: !unsupported.contains(&ModelTechnicalCapability::FunctionCalling),
+        reasoning: !unsupported.contains(&ModelTechnicalCapability::Reasoning),
         web_search,
     })
 }
@@ -166,7 +164,12 @@ fn build_chat_catalog(
             let key = (provider.provider_id.clone(), model);
             let entry = ChatCatalogEntry {
                 description: row.description.clone(),
-                traits: project_chat_traits(&key.0, &key.1, &chat_capability.traits)?,
+                traits: project_chat_traits(
+                    &key.0,
+                    &key.1,
+                    &chat_capability.traits,
+                    chat_capability.health.as_deref(),
+                )?,
             };
             if catalog.insert(key.clone(), entry).is_none() {
                 catalog_order.push(ExecutionModelRef {
@@ -698,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn participant_capability_comes_only_from_persisted_chat_traits() {
+    fn participant_capability_uses_user_traits_and_optimistic_technical_defaults() {
         let providers = vec![provider(PROVIDER_1, true)];
         let models = vec![
             model_row(PROVIDER_1, "gpt-4o-vision-looking-name", true),
@@ -736,14 +739,7 @@ mod tests {
             &catalog[&(PROVIDER_1.to_owned(), "opaque-model".to_owned())].traits;
         assert_eq!(
             opaque_projection.modalities,
-            [
-                "vision",
-                "video",
-                "audio_input",
-                "audio_output",
-                "realtime",
-                "streaming",
-            ]
+            ["vision", "video", "audio_input"]
         );
         let mut opaque_capability = derive_capability(None);
         opaque_projection.apply_to(&mut opaque_capability);
@@ -751,13 +747,25 @@ mod tests {
         assert!(opaque_capability.web_search);
         assert_eq!(opaque_capability.reasoning, "high");
 
-        let no_traits = project_chat_traits(PROVIDER_1, "plain", "[]").unwrap();
+        let no_traits = project_chat_traits(PROVIDER_1, "plain", "[]", None).unwrap();
         let mut plain_capability = derive_capability(None);
         no_traits.apply_to(&mut plain_capability);
         assert!(plain_capability.modalities.is_empty());
-        assert!(!plain_capability.tools);
+        assert!(plain_capability.tools);
         assert!(!plain_capability.web_search);
-        assert_eq!(plain_capability.reasoning, "low");
+        assert_eq!(plain_capability.reasoning, "high");
+
+        let observed = project_chat_traits(
+            PROVIDER_1,
+            "observed-limited",
+            "[]",
+            Some(
+                r#"{"status":"unknown","unsupported_technical_capabilities":["function_calling","reasoning"]}"#,
+            ),
+        )
+        .unwrap();
+        assert!(!observed.function_calling);
+        assert!(!observed.reasoning);
     }
 
     #[test]

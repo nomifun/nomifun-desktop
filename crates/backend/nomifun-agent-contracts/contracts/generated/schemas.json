@@ -428,6 +428,11 @@
             "type": "string"
           },
           {
+            "const": "streaming",
+            "description": "Provider incremental output is available. Runtime observations may\nremove this and use a bounded single-response transport instead.",
+            "type": "string"
+          },
+          {
             "const": "web_search",
             "description": "Exact Chat route supports provider-native web search with source\nattribution (currently OpenAI Responses built-in `web_search`).",
             "type": "string"
@@ -975,6 +980,11 @@
             "type": "string"
           },
           {
+            "const": "streaming",
+            "description": "Provider incremental output is available. Runtime observations may\nremove this and use a bounded single-response transport instead.",
+            "type": "string"
+          },
+          {
             "const": "web_search",
             "description": "Exact Chat route supports provider-native web search with source\nattribution (currently OpenAI Responses built-in `web_search`).",
             "type": "string"
@@ -1400,6 +1410,11 @@
               "provider_round_state",
               "native_responses_items"
             ],
+            "type": "string"
+          },
+          {
+            "const": "streaming",
+            "description": "Provider incremental output is available. Runtime observations may\nremove this and use a bounded single-response transport instead.",
             "type": "string"
           },
           {

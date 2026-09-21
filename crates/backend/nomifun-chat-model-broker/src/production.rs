@@ -35,8 +35,8 @@ use crate::contracts::{
     ResolvedChatRouteSet,
 };
 use crate::ports::{
-    ChatCausalityGate, ChatRouteResolver, CredentialLease, CredentialTarget,
-    ProviderCredentialStore,
+    ChatCapabilityObserver, ChatCausalityGate, ChatRouteResolver, CredentialLease,
+    CredentialTarget, NoopChatCapabilityObserver, ProviderCredentialStore,
 };
 use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex};
 
@@ -155,6 +155,7 @@ pub struct ProductionBrokerDependencies {
     pub causality_gate: Arc<dyn ChatCausalityGate>,
     pub model_invoke: Arc<dyn ChatModelInvokePort>,
     pub retry_policy: BrokerRetryPolicy,
+    pub capability_observer: Arc<dyn ChatCapabilityObserver>,
 }
 
 impl ProductionBrokerDependencies {
@@ -176,11 +177,20 @@ impl ProductionBrokerDependencies {
             causality_gate,
             model_invoke,
             retry_policy: BrokerRetryPolicy::default(),
+            capability_observer: Arc::new(NoopChatCapabilityObserver),
         }
     }
 
     pub fn with_retry_policy(mut self, retry_policy: BrokerRetryPolicy) -> Self {
         self.retry_policy = retry_policy;
+        self
+    }
+
+    pub fn with_capability_observer(
+        mut self,
+        capability_observer: Arc<dyn ChatCapabilityObserver>,
+    ) -> Self {
+        self.capability_observer = capability_observer;
         self
     }
 }
@@ -642,6 +652,7 @@ fn assemble_production_broker(
         causality_gate,
         model_invoke,
         retry_policy,
+        capability_observer,
     } = dependencies;
 
     let route_resolver = Arc::new(ProductionRouteResolver::new(repositories.clone()));
@@ -651,12 +662,13 @@ fn assemble_production_broker(
     ));
     let transport = Arc::new(SixProtocolProviderTransport::try_new(model_invoke)?);
     let transport: Arc<dyn ProviderTransport> = transport;
-    let broker = ChatModelBroker::new(
+    let broker = ChatModelBroker::new_with_capability_observer(
         causality_gate,
         route_resolver,
         credential_store,
         six_protocol_adapters(transport),
         retry_policy,
+        capability_observer,
     )
     .map_err(ProductionBrokerError::Broker)?;
     Ok(Arc::new(broker))
@@ -958,6 +970,7 @@ mod tests {
                 max_total_attempts: 1,
                 max_attempts_per_route: 1,
             },
+            capability_observer: Arc::new(NoopChatCapabilityObserver),
         }
     }
 
@@ -1122,6 +1135,7 @@ mod tests {
             connection_config_ref: route.connection_config_ref.clone(),
             config_revision_digest: route.config_revision_digest.clone(),
             credential_ref: route.credential_ref.clone(),
+            route_features: route.features.clone(),
             body: json!({"api_key": "super-secret-value"}),
         };
 

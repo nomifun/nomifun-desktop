@@ -14,6 +14,10 @@ use serde::de::DeserializeOwned;
 
 use crate::auth::AuthMaterial;
 use crate::error::{InvokeError, InvokeErrorKind};
+use nomifun_api_types::ModelTechnicalCapability;
+use nomifun_net::provider_capability::{
+    ProviderTechnicalCapability, classify_unsupported_technical_capability_body,
+};
 use nomifun_net::secret_redaction::SecretRedactor;
 
 /// Map a reqwest transport error onto [`InvokeError`]
@@ -194,10 +198,16 @@ async fn error_from_response_with_body_deadline(
     let retry_after_ms = (code == 429)
         .then(|| parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER)))
         .flatten();
-    let (snippet, context_length_rejected) = match timeout {
+    let (snippet, context_length_rejected, unsupported_technical_capability) = match timeout {
         Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp))
             .await
-            .unwrap_or_else(|_| ("<provider error body read timed out>".to_owned(), false)),
+            .unwrap_or_else(|_| {
+                (
+                    "<provider error body read timed out>".to_owned(),
+                    false,
+                    None,
+                )
+            }),
         None => read_error_body_snippet(resp).await,
     };
     let snippet = redactor.redact(&snippet);
@@ -208,6 +218,9 @@ async fn error_from_response_with_body_deadline(
         retry_after_ms,
         catalog_failure: false,
         context_length_rejected: matches!(code, 400 | 413 | 422) && context_length_rejected,
+        unsupported_technical_capability: matches!(code, 400 | 422)
+            .then_some(unsupported_technical_capability)
+            .flatten(),
     }
 }
 
@@ -221,7 +234,9 @@ pub(crate) fn response_secret_redactor(resp: &reqwest::Response) -> SecretRedact
         .unwrap_or_default()
 }
 
-async fn read_error_body_snippet(mut resp: reqwest::Response) -> (String, bool) {
+async fn read_error_body_snippet(
+    mut resp: reqwest::Response,
+) -> (String, bool, Option<ModelTechnicalCapability>) {
     if let Some(declared) = resp.content_length()
         && declared > MAX_ERROR_RESPONSE_BODY_BYTES as u64
     {
@@ -231,6 +246,7 @@ async fn read_error_body_snippet(mut resp: reqwest::Response) -> (String, bool) 
                 MAX_ERROR_RESPONSE_BODY_BYTES
             ),
             false,
+            None,
         );
     }
 
@@ -260,7 +276,11 @@ async fn read_error_body_snippet(mut resp: reqwest::Response) -> (String, bool) 
             }
             Err(error) => {
                 if body.is_empty() {
-                    return (format!("<provider error body read failed: {error}>"), false);
+                    return (
+                        format!("<provider error body read failed: {error}>"),
+                        false,
+                        None,
+                    );
                 }
                 break;
             }
@@ -271,6 +291,9 @@ async fn read_error_body_snippet(mut resp: reqwest::Response) -> (String, bool) 
     // observed. A partial JSON body or a quoted error inside message text is
     // never evidence for a new paid model request.
     let context_length_rejected = complete && explicit_context_length_error(&body);
+    let unsupported_technical_capability = complete
+        .then(|| explicit_unsupported_technical_capability(&body))
+        .flatten();
     let mut snippet: String = String::from_utf8_lossy(&body)
         .chars()
         .take(MAX_ERROR_RESPONSE_SNIPPET_CHARS)
@@ -281,7 +304,23 @@ async fn read_error_body_snippet(mut resp: reqwest::Response) -> (String, bool) 
             MAX_ERROR_RESPONSE_BODY_BYTES
         ));
     }
-    (snippet, context_length_rejected)
+    (
+        snippet,
+        context_length_rejected,
+        unsupported_technical_capability,
+    )
+}
+
+fn explicit_unsupported_technical_capability(
+    body: &[u8],
+) -> Option<ModelTechnicalCapability> {
+    classify_unsupported_technical_capability_body(body).map(|capability| match capability {
+        ProviderTechnicalCapability::FunctionCalling => {
+            ModelTechnicalCapability::FunctionCalling
+        }
+        ProviderTechnicalCapability::Reasoning => ModelTechnicalCapability::Reasoning,
+        ProviderTechnicalCapability::Streaming => ModelTechnicalCapability::Streaming,
+    })
 }
 
 fn explicit_context_length_error(body: &[u8]) -> bool {
@@ -540,6 +579,61 @@ mod tests {
 
     use super::*;
     use crate::auth::{AuthMaterial, AuthScheme};
+
+    #[test]
+    fn technical_capability_downgrade_requires_explicit_machine_evidence() {
+        for (body, expected) in [
+            (
+                br#"{"error":{"code":"unsupported_parameter","param":"tools","message":"ignored"}}"#.as_slice(),
+                Some(ModelTechnicalCapability::FunctionCalling),
+            ),
+            (
+                br#"{"error":{"type":"reasoning_not_supported","message":"ignored"}}"#.as_slice(),
+                Some(ModelTechnicalCapability::Reasoning),
+            ),
+            (
+                br#"{"error":{"code":"unsupported_value","param":"stream"}}"#.as_slice(),
+                Some(ModelTechnicalCapability::Streaming),
+            ),
+        ] {
+            assert_eq!(explicit_unsupported_technical_capability(body), expected);
+        }
+
+        for body in [
+            br#"{"error":{"code":"invalid_request_error","param":"tools","message":"tools are unsupported"}}"#.as_slice(),
+            br#"{"error":{"code":"unsupported_parameter","param":"temperature"}}"#.as_slice(),
+            br#"{"message":"streaming not supported"}"#.as_slice(),
+            b"not json".as_slice(),
+        ] {
+            assert_eq!(explicit_unsupported_technical_capability(body), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_rate_limit_and_server_failures_never_downgrade_capabilities() {
+        let body = serde_json::json!({
+            "error": {"code": "unsupported_parameter", "param": "tools"}
+        });
+        for status in [401, 403, 429, 500, 503] {
+            let error = error_from_response(
+                respond(ResponseTemplate::new(status).set_body_json(&body)).await,
+            )
+            .await;
+            assert_eq!(
+                error.unsupported_technical_capability,
+                None,
+                "status {status}"
+            );
+        }
+        let error = error_from_response(
+            respond(ResponseTemplate::new(400).set_body_json(&body)).await,
+        )
+        .await;
+        assert_eq!(
+            error.unsupported_technical_capability,
+            Some(ModelTechnicalCapability::FunctionCalling)
+        );
+    }
 
     async fn respond(template: ResponseTemplate) -> reqwest::Response {
         let server = MockServer::start().await;

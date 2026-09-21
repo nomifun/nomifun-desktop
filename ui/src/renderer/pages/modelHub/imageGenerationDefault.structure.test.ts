@@ -21,9 +21,10 @@ describe('default image-generation model', () => {
         "defaultModelPreferenceKey='models.default.imageGeneration'",
       ),
     ).toBe(true);
-    expect(panel.includes("'models.default.imageGeneration': { task: 'image_generation', traits: [] }")).toBe(true);
+    expect(panel.includes("'models.default.imageGeneration': { task: 'image_generation', traits: [], technical: [] }")).toBe(true);
     expect(panel.includes('task={spec.task}')).toBe(true);
-    expect(panel.includes('useModelsForTask(spec.task, [...spec.traits])')).toBe(true);
+    expect(panel.includes('[...spec.traits]')).toBe(true);
+    expect(panel.includes('[...spec.technical]')).toBe(true);
     expect(panel.includes('disabled={noCandidates || isSavingDefault}')).toBe(
       true,
     );
@@ -40,7 +41,9 @@ describe('default image-generation model', () => {
       visionSection.includes("defaultModelPreferenceKey='models.default.vision'"),
     ).toBe(true);
     expect(
-      panel.includes("'models.default.vision': { task: 'chat', traits: ['vision_input', 'function_calling'] }"),
+      panel.includes("task: 'chat'")
+        && panel.includes("traits: ['vision_input']")
+        && panel.includes("technical: ['function_calling']"),
     ).toBe(true);
   });
 

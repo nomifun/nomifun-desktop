@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex, ModelRouteId};
 
 use crate::contracts::{
-    ChatCausality, ChatModelError, ChatProtocol, ChatRouteSelection, ProviderCredentialRef,
-    ProviderIdRef, ResolvedChatRoute, ResolvedChatRouteSet,
+    ChatCausality, ChatModelError, ChatModelFeature, ChatProtocol, ChatRouteSelection,
+    ProviderCredentialRef, ProviderIdRef, ResolvedChatRoute, ResolvedChatRouteSet,
 };
 
 #[async_trait]
@@ -22,6 +22,30 @@ pub trait ChatRouteResolver: Send + Sync {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<ResolvedChatRouteSet, ChatModelError>;
+}
+
+/// Host-owned sink for conclusive negative technical-capability observations.
+/// It is deliberately separate from provider diagnostics and retry policy.
+#[async_trait]
+pub trait ChatCapabilityObserver: Send + Sync {
+    async fn record_unsupported(
+        &self,
+        route: &ResolvedChatRoute,
+        feature: ChatModelFeature,
+    );
+}
+
+#[derive(Default)]
+pub struct NoopChatCapabilityObserver;
+
+#[async_trait]
+impl ChatCapabilityObserver for NoopChatCapabilityObserver {
+    async fn record_unsupported(
+        &self,
+        _route: &ResolvedChatRoute,
+        _feature: ChatModelFeature,
+    ) {
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

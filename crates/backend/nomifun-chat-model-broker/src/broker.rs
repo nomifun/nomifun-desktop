@@ -16,7 +16,8 @@ use crate::contracts::{
     ChatRetryDirective, ChatToolCall, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::{
-    ChatCausalityGate, ChatRouteResolver, CredentialTarget, ProviderCredentialStore,
+    ChatCapabilityObserver, ChatCausalityGate, ChatRouteResolver, CredentialTarget,
+    NoopChatCapabilityObserver, ProviderCredentialStore,
 };
 use crate::provider_reasoning::ProviderReasoningRoute;
 
@@ -121,6 +122,7 @@ pub struct ChatModelBroker {
     credential_store: Arc<dyn ProviderCredentialStore>,
     adapters: BTreeMap<ChatProtocol, Arc<dyn ChatProtocolAdapter>>,
     retry_policy: BrokerRetryPolicy,
+    capability_observer: Arc<dyn ChatCapabilityObserver>,
 }
 
 impl ChatModelBroker {
@@ -130,6 +132,24 @@ impl ChatModelBroker {
         credential_store: Arc<dyn ProviderCredentialStore>,
         adapters: impl IntoIterator<Item = Arc<dyn ChatProtocolAdapter>>,
         retry_policy: BrokerRetryPolicy,
+    ) -> Result<Self, ChatModelError> {
+        Self::new_with_capability_observer(
+            causality_gate,
+            route_resolver,
+            credential_store,
+            adapters,
+            retry_policy,
+            Arc::new(NoopChatCapabilityObserver),
+        )
+    }
+
+    pub fn new_with_capability_observer(
+        causality_gate: Arc<dyn ChatCausalityGate>,
+        route_resolver: Arc<dyn ChatRouteResolver>,
+        credential_store: Arc<dyn ProviderCredentialStore>,
+        adapters: impl IntoIterator<Item = Arc<dyn ChatProtocolAdapter>>,
+        retry_policy: BrokerRetryPolicy,
+        capability_observer: Arc<dyn ChatCapabilityObserver>,
     ) -> Result<Self, ChatModelError> {
         let retry_policy = retry_policy.validate()?;
         let mut by_protocol = BTreeMap::new();
@@ -167,6 +187,7 @@ impl ChatModelBroker {
             credential_store,
             adapters: by_protocol,
             retry_policy,
+            capability_observer,
         })
     }
 
@@ -246,6 +267,7 @@ impl ChatModelBroker {
         let adapters = self.adapters.clone();
         let credential_store = Arc::clone(&self.credential_store);
         let retry_policy = self.retry_policy;
+        let capability_observer = Arc::clone(&self.capability_observer);
         let (sender, receiver) = mpsc::channel(BROKER_STREAM_CAPACITY);
 
         let attempt_cancellation = cancellation.clone();
@@ -260,6 +282,7 @@ impl ChatModelBroker {
                     adapters,
                     credential_store,
                     retry_policy,
+                    capability_observer,
                     sender.clone(),
                 ) => {},
             }
@@ -292,6 +315,7 @@ async fn run_broker(
     adapters: BTreeMap<ChatProtocol, Arc<dyn ChatProtocolAdapter>>,
     credential_store: Arc<dyn ProviderCredentialStore>,
     retry_policy: BrokerRetryPolicy,
+    capability_observer: Arc<dyn ChatCapabilityObserver>,
     sender: mpsc::Sender<Result<BrokerEventEnvelope, ChatModelError>>,
 ) {
     let mut route_index = 0_usize;
@@ -344,6 +368,9 @@ async fn run_broker(
                 error,
                 semantic_output_committed: false,
             } => {
+                if let Some(feature) = error.unsupported_feature {
+                    capability_observer.record_unsupported(route, feature).await;
+                }
                 let retry = error.retry;
                 last_error = Some(error);
                 let total_capacity =

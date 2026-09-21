@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
+import type {
+  IProvider,
+  ModelTask,
+  ModelTechnicalCapability,
+  ModelTrait,
+} from '@/common/config/storage';
 import { modelSupportsTask } from '@/common/utils/providerModels';
 import { useCallback, useMemo } from 'react';
 import { useProvidersQuery } from './useModelProviderList';
@@ -31,12 +36,17 @@ export interface ModelsForTaskResult {
 export const buildTaskModelGroups = (
   providers: readonly IProvider[],
   task: ModelTask,
-  requiredTraits: readonly ModelTrait[] = []
+  requiredTraits: readonly ModelTrait[] = [],
+  requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = []
 ): TaskModelGroup[] =>
   orderModelSelectorProviders(providers.filter((provider) => provider.enabled !== false)).flatMap(
     (provider) => {
       const models = provider.models
-        .filter((model) => model.enabled && modelSupportsTask(model, task, requiredTraits))
+        .filter(
+          (model) =>
+            model.enabled &&
+            modelSupportsTask(model, task, requiredTraits, requiredTechnicalCapabilities)
+        )
         .map((model) => model.model);
       return models.length === 0 ? [] : [{ provider, models }];
     }
@@ -47,12 +57,16 @@ export const buildTaskModelGroups = (
  * already contains the complete model/capability graph, so no second profile
  * request, bridge join, name heuristic, or fallback cache is involved.
  */
-export function useModelsForTask(task: ModelTask, requiredTraits?: ModelTrait[]): ModelsForTaskResult {
+export function useModelsForTask(
+  task: ModelTask,
+  requiredTraits?: ModelTrait[],
+  requiredTechnicalCapabilities?: ModelTechnicalCapability[]
+): ModelsForTaskResult {
   const { data, error, isLoading, mutate } = useProvidersQuery();
 
   const groups = useMemo(
-    () => buildTaskModelGroups(data ?? [], task, requiredTraits),
-    [data, requiredTraits, task]
+    () => buildTaskModelGroups(data ?? [], task, requiredTraits, requiredTechnicalCapabilities),
+    [data, requiredTechnicalCapabilities, requiredTraits, task]
   );
 
   const refresh = useCallback(() => {

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nomifun_api_types::{
-    CapabilityHealth, ModelTask, ModelTrait, ProviderModelCapabilityInput,
+    CapabilityHealth, ModelTask, ProviderModelCapabilityInput,
     ProviderModelCapabilityResponse, ProviderModelResponse, SaveProviderModelRequest,
 };
 use nomifun_common::{AppError, ProviderId};
@@ -833,7 +833,7 @@ pub(crate) fn capability_row_to_response(
             ))
         },
     )?;
-    let traits: Vec<ModelTrait> = serde_json::from_str(&row.traits).map_err(|error| {
+    let traits = nomifun_api_types::parse_persisted_model_traits(&row.traits).map_err(|error| {
         AppError::Internal(format!(
             "stored capability traits for {}/{} are invalid: {error}",
             row.provider_id, row.model

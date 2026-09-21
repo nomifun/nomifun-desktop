@@ -72,6 +72,11 @@ impl ResponsesDecoder {
             return Some(Err(invalid("Invalid Responses event type")));
         }
         let declared = frame.data.get("type").and_then(Value::as_str);
+        if named == "json"
+            && frame.data.get("object").and_then(Value::as_str) == Some("response")
+        {
+            return Some(self.decode_complete_response(&frame.data));
+        }
         let native_frame = declared.is_some_and(|kind| kind.starts_with("response."))
             || frame.data.get("response").is_some()
             || frame.data.get("output_index").is_some();
@@ -95,6 +100,108 @@ impl ResponsesDecoder {
             &named
         };
         Some(self.decode_native(kind, &frame.data))
+    }
+
+    fn decode_complete_response(
+        &mut self,
+        response: &Value,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        if self.response_id.is_some() || self.terminal {
+            return Err(invalid("Duplicate complete Responses response"));
+        }
+        let status = string(response, "status")?;
+        if !matches!(status, "completed" | "incomplete") {
+            return Err(invalid("Complete Responses response has a nonterminal status"));
+        }
+        let mut events = self.decode_native(
+            "response.created",
+            &serde_json::json!({
+                "type": "response.created",
+                "response": {"id": identity(response, "id")?},
+            }),
+        )?;
+        for (output_index, item) in array(response, "output")?.iter().enumerate() {
+            let kind = identity(item, "type")?;
+            let item_id = identity(item, "id")?;
+            let mut initial = item.clone();
+            match kind {
+                "message" => {
+                    initial["content"] = Value::Array(Vec::new());
+                }
+                "reasoning" => {
+                    initial["summary"] = Value::Array(Vec::new());
+                }
+                _ => {}
+            }
+            events.extend(self.decode_native(
+                "response.output_item.added",
+                &serde_json::json!({
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": initial,
+                }),
+            )?);
+            if kind == "message" {
+                for (content_index, part) in array(item, "content")?.iter().enumerate() {
+                    let part_type = identity(part, "type")?;
+                    let (event, field, text) = match part_type {
+                        "output_text" => (
+                            "response.output_text.done",
+                            "text",
+                            string(part, "text")?,
+                        ),
+                        "refusal" => (
+                            "response.refusal.done",
+                            "refusal",
+                            string(part, "refusal")?,
+                        ),
+                        _ => return Err(invalid("Unsupported complete Responses content part")),
+                    };
+                    let mut data = serde_json::json!({
+                        "type": event,
+                        "output_index": output_index,
+                        "item_id": item_id,
+                        "content_index": content_index,
+                    });
+                    data[field] = Value::String(text.to_owned());
+                    events.extend(self.decode_native(event, &data)?);
+                }
+            } else if kind == "reasoning" {
+                for (summary_index, part) in array(item, "summary")?.iter().enumerate() {
+                    if identity(part, "type")? != "summary_text" {
+                        return Err(invalid("Unsupported complete Responses reasoning part"));
+                    }
+                    events.extend(self.decode_native(
+                        "response.reasoning_summary_text.done",
+                        &serde_json::json!({
+                            "type": "response.reasoning_summary_text.done",
+                            "output_index": output_index,
+                            "item_id": item_id,
+                            "summary_index": summary_index,
+                            "text": string(part, "text")?,
+                        }),
+                    )?);
+                }
+            }
+            events.extend(self.decode_native(
+                "response.output_item.done",
+                &serde_json::json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": item,
+                }),
+            )?);
+        }
+        let terminal = if status == "completed" {
+            "response.completed"
+        } else {
+            "response.incomplete"
+        };
+        events.extend(self.decode_native(
+            terminal,
+            &serde_json::json!({"type": terminal, "response": response}),
+        )?);
+        Ok(events)
     }
 
     fn decode_native(
@@ -630,5 +737,44 @@ fn part_text(value: &Value, reasoning: bool) -> Result<(&str, &str), ChatModelEr
         (true, "summary_text") | (false, "output_text") => Ok((kind, string(value, "text")?)),
         (false, "refusal") => Ok((kind, string(value, "refusal")?)),
         _ => Err(invalid("Unsupported Responses content part")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::ProviderWireFrame;
+
+    #[test]
+    fn complete_json_response_is_projected_through_the_native_lifecycle() {
+        let mut decoder = ResponsesDecoder::new(false);
+        let events = decoder
+            .decode(&ProviderWireFrame {
+                event: "json".into(),
+                data: serde_json::json!({
+                    "id": "resp_1",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [{
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "hello", "annotations": []}]
+                    }],
+                    "usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+                }),
+            })
+            .expect("complete JSON response is handled")
+            .unwrap();
+        assert!(matches!(events.first(), Some(ChatModelEvent::ResponseStarted { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatModelEvent::OutputTextDelta { text } if text == "hello"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })
+        ));
     }
 }

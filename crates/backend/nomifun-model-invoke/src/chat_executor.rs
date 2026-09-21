@@ -431,6 +431,10 @@ fn json_chat_protocol(protocol: &str) -> bool {
         protocol.trim().to_ascii_lowercase().as_str(),
         "openai.chat"
             | "openai.chat_text"
+            | "openai.responses"
+            | "anthropic.messages"
+            | "bedrock.anthropic_messages"
+            | "vertex.anthropic_messages"
             | "gemini"
             | "google.gemini"
             | "gemini.generate_text"
