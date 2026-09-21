@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use nomifun_api_types::{ModelTask, ModelTrait, validate_model_traits_unique};
+use nomifun_api_types::{ModelTask, ModelTrait, parse_persisted_model_traits};
 use nomifun_common::ProviderId;
 use nomifun_db::models::Provider;
 
@@ -70,11 +70,9 @@ fn parse_provider_params(
 }
 
 fn parse_capability_traits(raw: &str) -> Result<Vec<ModelTrait>, InvokeError> {
-    let traits: Vec<ModelTrait> = serde_json::from_str(raw).map_err(|error| {
-        InvokeError::config(format!("capability traits is invalid JSON: {error}"))
-    })?;
-    validate_model_traits_unique(&traits).map_err(InvokeError::config)?;
-    Ok(traits)
+    parse_persisted_model_traits(raw).map_err(|error| {
+        InvokeError::config(format!("capability traits are invalid: {error}"))
+    })
 }
 
 fn auth_scheme_key(scheme: &AuthScheme) -> String {

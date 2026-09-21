@@ -66,8 +66,11 @@ import { CreationComposerContext } from '@/renderer/creation/CreationComposerCon
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 import { createDefaultIdmmConfig } from '@/common/types/idmm';
-import type { ModelTrait } from '@/common/config/storage';
-import { capabilityOf } from '@/common/utils/providerModels';
+import type { ModelTechnicalCapability } from '@/common/config/storage';
+import {
+  capabilityOf,
+  capabilitySupportsTechnicalCapability,
+} from '@/common/utils/providerModels';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import GuidModelCompatibilityNotice from './components/GuidModelCompatibilityNotice';
@@ -154,21 +157,25 @@ const GuidPage: React.FC = () => {
       )
     : presetCapabilities.actionIds;
   const selectedAgentRequiresToolCalls = presetActionIds.size > 0;
-  const requiredModelTraits: readonly ModelTrait[] = selectedAgentRequiresToolCalls
+  const requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = selectedAgentRequiresToolCalls
     ? ['function_calling']
     : [];
-  const missingModelTraits = requiredModelTraits.filter(
-    (trait) => !modelSelection.currentModelTraits.includes(trait)
-  );
-  const selectedAgentModelCompatible = missingModelTraits.length === 0;
-  const selectedAgentModelIncompatible =
-    Boolean(modelSelection.current_model) && !selectedAgentModelCompatible;
   const currentModelProvider = modelSelection.modelList.find(
     (provider) => provider.id === modelSelection.current_model?.id
   );
   const currentModelDefinition = currentModelProvider?.models.find(
     (model) => model.model === modelSelection.current_model?.use_model
   );
+  const currentModelCapability = currentModelDefinition?.capabilities.find(
+    (capability) => capability.task === 'chat'
+  );
+  const missingTechnicalCapabilities = requiredTechnicalCapabilities.filter(
+    (technical) =>
+      !capabilitySupportsTechnicalCapability(currentModelCapability, technical)
+  );
+  const selectedAgentModelCompatible = missingTechnicalCapabilities.length === 0;
+  const selectedAgentModelIncompatible =
+    Boolean(modelSelection.current_model) && !selectedAgentModelCompatible;
   const currentModelLabel = modelDisplayLabel(
     modelSelection.current_model?.use_model ?? '',
     currentModelDefinition?.display_name
@@ -177,8 +184,10 @@ const GuidPage: React.FC = () => {
     currentModelProvider?.name ?? modelSelection.current_model?.name ?? '';
   const compatibleModelCount = modelSelection.modelList.reduce(
     (count, provider) => count + modelSelection.getAvailableModels(provider).filter((model) => {
-      const traits = capabilityOf(provider, model, 'chat')?.traits ?? [];
-      return requiredModelTraits.every((trait) => traits.includes(trait));
+      const capability = capabilityOf(provider, model, 'chat');
+      return requiredTechnicalCapabilities.every((technical) =>
+        capabilitySupportsTechnicalCapability(capability, technical)
+      );
     }).length,
     0
   );
@@ -584,7 +593,7 @@ const GuidPage: React.FC = () => {
         providers={modelSelection.modelList}
         currentModel={modelSelection.current_model}
         getAvailableModels={modelSelection.getAvailableModels}
-        requiredTraits={requiredModelTraits}
+        requiredTechnicalCapabilities={requiredTechnicalCapabilities}
         popupVisible={modelPickerOpen}
         onPopupVisibleChange={setModelPickerOpen}
         onSelectModel={(provider, model) => modelSelection.setCurrentModel({ ...provider, use_model: model })}
@@ -628,7 +637,7 @@ const GuidPage: React.FC = () => {
               <GuidModelCompatibilityNotice
                 modelLabel={currentModelLabel}
                 providerLabel={currentProviderLabel}
-                missingTraits={missingModelTraits}
+                missingCapabilities={missingTechnicalCapabilities}
                 compatibleModelCount={compatibleModelCount}
                 canConfigureCurrentModel={canConfigureCurrentModel}
                 onChooseCompatibleModel={() => setModelPickerOpen(true)}

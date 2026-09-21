@@ -72,7 +72,7 @@ describe('model-owned tool configuration placement', () => {
     expect(source.includes('/settings/capabilities?tab=tools')).toBe(false);
   });
 
-  test('exact model links open the requested capability editor and chat rows expose tool support', () => {
+  test('exact model links open the requested editor and rows expose negative technical evidence', () => {
     const providerSource = readSource(
       '../../components/settings/SettingsModal/contents/ModelModalContent.tsx'
     );
@@ -81,7 +81,7 @@ describe('model-owned tool configuration placement', () => {
     expect(providerSource.includes('modelConfigurationTarget(searchParams)')).toBe(true);
     expect(providerSource.includes('configurationTarget.model === model')).toBe(true);
     expect(providerSource.includes('withoutModelConfigurationTarget(searchParams)')).toBe(true);
-    expect(modalitySource.includes("row.traits.includes('function_calling')")).toBe(true);
-    expect(modalitySource.includes("t('settings.modelTrait.function_calling')")).toBe(true);
+    expect(modalitySource.includes('unsupported_technical_capabilities')).toBe(true);
+    expect(modalitySource.includes("functionCallingUnsupported")).toBe(true);
   });
 });

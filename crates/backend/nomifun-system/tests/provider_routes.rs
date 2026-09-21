@@ -61,7 +61,7 @@ fn create_body(name: &str) -> Value {
             "description": "initial chat model",
             "capabilities": [{
                 "task": "chat",
-                "traits": ["function_calling", "streaming"],
+                "traits": [],
                 "protocol": "openai.chat_text",
                 "connection_role": "default",
                 "provider_params": {}

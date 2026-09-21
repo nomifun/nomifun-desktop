@@ -12,7 +12,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_chat_model_broker::{
     AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatBrokerPort, ChatCausality,
-    ChatCausalityGate, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelBroker,
+    ChatCapabilityObserver, ChatCausalityGate, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelBroker,
     ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelFeature, ChatModelInput, ChatModelRequest,
     ChatModality, ChatProtocol, ChatProtocolAdapter, ChatResponseFormat, ChatRetryDirective,
     ChatRole, ChatRouteResolver, ChatRouteSelection, ChatToolChoice,
@@ -197,6 +197,25 @@ struct StaticCredentialStore {
     mismatch: bool,
 }
 
+#[derive(Default)]
+struct RecordingCapabilityObserver {
+    observations: Mutex<Vec<(String, ChatModelFeature)>>,
+}
+
+#[async_trait]
+impl ChatCapabilityObserver for RecordingCapabilityObserver {
+    async fn record_unsupported(
+        &self,
+        route: &ResolvedChatRoute,
+        feature: ChatModelFeature,
+    ) {
+        self.observations
+            .lock()
+            .unwrap()
+            .push((route.model_route_id.as_ref().to_owned(), feature));
+    }
+}
+
 #[async_trait]
 impl ProviderCredentialStore for StaticCredentialStore {
     async fn lease(
@@ -370,6 +389,27 @@ fn broker(
     )
 }
 
+fn broker_with_observer(
+    gate: Arc<dyn ChatCausalityGate>,
+    routes: ResolvedChatRouteSet,
+    store: Arc<dyn ProviderCredentialStore>,
+    transports: &BTreeMap<ChatProtocol, Arc<dyn ProviderTransport>>,
+    retry_policy: BrokerRetryPolicy,
+    observer: Arc<dyn ChatCapabilityObserver>,
+) -> Arc<ChatModelBroker> {
+    Arc::new(
+        ChatModelBroker::new_with_capability_observer(
+            gate,
+            Arc::new(StaticRouteResolver { routes }),
+            store,
+            adapters(transports),
+            retry_policy,
+            observer,
+        )
+        .expect("valid six-protocol broker"),
+    )
+}
+
 #[test]
 fn recorded_wire_fixtures_cover_the_exact_six_protocols() {
     let fixtures = recorded_conformance_fixtures();
@@ -409,6 +449,61 @@ fn every_recorded_wire_decodes_to_its_canonical_event_sequence() {
             .flat_map(|frame| adapter.decode_frame(frame).expect("recorded frame"))
             .collect::<Vec<_>>();
         assert_eq!(decoded, fixture.expected_events, "{}", fixture.scenario_id);
+    }
+}
+
+#[test]
+fn bounded_json_fallback_decodes_openai_chat_and_gemini_responses() {
+    let transports =
+        transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());
+    let adapters = adapters(&transports)
+        .into_iter()
+        .map(|adapter| (adapter.protocol(), adapter))
+        .collect::<BTreeMap<_, _>>();
+    for (protocol, data) in [
+        (
+            ChatProtocol::OpenaiChat,
+            serde_json::json!({
+                "id": "chatcmpl_1",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
+            }),
+        ),
+        (
+            ChatProtocol::Gemini,
+            serde_json::json!({
+                "responseId": "gemini_1",
+                "candidates": [{
+                    "content": {"role": "model", "parts": [{"text": "hello"}]},
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1, "totalTokenCount": 3}
+            }),
+        ),
+    ] {
+        let route = route(protocol, "json-fallback", 1);
+        let request = basic_request(&route);
+        let mut decoder = adapters[&protocol]
+            .new_frame_decoder_for(&request)
+            .expect("official adapter has an attempt-local decoder");
+        let events = decoder
+            .decode_frame(ProviderWireFrame {
+                event: "json".into(),
+                data,
+            })
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ChatModelEvent::OutputTextDelta { text } if text == "hello"
+        )));
+        assert!(matches!(
+            events.last(),
+            Some(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed })
+        ));
     }
 }
 
@@ -933,6 +1028,49 @@ fn assert_recorded_request_shape(protocol: ChatProtocol, body: &serde_json::Valu
             assert!(body.get("toolConfig").is_some());
         }
     }
+}
+
+#[tokio::test]
+async fn broker_reports_only_conclusive_pre_semantic_capability_failures() {
+    let route = route(ChatProtocol::OpenaiChat, "observed", 1);
+    let request = basic_request(&route);
+    let mut unsupported = ChatModelError::new(
+        ChatModelErrorCode::UnsupportedFeature,
+        "provider machine error",
+        ChatRetryDirective::Never,
+    );
+    unsupported.unsupported_feature = Some(ChatModelFeature::ToolCalls);
+    let transport = ScriptedTransport::new([TransportScript::OpenError(unsupported)]);
+    let transports = transport_map([(
+        ChatProtocol::OpenaiChat,
+        provider_transport(&transport),
+    )]);
+    let observer = Arc::new(RecordingCapabilityObserver::default());
+    let broker = broker_with_observer(
+        StaticCausalityGate::allow(),
+        ResolvedChatRouteSet {
+            primary: route,
+            failovers: Vec::new(),
+        },
+        Arc::new(StaticCredentialStore { mismatch: false }),
+        &transports,
+        BrokerRetryPolicy {
+            max_total_attempts: 1,
+            max_attempts_per_route: 1,
+        },
+        observer.clone(),
+    );
+    let events = broker
+        .open_chat_stream(request)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(Result::is_err));
+    assert_eq!(
+        *observer.observations.lock().unwrap(),
+        vec![("observed".to_owned(), ChatModelFeature::ToolCalls)]
+    );
 }
 
 #[tokio::test]

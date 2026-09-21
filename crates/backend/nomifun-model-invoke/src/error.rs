@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 use nomifun_net::secret_redaction::redact_url_queries as transport_cause_detail;
+use nomifun_api_types::ModelTechnicalCapability;
 
 /// Machine-readable classification of an invocation failure.
 /// Wire values are snake_case (serialized into API error payloads/logs).
@@ -63,6 +64,10 @@ pub struct InvokeError {
     /// Set only from a complete, bounded provider error envelope, never from
     /// a diagnostic substring. Legacy callers retain the HTTP-based kind.
     pub(crate) context_length_rejected: bool,
+    /// Set only from a complete, bounded provider error object whose
+    /// machine-readable code and exact parameter identify an unsupported
+    /// technical capability. Natural-language diagnostics never set it.
+    pub unsupported_technical_capability: Option<ModelTechnicalCapability>,
 }
 
 /// Render a transport error's cause chain for a diagnostic, with URL query
@@ -101,6 +106,7 @@ impl InvokeError {
             retry_after_ms: None,
             catalog_failure: false,
             context_length_rejected: false,
+            unsupported_technical_capability: None,
         }
     }
 

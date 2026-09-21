@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 nomifun-agent-contracts.workspace = true
+nomifun-net.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true

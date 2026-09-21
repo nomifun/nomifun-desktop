@@ -6,7 +6,7 @@
 //! or a provider revision digest from another value.
 
 #![forbid(unsafe_code)]
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use nomifun_agent_contracts::{
     validate_chat_route_records,
 };
 use nomifun_chat_model_broker::{
-    BrokerRetryPolicy, ChatBrokerPort, ChatCausalityGate, ChatModelError,
+    BrokerRetryPolicy, ChatBrokerPort, ChatCapabilityObserver, ChatCausalityGate, ChatModelError,
     ChatModelErrorCode, ChatModelFeature, ChatModelInvokePort, ChatProtocol,
     ChatRetryDirective, ChatRouteSelection,
     CredentialLease, CredentialTarget, ProductionBrokerDependencies, ProductionBrokerError,
@@ -30,9 +30,11 @@ use nomifun_chat_model_broker::{
     ResolvedChatRouteSet, ProviderWireFrame, ProviderWireRequest, ProviderWireStream,
     build_production_chat_model_broker,
 };
-use nomifun_db::SqlitePool;
+use nomifun_db::{
+    IProviderModelCapabilityRepository, SqlitePool, SqliteProviderModelCapabilityRepository,
+};
 use nomifun_db::sqlx::{self, Row};
-use nomifun_api_types::ModelTask;
+use nomifun_api_types::{CapabilityHealth, ModelTask, ModelTechnicalCapability};
 use nomifun_model_invoke::{
     AuthMaterial, AuthScheme, OpaqueCredentialLease, OpaqueCredentialResolver,
     InvokeError, InvokeErrorKind, SingleAttemptFraming, SingleAttemptHttpExecutor,
@@ -133,6 +135,7 @@ fn convert_route_feature(feature: &ChatRouteFeature) -> ChatModelFeature {
         ChatRouteFeature::StructuredOutput => ChatModelFeature::StructuredOutput,
         ChatRouteFeature::ProviderRoundState => ChatModelFeature::ProviderRoundState,
         ChatRouteFeature::NativeResponsesItems => ChatModelFeature::NativeResponsesItems,
+        ChatRouteFeature::Streaming => ChatModelFeature::Streaming,
         ChatRouteFeature::WebSearch => ChatModelFeature::WebSearch,
     }
 }
@@ -439,15 +442,168 @@ pub(crate) async fn provider_config_digest(
         .map_err(|_| ProductionRepositoryError::InvalidData)
 }
 
+#[derive(Clone, Debug)]
+struct CachedTechnicalCapabilities {
+    config_revision: i64,
+    unsupported: BTreeSet<ModelTechnicalCapability>,
+}
+
+/// Process-local projection of the durable negative-observation set. A
+/// provider configuration revision change invalidates an entry automatically;
+/// conclusive failures update DB first and this cache second.
+#[derive(Clone, Default)]
+struct ModelTechnicalCapabilityCache {
+    entries: Arc<RwLock<BTreeMap<(String, String), CachedTechnicalCapabilities>>>,
+}
+
+impl ModelTechnicalCapabilityCache {
+    async fn unsupported_for(
+        &self,
+        pool: &SqlitePool,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<(i64, BTreeSet<ModelTechnicalCapability>), ProductionRepositoryError> {
+        let row = sqlx::query(
+            "SELECT provider.config_revision, capability.health \
+             FROM providers provider \
+             JOIN provider_model_capabilities capability \
+               ON capability.provider_id = provider.provider_id \
+             WHERE capability.provider_id = ? AND capability.model = ? \
+               AND capability.task = 'chat'",
+        )
+        .bind(provider_id)
+        .bind(model)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| ProductionRepositoryError::Unavailable)?
+        .ok_or(ProductionRepositoryError::Missing)?;
+        let config_revision: i64 = row
+            .try_get("config_revision")
+            .map_err(|_| ProductionRepositoryError::InvalidData)?;
+        let key = (provider_id.to_owned(), model.to_owned());
+        if let Some(cached) = self
+            .entries
+            .read()
+            .map_err(|_| ProductionRepositoryError::Unavailable)?
+            .get(&key)
+            .filter(|cached| cached.config_revision == config_revision)
+            .cloned()
+        {
+            return Ok((config_revision, cached.unsupported));
+        }
+        let health: Option<String> = row
+            .try_get("health")
+            .map_err(|_| ProductionRepositoryError::InvalidData)?;
+        let unsupported = health
+            .as_deref()
+            .map(serde_json::from_str::<CapabilityHealth>)
+            .transpose()
+            .map_err(|_| ProductionRepositoryError::InvalidData)?
+            .map(|health| {
+                health
+                    .unsupported_technical_capabilities
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        self.entries
+            .write()
+            .map_err(|_| ProductionRepositoryError::Unavailable)?
+            .insert(
+                key,
+                CachedTechnicalCapabilities {
+                    config_revision,
+                    unsupported: unsupported.clone(),
+                },
+            );
+        Ok((config_revision, unsupported))
+    }
+
+    fn remember_unsupported(
+        &self,
+        provider_id: &str,
+        model: &str,
+        config_revision: i64,
+        capability: ModelTechnicalCapability,
+    ) -> Result<(), ProductionRepositoryError> {
+        let mut entries = self
+            .entries
+            .write()
+            .map_err(|_| ProductionRepositoryError::Unavailable)?;
+        let entry = entries
+            .entry((provider_id.to_owned(), model.to_owned()))
+            .or_insert_with(|| CachedTechnicalCapabilities {
+                config_revision,
+                unsupported: BTreeSet::new(),
+            });
+        if entry.config_revision != config_revision {
+            *entry = CachedTechnicalCapabilities {
+                config_revision,
+                unsupported: BTreeSet::new(),
+            };
+        }
+        entry.unsupported.insert(capability);
+        Ok(())
+    }
+}
+
 /// DB-backed v4 route repository plus provider-model identity checks.
 #[derive(Clone)]
 pub struct ProductionModelRepository {
     pool: SqlitePool,
+    technical_capabilities: ModelTechnicalCapabilityCache,
 }
 
 impl ProductionModelRepository {
+    #[cfg(test)]
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            technical_capabilities: ModelTechnicalCapabilityCache::default(),
+        }
+    }
+
+    fn with_technical_capabilities(
+        pool: SqlitePool,
+        technical_capabilities: ModelTechnicalCapabilityCache,
+    ) -> Self {
+        Self {
+            pool,
+            technical_capabilities,
+        }
+    }
+
+    async fn apply_technical_capabilities(
+        &self,
+        mut routes: ResolvedChatRouteSet,
+    ) -> Result<ResolvedChatRouteSet, ProductionRepositoryError> {
+        for route in std::iter::once(&mut routes.primary).chain(routes.failovers.iter_mut()) {
+            let (_, unsupported) = self
+                .technical_capabilities
+                .unsupported_for(&self.pool, route.provider_id.as_ref(), &route.model)
+                .await?;
+            for feature in [
+                ChatModelFeature::ToolCalls,
+                ChatModelFeature::Reasoning,
+                ChatModelFeature::Streaming,
+            ] {
+                route.features.insert(feature);
+            }
+            if route.protocol == ChatProtocol::OpenaiResponses {
+                route.features.extend([
+                    ChatModelFeature::AudioOutput,
+                    ChatModelFeature::ProviderRoundState,
+                ]);
+            }
+            for capability in unsupported {
+                route.features.remove(&match capability {
+                    ModelTechnicalCapability::FunctionCalling => ChatModelFeature::ToolCalls,
+                    ModelTechnicalCapability::Reasoning => ChatModelFeature::Reasoning,
+                    ModelTechnicalCapability::Streaming => ChatModelFeature::Streaming,
+                });
+            }
+        }
+        Ok(routes)
     }
 
     async fn load_route_record(
@@ -559,6 +715,7 @@ impl ProductionModelRepository {
         self.validate_model_bindings(&routes)
             .await
             .map_err(ProductionRepositoryError::from)?;
+        let routes = self.apply_technical_capabilities(routes).await?;
         let route = routes
             .candidates()
             .find(|route| {
@@ -570,6 +727,7 @@ impl ProductionModelRepository {
                     && route.connection_config_ref == request.connection_config_ref
                     && route.config_revision_digest == request.config_revision_digest
                     && route.credential_ref == request.credential_ref
+                    && route.features == request.route_features
             })
             .cloned()
             .ok_or(ProductionRepositoryError::Missing)?;
@@ -768,7 +926,134 @@ impl ProductionModelRepositoryPort for ProductionModelRepository {
         self.validate_model_bindings(&routes)
             .await
             .map_err(ProductionRepositoryError::from)?;
-        Ok(Some(routes))
+        Ok(Some(self.apply_technical_capabilities(routes).await?))
+    }
+}
+
+#[derive(Clone)]
+struct ProductionChatCapabilityObserver {
+    pool: SqlitePool,
+    technical_capabilities: ModelTechnicalCapabilityCache,
+}
+
+impl ProductionChatCapabilityObserver {
+    fn new(
+        pool: SqlitePool,
+        technical_capabilities: ModelTechnicalCapabilityCache,
+    ) -> Self {
+        Self {
+            pool,
+            technical_capabilities,
+        }
+    }
+}
+
+fn technical_capability_for_feature(
+    feature: ChatModelFeature,
+) -> Option<ModelTechnicalCapability> {
+    match feature {
+        ChatModelFeature::ToolCalls => Some(ModelTechnicalCapability::FunctionCalling),
+        ChatModelFeature::Reasoning => Some(ModelTechnicalCapability::Reasoning),
+        ChatModelFeature::Streaming => Some(ModelTechnicalCapability::Streaming),
+        _ => None,
+    }
+}
+
+fn technical_capability_key(capability: ModelTechnicalCapability) -> &'static str {
+    match capability {
+        ModelTechnicalCapability::FunctionCalling => "function_calling",
+        ModelTechnicalCapability::Reasoning => "reasoning",
+        ModelTechnicalCapability::Streaming => "streaming",
+    }
+}
+
+#[async_trait]
+impl ChatCapabilityObserver for ProductionChatCapabilityObserver {
+    async fn record_unsupported(
+        &self,
+        route: &ResolvedChatRoute,
+        feature: ChatModelFeature,
+    ) {
+        let Some(capability) = technical_capability_for_feature(feature) else {
+            return;
+        };
+        // Capture the monotonic revision before recomputing the route digest.
+        // If configuration changes at either side of the digest read, the
+        // digest comparison or the repository CAS below rejects the late
+        // provider response.
+        let revision: i64 = match sqlx::query_scalar(
+            "SELECT config_revision FROM providers WHERE provider_id = ?",
+        )
+        .bind(route.provider_id.as_ref())
+        .fetch_one(&self.pool)
+        .await
+        {
+            Ok(revision) => revision,
+            Err(error) => {
+                tracing::warn!(
+                    provider_id = route.provider_id.as_ref(),
+                    model = route.model,
+                    ?feature,
+                    ?error,
+                    "could not read provider revision before recording unsupported capability"
+                );
+                return;
+            }
+        };
+        let current_digest = match provider_config_digest(&self.pool, &route.provider_id).await {
+            Ok(digest) => digest,
+            Err(error) => {
+                tracing::warn!(
+                    provider_id = route.provider_id.as_ref(),
+                    model = route.model,
+                    ?feature,
+                    ?error,
+                    "could not verify provider digest before recording unsupported capability"
+                );
+                return;
+            }
+        };
+        if current_digest != route.config_revision_digest {
+            return;
+        }
+        let repository = SqliteProviderModelCapabilityRepository::new(self.pool.clone());
+        match repository
+            .mark_technical_capability_unsupported(
+                route.provider_id.as_ref(),
+                revision,
+                &route.model,
+                PROVIDER_CHAT_MODEL_TASK,
+                technical_capability_key(capability),
+            )
+            .await
+        {
+            Ok(true) => {
+                if let Err(error) = self.technical_capabilities.remember_unsupported(
+                    route.provider_id.as_ref(),
+                    &route.model,
+                    revision,
+                    capability,
+                ) {
+                    tracing::warn!(
+                        provider_id = route.provider_id.as_ref(),
+                        model = route.model,
+                        ?feature,
+                        ?error,
+                        "durable capability downgrade succeeded but cache update failed"
+                    );
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(
+                    provider_id = route.provider_id.as_ref(),
+                    model = route.model,
+                    ?feature,
+                    ?error,
+                    "could not persist unsupported technical capability"
+                );
+            }
+        }
     }
 }
 
@@ -1050,7 +1335,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
             registry: self.credentials.clone(),
             handle: credential_handle.clone(),
         };
-        let target = self
+        let mut target = self
             .routes
             .resolve_attempt_target(&request)
             .await
@@ -1066,12 +1351,20 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
             })?;
         let lease = OpaqueCredentialLease::new(&credential_handle)
             .map_err(invoke_error_to_chat_error)?;
-        let body = merge_chat_provider_params(
+        let mut body = merge_chat_provider_params(
             request.body,
             &target.provider_params,
             request.protocol,
             target.output_limit,
         )?;
+        if !request.route_features.contains(&ChatModelFeature::Streaming) {
+            configure_non_streaming_attempt(
+                request.protocol,
+                &mut target.url,
+                &mut target.framing,
+                &mut body,
+            )?;
+        }
         let result = self
             .executor
             .open_stream(SingleAttemptRequest {
@@ -1100,6 +1393,58 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
                 .map_err(invoke_error_to_chat_error)
         })))
     }
+}
+
+fn configure_non_streaming_attempt(
+    protocol: ChatProtocol,
+    url: &mut String,
+    framing: &mut SingleAttemptFraming,
+    body: &mut Value,
+) -> Result<(), ChatModelError> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        ChatModelError::new(
+            ChatModelErrorCode::ProtocolViolation,
+            "provider chat request body is not a JSON object",
+            ChatRetryDirective::Never,
+        )
+    })?;
+    match protocol {
+        ChatProtocol::OpenaiChat => {
+            object.insert("stream".into(), Value::Bool(false));
+            object.remove("stream_options");
+        }
+        ChatProtocol::OpenaiResponses | ChatProtocol::Anthropic | ChatProtocol::Vertex => {
+            object.insert("stream".into(), Value::Bool(false));
+        }
+        ChatProtocol::Gemini => {
+            let mut parsed = reqwest::Url::parse(url).map_err(|_| {
+                ChatModelError::new(
+                    ChatModelErrorCode::AdapterUnavailable,
+                    "configured Gemini endpoint is invalid",
+                    ChatRetryDirective::Never,
+                )
+            })?;
+            let path = parsed.path().replace(":streamGenerateContent", ":generateContent");
+            parsed.set_path(&path);
+            let query = parsed
+                .query_pairs()
+                .filter(|(key, value)| !(key == "alt" && value == "sse"))
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect::<Vec<_>>();
+            parsed.set_query(None);
+            if !query.is_empty() {
+                parsed.query_pairs_mut().extend_pairs(query);
+            }
+            *url = parsed.into();
+        }
+        ChatProtocol::Bedrock => {
+            *url = url.replace("/invoke-with-response-stream", "/invoke");
+        }
+    }
+    // The executor's bounded JSON framing turns one response object into one
+    // broker frame; no SSE/AWS event-stream parser is used in this mode.
+    *framing = SingleAttemptFraming::Sse;
+    Ok(())
 }
 
 fn merge_chat_provider_params(
@@ -1293,25 +1638,37 @@ fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
         mapped.provider_status = error.http_status;
         return mapped;
     }
-    let retry = match error.kind {
-        InvokeErrorKind::Auth
-        | InvokeErrorKind::RateLimited
-        | InvokeErrorKind::ProviderError
-        | InvokeErrorKind::Network
-        | InvokeErrorKind::Timeout => ChatRetryDirective::Failover,
-        InvokeErrorKind::Config
-        | InvokeErrorKind::InvalidParams
-        | InvokeErrorKind::UnsupportedTask
-        | InvokeErrorKind::NoAdapter
-        | InvokeErrorKind::MissingConnection
-        | InvokeErrorKind::ParseError
-        | InvokeErrorKind::NonApiResponse
-        | InvokeErrorKind::NotPollable
-        | InvokeErrorKind::ContentPolicy
-        | InvokeErrorKind::QuotaExhausted
-        | InvokeErrorKind::JobFailed => ChatRetryDirective::Never,
+    let unsupported_feature = error.unsupported_technical_capability.map(|capability| match capability {
+        nomifun_api_types::ModelTechnicalCapability::FunctionCalling => ChatModelFeature::ToolCalls,
+        nomifun_api_types::ModelTechnicalCapability::Reasoning => ChatModelFeature::Reasoning,
+        nomifun_api_types::ModelTechnicalCapability::Streaming => ChatModelFeature::Streaming,
+    });
+    let retry = if unsupported_feature.is_some() {
+        ChatRetryDirective::Failover
+    } else {
+        match error.kind {
+            InvokeErrorKind::Auth
+            | InvokeErrorKind::RateLimited
+            | InvokeErrorKind::ProviderError
+            | InvokeErrorKind::Network
+            | InvokeErrorKind::Timeout => ChatRetryDirective::Failover,
+            InvokeErrorKind::Config
+            | InvokeErrorKind::InvalidParams
+            | InvokeErrorKind::UnsupportedTask
+            | InvokeErrorKind::NoAdapter
+            | InvokeErrorKind::MissingConnection
+            | InvokeErrorKind::ParseError
+            | InvokeErrorKind::NonApiResponse
+            | InvokeErrorKind::NotPollable
+            | InvokeErrorKind::ContentPolicy
+            | InvokeErrorKind::QuotaExhausted
+            | InvokeErrorKind::JobFailed => ChatRetryDirective::Never,
+        }
     };
-    let code = match error.kind {
+    let code = if unsupported_feature.is_some() {
+        ChatModelErrorCode::UnsupportedFeature
+    } else {
+        match error.kind {
         InvokeErrorKind::Auth => ChatModelErrorCode::AuthenticationFailed,
         InvokeErrorKind::RateLimited => ChatModelErrorCode::RateLimited,
         InvokeErrorKind::InvalidParams | InvokeErrorKind::UnsupportedTask => {
@@ -1332,10 +1689,12 @@ fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
         InvokeErrorKind::NotPollable | InvokeErrorKind::ContentPolicy => {
             ChatModelErrorCode::UnsupportedFeature
         }
+        }
     };
     let mut mapped = ChatModelError::new(code, "provider chat attempt failed", retry);
     mapped.retry_after_ms = error.retry_after_ms;
     mapped.provider_status = error.http_status;
+    mapped.unsupported_feature = unsupported_feature;
     mapped
 }
 
@@ -1460,16 +1819,28 @@ pub struct ChatBrokerHostComposition {
     provider_repository: Arc<ProductionProviderRepository>,
     model_repository: Arc<ProductionModelRepository>,
     connection_repository: Arc<ProductionConnectionRepository>,
+    capability_observer: Arc<ProductionChatCapabilityObserver>,
     encryption_key: [u8; 32],
 }
 
 impl ChatBrokerHostComposition {
     /// Default product route storage in the canonical main SQLite.
     pub fn for_nomi_core(pool: SqlitePool, encryption_key: [u8; 32]) -> Self {
+        let technical_capabilities = ModelTechnicalCapabilityCache::default();
         Self {
             provider_repository: Arc::new(ProductionProviderRepository::new(pool.clone())),
-            model_repository: Arc::new(ProductionModelRepository::new(pool.clone())),
-            connection_repository: Arc::new(ProductionConnectionRepository::new(pool, ConnectionCredentialLeaseRegistry::default())),
+            model_repository: Arc::new(ProductionModelRepository::with_technical_capabilities(
+                pool.clone(),
+                technical_capabilities.clone(),
+            )),
+            connection_repository: Arc::new(ProductionConnectionRepository::new(
+                pool.clone(),
+                ConnectionCredentialLeaseRegistry::default(),
+            )),
+            capability_observer: Arc::new(ProductionChatCapabilityObserver::new(
+                pool,
+                technical_capabilities,
+            )),
             encryption_key,
         }
     }
@@ -1488,6 +1859,7 @@ impl ChatBrokerHostComposition {
             model_invoke,
         );
         dependencies.retry_policy = retry_policy;
+        dependencies.capability_observer = self.capability_observer.clone();
         build_production_chat_model_broker(dependencies)
     }
 
@@ -1699,6 +2071,71 @@ mod tests {
     }
 
     #[test]
+    fn explicit_http_capability_rejection_is_failover_eligible_and_typed() {
+        let mut source = InvokeError::new(
+            InvokeErrorKind::InvalidParams,
+            "provider returned a bounded machine-readable error",
+        )
+        .with_http_status(400);
+        source.unsupported_technical_capability =
+            Some(ModelTechnicalCapability::FunctionCalling);
+        let mapped = invoke_error_to_chat_error(source);
+        assert_eq!(mapped.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(mapped.retry, ChatRetryDirective::Failover);
+        assert_eq!(mapped.unsupported_feature, Some(ChatModelFeature::ToolCalls));
+        assert_eq!(mapped.provider_status, Some(400));
+    }
+
+    #[test]
+    fn observed_non_streaming_routes_use_bounded_json_transport() {
+        let mut openai_url = "https://example.invalid/v1/chat/completions".to_owned();
+        let mut openai_framing = SingleAttemptFraming::Sse;
+        let mut openai_body = json!({
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        });
+        configure_non_streaming_attempt(
+            ChatProtocol::OpenaiChat,
+            &mut openai_url,
+            &mut openai_framing,
+            &mut openai_body,
+        )
+        .unwrap();
+        assert_eq!(openai_body["stream"], false);
+        assert!(openai_body.get("stream_options").is_none());
+
+        let mut gemini_url =
+            "https://example.invalid/v1beta/models/model:streamGenerateContent?alt=sse".to_owned();
+        let mut gemini_framing = SingleAttemptFraming::Sse;
+        let mut gemini_body = json!({"contents": []});
+        configure_non_streaming_attempt(
+            ChatProtocol::Gemini,
+            &mut gemini_url,
+            &mut gemini_framing,
+            &mut gemini_body,
+        )
+        .unwrap();
+        assert_eq!(
+            gemini_url,
+            "https://example.invalid/v1beta/models/model:generateContent"
+        );
+
+        let mut bedrock_url =
+            "https://bedrock.example/model/model/invoke-with-response-stream".to_owned();
+        let mut bedrock_framing = SingleAttemptFraming::AwsEventStream;
+        let mut bedrock_body = json!({});
+        configure_non_streaming_attempt(
+            ChatProtocol::Bedrock,
+            &mut bedrock_url,
+            &mut bedrock_framing,
+            &mut bedrock_body,
+        )
+        .unwrap();
+        assert_eq!(bedrock_url, "https://bedrock.example/model/model/invoke");
+        assert_eq!(bedrock_framing, SingleAttemptFraming::Sse);
+    }
+
+    #[test]
     fn chat_protocol_auth_validation_uses_the_manifest_contract() {
         assert!(validate_protocol_auth("openai.chat_text", &AuthScheme::Bearer).is_ok());
         assert!(
@@ -1844,5 +2281,142 @@ mod tests {
             ChatBrokerHostError::RouteRecordMissing { .. }
         ));
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_unsupported_feature_updates_database_and_shared_cache() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let pool = database.pool().clone();
+        let provider_id = "0190f5fe-7c00-7a00-8000-000000000099";
+        sqlx::query(
+            "INSERT INTO providers \
+             (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted, \
+              enabled, config_revision, created_at, updated_at) \
+             VALUES (?, 'custom', 'Observed provider', 'https://example.invalid/v1', \
+                     'bearer', 'encrypted', 1, 0, 0, 0)",
+        )
+        .bind(provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_models \
+             (provider_id, model, enabled, sort_order, created_at, updated_at) \
+             VALUES (?, 'observed-model', 1, 0, 0, 0)",
+        )
+        .bind(provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_model_capabilities \
+             (provider_id, model, task, traits, protocol, connection_role, provider_params, \
+              created_at, updated_at) \
+             VALUES (?, 'observed-model', 'chat', '[]', 'openai.chat_text', 'default', '{}', 0, 0)",
+        )
+        .bind(provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let provider_ref = ProviderIdRef::from(provider_id);
+        let digest = provider_config_digest(&pool, &provider_ref).await.unwrap();
+        let route = ResolvedChatRoute {
+            model_route_id: "observed-route".into(),
+            model_route_revision: 1,
+            provider_id: provider_ref,
+            model: "observed-model".into(),
+            protocol: ChatProtocol::OpenaiChat,
+            connection_config_ref: "default".into(),
+            config_revision_digest: digest,
+            credential_ref: "observed-credential".into(),
+            features: BTreeSet::from([
+                ChatModelFeature::TextInput,
+                ChatModelFeature::TextOutput,
+                ChatModelFeature::ToolCalls,
+                ChatModelFeature::Reasoning,
+                ChatModelFeature::Streaming,
+            ]),
+            activation_features: BTreeSet::new(),
+        };
+        let cache = ModelTechnicalCapabilityCache::default();
+        let observer = ProductionChatCapabilityObserver::new(pool.clone(), cache.clone());
+        observer
+            .record_unsupported(&route, ChatModelFeature::ToolCalls)
+            .await;
+
+        let stored: String = sqlx::query_scalar(
+            "SELECT health FROM provider_model_capabilities \
+             WHERE provider_id = ? AND model = 'observed-model' AND task = 'chat'",
+        )
+        .bind(provider_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let health: CapabilityHealth = serde_json::from_str(&stored).unwrap();
+        assert_eq!(
+            health.unsupported_technical_capabilities,
+            vec![ModelTechnicalCapability::FunctionCalling]
+        );
+        let (_, cached) = cache
+            .unsupported_for(&pool, provider_id, "observed-model")
+            .await
+            .unwrap();
+        assert!(cached.contains(&ModelTechnicalCapability::FunctionCalling));
+
+        let repository = ProductionModelRepository::with_technical_capabilities(
+            pool.clone(),
+            cache.clone(),
+        );
+        let overlaid = repository
+            .apply_technical_capabilities(ResolvedChatRouteSet {
+                primary: route.clone(),
+                failovers: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(!overlaid.primary.features.contains(&ChatModelFeature::ToolCalls));
+        assert!(overlaid.primary.features.contains(&ChatModelFeature::Reasoning));
+        assert!(overlaid.primary.features.contains(&ChatModelFeature::Streaming));
+
+        sqlx::query(
+            "UPDATE providers SET config_revision = 1, \
+             base_url = 'https://replacement.example.invalid/v1' WHERE provider_id = ?",
+        )
+            .bind(provider_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE provider_model_capabilities SET health = NULL, health_checked_at = NULL \
+             WHERE provider_id = ? AND model = 'observed-model' AND task = 'chat'",
+        )
+        .bind(provider_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        observer
+            .record_unsupported(&route, ChatModelFeature::Reasoning)
+            .await;
+        let stale_health: Option<String> = sqlx::query_scalar(
+            "SELECT health FROM provider_model_capabilities \
+             WHERE provider_id = ? AND model = 'observed-model' AND task = 'chat'",
+        )
+        .bind(provider_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            stale_health.is_none(),
+            "an old route response cannot downgrade a newer provider revision"
+        );
+        let (_, refreshed) = cache
+            .unsupported_for(&pool, provider_id, "observed-model")
+            .await
+            .unwrap();
+        assert!(
+            refreshed.is_empty(),
+            "a provider revision change invalidates the negative cache"
+        );
     }
 }

@@ -118,6 +118,19 @@ describe('buildTaskModelGroups', () => {
       'vision-chat',
     ]);
   });
+
+  test('treats technical capabilities as optimistic until negative evidence exists', () => {
+    const optimistic = model(PROVIDER_A, 'optimistic-chat', 'chat');
+    const limited = model(PROVIDER_A, 'limited-chat', 'chat');
+    limited.capabilities[0]!.health = {
+      status: 'unknown',
+      unsupported_technical_capabilities: ['function_calling'],
+    };
+    const providers = [provider(PROVIDER_A, 'Technical', [optimistic, limited])];
+    expect(
+      buildTaskModelGroups(providers, 'chat', [], ['function_calling'])[0]?.models
+    ).toEqual(['optimistic-chat']);
+  });
 });
 
 describe('useModelsForTask wiring', () => {
@@ -126,6 +139,7 @@ describe('useModelsForTask wiring', () => {
   test('uses the nested provider response directly', () => {
     expect(source.includes('useProvidersQuery()')).toBe(true);
     expect(source.includes('useSWR')).toBe(false);
-    expect(source.includes('model.enabled && modelSupportsTask')).toBe(true);
+    expect(source.includes('model.enabled &&')).toBe(true);
+    expect(source.includes('modelSupportsTask(model, task, requiredTraits, requiredTechnicalCapabilities)')).toBe(true);
   });
 });

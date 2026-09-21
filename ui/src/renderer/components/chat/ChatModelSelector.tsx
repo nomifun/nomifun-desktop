@@ -1,4 +1,9 @@
-import type { IProvider, ModelTrait, TProviderWithModel } from '@/common/config/storage';
+import type {
+  IProvider,
+  ModelTechnicalCapability,
+  ModelTrait,
+  TProviderWithModel,
+} from '@/common/config/storage';
 import { compositeKey } from '@/common/utils/compositeKey';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { capabilityOf } from '@/common/utils/providerModels';
@@ -10,10 +15,30 @@ import { Brain, Down, Plus } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
+type ChatModelGroup = { provider: IProvider; models: string[] };
+
+export const filterCompatibleChatModelGroups = (
+  groups: readonly ChatModelGroup[],
+  requiredTraits: readonly ModelTrait[] = [],
+  requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = []
+): ChatModelGroup[] =>
+  groups
+    .map(group => ({
+      ...group,
+      models: group.models.filter(name => {
+        const capability = capabilityOf(group.provider, name, 'chat');
+        const traits = capability?.traits ?? [];
+        const unsupported = capability?.health?.unsupported_technical_capabilities ?? [];
+        return requiredTraits.every(trait => traits.includes(trait))
+          && requiredTechnicalCapabilities.every(technical => !unsupported.includes(technical));
+      }),
+    }))
+    .filter(group => group.models.length > 0);
+
 /** Rendering is shared; the caller owns eligibility and persistence. */
 export default function ChatModelSelector({ providers, currentModel, getAvailableModels, onSelectModel,
   disabled = false, compact = false, className = '', readOnlyLabel, testId = 'chat-model-selector',
-  requiredTraits = [], popupVisible, onPopupVisibleChange,
+  requiredTraits = [], requiredTechnicalCapabilities = [], popupVisible, onPopupVisibleChange,
 }: {
   providers: IProvider[];
   currentModel?: TProviderWithModel;
@@ -25,6 +50,7 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
   readOnlyLabel?: string;
   testId?: string;
   requiredTraits?: readonly ModelTrait[];
+  requiredTechnicalCapabilities?: readonly ModelTechnicalCapability[];
   popupVisible?: boolean;
   onPopupVisibleChange?: (visible: boolean) => void;
 }) {
@@ -49,22 +75,19 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
     </span>
   </Button>;
   if (disabled) return trigger;
-  const compatibleGroups = groups
-    .map(group => ({
-      ...group,
-      models: group.models.filter(name => {
-        const traits = capabilityOf(group.provider, name, 'chat')?.traits ?? [];
-        return requiredTraits.every(trait => traits.includes(trait));
-      }),
-    }))
-    .filter(group => group.models.length > 0);
+  const compatibleGroups = filterCompatibleChatModelGroups(
+    groups,
+    requiredTraits,
+    requiredTechnicalCapabilities
+  );
   return <Dropdown
     trigger='click'
+    getPopupContainer={() => document.body}
     popupVisible={popupVisible}
     onVisibleChange={onPopupVisibleChange}
     droplist={<Menu selectedKeys={currentModel ? [compositeKey(currentModel.id, currentModel.use_model)] : []}>
     {compatibleGroups.length === 0 && <Menu.Item key='no-models' disabled>{t(
-      requiredTraits.length > 0
+      requiredTraits.length > 0 || requiredTechnicalCapabilities.length > 0
         ? 'guid.agentEntries.modelCompatibility.noCompatibleOption'
         : 'settings.noAvailableModels'
     )}</Menu.Item>}

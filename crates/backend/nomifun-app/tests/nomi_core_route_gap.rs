@@ -202,7 +202,7 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
                 "enabled": true,
                 "capabilities": [{
                     "task": "chat",
-                    "traits": ["function_calling", "streaming"],
+                    "traits": [],
                     "protocol": "openai.chat_text",
                     "connection_role": "default",
                     "provider_params": {}
@@ -883,7 +883,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
         "base_url": format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] }, "enabled": true,
         "initial_model": { "model": "step-3.7-flash", "enabled": true,
-            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+            "capabilities": [{ "task": "chat", "traits": [],
                 "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }] }
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
@@ -945,7 +945,7 @@ async fn canonical_coding_session_has_no_in_place_binding_override_routes() {
         "base_url":format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
         "initial_model":{"model":"step-3.7-flash", "enabled":true,
-            "capabilities":[{"task":"chat", "traits":["function_calling","reasoning","streaming"],
+            "capabilities":[{"task":"chat", "traits":[],
                 "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}}]}
     })).await;
     let model = json!({"provider_id":provider["provider_id"], "model":"step-3.7-flash"});
@@ -1030,7 +1030,7 @@ async fn http_execution_freezes_the_lead_session_snapshot_and_projects_its_link(
             "base_url":format!("{}/step_plan/v1", upstream.uri()),
             "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
             "initial_model":{"model":"step-3.7-flash", "enabled":true,
-                "capabilities":[{"task":"chat", "traits":["function_calling","reasoning","streaming"],
+                "capabilities":[{"task":"chat", "traits":[],
                     "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}}]}
         }),
     )
@@ -1126,7 +1126,7 @@ async fn creative_studio_entry_uses_its_official_agent() {
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
         "enabled": true, "initial_model": {
             "model": "step-3.7-flash", "enabled": true,
-            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+            "capabilities": [{ "task": "chat", "traits": [],
                 "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
         }
     })).await;
@@ -1222,7 +1222,7 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
         "enabled": true, "initial_model": {
             "model": "step-3.7-flash", "enabled": true,
-            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+            "capabilities": [{ "task": "chat", "traits": [],
                 "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
         }
     })).await;
@@ -1593,7 +1593,7 @@ async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_
         "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
         "enabled": true, "initial_model": {
             "model": "step-3.7-flash", "enabled": true,
-            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+            "capabilities": [{ "task": "chat", "traits": [],
                 "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
         }
     })).await;
@@ -1817,10 +1817,14 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     .fetch_one(services.database.pool())
     .await
     .expect("persisted AgentPreset revision payload");
+    let persisted_document: nomifun_api_types::AgentPresetDocumentDto =
+        serde_json::from_str(&persisted_payload).expect("persisted payload JSON");
+    let response_document: nomifun_api_types::AgentPresetDocumentDto =
+        serde_json::from_value(value["data"]["revision"]["document"].clone())
+            .expect("response revision document");
     assert_eq!(
-        serde_json::from_str::<Value>(&persisted_payload).expect("persisted payload JSON"),
-        value["data"]["revision"]["document"],
-        "Nomi-core must persist the canonical revision payload in payload_json"
+        persisted_document, response_document,
+        "persisted and returned revision payloads must be semantically identical after defaults"
     );
     assert_eq!(
         value["data"]["revision"]["reference"]["revision"],

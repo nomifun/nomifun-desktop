@@ -21,15 +21,10 @@ export const MODEL_TASK_ORDER = [
   'rerank',
 ] as const satisfies readonly ModelTask[];
 
-/** Canonical product order for refinements within a model capability. */
+/** User-authored Chat input/search refinements; technical traits are runtime-owned. */
 export const MODEL_TRAIT_ORDER = [
   'vision_input',
   'video_input',
   'audio_input',
-  'audio_output',
-  'realtime',
-  'streaming',
-  'function_calling',
-  'reasoning',
   'web_search',
 ] as const satisfies readonly ModelTrait[];

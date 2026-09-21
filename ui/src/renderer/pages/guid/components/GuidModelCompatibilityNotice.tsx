@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ModelTrait } from '@/common/config/storage';
+import type { ModelTechnicalCapability } from '@/common/config/storage';
 import { Alert, Button, Tag } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -13,7 +13,7 @@ import styles from '../index.module.css';
 type GuidModelCompatibilityNoticeProps = {
   modelLabel: string;
   providerLabel: string;
-  missingTraits: readonly ModelTrait[];
+  missingCapabilities: readonly ModelTechnicalCapability[];
   compatibleModelCount: number;
   canConfigureCurrentModel: boolean;
   onChooseCompatibleModel: () => void;
@@ -24,7 +24,7 @@ type GuidModelCompatibilityNoticeProps = {
 const GuidModelCompatibilityNotice: React.FC<GuidModelCompatibilityNoticeProps> = ({
   modelLabel,
   providerLabel,
-  missingTraits,
+  missingCapabilities,
   compatibleModelCount,
   canConfigureCurrentModel,
   onChooseCompatibleModel,
@@ -55,9 +55,9 @@ const GuidModelCompatibilityNotice: React.FC<GuidModelCompatibilityNoticeProps> 
             <div className={styles.modelCompatibilityFact}>
               <dt>{t('guid.agentEntries.modelCompatibility.missingCapabilities')}</dt>
               <dd className={styles.modelCompatibilityTags}>
-                {missingTraits.map((trait) => (
-                  <Tag key={trait} size='small' color='orange'>
-                    {t(`settings.modelTrait.${trait}`)}
+                {missingCapabilities.map((capability) => (
+                  <Tag key={capability} size='small' color='orange'>
+                    {t(`settings.modelTechnicalCapability.${capability}`)}
                   </Tag>
                 ))}
               </dd>

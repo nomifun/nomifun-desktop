@@ -1431,7 +1431,8 @@
       "taskRealtime": "实时会话",
       "taskEmbedding": "嵌入",
       "taskRerank": "重排序",
-      "traitVision": "看图"
+      "traitVision": "看图",
+      "functionCallingUnsupported": "已确认不支持工具调用"
     },
     "provider": {
       "title": "供应商与密钥",
@@ -1705,14 +1706,14 @@
     "vision_input": "视觉输入",
     "video_input": "视频输入",
     "audio_input": "音频输入",
-    "audio_output": "音频输出",
-    "realtime": "实时会话",
-    "streaming": "流式传输",
-    "function_calling": "工具调用",
-    "reasoning": "推理",
     "web_search": "联网搜索"
   },
-  "modelTraitsLabel": "能力细化（traits）",
+  "modelTechnicalCapability": {
+    "function_calling": "工具调用",
+    "reasoning": "推理",
+    "streaming": "流式传输"
+  },
+  "modelTraitsLabel": "内容理解与搜索能力",
   "modelAdvanced": {
     "trigger": "高级",
     "title": "高级设置",

@@ -15,7 +15,10 @@ use nomifun_agent_contracts::{
     ChatRouteRecordSchema, ChatRouteTask, ConnectionConfigRef, DigestHex, ModelRouteId, UserId,
 };
 use nomifun_agent_control_plane::{ControlPlaneError, DefaultChatRouteResolver};
-use nomifun_api_types::{ModelFailoverConfig, ModelTrait};
+use nomifun_api_types::{
+    CapabilityHealth, ModelFailoverConfig, ModelTechnicalCapability, ModelTrait,
+    parse_persisted_model_traits,
+};
 use nomifun_chat_model_broker::ProviderIdRef;
 use nomifun_db::{
     IClientPreferenceRepository, IProviderConnectionRepository,
@@ -264,7 +267,11 @@ impl NomiCoreDefaultChatRouteResolver {
                     digest
                 }
             };
-            let features = features_for(&capability.traits)?;
+            let features = features_for(
+                &capability.traits,
+                protocol,
+                capability.health.as_deref(),
+            )?;
             candidates.push(ChatRouteCandidate {
                 model_route_id: ModelRouteId::from(Uuid::now_v7().to_string()),
                 model_route_revision: 1,
@@ -372,8 +379,12 @@ fn protocol_for(value: &str) -> Option<ChatRouteProtocol> {
     }
 }
 
-fn features_for(raw: &str) -> Result<BTreeSet<ChatRouteFeature>, ControlPlaneError> {
-    let traits: Vec<ModelTrait> = serde_json::from_str(raw).map_err(|_| {
+fn features_for(
+    raw: &str,
+    protocol: ChatRouteProtocol,
+    health: Option<&str>,
+) -> Result<BTreeSet<ChatRouteFeature>, ControlPlaneError> {
+    let traits = parse_persisted_model_traits(raw).map_err(|_| {
         ControlPlaneError::canonical(
             "MODEL_ROUTE_RECORD_INVALID",
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -383,18 +394,41 @@ fn features_for(raw: &str) -> Result<BTreeSet<ChatRouteFeature>, ControlPlaneErr
     let mut features = BTreeSet::from([
         ChatRouteFeature::TextInput,
         ChatRouteFeature::TextOutput,
+        ChatRouteFeature::ToolCalls,
+        ChatRouteFeature::Reasoning,
+        ChatRouteFeature::Streaming,
     ]);
+    if protocol == ChatRouteProtocol::OpenaiResponses {
+        features.extend([
+            ChatRouteFeature::AudioOutput,
+            ChatRouteFeature::ProviderRoundState,
+        ]);
+    }
+    let unsupported = health
+        .map(serde_json::from_str::<CapabilityHealth>)
+        .transpose()
+        .map_err(|_| {
+            ControlPlaneError::canonical(
+                "MODEL_ROUTE_RECORD_INVALID",
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a configured Chat capability has invalid health metadata",
+            )
+        })?
+        .map(|health| health.unsupported_technical_capabilities)
+        .unwrap_or_default();
+    for capability in unsupported {
+        features.remove(&match capability {
+            ModelTechnicalCapability::FunctionCalling => ChatRouteFeature::ToolCalls,
+            ModelTechnicalCapability::Reasoning => ChatRouteFeature::Reasoning,
+            ModelTechnicalCapability::Streaming => ChatRouteFeature::Streaming,
+        });
+    }
     for model_trait in traits {
         let feature = match model_trait {
             ModelTrait::VisionInput => ChatRouteFeature::ImageInput,
-            ModelTrait::FunctionCalling => ChatRouteFeature::ToolCalls,
-            ModelTrait::Reasoning => ChatRouteFeature::Reasoning,
             ModelTrait::WebSearch => ChatRouteFeature::WebSearch,
             ModelTrait::AudioInput => ChatRouteFeature::AudioInput,
-            ModelTrait::AudioOutput => ChatRouteFeature::AudioOutput,
             ModelTrait::VideoInput => continue,
-            ModelTrait::Realtime => ChatRouteFeature::ProviderRoundState,
-            ModelTrait::Streaming => continue,
         };
         features.insert(feature);
     }
@@ -420,12 +454,32 @@ mod tests {
             "stepfun-plan",
             "step-3.7-flash",
         );
-        let features = features_for(&serde_json::to_string(&traits).unwrap()).unwrap();
+        let features = features_for(
+            &serde_json::to_string(&traits).unwrap(),
+            ChatRouteProtocol::OpenaiChat,
+            None,
+        )
+        .unwrap();
 
         assert!(features.contains(&ChatRouteFeature::TextInput));
         assert!(features.contains(&ChatRouteFeature::TextOutput));
         assert!(features.contains(&ChatRouteFeature::ImageInput));
         assert!(features.contains(&ChatRouteFeature::ToolCalls));
+        assert!(features.contains(&ChatRouteFeature::Reasoning));
+    }
+
+    #[test]
+    fn persisted_negative_observations_narrow_new_route_records() {
+        let features = features_for(
+            "[]",
+            ChatRouteProtocol::OpenaiChat,
+            Some(
+                r#"{"status":"unknown","unsupported_technical_capabilities":["function_calling","streaming"]}"#,
+            ),
+        )
+        .unwrap();
+        assert!(!features.contains(&ChatRouteFeature::ToolCalls));
+        assert!(!features.contains(&ChatRouteFeature::Streaming));
         assert!(features.contains(&ChatRouteFeature::Reasoning));
     }
 

@@ -249,17 +249,8 @@ export const capabilityHasConfiguration = (capability: ModelCapabilityDraft): bo
   Boolean(capability.providerParamsJson.trim());
 
 const CATALOG_TRAITS_BY_TASK: Readonly<Record<ModelTask, readonly ModelTrait[]>> = {
-  chat: [
-    'vision_input',
-    'video_input',
-    'audio_input',
-    'audio_output',
-    'streaming',
-    'function_calling',
-    'reasoning',
-    'web_search',
-  ],
-  realtime_conversation: ['audio_input', 'audio_output', 'realtime', 'streaming'],
+  chat: ['vision_input', 'video_input', 'audio_input', 'web_search'],
+  realtime_conversation: [],
   image_generation: [],
   image_edit: [],
   video_generation: [],

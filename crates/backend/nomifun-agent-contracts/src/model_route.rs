@@ -73,6 +73,9 @@ pub enum ChatRouteFeature {
     StructuredOutput,
     ProviderRoundState,
     NativeResponsesItems,
+    /// Provider incremental output is available. Runtime observations may
+    /// remove this and use a bounded single-response transport instead.
+    Streaming,
     /// Exact Chat route supports provider-native web search with source
     /// attribution (currently OpenAI Responses built-in `web_search`).
     WebSearch,

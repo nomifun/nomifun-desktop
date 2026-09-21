@@ -1392,15 +1392,7 @@ mod tests {
                 infer_catalog_tasks_and_traits(platform, "stepaudio-2.5-realtime");
             assert_eq!(tasks, vec![ModelTask::RealtimeConversation]);
             assert!(!tasks.contains(&ModelTask::Chat));
-            assert_eq!(
-                traits,
-                vec![
-                    ModelTrait::AudioInput,
-                    ModelTrait::AudioOutput,
-                    ModelTrait::Realtime,
-                    ModelTrait::Streaming,
-                ]
-            );
+            assert!(traits.is_empty());
             let (tasks, traits) =
                 infer_catalog_tasks_and_traits(platform, "stepaudio-2.5-chat");
             assert_eq!(tasks, vec![ModelTask::Chat]);
@@ -1415,13 +1407,7 @@ mod tests {
         assert_eq!(tasks, vec![ModelTask::Chat]);
         assert_eq!(
             traits,
-            vec![
-                ModelTrait::VisionInput,
-                ModelTrait::VideoInput,
-                ModelTrait::FunctionCalling,
-                ModelTrait::Reasoning,
-                ModelTrait::Streaming,
-            ]
+            vec![ModelTrait::VisionInput, ModelTrait::VideoInput]
         );
     }
 

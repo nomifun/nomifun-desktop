@@ -74,7 +74,15 @@ describe('nested provider models', () => {
   test('requires every requested trait on the selected task capability', () => {
     const model = row('multimodal');
     expect(modelSupportsTask(model, 'chat', ['vision_input'])).toBe(true);
-    expect(modelSupportsTask(model, 'chat', ['vision_input', 'function_calling'])).toBe(false);
+    expect(modelSupportsTask(model, 'chat', ['vision_input', 'web_search'])).toBe(false);
+    expect(modelSupportsTask(model, 'chat', [], ['function_calling'])).toBe(true);
+
+    const limited = row('limited');
+    limited.capabilities[0]!.health = {
+      status: 'unknown',
+      unsupported_technical_capabilities: ['function_calling'],
+    };
+    expect(modelSupportsTask(limited, 'chat', [], ['function_calling'])).toBe(false);
   });
 
   test('strips health and timestamps from full save input', () => {

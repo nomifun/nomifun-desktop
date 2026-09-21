@@ -66,7 +66,7 @@ async fn product_middleware_order_is_saved_reused_and_frozen_per_session() {
         "platform":"stepfun-plan", "name":"Ordered middleware model", "base_url":format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
         "initial_model":{"model":"step-3.7-flash", "enabled":true, "capabilities":[{
-            "task":"chat", "traits":["function_calling","streaming"], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
+            "task":"chat", "traits":[], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
         }]}
     })).await;
     let preset = data(
@@ -322,7 +322,7 @@ async fn product_before_model_publish_select_and_real_node_transform() {
         "platform":"stepfun-plan", "name":"Middleware model", "base_url":format!("{}/step_plan/v1", upstream.uri()),
         "auth_scheme":"bearer", "credentials":{"api_keys":["test-only"]}, "enabled":true,
         "initial_model":{"model":"step-3.7-flash", "enabled":true, "capabilities":[{
-            "task":"chat", "traits":["function_calling","streaming"], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
+            "task":"chat", "traits":[], "protocol":"openai.chat_text", "connection_role":"default", "provider_params":{}
         }]}
     })).await;
     let preset = data(

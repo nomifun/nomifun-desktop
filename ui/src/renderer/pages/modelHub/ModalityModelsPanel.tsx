@@ -52,12 +52,16 @@ type GenerationDefaultModel = NonNullable<
 
 export type GenerationDefaultPreferenceKey = 'models.default.imageGeneration' | 'models.default.imageEdit' | 'models.default.vision' | 'models.default.videoGeneration' | 'models.default.musicGeneration' | 'models.default.speechSynthesis';
 const specForDefault = {
-  'models.default.imageGeneration': { task: 'image_generation', traits: [] },
-  'models.default.imageEdit': { task: 'image_edit', traits: [] },
-  'models.default.vision': { task: 'chat', traits: ['vision_input', 'function_calling'] },
-  'models.default.videoGeneration': { task: 'video_generation', traits: [] },
-  'models.default.musicGeneration': { task: 'music_generation', traits: [] },
-  'models.default.speechSynthesis': { task: 'speech_synthesis', traits: [] },
+  'models.default.imageGeneration': { task: 'image_generation', traits: [], technical: [] },
+  'models.default.imageEdit': { task: 'image_edit', traits: [], technical: [] },
+  'models.default.vision': {
+    task: 'chat',
+    traits: ['vision_input'],
+    technical: ['function_calling'],
+  },
+  'models.default.videoGeneration': { task: 'video_generation', traits: [], technical: [] },
+  'models.default.musicGeneration': { task: 'music_generation', traits: [], technical: [] },
+  'models.default.speechSynthesis': { task: 'speech_synthesis', traits: [], technical: [] },
 } as const;
 interface GenerationDefaultControlProps {
   preferenceKey: GenerationDefaultPreferenceKey;
@@ -69,7 +73,11 @@ const GenerationDefaultControl: React.FC<
   const { t } = useTranslation();
   const [message, messageContext] = useArcoMessage({ maxCount: 1 });
   const spec = specForDefault[preferenceKey];
-  const { groups, isLoading } = useModelsForTask(spec.task, [...spec.traits]);
+  const { groups, isLoading } = useModelsForTask(
+    spec.task,
+    [...spec.traits],
+    [...spec.technical]
+  );
   const [defaultModel, setDefaultModel] =
     useState<GenerationDefaultModel | null>(
       () => configService.get(preferenceKey) ?? null,
@@ -336,9 +344,9 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
                     {t('settings.modelHub.modality.traitVision')}
                   </Tag>
                 )}
-                {row.traits.includes('function_calling') && (
-                  <Tag size='small' color='green'>
-                    {t('settings.modelTrait.function_calling')}
+                {row.capability.health?.unsupported_technical_capabilities?.includes('function_calling') && (
+                  <Tag size='small' color='red'>
+                    {t('settings.modelHub.modality.functionCallingUnsupported')}
                   </Tag>
                 )}
                 <Tag size='small' color='gray'>

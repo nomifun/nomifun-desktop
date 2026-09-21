@@ -9,7 +9,8 @@ use nomifun_api_types::{
     KnowledgeEntryOrigin, KnowledgeEntrySourceInfo, KnowledgeEntrySourceRelationship,
     KnowledgeRerankConfig, KnowledgeRetrievalConfig, KnowledgeSourceSyncStatus,
     KnowledgeTreeAccess, ModelInfo,
-    ModelProtocolManifestResponse, ModelTask, ModelTrait, PlatformPresetDescriptor,
+    ModelProtocolManifestResponse, ModelTask, ModelTechnicalCapability, ModelTrait,
+    PlatformPresetDescriptor,
     ProtocolDefaultConnection, ProtocolDescriptor, ProtocolEndpointDescriptor,
     ProtocolEndpointPurpose, ProtocolExecutorKind, ProtocolRecommendation, ProtocolScope,
     ProbeCandidateResult, ProbeProviderConnectionAnonymousRequest, ProbeProviderConnectionRequest,
@@ -81,6 +82,7 @@ fn export_provider_domain_bindings() {
     export_binding_if_changed::<KnowledgeRetrievalConfig>("KnowledgeRetrievalConfig.ts");
     export_binding_if_changed::<ModelTask>("ModelTask.ts");
     export_binding_if_changed::<ModelTrait>("ModelTrait.ts");
+    export_binding_if_changed::<ModelTechnicalCapability>("ModelTechnicalCapability.ts");
     export_binding_if_changed::<HealthStatus>("HealthStatus.ts");
     export_binding_if_changed::<ProviderHealthCheckErrorKind>("ProviderHealthCheckErrorKind.ts");
     export_binding_if_changed::<ProviderHealthCheckRequest>("ProviderHealthCheckRequest.ts");

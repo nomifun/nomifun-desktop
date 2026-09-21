@@ -1,8 +1,12 @@
 //! Protocol error envelopes, not model/tool text. Keep provider diagnostics
 //! out of canonical errors and classify only explicit machine-readable codes.
 use serde_json::{Map, Value};
+use nomifun_net::provider_capability::{
+    ProviderTechnicalCapability, classify_unsupported_technical_capability,
+};
 
 use crate::{ChatModelError, ChatModelErrorCode, ChatProtocol, ChatRetryDirective};
+use crate::ChatModelFeature;
 
 fn malformed() -> ChatModelError {
     ChatModelError::protocol_violation(
@@ -205,6 +209,21 @@ pub(crate) fn decode(protocol: ChatProtocol, event: &str, data: &Value) -> Optio
             return Some(malformed());
         }
     }
+    if let Some(feature) = classify_unsupported_technical_capability(error).map(|capability| {
+        match capability {
+            ProviderTechnicalCapability::FunctionCalling => ChatModelFeature::ToolCalls,
+            ProviderTechnicalCapability::Reasoning => ChatModelFeature::Reasoning,
+            ProviderTechnicalCapability::Streaming => ChatModelFeature::Streaming,
+        }
+    }) {
+        let mut failure = ChatModelError::new(
+            ChatModelErrorCode::UnsupportedFeature,
+            "provider does not support the requested chat feature",
+            ChatRetryDirective::Failover,
+        );
+        failure.unsupported_feature = Some(feature);
+        return Some(failure);
+    }
     // Specific code wins over a generic type (e.g. context_length_exceeded
     // plus invalid_request_error). Do not interpret natural-language messages
     // or parse retry delays from diagnostics that may contain private data.
@@ -226,4 +245,61 @@ pub(crate) fn decode(protocol: ChatProtocol, event: &str, data: &Value) -> Optio
             ChatRetryDirective::Never
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn technical_downgrade_uses_codes_and_exact_parameters_not_message_text() {
+        let error = decode(
+            ChatProtocol::OpenaiChat,
+            "error",
+            &serde_json::json!({
+                "error": {
+                    "code": "unsupported_parameter",
+                    "type": "invalid_request_error",
+                    "param": "tools",
+                    "message": "diagnostic prose is not inspected"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(error.unsupported_feature, Some(ChatModelFeature::ToolCalls));
+
+        let generic = decode(
+            ChatProtocol::OpenaiChat,
+            "error",
+            &serde_json::json!({
+                "error": {
+                    "code": "invalid_request_error",
+                    "param": "tools",
+                    "message": "tools are unsupported"
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(generic.code, ChatModelErrorCode::InvalidRequest);
+        assert_eq!(generic.unsupported_feature, None);
+    }
+
+    #[test]
+    fn transient_and_account_errors_never_become_capability_evidence() {
+        for code in [
+            "rate_limit_error",
+            "authentication_error",
+            "server_error",
+            "insufficient_quota",
+        ] {
+            let error = decode(
+                ChatProtocol::OpenaiChat,
+                "error",
+                &serde_json::json!({"error": {"code": code, "param": "tools"}}),
+            )
+            .unwrap();
+            assert_eq!(error.unsupported_feature, None, "code {code}");
+        }
+    }
 }

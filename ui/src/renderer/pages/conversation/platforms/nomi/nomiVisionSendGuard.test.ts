@@ -6,18 +6,25 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import type { IProvider, ModelTask, ModelTrait } from '@/common/config/storage';
+import type {
+  IProvider,
+  ModelTask,
+  ModelTechnicalCapability,
+  ModelTrait,
+} from '@/common/config/storage';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 
 const provider = ({
   id,
   model,
   chatTraits = [],
+  unsupportedTechnical = [],
   otherTask,
 }: {
   id: string;
   model: string;
   chatTraits?: ModelTrait[];
+  unsupportedTechnical?: ModelTechnicalCapability[];
   otherTask?: ModelTask;
 }): IProvider =>
   ({
@@ -44,6 +51,14 @@ const provider = ({
             connection_role: 'default',
             allow_cross_origin_credentials: false,
             provider_params: {},
+            ...(unsupportedTechnical.length > 0
+              ? {
+                  health: {
+                    status: 'unknown' as const,
+                    unsupported_technical_capabilities: unsupportedTechnical,
+                  },
+                }
+              : {}),
             created_at: 1,
             updated_at: 1,
           },
@@ -122,7 +137,7 @@ describe('Nomi image-send capability guard', () => {
       decision({
         providers: [
           provider({ id: 'provider-a', model: 'text-only' }),
-          provider({ id: 'provider-b', model: 'vision', chatTraits: ['vision_input', 'function_calling'] }),
+          provider({ id: 'provider-b', model: 'vision', chatTraits: ['vision_input'] }),
         ],
         model: 'text-only',
         visionModel: { provider_id: 'provider-b', model: 'vision' },
@@ -133,7 +148,12 @@ describe('Nomi image-send capability guard', () => {
       decision({
         providers: [
           provider({ id: 'provider-a', model: 'text-only' }),
-          provider({ id: 'provider-b', model: 'vision-only', chatTraits: ['vision_input'] }),
+          provider({
+            id: 'provider-b',
+            model: 'vision-only',
+            chatTraits: ['vision_input'],
+            unsupportedTechnical: ['function_calling'],
+          }),
         ],
         model: 'text-only',
         visionModel: { provider_id: 'provider-b', model: 'vision-only' },

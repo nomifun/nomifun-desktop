@@ -287,6 +287,7 @@ mod tests {
                 error_kind: None,
                 http_status: None,
                 attempted_url: None,
+                unsupported_technical_capabilities: Vec::new(),
             })
             .unwrap()
         });

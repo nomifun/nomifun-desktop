@@ -5,7 +5,10 @@
  */
 
 import type { IProvider } from '@/common/config/storage';
-import { capabilityOf } from '@/common/utils/providerModels';
+import {
+  capabilityOf,
+  capabilitySupportsTechnicalCapability,
+} from '@/common/utils/providerModels';
 import { imageExts } from '@/renderer/services/FileService';
 
 export type NomiVisionSendDecision =
@@ -53,7 +56,10 @@ export const evaluateNomiVisionSend = ({
       ? capabilityOf(provider, candidateModel, 'chat')
       : undefined;
     return chatCapability?.traits.includes('vision_input') === true
-      && (!requireToolCalls || chatCapability.traits.includes('function_calling'));
+      && (!requireToolCalls || capabilitySupportsTechnicalCapability(
+        chatCapability,
+        'function_calling'
+      ));
   };
   return supportsVision(providerId, model)
     || supportsVision(visionModel?.provider_id, visionModel?.model, true)

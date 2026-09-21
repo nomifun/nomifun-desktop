@@ -110,12 +110,12 @@ describe('model definition capability selection', () => {
 
     definition = applyCatalogSuggestionForTask(
       definition,
-      { model: 'catalog/chat', tasks: ['chat', 'embedding'], traits: ['reasoning'] },
+      { model: 'catalog/chat', tasks: ['chat', 'embedding'], traits: ['web_search'] },
       'chat'
     );
     expect(definition).toEqual({
       model: 'catalog/chat',
-      capabilities: [{ ...emptyCapabilityDraft('chat'), traits: ['reasoning'] }],
+      capabilities: [{ ...emptyCapabilityDraft('chat'), traits: ['web_search'] }],
     });
   });
 
@@ -135,7 +135,7 @@ describe('model definition capability selection', () => {
   test('adopting a catalog model preserves every other configured task', () => {
     const oldChat: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('chat'),
-      traits: ['reasoning'],
+      traits: ['web_search'],
       protocol: 'old.chat',
       endpoint: '/old/chat',
       providerParamsJson: '{"old":true}',
@@ -147,10 +147,7 @@ describe('model definition capability selection', () => {
         tasks: ['speech_synthesis', 'chat', 'realtime_conversation', 'chat'],
         traits: [
           'web_search',
-          'realtime',
-          'audio_output',
           'vision_input',
-          'streaming',
           'audio_input',
         ],
       },
@@ -203,12 +200,12 @@ describe('model definition capability selection', () => {
     expect(
       applyCatalogSuggestionForTask(
         { model: 'old/model', capabilities: [configuredChat] },
-        { model: 'catalog/chat', tasks: ['chat'], traits: ['reasoning', 'vision_input'] },
+        { model: 'catalog/chat', tasks: ['chat'], traits: ['web_search', 'vision_input'] },
         'chat'
       )
     ).toEqual({
       model: 'catalog/chat',
-      capabilities: [{ ...configuredChat, traits: ['vision_input', 'reasoning'] }],
+      capabilities: [{ ...configuredChat, traits: ['vision_input', 'web_search'] }],
     });
   });
 
@@ -339,7 +336,7 @@ describe('model definition capability selection', () => {
     const worthKeeping: Array<Partial<ModelCapabilityDraft>> = [
       { transportSource: 'user' },
       { transportSource: 'persisted' },
-      { traits: ['reasoning'] },
+      { traits: ['vision_input'] },
       { contextLimit: 32_000 },
       { outputLimit: 4096 },
       { allowCrossOriginCredentials: true },
@@ -360,7 +357,7 @@ describe('model definition capability selection', () => {
   test('does not touch traits when the selected task is absent from the entry', () => {
     const oldSpeech: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('speech_synthesis'),
-      traits: ['audio_output'],
+      traits: [],
       protocol: 'old.speech',
       endpoint: '/old/speech',
     };
@@ -368,7 +365,7 @@ describe('model definition capability selection', () => {
     expect(
       applyCatalogSuggestionForTask(
         { model: 'old/model', capabilities: [oldSpeech] },
-        { model: 'catalog/unknown', tasks: [], traits: ['audio_output'] },
+        { model: 'catalog/unknown', tasks: [], traits: ['audio_input'] },
         'speech_synthesis'
       )
     ).toEqual({ model: 'catalog/unknown', capabilities: [oldSpeech] });
@@ -532,7 +529,7 @@ describe('model definition capability selection', () => {
     });
     const current: ModelCapabilityDraft = {
       ...emptyCapabilityDraft('speech_synthesis'),
-      traits: ['audio_output'],
+      traits: [],
       protocol: 'stepfun.audio_speech',
       connectionRole: 'voice',
       baseUrlOverride: 'https://old.example/v1',
@@ -774,7 +771,7 @@ describe('capability validation and serialization', () => {
     expect(
       capabilityDraftFromResponse({
         task: 'speech_synthesis',
-        traits: ['audio_output'],
+        traits: [],
         protocol: 'stepfun.audio_speech',
         connection_role: 'voice',
         base_url_override: 'https://voice.example/v1',
@@ -786,7 +783,7 @@ describe('capability validation and serialization', () => {
       })
     ).toEqual({
       task: 'speech_synthesis',
-      traits: ['audio_output'],
+      traits: [],
       transportSource: 'persisted',
       protocol: 'stepfun.audio_speech',
       connectionRole: 'voice',
