@@ -1167,7 +1167,8 @@ CREATE TABLE creative_studio_agent_sessions (
                         AND replace(conversation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
                     ),
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    UNIQUE (owner_id, project_id, session_id)
 );
 
 CREATE TABLE creative_studio_projects (
