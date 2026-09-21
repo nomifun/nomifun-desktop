@@ -140,6 +140,11 @@ async fn seed_conversation(
     csrf: &str,
     id: &str,
 ) {
+    // This test builder bypasses the production bootstrap that creates the
+    // configured work root. Canonical default-workspace admission correctly
+    // requires the directory to exist, so establish the fixture precondition
+    // before launching the source AgentSession.
+    tokio::fs::create_dir_all(&services.work_dir).await.unwrap();
     seed_cron_provider(services).await;
     let preset_response = app
         .clone()
@@ -1089,6 +1094,124 @@ async fn rn1_run_now_returns_conversation_id_for_new_conversation_job() {
     assert_eq!(replay.status(), StatusCode::OK);
     let replay = body_json(replay).await;
     assert_eq!(replay["data"]["conversation_id"], json!(conversation_id));
+}
+
+#[tokio::test]
+async fn rn1b_lazy_session_modes_materialize_an_immutable_agent_binding() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    seed_cron_provider(&services).await;
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(
+                    "data: {\"id\":\"cron\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"scheduled reply\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"cron\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+                ),
+        )
+        .expect(2)
+        .mount(&upstream)
+        .await;
+    let credentials = nomifun_common::encrypt_string(
+        r#"{"api_keys":["cron-e2e-only"]}"#,
+        &services.encryption_key,
+    )
+    .unwrap();
+    sqlx::query(
+        "UPDATE providers SET base_url = ?, credentials_encrypted = ? WHERE provider_id = ?",
+    )
+        .bind(format!("{}/v1", upstream.uri()))
+        .bind(credentials)
+        .bind(CRON_PROVIDER_ID)
+        .execute(services.database.pool())
+        .await
+        .unwrap();
+
+    for execution_mode in ["new_conversation", "existing"] {
+        let created = create_job(
+            &mut app,
+            &token,
+            &csrf,
+            json!({
+                "name": format!("Model-only {execution_mode}"),
+                "schedule": {
+                    "kind": "every",
+                    "every_ms": 600_000,
+                    "description": "every ten minutes"
+                },
+                "message": "run the model-only task",
+                "agent_type": "nomi",
+                "created_by": "user",
+                "execution_mode": execution_mode,
+                "agent_config": {
+                    "provider_id": CRON_PROVIDER_ID,
+                    "name": "Nomi",
+                    "model": CRON_MODEL
+                }
+            }),
+        )
+        .await;
+        let job_id = created["cron_job_id"].as_str().unwrap().to_owned();
+
+        let response = app
+            .clone()
+            .oneshot(run_now_request(&job_id, &token, &csrf))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = body_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{execution_mode}: {body}");
+        let conversation_id = body["data"]["conversation_id"]
+            .as_str()
+            .expect("created canonical AgentSession");
+
+        let response = app
+            .clone()
+            .oneshot(get_with_token(
+                &format!("/api/agent-sessions/{conversation_id}/projection"),
+                &token,
+            ))
+            .await
+            .unwrap();
+        let status = response.status();
+        let projection = body_json(response).await;
+        assert_eq!(status, StatusCode::OK, "{execution_mode}: {projection}");
+        assert_eq!(projection["data"]["model"]["provider_id"], CRON_PROVIDER_ID);
+        assert_eq!(projection["data"]["model"]["model"], CRON_MODEL);
+        assert!(
+            projection["data"]["agent_snapshot"]["canonical_binding"].is_object(),
+            "{execution_mode} must freeze the host-resolved binding: {projection}"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let response = app
+                    .clone()
+                    .oneshot(get_with_token(
+                        &format!("/api/cron/jobs/{job_id}"),
+                        &token,
+                    ))
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let job = body_json(response).await;
+                assert_eq!(status, StatusCode::OK, "{execution_mode}: {job}");
+                match job["data"]["state"]["last_status"].as_str() {
+                    Some("ok") => break,
+                    Some("error" | "skipped" | "missed") => {
+                        panic!("{execution_mode} did not complete successfully: {job}")
+                    }
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{execution_mode} Cron run did not settle"));
+    }
+
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]

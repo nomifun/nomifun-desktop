@@ -29,6 +29,10 @@ pub struct CronTurnRuntimeOverlay {
     /// Cron-owned annotation used for artifacts, diagnostics, and runtime
     /// attribution. It is not a Session identity or runtime selector.
     pub cron_job_id: String,
+    /// Exact durable reservation that authorized this turn. New-conversation
+    /// jobs intentionally do not store their per-run Session on `cron_jobs`,
+    /// so the reservation is the canonical job/Session relation.
+    pub cron_job_run_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +62,19 @@ pub struct CronRuntimePreparationRequest {
 pub struct CronSessionHandle {
     pub agent_session_id: AgentSessionId,
     pub workspace: String,
+}
+
+/// Exact Agent authority requested for a newly-created Cron Session.
+///
+/// Preset-backed schedules carry their already-frozen Snapshot. The explicit
+/// model-only variant asks the host Agent application service to materialize a
+/// minimal immutable binding from the job's provider/model selection. An
+/// untyped `None` would let an invalid legacy configuration reach Session
+/// creation and fail only after scheduler admission.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CronSessionAgentBinding {
+    Frozen(AgentResolvedSnapshot),
+    ModelOnly,
 }
 
 /// Canonical Session projection used by Cron scheduling and execution.
@@ -202,7 +219,7 @@ pub trait CronSessionPort: Send + Sync {
         &self,
         user_id: &str,
         request: CreateConversationRequest,
-        snapshot: Option<AgentResolvedSnapshot>,
+        agent_binding: CronSessionAgentBinding,
         creation_key: &str,
     ) -> Result<CronSessionHandle, AppError>;
 

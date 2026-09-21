@@ -28,6 +28,7 @@ pub use agent_schedule::{
 pub use routes::cron_routes;
 pub use session_port::{
     CronRuntimePreparationRequest, CronScheduledSession, CronScheduledSessionLookup,
+    CronSessionAgentBinding,
     CronSessionCronBindingRequest, CronSessionHandle, CronSessionLookup, CronSessionPort,
     CronSessionProjection, CronPreparedTurnDelivery, CronTurnDelivery, CronTurnDeliveryQuery,
     CronTurnMessage, CronTurnReceiptState, CronTurnReconciliation,
