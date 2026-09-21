@@ -433,6 +433,94 @@ const PARTIAL_UNIQUE_INDEXES: &[PartialUniqueIndexContract] = &[
     },
 ];
 
+macro_rules! unique_key {
+    ($table:literal, $($column:literal),+ $(,)?) => {
+        UniqueKeyContract {
+            table: $table,
+            columns: &[$($column),+],
+        }
+    };
+}
+
+/// Exact non-partial keys named by production `ON CONFLICT(column, ...)`
+/// clauses. These are write semantics, not optional read accelerators: SQLite
+/// rejects the statement at prepare time when the matching UNIQUE key is
+/// absent. Keep this registry separate from the physical index budget so an
+/// index-pruning pass cannot silently turn a valid upsert into a runtime 500.
+const UPSERT_CONFLICT_KEYS: &[UniqueKeyContract] = &[
+    unique_key!("agent_bindings", "target_kind", "target_id"),
+    unique_key!("agent_messages", "session_id", "projection_id"),
+    unique_key!("agent_metadata", "agent_id"),
+    unique_key!("channel_inbound_receipts", "operation_key"),
+    unique_key!(
+        "channel_users",
+        "platform_user_id",
+        "platform_type",
+        "channel_plugin_id"
+    ),
+    unique_key!("client_preferences", "key"),
+    unique_key!("creation_tasks", "creation_task_id"),
+    unique_key!(
+        "creative_studio_agent_sessions",
+        "owner_id",
+        "project_id",
+        "session_id"
+    ),
+    unique_key!("creative_studio_template_runs", "template_run_id"),
+    unique_key!(
+        "cs_dialogues",
+        "channel_plugin_id",
+        "channel_user_id",
+        "chat_id"
+    ),
+    unique_key!("installation_role_bindings", "role_id"),
+    unique_key!("instance_access_token", "singleton_key"),
+    unique_key!("knowledge_entries", "knowledge_entry_id"),
+    unique_key!(
+        "knowledge_tree_operations",
+        "knowledge_base_id",
+        "request_id"
+    ),
+    unique_key!("oauth_tokens", "server_url"),
+    unique_key!("plugin_artifacts", "artifact_digest"),
+    unique_key!("plugin_catalog_publications", "plugin_product_id"),
+    unique_key!("plugin_mount_kv", "mount_id", "namespace", "key"),
+    unique_key!("plugin_release_artifacts", "artifact_digest"),
+    unique_key!("plugin_surface_sessions", "plugin_product_id"),
+    unique_key!(
+        "product_agent_selections",
+        "owner_user_id",
+        "target_kind",
+        "target_id"
+    ),
+    unique_key!("provider_connections", "provider_id", "role"),
+    unique_key!(
+        "provider_model_capabilities",
+        "provider_id",
+        "model",
+        "task"
+    ),
+    unique_key!("provider_models", "provider_id", "model"),
+    unique_key!("requirement_tags", "tag"),
+    unique_key!("skill_tags", "skill_name"),
+    unique_key!("system_settings", "singleton_key"),
+    unique_key!("tag_settings", "tag"),
+    unique_key!("terminal_scrollback", "terminal_id"),
+    unique_key!(
+        "terminal_turn_admissions",
+        "terminal_id",
+        "pty_epoch",
+        "requirement_id",
+        "claim_generation"
+    ),
+];
+
+#[derive(Clone, Copy, Debug)]
+struct UniqueKeyContract {
+    table: &'static str,
+    columns: &'static [&'static str],
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PartialUniqueIndexContract {
     index_name: &'static str,
@@ -1149,6 +1237,9 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_no_physical_foreign_keys(pool).await?;
     validate_no_triggers(pool).await?;
     validate_no_row_id_columns(pool).await?;
+    for contract in UPSERT_CONFLICT_KEYS {
+        require_exact_unique_key(pool, contract.table, contract.columns).await?;
+    }
     validate_index_budget(pool).await?;
 
     validate_business_id_registry(pool).await?;
@@ -3024,13 +3115,40 @@ async fn require_single_column_unique_index(
     let indexes = index_columns(pool, table).await?;
     if !indexes
         .values()
-        .any(|index| index.unique && index.columns.len() == 1 && index.columns[0] == column)
+        .any(|index| {
+            index.unique
+                && !index.partial
+                && index.columns.len() == 1
+                && index.columns[0] == column
+        })
     {
         return Err(DbError::Init(format!(
             "v3 business ID {table}.{column} must have a single-column UNIQUE index"
         )));
     }
     Ok(())
+}
+
+async fn require_exact_unique_key(
+    pool: &SqlitePool,
+    table: &str,
+    expected_columns: &[&str],
+) -> Result<(), DbError> {
+    let indexes = index_columns(pool, table).await?;
+    if indexes.values().any(|index| {
+        index.unique
+            && !index.partial
+            && index
+                .columns
+                .iter()
+                .map(String::as_str)
+                .eq(expected_columns.iter().copied())
+    }) {
+        return Ok(());
+    }
+    Err(DbError::Init(format!(
+        "v3 schema upsert target {table}{expected_columns:?} requires an exact non-partial UNIQUE key"
+    )))
 }
 
 async fn require_unique_parent_identity(
@@ -3165,6 +3283,7 @@ async fn table_info(pool: &SqlitePool, table: &str) -> Result<Vec<ColumnInfo>, D
 #[derive(Debug)]
 struct IndexInfo {
     unique: bool,
+    partial: bool,
     columns: Vec<String>,
 }
 
@@ -3175,6 +3294,7 @@ async fn index_columns(pool: &SqlitePool, table: &str) -> Result<BTreeMap<String
     for row in rows {
         let name: String = row.try_get("name").map_err(DbError::Query)?;
         let unique = row.try_get::<i64, _>("unique").map_err(DbError::Query)? != 0;
+        let partial = row.try_get::<i64, _>("partial").map_err(DbError::Query)? != 0;
         let info_sql = format!("PRAGMA index_info({})", quote_sqlite_identifier(&name));
         let mut columns = sqlx::query(&info_sql).fetch_all(pool).await?;
         columns.sort_by_key(|column| column.try_get::<i64, _>("seqno").unwrap_or(i64::MAX));
@@ -3182,7 +3302,14 @@ async fn index_columns(pool: &SqlitePool, table: &str) -> Result<BTreeMap<String
             .into_iter()
             .filter_map(|column| column.try_get::<String, _>("name").ok())
             .collect();
-        indexes.insert(name, IndexInfo { unique, columns });
+        indexes.insert(
+            name,
+            IndexInfo {
+                unique,
+                partial,
+                columns,
+            },
+        );
     }
     Ok(indexes)
 }
