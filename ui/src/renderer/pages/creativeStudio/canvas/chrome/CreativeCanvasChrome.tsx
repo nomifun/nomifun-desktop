@@ -18,7 +18,6 @@ import {
   History,
   Loading,
   MenuFold,
-  PanoramaHorizontal,
   Pic,
   Platte,
   Redo,
@@ -65,7 +64,6 @@ import {
 const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   text: 'creativeStudio.canvas.nodeKinds.text',
   image: 'creativeStudio.canvas.nodeKinds.image',
-  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
   timeline: 'creativeStudio.canvas.nodeKinds.timeline',
@@ -167,8 +165,6 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
       return <Text {...iconProps} />;
     case 'image':
       return <Pic {...iconProps} />;
-    case 'panorama':
-      return <PanoramaHorizontal {...iconProps} />;
     case 'video':
       return <VideoTwo {...iconProps} />;
     case 'audio':

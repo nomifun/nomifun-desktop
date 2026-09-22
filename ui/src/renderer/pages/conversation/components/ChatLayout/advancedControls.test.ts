@@ -60,6 +60,13 @@ describe('ChatLayout advanced controls', () => {
     expect(source.includes('<FrozenKnowledgeControl')).toBe(false);
   });
 
+  test('does not repeat the selected Agent beside the conversation title', () => {
+    const source = readSource(new URL('./index.tsx', import.meta.url));
+
+    expect(source).not.toContain('AgentIdentityBadge');
+    expect(source).toContain('leading={props.headerLeading}');
+  });
+
   test('does not let workspace file-tree events auto-expand the conversation right rail', () => {
     const source = readSource(new URL('./index.tsx', import.meta.url));
 

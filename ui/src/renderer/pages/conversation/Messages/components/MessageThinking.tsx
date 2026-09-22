@@ -5,8 +5,10 @@
  */
 
 import type { IMessageThinking } from '@/common/chat/chatLib';
+import { buildCompletedThinkingSummary } from '@/common/config/thinkingDisplay';
 import { toDisplayText } from '@/common/chat/displayText';
 import ThinkingProcessDisplay from '@renderer/components/chat/ThinkingProcessDisplay';
+import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -26,6 +28,7 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
   onExpandedChange,
 }) => {
   const { t } = useTranslation();
+  const thinkingDisplay = useThinkingDisplayPreferences();
 
   const formatElapsedTime = (seconds: number): string => {
     const sUnit = t('common.unit.second_short', { defaultValue: 's' });
@@ -40,6 +43,11 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
   const { status, subject } = message.content;
   const text = toDisplayText(message.content.content);
   const isDone = completed === true || status === 'done';
+  const completedSummary = isDone
+    ? buildCompletedThinkingSummary(toDisplayText(subject), text, thinkingDisplay.summaryLength)
+    : '';
+
+  if (!thinkingDisplay.visible) return null;
 
   return (
     <ThinkingProcessDisplay
@@ -57,6 +65,8 @@ const MessageThinking: React.FC<MessageThinkingProps> = ({
       completedLabel={t('conversation.thinking.complete', {
         defaultValue: 'Thought complete',
       })}
+      completedSummary={completedSummary}
+      bodyLength={thinkingDisplay.contentLength}
       formatElapsedTime={formatElapsedTime}
     />
   );

@@ -136,6 +136,8 @@ const NomiSendBox: React.FC<{
   extraRightTools?: React.ReactNode;
   /** False for product surfaces that currently support chat only. */
   creationEnabled?: boolean;
+  /** Hide work-session configuration chrome on a dedicated product surface. */
+  compactProductComposer?: boolean;
 }> = ({
   conversation_id,
   modelSelection,
@@ -148,6 +150,7 @@ const NomiSendBox: React.FC<{
   collaboratorSelectorNode,
   extraRightTools,
   creationEnabled = true,
+  compactProductComposer = false,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
   const { t } = useTranslation();
@@ -811,7 +814,7 @@ const NomiSendBox: React.FC<{
   };
 
   return (
-    <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto mb-16px`}>
+    <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto ${compactProductComposer ? 'mb-12px' : 'mb-16px'}`}>
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
@@ -827,18 +830,18 @@ const NomiSendBox: React.FC<{
       />
       <SendBox
         key={conversation_id}
-        sideTools={
-          capabilityControls !== undefined
+        sideTools={compactProductComposer
+          ? undefined
+          : capabilityControls !== undefined
             ? capabilityControls
             : collaboratorSelectorNode
               ? <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
                   {collaboratorSelectorNode}
                 </ComposerToolRail>
-              : undefined
-        }
-        prefix={<ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
+              : undefined}
+        prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
-        showPinnedPlan
+        showPinnedPlan={!compactProductComposer}
         value={content}
         onChange={handleContentChange}
         selectedWorkspaceItems={atPath}
@@ -851,7 +854,12 @@ const NomiSendBox: React.FC<{
         preserveDraftUntilAccepted={Boolean(creation)}
         skipChatWarmup={isCreating}
         placeholder={
-          isCreating ? '描述你想创作的内容，可添加参考素材…' : current_model?.use_model
+          compactProductComposer
+            ? t('nomi.cohabit.composerPlaceholder', {
+                name: agent_name || 'Nomi',
+                defaultValue: '和{{name}}说点什么…',
+              })
+            : isCreating ? '描述你想创作的内容，可添加参考素材…' : current_model?.use_model
             ? t('agent.sendbox.placeholder', {
                 backend: agent_name || 'Nomi',
                 defaultValue: `Send message to {{backend}}...`,
@@ -864,8 +872,10 @@ const NomiSendBox: React.FC<{
         onFilesAdded={handleFilesAdded}
         hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
         supportedExts={allSupportedExts}
-        defaultMultiLine
-        lockMultiLine
+        defaultMultiLine={!compactProductComposer}
+        lockMultiLine={!compactProductComposer}
+        compactActions={compactProductComposer}
+        bottomHint={compactProductComposer ? ' ' : undefined}
         tools={
           <FileAttachButton
             openFileSelector={openFileSelector}
@@ -881,7 +891,7 @@ const NomiSendBox: React.FC<{
               data-composer-group
               data-testid='nomi-sendbox-config-group'
             >
-              {hasContextUsage && (
+              {!compactProductComposer && hasContextUsage && (
                 <ContextUsageRing
                   used={tokenUsage?.context_tokens}
                   max={tokenUsage?.context_window}
@@ -890,8 +900,8 @@ const NomiSendBox: React.FC<{
                   reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
               )}
-              {isCreating && <CreationModelSelector files={collectSelectedFiles(uploadFile, atPath)} />}
-              {!isCreating && (
+              {!compactProductComposer && isCreating && <CreationModelSelector files={collectSelectedFiles(uploadFile, atPath)} />}
+              {!compactProductComposer && !isCreating && (
                 <Tooltip content={modelPickerHint} disabled={!modelPickerHint}>
                   <span className='inline-flex min-w-0'>
                     <NomiModelSelector
@@ -902,7 +912,7 @@ const NomiSendBox: React.FC<{
                   </span>
                 </Tooltip>
               )}
-              {extraRightTools}
+              {!compactProductComposer && extraRightTools}
             </div>
           )
         }

@@ -14,6 +14,7 @@
 }
 
 .nomi-companion-window {
+  position: relative;
   width: 100vw;
   height: 100vh;
   display: flex;
@@ -114,6 +115,349 @@
 
 .nomi-companion-bubble--loading {
   color: var(--text-secondary);
+}
+
+/* ---- expanded quick cohabit window ---- */
+
+.nomi-companion-quick {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 420px;
+  max-height: 720px;
+  width: min(96vw, 640px);
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  margin-bottom: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-base);
+  border-radius: 18px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.2);
+  cursor: grab;
+  animation: nomi-bubble-in 0.18s ease-out;
+}
+
+.nomi-companion-quick:active {
+  cursor: grabbing;
+}
+
+.nomi-companion-quick.is-dragover {
+  outline: 2px dashed var(--primary);
+  outline-offset: 2px;
+}
+
+.nomi-companion-quick__rail {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 7px;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-base);
+  background: var(--bg-2);
+}
+
+.nomi-companion-quick__roster-item {
+  position: relative;
+  width: 64px;
+  min-height: 70px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 5px 3px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.nomi-companion-quick__roster-item:hover,
+.nomi-companion-quick__roster-item[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+}
+
+.nomi-companion-quick__roster-item i {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--bg-2);
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.nomi-companion-quick__roster-item i.is-online {
+  background: var(--success);
+}
+
+.nomi-companion-quick__roster-item.is-more {
+  margin-top: auto;
+}
+
+.nomi-companion-quick__more-menu {
+  position: absolute;
+  z-index: 20;
+  left: 68px;
+  bottom: 70px;
+  width: 224px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--border-base);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--bg-base) 96%, transparent);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2);
+  cursor: default;
+  backdrop-filter: blur(14px);
+  animation: nomi-bubble-in 0.14s ease-out;
+}
+
+.nomi-companion-quick__more-menu button {
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nomi-companion-quick__more-menu button:hover,
+.nomi-companion-quick__more-menu button:focus-visible {
+  outline: none;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg-2));
+}
+
+.nomi-companion-quick__more-menu button > :last-child {
+  justify-self: end;
+}
+
+.nomi-companion-quick__main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.nomi-companion-quick__header {
+  flex: none;
+  min-height: 72px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border-base);
+}
+
+.nomi-companion-quick__identity {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nomi-companion-quick__identity strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nomi-companion-quick__identity span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.nomi-companion-quick__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.nomi-companion-quick__drag-hint {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: var(--text-secondary);
+  cursor: grab;
+  opacity: 0.58;
+  transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.nomi-companion-quick__header:hover .nomi-companion-quick__drag-hint {
+  opacity: 1;
+  background: var(--bg-2);
+}
+
+.nomi-companion-quick__header-actions button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-base);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.nomi-companion-quick__header-actions button:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.nomi-companion-quick__history {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 14px 10px;
+  overflow-y: auto;
+}
+
+.nomi-companion-quick__message {
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+  margin: 10px 0;
+  cursor: text;
+}
+
+.nomi-companion-quick__message > span {
+  max-width: 86%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-base);
+  border-radius: 12px;
+  background: var(--bg-base);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.nomi-companion-quick__message.is-user {
+  justify-content: flex-end;
+}
+
+.nomi-companion-quick__message.is-user > span {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--primary) 12%, var(--bg-base));
+}
+
+.nomi-companion-quick__empty {
+  width: 100%;
+  height: 100%;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 24px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  text-align: center;
+}
+
+.nomi-companion-quick__empty strong {
+  margin-top: 2px;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.nomi-companion-quick__empty span {
+  max-width: 280px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.nomi-companion-quick__live {
+  margin: 8px 0 4px 34px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg-2);
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: text;
+}
+
+.nomi-companion-quick__composer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 50px;
+  margin: 0 14px 14px;
+  padding: 6px 7px;
+  border: 1px solid var(--border-base);
+  border-radius: 17px;
+  background: var(--bg-base);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.06);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  cursor: default;
+}
+
+.nomi-companion-quick__composer:focus-within {
+  border-color: color-mix(in srgb, var(--primary) 56%, var(--border-base));
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+
+.nomi-companion-quick__composer .nomi-companion-composer__input {
+  height: 36px;
+  min-height: 36px;
+  max-height: 76px;
+  padding: 7px 3px;
+  line-height: 20px;
+}
+
+.nomi-companion-quick__composer .nomi-companion-composer__send {
+  flex: none;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.nomi-companion-quick__composer .nomi-companion-composer__attach {
+  width: 36px;
+  height: 36px;
+}
+
+.nomi-companion-window.is-quick-open .nomi-companion-stage-shell {
+  position: relative;
+  z-index: 4;
+  width: min(96vw, 640px);
+  justify-content: flex-end;
+  margin-top: -18px;
+  padding-right: 6px;
 }
 
 /* 快捷反应控件：□ 打断（本地/远程生成中）+ × 忽略（有气泡时）。原先浮在气泡右上角，
@@ -243,6 +587,109 @@
 }
 
 /* ---- quick-input row (mini, appears on hover) ---- */
+
+.nomi-companion-switcher {
+  position: absolute;
+  z-index: 5;
+  left: calc(50% - min(46vw, 180px));
+  bottom: 48px;
+  width: 44px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 4px 6px;
+  border: 1px solid color-mix(in srgb, var(--border-base) 82%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-base) 88%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  color: var(--text-secondary);
+  opacity: 0.84;
+  backdrop-filter: blur(12px);
+  transition: opacity 0.16s ease, box-shadow 0.16s ease;
+}
+
+.nomi-companion-window:hover .nomi-companion-switcher,
+.nomi-companion-switcher:focus-within {
+  opacity: 1;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+}
+
+.nomi-companion-switcher__label {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 12px;
+  white-space: nowrap;
+}
+
+.nomi-companion-switcher__item,
+.nomi-companion-switcher__more {
+  position: relative;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.nomi-companion-switcher__item:hover,
+.nomi-companion-switcher__item:focus-visible,
+.nomi-companion-switcher__more:hover,
+.nomi-companion-switcher__more:focus-visible {
+  outline: none;
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--primary) 50%, var(--border-base));
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg-base));
+}
+
+.nomi-companion-switcher__item:disabled {
+  cursor: progress;
+}
+
+.nomi-companion-switcher__item.is-switching::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border: 2px solid color-mix(in srgb, var(--primary) 24%, transparent);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: nomi-spin 0.7s linear infinite;
+}
+
+.nomi-companion-switcher__item.is-switching i {
+  opacity: 0;
+}
+
+.nomi-companion-switcher__item i {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--bg-base);
+  border-radius: 50%;
+  background: var(--text-secondary);
+}
+
+.nomi-companion-switcher__item i.is-online {
+  background: var(--success);
+}
+
+.nomi-companion-switcher__more {
+  height: 26px;
+  border-radius: 12px;
+  background: var(--bg-2);
+}
 
 .nomi-companion-chatbar {
   display: flex;

@@ -260,7 +260,7 @@ embedded fan-out 的并行与协调属于 AgentExecution 内部实现：宿主�
 | 3 | ExecutionStep | `agent_execution_steps` | Step 规格、自由文本 role、显式 tool policy、当前归约状态、当前路由、Engine 派生的委派深度、受约束的节点配置和版本 |
 | 4 | ExecutionStepDependency | `agent_execution_step_dependencies` | blocker_step_id → blocked_step_id 有向边及其 revision 生命周期 |
 | 5 | ExecutionAttempt | `agent_execution_attempts` | attempt_no、participant_id、触发原因、生效配置快照、状态、错误、输出、token、开始/结束时间 |
-| 6 | ConversationExecutionLink | `conversation_execution_links` | lead/attempt Conversation 与 execution/step/attempt 的显式关系和活动状态 |
+| 6 | ConversationExecutionLink | `conversation_execution_links` | lead/attempt/automation AgentSession 与 execution/step/attempt 的显式关系和活动状态 |
 | 7 | ExecutionEvent | `agent_execution_events` | execution 内单调 sequence、事件类型、不可变的实际 actor（system/user/agent 与 Agent 会话/attempt 上下文）、由执行 owner 事务内派生的 `on_behalf_of_user_id`、step/attempt 引用、payload 和时间戳 |
 
 关键约束：
@@ -277,7 +277,7 @@ embedded fan-out 的并行与协调属于 AgentExecution 内部实现：宿主�
 - Provider 删除以“未来是否仍可调度”为边界，而不是以“当前是否运行”为边界：未墓碑且非 `cancelled` 的 Execution（包括 `completed`、`completed_with_failures`、`failed`，它们可通过 retry/adopt 重开）的当前 Participant 都是硬引用；只有 `cancelled` 或已墓碑 Execution 不再阻断。frozen preset snapshot 不是 live provider 引用。
 - `UNIQUE(execution_id, sequence)`；状态变更与对应 ExecutionEvent 在同一事务提交，WebSocket 只转发已提交事件。
 - Event 类型固定为 `created`、`status_changed`、`plan_changed`、`step_changed`、`attempt_changed`、`decision_requested`、`decision_answered`、`deleted` 八种。新 v3 Execution 的第一条只能是 `created`；v3 不生成 `migrated` 事件，因为历史数据通过 hard reset 退出 active dataset，不进入 v3 执行域。
-- Conversation Link 必须满足 relation 对应的空值规则：lead 只需 execution，attempt 必须同时指向 step 和 attempt。同一 Attempt 只能有一个活动 link；Link 身份不可改写，只能从 active 单向转为 inactive。只要 Conversation 曾有 attempt Link，即使 Link 已失活或 Execution 已结算，它仍是该 Attempt 的审计 transcript，永远不能成为另一个 Execution 的 lead；Gateway 只能把相同语义的重放路由回原 Execution，任何新委派由 Engine 拒绝。
+- Conversation Link 必须满足 relation 对应的空值规则：lead 只需 execution；attempt 与 automation 必须同时指向 step 和 attempt。同一 Attempt 只能有一个活动执行 link；Link 身份不可改写，只能从 active 单向转为 inactive。普通 attempt Link 表示独立、可清理的协作审计 transcript：Conversation 即使在 Link 失活或 Execution 结算后也永远不能成为另一个 Execution 的 lead。automation Link 则表示 AutoWork 精确复用既有主 AgentSession，只参与 Attempt authority、receipt 与恢复，不把主 Session 变成协作 transcript，不进入 Attempt cleanup，也不投影协作画布。
 - 非终态且未墓碑 Execution 的 active lead Conversation 是可恢复与最终回执的权威入口，用户不得删除；Execution 进入 `completed`、`completed_with_failures`、`failed` 或 `cancelled` 后，lead Conversation 恢复为普通产品数据，可删除并由 Repository 应用层清理对应 Link。账户级删除始终允许按逻辑删除策略清理完整聚合。
 - Attempt Conversation 及其 message transcript 是 Execution 审计记录的一部分；普通 Conversation 删除，以及 reset、clear messages、edit-resubmit 等物理删 message 路径都必须 fail-closed，即使对应 Link 已失活。只有删除用户账户时才允许整套聚合随 owner 一起清理。
 - ExecutionEvent 的 sequence、类型、actor、payload 和关联对象提交后不可改写；唯一可变的 outbox 元数据是 `published_at`。发布失败靠后台有界退避重扫未发布行，不在 Event 表复制尝试次数、错误或另一套投递状态。

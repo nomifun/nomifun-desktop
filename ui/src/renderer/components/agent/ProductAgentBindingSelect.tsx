@@ -3,8 +3,8 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type { TProviderWithModel } from '@/common/config/storage';
 import type { OfficialPresetKey, ProductAgentOptions, ProductAgentSelection } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
-import { AgentIdentityBadge, AgentLogoIcon } from './AgentBadge';
-import { Button, Dropdown, Menu, Message, Select, Tooltip } from '@arco-design/web-react';
+import { AgentLogoIcon } from './AgentBadge';
+import { Button, Dropdown, Menu, Message, Select, Spin, Tooltip } from '@arco-design/web-react';
 import { Down } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -94,24 +94,11 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     }
   };
 
-  if (error) return <div role='alert' className='inline-flex min-w-0 items-center gap-8px'>
-    <AgentIdentityBadge
-      backend='nomi'
-      name={t('agent.identity.unavailable', { defaultValue: 'Unavailable' })}
-      compact
-    />
-    <span>{t('agentSettings.productBinding.loadFailed')}</span>
+  if (error) return <div role='alert'>
+    {t('agentSettings.productBinding.loadFailed')}
     <Button size='mini' onClick={() => void mutate()}>{t('agentSettings.actions.retry')}</Button>
   </div>;
-  if (isLoading || !data) {
-    return (
-      <AgentIdentityBadge
-        backend='nomi'
-        loading
-        compact
-      />
-    );
-  }
+  if (isLoading || !data) return <Spin size={14} />;
   const selected = data.options.find((option) => productSelectionValue(option.selection) === productSelectionValue(data.selection));
   const selectedName = selected
     ? nameFor(selected)
@@ -149,7 +136,6 @@ const ProductAgentBindingSelect: React.FC<Props> = ({ targetKind, targetId, mode
     </Tooltip>
   );
   return <div className='flex min-w-0 flex-col gap-6px' style={{ maxWidth: 300 }}>
-    <AgentIdentityBadge backend='nomi' name={selectedName} />
     <Select value={productSelectionValue(data.selection)} loading={saving} disabled={disabled || saving}
       onChange={(next: string) => void change(next)} style={{ width: 230, maxWidth: '100%' }}
       aria-label={t('agentSettings.productBinding.label')}>

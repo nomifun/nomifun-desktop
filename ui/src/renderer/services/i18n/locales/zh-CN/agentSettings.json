@@ -56,7 +56,7 @@
     "fork": "自定义预设",
     "remove": "移除",
     "retry": "重试",
-    "startConversation": "使用 Agent",
+    "startConversation": "开始对话",
     "saveRevision": "保存配置"
   },
   "defaults": {
@@ -282,9 +282,9 @@
     "robotHardwareMissing": "此设备不提供：{{permissions}}",
     "robotPermissionsNotRequired": "此 Agent 不需要机器人动作权限",
     "computerChecking": "正在检查当前桌面的系统权限…",
-    "computerCheckFailed": "无法确认电脑控制可用性；不影响继续使用 Agent，调用相关动作前请检查系统设置。",
+    "computerCheckFailed": "无法确认电脑控制可用性；不影响继续对话，调用相关动作前请检查系统设置。",
     "computerReady": "此桌面已具备所需的电脑操作权限。",
-    "computerPermissionNeeded": "电脑操作暂不可用；不影响继续使用 Agent，授权后即可恢复相关动作。",
+    "computerPermissionNeeded": "电脑操作暂不可用；不影响继续对话，授权后即可恢复相关动作。",
     "computerPermissionScope": "本 Agent 需要：{{permissions}}。系统授权不会扩大 Agent 的能力范围。",
     "computerPermissionNotRequired": "本 Agent 仅使用启动应用/网址动作，不需要屏幕录制或辅助功能权限。",
     "configure": "去配置",

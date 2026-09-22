@@ -295,7 +295,9 @@ pub struct ConversationResponse {
         deserialize_with = "crate::serde_util::deserialize_optional_execution_template_id"
     )]
     pub execution_template_id: Option<String>,
-    /// Current Agent collaboration projected from `conversation_execution_links`.
+    /// Current user-visible Agent collaboration projected from
+    /// `conversation_execution_links`. Internal AutoWork executions reuse the
+    /// main AgentSession and are deliberately excluded from these UI fields.
     /// These fields are read-only and are never stored on the conversation.
     #[serde(
         default,

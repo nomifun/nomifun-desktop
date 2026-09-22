@@ -12,7 +12,7 @@ import { startCanvasResize, updateCanvasResize } from './resize';
 
 describe('canvas pointer controllers', () => {
   test('connects a stable multi-selection as one undoable operation and skips duplicates', () => {
-    const sources = [testNode('image', 51), testNode('text', 52), testNode('panorama', 53)];
+    const sources = [testNode('image', 51), testNode('text', 52), testNode('image', 53)];
     const target = testNode('image', 54);
     const document = testDocument([...sources, target], [testEdge(60, sources[0].id, target.id)]);
     const selectedNodeIds = sources.map((source) => source.id).reverse();

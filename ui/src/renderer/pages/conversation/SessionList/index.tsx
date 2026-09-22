@@ -23,10 +23,10 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import ConversationRow from './ConversationRow';
-import CompanionSessionGroup from './CompanionSessionGroup';
 import SshSessionGroup from './SshSessionGroup';
 import { useBatchSelection } from './hooks/useBatchSelection';
 import { useConversationActions } from './hooks/useConversationActions';
+import { isOrdinaryWorkConversation } from './hooks/conversationListFilter';
 import { useExport } from './hooks/useExport';
 import { capabilityKey, useSessionCapabilities } from './hooks/useSessionCapabilities';
 import { useWorkpathBranches } from './hooks/useWorkpathBranches';
@@ -35,7 +35,7 @@ import TerminalRow from './TerminalRow';
 import WorkpathDrawer from './WorkpathDrawer';
 import { useWorkpathUiState } from './hooks/useWorkpathUiState';
 import { toggleBatchSelectionScope, type BatchSelectableScope } from './utils/batchSelectionScopes';
-import { DEFAULT_WORKPATH_KEY } from './utils/workpathKey';
+import { DEFAULT_WORKPATH_KEY, workpathKey } from './utils/workpathKey';
 import { buildWorkpathTree } from './utils/workpathTree';
 import {
   getProjectWorkpaths,
@@ -92,17 +92,35 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
   const { sessions: terminals } = useTerminalSessions();
   const ui = useWorkpathUiState();
   const [emptyProjectWorkpaths, setEmptyProjectWorkpaths] = useState<string[]>(() => getProjectWorkpaths());
+  const workConversations = useMemo(
+    () => conversations.filter(isOrdinaryWorkConversation),
+    [conversations]
+  );
+  const companionWorkpathKeys = useMemo(
+    () => new Set(
+      conversations
+        .filter((conversation) => !isOrdinaryWorkConversation(conversation))
+        .map((conversation) => conversation.extra?.workspace)
+        .filter((workspace): workspace is string => typeof workspace === 'string' && workspace.length > 0)
+        .map((workspace) => workpathKey(workspace))
+    ),
+    [conversations]
+  );
+  const visibleEmptyProjectWorkpaths = useMemo(
+    () => emptyProjectWorkpaths.filter((workpath) => !companionWorkpathKeys.has(workpathKey(workpath))),
+    [companionWorkpathKeys, emptyProjectWorkpaths]
+  );
 
   useEffect(() => {
     return subscribeProjectWorkpaths(() => setEmptyProjectWorkpaths(getProjectWorkpaths()));
   }, []);
 
   const tree = useMemo(
-    () => buildWorkpathTree(conversations, terminals, ui.pinnedKeys, emptyProjectWorkpaths),
-    [conversations, terminals, ui.pinnedKeys, emptyProjectWorkpaths]
+    () => buildWorkpathTree(workConversations, terminals, ui.pinnedKeys, visibleEmptyProjectWorkpaths),
+    [workConversations, terminals, ui.pinnedKeys, visibleEmptyProjectWorkpaths]
   );
 
-  const projectWorkpathKeys = useMemo(() => new Set(emptyProjectWorkpaths), [emptyProjectWorkpaths]);
+  const projectWorkpathKeys = useMemo(() => new Set(visibleEmptyProjectWorkpaths), [visibleEmptyProjectWorkpaths]);
   const branchWorkpaths = useMemo(
     () => tree.filter((node) => node.key !== DEFAULT_WORKPATH_KEY).map((node) => node.key),
     [tree]
@@ -658,11 +676,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
       <>
         {modals}
         <div className='min-w-0'>
-          <CompanionSessionGroup
-            collapsed
-            activeConversationId={activeConversationId}
-            onSessionClick={onSessionClick}
-          />
           <SshSessionGroup collapsed activeConversationId={activeConversationId} renderRow={renderSshRow} />
           {tree.flatMap((node) =>
             node.interactive.map((entry) =>
@@ -682,16 +695,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
     <>
       {modals}
       <div className='min-w-0'>
-        {/* 桌面伙伴专属工作空间分组（roster-driven，置于项目/工作路径之上）。仅交互式、
-            不在此新建；可折叠（状态持久化于 useWorkpathUiState，默认展开）；
-            点击伙伴行跳转其唯一会话 /conversation/:id。 */}
-        <CompanionSessionGroup
-          activeConversationId={activeConversationId}
-          onSessionClick={onSessionClick}
-          expanded={ui.companionGroupExpanded}
-          onToggleExpanded={ui.toggleCompanionGroup}
-        />
-
         {/* SSH 远程会话分组（设计 §10）：绑定主机的会话不进普通工作会话列表，
             这里按主机二级聚合给它们一个可回访的家。行由 renderSshRow 注入。 */}
         <SshSessionGroup

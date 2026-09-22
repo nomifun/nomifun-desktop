@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'bun:test';
-import { placeResizedWindow } from './windowGeometry';
+import { placeResizedWindow, translateAnchorAfterDrag } from './windowGeometry';
 
 const MON = { x: 0, y: 0, width: 2880, height: 1800 };
 
@@ -70,5 +70,15 @@ describe('placeResizedWindow', () => {
     const pos = placeResizedWindow({ x: 1000, y: 800, width: 640, height: 1200 }, { width: 640, height: 1200 }, [MON]);
     // identical size → pure clamp; y bound = 1800 - 1200 = 600
     expect(pos).toEqual({ x: 1000, y: 600 });
+  });
+});
+
+describe('translateAnchorAfterDrag', () => {
+  it('applies the expanded window delta without changing the small-window size', () => {
+    expect(translateAnchorAfterDrag(
+      { x: 900, y: 700, width: 240, height: 214 },
+      { x: 600, y: 300 },
+      { x: 725, y: 240 },
+    )).toEqual({ x: 1025, y: 640, width: 240, height: 214 });
   });
 });

@@ -321,7 +321,6 @@ const incomingMediaAssetIds = (
     if (!sourceIds.has(node.id)) return [];
     if (
       node.type === 'image' ||
-      node.type === 'panorama' ||
       node.type === 'video' ||
       node.type === 'audio'
     ) {

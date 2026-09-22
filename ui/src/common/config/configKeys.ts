@@ -3,6 +3,7 @@ import type { ICssTheme } from '@/common/config/storage';
 import type { AgentPresetId, CompanionId, ProviderId } from '@/common/types/ids';
 import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 import type { LanguageMode } from './i18n';
+import type { ThinkingContentDisplayLength, ThinkingSummaryDisplayLength } from './thinkingDisplay';
 
 export type GuidAgentSelectionPreference =
   | { kind: 'template'; templateKey: OfficialPresetKey }
@@ -57,6 +58,11 @@ export type ConfigKeyMap = {
   'system.autoPreviewOfficeFiles': boolean | undefined;
   // 发送键偏好：'enter'=Enter 发送/Shift+Enter 换行（默认）；'mod-enter'=Ctrl/⌘+Enter 发送、Enter 换行
   'chat.sendKey': 'enter' | 'mod-enter' | undefined;
+  // Install-wide conversation presentation preferences. These only affect
+  // rendering; the complete reasoning payload remains available in history.
+  'chat.thinking.visible': boolean | undefined;
+  'chat.thinking.contentLength': ThinkingContentDisplayLength | undefined;
+  'chat.thinking.summaryLength': ThinkingSummaryDisplayLength | undefined;
   // Desktop control (computer-use): gates the nomi engine's Computer tool
   // (observe/click/type/launch). Read by the backend agent factory per session.
   'channels.telegram.agent':

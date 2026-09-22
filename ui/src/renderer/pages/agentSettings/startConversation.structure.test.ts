@@ -44,7 +44,7 @@ describe('Agent Workbench start conversation boundary', () => {
 
   test('keeps the action copy localized', () => {
     expect(en.actions.startConversation).toBe('Start conversation');
-    expect(zh.actions.startConversation).toBe('使用 Agent');
+    expect(zh.actions.startConversation).toBe('开始对话');
   });
 });
 

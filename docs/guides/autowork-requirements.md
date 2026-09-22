@@ -123,15 +123,18 @@ What happens per turn:
 1. The AutoWork loop claims the next `pending` requirement in that tag.
 2. It submits one idempotent execution generation to AgentExecution, using the
    exact Agent snapshot and resource bindings frozen into the selected Session.
-3. AgentExecution owns the Attempt Session, retry/adaptation state,
-   user-action state, cancellation and canonical turn receipt. The bound
-   conversation displays the linked execution and receives its terminal report.
+3. AgentExecution owns the Attempt, retry/adaptation state, user-action state,
+   cancellation and canonical turn receipt, but an AutoWork Attempt **reuses
+   the bound main AgentSession**. The requirement is injected as a hidden
+   `origin=autowork` turn, so the main Agent streams and retains the work in the
+   main conversation. No `Collaboration · Requirement` child Session or
+   collaboration canvas is created.
 4. A successful receipt marks the Requirement `done`. Failure, ambiguous
    effects, or an unsafe cancellation parks it as `failed`/`needs_review` and
    pauses the tag instead of replaying effects.
 5. A paused control is shown explicitly in the conversation header. Review the
-   linked execution, then choose **Resume**; failed rows are requeued by that
-   explicit user action.
+   main conversation and Requirement, then choose **Resume**; failed rows are
+   requeued by that explicit user action.
 
 ## Boot resume — it runs without you
 

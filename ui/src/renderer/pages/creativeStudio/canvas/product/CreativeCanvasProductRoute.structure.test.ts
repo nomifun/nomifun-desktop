@@ -124,7 +124,6 @@ describe('Creative Canvas product route composition', () => {
       'hasImageContent={Boolean(node.data.assetId)}',
       'navigator.clipboard.read()',
       'manualUploadRejectionMessage',
-      'pendingPanoramaChoice',
       '<CreativeCanvasImageToolbar',
       '<CreativeCanvasImageComposer',
       '<CreativeCanvasVideoComposer',

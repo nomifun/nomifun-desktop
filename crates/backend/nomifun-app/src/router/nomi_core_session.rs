@@ -1829,7 +1829,8 @@ impl NomiCoreSessionOwner {
                AND step.superseded_in_revision IS NULL \
                AND attempt.attempt_id = ? AND attempt.version = ? \
                AND attempt.status = 'running' \
-               AND link.conversation_id = ? AND link.relation = 'attempt' AND link.active = 1 \
+               AND link.conversation_id = ? \
+               AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
                AND session.state = 'live' \
                AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
                AND json_extract(session.owner_ref_json, '$.principal_id') = ?",
@@ -1974,9 +1975,10 @@ impl NomiCoreSessionOwner {
             .session_created_at(session_id)
             .await
             .map_err(agent_session_store_error)?;
-        let execution_link: Option<(String, String, Option<String>, Option<String>)> =
+        let execution_link: Option<ConversationExecutionLinkProjection> =
             sqlx::query_as(
-                "SELECT link.execution_id, link.relation, link.step_id, link.attempt_id \
+                "SELECT link.execution_id, link.relation, link.step_id, link.attempt_id, \
+                        json_extract(execution.initial_plan_input, '$.mode') \
                  FROM conversation_execution_links link \
                  JOIN agent_executions execution ON execution.execution_id = link.execution_id \
                  WHERE link.conversation_id = ? AND execution.user_id = ? \
@@ -4556,12 +4558,41 @@ fn has_attached_browser_binding(
     Ok(attached)
 }
 
+type ConversationExecutionLinkProjection = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn visible_conversation_execution(
+    execution_link: Option<ConversationExecutionLinkProjection>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    execution_link.map_or(
+        (None, None, None),
+        |(execution_id, relation, step_id, attempt_id, initial_mode)| {
+            // AutoWork uses AgentExecution for durability, but the bound main
+            // AgentSession is the work surface. Never project that internal
+            // aggregate as a user-created collaboration canvas/transcript.
+            if initial_mode.as_deref() == Some("automation") {
+                return (None, None, None);
+            }
+            if relation == "attempt" {
+                (Some(execution_id), step_id, attempt_id)
+            } else {
+                (Some(execution_id), None, None)
+            }
+        },
+    )
+}
+
 fn canonical_conversation_response(
     observed: SessionObservation,
     projected: super::agent_binding_projection::SavedAgentBindingProjection,
     workspace: Option<String>,
     created_at: i64,
-    execution_link: Option<(String, String, Option<String>, Option<String>)>,
+    execution_link: Option<ConversationExecutionLinkProjection>,
     companion_id: Option<String>,
 ) -> Result<ConversationResponse, AppError> {
     let SessionObservation { session, head, events, .. } = observed;
@@ -4658,13 +4689,7 @@ fn canonical_conversation_response(
         .or(request.name)
         .unwrap_or_else(|| snapshot.preset_name.clone());
     let (linked_execution_id, execution_step_id, execution_attempt_id) =
-        execution_link.map_or((None, None, None), |(execution_id, relation, step_id, attempt_id)| {
-            if relation == "attempt" {
-                (Some(execution_id), step_id, attempt_id)
-            } else {
-                (Some(execution_id), None, None)
-            }
-        });
+        visible_conversation_execution(execution_link);
     Ok(ConversationResponse {
         conversation_id: session.agent_session_id.as_ref().to_owned(),
         name,
@@ -4975,7 +5000,8 @@ mod session_boundary_tests {
         freeze_selected_workspace, frozen_workspace_root, has_selected_workspace,
         initial_delivery_requested, NomiCoreSessionOwner,
         parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
-        workspace_projection_flags, SELECTED_WORKSPACE_RESOURCE_PREFIX,
+        visible_conversation_execution, workspace_projection_flags,
+        SELECTED_WORKSPACE_RESOURCE_PREFIX,
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use std::collections::{BTreeMap, BTreeSet};
@@ -4996,6 +5022,31 @@ mod session_boundary_tests {
 
     const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn autowork_execution_is_not_projected_as_collaboration_or_attempt_ui() {
+        let execution_id = "0190f5fe-7c00-7a00-8000-000000000099".to_owned();
+        assert_eq!(
+            visible_conversation_execution(Some((
+                execution_id.clone(),
+                "automation".to_owned(),
+                Some("0190f5fe-7c00-7a00-8000-000000000098".to_owned()),
+                Some("0190f5fe-7c00-7a00-8000-000000000097".to_owned()),
+                Some("automation".to_owned()),
+            ))),
+            (None, None, None),
+        );
+        assert_eq!(
+            visible_conversation_execution(Some((
+                execution_id.clone(),
+                "lead".to_owned(),
+                None,
+                None,
+                Some("explicit".to_owned()),
+            ))),
+            (Some(execution_id), None, None),
+        );
+    }
 
     #[test]
     fn canonical_stream_wire_separates_assistant_segment_from_user_turn_root() {

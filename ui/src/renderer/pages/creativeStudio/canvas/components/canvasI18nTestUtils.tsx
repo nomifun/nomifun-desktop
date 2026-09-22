@@ -63,14 +63,6 @@ await canvasTestI18n.use(initReactI18next).init({
                   "creativeStudio.canvas.imageTools.split.pieceCount {{count}}",
               },
             },
-            nodes: {
-              panorama: {
-                fieldOfView:
-                  "creativeStudio.canvas.nodes.panorama.fieldOfView {{value}}",
-                orientation:
-                  "creativeStudio.canvas.nodes.panorama.orientation {{yaw}} {{pitch}}",
-              },
-            },
           },
         },
       },
