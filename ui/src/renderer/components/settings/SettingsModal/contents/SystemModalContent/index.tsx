@@ -7,6 +7,10 @@
 import { ipcBridge } from '@/common';
 import type { IStartOnBootStatus } from '@/common/adapter/ipcBridge';
 import { configService } from '@/common/config/configService';
+import type {
+  ThinkingContentDisplayLength,
+  ThinkingSummaryDisplayLength,
+} from '@/common/config/thinkingDisplay';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
@@ -14,6 +18,7 @@ import LanguageSwitcher from '@/renderer/components/settings/LanguageSwitcher';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useKeepAwake } from '@renderer/hooks/ui/useKeepAwake';
+import { useThinkingDisplayPreferences } from '@renderer/hooks/config/useThinkingDisplayPreferences';
 import { capabilityPermissionsHref } from '@/renderer/hooks/system/systemPermissionModel';
 import { Alert, Button, Collapse, Form, Message, Modal, Switch, Tooltip } from '@arco-design/web-react';
 import { FolderSearch } from '@icon-park/react';
@@ -53,6 +58,7 @@ const SystemModalContent: React.FC = () => {
   const [autoPreviewOfficeFiles, setAutoPreviewOfficeFiles] = useState(true);
   const [sendKey, setSendKey] = useState<'enter' | 'mod-enter'>('enter');
   const [factoryResetVisible, setFactoryResetVisible] = useState(false);
+  const thinkingDisplay = useThinkingDisplayPreferences();
 
   useEffect(() => {
     // Start-on-boot is only meaningful in the Tauri desktop shell (backed by
@@ -169,6 +175,39 @@ const SystemModalContent: React.FC = () => {
     });
   }, []);
 
+  const handleThinkingVisibleChange = useCallback(
+    (checked: boolean) => {
+      const previous = thinkingDisplay.visible;
+      configService.set('chat.thinking.visible', checked).catch(() => {
+        configService.setLocal('chat.thinking.visible', previous);
+        Message.error(t('settings.thinkingDisplaySaveFailed'));
+      });
+    },
+    [t, thinkingDisplay.visible]
+  );
+
+  const handleThinkingContentLengthChange = useCallback(
+    (value: ThinkingContentDisplayLength) => {
+      const previous = thinkingDisplay.contentLength;
+      configService.set('chat.thinking.contentLength', value).catch(() => {
+        configService.setLocal('chat.thinking.contentLength', previous);
+        Message.error(t('settings.thinkingDisplaySaveFailed'));
+      });
+    },
+    [t, thinkingDisplay.contentLength]
+  );
+
+  const handleThinkingSummaryLengthChange = useCallback(
+    (value: ThinkingSummaryDisplayLength) => {
+      const previous = thinkingDisplay.summaryLength;
+      configService.set('chat.thinking.summaryLength', value).catch(() => {
+        configService.setLocal('chat.thinking.summaryLength', previous);
+        Message.error(t('settings.thinkingDisplaySaveFailed'));
+      });
+    },
+    [t, thinkingDisplay.summaryLength]
+  );
+
   const { keepAwake, setKeepAwake: applyKeepAwake } = useKeepAwake();
 
   const handleKeepAwakeChange = useCallback(async (checked: boolean) => {
@@ -217,6 +256,44 @@ const SystemModalContent: React.FC = () => {
         >
           <NomiSelect.Option value='enter'>{t('settings.sendKeyEnter')}</NomiSelect.Option>
           <NomiSelect.Option value='mod-enter'>{t('settings.sendKeyModEnter')}</NomiSelect.Option>
+        </NomiSelect>
+      ),
+    },
+    {
+      key: 'thinkingVisible',
+      label: t('settings.thinkingProcessVisible'),
+      description: t('settings.thinkingProcessVisibleDesc'),
+      component: <Switch checked={thinkingDisplay.visible} onChange={handleThinkingVisibleChange} />,
+    },
+    {
+      key: 'thinkingContentLength',
+      label: t('settings.thinkingContentLength'),
+      description: t('settings.thinkingContentLengthDesc'),
+      component: (
+        <NomiSelect
+          className='w-200px'
+          value={thinkingDisplay.contentLength}
+          disabled={!thinkingDisplay.visible}
+          onChange={(value) => handleThinkingContentLengthChange(value as ThinkingContentDisplayLength)}
+        >
+          <NomiSelect.Option value='compact'>{t('settings.thinkingContentCompact')}</NomiSelect.Option>
+          <NomiSelect.Option value='full'>{t('settings.thinkingContentFull')}</NomiSelect.Option>
+        </NomiSelect>
+      ),
+    },
+    {
+      key: 'thinkingSummaryLength',
+      label: t('settings.thinkingSummaryLength'),
+      description: t('settings.thinkingSummaryLengthDesc'),
+      component: (
+        <NomiSelect
+          className='w-200px'
+          value={thinkingDisplay.summaryLength}
+          disabled={!thinkingDisplay.visible}
+          onChange={(value) => handleThinkingSummaryLengthChange(value as ThinkingSummaryDisplayLength)}
+        >
+          <NomiSelect.Option value='hidden'>{t('settings.thinkingSummaryHidden')}</NomiSelect.Option>
+          <NomiSelect.Option value='shown'>{t('settings.thinkingSummaryShown')}</NomiSelect.Option>
         </NomiSelect>
       ),
     },
