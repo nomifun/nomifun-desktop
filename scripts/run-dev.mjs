@@ -9,13 +9,28 @@
  * pass it only to the Tauri child. Other platforms retain the original path.
  */
 
-import { existsSync, mkdirSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const CANONICAL_DATABASE_BASELINE = join(
+  ROOT,
+  'crates',
+  'backend',
+  'nomifun-db',
+  'migrations',
+  '001_canonical_baseline.sql',
+);
+export const DEVELOPMENT_SCHEMA_FINGERPRINT = createHash('sha256')
+  .update(readFileSync(CANONICAL_DATABASE_BASELINE))
+  .digest('hex')
+  .slice(0, 16);
+const GENERATED_WINDOWS_DEV_DIRECTORY =
+  `NomiFun-dev-schema-${DEVELOPMENT_SCHEMA_FINGERPRINT}`;
 const WINDOWS_TOOLCHAIN_COMPONENT =
   'Microsoft.VisualStudio.Component.VC.Tools.x86.x64';
 
@@ -337,10 +352,12 @@ export function loadWindowsToolchainEnvironment(
   return initialized;
 }
 
-// The Plugin clean-start refactor intentionally replaced the historical product
-// migrations. Reusing NomiFun-dev[-nomi-core] cannot upgrade that database.
-// Give Windows dev a stable generation-specific root without deleting or
-// rewriting old data. Explicit data roots remain the caller's responsibility.
+// The clean-start refactor intentionally has one editable canonical migration.
+// Reusing a database created from an older byte-for-byte baseline must fail its
+// SQLx lineage check. Derive the generated Windows development root from that
+// baseline so `bun run dev` gets a fresh dataset after an intentional schema
+// rewrite without deleting or rewriting any older directory. Explicit data
+// roots remain the caller's responsibility.
 // TODO(platform): validate the same clean-start dev policy on macOS/Linux.
 export function developmentEnvironment(environment, platform = process.platform) {
   const result = { ...environment, NOMI_CHANNEL: 'dev' };
@@ -358,7 +375,7 @@ export function developmentEnvironment(environment, platform = process.platform)
   if (!localAppData) {
     throw new Error('LOCALAPPDATA is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
   }
-  result.NOMIFUN_DATA_DIR = join(localAppData, 'NomiFun-dev-plugin-v1');
+  result.NOMIFUN_DATA_DIR = join(localAppData, GENERATED_WINDOWS_DEV_DIRECTORY);
   return result;
 }
 
@@ -381,7 +398,7 @@ export function ensureGeneratedDevelopmentDataDirectory(
   const localAppData = getEnvironmentValue(sourceEnvironment, 'LOCALAPPDATA');
   const target = getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR');
   const expected = localAppData
-    ? join(localAppData, 'NomiFun-dev-plugin-v1')
+    ? join(localAppData, GENERATED_WINDOWS_DEV_DIRECTORY)
     : '';
   if (!target || target !== expected) {
     throw new Error('generated Windows development data directory does not match LOCALAPPDATA');
@@ -475,7 +492,7 @@ async function main() {
   }
 
   if (process.platform === 'win32') {
-    console.log(`[dev] data directory: ${getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR')} (existing historical directories are preserved)`);
+    console.log(`[dev] data directory: ${getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR')} (schema ${DEVELOPMENT_SCHEMA_FINGERPRINT}; historical directories are preserved)`);
   }
 
   const lifetime = process.platform === 'darwin'

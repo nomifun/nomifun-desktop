@@ -15,12 +15,18 @@
  *   bun scripts/check-icon-imports.mjs             # 校验,发现违规 exit 1
  *   bun scripts/check-icon-imports.mjs --self-test # 校验器自测
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCAN_DIR = join(ROOT, 'ui', 'src');
+const GENERATED_HOC = join(
+  SCAN_DIR,
+  'renderer',
+  'components',
+  'IconParkHOC.tsx',
+);
 
 // 具名导入块:import [type] { ... } from '@icon-park/react'(可跨行)
 const NAMED_IMPORT_RE = /import\s+(?:type\s+)?\{([^}]*)\}\s*from\s*['"]@icon-park\/react['"]/g;
@@ -105,6 +111,25 @@ function selfTest() {
 if (process.argv.includes('--self-test')) {
   selfTest();
   process.exit(0);
+}
+
+if (!existsSync(GENERATED_HOC)) {
+  console.error(
+    '❌ ui/vite.config.ts injects @renderer/components/IconParkHOC into every IconPark TSX module, but IconParkHOC.tsx is missing',
+  );
+  process.exit(1);
+}
+const generatedHocSource = readFileSync(GENERATED_HOC, 'utf8');
+for (const required of [
+  "from '@icon-park/react/es/runtime'",
+  'export default IconParkHOC',
+]) {
+  if (!generatedHocSource.includes(required)) {
+    console.error(
+      `❌ IconParkHOC.tsx no longer satisfies the Vite-generated import contract: missing ${required}`,
+    );
+    process.exit(1);
+  }
 }
 
 const problems = [];
