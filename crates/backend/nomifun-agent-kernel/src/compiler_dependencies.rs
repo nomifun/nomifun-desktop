@@ -42,7 +42,6 @@ pub(super) fn resolve(
                 .capability(&id)
                 .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                     capability_id: id.clone(),
-                    version: "unknown".into(),
                 })?;
         let mut refs = capability.manifest.requires.clone();
         if let Some(role_id) = registry.role_for_capability(&id) {
@@ -96,14 +95,10 @@ pub(super) fn resolve(
         refs.sort();
         refs.dedup();
         for dependency in &refs {
-            if !registry
-                .capability(&dependency.id)
-                .is_some_and(|value| value.manifest.version == dependency.version)
-            {
+            if registry.capability(&dependency.id).is_none() {
                 return Err(KernelError::MissingCapabilityDependency {
                     capability_id: id.clone(),
                     dependency_id: dependency.id.clone(),
-                    dependency_version: dependency.version.clone(),
                 });
             }
         }

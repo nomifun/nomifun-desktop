@@ -2078,7 +2078,6 @@ fn conversation_module_manifest(
             "module:{}",
             module.id
         )),
-        version: VersionString::from(CONTRACT_VERSION),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: localized(module.display_name, module.description),
@@ -2186,7 +2185,6 @@ fn capability_manifest(
             "capability:{}",
             spec.id
         )),
-        version: VersionString::from(CONTRACT_VERSION),
         kind: spec.kind,
         package: package.clone(),
         display: localized(spec.display_name, spec.description),

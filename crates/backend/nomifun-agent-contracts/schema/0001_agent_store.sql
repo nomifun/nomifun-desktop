@@ -2,7 +2,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE schema_metadata (
     singleton_key TEXT PRIMARY KEY CHECK (singleton_key = 'canonical'),
-    data_generation INTEGER NOT NULL CHECK (data_generation = 5),
+    data_generation INTEGER NOT NULL CHECK (data_generation = 6),
     root_instance_id TEXT NOT NULL,
     migration_head INTEGER NOT NULL CHECK (migration_head >= 1),
     seed_manifest_digest TEXT NOT NULL CHECK (length(seed_manifest_digest) = 64),
@@ -77,13 +77,11 @@ CREATE TABLE installation_role_bindings (
 ) STRICT;
 
 CREATE TABLE capability_definitions (
-    capability_id TEXT NOT NULL,
-    capability_version TEXT NOT NULL,
+    capability_id TEXT PRIMARY KEY,
     package_id TEXT NOT NULL,
     package_version TEXT NOT NULL,
     manifest_json TEXT NOT NULL CHECK (json_valid(manifest_json)),
     manifest_digest TEXT NOT NULL CHECK (length(manifest_digest) = 64),
-    PRIMARY KEY (capability_id, capability_version),
     FOREIGN KEY (package_id, package_version)
         REFERENCES plugin_packages (package_id, package_version)
         ON UPDATE RESTRICT ON DELETE RESTRICT
@@ -91,11 +89,10 @@ CREATE TABLE capability_definitions (
 
 CREATE TABLE capability_catalog_entries (
     capability_id TEXT NOT NULL CHECK (trim(capability_id) <> ''),
-    capability_version TEXT NOT NULL CHECK (trim(capability_version) <> ''),
     contribution_id TEXT NOT NULL CHECK (trim(contribution_id) <> ''),
     entry_json TEXT NOT NULL CHECK (json_valid(entry_json)),
     entry_digest TEXT NOT NULL CHECK (length(entry_digest) = 64),
-    PRIMARY KEY (capability_id, capability_version, contribution_id)
+    PRIMARY KEY (capability_id, contribution_id)
 ) STRICT;
 
 CREATE TABLE skill_instructions (
@@ -123,15 +120,14 @@ CREATE TABLE mcp_tool_materializations (
     canonical_tool_key TEXT NOT NULL,
     schema_hash TEXT NOT NULL CHECK (length(schema_hash) = 64),
     capability_id TEXT NOT NULL,
-    capability_version TEXT NOT NULL,
     materialization_revision INTEGER NOT NULL CHECK (materialization_revision >= 1),
     package_id TEXT NOT NULL,
     package_version TEXT NOT NULL,
     PRIMARY KEY (server_id, canonical_tool_key),
     FOREIGN KEY (server_id) REFERENCES mcp_servers (server_id)
         ON UPDATE RESTRICT ON DELETE CASCADE,
-    FOREIGN KEY (capability_id, capability_version)
-        REFERENCES capability_definitions (capability_id, capability_version)
+    FOREIGN KEY (capability_id)
+        REFERENCES capability_definitions (capability_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY (package_id, package_version)
         REFERENCES plugin_packages (package_id, package_version)

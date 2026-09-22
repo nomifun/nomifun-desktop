@@ -98,7 +98,6 @@ fn registration_for(
     let package = package_ref(package_id);
     let capability_ref = CapabilityRef {
         id: CapabilityId::from(capability_id),
-        version: VersionString::from(VERSION),
     };
     let config_schema = StrictJsonValue(json!({
         "type": "object",
@@ -136,7 +135,6 @@ fn registration_for(
             "capability:{}",
             capability_ref.id.as_ref()
         )),
-        version: capability_ref.version.clone(),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: display("Sample Echo", "Echo a message through the capability host."),
@@ -512,7 +510,6 @@ fn role_capability(
         contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
             "capability:{capability_id}"
         )),
-        version: VersionString::from(VERSION),
         kind,
         package: package.clone(),
         display: display("Sample Role Member", "Kernel operation admission fixture."),
@@ -571,7 +568,6 @@ fn operation_role_registration(
         RoleMemberContract {
             capability: CapabilityRef {
                 id: tool.id.clone(),
-                version: tool.version.clone(),
             },
             capability_manifest_digest: digest_payload(&tool).unwrap(),
             requirement: RoleMemberRequirement::Required,
@@ -579,7 +575,6 @@ fn operation_role_registration(
         RoleMemberContract {
             capability: CapabilityRef {
                 id: context.id.clone(),
-                version: context.version.clone(),
             },
             capability_manifest_digest: digest_payload(&context).unwrap(),
             requirement: RoleMemberRequirement::Optional,
@@ -587,7 +582,6 @@ fn operation_role_registration(
         RoleMemberContract {
             capability: CapabilityRef {
                 id: resource.id.clone(),
-                version: resource.version.clone(),
             },
             capability_manifest_digest: digest_payload(&resource).unwrap(),
             requirement: RoleMemberRequirement::Optional,
@@ -874,7 +868,6 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
         enabled_capabilities: vec![nomifun_agent_contracts::CapabilitySelection {
             capability: CapabilityRef {
                 id: CapabilityId::from(SAMPLE_CAPABILITY),
-                version: VersionString::from(VERSION),
             },
             action_allowlist: BTreeSet::from([ActionId::from(SAMPLE_ACTION)]),
         }],
@@ -2034,7 +2027,6 @@ fn duplicate_skill_and_mcp_faults_do_not_publish_partial_generation() {
         .mcp_tools[0]
         .capability = CapabilityRef {
         id: CapabilityId::from("sample.mcp-target.capability"),
-        version: VersionString::from(VERSION),
     };
     refresh_manifest(&mut cross_owner);
     assert!(matches!(
@@ -2064,7 +2056,6 @@ fn dependency_skill_and_service_faults_fail_closed() {
         .requires
         .push(CapabilityRef {
             id: CapabilityId::from("missing.capability"),
-            version: VersionString::from(VERSION),
         });
     refresh_manifest(&mut missing_capability);
     assert!(matches!(

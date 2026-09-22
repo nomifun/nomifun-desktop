@@ -19,7 +19,7 @@ async fn agent_only_reset_removes_canonical_agent_facts_and_preserves_configurat
     pool.execute(
         r#"
         INSERT INTO schema_metadata VALUES (
-            'canonical', 5, 'reset-test', 1,
+            'canonical', 6, 'reset-test', 1,
             '0000000000000000000000000000000000000000000000000000000000000000',
             '1111111111111111111111111111111111111111111111111111111111111111', 1
         );

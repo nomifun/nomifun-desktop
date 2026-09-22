@@ -91,10 +91,12 @@ describe('CreativeStudioAgentPanel source-parity states', () => {
   });
 
   test('renders the right panel, source header, empty state and composer', () => {
-    const html = renderPanel();
+    const html = renderPanel({ agentSelector: <button type='button'>Canvas Agent</button> });
 
     expect(html.includes('data-creative-studio-agent-panel="true"')).toBe(true);
     expect(html.includes('Creative Agent')).toBe(true);
+    expect(html.includes('Canvas Agent')).toBe(true);
+    expect(html.includes('Using Agent')).toBe(false);
     expect(html.includes('View history')).toBe(true);
     expect(html.includes('New conversation')).toBe(true);
     expect(html.includes('Collapse Agent panel')).toBe(true);

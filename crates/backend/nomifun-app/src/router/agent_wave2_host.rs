@@ -2153,7 +2153,6 @@ mod tests {
             enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
                     id: CapabilityId::from("workspace.files"),
-                    version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
             }],

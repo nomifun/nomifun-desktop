@@ -89,7 +89,7 @@ async fn product_middleware_order_is_saved_reused_and_frozen_per_session() {
             .as_array_mut()
             .unwrap()
             .push(json!({
-                "capability":{"id":id,"version":"1.0.0"},
+                "capability":{"id":id},
                 "action_allowlist":[middleware::ACTION_ID]
             }));
     }
@@ -364,14 +364,14 @@ async fn product_before_model_publish_select_and_real_node_transform() {
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "capability":{"id":discovery::CAPABILITY_ID,"version":"1.0.0"},
+            "capability":{"id":discovery::CAPABILITY_ID},
             "action_allowlist":[discovery::ACTION_ID]
         }));
     draft["document"]["enabled_capabilities"]
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "capability":{"id":capability_id,"version":"1.0.0"},
+            "capability":{"id":capability_id},
             "action_allowlist":[middleware::ACTION_ID]
         }));
     data(

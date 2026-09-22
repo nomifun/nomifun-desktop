@@ -31,8 +31,8 @@ use nomifun_agent_contracts::{
 use nomifun_api_types::{
     AgentCatalogResponse, AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
     ApplyPluginCandidateRequest, ApplyPluginTargetDto, CapabilityCatalogItemDto,
-    AgentChatModelSelectionDto, CatalogMaterializationStateDto,
-    CreateAgentPresetFromTemplateRequest, ExactCatalogRefDto, ImportPluginRequest,
+    AgentChatModelSelectionDto, CapabilityRefDto, CatalogMaterializationStateDto,
+    CreateAgentPresetFromTemplateRequest, ImportPluginRequest,
     PluginImportKindDto, SkillCatalogItemDto,
 };
 use nomifun_app::compatibility::{
@@ -378,15 +378,7 @@ async fn assert_official_preset_catalog_integrity(
     );
     let capability_by_ref = capabilities
         .iter()
-        .map(|item| {
-            (
-                (
-                    item.capability.id.clone(),
-                    item.capability.version.clone(),
-                ),
-                item,
-            )
-        })
+        .map(|item| (item.capability.id.clone(), item))
         .collect::<BTreeMap<_, _>>();
     let capabilities_by_id = capabilities.iter().fold(
         BTreeMap::<&str, Vec<&CapabilityCatalogItemDto>>::new(),
@@ -407,9 +399,7 @@ async fn assert_official_preset_catalog_integrity(
     let module_by_ref = catalog
         .modules
         .iter()
-        .map(|module| {
-            ((module.module.id.clone(), module.module.version.clone()), module)
-        })
+        .map(|module| (module.module.id.clone(), module))
         .collect::<BTreeMap<_, _>>();
 
     let mut missing = Vec::new();
@@ -421,7 +411,7 @@ async fn assert_official_preset_catalog_integrity(
             .enabled_capabilities
             .iter();
         for selection in direct_capabilities {
-            require_available_exact_capability(
+            require_available_capability(
                 phase,
                 &template_key,
                 &selection.capability,
@@ -429,13 +419,10 @@ async fn assert_official_preset_catalog_integrity(
                 &mut missing,
                 &mut unavailable,
             );
-            match module_by_ref.get(&(
-                selection.capability.id.clone(),
-                selection.capability.version.clone(),
-            )) {
+            match module_by_ref.get(&selection.capability.id) {
                 None => missing.push(format!(
-                    "{template_key}: exact Module catalog entry is missing for {}@{}",
-                    selection.capability.id, selection.capability.version,
+                    "{template_key}: Module catalog entry is missing for {}",
+                    selection.capability.id,
                 )),
                 Some(module) => {
                     if module.display_name.trim().is_empty() || module.description.trim().is_empty() {
@@ -471,7 +458,7 @@ async fn assert_official_preset_catalog_integrity(
                 )),
                 Some(items) if !items.iter().any(|item| capability_is_available(item)) => {
                     unavailable.push(format!(
-                        "{template_key}: role coverage capability {capability_id} has no available published version ({})",
+                        "{template_key}: role coverage capability {capability_id} has no available publication ({})",
                         items
                             .iter()
                             .map(|item| capability_state(item))
@@ -495,7 +482,7 @@ async fn assert_official_preset_catalog_integrity(
                 continue;
             };
             for reference in &skill.required_capabilities {
-                require_available_exact_capability(
+                require_available_capability(
                     phase,
                     &format!("{template_key} via skill {}@{}", skill_ref.id, skill_ref.version),
                     reference,
@@ -539,23 +526,22 @@ async fn assert_official_preset_catalog_integrity(
     }
 }
 
-fn require_available_exact_capability(
+fn require_available_capability(
     phase: &str,
     template: &str,
-    reference: &ExactCatalogRefDto,
-    capability_by_ref: &BTreeMap<(String, String), &CapabilityCatalogItemDto>,
+    reference: &CapabilityRefDto,
+    capability_by_ref: &BTreeMap<String, &CapabilityCatalogItemDto>,
     missing: &mut Vec<String>,
     unavailable: &mut Vec<String>,
 ) {
-    match capability_by_ref.get(&(reference.id.clone(), reference.version.clone())) {
+    match capability_by_ref.get(&reference.id) {
         None => missing.push(format!(
-            "{phase}: {template} references missing capability {}@{}",
-            reference.id, reference.version
+            "{phase}: {template} references missing capability {}",
+            reference.id
         )),
         Some(item) if !capability_is_available(item) => unavailable.push(format!(
-            "{phase}: {template} references unavailable capability {}@{} ({})",
+            "{phase}: {template} references unavailable capability {} ({})",
             reference.id,
-            reference.version,
             capability_state(item)
         )),
         Some(_) => {}
@@ -569,9 +555,8 @@ fn capability_is_available(item: &CapabilityCatalogItemDto) -> bool {
 
 fn capability_state(item: &CapabilityCatalogItemDto) -> String {
     format!(
-        "{}@{} state={:?} unavailable_code={:?}",
+        "{} state={:?} unavailable_code={:?}",
         item.capability.id,
-        item.capability.version,
         item.materialization_state,
         item.unavailable_code
     )
@@ -668,7 +653,6 @@ fn plugin_artifact(main: &[u8]) -> PluginPackageArtifactV1 {
     let capability = CapabilityManifest {
         id: CapabilityId::from("test.release-gate.plugin.echo"),
         contribution_id: "test.release_gate.echo.contribution".into(),
-        version: VersionString::from("1.0.0"),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: display("Release Gate Echo", "Triggers a real Plugin Catalog refresh."),

@@ -697,7 +697,6 @@ impl KernelRegistry {
                 .capability(&request.operation_lock.capability.id)
                 .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                     capability_id: request.operation_lock.capability.id.clone(),
-                    version: request.operation_lock.capability.version.clone(),
                 })?;
             validate_operation_lock(materialized, &request)?;
             let binding = published
@@ -1499,9 +1498,6 @@ fn validate_exact_capability_target(
             capability_id: capability_id.clone(),
             reason: "the frozen target is no longer materialized".to_owned(),
         })?;
-    if frozen.capability.version != current.manifest.version {
-        return capability_provenance_drift(capability_id, "capability version changed");
-    }
     if frozen.source_package != current.manifest.package {
         return capability_provenance_drift(capability_id, "source package changed");
     }
@@ -1618,7 +1614,6 @@ fn validate_operation_lock(
         });
     }
     if request.operation_lock.capability.id != *capability_id
-        || request.operation_lock.capability.version != materialized.manifest.version
         || request.operation_lock.contribution != materialized.contribution_lock
         || request.operation_lock.target_artifact_digest.as_ref()
             != Some(&materialized.target_artifact_digest)
@@ -2033,7 +2028,6 @@ fn resolve_role_member_dispatch(
             .capability(&request.capability_id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: request.capability_id.clone(),
-                version: nomifun_agent_contracts::VersionString::from("unknown"),
             })?;
         if !capability
             .manifest
@@ -2211,7 +2205,6 @@ fn resolve_role_member(
         .capability(&request.capability_id)
         .ok_or_else(|| KernelError::CapabilityNotMaterialized {
             capability_id: request.capability_id.clone(),
-            version: nomifun_agent_contracts::VersionString::from("unknown"),
         })?;
     let supports_expected = match expected_kind {
         CapabilityKind::Tool => capability.manifest.declares_actions(),

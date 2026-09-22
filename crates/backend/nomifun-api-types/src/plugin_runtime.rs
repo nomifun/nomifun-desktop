@@ -357,9 +357,9 @@ pub struct OpenPluginRuntimeSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct PluginAgentSurfaceGrantDto {
     pub agent_session_id: String,
-    /// Optional exact Catalog choice for a replacement Agent page.
+    /// Optional Catalog choice for a replacement Agent page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ui_capability: Option<crate::ExactCatalogRefDto>,
+    pub ui_capability: Option<crate::CapabilityRefDto>,
     /// Consent applies only to the release displayed by the trusted host UI.
     pub expected_release_digest: String,
 }

@@ -72,7 +72,6 @@ async fn run_runtime_lease_case(context: bool) {
             target: demand.context.target.clone(),
             capability: nomifun_agent_contracts::CapabilityRef {
                 id: "fixture.parent".into(),
-                version: "1.0.0".into(),
             },
             contribution_id: "fixture.dependency".into(),
             contract_digest: DigestHex::from("e".repeat(64)),

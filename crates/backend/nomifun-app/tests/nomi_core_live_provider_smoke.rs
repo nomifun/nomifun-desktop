@@ -589,16 +589,9 @@ async fn create_agent_preset(
                 StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
             ));
         }
-        let version = required_string(
-            "agent_settings.capabilities",
-            item,
-            "/capability/version",
-            "CODING_CAPABILITY_VERSION_MISSING",
-        )?;
         selections.push(json!({
             "capability": {
-                "id": capability_id,
-                "version": version
+                "id": capability_id
             },
             "action_allowlist": action_allowlist
         }));

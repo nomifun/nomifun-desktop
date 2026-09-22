@@ -17,11 +17,39 @@ use crate::{
 };
 
 pub type PackageRef = ExactVersionRef<PackageId>;
-pub type CapabilityRef = ExactVersionRef<CapabilityId>;
 pub type SkillRef = ExactVersionRef<SkillId>;
 pub type ServiceKeyRef = ExactVersionRef<ServiceKeyId>;
 pub type HostPortRef = ExactVersionRef<HostPortId>;
 pub type RuntimeFeatureRef = ExactVersionRef<RuntimeFeatureId>;
+
+/// Stable capability identity.
+///
+/// Capability implementations are frozen by their package/release provenance
+/// and contract digests. A second, independently maintained capability version
+/// would duplicate that identity and make authoring references unnecessarily
+/// brittle, so capability references intentionally contain only the stable ID.
+#[derive(
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityRef {
+    pub id: CapabilityId,
+}
+
+impl From<CapabilityId> for CapabilityRef {
+    fn from(id: CapabilityId) -> Self {
+        Self { id }
+    }
+}
 
 pub type PackageManifestArtifact = ArtifactEnvelope<PackageManifest>;
 pub type ServiceKeyDagArtifact = ArtifactEnvelope<ServiceKeyDagPayload>;
@@ -761,7 +789,6 @@ impl ContextContributionInput {
 pub struct CapabilityManifest {
     pub id: CapabilityId,
     pub contribution_id: crate::ContributionId,
-    pub version: VersionString,
     pub kind: CapabilityKind,
     pub package: PackageRef,
     pub display: LocalizedMetadata,
@@ -1299,7 +1326,6 @@ pub struct PluginRegistrationMetadata {
 #[serde(deny_unknown_fields)]
 pub struct TargetVersionPolicy {
     pub package_version: VersionString,
-    pub capability_version: VersionString,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1341,9 +1367,27 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        InProcessEntrypointMetadata, JavaScriptEntrypointMetadata, PackageEntrypointMetadata,
+        CapabilityRef, InProcessEntrypointMetadata, JavaScriptEntrypointMetadata,
+        PackageEntrypointMetadata,
     };
-    use crate::{DigestHex, VersionString};
+    use crate::{CapabilityId, DigestHex, VersionString};
+
+    #[test]
+    fn capability_reference_serializes_only_the_stable_id() {
+        let reference = CapabilityRef {
+            id: CapabilityId::from("workspace.files"),
+        };
+        assert_eq!(
+            serde_json::to_value(&reference).unwrap(),
+            json!({"id": "workspace.files"})
+        );
+        assert!(
+            serde_json::from_value::<CapabilityRef>(
+                json!({"id": "workspace.files", "version": "1.0.0"})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn context_phase_preserves_legacy_digest_and_turn_input_rejects_authority_fields() {
@@ -1380,7 +1424,6 @@ mod tests {
         let mut module = CapabilityManifest {
             id: CapabilityId::from("workspace.files"),
             contribution_id: ContributionId::from("module:workspace.files"),
-            version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: PackageRef {
                 id: PackageId::from("nomifun.workspace"),

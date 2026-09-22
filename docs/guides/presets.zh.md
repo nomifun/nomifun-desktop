@@ -62,8 +62,11 @@ typed resource 或已物化 Capability。
 ## 能力、技能与来源
 
 工作台从平台 Capability Catalog 查询能力。Catalog 条目至少包含稳定能力 ID、合同
-版本/digest、owner、来源 provenance、支持的消费者、typed contribution、所需资源和
+digest、owner、来源 Package/Release provenance、支持的消费者、typed contribution、所需资源和
 按消费者区分的 availability。
+
+Capability 没有独立版本号。Preset、依赖和冲突只引用稳定能力 ID；具体实现由 Package/Release
+版本、合同 digest、ContributionLock 与 Snapshot digest 冻结，因此更新实现不需要同步改写工作台引用。
 
 - 只有已发布、已启用并完成 materialization 的贡献可以进入正式 Catalog；
 - Ready Candidate、未发布 Release、Project Source、测试 Host 和 Plugin 私有

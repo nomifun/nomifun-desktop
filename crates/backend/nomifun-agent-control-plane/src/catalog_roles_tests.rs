@@ -8,7 +8,6 @@ use nomifun_agent_contracts::{
 fn fixture() -> (CatalogSnapshot, Vec<CapabilityCatalogItemDto>) {
     let member = CapabilityRef {
         id: "platform.search".into(),
-        version: "1.0.0".into(),
     };
     let manifest = RoleContractManifest {
         key: RoleContractKey {
@@ -134,9 +133,9 @@ fn role_projection_exposes_exact_sorted_builtin_and_user_choices_not_test_fixtur
 fn role_projection_uses_exact_visible_members_and_never_substitutes_a_different_contract() {
     let (mut catalog, mut capabilities) = fixture();
     assert!(catalog.roles_api(&[]).unwrap().is_empty());
-    capabilities[0].capability.version = "2.0.0".into();
+    capabilities[0].capability.id = "platform.other".into();
     assert!(catalog.roles_api(&capabilities).unwrap().is_empty());
-    capabilities[0].capability.version = "1.0.0".into();
+    capabilities[0].capability.id = "platform.search".into();
     catalog.role_providers[0].provider.role.contract_digest = "b".repeat(64).into();
     let roles = catalog.roles_api(&capabilities).unwrap();
     assert_eq!(roles[0].providers.len(), 1);

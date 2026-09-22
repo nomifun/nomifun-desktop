@@ -13,7 +13,7 @@ import {
 } from './capabilityGroups';
 
 const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
-  module: { id: asCapabilityId(id), version: '1.0.0' },
+  module: { id: asCapabilityId(id) },
   display_name: id,
   description: id,
   source_package: { id: asPackageId('nomifun.test'), version: '1.0.0' },

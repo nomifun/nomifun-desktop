@@ -649,7 +649,6 @@ export type I18nKey =
   | 'agentSettings.workbench.systemPermissionMissing'
   | 'agentSettings.workbench.toggleAction'
   | 'agentSettings.workbench.undo'
-  | 'agentSettings.workbench.version'
   | 'assetLibrary.actionFailed'
   | 'assetLibrary.bulk.addTags'
   | 'assetLibrary.bulk.delete'

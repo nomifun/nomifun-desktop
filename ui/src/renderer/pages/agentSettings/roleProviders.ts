@@ -1,8 +1,8 @@
 import type {
-  AgentCatalogResponse, AgentPresetDocument, ExactCatalogRef, RoleProviderSelection,
+  AgentCatalogResponse, AgentPresetDocument, CapabilityRef, RoleProviderSelection,
 } from '@/common/types/agentPlatform';
 
-const refKey = (ref: ExactCatalogRef<'capability'>) => JSON.stringify([ref.id, ref.version]);
+const refKey = (ref: CapabilityRef) => String(ref.id);
 
 export const providerSelectionKey = (selection: RoleProviderSelection): string => JSON.stringify([
   selection.role.key.role_id, selection.role.key.contract_version,

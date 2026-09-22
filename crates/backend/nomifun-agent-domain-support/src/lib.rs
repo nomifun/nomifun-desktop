@@ -346,7 +346,6 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
         capability_manifests.push(CapabilityManifest {
             id: capability_id,
             contribution_id,
-            version: VersionString::from(CONTRACT_VERSION),
             kind: capability.kind,
             package: package_ref.clone(),
             display: localized(capability.id, capability.id),
@@ -727,10 +726,7 @@ pub fn validate_inventory(
                     .contributions
                     .capabilities
                     .iter()
-                    .any(|capability| {
-                        capability.id == mapping.capability.id
-                            && capability.version == mapping.capability.version
-                    })
+                    .any(|capability| capability.id == mapping.capability.id)
             {
                 return Err(invalid_registration(
                     &manifest.package_id,

@@ -63,7 +63,6 @@ fn package_artifact(main: &[u8], lock_digest: DigestHex) -> PluginPackageArtifac
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.plugin-share.echo"),
         contribution_id: "capability:example.plugin-share.echo".into(),
-        version: "1.0.0".into(),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: LocalizedMetadata {

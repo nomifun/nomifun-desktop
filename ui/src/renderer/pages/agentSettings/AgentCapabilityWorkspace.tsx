@@ -698,7 +698,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                         <summary>{t('agentSettings.workbench.moduleTechnicalDetails')}</summary>
                         <dl>
                           <dt>ID</dt><dd>{reference.id}</dd>
-                          <dt>{t('agentSettings.workbench.version')}</dt><dd>{reference.version}</dd>
                           <dt>{t('agentSettings.capabilities.source')}</dt>
                           <dd>{entry.missing ? '—' : entry.module.source_package.id}</dd>
                           {availability?.unavailable_code && <>

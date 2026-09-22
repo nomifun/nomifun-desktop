@@ -625,9 +625,7 @@ fn validate_plugin_product_inputs<'a>(
                         .to_owned(),
             });
         }
-        if capability.capability.id.as_ref().trim().is_empty()
-            || capability.capability.version.as_ref().trim().is_empty()
-        {
+        if capability.capability.id.as_ref().trim().is_empty() {
             return Err(KernelError::InvalidPresetRevision {
                 reason: "Plugin Product capability reference must be non-empty".to_owned(),
             });
@@ -736,7 +734,6 @@ fn validate_plugin_product_inputs<'a>(
             if selection.capability != capability.capability {
                 return Err(KernelError::CapabilityNotMaterialized {
                     capability_id: selection.capability.id.clone(),
-                    version: selection.capability.version.clone(),
                 });
             }
             matched_selection = Some(selection);
@@ -786,15 +783,8 @@ fn validate_direct_selections(
         let Some(capability) = registry.capability(&selection.capability.id) else {
             return Err(KernelError::CapabilityNotMaterialized {
                 capability_id: selection.capability.id.clone(),
-                version: selection.capability.version.clone(),
             });
         };
-        if capability.manifest.version != selection.capability.version {
-            return Err(KernelError::CapabilityNotMaterialized {
-                capability_id: selection.capability.id.clone(),
-                version: selection.capability.version.clone(),
-            });
-        }
         let authoring = capability
             .manifest
             .authoring_policy()
@@ -847,7 +837,6 @@ fn validate_revision_contribution_locks(
             if plugin_product.capability != selection.capability {
                 return Err(KernelError::CapabilityNotMaterialized {
                     capability_id: selection.capability.id.clone(),
-                    version: selection.capability.version.clone(),
                 });
             }
             let frozen = revision
@@ -874,7 +863,6 @@ fn validate_revision_contribution_locks(
             .capability(&selection.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: selection.capability.id.clone(),
-                version: selection.capability.version.clone(),
             })?;
         if capability.source.source_kind
             == nomifun_agent_contracts::PluginSourceKind::TestFixture
@@ -1046,7 +1034,7 @@ fn validate_conflicts(
     for capability_id in &consumed {
         let capability = &registry.capability(capability_id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
-                capability_id: capability_id.clone(), version: "unknown".into(),
+                capability_id: capability_id.clone(),
             })?.manifest;
         if let Some(conflict) = capability
             .conflicts
@@ -1109,7 +1097,6 @@ fn resolved_capabilities(
                 dependency_refs: Vec::new(),
                 capability: CapabilityRef {
                     id: capability_id.clone(),
-                    version: capability.manifest.version.clone(),
                 },
                 source_package: capability.manifest.package.clone(),
                 contribution_id: capability.contribution_id.clone(),
@@ -1314,7 +1301,6 @@ fn apply_role_requirements(
                 let capability = registry.capability(capability_id)
                     .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                         capability_id: capability_id.clone(),
-                        version: "unknown".into(),
                     })?;
                 resolved.required_runtime_features.extend(capability.manifest.requires_runtime_features
                     .iter().map(|value| value.id.clone()));
@@ -1581,7 +1567,6 @@ mod tests {
             dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: CAPABILITY_ID.into(),
-                version: VERSION.into(),
             },
             source_package: PackageRef {
                 id: PackageId::from("plugin.fixture"),
@@ -1629,7 +1614,6 @@ mod tests {
         let selection = CapabilitySelection {
             capability: CapabilityRef {
                 id: CAPABILITY_ID.into(),
-                version: VERSION.into(),
             },
             action_allowlist,
         };
@@ -1750,12 +1734,12 @@ mod tests {
         let capability = plugin_product_capability(granted.clone());
         let mut saved_revision = revision(granted, capability.contribution_lock.clone());
         saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
-        saved_revision.payload.enabled_capabilities[0].capability.version = "2.0.0".into();
+        saved_revision.payload.enabled_capabilities[0].capability.id = "plugin.fixture.other".into();
         saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
         assert!(matches!(AgentPresetCompiler::compile(
             &MaterializedRegistry::empty(), &environment(),
             compile_request(saved_revision.clone(), capability.clone()),
-        ), Err(KernelError::CapabilityNotMaterialized { .. })));
+        ), Err(KernelError::InvalidPresetRevision { .. })));
 
         saved_revision.payload.enabled_capabilities[0].capability = capability.capability.clone();
         saved_revision.contribution_locks[0].contract_digest = digest('e');

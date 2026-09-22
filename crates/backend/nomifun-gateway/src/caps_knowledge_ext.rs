@@ -7,7 +7,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    CapabilityConsumer, CapabilityId, CapabilityRef, VersionString,
+    CapabilityConsumer, CapabilityId, CapabilityRef,
 };
 use nomifun_common::KnowledgeBaseId;
 use nomifun_knowledge::KnowledgeService;
@@ -239,7 +239,6 @@ async fn delete_file(deps: Arc<KnowledgeCapabilityDeps>, p: DeleteFileParams) ->
 async fn search(deps: Arc<KnowledgeCapabilityDeps>, p: SearchParams) -> Value {
     let capability = CapabilityRef {
         id: CapabilityId::from("knowledge"),
-        version: VersionString::from("1.0.0"),
     };
     if let Err(error) = deps
         .admission

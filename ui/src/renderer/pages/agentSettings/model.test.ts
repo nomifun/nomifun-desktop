@@ -36,7 +36,7 @@ const draft = (): AgentPresetDraft => ({
 });
 
 const moduleItem = (id: string): CapabilityModuleCatalogItem => ({
-  module: { id: asCapabilityId(id), version: '1.0.0' },
+  module: { id: asCapabilityId(id) },
   display_name: 'Workspace files',
   description: 'Read and change workspace files',
   source_package: { id: asPackageId('nomifun.workspace'), version: '1.0.0' },

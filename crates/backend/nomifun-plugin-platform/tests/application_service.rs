@@ -1719,7 +1719,6 @@ fn artifact_with_config_schema(
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.csv.read"),
         contribution_id: "capability:example.csv.read".into(),
-        version: "1.0.0".into(),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: LocalizedMetadata {

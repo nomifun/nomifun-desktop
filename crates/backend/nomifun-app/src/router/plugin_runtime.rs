@@ -273,7 +273,7 @@ async fn open_surface(
 ) -> Result<Json<ApiResponse<PluginRuntimeSurfaceLaunchDescriptorDto>>, Response> {
     require_route_id("plugin_id", &plugin_id, &request.plugin_id).map_err(IntoResponse::into_response)?;
     let selected = request.agent_session.as_ref().and_then(|grant| grant.ui_capability.as_ref()).map(|reference| nomifun_agent_contracts::CapabilityRef {
-        id: reference.id.clone().into(), version: reference.version.clone().into(),
+        id: reference.id.clone().into(),
     });
     let descriptor = state
         .application

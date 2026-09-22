@@ -64,7 +64,6 @@ fn contract(base: &PluginPackageArtifactV1) -> (RoleContractManifest, Vec<Capabi
             .map(|capability| RoleMemberContract {
                 capability: CapabilityRef {
                     id: capability.id.clone(),
-                    version: capability.version.clone(),
                 },
                 capability_manifest_digest: digest_payload(capability).unwrap(),
                 requirement: RoleMemberRequirement::Required,
@@ -94,7 +93,6 @@ fn provider(contract: &RoleContractManifest, mapped: bool) -> RoleProviderContri
                     RoleProviderMemberContribution {
                         implementation: mapped.then(|| CapabilityRef {
                             id: implementation.into(),
-                            version: VERSION.into(),
                         }),
                         supported_platforms: vec![PlatformConstraint::Any],
                         required_resource_kinds: if implementation == RESOURCE_ID {
@@ -747,7 +745,6 @@ async fn user_defined_role_registers_only_typed_facade_exports() {
         members: vec![RoleMemberContract {
             capability: CapabilityRef {
                 id: facade.id.clone(),
-                version: facade.version.clone(),
             },
             capability_manifest_digest: digest_payload(&facade).unwrap(),
             requirement: RoleMemberRequirement::Required,
@@ -769,7 +766,6 @@ async fn user_defined_role_registers_only_typed_facade_exports() {
                 RoleProviderMemberContribution {
                     implementation: Some(CapabilityRef {
                         id: implementation.id.clone(),
-                        version: implementation.version.clone(),
                     }),
                     supported_platforms: vec![PlatformConstraint::Any],
                     required_resource_kinds: BTreeSet::new(),

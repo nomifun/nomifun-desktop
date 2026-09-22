@@ -1,10 +1,10 @@
 import type {
   AgentPresetDocument,
   AgentPresetDraft,
+  CapabilityRef,
   CapabilityModuleCatalogItem,
   ChatRouteCandidate,
   ChatRouteRecord,
-  ExactCatalogRef,
   OfficialPresetKey,
   OfficialPresetTemplate,
 } from '@/common/types/agentPlatform';
@@ -101,8 +101,8 @@ export function updateDocument(
 }
 
 export const capabilityReferenceKey = (
-  reference: ExactCatalogRef<'capability'>
-): string => `${reference.id}@${reference.version}`;
+  reference: CapabilityRef
+): string => String(reference.id);
 
 export const RESOURCE_KIND_I18N_KEYS: Readonly<Record<string, string>> = {
   asset_library: 'assetLibrary',

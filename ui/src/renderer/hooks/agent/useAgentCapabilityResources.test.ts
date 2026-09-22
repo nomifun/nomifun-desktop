@@ -10,10 +10,9 @@ import {
 
 const capability = (
   id: string,
-  version: string,
   required_resource_kinds: string[]
 ): CapabilityCatalogItem => ({
-  capability: { id: asCapabilityId(id), version },
+  capability: { id: asCapabilityId(id) },
   kind: 'tool',
   display_name: id,
   description: id,
@@ -33,16 +32,15 @@ const capability = (
 });
 
 const catalog = [
-  capability('knowledge/search', '1.0.0', ['knowledge_base']),
-  capability('workspace.bind', '1.0.0', ['workspace']),
-  capability('knowledge/search', '2.0.0', ['different_resource']),
+  capability('knowledge/search', ['knowledge_base']),
+  capability('workspace.bind', ['workspace']),
 ];
 
 describe('Agent capability resource projection', () => {
-  test('matches exact capability references, including version', () => {
+  test('matches stable capability references by ID', () => {
     expect(
       [...requiredResourceKindsForCapabilityReferences(
-        [{ id: asCapabilityId('knowledge/search'), version: '1.0.0' }],
+        [{ id: asCapabilityId('knowledge/search') }],
         catalog
       )]
     ).toEqual(['knowledge_base']);
@@ -51,7 +49,7 @@ describe('Agent capability resource projection', () => {
   test('returns no resource kind for an absent capability', () => {
     expect(
       requiredResourceKindsForCapabilityReferences(
-        [{ id: asCapabilityId('missing.capability'), version: '1.0.0' }],
+        [{ id: asCapabilityId('missing.capability') }],
         catalog
       )
     ).toEqual(new Set());

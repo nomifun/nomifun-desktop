@@ -866,7 +866,6 @@ impl NomiPluginToolSchemaResolver for NomiCorePluginArtifactResolver {
             .iter()
             .find(|candidate| {
                 candidate.id == capability.capability.id
-                    && candidate.version == capability.capability.version
                     && candidate.contribution_id == capability.contribution_id
             })
             .ok_or_else(|| {
@@ -1364,7 +1363,6 @@ fn materialize_generated_plugin_draft(
         capabilities.push(CapabilityManifest {
             id: CapabilityId::from(capability_id.clone()),
             contribution_id: contribution_id.clone().into(),
-            version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
@@ -2785,7 +2783,6 @@ export async function activate() {
         let capability = CapabilityManifest {
             id: CapabilityId::from("test.nomicore.plugin.echo"),
             contribution_id: "test.nomicore.plugin.echo.contribution".into(),
-            version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: display("Echo", "NomiCore Plugin publisher fixture."),
@@ -2852,7 +2849,7 @@ export async function activate() {
                 contract_version: "1.0.0".into(),
             },
             members: vec![nomifun_agent_contracts::RoleMemberContract {
-                capability: CapabilityRef { id: facade.id.clone(), version: facade.version.clone() },
+                capability: CapabilityRef { id: facade.id.clone() },
                 capability_manifest_digest: nomifun_agent_contracts::digest_payload(&facade).unwrap(),
                 requirement: nomifun_agent_contracts::RoleMemberRequirement::Required,
             }],
@@ -2864,7 +2861,7 @@ export async function activate() {
             },
             display: display("Installed Context Provider", "Maps a user contract to an independently published Context."),
             members: BTreeMap::from([(facade.id.clone(), nomifun_agent_contracts::RoleProviderMemberContribution {
-                implementation: Some(CapabilityRef { id: context.id.clone(), version: context.version.clone() }),
+                implementation: Some(CapabilityRef { id: context.id.clone() }),
                 supported_platforms: vec![PlatformConstraint::Any], required_resource_kinds: BTreeSet::new(),
             })]),
         };
@@ -2872,7 +2869,7 @@ export async function activate() {
         // other candidates retain their independently defined callable contract.
         let mut context = context;
         context.conflicts.push(nomifun_agent_contracts::CapabilityConflict {
-            capability: CapabilityRef { id: dynamic_context.id.clone(), version: dynamic_context.version.clone() },
+            capability: CapabilityRef { id: dynamic_context.id.clone() },
             reason: "This Context implementation cannot be combined with the fixture turn Context".into(),
         });
         PluginPackageArtifactV1::new(
@@ -2992,13 +2989,13 @@ export async function activate() {
         let mut draft = editor.draft;
         draft.document.context_order = vec![capability_id.into()];
         draft.document.enabled_capabilities = vec![nomifun_api_types::CapabilitySelectionDto {
-            capability: nomifun_api_types::ExactCatalogRefDto { id: capability_id.into(), version: capability.manifest.version.as_ref().into() },
+            capability: nomifun_api_types::CapabilityRefDto { id: capability_id.into() },
             action_allowlist: BTreeSet::new(),
         }];
         let ordered_peer = "test.nomicore.plugin.turn-context-peer";
         if capability_id == "test.nomicore.plugin.turn-context" {
             draft.document.enabled_capabilities.push(nomifun_api_types::CapabilitySelectionDto {
-                capability: nomifun_api_types::ExactCatalogRefDto { id: ordered_peer.into(), version: "1.0.0".into() },
+                capability: nomifun_api_types::CapabilityRefDto { id: ordered_peer.into() },
                 action_allowlist: BTreeSet::new(),
             });
             draft.document.context_order.insert(0, ordered_peer.into());
@@ -3015,13 +3012,13 @@ export async function activate() {
         let expected_document = draft.document.clone();
         let preset_id = draft.preset_id.clone();
         if let Some(peer_id) = conflict_peer {
-            let peer = materialized.capability(&CapabilityId::from(peer_id))
-                .expect("conflict fixture must install both capabilities, not test missing admission");
+            assert!(
+                materialized.capability(&CapabilityId::from(peer_id)).is_some(),
+                "conflict fixture must install both capabilities, not test missing admission"
+            );
             let mut conflicting = draft.clone();
             conflicting.document.enabled_capabilities.push(nomifun_api_types::CapabilitySelectionDto {
-                capability: nomifun_api_types::ExactCatalogRefDto {
-                    id: peer_id.into(), version: peer.manifest.version.as_ref().into(),
-                },
+                capability: nomifun_api_types::CapabilityRefDto { id: peer_id.into() },
                 action_allowlist: BTreeSet::new(),
             });
             let rejected = control_plane.save_revision(&owner, &preset_id, nomifun_api_types::SaveAgentPresetRevisionRequest {
@@ -3563,7 +3560,6 @@ export async function activate() {
             dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: materialized.manifest.id.clone(),
-                version: materialized.manifest.version.clone(),
             },
             source_package: materialized.manifest.package.clone(),
             contribution_id: materialized.contribution_id.clone(),
@@ -3632,7 +3628,6 @@ export async function activate() {
         let catalog_snapshot = catalog.snapshot().unwrap();
         let capability_ref = CapabilityRef {
             id: capability_id.clone(),
-            version: VersionString::from("1.0.0"),
         };
         let operation_lock = catalog_snapshot
             .capability_catalog_entry(&capability_ref)
