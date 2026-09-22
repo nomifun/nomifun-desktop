@@ -13,13 +13,12 @@ import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import { Message } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
 import ChatSlider from './ChatSlider.tsx';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
-import CompanionChatPanel from '@/renderer/pages/nomi/companion/CompanionChatPanel';
 import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
 import {
   toAppliedCollaborationTemplate,
@@ -64,6 +63,40 @@ const sshHostIdOf = (conversation: TChatConversation | undefined): SshHostId | u
 
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
+
+const CompanionConversationRedirect: React.FC<{ conversationId: NomiConversation['id'] }> = ({ conversationId }) => {
+  const [target, setTarget] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void ipcBridge.companion.listCompanions
+      .invoke()
+      .then(async (companions) => {
+        const sessions = await Promise.all(
+          companions.map(async (companion) => ({
+            companionId: companion.companion_id,
+            session: await ipcBridge.companion.getCompanionSession
+              .invoke({ companion_id: companion.companion_id })
+              .catch(() => ({ conversation_id: null })),
+          }))
+        );
+        const owner = sessions.find((item) => item.session.conversation_id === conversationId);
+        if (!cancelled) {
+          setTarget(owner
+            ? `/nomi?companion=${encodeURIComponent(owner.companionId)}&mode=cohabit`
+            : '/nomi?mode=cohabit');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTarget('/nomi?mode=cohabit');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conversationId]);
+
+  return target ? <Navigate replace to={target} /> : <div className='size-full bg-1' />;
+};
 
 const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
@@ -443,16 +476,13 @@ const ChatConversation: React.FC<{
   if (conversation && conversation.type === 'nomi') {
     // Use the shared shell and composer with companion-owned configuration
     // callbacks; model/Agent edits must update the companion across all inputs.
-    if (conversation.extra?.companion_session) {
-      return (
-        <ExecutionProvider conversation={conversation}>
-          <CompanionChatPanel
-            key={conversation.id}
-            conversation={conversation}
-            extraTabs={workspaceExtraTabs}
-          />
-        </ExecutionProvider>
-      );
+    const isCompanionConversation =
+      conversation.extra?.companion_session ||
+      Boolean(conversation.extra?.companion_id) ||
+      conversation.agent_snapshot?.preset_name === 'companion.default' ||
+      conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
+    if (isCompanionConversation) {
+      return <CompanionConversationRedirect conversationId={conversation.id} />;
     }
     return (
       <ExecutionProvider conversation={conversation}>

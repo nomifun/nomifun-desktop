@@ -64,8 +64,8 @@ const CompanionRow: React.FC<CompanionRowProps> = ({
       onClick={() => onSelect(companion.companion_id)}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={classNames(
-        'group relative flex items-center gap-8px shrink-0 h-44px rd-8px pl-8px pr-6px cursor-pointer transition-colors box-border outline-none',
-        active ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3',
+        'group relative flex items-center gap-9px shrink-0 h-56px rd-10px pl-9px pr-7px cursor-pointer transition-colors box-border outline-none',
+        active ? '!bg-[rgba(var(--primary-6),0.09)] !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3',
         isDragging && 'opacity-60'
       )}
     >
@@ -76,7 +76,7 @@ const CompanionRow: React.FC<CompanionRowProps> = ({
           customFigure={customFigureMetaOf(companion)}
           mood={(companion.status.mood as CompanionMood) || 'content'}
           activity='idle'
-          size={30}
+          size={38}
         />
         {/* Model readiness is the one thing that decides whether this companion can
             talk at all, so it rides the avatar rather than hiding in a tab.
@@ -94,8 +94,8 @@ const CompanionRow: React.FC<CompanionRowProps> = ({
         >
           {companion.name}
         </span>
-        <span className={classNames('text-11px leading-13px', active ? 'text-primary-6 opacity-70' : 'text-t-tertiary')}>
-          Lv{companion.status.level}
+        <span className={classNames('text-11px leading-14px', active ? 'text-primary-6 opacity-75' : 'text-t-tertiary')}>
+          Lv {companion.status.level} · {t(`nomi.moods.${companion.status.mood}`, { defaultValue: companion.status.mood })}
         </span>
       </div>
       {/* Row actions live on an opaque tier: they float over text, and the app's

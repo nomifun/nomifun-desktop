@@ -7,7 +7,7 @@
 import type { TChatConversation } from '@/common/config/storage';
 import type { CompanionId, SshHostId } from '@/common/types/ids';
 
-type ConversationListItem = Pick<TChatConversation, 'execution_step_id' | 'extra'>;
+type ConversationListItem = Pick<TChatConversation, 'execution_step_id' | 'extra' | 'agent_snapshot'>;
 
 /** Attempt transcripts, companion-owned sessions, SSH-bound sessions have dedicated surfaces; they never re-enter the ordinary
  * work-conversation list. */
@@ -22,7 +22,11 @@ export const isOrdinaryWorkConversation = (conversation: ConversationListItem): 
       }
     | undefined;
   const isCompanionConversation =
-    !!extra?.companion_session || !!extra?.companion_id || !!extra?.channel_platform;
+    !!extra?.companion_session ||
+    !!extra?.companion_id ||
+    !!extra?.channel_platform ||
+    conversation.agent_snapshot?.preset_name === 'companion.default' ||
+    conversation.agent_snapshot?.enabled_capabilities.includes('companion') === true;
   const isSshHostConversation = !!extra?.ssh_host_id;
   const isExecutionAttemptTranscript = Boolean(conversation.execution_step_id);
   return (

@@ -48,6 +48,8 @@ const NomiChat: React.FC<{
   creationTasksEnabled?: boolean;
   /** Product-owned chat surfaces can explicitly suppress media creation scenes. */
   creationEnabled?: boolean;
+  /** Product-owned compact composer; configuration is exposed outside chat. */
+  compactProductComposer?: boolean;
 }> = ({
   conversation_id,
   workspace,
@@ -68,6 +70,7 @@ const NomiChat: React.FC<{
   extraRightTools,
   creationTasksEnabled = false,
   creationEnabled = true,
+  compactProductComposer = false,
 }) => {
   // Windowed history: load only the newest page on mount + lazily prepend older
   // pages on scroll-up. The nomi surface backs both work conversations and the
@@ -132,6 +135,7 @@ const NomiChat: React.FC<{
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
               creationEnabled={creationEnabled}
+              compactProductComposer={compactProductComposer}
               turnActivity={turnActivity}
             />
           )}

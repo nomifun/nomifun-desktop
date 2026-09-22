@@ -127,6 +127,7 @@ const Titlebar: React.FC = () => {
       </button>
     </InstantHoverTooltip>
   );
+  const showWorkCreateActions = !location.pathname.startsWith('/nomi');
 
   return (
     <div
@@ -170,19 +171,23 @@ const Titlebar: React.FC = () => {
             })}
           </>
         )}
-        {renderIconButton({
-          tooltip: t('terminal.newConversation'),
-          className: 'app-titlebar__button app-titlebar__button--nav',
-          onClick: () =>
-            navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetAgentSelection: true } })),
-          children: <Plus theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
-        })}
-        {renderIconButton({
-          tooltip: t('terminal.newTerminal'),
-          className: 'app-titlebar__button app-titlebar__button--nav',
-          onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
-          children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
-        })}
+        {showWorkCreateActions && (
+          <>
+            {renderIconButton({
+              tooltip: t('terminal.newConversation'),
+              className: 'app-titlebar__button app-titlebar__button--nav',
+              onClick: () =>
+                navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetAgentSelection: true } })),
+              children: <Plus theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
+            })}
+            {renderIconButton({
+              tooltip: t('terminal.newTerminal'),
+              className: 'app-titlebar__button app-titlebar__button--nav',
+              onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
+              children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
+            })}
+          </>
+        )}
         {(isSessionRoute || isAgentRoute) && (
           <ContentSiderTitlebarToggle
             channel={contentSiderChannel}

@@ -35,4 +35,19 @@ describe('ordinary conversation list ownership', () => {
     };
     expect(isOrdinaryWorkConversation(companionSession as never)).toBe(false);
   });
+
+  test('companion sessions remain hidden when list summaries omit companion extra fields', () => {
+    const companionSession = {
+      execution_step_id: undefined,
+      extra: {
+        custom_workspace: true,
+        workspace: 'C:/data/companion/workspaces/1-mochi',
+      },
+      agent_snapshot: {
+        preset_name: 'companion.default',
+        enabled_capabilities: ['companion', 'companion.memory'],
+      },
+    };
+    expect(isOrdinaryWorkConversation(companionSession as never)).toBe(false);
+  });
 });

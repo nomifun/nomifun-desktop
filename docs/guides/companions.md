@@ -18,24 +18,34 @@ migration painless.
 > route); the right-click menu of any desktop companion window ("Open chat")
 > deep-links there too.
 
-## Page layout: companion switcher + two tab domains
+## Page layout: roster + Cohabit / Manage
 
-The top of the Desktop Companion page is the **companion switcher bar**: one card per companion
-(character thumbnail + name + level) plus a **New companion** button. The
-selected companion drives the **companion-domain** tabs below; the few settings
-that are genuinely one-per-machine live in the **install-wide** tabs:
+The Desktop Companion page owns the whole companion experience. A persistent
+roster on the left switches identity without mixing companions into the work
+Session tree. The selected companion then has two first-level modes:
 
-| Domain | Tab | Contents |
+| Mode | Surface | Contents |
 | --- | --- | --- |
-| Companion domain (follows the switcher) | Overview | **Desktop-companion toggle** + that companion's level / XP / mood |
-| | Memory | **That companion's own memories** — no other companion's rows are listed here, and none of them can read these |
-| | Chat | That companion's own companion threads |
-| | Model & Knowledge | Chat model picker / **knowledge bindings** |
-| | Remote | That companion's IM bots (bound per companion — see the [channels guide](./channels.md)) |
-| | Evolution | **That companion's own** scheduled learning + skill generation + quiet hours |
-| | Settings | Name / character / persona / delete companion |
-| Install-wide (one per install) | Data Sources (in Settings › Privacy) | Which events this machine records at all, and how long they are kept. One set of switches for the whole device — every companion learns from the same recording |
-| | Migrate | Export / import migration bundles (see below) |
+| Cohabit | Dedicated companion conversation | One continuous history across desktop, IM and robot inputs, plus a concise status / memory / connection summary |
+| Manage | Overview | Name, figure, desktop visibility, level, persona, Agent and model / voice / vision slots |
+| Manage | Memory & knowledge | Only this companion's memories and knowledge bindings |
+| Manage | Connections & devices | IM channels, physical robots and companion-scoped MCP connections |
+| Manage | Evolution / Skills | Learning cadence, collection inputs, retention, quiet hours and generated / configured skills |
+| Manage | History / Migration & deletion | Day-based chat reading, package transfer and irreversible deletion |
+
+The native desktop quick window is the lightweight path into the same product:
+it switches companions, shows the latest turns, accepts a quick reply, and
+deep-links to Cohabit or Manage. It never appears in the work Session sidebar.
+The collapsed figure exposes up to three alternative companions directly. If
+the target already has a visible desktop window it is brought forward; otherwise
+the target is created at the current position and replaces the current figure
+only after its window is ready.
+In the expanded quick window, full Cohabit and Manage links live under **More**.
+Drag any non-interactive frame area to reposition the native window; collapsing
+the panel keeps the adjusted small-window position.
+The Guid home may still present the visual companion showcase as a discovery
+and deep-link surface; selecting a companion opens Cohabit and never creates or
+inserts a companion row in the work Session tree.
 
 ## Creating and managing companions
 
@@ -44,10 +54,9 @@ that are genuinely one-per-machine live in the **install-wide** tabs:
 2. **The first companion automatically becomes the default companion** (its card
    carries a "default" badge). The default companion is the fallback whenever
    a channel has no explicit binding (see the channels section below).
-3. In a companion's **Settings** tab you can rename it at any time (takes
-   effect immediately), swap the character, tune the persona (preset or
-   custom), **pick a chat model just for this companion**, and toggle the
-   desktop companion plus its quiet hours.
+3. In **Manage → Overview** you can rename it, swap its character, tune its
+   persona, **pick its chat model**, and toggle the desktop window. Quiet hours
+   and learning controls live under **Manage → Evolution**.
 4. **Deleting a companion** cascades: its **memories**, skills, companion
    conversations, runtime state (XP, …), and `('companion', companionId)` knowledge
    bindings are removed together; if you delete the default companion, the
