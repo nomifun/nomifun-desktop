@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use nomifun_common::KnowledgeBaseId;
 
 use crate::{ExecutionModelRef, IdmmConfig};
 
@@ -901,6 +902,24 @@ pub struct AgentSessionKnowledgePolicyDto {
     pub writeback_eagerness: AgentSessionKnowledgeWritebackEagernessDto,
 }
 
+/// Mutable Knowledge selection owned by one local AgentSession.
+///
+/// The saved Agent revision remains the immutable capability ceiling. This
+/// value may only select owner-visible Knowledge bases and narrow the
+/// Knowledge Actions that revision already grants.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionKnowledgeBindingDto {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub writeback: bool,
+    #[serde(default)]
+    pub writeback_eagerness: AgentSessionKnowledgeWritebackEagernessDto,
+    #[serde(default)]
+    pub kb_ids: Vec<KnowledgeBaseId>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
@@ -915,9 +934,10 @@ pub struct CreateAgentSessionRequestDto {
     /// themselves resource permissions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_selections: Vec<AgentResourceSelectionDto>,
-    /// Optional write-back disposition for the Knowledge resources selected
-    /// above. The host freezes it into those exact typed bindings; it cannot
-    /// add Knowledge, make a read-only base writable, or mutate later.
+    /// Initial write-back disposition for the Knowledge resources selected
+    /// above. The host freezes the exact initial authority; the dedicated
+    /// AgentSession Knowledge command may later replace only this resource
+    /// subset inside the saved Agent's immutable capability ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge_policy: Option<AgentSessionKnowledgePolicyDto>,
     /// Optional user-selected host workspace. This is only a candidate path:
@@ -1296,6 +1316,25 @@ mod snapshot_tests {
                 "unknown policy values or authority fields must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn agent_session_knowledge_binding_validates_exact_base_ids() {
+        let binding = serde_json::from_value::<AgentSessionKnowledgeBindingDto>(json!({
+            "enabled": true,
+            "writeback": true,
+            "writeback_eagerness": "auto",
+            "kb_ids": ["0190f5fe-7c00-7a00-8000-000000000099"]
+        }))
+        .expect("canonical live Knowledge binding");
+        assert_eq!(binding.kb_ids.len(), 1);
+        assert_eq!(binding.writeback_eagerness.as_str(), "auto");
+
+        assert!(serde_json::from_value::<AgentSessionKnowledgeBindingDto>(json!({
+            "enabled": true,
+            "kb_ids": ["not-a-knowledge-id"]
+        }))
+        .is_err());
     }
 
     #[test]

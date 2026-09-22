@@ -192,6 +192,22 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
             return Err(DbError::NotFound(format!("knowledge base {id}")));
         }
 
+        let session_consumers: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) \
+             FROM agent_session_resources resources \
+             JOIN agent_sessions sessions ON sessions.agent_session_id = resources.session_id \
+             WHERE sessions.state = 'live' AND resources.resource_kind = 'knowledge_base' \
+               AND resources.resource_id = ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if session_consumers > 0 {
+            return Err(DbError::Conflict(format!(
+                "knowledge base is still selected by {session_consumers} AgentSession(s); unmount it from those conversations before deleting it"
+            )));
+        }
+
         // CASCADE: remove this base from every session/workpath binding. The
         // binding row itself remains and may still contain other ordered bases.
         sqlx::query(
@@ -460,6 +476,29 @@ impl IKnowledgeRepository for SqliteKnowledgeRepository {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    async fn list_agent_sessions_using_kb(
+        &self,
+        kb_id: &str,
+    ) -> Result<Vec<(String, bool)>, DbError> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT resources.session_id, \
+                    CASE WHEN json_extract(resources.typed_parameters_json, '$.knowledge_enabled') = 'false' \
+                         THEN 0 ELSE 1 END \
+             FROM agent_session_resources resources \
+             JOIN agent_sessions sessions ON sessions.agent_session_id = resources.session_id \
+             WHERE sessions.state = 'live' AND resources.resource_kind = 'knowledge_base' \
+               AND resources.resource_id = ? \
+             ORDER BY resources.session_id",
+        )
+        .bind(kb_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(session_id, enabled)| (session_id, enabled != 0))
+            .collect())
     }
 
     // ── Knowledge tags ────────────────────────────────────────────────────

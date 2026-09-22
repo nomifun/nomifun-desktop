@@ -281,8 +281,8 @@ pub struct KbFileUpdateResult {
     pub entry_id: Option<KnowledgeEntryId>,
 }
 
-/// One mutable product consumer of a knowledge base (workpath, terminal, or
-/// Companion profile). Includes disabled bindings (greyed in the UI).
+/// One product consumer of a knowledge base (AgentSession, workpath, terminal,
+/// or Companion profile). Includes disabled selections (greyed in the UI).
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumerInfo {
     pub target_kind: String,
@@ -471,10 +471,10 @@ pub struct WriteOutcome {
 }
 
 /// Inputs for the turn-final write-back trigger. Whether the trigger fires at
-/// all is decided by the caller from [`WritebackEagerness`] — a `manual` binding
-/// never reaches here, so no provider call is spent on it. Once here, eagerness
-/// only shapes candidate extraction and [`resolve_write_policy`] decides whether
-/// this surface may write.
+/// all is decided by the caller from [`WritebackEagerness`]: automatic mode
+/// evaluates each completed turn, while manual mode reaches this boundary only
+/// after explicit user save/record intent. Once here, eagerness shapes candidate
+/// extraction and [`resolve_write_policy`] decides whether this surface may write.
 #[derive(Debug, Clone)]
 pub struct TurnWritebackRequest {
     pub mounts: Vec<KnowledgeMountInfo>,
@@ -2602,7 +2602,10 @@ impl KnowledgeService {
         Ok(info)
     }
 
-    /// Delete a base registration and its logical binding references.
+    /// Delete a base registration and its legacy logical binding references.
+    /// The SQLite repository atomically refuses deletion while any live
+    /// canonical AgentSession still selects the base, including a disabled
+    /// selection retained for later re-enabling.
     ///
     /// `purge` additionally removes the files on disk, but only for managed
     /// bases whose path is strictly below `{data_dir}/knowledge/`. The database
@@ -5204,10 +5207,26 @@ impl KnowledgeService {
     pub async fn list_consumers(&self, id: &str) -> Result<Vec<ConsumerInfo>, AppError> {
         self.require_base(id).await?;
         let rows = self.repo.list_bindings_using_kb(id).await?;
-        Ok(rows
+        let mut consumers = rows
             .into_iter()
+            // Conversation rows belong to the retired side channel. Canonical
+            // AgentSession consumers are projected below from
+            // `agent_session_resources`; never show both authorities.
+            .filter(|row| row.target_kind != "conversation")
             .map(|r| ConsumerInfo { target_kind: r.target_kind.clone(), target_id: r.target_id(), enabled: r.enabled })
-            .collect())
+            .collect::<Vec<_>>();
+        consumers.extend(
+            self.repo
+                .list_agent_sessions_using_kb(id)
+                .await?
+                .into_iter()
+                .map(|(session_id, enabled)| ConsumerInfo {
+                    target_kind: "conversation".to_owned(),
+                    target_id: Some(session_id),
+                    enabled,
+                }),
+        );
+        Ok(consumers)
     }
 
     /// Resolve a model-supplied write target to a canonical document + op.
@@ -8635,6 +8654,73 @@ impl KnowledgeService {
             writeback_eagerness: binding.writeback_eagerness,
             channel_write_enabled: binding.channel_write_enabled,
         }
+    }
+
+    /// Build bounded prompt/write-back metadata for an exact AgentSession
+    /// Knowledge selection without creating workspace symlinks or consulting
+    /// the legacy mutable binding table.
+    pub async fn mount_info_for_bases(
+        &self,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<Vec<KnowledgeMountInfo>, AppError> {
+        if kb_ids.len() > 32 {
+            return Err(AppError::BadRequest(
+                "an AgentSession may mount at most 32 Knowledge bases".to_owned(),
+            ));
+        }
+        let mut unique = HashSet::with_capacity(kb_ids.len());
+        let mut used_names = HashSet::new();
+        let mut metas = Vec::with_capacity(kb_ids.len());
+        for kb_id in kb_ids {
+            if !unique.insert(kb_id.clone()) {
+                return Err(AppError::BadRequest(format!(
+                    "duplicate knowledge base id in AgentSession: {kb_id}"
+                )));
+            }
+            let row = self.require_base(kb_id.as_str()).await?;
+            validate_knowledge_root_bounded(PathBuf::from(&row.root_path)).await?;
+            let link_name = unique_link_name(&row, &mut used_names);
+            metas.push((link_name, row));
+        }
+
+        let mut tocs = Vec::with_capacity(metas.len());
+        for (_, row) in &metas {
+            tocs.push(build_toc(Path::new(&row.root_path)).await);
+        }
+        crate::context::apply_toc_budgets(&mut tocs);
+
+        let mut mounts = Vec::with_capacity(metas.len());
+        for ((link_name, row), toc) in metas.into_iter().zip(tocs) {
+            let knowledge_base_id = KnowledgeBaseId::parse(row.knowledge_base_id.clone())
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "stored knowledge base id '{}' is invalid: {error}",
+                        row.knowledge_base_id
+                    ))
+                })?;
+            let live_sources = match source_from_extra(&row.extra).map_err(|error| {
+                knowledge_row_json_error(&row.knowledge_base_id, error)
+            })? {
+                Some(source) if source.mode == KnowledgeSourceMode::Live => source
+                    .entries
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.sync_status != KnowledgeSourceSyncStatus::Paused
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            mounts.push(KnowledgeMountInfo {
+                knowledge_base_id,
+                name: row.name,
+                description: row.description,
+                rel_path: format!("{KB_MOUNT_REL_DIR}/{link_name}"),
+                toc,
+                summary: read_base_summary(Path::new(&row.root_path)).await,
+                live_sources,
+            });
+        }
+        Ok(mounts)
     }
 
     // ── Internals ───────────────────────────────────────────────────

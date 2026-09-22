@@ -121,6 +121,7 @@ pub const COMPANION_MEMORY_RESOURCE_KIND: &str = "companion_memory";
 pub const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
 pub const KNOWLEDGE_NAME_PARAMETER: &str = "knowledge_name";
 pub const KNOWLEDGE_DESCRIPTION_PARAMETER: &str = "knowledge_description";
+pub const KNOWLEDGE_ENABLED_PARAMETER: &str = "knowledge_enabled";
 pub const KNOWLEDGE_WRITEBACK_PARAMETER: &str = "knowledge_writeback";
 pub const KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER: &str = "knowledge_writeback_eagerness";
 pub const WAVE1_CAPABILITY_HOST_PORT_ID: &str = "host.wave1.capability.invoke";
@@ -282,7 +283,7 @@ const PACKAGES: [PackageSpec; 4] = [
         mount_id: KNOWLEDGE_MOUNT_ID,
         module_id: KNOWLEDGE_MODULE_ID,
         display_name: "Knowledge",
-        description: "Search and read the Session's mounted Knowledge bases before answering covered topics; write and generate content only through the frozen Knowledge authority.",
+        description: "Search and read the Session's mounted Knowledge bases before answering covered topics; write and generate content only through the current host-validated Knowledge authority.",
         actions: &KNOWLEDGE_ACTIONS,
     },
     PackageSpec {
@@ -751,6 +752,20 @@ fn capability_manifest(
 
 struct Wave1KnowledgeContextFactory;
 
+/// Whether this exact persisted Knowledge resource participates in the next
+/// AgentSession turn. Missing means enabled for pre-toggle Session bindings.
+pub fn agent_knowledge_enabled(binding: &TypedResourceBinding) -> Result<bool, String> {
+    match binding
+        .typed_parameters
+        .get(KNOWLEDGE_ENABLED_PARAMETER)
+        .map(String::as_str)
+    {
+        None | Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => Err("Knowledge resource has an invalid enabled switch".to_owned()),
+    }
+}
+
 /// Read the host-frozen Session write-back disposition from one exact
 /// Knowledge resource. Legacy bindings default to the safe read-only/manual
 /// policy. Invalid persisted values fail closed instead of widening behavior.
@@ -780,12 +795,23 @@ pub fn agent_knowledge_writeback_policy(
     Ok((enabled, eagerness))
 }
 
-pub fn agent_knowledge_writeback_policy_is_explicit(
+/// Runtime operations after applying the mutable per-Session disposition.
+/// The saved Agent Action grant remains the ceiling; this function only
+/// removes authority. Disabled resources return an empty set and are omitted
+/// from runtime compilation by the application host.
+pub fn effective_agent_knowledge_operations(
     binding: &TypedResourceBinding,
-) -> bool {
-    binding
-        .typed_parameters
-        .contains_key(KNOWLEDGE_WRITEBACK_PARAMETER)
+) -> Result<BTreeSet<String>, String> {
+    if !agent_knowledge_enabled(binding)? {
+        return Ok(BTreeSet::new());
+    }
+    let (writeback, _) = agent_knowledge_writeback_policy(binding)?;
+    Ok(binding
+        .operations
+        .iter()
+        .filter(|operation| writeback || operation.as_str() != "write")
+        .cloned()
+        .collect())
 }
 
 #[async_trait]
@@ -848,7 +874,8 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
                 .map(String::as_str)
                 .unwrap_or_default();
             let policy = (
-                agent_knowledge_writeback_policy_is_explicit(binding),
+                agent_knowledge_enabled(binding)
+                    .map_err(|reason| KernelError::CapabilityExecution { reason })?,
                 agent_knowledge_writeback_policy(binding)
                     .map_err(|reason| KernelError::CapabilityExecution { reason })?,
             );
@@ -859,12 +886,14 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
                 });
             }
             writeback_policy = Some(policy);
-            let allowed_operations = binding
-                .operations
-                .iter()
-                .filter(|operation| !policy.0 || (policy.1).0 || operation.as_str() != "write")
-                .cloned()
-                .collect::<BTreeSet<_>>();
+            if !policy.0 {
+                return Err(KernelError::CapabilityExecution {
+                    reason: "Disabled Knowledge resources reached the active runtime context"
+                        .to_owned(),
+                });
+            }
+            let allowed_operations = effective_agent_knowledge_operations(binding)
+                .map_err(|reason| KernelError::CapabilityExecution { reason })?;
             mounted_bases.push(json!({
                 "knowledge_base_id": binding.resource_id.as_ref(),
                 "name": name,
@@ -879,16 +908,15 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
             });
         }
 
-        let (policy_explicit, (writeback, writeback_eagerness)) =
-            writeback_policy.unwrap_or((false, (false, "manual")));
+        let (_enabled, (writeback, writeback_eagerness)) =
+            writeback_policy.unwrap_or((true, (false, "manual")));
         let available_actions = request
             .context
             .resolved_capability
             .action_allowlist
             .iter()
             .filter(|action| {
-                !policy_explicit
-                    || writeback
+                writeback
                     || !matches!(
                         action.as_ref(),
                         KNOWLEDGE_WRITE_ACTION_ID | KNOWLEDGE_AUTOGEN_ACTION_ID
@@ -902,21 +930,18 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
             .action_allowlist
             .contains(&ActionId::from(KNOWLEDGE_SEARCH_ACTION_ID));
         let retrieval_instruction = if search_first {
-            "These are the authoritative Knowledge bases mounted into this Session. Whenever the user's task or question may be covered by them, call the tool whose Action is knowledge/search before answering from memory. Then call knowledge/read with the returned handle for the most relevant document before relying on it. Cite the returned source path, and never claim that Knowledge was checked unless the tool was actually called."
+            "These are the authoritative Knowledge bases mounted into this Session. The host performs one bounded search for every user turn and supplies a nomifun_knowledge_retrieval block when this Module is enabled. Use matching documents before answering from memory and cite their source_path. Call knowledge/search and then knowledge/read when the automatic evidence is absent, ambiguous, or needs refinement. Never claim that Knowledge was checked unless the host retrieval block or an actual Knowledge tool result proves it."
         } else {
             "These are the authoritative Knowledge bases mounted into this Session. Use only the Knowledge Actions explicitly available to this Agent and never claim that a base was checked unless a Knowledge tool was actually called."
         };
-        let writeback_instruction = match (policy_explicit, writeback, writeback_eagerness) {
-            (false, _, _) => {
-                "This legacy Session has no explicit write-back disposition. Use Knowledge write actions only when the user explicitly asks you to save or update Knowledge."
-            }
-            (true, false, _) => {
+        let writeback_instruction = match (writeback, writeback_eagerness) {
+            (false, _) => {
                 "Knowledge write-back is disabled for this Session. Treat every mounted base as read-only and do not call knowledge/write or knowledge/autogen."
             }
-            (true, true, "manual") => {
+            (true, "manual") => {
                 "Knowledge write-back is enabled in manual mode. Call knowledge/write or knowledge/autogen only when the user explicitly asks you to save or update Knowledge."
             }
-            (true, true, "auto") => {
+            (true, "auto") => {
                 "Knowledge write-back is enabled in automatic mode. You may call knowledge/write for clearly correct, durable, reusable knowledge with lasting value; never persist trivia, temporary state, guesses, secrets, or duplicates."
             }
             _ => unreachable!("write-back eagerness was validated above"),
@@ -1923,17 +1948,27 @@ mod tests {
             typed_parameters: BTreeMap::new(),
         };
         assert_eq!(agent_knowledge_writeback_policy(&binding), Ok((false, "manual")));
-        assert!(!agent_knowledge_writeback_policy_is_explicit(&binding));
+        assert_eq!(agent_knowledge_enabled(&binding), Ok(true));
+
+        binding
+            .typed_parameters
+            .insert(KNOWLEDGE_ENABLED_PARAMETER.to_owned(), "false".to_owned());
+        assert_eq!(agent_knowledge_enabled(&binding), Ok(false));
+        binding
+            .typed_parameters
+            .insert(KNOWLEDGE_ENABLED_PARAMETER.to_owned(), "true".to_owned());
 
         binding
             .typed_parameters
             .insert(KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(), "true".to_owned());
-        assert!(agent_knowledge_writeback_policy_is_explicit(&binding));
         binding.typed_parameters.insert(
             KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
             "auto".to_owned(),
         );
         assert_eq!(agent_knowledge_writeback_policy(&binding), Ok((true, "auto")));
+        assert!(effective_agent_knowledge_operations(&binding)
+            .unwrap()
+            .contains("write"));
 
         binding.typed_parameters.insert(
             KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),

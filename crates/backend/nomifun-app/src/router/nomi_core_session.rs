@@ -42,7 +42,8 @@ use nomifun_agent_control_plane::{
 use super::nomi_core_control_plane::control_plane_router_without_legacy_skills;
 use nomifun_api_types::{
     AgentBindingValueDto, AgentResourceSelectionDto,
-    AgentSessionKnowledgePolicyDto, AgentSessionKnowledgeWritebackEagernessDto,
+    AgentSessionKnowledgeBindingDto, AgentSessionKnowledgePolicyDto,
+    AgentSessionKnowledgeWritebackEagernessDto,
     ApiResponse, ConversationListResponse, ConversationResponse,
     ConversationRuntimeStateKind, ConversationRuntimeSummary, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
@@ -1613,6 +1614,10 @@ impl NomiCoreSessionOwner {
         request: SendMessageRequest,
         initial_only: bool,
     ) -> Result<IdempotentMessageDelivery, AppError> {
+        let _operation_fence = self
+            .session_operation_lock(session_id.as_ref())
+            .read_owned()
+            .await;
         let input = self
             .canonical_turn_input_with_admission(owner_id, session_id, &request)
             .await?;
@@ -6935,6 +6940,11 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             put(switch_nomi_core_agent_session_model),
         )
         .route(
+            "/api/agent-sessions/{agent_session_id}/knowledge",
+            get(get_nomi_core_agent_session_knowledge)
+                .put(update_nomi_core_agent_session_knowledge),
+        )
+        .route(
             "/api/agent-sessions/{agent_session_id}/projection",
             get(get_nomi_core_agent_session_projection),
         )
@@ -9725,6 +9735,10 @@ fn freeze_agent_session_knowledge_policy(
     };
     for resource in knowledge {
         resource.typed_parameters.insert(
+            nomifun_agent_domain_wave1::KNOWLEDGE_ENABLED_PARAMETER.to_owned(),
+            "true".to_owned(),
+        );
+        resource.typed_parameters.insert(
             nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(),
             writeback.to_owned(),
         );
@@ -9734,6 +9748,246 @@ fn freeze_agent_session_knowledge_policy(
         );
     }
     Ok(())
+}
+
+fn agent_session_knowledge_binding(
+    binding: &AgentBindingValue,
+) -> Result<AgentSessionKnowledgeBindingDto, NomiCoreApiError> {
+    let resources = binding
+        .typed_resource_bindings
+        .iter()
+        .filter(|resource| {
+            resource.resource_kind.as_ref()
+                == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+        })
+        .collect::<Vec<_>>();
+    let Some(first) = resources.first() else {
+        return Ok(AgentSessionKnowledgeBindingDto::default());
+    };
+    let enabled = nomifun_agent_domain_wave1::agent_knowledge_enabled(first)
+        .map_err(AppError::Conflict)?;
+    let (writeback, eagerness) =
+        nomifun_agent_domain_wave1::agent_knowledge_writeback_policy(first)
+            .map_err(AppError::Conflict)?;
+    for resource in resources.iter().skip(1) {
+        if nomifun_agent_domain_wave1::agent_knowledge_enabled(resource)
+            .map_err(AppError::Conflict)?
+            != enabled
+            || nomifun_agent_domain_wave1::agent_knowledge_writeback_policy(resource)
+                .map_err(AppError::Conflict)?
+                != (writeback, eagerness)
+        {
+            return Err(AppError::Conflict(
+                "AgentSession Knowledge resources carry inconsistent live policies".to_owned(),
+            )
+            .into());
+        }
+    }
+    Ok(AgentSessionKnowledgeBindingDto {
+        enabled,
+        writeback: enabled && writeback,
+        writeback_eagerness: if enabled && writeback && eagerness == "auto" {
+            AgentSessionKnowledgeWritebackEagernessDto::Auto
+        } else {
+            AgentSessionKnowledgeWritebackEagernessDto::Manual
+        },
+        kb_ids: resources
+            .iter()
+            .map(|resource| {
+                nomifun_common::KnowledgeBaseId::parse(
+                    resource.resource_id.as_ref().to_owned(),
+                )
+                .map_err(|error| {
+                    AppError::Conflict(format!(
+                        "AgentSession Knowledge resource identity is invalid: {error}"
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+async fn get_nomi_core_agent_session_knowledge(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+) -> Result<Json<ApiResponse<AgentSessionKnowledgeBindingDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let observation = state
+        .session_owner
+        .canonical()
+        .get(&authenticated_principal(&owner), &session_id)
+        .await?;
+    Ok(Json(ApiResponse::ok(agent_session_knowledge_binding(
+        &observation.session.agent_binding,
+    )?)))
+}
+
+async fn update_nomi_core_agent_session_knowledge(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(mut requested): Json<AgentSessionKnowledgeBindingDto>,
+) -> Result<Json<ApiResponse<AgentSessionKnowledgeBindingDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    if requested.enabled && requested.kb_ids.is_empty() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "KNOWLEDGE_RESOURCE_NOT_BOUND",
+            "enable Knowledge only after selecting at least one Knowledge base",
+        ));
+    }
+    if !requested.enabled || !requested.writeback {
+        requested.writeback = false;
+        requested.writeback_eagerness =
+            AgentSessionKnowledgeWritebackEagernessDto::Manual;
+    }
+
+    // Serialize admission, runtime recycling and the binding CAS against new
+    // turns. A turn admitted first makes the Store reject this mutation; a
+    // mutation admitted first tears down the old runtime before any successor
+    // can observe the new binding.
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .write_owned()
+        .await;
+    let principal = authenticated_principal(&owner);
+    let observation = state
+        .session_owner
+        .canonical()
+        .get(&principal, &session_id)
+        .await?;
+    if observation.session.remote_binding_provenance.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_KNOWLEDGE_IS_REMOTE_FROZEN",
+            "Remote AgentSession Knowledge resources are fixed by its Remote binding",
+        ));
+    }
+    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_TURN_ACTIVE",
+            "wait for the active Turn before changing Knowledge",
+        ));
+    }
+    let attempt_transcript: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
+         WHERE conversation_id = ? AND relation = 'attempt')",
+    )
+    .bind(session_id.as_ref())
+    .fetch_one(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if attempt_transcript != 0 {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+            "AgentExecution Attempt transcripts cannot change their Knowledge binding",
+        ));
+    }
+    if agent_session_knowledge_binding(&observation.session.agent_binding)? == requested {
+        return Ok(Json(ApiResponse::ok(requested)));
+    }
+
+    let current_dto = agent_binding_dto(&observation.session.agent_binding)?;
+    let requested_ids = requested
+        .kb_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let mut knowledge = state
+        .resource_bindings
+        .resolve_knowledge_for_saved_binding(
+            &state.control_plane,
+            &owner.0,
+            &current_dto,
+            &requested_ids,
+        )
+        .await?;
+    if requested.writeback
+        && knowledge
+            .iter()
+            .any(|resource| !resource.operations.contains("write"))
+    {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "KNOWLEDGE_WRITEBACK_NOT_AVAILABLE",
+            "every selected Knowledge base must be editable before write-back can be enabled",
+        ));
+    }
+    let enabled = if requested.enabled { "true" } else { "false" };
+    let writeback = if requested.writeback { "true" } else { "false" };
+    let eagerness = requested.writeback_eagerness.as_str();
+    for resource in &mut knowledge {
+        resource.typed_parameters.insert(
+            nomifun_agent_domain_wave1::KNOWLEDGE_ENABLED_PARAMETER.to_owned(),
+            enabled.to_owned(),
+        );
+        resource.typed_parameters.insert(
+            nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(),
+            writeback.to_owned(),
+        );
+        resource.typed_parameters.insert(
+            nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
+            eagerness.to_owned(),
+        );
+    }
+    let mut replacement_dto = current_dto;
+    replacement_dto.typed_resource_bindings.retain(|resource| {
+        resource.resource_kind
+            != nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+    });
+    replacement_dto.typed_resource_bindings.extend(knowledge);
+    replacement_dto
+        .typed_resource_bindings
+        .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+    replacement_dto.binding_version = replacement_dto
+        .binding_version
+        .checked_add(1)
+        .ok_or_else(|| AppError::Conflict("AgentSession binding version overflow".to_owned()))?;
+    let replacement: AgentBindingValue = serde_json::to_value(&replacement_dto)
+        .and_then(serde_json::from_value)
+        .map_err(|error| {
+            AppError::Conflict(format!(
+                "resolved Session Knowledge binding is invalid: {error}"
+            ))
+        })?;
+
+    state
+        .session_owner
+        .runtime_sessions
+        .terminate_and_wait_result(
+            session_id.as_ref(),
+            Some(AgentKillReason::ConfigurationChanged),
+        )
+        .await?;
+    let updated = state
+        .session_owner
+        .canonical()
+        .store()
+        .replace_session_resource_bindings(
+            &principal,
+            &session_id,
+            &observation.session.agent_binding,
+            replacement,
+            nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND,
+        )
+        .await
+        .map_err(agent_session_store_error)?;
+    let updated_binding = agent_session_knowledge_binding(&updated.agent_binding)?;
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "agentSession.knowledgeChanged",
+            json!({
+                "agent_session_id": session_id,
+                "binding": updated_binding.clone(),
+            }),
+        ),
+    );
+    Ok(Json(ApiResponse::ok(updated_binding)))
 }
 
 async fn get_nomi_core_agent_session(
@@ -9809,6 +10063,11 @@ async fn switch_nomi_core_agent_session_model(
     Json(model): Json<AgentChatModelSelectionDto>,
 ) -> Result<Json<ApiResponse<ConversationResponse>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .write_owned()
+        .await;
     let observation = state
         .session_owner
         .canonical()
@@ -10500,6 +10759,11 @@ async fn warm_nomi_core_agent_session(
     Path(agent_session_id): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, NomiCoreApiError> {
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .read_owned()
+        .await;
     let mut projection = state
         .session_owner
         .canonical_conversation_projection(owner.as_ref(), &session_id)

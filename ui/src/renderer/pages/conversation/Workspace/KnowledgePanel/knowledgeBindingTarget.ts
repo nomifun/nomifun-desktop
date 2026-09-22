@@ -6,7 +6,7 @@
 
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
-import type { KnowledgeBaseId } from '@/common/types/ids';
+import type { ConversationId } from '@/common/types/ids';
 import {
   workpathKeyForTerminal,
 } from '@/renderer/pages/conversation/SessionList/utils/sessionWorkpath';
@@ -22,8 +22,8 @@ import {
 export type SessionKnowledgeSource =
   | {
       kind: 'conversation';
-      /** Exact resources frozen into the canonical AgentSession binding. */
-      knowledgeBaseIds: readonly KnowledgeBaseId[];
+      /** Canonical AgentSession whose Knowledge subset is mutable between turns. */
+      sessionId: ConversationId;
     }
   | {
       kind: 'terminal';
@@ -36,7 +36,7 @@ export type SessionKnowledgeSource =
  * the widened, already-resolved form the read path passes around.
  */
 export interface ResolvedKnowledgeBindingTarget {
-  kind: KnowledgeBindingKind;
+  kind: KnowledgeBindingKind | 'conversation';
   target_id: string;
 }
 
@@ -48,9 +48,8 @@ export function workpathDisplayForKnowledgeTarget(
 }
 
 /**
- * Resolve only mutable workpath-backed terminal bindings. Conversation
- * resources are already carried by their frozen canonical AgentSession and do
- * not have a second Knowledge-binding row.
+ * Resolve the product-owned binding address. Conversation updates use the
+ * dedicated AgentSession command; terminals keep the workpath binding route.
  */
 export function resolveKnowledgeBindingTarget(
   source: SessionKnowledgeSource
@@ -58,7 +57,7 @@ export function resolveKnowledgeBindingTarget(
   if (source.kind === 'terminal') {
     return { kind: 'workpath', target_id: workpathKeyForTerminal(source.session) };
   }
-  return null;
+  return { kind: 'conversation', target_id: source.sessionId };
 }
 
 /** Stable cache/subscription key for a resolved target. */

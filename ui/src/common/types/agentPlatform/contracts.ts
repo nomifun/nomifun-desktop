@@ -2,6 +2,7 @@ import type {
   AgentId,
   AgentPresetId,
   AgentSessionId,
+  KnowledgeBaseId,
   MessageId,
   ProviderId,
   RemoteBindingId,
@@ -117,8 +118,9 @@ export interface AgentBindingValue {
 }
 
 /**
- * Consumer-neutral frozen Agent configuration returned with a Conversation,
- * Cron job, or execution projection.
+ * Consumer-neutral AgentSession configuration returned with a Conversation,
+ * Cron job, or execution projection. Preset/Snapshot identity is immutable;
+ * explicitly mutable product resource subsets advance `binding_version`.
  *
  * The renderer only uses this for historical identity presentation. It never
  * resolves a live AgentPreset from this object and never treats it as an
@@ -551,6 +553,15 @@ export interface CreateAgentSessionRequest {
   /** User-selected host directory candidate. The backend validates and freezes
    * the canonical workspace resource; this field is never authority by itself. */
   workspace?: string;
+}
+
+/** Live Knowledge selection owned by one AgentSession. Agent capabilities are
+ * still immutable; this value can only narrow/select resources within them. */
+export interface AgentSessionKnowledgeBinding {
+  enabled: boolean;
+  writeback: boolean;
+  writeback_eagerness: 'manual' | 'auto';
+  kb_ids: KnowledgeBaseId[];
 }
 
 export interface AgentResourceSelection {
