@@ -673,6 +673,14 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
         normalizeAgentStreamError({ ...parsed, message: parsed.content }))
       : undefined;
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
+  const startedAtMs =
+    typeof parsed.started_at_ms === 'number' && Number.isFinite(parsed.started_at_ms) && parsed.started_at_ms > 0
+      ? parsed.started_at_ms
+      : undefined;
+  const finishedAtMs =
+    typeof parsed.finished_at_ms === 'number' && Number.isFinite(parsed.finished_at_ms) && parsed.finished_at_ms > 0
+      ? parsed.finished_at_ms
+      : undefined;
 
   return {
     ...msg,
@@ -682,6 +690,8 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       type: tipType,
       ...(structuredError ? { error: structuredError } : {}),
       ...(recovery ? { recovery } : {}),
+      ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
+      ...(finishedAtMs !== undefined ? { finished_at_ms: finishedAtMs } : {}),
     },
   } as IMessageTips;
 };

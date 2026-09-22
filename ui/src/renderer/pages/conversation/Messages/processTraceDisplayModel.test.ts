@@ -19,17 +19,17 @@ const row = (item: Partial<ToolReceiptDetailRow> & Pick<ToolReceiptDetailRow, 'a
 });
 
 describe('process trace display model', () => {
-  test('does not expand a single file receipt when the file name is already visible in the row', () => {
+  test('keeps a single file receipt collapsed but expandable for exact-path inspection', () => {
     const writeRow = row({ action: 'edit_files', target: 'snake.html' });
 
-    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(false);
+    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(true);
     expect(shouldShowFileListDetail([writeRow])).toBe(false);
   });
 
-  test('does not expand a completed single file row just because the tool echoed output', () => {
+  test('keeps a completed single file row expandable even when output is terse', () => {
     const writeRow = row({ action: 'edit_files', target: 'snake.html', output: 'snake.html' });
 
-    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(false);
+    expect(shouldShowToolRowDetail(writeRow, { fileRowCount: 1 })).toBe(true);
   });
 
   test('keeps failed single file rows expandable so the error remains inspectable', () => {

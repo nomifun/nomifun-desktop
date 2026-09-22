@@ -26,7 +26,6 @@ import {
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
 import type { MessageId } from '@/common/types/ids';
 import { getProcessItemState, mergeProcessStates } from '../turnProcessState';
-import MessageThinking from './MessageThinking';
 import {
   buildToolReceiptDetailRows,
   type ToolReceiptAction,
@@ -58,11 +57,6 @@ type TranslationFn = ReturnType<typeof useTranslation>['t'];
 
 type ProcessTraceVariant = 'list' | 'receipt';
 type ProcessTraceIconKind = 'system' | 'tool' | 'command' | 'file' | 'edit';
-
-export type ProcessTraceItemExpansionControls = {
-  expanded?: boolean;
-  onExpandedChange?: (expanded: boolean) => void;
-};
 
 type ProcessTraceRow = {
   key: string;
@@ -237,18 +231,16 @@ const formatToolFileListLabel = (
   const hasEditRows = rows.some((row) => row.action === 'edit_files');
 
   if (hasEditRows && !hasReadRows) {
-    return t('messages.processReceipt.fileEditTargets', {
+    return t('messages.processReceipt.fileEdits', {
       count: targets.length,
-      target: targetPreview,
-      defaultValue: 'Edited {{count}} files: {{target}}',
+      defaultValue: 'Edited {{count}} files',
     });
   }
 
   if (hasReadRows && !hasEditRows) {
-    return t('messages.processReceipt.readTargets', {
+    return t('messages.processReceipt.readFiles', {
       count: targets.length,
-      target: targetPreview,
-      defaultValue: 'Read {{count}} files: {{target}}',
+      defaultValue: 'Read {{count}} files',
     });
   }
 
@@ -565,6 +557,7 @@ const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[]; workspaceRoots: 
 }) => {
   const { t } = useTranslation();
   const { launchPreview } = usePreviewLauncher();
+  const [expanded, setExpanded] = useState(false);
   const files = useMemo(() => Array.from(new Map(diffs.map((file) => [file.fullPath, file])).values()), [diffs]);
 
   const openFile = useCallback(
@@ -583,31 +576,64 @@ const FileProcessTraceRows: React.FC<{ diffs: FileChangeInfo[]; workspaceRoots: 
     [launchPreview]
   );
 
-  const rows = useMemo<ProcessTraceRow[]>(
-    () =>
-      files.map((file) => {
-        const stats = formatFileChangeStats(file);
-        const target = formatWorkspaceFileTarget(file.fullPath, { workspaceRoots });
-        return {
-          key: file.fullPath,
-          state: 'completed',
-          title: file.fullPath,
-          label: compactReceiptText(
-            t('messages.processReceipt.fileChanged', {
-              target: target.label,
-              stats,
-              defaultValue: 'Edited {{target}} {{stats}}',
-            }),
-            target.label
-          ),
-          iconKind: 'file',
-          onClick: () => openFile(file),
-        };
-      }),
-    [files, openFile, t, workspaceRoots]
-  );
+  if (!files.length) return null;
+  const targets = files.map((file) => file.fullPath);
+  const targetPreview = formatTargetPreview(targets, workspaceRoots);
+  const label = files.length === 1
+    ? t('messages.processReceipt.fileChanged', {
+        target: formatWorkspaceFileTarget(files[0].fullPath, { workspaceRoots }).label,
+        stats: '',
+        defaultValue: 'Edited {{target}}',
+      })
+    : t('messages.processReceipt.fileEditTargets', {
+        count: files.length,
+        target: targetPreview,
+        defaultValue: 'Edited {{count}} files: {{target}}',
+      });
 
-  return <ProcessTraceRows rows={rows} />;
+  return (
+    <div className='turn-process-trace-tool'>
+      <button
+        type='button'
+        className='turn-process-trace__row turn-process-trace-tool__toggle turn-process-trace__row--completed'
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <TraceRowIcon kind='edit' />
+        <span className='turn-process-trace__text' title={targets.join('\n')}>
+          {compactReceiptText(label, targetPreview)}
+        </span>
+        <Right
+          theme='outline'
+          size='12'
+          className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')}
+        />
+      </button>
+      {expanded && (
+        <div className='turn-process-trace-detail'>
+          <ul className='turn-process-trace-file-list'>
+            {files.map((file) => {
+              const target = formatWorkspaceFileTarget(file.fullPath, { workspaceRoots });
+              const stats = formatFileChangeStats(file);
+              return (
+                <li key={file.fullPath} className='turn-process-trace-file-list__item'>
+                  <button
+                    type='button'
+                    className='turn-process-trace-file-list__button'
+                    title={file.fullPath}
+                    onClick={() => openFile(file)}
+                  >
+                    <span>{target.label}</span>
+                    {stats && <span className='turn-process-trace-file-list__stats'>{stats}</span>}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
 };
 
 const getUnhandledMessageType = (_message: never): string => 'unknown';
@@ -617,13 +643,11 @@ const ProcessTraceItem: React.FC<{
   variant?: ProcessTraceVariant;
   workspaceRoots?: string[];
   stateOverride?: TurnDisclosureProcessState;
-  thinkingExpansion?: ProcessTraceItemExpansionControls;
 }> = ({
   item,
   variant = 'list',
   workspaceRoots,
   stateOverride,
-  thinkingExpansion,
 }) => {
   const { t } = useTranslation();
   const conversationContext = useConversationContextSafe();
@@ -664,15 +688,17 @@ const ProcessTraceItem: React.FC<{
         </div>
       );
     case 'thinking':
-      return (
-        <MessageThinking
-          message={item}
-          variant='process'
-          completed={state === 'completed'}
-          expanded={thinkingExpansion?.expanded}
-          onExpandedChange={thinkingExpansion?.onExpandedChange}
-        />
-      );
+      {
+        const content = toDisplayText(item.content.content).trim();
+        if (!content || /^\[Private reasoning omitted(?: from replay)?\]$/i.test(content)) return null;
+        return (
+          <div className='turn-process-trace turn-process-trace--thinking'>
+            <div className='turn-process-trace__paragraph-row turn-process-trace__paragraph-row--thinking'>
+              <div className='turn-process-trace__paragraph'>{content}</div>
+            </div>
+          </div>
+        );
+      }
     case 'tips':
       if (isContextCompressionTip(item)) {
         return (
@@ -715,6 +741,7 @@ const ProcessTraceItem: React.FC<{
         />
       );
     case 'agent_status':
+      if (item.content.turn_summary) return null;
       return (
         <ProcessTraceRows
           rows={[
@@ -722,19 +749,7 @@ const ProcessTraceItem: React.FC<{
               key: item.id,
               state,
               label:
-                item.content.turn_summary
-                  ? item.content.status === 'preparing'
-                    ? t('messages.processReceipt.turnSummaryRunning', {
-                        defaultValue: 'Processing this turn',
-                      })
-                    : item.content.status === 'prepared'
-                      ? t('messages.processReceipt.turnSummaryCompleted', {
-                          defaultValue: 'Turn processing completed',
-                        })
-                      : t('messages.processReceipt.turnSummaryFailed', {
-                          defaultValue: 'Turn processing did not complete',
-                        })
-                  : item.content.status === 'preparing'
+                item.content.status === 'preparing'
                     ? t('messages.processReceipt.preparingAction', {
                         defaultValue: 'Preparing next action',
                       })
