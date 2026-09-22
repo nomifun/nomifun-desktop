@@ -99,6 +99,7 @@ const PluginCreatorSurface: React.FC<PluginCreatorSurfaceProps> = ({
             <AgentIdentityBadge
               backend='nomi'
               name={t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}
+              compact
               className='mt-8px w-fit'
             />
           </div>
