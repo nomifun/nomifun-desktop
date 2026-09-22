@@ -42,6 +42,7 @@ use nomifun_agent_control_plane::{
 use super::nomi_core_control_plane::control_plane_router_without_legacy_skills;
 use nomifun_api_types::{
     AgentBindingValueDto, AgentResourceSelectionDto,
+    AgentSessionKnowledgePolicyDto, AgentSessionKnowledgeWritebackEagernessDto,
     ApiResponse, ConversationListResponse, ConversationResponse,
     ConversationRuntimeStateKind, ConversationRuntimeSummary, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
@@ -9617,6 +9618,10 @@ async fn create_nomi_core_agent_session(
             &request.resource_selections,
         )
         .await?;
+    freeze_agent_session_knowledge_policy(
+        &mut binding,
+        request.knowledge_policy.as_ref(),
+    )?;
     if let Some(workspace) = request.workspace.as_deref() {
         freeze_selected_workspace(
             &mut binding,
@@ -9677,6 +9682,58 @@ async fn create_nomi_core_agent_session(
         state: "ready".to_owned(),
         cursor: session_cursor(&opened.session.agent_session_id, opened.cursor.seq),
     })))
+}
+
+fn freeze_agent_session_knowledge_policy(
+    binding: &mut AgentBindingValueDto,
+    requested: Option<&AgentSessionKnowledgePolicyDto>,
+) -> Result<(), NomiCoreApiError> {
+    let knowledge = binding
+        .typed_resource_bindings
+        .iter_mut()
+        .filter(|resource| {
+            resource.resource_kind
+                == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+        })
+        .collect::<Vec<_>>();
+    if knowledge.is_empty() {
+        if requested.is_some() {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "KNOWLEDGE_RESOURCE_NOT_BOUND",
+                "Knowledge write-back policy requires at least one selected Knowledge base",
+            ));
+        }
+        return Ok(());
+    }
+    let policy = requested.cloned().unwrap_or_default();
+    if policy.writeback
+        && knowledge
+            .iter()
+            .any(|resource| !resource.operations.contains("write"))
+    {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "KNOWLEDGE_WRITEBACK_NOT_AVAILABLE",
+            "the selected Agent or Knowledge base does not grant write-back",
+        ));
+    }
+    let writeback = if policy.writeback { "true" } else { "false" };
+    let eagerness = match policy.writeback_eagerness {
+        AgentSessionKnowledgeWritebackEagernessDto::Manual => "manual",
+        AgentSessionKnowledgeWritebackEagernessDto::Auto => "auto",
+    };
+    for resource in knowledge {
+        resource.typed_parameters.insert(
+            nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(),
+            writeback.to_owned(),
+        );
+        resource.typed_parameters.insert(
+            nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
+            eagerness.to_owned(),
+        );
+    }
+    Ok(())
 }
 
 async fn get_nomi_core_agent_session(

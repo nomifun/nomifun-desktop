@@ -121,6 +121,8 @@ pub const COMPANION_MEMORY_RESOURCE_KIND: &str = "companion_memory";
 pub const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
 pub const KNOWLEDGE_NAME_PARAMETER: &str = "knowledge_name";
 pub const KNOWLEDGE_DESCRIPTION_PARAMETER: &str = "knowledge_description";
+pub const KNOWLEDGE_WRITEBACK_PARAMETER: &str = "knowledge_writeback";
+pub const KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER: &str = "knowledge_writeback_eagerness";
 pub const WAVE1_CAPABILITY_HOST_PORT_ID: &str = "host.wave1.capability.invoke";
 const CAPABILITY_UNAVAILABLE_CODE: &str = "CAPABILITY_UNAVAILABLE";
 
@@ -749,6 +751,43 @@ fn capability_manifest(
 
 struct Wave1KnowledgeContextFactory;
 
+/// Read the host-frozen Session write-back disposition from one exact
+/// Knowledge resource. Legacy bindings default to the safe read-only/manual
+/// policy. Invalid persisted values fail closed instead of widening behavior.
+pub fn agent_knowledge_writeback_policy(
+    binding: &TypedResourceBinding,
+) -> Result<(bool, &'static str), String> {
+    let enabled = match binding
+        .typed_parameters
+        .get(KNOWLEDGE_WRITEBACK_PARAMETER)
+        .map(String::as_str)
+    {
+        None | Some("false") => false,
+        Some("true") => true,
+        Some(_) => return Err("Knowledge resource has an invalid write-back switch".to_owned()),
+    };
+    let eagerness = match binding
+        .typed_parameters
+        .get(KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER)
+        .map(String::as_str)
+    {
+        None | Some("manual") => "manual",
+        Some("auto") => "auto",
+        Some(_) => {
+            return Err("Knowledge resource has an invalid write-back disposition".to_owned());
+        }
+    };
+    Ok((enabled, eagerness))
+}
+
+pub fn agent_knowledge_writeback_policy_is_explicit(
+    binding: &TypedResourceBinding,
+) -> bool {
+    binding
+        .typed_parameters
+        .contains_key(KNOWLEDGE_WRITEBACK_PARAMETER)
+}
+
 #[async_trait]
 impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
     async fn contribute(
@@ -775,6 +814,7 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
         let mut binding_ids = BTreeSet::new();
         let mut resource_ids = BTreeSet::new();
         let mut mounted_bases = Vec::new();
+        let mut writeback_policy = None;
         for binding in &request.context.resource_bindings {
             if binding.resource_kind.as_ref() != KNOWLEDGE_BASE_RESOURCE_KIND {
                 return Err(KernelError::CapabilityExecution {
@@ -807,11 +847,29 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
                 .get(KNOWLEDGE_DESCRIPTION_PARAMETER)
                 .map(String::as_str)
                 .unwrap_or_default();
+            let policy = (
+                agent_knowledge_writeback_policy_is_explicit(binding),
+                agent_knowledge_writeback_policy(binding)
+                    .map_err(|reason| KernelError::CapabilityExecution { reason })?,
+            );
+            if writeback_policy.is_some_and(|expected| expected != policy) {
+                return Err(KernelError::CapabilityExecution {
+                    reason: "Knowledge resources carry inconsistent write-back policies"
+                        .to_owned(),
+                });
+            }
+            writeback_policy = Some(policy);
+            let allowed_operations = binding
+                .operations
+                .iter()
+                .filter(|operation| !policy.0 || (policy.1).0 || operation.as_str() != "write")
+                .cloned()
+                .collect::<BTreeSet<_>>();
             mounted_bases.push(json!({
                 "knowledge_base_id": binding.resource_id.as_ref(),
                 "name": name,
                 "description": description,
-                "allowed_operations": binding.operations,
+                "allowed_operations": allowed_operations,
             }));
         }
         if mounted_bases.is_empty() {
@@ -821,11 +879,21 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
             });
         }
 
+        let (policy_explicit, (writeback, writeback_eagerness)) =
+            writeback_policy.unwrap_or((false, (false, "manual")));
         let available_actions = request
             .context
             .resolved_capability
             .action_allowlist
             .iter()
+            .filter(|action| {
+                !policy_explicit
+                    || writeback
+                    || !matches!(
+                        action.as_ref(),
+                        KNOWLEDGE_WRITE_ACTION_ID | KNOWLEDGE_AUTOGEN_ACTION_ID
+                    )
+            })
             .map(|action| action.as_ref())
             .collect::<Vec<_>>();
         let search_first = request
@@ -833,14 +901,29 @@ impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
             .resolved_capability
             .action_allowlist
             .contains(&ActionId::from(KNOWLEDGE_SEARCH_ACTION_ID));
-        let instruction = if search_first {
+        let retrieval_instruction = if search_first {
             "These are the authoritative Knowledge bases mounted into this Session. Whenever the user's task or question may be covered by them, call the tool whose Action is knowledge/search before answering from memory. Then call knowledge/read with the returned handle for the most relevant document before relying on it. Cite the returned source path, and never claim that Knowledge was checked unless the tool was actually called."
         } else {
             "These are the authoritative Knowledge bases mounted into this Session. Use only the Knowledge Actions explicitly available to this Agent and never claim that a base was checked unless a Knowledge tool was actually called."
         };
+        let writeback_instruction = match (policy_explicit, writeback, writeback_eagerness) {
+            (false, _, _) => {
+                "This legacy Session has no explicit write-back disposition. Use Knowledge write actions only when the user explicitly asks you to save or update Knowledge."
+            }
+            (true, false, _) => {
+                "Knowledge write-back is disabled for this Session. Treat every mounted base as read-only and do not call knowledge/write or knowledge/autogen."
+            }
+            (true, true, "manual") => {
+                "Knowledge write-back is enabled in manual mode. Call knowledge/write or knowledge/autogen only when the user explicitly asks you to save or update Knowledge."
+            }
+            (true, true, "auto") => {
+                "Knowledge write-back is enabled in automatic mode. You may call knowledge/write for clearly correct, durable, reusable knowledge with lasting value; never persist trivia, temporary state, guesses, secrets, or duplicates."
+            }
+            _ => unreachable!("write-back eagerness was validated above"),
+        };
         Ok(ContextContributionResult {
             value: Some(StrictJsonValue(json!({
-                "instruction": instruction,
+                "instruction": format!("{retrieval_instruction} {writeback_instruction}"),
                 "available_actions": available_actions,
                 "mounted_bases": mounted_bases,
             }))),
@@ -1822,6 +1905,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn knowledge_writeback_policy_is_frozen_and_fail_closed() {
+        let mut binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from("knowledge:a"),
+            resource_kind: ResourceKind::from(KNOWLEDGE_BASE_RESOURCE_KIND),
+            resource_id: ResourceId::from("base-a"),
+            owner_id: "owner".to_owned(),
+            operations: BTreeSet::from([
+                "search".to_owned(),
+                "read".to_owned(),
+                "write".to_owned(),
+            ]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
+        assert_eq!(agent_knowledge_writeback_policy(&binding), Ok((false, "manual")));
+        assert!(!agent_knowledge_writeback_policy_is_explicit(&binding));
+
+        binding
+            .typed_parameters
+            .insert(KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(), "true".to_owned());
+        assert!(agent_knowledge_writeback_policy_is_explicit(&binding));
+        binding.typed_parameters.insert(
+            KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
+            "auto".to_owned(),
+        );
+        assert_eq!(agent_knowledge_writeback_policy(&binding), Ok((true, "auto")));
+
+        binding.typed_parameters.insert(
+            KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
+            "aggressive".to_owned(),
+        );
+        assert!(agent_knowledge_writeback_policy(&binding).is_err());
     }
 
     #[test]

@@ -872,6 +872,35 @@ pub struct AgentResourceSelectionDto {
     pub resource_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionKnowledgeWritebackEagernessDto {
+    #[default]
+    Manual,
+    Auto,
+}
+
+impl AgentSessionKnowledgeWritebackEagernessDto {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// User intent that narrows how one new AgentSession may use its already
+/// selected Knowledge resources. It grants neither Actions nor resources;
+/// those remain host-derived from the saved Agent and exact resource rows.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionKnowledgePolicyDto {
+    #[serde(default)]
+    pub writeback: bool,
+    #[serde(default)]
+    pub writeback_eagerness: AgentSessionKnowledgeWritebackEagernessDto,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
@@ -886,6 +915,11 @@ pub struct CreateAgentSessionRequestDto {
     /// themselves resource permissions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_selections: Vec<AgentResourceSelectionDto>,
+    /// Optional write-back disposition for the Knowledge resources selected
+    /// above. The host freezes it into those exact typed bindings; it cannot
+    /// add Knowledge, make a read-only base writable, or mutate later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_policy: Option<AgentSessionKnowledgePolicyDto>,
     /// Optional user-selected host workspace. This is only a candidate path:
     /// the authenticated host must canonicalize it, prove it is an existing
     /// directory, and derive the frozen typed resource binding itself.
@@ -1212,6 +1246,7 @@ mod snapshot_tests {
         assert_eq!(request.resource_selections.len(), 2);
         assert_eq!(request.resource_selections[0].resource_kind, "companion");
         assert_eq!(request.resource_selections[1].resource_id, "channel-1");
+        assert!(request.knowledge_policy.is_none());
         assert!(request.workspace.is_none());
 
         assert!(
@@ -1226,6 +1261,41 @@ mod snapshot_tests {
             .is_err(),
             "clients must not be able to submit resource operations"
         );
+    }
+
+    #[test]
+    fn create_agent_session_request_accepts_only_bounded_knowledge_policy() {
+        let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+            "preset_id": PRESET_ID,
+            "resource_selections": [{
+                "resource_kind": "knowledge_base",
+                "resource_id": "0190f5fe-7c00-7a00-8000-000000000099"
+            }],
+            "knowledge_policy": {
+                "writeback": true,
+                "writeback_eagerness": "auto"
+            }
+        }))
+        .expect("bounded Knowledge launch policy is supported");
+        let policy = request.knowledge_policy.expect("Knowledge policy");
+        assert!(policy.writeback);
+        assert_eq!(policy.writeback_eagerness.as_str(), "auto");
+
+        for invalid in [
+            json!({
+                "preset_id": PRESET_ID,
+                "knowledge_policy": { "writeback": true, "writeback_eagerness": "aggressive" }
+            }),
+            json!({
+                "preset_id": PRESET_ID,
+                "knowledge_policy": { "writeback": true, "operations": ["write"] }
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<CreateAgentSessionRequestDto>(invalid).is_err(),
+                "unknown policy values or authority fields must fail closed"
+            );
+        }
     }
 
     #[test]

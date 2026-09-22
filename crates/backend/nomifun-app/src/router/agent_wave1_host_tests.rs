@@ -79,13 +79,48 @@ fn knowledge_adapter_accepts_only_product_resource_operations() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("knowledge");
     std::fs::create_dir(&root).unwrap();
-    let binding = knowledge_binding(&root, "owner-a", &["read", "search", "write"]);
+    let mut binding = knowledge_binding(&root, "owner-a", &["read", "search", "write"]);
     let resource = agent_knowledge_resource(&binding).unwrap();
     let authority = nomifun_knowledge::AgentKnowledgeAuthority::new("owner-a", [resource])
         .unwrap();
     assert_eq!(
         authority
             .resource_ids_for(nomifun_knowledge::KnowledgeAction::Search)
+            .len(),
+        1
+    );
+    assert_eq!(
+        authority
+            .resource_ids_for(nomifun_knowledge::KnowledgeAction::Write)
+            .len(),
+        1,
+        "legacy bindings preserve their existing exact Agent grant"
+    );
+
+    binding.typed_parameters.insert(
+        nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(),
+        "false".to_owned(),
+    );
+    let read_only = agent_knowledge_resource(&binding).unwrap();
+    let read_only_authority =
+        nomifun_knowledge::AgentKnowledgeAuthority::new("owner-a", [read_only]).unwrap();
+    assert!(
+        read_only_authority
+            .resource_ids_for(nomifun_knowledge::KnowledgeAction::Write)
+            .is_empty(),
+        "an explicit disabled policy narrows the otherwise writable resource"
+    );
+
+    binding.typed_parameters.insert(
+        nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(),
+        "true".to_owned(),
+    );
+    let writable = agent_knowledge_resource(&binding).unwrap();
+    let writable_authority =
+        nomifun_knowledge::AgentKnowledgeAuthority::new("owner-a", [writable]).unwrap();
+    assert_eq!(
+        writable_authority
+            .resource_ids_for(nomifun_knowledge::KnowledgeAction::Write)
             .len(),
         1
     );
