@@ -4,12 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  PanoramaHorizontal,
-  Pic,
-  VideoTwo,
-  Voice,
-} from '@icon-park/react';
+import { Pic, VideoTwo, Voice } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -167,7 +162,7 @@ export const CreativeTextNode: React.FC<CreativeTextNodeProps> = ({
   );
 };
 
-interface CreativeAssetNodeProps<K extends 'image' | 'video' | 'audio' | 'panorama'>
+interface CreativeAssetNodeProps<K extends 'image' | 'video' | 'audio'>
   extends CreativeNodePresentationProps<K> {
   onMediaSize?: (size: { width: number; height: number }) => void;
   asset?: CreativeNodeAssetPresentation | null;
@@ -316,58 +311,6 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   );
 };
 
-export interface CreativePanoramaNodeProps extends CreativeAssetNodeProps<'panorama'> {
-  preview?: React.ReactNode;
-}
-
-export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
-  asset,
-  preview,
-  title,
-  emptyLabel,
-  ...props
-}) => {
-  const { t } = useTranslation();
-  const { node } = props;
-  const resolved = Boolean(node.data.assetId && asset?.src);
-  const resolvedTitle =
-    title ?? t('creativeStudio.canvas.nodeKinds.panorama');
-  const resolvedEmptyLabel =
-    asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
-      : emptyLabel ?? t('creativeStudio.canvas.nodes.panorama.empty');
-  return (
-    <CreativeNodeFrame
-      node={node}
-      title={resolvedTitle}
-      footer={t('creativeStudio.canvas.nodes.panorama.orientation', {
-        yaw: Math.round(node.data.yaw),
-        pitch: Math.round(node.data.pitch),
-      })}
-      {...sharedFrameProps(props)}
-    >
-      {preview && !asset?.deleted ? (
-        <div className={styles.previewSlot} data-node-preview='panorama'>
-          {preview}
-        </div>
-      ) : resolved ? (
-        <CreativeMediaPreview
-          kind='image'
-          className={styles.imageMedia}
-          src={asset?.originalSrc ?? asset?.src}
-          posterSrc={asset?.src}
-          alt={asset?.alt ?? asset?.label ?? resolvedTitle}
-        />
-      ) : (
-        <EmptyMedia
-          icon={<PanoramaHorizontal theme='outline' size={25} fill='currentColor' strokeWidth={2.5} />}
-          label={resolvedEmptyLabel}
-          assetId={node.data.assetId}
-        />
-      )}
-    </CreativeNodeFrame>
-  );
-};
-
 export interface CreativeGroupNodeProps extends CreativeNodePresentationProps<'group'> {
   titleFallback?: string;
   children?: React.ReactNode;
@@ -404,7 +347,6 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
   title?: string;
   onMediaSize?: (size: { width: number; height: number }) => void;
   asset?: CreativeNodeAssetPresentation | null;
-  panoramaPreview?: React.ReactNode;
   groupContent?: React.ReactNode;
   textEditing?: boolean;
   onTextChange?: (text: string) => void;
@@ -451,8 +393,6 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
           onUploadFiles={props.onTimelineUploadFiles}
         />
       );
-    case 'panorama':
-      return <CreativePanoramaNode {...props} node={node} asset={props.asset} preview={props.panoramaPreview} />;
     case 'config':
       return null;
     case 'group':
@@ -462,7 +402,6 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
 
 export const CREATIVE_NODE_VIEW_KINDS = [
   'image',
-  'panorama',
   'text',
   'video',
   'audio',

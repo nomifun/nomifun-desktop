@@ -28,7 +28,6 @@ import {
   type CreativeJsonValue,
   type CreativeLeftPanelView,
   type CreativeModelTask,
-  type CreativePanoramaNodeData,
   type CreativeProjectDetail,
   type CreativeProjectDocument,
   type CreativeProjectListResponse,
@@ -473,19 +472,6 @@ const parseImageComposerDraft = (
   };
 };
 
-const parsePanoramaData = (value: unknown, path: string): CreativePanoramaNodeData => {
-  const code = 'INVALID_DOCUMENT';
-  const record = asRecord(value, path, code);
-  exactKeys(record, ['assetId', 'projection', 'yaw', 'pitch', 'fieldOfView'], [], path, code);
-  return {
-    assetId: asNullableId(record.assetId, `${path}.assetId`, code),
-    projection: asLiteral(record.projection, ['equirectangular'], `${path}.projection`, code),
-    yaw: asNumber(record.yaw, `${path}.yaw`, code, { min: -360, max: 360 }),
-    pitch: asNumber(record.pitch, `${path}.pitch`, code, { min: -90, max: 90 }),
-    fieldOfView: asNumber(record.fieldOfView, `${path}.fieldOfView`, code, { min: 10, max: 150 }),
-  };
-};
-
 const parseTextData = (value: unknown, path: string): CreativeTextNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
@@ -883,7 +869,6 @@ const parseGroupData = (value: unknown, path: string): CreativeGroupNodeData => 
 
 const NODE_KINDS: readonly CreativeCanvasNodeKind[] = [
   'image',
-  'panorama',
   'text',
   'config',
   'video',
@@ -914,8 +899,6 @@ const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
   switch (type) {
     case 'image':
       return { ...base, type, data: parseImageData(record.data, `${path}.data`) };
-    case 'panorama':
-      return { ...base, type, data: parsePanoramaData(record.data, `${path}.data`) };
     case 'text':
       return { ...base, type, data: parseTextData(record.data, `${path}.data`) };
     case 'config':

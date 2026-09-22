@@ -208,7 +208,7 @@ describe('CreativeTaskClient', () => {
       mapCreationTaskWire(
         wireTask('queued', {
           inputs: [
-            { asset_id: ASSET_ID, kind: 'panorama', role: 'reference' },
+            { asset_id: ASSET_ID, kind: 'binary', role: 'reference' },
           ],
         })
       );

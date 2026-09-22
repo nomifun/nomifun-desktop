@@ -283,7 +283,7 @@ databases from before the cutover must be backed up and rebuilt separately.
 > Technical contract: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
 Creative Studio is a persistent creative document system, not a disposable
-whiteboard. An infinite Canvas stores text, image, video, audio, panorama,
+whiteboard. An infinite Canvas stores text, image, video, audio, timeline,
 config, and group nodes. Media nodes own the visible creation
 surface; config nodes keep the exact provider/model/task, typed parameters,
 ordered inputs, task state, and results auditable. The **Canvas Assistant**

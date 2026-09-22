@@ -206,7 +206,6 @@ export function creativeCanvasBlockedLeaveMessage(
 function referencedAssetId(node: CreativeCanvasNode): string | null {
   if (
     node.type === 'image' ||
-    node.type === 'panorama' ||
     node.type === 'video' ||
     node.type === 'audio'
   ) {
@@ -216,7 +215,7 @@ function referencedAssetId(node: CreativeCanvasNode): string | null {
 }
 
 function assetKindMatchesNode(node: CreativeCanvasNode, asset: CreativeAsset): boolean {
-  if (node.type === 'image' || node.type === 'panorama') return asset.kind === 'image';
+  if (node.type === 'image') return asset.kind === 'image';
   if (node.type === 'video') return asset.kind === 'video';
   if (node.type === 'audio') return asset.kind === 'audio';
   return false;
@@ -245,15 +244,14 @@ export function resolveCreativeNodeAssetPresentation(
     : null;
 
   return {
-    src:
-      node.type === 'image' || node.type === 'panorama'
-        ? asset.thumbnailUrl ?? asset.originalUrl
-        : asset.originalUrl,
+    src: node.type === 'image'
+      ? asset.thumbnailUrl ?? asset.originalUrl
+      : asset.originalUrl,
     ...(posterSrc
       ? { posterSrc }
       : {}),
     label: asset.title,
-    ...(node.type === 'image' || node.type === 'panorama'
+    ...(node.type === 'image'
       ? { originalSrc: asset.originalUrl, alt: asset.title }
       : {}),
   };
