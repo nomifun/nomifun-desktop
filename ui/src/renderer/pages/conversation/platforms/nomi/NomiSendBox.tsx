@@ -123,7 +123,7 @@ const NomiSendBox: React.FC<{
   agentSelectorNode?: React.ReactNode;
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
-  /** Product-owned controls may occupy the rail; the Agent binding stays frozen. */
+  /** Product-owned controls may occupy the rail; Agent/resource authority stays frozen. */
   capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
@@ -206,6 +206,10 @@ const NomiSendBox: React.FC<{
     getTurnStartGeneration,
     getTurnCompletionGeneration,
   } = turnActivity;
+  const modelPickerDisabled = Boolean(modelSelectionDisabled || running);
+  const modelPickerHint = running
+    ? t('conversation.chat.modelSwitchAfterTurn')
+    : modelSelectionHint;
   const hasContextUsage =
     typeof tokenUsage?.context_window === 'number' &&
     tokenUsage.context_window > 0 &&
@@ -888,11 +892,11 @@ const NomiSendBox: React.FC<{
               )}
               {isCreating && <CreationModelSelector files={collectSelectedFiles(uploadFile, atPath)} />}
               {!isCreating && (
-                <Tooltip content={modelSelectionHint} disabled={!modelSelectionHint}>
+                <Tooltip content={modelPickerHint} disabled={!modelPickerHint}>
                   <span className='inline-flex min-w-0'>
                     <NomiModelSelector
                       selection={modelSelection}
-                      disabled={modelSelectionDisabled}
+                      disabled={modelPickerDisabled}
                       className='nomi-sendbox-model-btn'
                     />
                   </span>

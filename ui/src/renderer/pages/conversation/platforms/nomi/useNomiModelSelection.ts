@@ -63,6 +63,7 @@ export const useNomiModelSelection = ({
   const handleSelectModel = useCallback(
     async (provider: IProvider, modelName: string) => {
       if (readOnly) return;
+      if (current_model?.id === provider.id && current_model.use_model === modelName) return;
       const selected = {
         ...(provider as unknown as TProviderWithModel),
         use_model: modelName,
@@ -72,7 +73,7 @@ export const useNomiModelSelection = ({
         setCurrentModel(selected);
       }
     },
-    [onSelectModel, readOnly]
+    [current_model?.id, current_model?.use_model, onSelectModel, readOnly]
   );
 
   const getDisplayModelName = useCallback(

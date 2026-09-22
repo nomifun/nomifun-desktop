@@ -414,6 +414,7 @@
     "visionCapabilityUnavailable": "暂时无法核验模型能力。请等待模型列表加载后重试，或移除图片后发送。",
     "sendMessageTo": "发送消息到 {{model}}",
     "processing": "正在处理中……",
+    "modelSwitchAfterTurn": "请等待当前任务完成后再切换模型。",
     "quotaExceededTitle": "模型额度已用尽",
     "quotaExceededBody": "当前模型额度已用尽，是否切换到 {{model}}？",
     "quotaExceededNoFallback": "当前模型额度已用尽，请切换到其他可用模型。",
@@ -421,7 +422,7 @@
     "apiErrorNoCli": "API 错误，没有可用的 CLI 代理进行回退。",
     "apiErrorSwitchFailed": "创建回退会话失败。",
     "apiErrorSwitched": "API 错误，已自动切换到 {{cli}} CLI",
-    "frozenSessionConfigHint": "当前会话的 Agent、模型、资源与协作配置均已冻结；如需更改，请创建新会话。",
+    "frozenSessionConfigHint": "当前会话的 Agent、资源与协作配置均已冻结；如需更改，请创建新会话。",
     "frozenAgentUnavailable": "当前会话缺少有效的冻结 Agent 绑定，请创建新会话。",
     "speech": {
       "recordTooltip": "开始语音输入",

@@ -1097,6 +1097,7 @@ export type I18nKey =
   | 'conversation.chat.frozenAgentUnavailable'
   | 'conversation.chat.frozenSessionConfigHint'
   | 'conversation.chat.modelHealedToDefault'
+  | 'conversation.chat.modelSwitchAfterTurn'
   | 'conversation.chat.noModelSelected'
   | 'conversation.chat.processing'
   | 'conversation.chat.quotaExceededBody'

@@ -6,10 +6,12 @@
 
 import type { SshHostId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
-import type { IConversationMcpStatus, TChatConversation } from '@/common/config/storage';
+import type { IConversationMcpStatus, IProvider, TChatConversation } from '@/common/config/storage';
+import { parseError } from '@/common/utils';
 import { CronJobManager } from '@/renderer/pages/cron';
 import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Message } from '@arco-design/web-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import ChatLayout, { type ChatLayoutProps } from './ChatLayout';
@@ -35,8 +37,12 @@ import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
 import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
-import { isExecutableAgentPreset } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
+import {
+  isExecutableAgentPreset,
+  saveNomiDefaultModel,
+} from '@/renderer/pages/guid/hooks/agentSelectionUtils';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
+import { refreshConversationCache } from '@/renderer/pages/conversation/utils/conversationCache';
 import { CreationComposerContext } from '@/renderer/creation/CreationComposerContext';
 import { useCreationDraft } from '@/renderer/creation/useCreationDraft';
 import type { CreationMode } from '@/renderer/creation/types';
@@ -66,7 +72,7 @@ const NomiConversationLayout: React.FC<{
   agentSelectorNode?: React.ReactNode;
   collaborationControlNode: React.ReactNode;
   presetPresetName?: string;
-  modelSelectionHint?: string;
+  modelSelectionDisabled?: boolean;
 }> = ({
   conversation,
   chatLayoutProps,
@@ -74,7 +80,7 @@ const NomiConversationLayout: React.FC<{
   agentSelectorNode,
   collaborationControlNode,
   presetPresetName,
-  modelSelectionHint,
+  modelSelectionDisabled,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
@@ -97,7 +103,7 @@ const NomiConversationLayout: React.FC<{
         }
         agent_name={presetPresetName}
         collaboratorSelectorNode={collaborationControlNode}
-        modelSelectionHint={modelSelectionHint}
+        modelSelectionDisabled={modelSelectionDisabled}
         isProcessing={isConversationProcessing(conversation)}
         creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
       />
@@ -181,12 +187,38 @@ const NomiConversationPanel: React.FC<{
 
   const { t } = useTranslation();
   const frozenSessionConfigHint = t('conversation.chat.frozenSessionConfigHint');
-  const rejectFrozenModelChange = useCallback(async () => false, []);
+  const [modelSwitching, setModelSwitching] = useState(false);
+  const modelSwitchingRef = useRef(false);
+  const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
+    if (modelSwitchingRef.current) return false;
+    modelSwitchingRef.current = true;
+    setModelSwitching(true);
+    try {
+      const switched = await ipcBridge.conversation.switchModel.invoke({
+        conversation_id: conversation.id,
+        provider_id: provider.id,
+        model: modelName,
+      });
+      if (!switched) return false;
+      await saveNomiDefaultModel(provider.id, modelName);
+      void refreshConversationCache(conversation.id).catch((error) => {
+        console.error('[ChatConversation] Failed to refresh switched model:', error);
+      });
+      Message.success(t('agent.model.switchSuccess'));
+      return true;
+    } catch (error) {
+      console.error('[ChatConversation] Failed to switch model:', error);
+      Message.error(`${t('agent.model.switchFailed')}: ${parseError(error)}`);
+      return false;
+    } finally {
+      modelSwitchingRef.current = false;
+      setModelSwitching(false);
+    }
+  }, [conversation.id, t]);
 
   const modelSelection = useNomiModelSelection({
     initialModel: conversation.model,
-    onSelectModel: rejectFrozenModelChange,
-    readOnly: true,
+    onSelectModel,
   });
 
   // Main model reference used by the collaboration selector.
@@ -345,7 +377,7 @@ const NomiConversationPanel: React.FC<{
         agentSelectorNode={agentSelectorNode}
         collaborationControlNode={collaborationControlNode}
         presetPresetName={presetPresetInfo?.name}
-        modelSelectionHint={frozenSessionConfigHint}
+        modelSelectionDisabled={modelSwitching}
       />
     </CreationComposerContext.Provider>
   );

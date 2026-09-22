@@ -609,6 +609,244 @@ impl AgentControlPlane {
         self.resolve_agent_session_binding_locked(owner, &prepared.preset.preset_id).await
     }
 
+    /// Replace only the exact Chat route of an existing Session binding.
+    ///
+    /// Unlike new-Session resolution, this starts from the Session's saved
+    /// immutable Revision/Snapshot rather than the Preset's current stable
+    /// revision. That distinction is what keeps later Agent edits, capability
+    /// catalog changes, Skills and resource authority out of a model switch.
+    /// The returned binding carries the existing typed resources and advances
+    /// its optimistic version exactly once.
+    pub async fn resolve_agent_session_model_binding(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+        model: &nomifun_api_types::AgentChatModelSelectionDto,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let _guard = self.template_launch_lock.lock().await;
+        let current: AgentBindingValue = wire_cast(current)?;
+        let (source_revision, source_snapshot) = self
+            .load_binding_artifacts(owner, &current)
+            .await?;
+        if nomifun_agent_contracts::is_direct_creation_agent(
+            source_revision
+                .payload
+                .enabled_capabilities
+                .iter()
+                .map(|selection| selection.capability.id.as_ref()),
+        ) || !source_revision
+            .payload
+            .chat_route_records
+            .contains_key(CHAT_MODEL_TASK)
+        {
+            return Err(ControlPlaneError::canonical(
+                "AGENT_SESSION_MODEL_NOT_SWITCHABLE",
+                axum::http::StatusCode::CONFLICT,
+                "this AgentSession does not own a switchable Chat model route",
+            ));
+        }
+
+        let required = required_chat_features(
+            source_revision
+                .payload
+                .enabled_capabilities
+                .iter()
+                .map(|selection| selection.capability.id.as_ref()),
+        );
+        let route = self
+            .resolve_selected_chat_route(owner, model, &required)
+            .await?;
+        if source_revision
+            .payload
+            .chat_route_records
+            .get(CHAT_MODEL_TASK)
+            .is_some_and(|current| same_chat_route_configuration(current, &route))
+        {
+            return wire_cast(&current);
+        }
+        let mut payload = source_revision.payload.clone();
+        payload.model_route_refs.insert(
+            CHAT_MODEL_TASK.into(),
+            route.primary.model_route_id.clone(),
+        );
+        payload
+            .chat_route_records
+            .insert(CHAT_MODEL_TASK.into(), route.clone());
+        if payload == source_revision.payload {
+            return wire_cast(&current);
+        }
+
+        let next_binding_version = current.binding_version.checked_add(1).ok_or_else(|| {
+            ControlPlaneError::canonical(
+                "AGENT_SESSION_BINDING_VERSION_EXHAUSTED",
+                axum::http::StatusCode::CONFLICT,
+                "AgentSession binding version cannot advance",
+            )
+        })?;
+
+        // Hidden variants are an implementation cache. Reuse one only when
+        // both its authoring payload and every non-model materialized contract
+        // are byte-for-byte equivalent to the currently frozen Session.
+        for existing in self.store.list_presets(owner).await? {
+            if !existing.session_only || existing.preset.source != AgentPresetSource::User {
+                continue;
+            }
+            let candidate = async {
+                let Some(revision) = self.current_revision(&existing).await? else {
+                    return Ok(None);
+                };
+                if revision.payload != payload
+                    || revision.contribution_locks != source_revision.contribution_locks
+                {
+                    return Ok(None);
+                }
+                let Some(snapshot) = self.current_snapshot(Some(&revision)).await? else {
+                    return Ok(None);
+                };
+                if !same_non_model_snapshot_contract(&snapshot, &source_snapshot) {
+                    return Ok(None);
+                }
+                let binding = session_binding_from_stable_artifacts(
+                    revision.reference.clone(),
+                    Some(revision),
+                    Some(snapshot),
+                )?;
+                Ok::<_, ControlPlaneError>(Some(binding))
+            }
+            .await;
+            match candidate {
+                Ok(Some(mut binding)) => {
+                    binding.typed_resource_bindings = current.typed_resource_bindings.clone();
+                    binding.binding_version = next_binding_version;
+                    self.validate_agent_binding(owner, &binding).await?;
+                    return wire_cast(&binding);
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        preset_id = existing.preset.preset_id.as_ref(),
+                        code = error.code().as_ref(),
+                        "skipping unreadable exact Session model variant"
+                    );
+                }
+            }
+        }
+
+        let source = self
+            .owned_preset(owner, source_revision.reference.preset_id.as_ref())
+            .await?;
+        let preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
+        let draft = AgentPresetDraftDto {
+            preset_id: preset_id.as_ref().to_owned(),
+            display_name: source.preset.display_name.clone(),
+            description: source.preset.description.clone(),
+            source_template_key: None,
+            current_revision: None,
+            document: wire_cast(&payload)?,
+        };
+        let catalog = self.catalog.snapshot()?;
+        let compilation = self.authoring_compiler(owner).await?.compile(
+            owner,
+            &draft,
+            None,
+            None,
+            &catalog,
+        )?;
+        let snapshot = compilation.snapshot.ok_or_else(|| {
+            ControlPlaneError::with_details(
+                "AGENT_SESSION_MODEL_SWITCH_FAILED",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                "the selected model route could not be compiled for this frozen Agent",
+                json!({ "diagnostics": compilation.diagnostics }),
+            )
+        })?;
+        let mut source_locks = source_revision.contribution_locks.clone();
+        source_locks.sort();
+        let mut contribution_locks = compilation.contribution_locks;
+        contribution_locks.sort();
+        if compilation.payload != payload
+            || contribution_locks != source_locks
+            || !same_non_model_snapshot_contract(&snapshot, &source_snapshot)
+        {
+            return Err(ControlPlaneError::canonical(
+                "AGENT_SESSION_NON_MODEL_CONTRACT_CHANGED",
+                axum::http::StatusCode::CONFLICT,
+                "model switching would change the frozen Agent capability contract",
+            ));
+        }
+        let reference = compilation.candidate_revision_ref;
+        let revision = AgentPresetRevision {
+            reference: reference.clone(),
+            payload: compilation.payload,
+            contribution_locks,
+            created_by: owner.clone(),
+            created_at_ms: snapshot.created_at_ms,
+            reason: Some("Session model switch".into()),
+        };
+        revision.validate().map_err(|violation| {
+            ControlPlaneError::canonical(
+                violation.code,
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                violation.message,
+            )
+        })?;
+
+        let base_binding = session_binding_from_stable_artifacts(
+            reference.clone(),
+            Some(revision.clone()),
+            Some(snapshot.clone()),
+        )?;
+        self.store
+            .insert_preset_with_revision(
+                StoredPreset {
+                    session_only: true,
+                    preset: AgentPreset {
+                        preset_id,
+                        owner_user_id: Some(owner.clone()),
+                        source: AgentPresetSource::User,
+                        display_name: source.preset.display_name,
+                        description: source.preset.description,
+                        current_stable_revision: Some(reference),
+                    },
+                },
+                revision,
+                snapshot,
+            )
+            .await?;
+
+        let mut binding = base_binding;
+        binding.typed_resource_bindings = current.typed_resource_bindings;
+        binding.binding_version = next_binding_version;
+        self.validate_agent_binding(owner, &binding).await?;
+        wire_cast(&binding)
+    }
+
+    /// Prove that a historical turn Snapshot belongs to the same frozen Agent
+    /// contract and differs from the current binding only by its Chat route.
+    /// Runtime history uses this to retain prior-model turns after a model
+    /// switch without accepting history from another Agent or resource scope.
+    pub async fn agent_session_model_history_compatible(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValue,
+        historical: &AgentBindingValue,
+    ) -> Result<bool, ControlPlaneError> {
+        if current.typed_resource_bindings != historical.typed_resource_bindings {
+            return Ok(false);
+        }
+        let (current_revision, current_snapshot) =
+            self.load_binding_artifacts(owner, current).await?;
+        let (historical_revision, historical_snapshot) =
+            self.load_binding_artifacts(owner, historical).await?;
+        Ok(same_non_model_revision_contract(
+            &current_revision,
+            &historical_revision,
+        ) && same_non_model_snapshot_contract(
+            &current_snapshot,
+            &historical_snapshot,
+        ))
+    }
+
     async fn resolve_default_chat_route(
         &self,
         owner: &UserId,
@@ -1762,6 +2000,82 @@ fn session_binding_from_stable_artifacts(
         typed_resource_bindings: Vec::new(),
         binding_version: 1,
     })
+}
+
+fn same_non_model_revision_contract(
+    left: &AgentPresetRevision,
+    right: &AgentPresetRevision,
+) -> bool {
+    let mut left_payload = left.payload.clone();
+    left_payload.model_route_refs.clear();
+    left_payload.chat_route_records.clear();
+    let mut right_payload = right.payload.clone();
+    right_payload.model_route_refs.clear();
+    right_payload.chat_route_records.clear();
+    let mut left_locks = left.contribution_locks.clone();
+    left_locks.sort();
+    let mut right_locks = right.contribution_locks.clone();
+    right_locks.sort();
+    left_payload == right_payload
+        && left_locks == right_locks
+        && left.created_by == right.created_by
+}
+
+fn same_chat_route_configuration(
+    left: &nomifun_agent_contracts::ChatRouteRecord,
+    right: &nomifun_agent_contracts::ChatRouteRecord,
+) -> bool {
+    fn candidate_configuration(
+        candidate: &nomifun_agent_contracts::ChatRouteCandidate,
+    ) -> (
+        &str,
+        &str,
+        u64,
+        nomifun_agent_contracts::ChatRouteProtocol,
+        &nomifun_agent_contracts::ConnectionConfigRef,
+        &nomifun_agent_contracts::DigestHex,
+        &BTreeSet<ChatRouteFeature>,
+        &BTreeSet<ChatRouteFeature>,
+    ) {
+        (
+            &candidate.provider_id,
+            &candidate.model,
+            candidate.model_route_revision,
+            candidate.protocol,
+            &candidate.connection_config_ref,
+            &candidate.config_revision_digest,
+            &candidate.features,
+            &candidate.activation_features,
+        )
+    }
+
+    left.schema == right.schema
+        && left.task == right.task
+        && candidate_configuration(&left.primary) == candidate_configuration(&right.primary)
+        && left.failovers.len() == right.failovers.len()
+        && left
+            .failovers
+            .iter()
+            .zip(&right.failovers)
+            .all(|(left, right)| candidate_configuration(left) == candidate_configuration(right))
+}
+
+fn same_non_model_snapshot_contract(
+    candidate: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    source: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+) -> bool {
+    let mut normalized = candidate.content.clone();
+    normalized.preset_revision_ref = source.content.preset_revision_ref.clone();
+    normalized.model_route_refs = source.content.model_route_refs.clone();
+    normalized.chat_route_identity = source.content.chat_route_identity.clone();
+    normalized.compiled_runtime_profile_digest =
+        source.content.compiled_runtime_profile_digest.clone();
+    normalized == source.content
+        && candidate.actor == source.actor
+        && candidate.scene == source.scene
+        && candidate.surface == source.surface
+        && candidate.audience == source.audience
+        && candidate.availability_evidence_revision == source.availability_evidence_revision
 }
 
 fn ensure_expected_current(

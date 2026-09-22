@@ -6,12 +6,13 @@ use std::sync::{Arc, Weak};
 
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetRevision, PrincipalRef, ResolvedSnapshotEnvelope,
+    ResolvedSnapshotRef,
 };
 use nomifun_agent_control_plane::{AgentControlPlane, AuthenticatedOwner};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_api_types::{ConversationResponse, RuntimeBuildBinding};
 use nomifun_common::AppError;
-use nomifun_db::SqlitePool;
+use nomifun_db::{SqlitePool, sqlx};
 
 use super::nomi_core_session::{NomiCoreSessionOwner, session_metadata};
 use super::official_runtime::{OfficialRuntimeHost, binding_from_extra};
@@ -187,6 +188,69 @@ impl EngineSessionHost {
             ));
         }
         super::engine_model_facts::load(&self.pool, session).await
+    }
+
+    /// Accept a prior turn's immutable Snapshot only when the control plane
+    /// proves that it differs from the current Session binding solely by the
+    /// selected Chat route. This keeps model switches history-preserving while
+    /// preventing another Agent's tools, instructions or resource scope from
+    /// entering replay.
+    pub async fn historical_model_binding_compatible(
+        &self,
+        session: &AdmittedEngineSession,
+        historical_snapshot_ref: &ResolvedSnapshotRef,
+    ) -> Result<bool, AppError> {
+        if historical_snapshot_ref == &session.snapshot.snapshot_ref {
+            return Ok(true);
+        }
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT envelope_json FROM agent_runtime_snapshots \
+             WHERE snapshot_id = ? AND snapshot_digest = ?",
+        )
+        .bind(historical_snapshot_ref.snapshot_id.as_ref())
+        .bind(historical_snapshot_ref.snapshot_digest.as_ref())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            AppError::Internal(format!("read historical Agent Snapshot: {error}"))
+        })?;
+        let Some(raw) = raw else {
+            return Ok(false);
+        };
+        let historical_snapshot: ResolvedSnapshotEnvelope = serde_json::from_str(&raw)
+            .map_err(|error| {
+                AppError::Conflict(format!("historical Agent Snapshot is invalid: {error}"))
+            })?;
+        historical_snapshot.validate().map_err(|error| {
+            AppError::Conflict(format!(
+                "historical Agent Snapshot is invalid: {}: {}",
+                error.code.as_ref(),
+                error.message,
+            ))
+        })?;
+        if historical_snapshot.snapshot_ref != *historical_snapshot_ref {
+            return Ok(false);
+        }
+        let historical_binding = AgentBindingValue {
+            preset_revision_ref: historical_snapshot.content.preset_revision_ref.clone(),
+            resolved_snapshot_ref: historical_snapshot.snapshot_ref,
+            typed_resource_bindings: session.agent_binding.typed_resource_bindings.clone(),
+            binding_version: session.agent_binding.binding_version,
+        };
+        self.control_plane
+            .agent_session_model_history_compatible(
+                &nomifun_agent_contracts::UserId::from(
+                    session.principal.principal_id.clone(),
+                ),
+                &session.agent_binding,
+                &historical_binding,
+            )
+            .await
+            .map_err(|error| {
+                AppError::Conflict(format!(
+                    "historical Agent model binding validation failed: {error}"
+                ))
+            })
     }
 
     /// Actual product Broker bound to this accepted turn's journal gate.

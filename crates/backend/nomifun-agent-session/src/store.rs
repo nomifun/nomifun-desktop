@@ -7,7 +7,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(test)]
 use nomifun_agent_contracts::AGENT_STORE_BASELINE_SQL;
 use nomifun_agent_contracts::{
-    ActionId, AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId,
+    ActionId, AgentBindingValue, AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId,
     AgentSessionLiveRecord, AgentSessionTombstone, ArtifactId, CapabilityId, ChatRouteIdentity,
     CompactionCompletedPayload, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand,
     DigestHex, EventId,
@@ -1273,6 +1273,94 @@ impl AgentSessionStore {
         if result.rows_affected() != 1 {
             return Err(SessionStoreError::Conflict(
                 "AgentSession metadata update lost its live row".to_owned(),
+            ));
+        }
+        let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Atomically replace only the host-validated model variant of a local
+    /// AgentSession binding.
+    ///
+    /// The Store deliberately does not resolve routes or Presets. Its boundary
+    /// is narrower: compare-and-swap the exact binding while proving that typed
+    /// resource authority is unchanged, no Turn owns the Session, and Remote
+    /// provenance is not being rewritten through a local product command.
+    pub async fn replace_session_model_binding(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        expected: &AgentBindingValue,
+        replacement: AgentBindingValue,
+    ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
+        validate_principal(owner)?;
+        if replacement.typed_resource_bindings != expected.typed_resource_bindings {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession model replacement must preserve typed resources".to_owned(),
+            ));
+        }
+        if replacement.binding_version != expected.binding_version.checked_add(1).ok_or_else(|| {
+            SessionStoreError::Conflict(
+                "AgentSession binding version cannot advance".to_owned(),
+            )
+        })? {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession model replacement must advance binding_version exactly once"
+                    .to_owned(),
+            ));
+        }
+        if replacement.preset_revision_ref == expected.preset_revision_ref
+            && replacement.resolved_snapshot_ref == expected.resolved_snapshot_ref
+        {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession model replacement requires a new exact Revision/Snapshot"
+                    .to_owned(),
+            ));
+        }
+
+        let replacement_json = serde_json::to_string(&replacement)?;
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "live" {
+            return Err(SessionStoreError::Deleted(row.agent_session_id));
+        }
+        if row.remote_binding_id.is_some() || row.remote_binding_version.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "Remote AgentSession model binding is immutable".to_owned(),
+            ));
+        }
+        let current: AgentBindingValue = serde_json::from_str(
+            row.agent_binding_json.as_deref().ok_or_else(|| {
+                SessionStoreError::InvalidSession(
+                    "live AgentSession lost agent_binding".to_owned(),
+                )
+            })?,
+        )?;
+        if &current != expected {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession binding changed before model replacement".to_owned(),
+            ));
+        }
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        if head.status == "running" || head.active_turn_id.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "wait for the active Turn before switching models".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE agent_sessions SET agent_binding_json = ? \
+             WHERE agent_session_id = ? AND state = 'live' AND agent_binding_json = ?",
+        )
+        .bind(replacement_json)
+        .bind(session_id.as_ref())
+        .bind(serde_json::to_string(expected)?)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession model replacement lost its compare-and-swap boundary".to_owned(),
             ));
         }
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;

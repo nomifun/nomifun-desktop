@@ -135,7 +135,7 @@ export interface AgentResolvedSnapshot {
   resolved_agent_id?: AgentId;
   resolved_agent_type?: string;
   resolved_agent_backend?: string;
-  /** Initial model at creation; Conversation.model is the current chat model. */
+  /** Exact Chat model in this versioned Session binding; Conversation.model mirrors it. */
   resolved_model?: {
     provider_id: ProviderId;
     model: string;

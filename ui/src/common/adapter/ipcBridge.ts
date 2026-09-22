@@ -933,8 +933,9 @@ export const conversation = {
   remove: httpDelete<void, { conversation_id: ConversationId }>(
     (p) => `/api/agent-sessions/${p.conversation_id}`
   ),
-  // AgentSession PATCH accepts presentation metadata only. Agent, model,
-  // workspace/resource, capability and collaboration facts are immutable.
+  // AgentSession PATCH accepts presentation metadata only. Agent,
+  // workspace/resource, capability and collaboration facts are immutable;
+  // model changes use the dedicated versioned binding command below.
   update: {
     provider: () => {},
     invoke: async (p: {
@@ -947,13 +948,28 @@ export const conversation = {
       );
       if (unsupported.length) {
         throw new Error(
-          `AgentSession binding is immutable; create or fork a Session instead of updating ${unsupported.join(', ')}`
+          `AgentSession metadata cannot update ${unsupported.join(', ')}; use its dedicated product command or create a new Session`
         );
       }
       await httpRequest(
         'PATCH',
         `/api/agent-sessions/${p.conversation_id}`,
         updates
+      );
+      return true;
+    },
+  },
+  switchModel: {
+    provider: () => {},
+    invoke: async (p: {
+      conversation_id: ConversationId;
+      provider_id: ProviderId;
+      model: string;
+    }): Promise<boolean> => {
+      await httpRequest(
+        'PUT',
+        `/api/agent-sessions/${p.conversation_id}/model`,
+        { provider_id: p.provider_id, model: p.model }
       );
       return true;
     },
