@@ -43,7 +43,7 @@ describe('the async resolve window cannot desync the rail from the body', () => 
     // `files` while the rail keeps its own copy — icon active, file tree shown.
     expect(mounts.includes('function readSeed(')).toBe(true);
     expect(mounts.includes('function writeSeed(')).toBe(true);
-    expect(mounts.includes('const mountedIds = binding ? liveIds : seedIds;')).toBe(true);
+    expect(mounts.includes('const mountedIds = frozenIds ? [...frozenIds] : binding ? liveIds : seedIds;')).toBe(true);
   });
 
   test('a refresh never blanks the cached list', () => {
@@ -150,9 +150,9 @@ describe('expand-all is one level per root, not a recursive crawl', () => {
 });
 
 describe('mount detection', () => {
-  test('requires the binding master switch as well as a non-empty kb_ids', () => {
-    // Matches useWorkpathKnowledge's `enabled && kb_ids.length` so the rail icon
-    // and the session-list capability dot agree.
+  test('uses frozen conversation resources and keeps the binding switch only for workpaths', () => {
+    expect(mounts.includes("source?.kind === 'conversation' ? source.knowledgeBaseIds : null")).toBe(true);
+    expect(mounts.includes('frozenIds ? [...frozenIds]')).toBe(true);
     expect(mounts.includes('binding?.enabled ? binding.kb_ids : []')).toBe(true);
   });
 

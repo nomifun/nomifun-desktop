@@ -18,10 +18,10 @@ import {
 /**
  * Which knowledge bases a session actually has mounted.
  *
- * Neither the conversation nor the terminal payload carries any knowledge field
- * (see `TChatConversation.extra`, `ITerminalSession`), and there is no batch
- * "resolve these kb_ids" endpoint, so this needs `getBinding` for the ids and
- * `listBases` for their names.
+ * Canonical conversations carry exact Knowledge resource IDs in their frozen
+ * Agent binding. Terminals remain workpath-scoped and resolve their mutable
+ * binding through `getBinding`. Both paths use `listBases` only for current
+ * presentation metadata; it is never a second authority source for a Session.
  *
  * Three properties matter and each cost a bug during review:
  *
@@ -115,8 +115,8 @@ const mountedIdsOf = (binding: IKnowledgeBinding | undefined): KnowledgeBaseId[]
 
 export interface SessionKnowledgeMounts {
   /**
-   * True when the session's binding is enabled with at least one base — the same
-   * rule as the session-list capability dot (`useWorkpathKnowledgeLit`).
+   * True when a canonical conversation has frozen Knowledge resources, or a
+   * terminal workpath binding is enabled with at least one base.
    *
    * Optimistic on the first render of a known session (seeded from
    * localStorage), then authoritative.
@@ -132,19 +132,22 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
 
   const target = useMemo(() => (source ? resolveKnowledgeBindingTarget(source) : null), [source]);
   const targetKey = target ? knowledgeBindingTargetKey(target) : null;
+  const frozenIds = source?.kind === 'conversation' ? source.knowledgeBaseIds : null;
+  const frozenKey = frozenIds?.join(',') ?? '';
+  const subscriptionKey = targetKey ?? (source?.kind === 'conversation' ? `frozen:${frozenKey}` : null);
 
   useEffect(() => {
-    if (!targetKey) return undefined;
+    if (!subscriptionKey) return undefined;
     ensureSubscribed();
     const listener = () => setTick((tick) => tick + 1);
-    const set = listeners.get(targetKey) ?? new Set();
+    const set = listeners.get(subscriptionKey) ?? new Set();
     set.add(listener);
-    listeners.set(targetKey, set);
+    listeners.set(subscriptionKey, set);
     return () => {
       set.delete(listener);
-      if (set.size === 0) listeners.delete(targetKey);
+      if (set.size === 0) listeners.delete(subscriptionKey);
     };
-  }, [targetKey]);
+  }, [subscriptionKey]);
 
   const binding = targetKey ? bindingCache.get(targetKey) : undefined;
 
@@ -182,7 +185,7 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
   const seedIds = useMemo(() => (targetKey ? readSeed(targetKey) : []), [targetKey, attempt]);
   // Before the binding resolves, trust the seed; afterwards the binding wins
   // (including when it says "nothing mounted any more").
-  const mountedIds = binding ? liveIds : seedIds;
+  const mountedIds = frozenIds ? [...frozenIds] : binding ? liveIds : seedIds;
   const hasMountedIds = mountedIds.length > 0;
 
   useEffect(() => {

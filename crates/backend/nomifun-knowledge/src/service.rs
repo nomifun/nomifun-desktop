@@ -25,7 +25,7 @@ use nomifun_api_types::{
     UndoKnowledgeEntryRelocationRequest, UpdateKnowledgeTagRequest,
 };
 use nomifun_common::{
-    AppError, CompanionId, ConversationId, KnowledgeBaseId, KnowledgeEntryId,
+    AppError, CompanionId, KnowledgeBaseId, KnowledgeEntryId,
     KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, ProviderWithModel,
     TerminalId, TimestampMs,
     UuidV7Error, generate_id, now_ms,
@@ -85,11 +85,11 @@ pub use bound::{
     BoundKnowledgeSearchHit,
 };
 
-/// Binding target kinds accepted by the API. `workpath` is the primary kind
-/// for conversation/terminal sessions since the session-list unification
-/// (its `target_id` is a normalized [`workpath_key`]); the remaining kinds use
-/// their registered canonical entity IDs.
-pub const BINDING_KINDS: &[&str] = &["workpath", "conversation", "terminal", "companion"];
+/// Mutable binding target kinds accepted by the Knowledge domain. Canonical
+/// AgentSession conversations are intentionally absent: their selected bases
+/// live in the frozen Agent binding, not in this side table. The repository
+/// still understands historical conversation rows for migration and cleanup.
+pub const BINDING_KINDS: &[&str] = &["workpath", "terminal", "companion"];
 
 /// Accepted write-back dispositions ("回写意识"). `manual` (the default) writes
 /// back only what the user explicitly asked for and suppresses the turn-final
@@ -281,8 +281,8 @@ pub struct KbFileUpdateResult {
     pub entry_id: Option<KnowledgeEntryId>,
 }
 
-/// One consumer (binding) of a knowledge base — a workspace/conversation/etc.
-/// that has this base mounted. Includes disabled bindings (greyed in the UI).
+/// One mutable product consumer of a knowledge base (workpath, terminal, or
+/// Companion profile). Includes disabled bindings (greyed in the UI).
 #[derive(Debug, Clone, Serialize)]
 pub struct ConsumerInfo {
     pub target_kind: String,
@@ -321,9 +321,8 @@ impl Default for KnowledgeBinding {
     }
 }
 
-/// Result of a mount sync for one target: what is mounted and whether the
-/// write-back contract applies. Consumed by the conversation service to
-/// inject prompt context.
+/// Result of a mutable workspace mount sync: what is mounted and whether the
+/// terminal/CLI write-back contract applies.
 #[derive(Debug, Clone, Default)]
 pub struct MountOutcome {
     pub mounts: Vec<KnowledgeMountInfo>,
@@ -777,8 +776,8 @@ pub struct KnowledgeService {
     /// Per-logical-target write-back lock. Direct mode holds it across
     /// read+merge+replace. Staged mode holds it across duplicate detection,
     /// collision-suffix allocation, and no-replace publication. The staged key
-    /// is rooted at the outer scope so an explicit tool write and a turn-final
-    /// write for `conversation[/turn]` cannot race each other.
+    /// is rooted at the outer caller scope so explicit and synthesized writes
+    /// cannot race each other.
     turn_writeback_locks: Arc<StdMutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     /// Serializes publication with base deletion per canonical root group.
     /// Duplicate and ancestor/descendant roots are assigned the same lock.
@@ -8329,8 +8328,7 @@ impl KnowledgeService {
 
     /// Remove a target's knowledge binding row entirely. For cleanup when the
     /// target itself goes away (e.g. a deleted companion → `("companion", companion_id)`);
-    /// mirrors the conversation-delete hook below. Deleting a missing row is
-    /// a no-op.
+    /// deleting a missing row is a no-op.
     pub async fn delete_binding(&self, kind: &str, target_id: &str) -> Result<(), AppError> {
         validate_kind(kind)?;
         let target_id = canonical_target_id(kind, target_id)?;
@@ -8348,17 +8346,6 @@ impl KnowledgeService {
             hook(kind, &target_id);
         }
         Ok(())
-    }
-
-    /// Resolve a session's workpath binding without mutating its workspace.
-    pub async fn prepare_mounts_for_session(
-        &self,
-        workpath: &str,
-        workspace: &Path,
-    ) -> Result<PreparedMountPlan, AppError> {
-        let key = workpath_key(workpath);
-        self.prepare_mounts_for_target(WORKPATH_BINDING_KIND, &key, workspace)
-            .await
     }
 
     /// Resolve one target's exact binding and runtime metadata without
@@ -8518,9 +8505,9 @@ impl KnowledgeService {
     /// Deleted/missing bases are skipped (no FK by design); a disabled or
     /// empty binding clears previously created mounts. Never fails the
     /// session start — errors degrade to an empty outcome with warnings.
-    /// Conversation/terminal mounts resolve exclusively through the canonical
-    /// workpath binding (`WORKPATH_BINDING_KIND` + `workpath_key`); v3 never
-    /// reads per-session binding rows as a fallback.
+    /// Terminal mounts resolve exclusively through the canonical workpath
+    /// binding (`WORKPATH_BINDING_KIND` + `workpath_key`). Canonical
+    /// AgentSessions never read this mutable binding table.
     pub async fn ensure_mounts_for_target(&self, kind: &str, target_id: &str, workspace: &Path) -> MountOutcome {
         // Safety guard: when the workspace is the backend data root (or one
         // of its ancestors), the mount sync / legacy cleanup would run their
@@ -9476,7 +9463,6 @@ fn canonical_target_id(kind: &str, target_id: &str) -> Result<String, AppError> 
     };
     match kind {
         WORKPATH_BINDING_KIND => Ok(workpath_key(target_id)),
-        "conversation" => ConversationId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
         "terminal" => TerminalId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
         "companion" => CompanionId::parse(target_id).map(|id| id.into_string()).map_err(invalid),
         _ => Err(AppError::BadRequest(format!("unsupported binding kind: {kind}"))),
@@ -14302,9 +14288,9 @@ mod tests {
     }
 
     const TEST_OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
-    const TEST_CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
-    const TEST_CONVERSATION_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
-    const TEST_CONVERSATION_ID_9: &str = "0190f5fe-7c00-7a00-8000-000000000019";
+    const TEST_SESSION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000011";
+    const TEST_SESSION_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000012";
+    const TEST_SESSION_ID_9: &str = "0190f5fe-7c00-7a00-8000-000000000019";
     const TEST_TERMINAL_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000022";
     const TEST_TERMINAL_ID_9: &str = "0190f5fe-7c00-7a00-8000-000000000029";
     const TEST_PROVIDER_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000032";
@@ -14487,16 +14473,21 @@ mod tests {
     }
 
     #[test]
-    fn canonical_entity_target_id_accepts_bare_uuidv7_and_rejects_legacy_prefix() {
+    fn mutable_binding_target_ids_are_canonical_and_conversation_is_retired() {
         assert_eq!(
-            canonical_target_id("conversation", TEST_CONVERSATION_ID).unwrap(),
-            TEST_CONVERSATION_ID
+            canonical_target_id("terminal", TEST_SESSION_ID).unwrap(),
+            TEST_SESSION_ID
         );
 
-        let legacy = format!("conv_{TEST_CONVERSATION_ID}");
-        let error = canonical_target_id("conversation", &legacy).unwrap_err();
+        let legacy = format!("terminal_{TEST_SESSION_ID}");
+        let error = canonical_target_id("terminal", &legacy).unwrap_err();
         assert!(
-            matches!(error, AppError::BadRequest(ref message) if message.contains("invalid conversation target id")),
+            matches!(error, AppError::BadRequest(ref message) if message.contains("invalid terminal target id")),
+            "{error}"
+        );
+        let error = validate_kind("conversation").unwrap_err();
+        assert!(
+            matches!(error, AppError::BadRequest(ref message) if message.contains("unsupported binding kind: conversation")),
             "{error}"
         );
     }
@@ -18758,8 +18749,8 @@ mod tests {
         // extra.source(live) → mounts.live_sources.
         service
             .set_binding(
-                "conversation",
-                TEST_CONVERSATION_ID,
+                "terminal",
+                TEST_SESSION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     kb_ids: vec![kb.knowledge_base_id.clone()],
@@ -18771,7 +18762,7 @@ mod tests {
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1);
         let live = &outcome.mounts[0].live_sources;
@@ -19839,8 +19830,8 @@ mod tests {
         service.write_file(&kb.knowledge_base_id, "a.md", "# A").await.unwrap();
         service
             .set_binding(
-                "conversation",
-                TEST_CONVERSATION_ID,
+                "terminal",
+                TEST_SESSION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     kb_ids: vec![kb.knowledge_base_id.clone()],
@@ -19852,14 +19843,14 @@ mod tests {
 
         // Workspace == data root → skipped, no scaffolding created.
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &data_dir)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &data_dir)
             .await;
         assert!(outcome.mounts.is_empty());
         assert!(!data_dir.join(".nomi").exists());
 
         // Workspace is an ancestor of the data root → skipped too.
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, dir.path())
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, dir.path())
             .await;
         assert!(outcome.mounts.is_empty());
         assert!(!dir.path().join(".nomi").exists());
@@ -19869,7 +19860,7 @@ mod tests {
         // mount sweep would otherwise run inside a knowledge base's files.
         let kb_root = PathBuf::from(&kb.root_path);
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &kb_root)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &kb_root)
             .await;
         assert!(outcome.mounts.is_empty());
         assert!(!kb_root.join(".nomi").exists());
@@ -19878,7 +19869,7 @@ mod tests {
         let ws = dir.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
         let outcome = service
-            .ensure_mounts_for_target("conversation", TEST_CONVERSATION_ID, &ws)
+            .ensure_mounts_for_target("terminal", TEST_SESSION_ID, &ws)
             .await;
         assert_eq!(outcome.mounts.len(), 1);
     }
@@ -19917,20 +19908,20 @@ mod tests {
         let kb_a = bind_new_base(
             &service,
             "binding-a",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
         let _kb_b = bind_new_base(
             &service,
             "binding-b",
-            "conversation",
-            TEST_CONVERSATION_ID_2,
+            "terminal",
+            TEST_SESSION_ID_2,
         )
         .await;
 
         let plan_a = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         assert!(
@@ -19938,25 +19929,25 @@ mod tests {
             "preparation must be read-only"
         );
         let signature_a = plan_a.binding_signature().to_owned();
-        let (_, lease_a) = plan_a.activate(TEST_CONVERSATION_ID).await.unwrap();
+        let (_, lease_a) = plan_a.activate(TEST_SESSION_ID).await.unwrap();
 
         let same_plan = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         assert_eq!(same_plan.binding_signature(), signature_a);
         let (_, same_lease) = same_plan
-            .activate(TEST_CONVERSATION_ID_9)
+            .activate(TEST_SESSION_ID_9)
             .await
             .expect("the exact same ordered binding can share a workspace");
 
         let conflicting_plan = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID_2, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID_2, &workspace)
             .await
             .unwrap();
         assert!(
             conflicting_plan
-                .activate(TEST_CONVERSATION_ID_2)
+                .activate(TEST_SESSION_ID_2)
                 .await
                 .is_err(),
             "a second active runtime must not replace different mounts"
@@ -19965,17 +19956,17 @@ mod tests {
         drop(same_lease);
         drop(lease_a);
         service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID_2, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID_2, &workspace)
             .await
             .unwrap()
-            .activate(TEST_CONVERSATION_ID_2)
+            .activate(TEST_SESSION_ID_2)
             .await
             .expect("the next binding can take over after every old runtime releases");
 
         // Mutable knowledge content changes the prompt metadata but not the
         // physical/logical mount binding authority.
         let before = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         service
@@ -19983,7 +19974,7 @@ mod tests {
             .await
             .unwrap();
         let after = service
-            .prepare_mounts_for_target("conversation", TEST_CONVERSATION_ID, &workspace)
+            .prepare_mounts_for_target("terminal", TEST_SESSION_ID, &workspace)
             .await
             .unwrap();
         assert_eq!(
@@ -20003,11 +19994,11 @@ mod tests {
         let key = workpath_key(&ws.to_string_lossy());
 
         let kb_workpath = bind_new_base(&service, "路径库", WORKPATH_BINDING_KIND, &key).await;
-        let _kb_session = bind_new_base(
+        let _kb_target = bind_new_base(
             &service,
             "会话库",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
 
@@ -20027,11 +20018,11 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let key = workpath_key(&ws.to_string_lossy());
 
-        let _kb_session = bind_new_base(
+        let _kb_target = bind_new_base(
             &service,
             "会话库",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
 
@@ -20058,11 +20049,11 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         let key = workpath_key(&ws.to_string_lossy());
 
-        let _kb_session = bind_new_base(
+        let _kb_target = bind_new_base(
             &service,
             "会话库",
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
         )
         .await;
         service
@@ -20085,7 +20076,7 @@ mod tests {
         let service = make_service(&data_dir);
 
         // Temp workspace under the backend data dir → sentinel key (the
-        // same derivation the conversation/terminal services apply).
+        // same derivation the terminal service applies).
         let temp_ws = data_dir.join("conversations").join("gemini-temp-c1");
         std::fs::create_dir_all(&temp_ws).unwrap();
         let key = crate::workpath::session_workpath_key(&temp_ws, &data_dir);
@@ -21420,8 +21411,8 @@ mod tests {
         let (svc, kb_id, _dir) = test_service_with_file("a.md", "x").await;
         let error = svc
             .set_binding(
-                "conversation",
-                TEST_CONVERSATION_ID,
+                "terminal",
+                TEST_SESSION_ID,
                 KnowledgeBinding {
                     enabled: true,
                     writeback: true,
@@ -22175,8 +22166,8 @@ mod tests {
     async fn list_consumers_returns_enabled_and_disabled_bindings() {
         let (svc, kb_id, _dir) = test_service_with_file("a.md", "x").await;
         svc.set_binding(
-            "conversation",
-            TEST_CONVERSATION_ID,
+            "terminal",
+            TEST_SESSION_ID,
             KnowledgeBinding {
                 enabled: true,
                 kb_ids: vec![KnowledgeBaseId::parse(kb_id.clone()).unwrap()],
@@ -22208,9 +22199,9 @@ mod tests {
 
         let consumers = svc.list_consumers(&kb_id).await.unwrap();
         assert_eq!(consumers.len(), 2, "only bindings using this kb: {consumers:?}");
-        let conv = consumers.iter().find(|c| c.target_kind == "conversation").unwrap();
-        assert_eq!(conv.target_id.as_deref(), Some(TEST_CONVERSATION_ID));
-        assert!(conv.enabled);
+        let terminal = consumers.iter().find(|c| c.target_kind == "terminal").unwrap();
+        assert_eq!(terminal.target_id.as_deref(), Some(TEST_SESSION_ID));
+        assert!(terminal.enabled);
         assert!(!consumers.iter().find(|c| c.target_kind == "workpath").unwrap().enabled, "disabled included");
     }
 

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   requiredAgentResourcePickerKinds,
   resolveAgentResourceSelections,
+  selectedKnowledgeResourceIds,
   selectedCapabilityIds,
   allowsMultipleMcpServers,
 } from './agentResourceSelection';
@@ -36,14 +37,19 @@ describe('Agent resource selection contract', () => {
     });
   });
 
-  test('submits only kind/id while server-owned resources use exact sentinels', () => {
+  test('submits every frozen Knowledge base as kind/id while host resources use exact sentinels', () => {
+    expect(selectedKnowledgeResourceIds({
+      knowledge_bases: ['kb-1', 'kb-2', 'kb-1'],
+      knowledge_base: 'legacy-kb',
+    })).toEqual(['kb-1', 'kb-2']);
     expect(resolveAgentResourceSelections(
       ['workspace', 'project_memory', 'process_session', 'terminal', 'asset_library', 'knowledge_base'],
-      { knowledge_base: 'kb-1' },
+      { knowledge_bases: ['kb-1', 'kb-2', 'kb-1'] },
     )).toEqual({
       selections: [
         { resource_kind: 'asset_library', resource_id: 'creative-studio-assets' },
         { resource_kind: 'knowledge_base', resource_id: 'kb-1' },
+        { resource_kind: 'knowledge_base', resource_id: 'kb-2' },
         { resource_kind: 'process_session', resource_id: 'managed-process-session' },
         { resource_kind: 'project_memory', resource_id: 'default-project-memory' },
         { resource_kind: 'terminal', resource_id: 'managed-terminal' },
@@ -102,7 +108,7 @@ describe('Agent resource selection contract', () => {
       channel: 'channel-1',
       robot: 'robot-1',
       customer: 'customer-1',
-      knowledge_base: 'kb-1',
+      knowledge_bases: ['kb-1', 'kb-2'],
       mcp_server: 'mcp-1',
       canvas: 'canvas-1',
       plugin: 'plugin-1',
@@ -114,6 +120,6 @@ describe('Agent resource selection contract', () => {
     ]);
     const resolution = resolveAgentResourceSelections(officialKinds, value);
     expect(resolution.missingKinds).toEqual([]);
-    expect(resolution.selections).toHaveLength(17);
+    expect(resolution.selections).toHaveLength(18);
   });
 });

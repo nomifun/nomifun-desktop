@@ -5904,9 +5904,13 @@ export interface IKnowledgeBinding {
 
 export type KnowledgeWritebackEagerness = 'manual' | 'auto';
 
-export type KnowledgeBindingKind = 'conversation' | 'terminal' | 'companion' | 'workpath';
+/**
+ * Mutable Knowledge-binding rows. Canonical AgentSession conversations are
+ * deliberately absent: their Knowledge resources are frozen in
+ * `agent_binding.typed_resource_bindings` when the Session is created.
+ */
+export type KnowledgeBindingKind = 'terminal' | 'companion' | 'workpath';
 export type KnowledgeBindingTarget =
-  | { kind: 'conversation'; target_id: ConversationId }
   | { kind: 'terminal'; target_id: TerminalId }
   | { kind: 'companion'; target_id: CompanionId }
   | { kind: 'workpath'; target_id: string };
@@ -6325,13 +6329,18 @@ const fromApiKnowledgeBinding = (binding: IKnowledgeBinding): IKnowledgeBinding 
   kb_ids: binding.kb_ids.map(parseKnowledgeBaseId),
 });
 
+const parseKnowledgeBindingKind = (value: unknown): KnowledgeBindingKind => {
+  if (value === 'terminal' || value === 'companion' || value === 'workpath') return value;
+  throw new TypeError(`unsupported mutable Knowledge binding kind: ${String(value)}`);
+};
+
 const parseKnowledgeBindingTargetId = (
-  kind: KnowledgeBindingKind,
+  kind: unknown,
   value: unknown
-): string | ConversationId | TerminalId | CompanionId => {
-  if (kind === 'conversation') return parseConversationId(value);
-  if (kind === 'terminal') return parseTerminalId(value);
-  if (kind === 'companion') return parseCompanionId(value);
+): string | TerminalId | CompanionId => {
+  const parsedKind = parseKnowledgeBindingKind(kind);
+  if (parsedKind === 'terminal') return parseTerminalId(value);
+  if (parsedKind === 'companion') return parseCompanionId(value);
   if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
     throw new TypeError('workpath binding target must be a non-empty canonical path');
   }
@@ -6341,18 +6350,16 @@ const parseKnowledgeBindingTargetId = (
 const parseKnowledgeBindingTarget = (
   target: KnowledgeBindingTargetInput
 ): KnowledgeBindingTarget => {
-  if (target.kind === 'conversation') {
-    return { kind: target.kind, target_id: parseConversationId(target.target_id) };
+  const kind = parseKnowledgeBindingKind(target.kind);
+  if (kind === 'terminal') {
+    return { kind, target_id: parseTerminalId(target.target_id) };
   }
-  if (target.kind === 'terminal') {
-    return { kind: target.kind, target_id: parseTerminalId(target.target_id) };
-  }
-  if (target.kind === 'companion') {
-    return { kind: target.kind, target_id: parseCompanionId(target.target_id) };
+  if (kind === 'companion') {
+    return { kind, target_id: parseCompanionId(target.target_id) };
   }
   return {
-    kind: target.kind,
-    target_id: parseKnowledgeBindingTargetId(target.kind, target.target_id),
+    kind,
+    target_id: parseKnowledgeBindingTargetId(kind, target.target_id),
   };
 };
 
@@ -6605,8 +6612,8 @@ export const knowledge = {
   ),
   getBinding: withResponseMap(httpGet<IKnowledgeBinding, KnowledgeBindingTargetInput>(
     // workpath target_id is a filesystem path containing `/`; encode so it
-    // stays a single path segment (`/`→`%2F`). conversation/terminal ids have
-    // no `/`, so their encoded form is byte-identical — no regression.
+    // stays a single path segment (`/`→`%2F`). terminal/companion ids have no
+    // `/`, so their encoded form is byte-identical.
     (p) => {
       const target = parseKnowledgeBindingTarget(p);
       return `/api/knowledge/binding/${target.kind}/${encodeURIComponent(target.target_id)}`;
@@ -6672,13 +6679,16 @@ export const knowledge = {
     rel_path: value.rel_path,
     revision: value.revision,
   })),
-  onBindingChanged: wsMappedEmitter<{ target_kind: KnowledgeBindingKind; target_id: string | ConversationId | TerminalId | CompanionId } & IKnowledgeBinding>(
+  onBindingChanged: wsMappedEmitter<{ target_kind: KnowledgeBindingKind; target_id: string | TerminalId | CompanionId } & IKnowledgeBinding>(
     'knowledge.binding-changed',
-    (value) => ({
-      ...fromApiKnowledgeBinding(value),
-      target_kind: value.target_kind,
-      target_id: parseKnowledgeBindingTargetId(value.target_kind, value.target_id),
-    })
+    (value) => {
+      const targetKind = parseKnowledgeBindingKind(value.target_kind);
+      return {
+        ...fromApiKnowledgeBinding(value),
+        target_kind: targetKind,
+        target_id: parseKnowledgeBindingTargetId(targetKind, value.target_id),
+      };
+    }
   ),
   /** A tag was created/renamed/recolored/reordered/deleted — re-list tags. */
   onTagChanged: wsEmitter<Record<string, never>>('knowledge.tag-changed'),

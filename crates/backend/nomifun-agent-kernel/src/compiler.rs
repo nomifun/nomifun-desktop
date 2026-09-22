@@ -187,9 +187,10 @@ impl CompiledSnapshot {
                 let mut matches = by_kind.get(resource_kind).cloned().unwrap_or_default();
                 // MCP mappings already freeze the server identity. A tool
                 // receives only that server, never the Session's entire set.
-                // The bundled resource provider explicitly selects one member
-                // at dispatch. Its connect/OAuth dependencies share that set;
-                // other unmapped/native consumers remain cardinality one.
+                // Other capabilities receive every binding of each required
+                // kind. Cardinality is a capability-owner contract: the Kernel
+                // must not globally collapse multi-resource scopes such as a
+                // Session with several mounted Knowledge bases.
                 if resource_kind.as_ref() == "mcp_server"
                     && let Some(lock) = self.envelope.content.mcp_tool_locks.iter()
                         .find(|lock| &lock.capability_id == capability_id)
@@ -201,14 +202,6 @@ impl CompiledSnapshot {
                             reason: format!("MCP capability {} requires one exact frozen server binding", capability_id.as_ref()),
                         });
                     }
-                }
-                if matches.len() > 1 {
-                    return Err(KernelError::InvalidPresetRevision {
-                        reason: format!(
-                            "target has multiple bindings for resource kind {}",
-                            resource_kind.as_ref()
-                        ),
-                    });
                 }
                 policy.resource_binding_ids.extend(matches);
             }

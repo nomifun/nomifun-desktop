@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use nomifun_api_types::{KnowledgeSource, KnowledgeSourceEntry, KnowledgeSourceMode};
 use nomifun_common::KnowledgeBaseId;
-use nomifun_common::{CompanionId, ConversationId, TerminalId};
+use nomifun_common::{CompanionId, TerminalId};
 use nomifun_knowledge::source_url::truncate_to_bytes;
 use nomifun_knowledge::{
     HttpFetcher, KnowledgeBinding, KnowledgeService, WriteRequest, WriteSurface,
@@ -88,7 +88,6 @@ struct FetchUrlParams {
 #[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum KnowledgeBindingTargetKind {
-    Conversation,
     Terminal,
     Companion,
 }
@@ -96,7 +95,6 @@ enum KnowledgeBindingTargetKind {
 impl KnowledgeBindingTargetKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Conversation => "conversation",
             Self::Terminal => "terminal",
             Self::Companion => "companion",
         }
@@ -106,7 +104,8 @@ impl KnowledgeBindingTargetKind {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GetBindingParams {
-    /// Target kind: "conversation" | "terminal" | "companion".
+    /// Mutable target kind: "terminal" | "companion". AgentSession resources
+    /// are frozen at creation and are not a Gateway binding target.
     kind: KnowledgeBindingTargetKind,
     /// The target id whose binding to read.
     target_id: CanonicalEntityId,
@@ -115,7 +114,8 @@ struct GetBindingParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SetBindingParams {
-    /// Target kind: "conversation" | "terminal" | "companion".
+    /// Mutable target kind: "terminal" | "companion". AgentSession resources
+    /// are frozen at creation and are not a Gateway binding target.
     kind: KnowledgeBindingTargetKind,
     /// The target id whose binding to set.
     target_id: CanonicalEntityId,
@@ -158,9 +158,7 @@ async fn resolve_binding_row(
             .await
             .map(|key| (nomifun_knowledge::WORKPATH_BINDING_KIND, key))
             .map_err(|error| json!({ "error": format!("terminal target_id: {error}") })),
-        KnowledgeBindingTargetKind::Conversation | KnowledgeBindingTargetKind::Companion => {
-            Ok((kind.as_str(), target_id))
-        }
+        KnowledgeBindingTargetKind::Companion => Ok((kind.as_str(), target_id)),
     }
 }
 
@@ -170,9 +168,6 @@ fn parse_binding_target(
 ) -> Result<String, Value> {
     let target_id = target_id.into_string();
     match kind {
-        KnowledgeBindingTargetKind::Conversation => ConversationId::parse(target_id)
-            .map(ConversationId::into_string)
-            .map_err(|error| json!({ "error": format!("invalid conversation target_id: {error}") })),
         KnowledgeBindingTargetKind::Terminal => TerminalId::parse(target_id)
             .map(TerminalId::into_string)
             .map_err(|error| json!({ "error": format!("invalid terminal target_id: {error}") })),
@@ -487,8 +482,8 @@ async fn set_binding(
         KnowledgeBindingTargetKind::Terminal => {
             "binding saved on the terminal's workpath; live terminals on it re-sync immediately"
         }
-        KnowledgeBindingTargetKind::Conversation | KnowledgeBindingTargetKind::Companion => {
-            "binding saved; the target picks the bases up at its NEXT task start"
+        KnowledgeBindingTargetKind::Companion => {
+            "binding saved as the Companion's product-owned Knowledge default; live AgentSessions remain immutable"
         }
     };
     let (kind, target_id) = match resolve_binding_row(&deps, p.kind, p.target_id).await {

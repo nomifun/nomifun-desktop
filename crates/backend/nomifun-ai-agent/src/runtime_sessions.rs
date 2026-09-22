@@ -3300,18 +3300,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn benign_recycles_never_trip_the_breaker() {
-        let registry = make_registry();
-        for _ in 0..6 {
-            registry.get_or_create_runtime("c", make_runtime_options("c")).await.unwrap();
-            // Knowledge-binding rebuild is a deliberate recycle, not a crash.
-            registry.terminate("c", Some(AgentKillReason::KnowledgeBindingChanged)).unwrap();
-        }
-        // Never counted as a crash → still builds.
-        assert!(registry.get_or_create_runtime("c", make_runtime_options("c")).await.is_ok());
-    }
-
-    #[tokio::test]
     async fn conversation_delete_resets_the_restart_governor() {
         let registry = make_registry();
         for _ in 0..RESTART_MAX_PER_WINDOW {

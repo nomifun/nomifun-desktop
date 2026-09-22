@@ -15,7 +15,6 @@ pub mod runtime_tool_middleware_contract;
 pub mod companion_tools;
 pub mod cron_tools;
 pub mod host_skills;
-pub mod knowledge_tools;
 pub mod requirement_tools;
 pub mod runtime_output;
 pub mod session_control_tools;
@@ -94,6 +93,8 @@ pub use factory::provider_config::{
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use plugin_tools::{
+    assemble_initial_capability_context,
+    render_initial_capability_context_section,
     supports_nomi_plugin_capability,
     KernelNomiPluginToolSession,
     NomiHostDynamicToolDescriptor, NomiHostDynamicToolError,

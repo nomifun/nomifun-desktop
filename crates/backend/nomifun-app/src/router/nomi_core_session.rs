@@ -5513,7 +5513,6 @@ mod session_boundary_tests {
             ".delete_agent_session(owner_id, agent_session_id, &bindings)",
             ".close_agent_session(owner_id, agent_session_id)",
             ".revoke_agent_session_surfaces(owner_id, agent_session_id)",
-            ".delete_binding(\"conversation\", agent_session_id)",
             ".delete_jobs_by_agent_session(owner_id, agent_session_id)",
             ".clear_owner_for_session(",
             ".record_resource_cleanup_started(&session_id, \"ssh\")",
@@ -5525,6 +5524,11 @@ mod session_boundary_tests {
                 "missing exact AgentSession cleanup {exact_cleanup}"
             );
         }
+        assert!(
+            !cleanup_owner.contains("delete_binding(\"conversation\"")
+                && !cleanup_owner.contains("knowledge_service"),
+            "canonical AgentSession deletion must not depend on the retired mutable Knowledge binding side channel"
+        );
         assert!(cleanup_owner.contains("record_resource_cleanup_uncertain"));
         assert!(cleanup_owner.contains("acknowledge_persisted_agent_session_teardowns"));
     }
@@ -5723,7 +5727,6 @@ pub(crate) struct NomiCoreAgentApiState {
     pub(crate) wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub(crate) wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     ssh_pool: nomifun_ssh::SshConnectionPool,
-    knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
     plugin_runtime:
         Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     cron_cleanup_owner:
@@ -5755,7 +5758,6 @@ impl NomiCoreAgentApiState {
         product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
         skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
         ssh_pool: nomifun_ssh::SshConnectionPool,
-        knowledge_service: Arc<nomifun_knowledge::KnowledgeService>,
         plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
         #[cfg(feature = "browser-use")]
         browser_resources: Option<
@@ -5777,7 +5779,6 @@ impl NomiCoreAgentApiState {
             wave4_owners,
             wave5_owner,
             ssh_pool,
-            knowledge_service,
             plugin_runtime,
             cron_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
             requirement_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
@@ -6010,20 +6011,6 @@ impl NomiCoreAgentApiState {
                     ),
                 )
             })?;
-        self.knowledge_service
-            .delete_binding("conversation", agent_session_id)
-            .await
-            .map_err(|error| {
-                NomiCoreApiError::new(
-                    StatusCode::CONFLICT,
-                    "AGENT_SESSION_KNOWLEDGE_CLEANUP_FAILED",
-                    format!(
-                        "Knowledge binding cleanup failed after AgentSession deletion was fenced: {error}"
-                    ),
-                )
-            })?;
-
-
         let cron = self.cron_cleanup_owner.get().ok_or_else(|| {
             NomiCoreApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,

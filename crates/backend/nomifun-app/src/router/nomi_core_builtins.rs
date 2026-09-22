@@ -65,7 +65,9 @@ pub(crate) async fn build(
     .into_iter()
     .map(CapabilityId::from)
     .collect::<BTreeSet<_>>();
-    let wave1_context = BTreeSet::new();
+    let wave1_context = BTreeSet::from([CapabilityId::from(
+        nomifun_agent_domain_wave1::KNOWLEDGE_MODULE_ID,
+    )]);
 
     let wave2_owner = super::nomi_core_wave2::action_host_port(services, effect_store.clone());
     let wave2_ports =

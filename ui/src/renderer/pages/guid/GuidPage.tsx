@@ -19,7 +19,6 @@ import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPi
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
-import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
@@ -197,14 +196,10 @@ const GuidPage: React.FC = () => {
   );
   const collaborationEnabled = presetResourceResolutionReady
     && presetCapabilityIds.has('agent.collaboration');
-  // Knowledge is an optional, session-scoped mount. It keeps its compact
-  // KnowledgeControl interaction and is applied after the conversation exists;
-  // only resources that truly gate launch belong in the large resource picker.
-  const knowledgeEnabled =
-    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
-  const resourcePickerKinds = new Set(
-    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
-  );
+  // Every concrete resource chosen for this launch crosses the same canonical
+  // AgentSession admission boundary. Knowledge is optional, but selected bases
+  // are frozen with the Session just like Workspace, Computer, or MCP resources.
+  const resourcePickerKinds = new Set(presetResourceKinds);
   const optionalResourcePickerKinds = requiredAgentResourcePickerKinds(
     [...resourcePickerKinds].filter(agentResourceKindMayRemainUnbound)
   );
@@ -243,14 +238,7 @@ const GuidPage: React.FC = () => {
   const appliedIdmmDefaultRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     setResourceSelectionValue({});
-    advancedConfig.setKnowledge({
-      enabled: false,
-      writeback: false,
-      writeback_eagerness: 'manual',
-      channel_write_enabled: false,
-      kb_ids: [],
-    });
-  }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
+  }, [selectedAgentResourceKey]);
   useEffect(() => {
     if (!presetResourceResolutionReady) return;
     const sourceKey = `${location.key}:${selectedAgentResourceKey}`;
@@ -294,7 +282,6 @@ const GuidPage: React.FC = () => {
     current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
-        allowKnowledgeBinding: knowledgeEnabled,
         allowAutomation: advancedControlsEnabled || idmmControlEnabled,
       }),
     autoWork: effectiveAutoWork,
@@ -551,18 +538,8 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled || idmmControlEnabled ? (
+  const advancedControlsNode = advancedControlsEnabled || idmmControlEnabled ? (
     <>
-      {knowledgeEnabled && (
-        <KnowledgeControl
-          key={`knowledge-${location.key}`}
-          draft={{
-            value: advancedConfig.knowledge,
-            onChange: advancedConfig.setKnowledge,
-          }}
-          applyNote={t('guid.advanced.applyNote')}
-        />
-      )}
       {advancedControlsEnabled && (
         <AutoWorkControl
           key={`autowork-${location.key}`}

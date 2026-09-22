@@ -295,6 +295,9 @@ const NomiConversationPanel: React.FC<{
     (!hasPreset || presetResourceKinds.has('workspace'));
   const knowledgeEnabled =
     !hasPreset || presetResourceKinds.has('knowledge_base');
+  const knowledgeResources = (
+    conversation.agent_snapshot?.canonical_binding?.typed_resource_bindings ?? []
+  ).filter((binding) => binding.resource_kind === 'knowledge_base');
   const hideAdvancedControls = hasPreset &&
     (conversation.agent_snapshot?.enabled_capabilities.length ?? 0) === 0;
   const sshHostId = sshHostIdOf(conversation);
@@ -329,6 +332,7 @@ const NomiConversationPanel: React.FC<{
     backend: 'nomi' as const,
     preset: presetPresetInfo ?? undefined,
     knowledgeEnabled,
+    knowledgeResources,
     hideAdvancedControls,
   };
 

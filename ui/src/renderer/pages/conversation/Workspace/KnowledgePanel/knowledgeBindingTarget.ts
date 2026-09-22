@@ -6,7 +6,7 @@
 
 import type { ITerminalSession } from '@/common/adapter/ipcBridge';
 import type { KnowledgeBindingKind } from '@/common/adapter/ipcBridge';
-import type { ConversationId } from '@/common/types/ids';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 import {
   workpathKeyForTerminal,
 } from '@/renderer/pages/conversation/SessionList/utils/sessionWorkpath';
@@ -22,8 +22,8 @@ import {
 export type SessionKnowledgeSource =
   | {
       kind: 'conversation';
-      conversationId: ConversationId;
-      extra: Record<string, unknown> | undefined;
+      /** Exact resources frozen into the canonical AgentSession binding. */
+      knowledgeBaseIds: readonly KnowledgeBaseId[];
     }
   | {
       kind: 'terminal';
@@ -48,27 +48,17 @@ export function workpathDisplayForKnowledgeTarget(
 }
 
 /**
- * Which knowledge-binding row a session actually reads and writes.
- *
- * Mirrors the product binding contract: Companion-owned AgentSessions use the
- * Companion binding; ordinary AgentSessions keep their own binding identity.
- *
- * 1. `extra.companion_id` present     → ('companion', companion_id)
- * 2. otherwise                        → ('conversation', conversation_id)
+ * Resolve only mutable workpath-backed terminal bindings. Conversation
+ * resources are already carried by their frozen canonical AgentSession and do
+ * not have a second Knowledge-binding row.
  */
-export function resolveKnowledgeBindingTarget(source: SessionKnowledgeSource): ResolvedKnowledgeBindingTarget {
+export function resolveKnowledgeBindingTarget(
+  source: SessionKnowledgeSource
+): ResolvedKnowledgeBindingTarget | null {
   if (source.kind === 'terminal') {
     return { kind: 'workpath', target_id: workpathKeyForTerminal(source.session) };
   }
-
-  const extra = source.extra ?? {};
-
-  const companionId = extra.companion_id;
-  if (typeof companionId === 'string' && companionId.trim().length > 0) {
-    return { kind: 'companion', target_id: companionId };
-  }
-
-  return { kind: 'conversation', target_id: source.conversationId };
+  return null;
 }
 
 /** Stable cache/subscription key for a resolved target. */

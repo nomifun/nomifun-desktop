@@ -589,6 +589,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if let Some(instruction) = self.resources.execution_constraints().instruction() {
             instructions.push(instruction.to_owned());
         }
+        if let Some(context) = self.resources.initial_capability_context().await? {
+            instructions.push(context);
+        }
         if let Some(context) = self.resources.hosted_effect_context().await? {
             instructions.push(context);
         }

@@ -31,8 +31,9 @@ use nomifun_agent_contracts::{
     CAPABILITY_UNAVAILABLE_ON_PLATFORM,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
-    PluginRegistration, PluginStateError, PluginStateHandle,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext, ContextContributionResult,
+    HostPluginStateApi, KernelError, PluginRegistration, PluginStateError, PluginStateHandle,
 };
 use serde_json::{Value, json};
 
@@ -117,13 +118,23 @@ pub const AGENT_SURFACES: &[&str] = &["desktop", "headless"];
 pub const KNOWLEDGE_BASE_RESOURCE_KIND: &str = "knowledge_base";
 pub const PROJECT_MEMORY_RESOURCE_KIND: &str = "project_memory";
 pub const COMPANION_MEMORY_RESOURCE_KIND: &str = "companion_memory";
+pub const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
+pub const KNOWLEDGE_NAME_PARAMETER: &str = "knowledge_name";
+pub const KNOWLEDGE_DESCRIPTION_PARAMETER: &str = "knowledge_description";
 pub const WAVE1_CAPABILITY_HOST_PORT_ID: &str = "host.wave1.capability.invoke";
 const CAPABILITY_UNAVAILABLE_CODE: &str = "CAPABILITY_UNAVAILABLE";
+
+#[derive(Clone, Copy)]
+enum ResourceCardinality {
+    ExactlyOne,
+    OneOrMore,
+}
 
 #[derive(Clone, Copy)]
 struct ResourceRequirement {
     resource_kind: &'static str,
     operation: &'static str,
+    cardinality: ResourceCardinality,
 }
 
 #[derive(Clone, Copy)]
@@ -150,30 +161,37 @@ const COMPANION_MEMORY_RESOURCE: &[&str] = &[COMPANION_MEMORY_RESOURCE_KIND];
 const KNOWLEDGE_SEARCH_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: KNOWLEDGE_BASE_RESOURCE_KIND,
     operation: "search",
+    cardinality: ResourceCardinality::OneOrMore,
 }];
 const KNOWLEDGE_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: KNOWLEDGE_BASE_RESOURCE_KIND,
     operation: "read",
+    cardinality: ResourceCardinality::OneOrMore,
 }];
 const KNOWLEDGE_WRITE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: KNOWLEDGE_BASE_RESOURCE_KIND,
     operation: "write",
+    cardinality: ResourceCardinality::OneOrMore,
 }];
 const PROJECT_MEMORY_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: PROJECT_MEMORY_RESOURCE_KIND,
     operation: "read",
+    cardinality: ResourceCardinality::ExactlyOne,
 }];
 const PROJECT_MEMORY_WRITE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: PROJECT_MEMORY_RESOURCE_KIND,
     operation: "write",
+    cardinality: ResourceCardinality::ExactlyOne,
 }];
 const COMPANION_MEMORY_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: COMPANION_MEMORY_RESOURCE_KIND,
     operation: "read",
+    cardinality: ResourceCardinality::ExactlyOne,
 }];
 const COMPANION_MEMORY_WRITE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: COMPANION_MEMORY_RESOURCE_KIND,
     operation: "write",
+    cardinality: ResourceCardinality::ExactlyOne,
 }];
 
 const WEB_RESEARCH_ACTIONS: [ActionSpec; 2] = [
@@ -262,7 +280,7 @@ const PACKAGES: [PackageSpec; 4] = [
         mount_id: KNOWLEDGE_MOUNT_ID,
         module_id: KNOWLEDGE_MODULE_ID,
         display_name: "Knowledge",
-        description: "Search, read, write, and generate owned Knowledge content.",
+        description: "Search and read the Session's mounted Knowledge bases before answering covered topics; write and generate content only through the frozen Knowledge authority.",
         actions: &KNOWLEDGE_ACTIONS,
     },
     PackageSpec {
@@ -375,6 +393,7 @@ pub struct Wave1KnowledgeWriteRequest {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wave1KnowledgeAutogenRequest {
+    pub base: Option<String>,
     pub overwrite_readme: bool,
 }
 
@@ -654,6 +673,14 @@ fn registration_for(
             }),
         )
         .map_err(|error| error.to_string())?;
+    if spec.module_id == KNOWLEDGE_MODULE_ID {
+        registration
+            .add_capability_context_factory(
+                CapabilityId::from(KNOWLEDGE_MODULE_ID),
+                Arc::new(Wave1KnowledgeContextFactory),
+            )
+            .map_err(|error| error.to_string())?;
+    }
     Ok(registration)
 }
 
@@ -675,6 +702,15 @@ fn capability_manifest(
         })
         .collect::<Result<Vec<_>, String>>()?;
     let supported_platforms = vec![PlatformConstraint::Any];
+    let context_schema_refs = if spec.module_id == KNOWLEDGE_MODULE_ID {
+        vec![schema_ref(
+            KNOWLEDGE_MODULE_ID,
+            "context",
+            &knowledge_context_output_schema(),
+        )?]
+    } else {
+        Vec::new()
+    };
     Ok(CapabilityManifest {
         id: CapabilityId::from(spec.module_id),
         contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
@@ -697,7 +733,7 @@ fn capability_manifest(
         config_schema: StrictJsonValue(object_schema(false)),
         contributions: CapabilityContributions {
             actions,
-            context_schema_refs: Vec::new(),
+            context_schema_refs,
             context_phase: Default::default(),
             ui_slot: None,
             event_schema_refs: Vec::new(),
@@ -710,6 +746,107 @@ fn capability_manifest(
             host_ports: vec![host_port_ref(WAVE1_CAPABILITY_HOST_PORT_ID)],
         },
     })
+}
+
+struct Wave1KnowledgeContextFactory;
+
+#[async_trait]
+impl CapabilityContextContributionFactory for Wave1KnowledgeContextFactory {
+    async fn contribute(
+        &self,
+        request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        if request.context.resolved_capability.capability.id.as_ref() != KNOWLEDGE_MODULE_ID {
+            return Err(KernelError::CapabilityExecution {
+                reason: "Knowledge Context factory received another capability".to_owned(),
+            });
+        }
+        let expected_schema = schema_ref(
+            KNOWLEDGE_MODULE_ID,
+            "context",
+            &knowledge_context_output_schema(),
+        )
+        .map_err(|reason| KernelError::CapabilityExecution { reason })?;
+        if request.schema_ref != expected_schema {
+            return Err(KernelError::CapabilityExecution {
+                reason: "Knowledge Context factory received a non-canonical schema".to_owned(),
+            });
+        }
+
+        let mut binding_ids = BTreeSet::new();
+        let mut resource_ids = BTreeSet::new();
+        let mut mounted_bases = Vec::new();
+        for binding in &request.context.resource_bindings {
+            if binding.resource_kind.as_ref() != KNOWLEDGE_BASE_RESOURCE_KIND {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!(
+                        "Knowledge Context received unexpected resource kind {}",
+                        binding.resource_kind.as_ref()
+                    ),
+                });
+            }
+            if binding.owner_id != request.context.principal.principal_id {
+                return Err(KernelError::ResourceOwnerMismatch {
+                    binding_id: binding.binding_id.clone(),
+                });
+            }
+            if !binding_ids.insert(binding.binding_id.clone())
+                || !resource_ids.insert(binding.resource_id.clone())
+            {
+                return Err(KernelError::CapabilityExecution {
+                    reason: "Knowledge Context received duplicate resource authority".to_owned(),
+                });
+            }
+            let name = binding
+                .typed_parameters
+                .get(KNOWLEDGE_NAME_PARAMETER)
+                .map(String::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(binding.resource_id.as_ref());
+            let description = binding
+                .typed_parameters
+                .get(KNOWLEDGE_DESCRIPTION_PARAMETER)
+                .map(String::as_str)
+                .unwrap_or_default();
+            mounted_bases.push(json!({
+                "knowledge_base_id": binding.resource_id.as_ref(),
+                "name": name,
+                "description": description,
+                "allowed_operations": binding.operations,
+            }));
+        }
+        if mounted_bases.is_empty() {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: CapabilityId::from(KNOWLEDGE_MODULE_ID),
+                resource_kind: KNOWLEDGE_BASE_RESOURCE_KIND.to_owned(),
+            });
+        }
+
+        let available_actions = request
+            .context
+            .resolved_capability
+            .action_allowlist
+            .iter()
+            .map(|action| action.as_ref())
+            .collect::<Vec<_>>();
+        let search_first = request
+            .context
+            .resolved_capability
+            .action_allowlist
+            .contains(&ActionId::from(KNOWLEDGE_SEARCH_ACTION_ID));
+        let instruction = if search_first {
+            "These are the authoritative Knowledge bases mounted into this Session. Whenever the user's task or question may be covered by them, call the tool whose Action is knowledge/search before answering from memory. Then call knowledge/read with the returned handle for the most relevant document before relying on it. Cite the returned source path, and never claim that Knowledge was checked unless the tool was actually called."
+        } else {
+            "These are the authoritative Knowledge bases mounted into this Session. Use only the Knowledge Actions explicitly available to this Agent and never claim that a base was checked unless a Knowledge tool was actually called."
+        };
+        Ok(ContextContributionResult {
+            value: Some(StrictJsonValue(json!({
+                "instruction": instruction,
+                "available_actions": available_actions,
+                "mounted_bases": mounted_bases,
+            }))),
+        })
+    }
 }
 
 struct Wave1CapabilityHandler {
@@ -838,6 +975,7 @@ pub fn operation_from_action(
         }
         KNOWLEDGE_AUTOGEN_ACTION_ID => {
             Wave1CapabilityOperation::KnowledgeAutogen(Wave1KnowledgeAutogenRequest {
+                base: optional("base"),
                 overwrite_readme: input
                     .0
                     .get("overwrite_readme")
@@ -985,6 +1123,12 @@ pub fn resolve_canonical_schema(
             if schema_ref(action.id, facet, &schema)?.as_ref() == reference.as_ref() {
                 return Ok(StrictJsonValue(schema));
             }
+        }
+    }
+    if capability_id == KNOWLEDGE_MODULE_ID {
+        let schema = knowledge_context_output_schema();
+        if schema_ref(KNOWLEDGE_MODULE_ID, "context", &schema)?.as_ref() == reference.as_ref() {
+            return Ok(StrictJsonValue(schema));
         }
     }
     Err(format!(
@@ -1205,33 +1349,34 @@ fn validate_resource_bindings<'a>(
             .iter()
             .filter(|binding| binding.resource_kind.as_ref() == requirement.resource_kind)
             .collect::<Vec<_>>();
-        let binding = match matches.as_slice() {
-            [binding] => *binding,
-            [] => {
-                return Err(KernelError::CapabilityResourceNotBound {
-                    capability_id: capability_id.clone(),
-                    resource_kind: requirement.resource_kind.to_owned(),
-                });
-            }
-            _ => {
+        if matches.is_empty() {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: requirement.resource_kind.to_owned(),
+            });
+        }
+        if matches!(requirement.cardinality, ResourceCardinality::ExactlyOne)
+            && matches.len() != 1
+        {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} requires exactly one {} resource binding",
+                    capability_id.as_ref(),
+                    requirement.resource_kind
+                ),
+            });
+        }
+        for binding in matches {
+            if !binding.operations.contains(requirement.operation) {
                 return Err(KernelError::CapabilityExecution {
                     reason: format!(
-                        "{} requires exactly one {} resource binding",
+                        "{} requires operation {} on every {} resource",
                         capability_id.as_ref(),
+                        requirement.operation,
                         requirement.resource_kind
                     ),
                 });
             }
-        };
-        if !binding.operations.contains(requirement.operation) {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
-                    "{} requires operation {} on {}",
-                    capability_id.as_ref(),
-                    requirement.operation,
-                    requirement.resource_kind
-                ),
-            });
         }
     }
     let mut selected = bindings.iter().collect::<Vec<_>>();
@@ -1272,7 +1417,15 @@ pub fn action_input_schema(action_id: &str) -> Result<Value, String> {
         }),
         KNOWLEDGE_AUTOGEN_ACTION_ID => json!({
             "type": "object", "additionalProperties": false,
-            "properties": {"overwrite_readme": {"type": "boolean"}}
+            "properties": {
+                "base": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256,
+                    "description": "Required when more than one Knowledge base is mounted; use its knowledge_base_id."
+                },
+                "overwrite_readme": {"type": "boolean"}
+            }
         }),
         PROJECT_MEMORY_READ_ACTION_ID => json!({
             "type": "object", "additionalProperties": false,
@@ -1308,6 +1461,49 @@ pub fn action_input_schema(action_id: &str) -> Result<Value, String> {
     Ok(schema)
 }
 
+fn knowledge_context_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "instruction": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "available_actions": {
+                "type": "array",
+                "maxItems": 4,
+                "uniqueItems": true,
+                "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+            },
+            "mounted_bases": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 32,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "knowledge_base_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "name": { "type": "string", "minLength": 1, "maxLength": 512 },
+                        "description": { "type": "string", "maxLength": 4096 },
+                        "allowed_operations": {
+                            "type": "array",
+                            "maxItems": 16,
+                            "uniqueItems": true,
+                            "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+                        }
+                    },
+                    "required": [
+                        "knowledge_base_id",
+                        "name",
+                        "description",
+                        "allowed_operations"
+                    ]
+                }
+            }
+        },
+        "required": ["instruction", "available_actions", "mounted_bases"]
+    })
+}
+
 pub fn action_output_schema(action_id: &str) -> Result<Value, String> {
     if !TARGET_ACTION_IDS.contains(&action_id) {
         return Err(format!("unknown Wave 1 Action {action_id}"));
@@ -1326,7 +1522,7 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
         WEB_RESEARCH_FETCH_ACTION_ID => &["url"][..],
         KNOWLEDGE_READ_ACTION_ID => &["handle"][..],
         KNOWLEDGE_WRITE_ACTION_ID => &["handle", "base", "rel_path", "content", "title"][..],
-        KNOWLEDGE_AUTOGEN_ACTION_ID => &["overwrite_readme"][..],
+        KNOWLEDGE_AUTOGEN_ACTION_ID => &["base", "overwrite_readme"][..],
         PROJECT_MEMORY_READ_ACTION_ID => &["limit"][..],
         PROJECT_MEMORY_WRITE_ACTION_ID => &["content", "title", "items"][..],
         COMPANION_MEMORY_RECALL_ACTION_ID => &["per_kind", "char_budget"][..],
@@ -1372,6 +1568,7 @@ fn validate_action_input(action_id: &str, input: &Value) -> Result<(), KernelErr
             validate_optional_string(object, action_id, "title", 512)?;
         }
         KNOWLEDGE_AUTOGEN_ACTION_ID => {
+            validate_optional_string(object, action_id, "base", 256)?;
             if object.get("overwrite_readme").is_some_and(|value| !value.is_boolean()) {
                 return Err(KernelError::CapabilityExecution {
                     reason: format!("{action_id} field `overwrite_readme` must be a boolean"),
@@ -1571,6 +1768,18 @@ mod tests {
             StrictJsonValue(json!({"query": "legacy"}))
         )
         .is_err());
+        let operation = operation_from_action(
+            &ActionId::from(KNOWLEDGE_AUTOGEN_ACTION_ID),
+            StrictJsonValue(json!({"base": "base-id", "overwrite_readme": true})),
+        )
+        .unwrap();
+        assert_eq!(
+            operation,
+            Wave1CapabilityOperation::KnowledgeAutogen(Wave1KnowledgeAutogenRequest {
+                base: Some("base-id".to_owned()),
+                overwrite_readme: true,
+            })
+        );
     }
 
     #[test]
@@ -1586,7 +1795,34 @@ mod tests {
                 .capabilities;
             assert_eq!(capabilities.len(), 1);
             assert!(!capabilities[0].contributions.actions.is_empty());
+            if capabilities[0].id.as_ref() == KNOWLEDGE_MODULE_ID {
+                assert_eq!(capabilities[0].contributions.context_schema_refs.len(), 1);
+            } else {
+                assert!(capabilities[0].contributions.context_schema_refs.is_empty());
+            }
         }
+    }
+
+    #[test]
+    fn knowledge_actions_accept_every_owned_mounted_base() {
+        let binding = |suffix: &str| TypedResourceBinding {
+            binding_id: ResourceBindingId::from(format!("knowledge:{suffix}")),
+            resource_kind: ResourceKind::from(KNOWLEDGE_BASE_RESOURCE_KIND),
+            resource_id: ResourceId::from(format!("base-{suffix}")),
+            owner_id: "owner".to_owned(),
+            operations: BTreeSet::from(["search".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
+        let bindings = vec![binding("a"), binding("b")];
+        let selected = validate_resource_bindings(
+            &CapabilityId::from(KNOWLEDGE_MODULE_ID),
+            "owner",
+            KNOWLEDGE_SEARCH_REQUIREMENTS,
+            &bindings,
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
     }
 
     #[test]

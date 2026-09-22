@@ -43,9 +43,14 @@ export const agentResourceKindMayRemainUnbound = (kind: string): boolean =>
 
 export type UserAgentResourceKind = (typeof USER_AGENT_RESOURCE_KINDS)[number];
 export type AgentResourceSelectionValue = Partial<Record<UserAgentResourceKind, string>> & {
+  /** Frozen Knowledge resources. The singular field is accepted only for old drafts. */
+  knowledge_bases?: string[];
   /** Frozen tool/resource servers. The singular field remains legacy-compatible. */
   mcp_servers?: string[];
 };
+
+export const selectedKnowledgeResourceIds = (value: AgentResourceSelectionValue): string[] =>
+  [...new Set((value.knowledge_bases ?? (value.knowledge_base ? [value.knowledge_base] : [])).filter(Boolean))];
 
 export const selectedMcpResourceIds = (value: AgentResourceSelectionValue): string[] =>
   [...new Set((value.mcp_servers ?? (value.mcp_server ? [value.mcp_server] : [])).filter(Boolean))];
@@ -94,6 +99,12 @@ export const resolveAgentResourceSelections = (
   const selections: AgentResourceSelection[] = [];
   const missingKinds: string[] = [];
   for (const resourceKind of [...new Set(requiredKinds)].sort()) {
+    if (resourceKind === 'knowledge_base') {
+      for (const resourceId of selectedKnowledgeResourceIds(value)) {
+        selections.push({ resource_kind: resourceKind, resource_id: resourceId });
+      }
+      continue;
+    }
     if (resourceKind === 'mcp_server') {
       const servers = selectedMcpResourceIds(value);
       if (!servers.length) missingKinds.push(resourceKind);

@@ -23,10 +23,13 @@ fn knowledge_binding(
         connection_config_ref: None,
         typed_parameters: BTreeMap::from([
             (
-                KNOWLEDGE_ROOT_PARAMETER.to_owned(),
+                nomifun_agent_domain_wave1::KNOWLEDGE_ROOT_PARAMETER.to_owned(),
                 root.to_string_lossy().into_owned(),
             ),
-            (KNOWLEDGE_NAME_PARAMETER.to_owned(), "Private Knowledge".to_owned()),
+            (
+                nomifun_agent_domain_wave1::KNOWLEDGE_NAME_PARAMETER.to_owned(),
+                "Private Knowledge".to_owned(),
+            ),
         ]),
     }
 }

@@ -1023,6 +1023,7 @@ async fn get_binding(
     Extension(_user): Extension<CurrentUser>,
     Path((kind, target_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<KnowledgeBinding>>, AppError> {
+    reject_canonical_session_binding_kind(&kind)?;
     Ok(Json(ApiResponse::ok(state.service.get_binding(&kind, &target_id).await?)))
 }
 
@@ -1032,10 +1033,21 @@ async fn set_binding(
     Path((kind, target_id)): Path<(String, String)>,
     body: Result<Json<KnowledgeBinding>, JsonRejection>,
 ) -> Result<Json<ApiResponse<KnowledgeBinding>>, AppError> {
+    reject_canonical_session_binding_kind(&kind)?;
     let Json(binding) = body.map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(ApiResponse::ok(
         state.service.set_binding(&kind, &target_id, binding).await?,
     )))
+}
+
+fn reject_canonical_session_binding_kind(kind: &str) -> Result<(), AppError> {
+    if kind == "conversation" {
+        return Err(AppError::Conflict(
+            "AgentSession Knowledge resources are frozen at creation; create a new Session to change them"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 // ─── Manual search (read-only, scoped) ───────────────────────────────────────
@@ -1418,6 +1430,31 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(get).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn binding_route_rejects_canonical_agent_session_side_channel() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let app = test_app(dir.path());
+        let id = "0190f5fe-7c00-7a00-8000-000000000299";
+        let get = Request::get(format!("/api/knowledge/binding/conversation/{id}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.clone().oneshot(get).await.unwrap().status(), StatusCode::CONFLICT);
+        let set = Request::post(format!("/api/knowledge/binding/conversation/{id}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "enabled": false,
+                    "writeback": false,
+                    "writeback_eagerness": "manual",
+                    "channel_write_enabled": false,
+                    "kb_ids": []
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(app.oneshot(set).await.unwrap().status(), StatusCode::CONFLICT);
     }
 
     /// A half-specified model pick (only `provider_id`, or only `model`) is a

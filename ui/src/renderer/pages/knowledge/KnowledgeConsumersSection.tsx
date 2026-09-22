@@ -34,7 +34,11 @@ function kindIcon(kind: string): React.ReactNode {
   }
 }
 
-const supportedBindingKinds = new Set<KnowledgeBindingKind>(['conversation', 'terminal', 'companion', 'workpath']);
+// A legacy conversation row may still be visible while old local data is being
+// inspected, but canonical AgentSession resources are immutable. Do not offer
+// a mutation that the server correctly rejects; only live mutable targets can
+// be unmounted from this reverse-consumer view.
+const supportedBindingKinds = new Set<KnowledgeBindingKind>(['terminal', 'companion', 'workpath']);
 
 function isSupportedBindingKind(kind: string): kind is KnowledgeBindingKind {
   return supportedBindingKinds.has(kind as KnowledgeBindingKind);
