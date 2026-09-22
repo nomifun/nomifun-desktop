@@ -17,11 +17,7 @@ describe('GuidPage advanced controls', () => {
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('<IdmmControl')).toBe(true);
     expect(source.includes('<AgentResourcePicker')).toBe(true);
-    expect(source.includes('<KnowledgeControl')).toBe(true);
-    expect(source.includes('knowledgeEnabled && (')).toBe(true);
-    expect(source.indexOf('<KnowledgeControl')).toBeLessThan(
-      source.indexOf('<AutoWorkControl')
-    );
+    expect(source.includes('<KnowledgeControl')).toBe(false);
     expect(source.includes('openBrowserHandler')).toBe(false);
     expect(source.includes('isBrowserButtonDisabled')).toBe(false);
     expect(send.includes("launch('browser')")).toBe(false);
@@ -39,7 +35,7 @@ describe('GuidPage advanced controls', () => {
     expect(source.includes('idmm: IIdmmConfig')).toBe(true);
     expect(source.includes('setIdmmDefault: (next: IIdmmConfig) => void')).toBe(true);
     expect(source.includes('idmmOverriddenRef.current')).toBe(true);
-    expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
+    expect(source.includes('knowledge: IKnowledgeBinding')).toBe(false);
   });
 
   test('shows collaboration only when the selected Agent grants its Module', () => {
@@ -60,8 +56,8 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes('const workspaceEnabled =')).toBe(true);
     expect(page.includes('Boolean(guidInput.dir.trim()) ||')).toBe(true);
     expect(page.includes("presetResourceKinds.has('workspace')")).toBe(true);
-    expect(page.includes("presetResourceKinds.has('knowledge_base')")).toBe(true);
-    expect(page.includes("filter((kind) => kind !== 'knowledge_base')")).toBe(true);
+    expect(page.includes('const resourcePickerKinds = new Set(presetResourceKinds)')).toBe(true);
+    expect(page.includes("filter((kind) => kind !== 'knowledge_base')")).toBe(false);
     expect(
       page.includes('requiredKinds={resourcePickerKinds}')
     ).toBe(true);

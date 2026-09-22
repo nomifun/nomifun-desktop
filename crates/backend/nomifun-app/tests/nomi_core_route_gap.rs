@@ -10,6 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -335,6 +336,377 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
         let (status, _) = call(router.clone(), method, path, json!({})).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "retired route survived: {method} {path}");
     }
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_before_answering() {
+    const TRUST: &str = "canonical-knowledge-tool";
+    const QUERY: &str = "NOMIFUN_KNOWLEDGE_QUERY_9233";
+    const RESULT_MARKER: &str = "KNOWLEDGE_TOOL_RESULT_9233";
+    const REPLY: &str = "KNOWLEDGE_SEARCH_WAS_USED";
+
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
+    let upstream = wiremock::MockServer::start().await;
+    let model_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&model_requests);
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body = request.body_json::<Value>().unwrap();
+            captured.lock().unwrap().push(body.clone());
+            let messages = body["messages"].as_array().unwrap();
+            let tool_results = messages
+                .iter()
+                .filter(|message| message["role"] == "tool")
+                .collect::<Vec<_>>();
+            let (frame, finish_reason, response_id) = if tool_results.is_empty() {
+                let search = body["tools"]
+                    .as_array()
+                    .and_then(|tools| {
+                        tools.iter().find(|tool| {
+                            tool["function"]["description"]
+                                .as_str()
+                                .is_some_and(|description| {
+                                    description.contains("Action: knowledge/search")
+                                })
+                        })
+                    })
+                    .expect("the frozen Knowledge search Action must reach the model");
+                (
+                    json!({
+                        "id": "knowledge-search-round",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "knowledge-search-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": search["function"]["name"],
+                                        "arguments": json!({"query": QUERY, "limit": 8}).to_string()
+                                    }
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    }),
+                    "tool_calls",
+                    "knowledge-search-round",
+                )
+            } else if tool_results.len() == 1 {
+                let search_result: Value = serde_json::from_str(
+                    tool_results[0]["content"]
+                        .as_str()
+                        .expect("Knowledge search result must be model-visible text"),
+                )
+                .expect("Knowledge search result must be canonical JSON");
+                let handle = search_result["hits"][0]["handle"]
+                    .as_str()
+                    .expect("Knowledge search result must carry an opaque handle");
+                let read = body["tools"]
+                    .as_array()
+                    .and_then(|tools| {
+                        tools.iter().find(|tool| {
+                            tool["function"]["description"]
+                                .as_str()
+                                .is_some_and(|description| {
+                                    description.contains("Action: knowledge/read")
+                                })
+                        })
+                    })
+                    .expect("the frozen Knowledge read Action must remain available");
+                (
+                    json!({
+                        "id": "knowledge-read-round",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [{
+                                    "index": 0,
+                                    "id": "knowledge-read-call",
+                                    "type": "function",
+                                    "function": {
+                                        "name": read["function"]["name"],
+                                        "arguments": json!({"handle": handle}).to_string()
+                                    }
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    }),
+                    "tool_calls",
+                    "knowledge-read-round",
+                )
+            } else {
+                assert!(
+                    tool_results.last().is_some_and(|message| message.to_string().contains(RESULT_MARKER)),
+                    "the full Knowledge document must reach the successor model round: {body}"
+                );
+                (
+                    json!({
+                        "id": "knowledge-final-round",
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": REPLY},
+                            "finish_reason": null
+                        }]
+                    }),
+                    "stop",
+                    "knowledge-final-round",
+                )
+            };
+            let done = json!({
+                "id": response_id,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}]
+            });
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"))
+        })
+        .mount(&upstream)
+        .await;
+
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let base_a = services
+        .knowledge_service
+        .create_base("Python handbook", "Python domain rules", None, None)
+        .await
+        .unwrap();
+    let base_b = services
+        .knowledge_service
+        .create_base("Engineering notes", "Team-specific references", None, None)
+        .await
+        .unwrap();
+    services
+        .knowledge_service
+        .write_file(
+            base_a.knowledge_base_id.as_str(),
+            "python-types.md",
+            &format!("# Python types\n\n{QUERY} {RESULT_MARKER}"),
+        )
+        .await
+        .unwrap();
+    services
+        .knowledge_service
+        .write_file(
+            base_b.knowledge_base_id.as_str(),
+            "unrelated.md",
+            "# Other notes\n\nNo matching marker here.",
+        )
+        .await
+        .unwrap();
+
+    let (status, provider) = call(
+        router.clone(),
+        "POST",
+        "/api/providers",
+        json!({
+            "platform": "stepfun-plan",
+            "name": "Knowledge tool fixture",
+            "base_url": format!("{}/v1", upstream.uri()),
+            "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["fixture-not-a-secret"]},
+            "enabled": true,
+            "initial_model": {
+                "model": "step-3.7-flash",
+                "enabled": true,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": [],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let model = json!({
+        "provider_id": provider["data"]["provider_id"],
+        "model": "step-3.7-flash"
+    });
+    let (status, minimal) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({
+            "display_name": "Knowledge route source",
+            "reuse_existing": false,
+            "model": model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minimal}");
+    let mut document = minimal["data"]["revision"]["document"].clone();
+    document["enabled_capabilities"] = json!([{
+        "capability": {"id": "knowledge", "version": "1.0.0"},
+        "action_allowlist": ["knowledge/read", "knowledge/search"]
+    }]);
+    document["instructions"] = Value::String(
+        "Use the mounted Knowledge bases for covered questions.".to_owned(),
+    );
+    let (status, preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets",
+        json!({
+            "display_name": "Knowledge-only Agent",
+            "description": "Canonical Knowledge regression fixture",
+            "document": document
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+
+    let (status, session) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({
+            "preset_id": preset_id,
+            "model": model,
+            "title": "Knowledge canonical Session",
+            "resource_selections": [
+                {"resource_kind": "knowledge_base", "resource_id": base_a.knowledge_base_id},
+                {"resource_kind": "knowledge_base", "resource_id": base_b.knowledge_base_id}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let resources = session["data"]["agent_binding"]["typed_resource_bindings"]
+        .as_array()
+        .unwrap();
+    assert_eq!(resources.len(), 2, "{session}");
+    assert!(resources.iter().all(|resource| resource["resource_kind"] == "knowledge_base"));
+    assert!(resources.iter().any(|resource| {
+        resource["typed_parameters"]["knowledge_name"] == "Python handbook"
+    }));
+
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (status, retired_binding) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/knowledge/binding/conversation/{session_id}"),
+        json!({
+            "enabled": true,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "channel_write_enabled": false,
+            "kb_ids": [base_a.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{retired_binding}");
+
+    let (status, turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": {"content": format!("请根据挂载知识库回答 {QUERY}")}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (status, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == REPLY)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if completed.is_err() {
+        let (_, events) = call(
+            router.clone(),
+            "GET",
+            &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=200"),
+            json!({}),
+        )
+        .await;
+        let (_, history) = call(
+            router.clone(),
+            "GET",
+            &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+            json!({}),
+        )
+        .await;
+        panic!(
+            "Knowledge-backed assistant reply did not become durable; model requests: {}; events: {}; history: {}",
+            serde_json::to_string_pretty(&*model_requests.lock().unwrap()).unwrap(),
+            serde_json::to_string_pretty(&events).unwrap(),
+            serde_json::to_string_pretty(&history).unwrap(),
+        );
+    }
+
+    let requests = model_requests.lock().unwrap();
+    assert_eq!(requests.len(), 3, "search, read, and final model rounds are required");
+    let first = &requests[0];
+    let prompt = first["messages"].to_string();
+    assert!(prompt.contains("knowledge/search before answering from memory"), "{first}");
+    assert!(prompt.contains("Python handbook"), "{first}");
+    assert!(prompt.contains("Engineering notes"), "{first}");
+    assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Action: knowledge/search"))
+    }));
+    assert!(requests[1].to_string().contains("knowledge-search-call"), "{}", requests[1]);
+    assert!(requests[2].to_string().contains(RESULT_MARKER), "{}", requests[2]);
+    drop(requests);
+
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -1360,11 +1732,16 @@ async fn companion_entry_is_fixed_to_its_official_agent() {
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{history}");
-            if history["data"]["items"]
-                .as_array()
-                .unwrap()
+            let items = history["data"]["items"].as_array().unwrap();
+            if let Some(reply) = items
                 .iter()
-                .any(|message| message["content"]["content"] == REPLY)
+                .find(|message| message["content"]["content"] == REPLY)
+                && items.iter().any(|message| {
+                    message["type"] == "agent_status"
+                        && message["content"]["turn_summary"] == true
+                        && message["content"]["status"] == "prepared"
+                        && message["msg_id"] == reply["message_id"]
+                })
             {
                 break history;
             }

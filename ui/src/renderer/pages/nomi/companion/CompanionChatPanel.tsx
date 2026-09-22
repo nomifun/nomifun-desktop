@@ -15,7 +15,7 @@ import ExecutionConversationLayout from '@/renderer/pages/conversation/execution
 import { useCompanion } from '../useNomi';
 import CompanionConversation from './CompanionConversation';
 import CompanionDevicesControl from './CompanionDevicesControl';
-import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
+import FrozenKnowledgeControl from '@/renderer/pages/conversation/components/FrozenKnowledgeControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import SystemPermissionReminder from '@/renderer/pages/conversation/components/SystemPermissionReminder';
 import type { WorkspaceExtraTab } from '@/renderer/pages/conversation/Workspace/types';
@@ -36,6 +36,9 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation, extraTabs }) => {
   const companion = useCompanion(companionId);
   const { profile } = companion;
   const workspace = conversation.extra?.workspace ?? '';
+  const knowledgeResources = (
+    conversation.agent_snapshot?.canonical_binding?.typed_resource_bindings ?? []
+  ).filter((binding) => binding.resource_kind === 'knowledge_base');
   useEffect(() => {
     if (!companionId || conversation.status === 'running') return;
     let cancelled = false;
@@ -56,7 +59,7 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation, extraTabs }) => {
       headerControls={<div className='flex items-center gap-8px'>
         <IdmmControl target={{ id: conversation.id }} />
         {companionId && conversation.agent_snapshot?.required_resource_kinds.includes('knowledge_base')
-          ? <KnowledgeControl target={{ kind: 'companion', id: companionId }} /> : null}
+          ? <FrozenKnowledgeControl resources={knowledgeResources} /> : null}
       </div>}
       disableRename
       workspaceEnabled={Boolean(workspace)}

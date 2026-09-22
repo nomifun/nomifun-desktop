@@ -18,4 +18,17 @@ describe('Knowledge consumers section visual style', () => {
     expect(consumersSource.includes('Unlink')).toBe(true);
     expect(consumersSource.includes('Delete')).toBe(false);
   });
+
+  test('does not expose frozen AgentSession conversations as mutable binding targets', () => {
+    expect(
+      consumersSource.includes(
+        "new Set<KnowledgeBindingKind>(['terminal', 'companion', 'workpath'])"
+      )
+    ).toBe(true);
+    expect(
+      consumersSource.includes(
+        "new Set<KnowledgeBindingKind>(['conversation', 'terminal', 'companion', 'workpath'])"
+      )
+    ).toBe(false);
+  });
 });

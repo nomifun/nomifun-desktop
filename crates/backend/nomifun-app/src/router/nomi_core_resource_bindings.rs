@@ -54,6 +54,11 @@ const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 7] = [
     "ssh_host",
     "browser",
 ];
+const MAX_SESSION_KNOWLEDGE_BASES: usize = 32;
+
+fn resource_kind_allows_multiple(kind: &str) -> bool {
+    matches!(kind, "knowledge_base" | "mcp_server")
+}
 
 type FrozenActionAllowlists = BTreeMap<String, BTreeSet<ActionId>>;
 
@@ -283,6 +288,15 @@ impl NomiCoreResourceBindingResolverRegistry {
             .iter()
             .filter(|selection| selection.resource_kind == "mcp_server")
             .count();
+        let selected_knowledge_bases = selections
+            .iter()
+            .filter(|selection| selection.resource_kind == "knowledge_base")
+            .count();
+        if selected_knowledge_bases > MAX_SESSION_KNOWLEDGE_BASES {
+            return Err(ResourceSelectionResolutionError::invalid(format!(
+                "a Session may mount at most {MAX_SESSION_KNOWLEDGE_BASES} Knowledge bases"
+            )));
+        }
         if selected_mcp_servers > 0 {
             required
                 .entry("mcp_server".to_owned())
@@ -302,7 +316,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                     selection.resource_kind.clone(),
                     selection.resource_id.clone(),
                 )
-                .is_some() && selection.resource_kind != "mcp_server"
+                .is_some() && !resource_kind_allows_multiple(&selection.resource_kind)
             {
                 return Err(ResourceSelectionResolutionError::invalid(format!(
                     "resource kind {} was selected more than once",
@@ -330,6 +344,10 @@ impl NomiCoreResourceBindingResolverRegistry {
             // expose an arbitrary last MCP server as the singular selection.
             selections_by_kind.remove("mcp_server");
         }
+        // Knowledge Actions intentionally receive the complete mounted set.
+        // No cross-kind relationship may observe one arbitrary member as if it
+        // were the Session's singular Knowledge selection.
+        selections_by_kind.remove("knowledge_base");
         if let (Some(companion_id), Some(memory_id)) = (
             selections_by_kind.get("companion"),
             selections_by_kind.get("companion_memory"),
@@ -1077,8 +1095,18 @@ impl ProductResourceAuthority {
             allowed_operations: allowed,
             connection_config_ref: None,
             typed_parameters: BTreeMap::from([
-                ("knowledge_root".to_owned(), info.root_path),
-                ("name".to_owned(), info.name),
+                (
+                    nomifun_agent_domain_wave1::KNOWLEDGE_ROOT_PARAMETER.to_owned(),
+                    info.root_path,
+                ),
+                (
+                    nomifun_agent_domain_wave1::KNOWLEDGE_NAME_PARAMETER.to_owned(),
+                    info.name,
+                ),
+                (
+                    nomifun_agent_domain_wave1::KNOWLEDGE_DESCRIPTION_PARAMETER.to_owned(),
+                    info.description,
+                ),
             ]),
         })
     }
@@ -1536,7 +1564,7 @@ mod tests {
                     },
                     AgentResourceSelectionDto {
                         resource_kind: "knowledge_base".into(),
-                        resource_id: "two".into(),
+                        resource_id: "one".into(),
                     },
                 ],
                 &capabilities,
@@ -1546,6 +1574,45 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(duplicate.code(), "RESOURCE_SELECTION_INVALID");
+
+        let too_many = (0..=MAX_SESSION_KNOWLEDGE_BASES)
+            .map(|index| AgentResourceSelectionDto {
+                resource_kind: "knowledge_base".into(),
+                resource_id: format!("base-{index}"),
+            })
+            .collect::<Vec<_>>();
+        let overflow = knowledge_registry
+            .resolve_selected("owner-1", &too_many, &capabilities, &actions, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(overflow.code(), "RESOURCE_SELECTION_INVALID");
+
+        let mounted = knowledge_registry
+            .resolve_selected(
+                "owner-1",
+                &[
+                    AgentResourceSelectionDto {
+                        resource_kind: "knowledge_base".into(),
+                        resource_id: "one".into(),
+                    },
+                    AgentResourceSelectionDto {
+                        resource_kind: "knowledge_base".into(),
+                        resource_id: "two".into(),
+                    },
+                ],
+                &capabilities,
+                &actions,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            mounted
+                .iter()
+                .map(|binding| binding.resource_id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
 
         let workspace_module = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID.to_owned();
         let missing = registry("workspace", &["read"])
@@ -1578,7 +1645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn knowledge_base_may_remain_unbound_until_the_session_mount_is_applied() {
+    async fn knowledge_base_may_remain_unbound_when_the_session_selects_no_scope() {
         let bindings = registry("knowledge_base", &["search"])
             .resolve_selected(
                 "owner-1",

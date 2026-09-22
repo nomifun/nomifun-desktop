@@ -5,6 +5,7 @@
  */
 
 import type { TChatConversation } from '@/common/config/storage';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 import ConversationTerminalPanel from '@/renderer/pages/conversation/components/ConversationTerminalPanel';
 import type { SessionKnowledgeSource } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/knowledgeBindingTarget';
 import { useSessionKnowledgeTab } from '@/renderer/pages/conversation/Workspace/KnowledgePanel/useSessionKnowledgeTab';
@@ -32,10 +33,18 @@ export function useWorkspaceExtraTabs(conversation?: TChatConversation): Workspa
   const conversationId = conversation?.id;
   const extra = conversation?.extra as Record<string, unknown> | undefined;
   const hasWorkspace = Boolean(extra?.workspace);
+  const knowledgeBaseIds = useMemo(
+    () => (conversation?.agent_snapshot?.canonical_binding?.typed_resource_bindings ?? [])
+      .filter((binding) => binding.resource_kind === 'knowledge_base')
+      .map((binding) => binding.resource_id as KnowledgeBaseId),
+    [conversation?.agent_snapshot?.canonical_binding?.typed_resource_bindings]
+  );
 
   const knowledgeSource = useMemo<SessionKnowledgeSource | undefined>(
-    () => (conversationId && hasWorkspace ? { kind: 'conversation', conversationId, extra } : undefined),
-    [conversationId, hasWorkspace, extra]
+    () => (conversationId && hasWorkspace
+      ? { kind: 'conversation', knowledgeBaseIds }
+      : undefined),
+    [conversationId, hasWorkspace, knowledgeBaseIds]
   );
   const knowledgeTabs = useSessionKnowledgeTab(knowledgeSource);
 

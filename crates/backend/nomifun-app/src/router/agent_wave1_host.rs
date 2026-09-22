@@ -45,8 +45,6 @@ impl Wave1ApplicationHost {
     }
 }
 
-const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
-const KNOWLEDGE_NAME_PARAMETER: &str = "knowledge_name";
 const DEFAULT_KNOWLEDGE_SEARCH_LIMIT: usize = 20;
 const MEMORY_STATE_KEY: &str = "memory.entries";
 const MEMORY_STATE_FORMAT_VERSION: &str = "1.0.0";
@@ -281,14 +279,29 @@ impl Wave1ApplicationHost {
         let resources = service
             .authority()
             .resource_ids_for(nomifun_knowledge::KnowledgeAction::Autogen);
-        let [resource_id] = resources.as_slice() else {
-            return Err(Wave1HostPortError::new(
-                "PRESET_RESOURCE_NOT_BOUND",
-                "knowledge/autogen requires exactly one writable Knowledge resource",
-            ));
+        let selected = match request.base {
+            Some(base) => nomifun_common::KnowledgeBaseId::parse(base).map_err(|error| {
+                Wave1HostPortError::invalid_request(format!(
+                    "knowledge base identity is invalid: {error}"
+                ))
+            })?,
+            None => match resources.as_slice() {
+                [resource_id] => resource_id.clone(),
+                [] => {
+                    return Err(Wave1HostPortError::new(
+                        "PRESET_RESOURCE_NOT_BOUND",
+                        "knowledge/autogen requires one writable Knowledge resource",
+                    ));
+                }
+                _ => {
+                    return Err(Wave1HostPortError::invalid_request(
+                        "knowledge/autogen requires `base` when multiple Knowledge bases are mounted",
+                    ));
+                }
+            },
         };
         let result = service
-            .autogen(resource_id, request.overwrite_readme)
+            .autogen(&selected, request.overwrite_readme)
             .await
             .map_err(wave1_application_error)?;
         serde_json::to_value(result)
@@ -601,20 +614,21 @@ fn agent_knowledge_resource(
     })?;
     let root = binding
         .typed_parameters
-        .get(KNOWLEDGE_ROOT_PARAMETER)
+        .get(nomifun_agent_domain_wave1::KNOWLEDGE_ROOT_PARAMETER)
         .filter(|root| !root.trim().is_empty())
         .ok_or_else(|| {
             Wave1HostPortError::new(
                 "PRESET_RESOURCE_NOT_BOUND",
                 format!(
-                    "knowledge resource binding {} has no {KNOWLEDGE_ROOT_PARAMETER}",
-                    binding.binding_id.as_ref()
+                    "knowledge resource binding {} has no {}",
+                    binding.binding_id.as_ref(),
+                    nomifun_agent_domain_wave1::KNOWLEDGE_ROOT_PARAMETER,
                 ),
             )
         })?;
     let name = binding
         .typed_parameters
-        .get(KNOWLEDGE_NAME_PARAMETER)
+        .get(nomifun_agent_domain_wave1::KNOWLEDGE_NAME_PARAMETER)
         .map(String::as_str)
         .filter(|name| !name.trim().is_empty())
         .map(str::to_owned)

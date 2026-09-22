@@ -1763,22 +1763,19 @@ impl NomiPluginToolSession {
                 "initial capability and Skill context exceeds the {MAX_INITIAL_CAPABILITY_CONTEXT_BYTES}-byte Nomi prompt limit"
             )));
         }
-        let context = String::from_utf8(bytes).map_err(|error| {
-            NomiPluginToolError::Contract(format!(
-                "initial capability context is not UTF-8: {error}"
-            ))
-        })?;
         let mut prompt = base.unwrap_or_default().to_owned();
-        if !prompt.is_empty() {
-            prompt.push_str("\n\n");
+        if let Some(context) = render_initial_capability_context_section(
+            &self.initial_context_contributions,
+        )? {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str(&context);
         }
-        prompt.push_str(
-            "<nomifun_initial_capability_context format=\"canonical-json\">\n",
-        );
-        prompt.push_str(&context);
-        prompt.push_str("\n</nomifun_initial_capability_context>");
         if let Some(skills) = &self.selected_skills {
-            prompt.push_str("\n\n");
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
             prompt.push_str(skills.prompt());
         }
         Ok(Some(prompt))
@@ -2524,7 +2521,7 @@ impl KernelNomiPluginToolSession {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn assemble_initial_capability_context(
+pub async fn assemble_initial_capability_context(
     kernel: &Arc<KernelRegistry>,
     compiled: &CompiledSnapshot,
     active: &nomifun_agent_kernel::ActiveCapabilitySetSnapshot,
@@ -2664,6 +2661,34 @@ async fn assemble_initial_capability_context(
         )));
     }
     Ok((contributions, turn_context_ids))
+}
+
+/// Encode one already-authorized initial Context set in the exact system-prompt
+/// envelope shared by every Agent execution host.
+pub fn render_initial_capability_context_section(
+    contributions: &[NomiInitialContextContribution],
+) -> Result<Option<String>, NomiPluginToolError> {
+    if contributions.is_empty() {
+        return Ok(None);
+    }
+    let bytes = canonical_json_bytes(&contributions).map_err(|error| {
+        NomiPluginToolError::Contract(format!(
+            "initial capability context could not be encoded: {error}"
+        ))
+    })?;
+    if bytes.len() > MAX_INITIAL_CAPABILITY_CONTEXT_BYTES {
+        return Err(NomiPluginToolError::Contract(format!(
+            "initial capability context exceeds the {MAX_INITIAL_CAPABILITY_CONTEXT_BYTES}-byte Nomi prompt limit"
+        )));
+    }
+    let context = String::from_utf8(bytes).map_err(|error| {
+        NomiPluginToolError::Contract(format!(
+            "initial capability context is not UTF-8: {error}"
+        ))
+    })?;
+    Ok(Some(format!(
+        "<nomifun_initial_capability_context format=\"canonical-json\">\n{context}\n</nomifun_initial_capability_context>"
+    )))
 }
 
 #[allow(clippy::too_many_arguments)]

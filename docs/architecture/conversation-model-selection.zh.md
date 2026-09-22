@@ -19,5 +19,12 @@ Turn 输入，不接受 `preset_id`、Capability overlay 或 MCP overlay。后�
 模型与协作控件在已有会话中保留为只读摘要，并明确提示“新建会话后更改”。执行
 Attempt 的只读记录继续由 AgentExecution 控制，不能成为绕过冻结 Session 的聊天入口。
 
+知识库遵循同一边界：Agent 工作台决定 `knowledge` Actions 的能力上限，Guid 在创建
+会话前选择零到多个 `knowledge_base` 资源，后端校验归属并把精确资源冻结进
+`AgentBinding.typed_resource_bindings`。已有会话只读展示这组挂载；不得再用
+`/api/knowledge/binding/conversation/*` 旁路修改工具权限或制造“界面已挂载、Runtime
+无工具”的第二事实源。终端的 workpath 知识挂载属于独立产品契约，仍可随工作路径动态
+更新。
+
 创意工坊任务只在已冻结为 Creative Studio Agent 的会话内继续复用该 Preset；从其他
 会话选择图像、视频或音乐模式会进入 Guid 创建新的 Creative Studio Session。

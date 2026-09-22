@@ -11,6 +11,7 @@ import { customFigureMetaOf } from '@/renderer/pages/companion/characters/custom
 import {
   requiredAgentResourcePickerKinds,
   resolveAgentResourceSelections,
+  selectedKnowledgeResourceIds,
   selectedMcpResourceIds,
   allowsMultipleMcpServers,
   type AgentResourceSelectionValue,
@@ -303,6 +304,21 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
     let changed = false;
     for (const kind of fields) {
       if (inventory.errors[kind]) continue;
+      if (kind === 'knowledge_base') {
+        const selected = selectedKnowledgeResourceIds(next);
+        const available = new Set(fieldOptions(kind, next).map((option) => option.value));
+        const retained = selected.filter((id) => available.has(id)).slice(0, 32);
+        if (
+          retained.length !== selected.length ||
+          retained.some((id, index) => id !== selected[index]) ||
+          next.knowledge_base !== undefined
+        ) {
+          next.knowledge_bases = retained;
+          delete next.knowledge_base;
+          changed = true;
+        }
+        continue;
+      }
       if (kind === 'mcp_server' && multipleMcp) {
         const selected = selectedMcpResourceIds(next);
         const available = new Set(optionsForAgentResourceField(kind, inventory, value, required).map((option) => option.value));
@@ -471,8 +487,12 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
       // click to it, toggling the popup closed immediately after it opens. Keep
       // the field non-labeling; the combobox has its own accessible aria-label.
       return <div className={styles.field} key={kind}><span className={styles.fieldLabel}>{kindName(kind)} {optional.has(kind) && t('common.optional')}</span><div className={styles.fieldControl}>
-        <Select allowClear={optional.has(kind)} mode={kind === 'mcp_server' && multipleMcp ? 'multiple' : undefined} value={kind === 'mcp_server' && multipleMcp ? selectedMcpResourceIds(value) : value[kind]} disabled={disabled || loading || waitingDependency || options.length === 0} placeholder={t(waitingDependency ? 'agentSettings.resources.selectDependency' : 'agentSettings.resources.selectPlaceholder', { resource: dependsOn ? kindName(dependsOn as UserAgentResourceKind) : kindName(kind) })} aria-label={t('agentSettings.resources.selectAria', { resource: kindName(kind) })} onClear={() => { const next = { ...value }; delete next[kind]; if (kind === 'mcp_server') next.mcp_servers = []; onChange(next); }} onChange={(resourceId: string | string[]) => {
-          if (kind === 'mcp_server' && multipleMcp) {
+        <Select allowClear={optional.has(kind)} mode={kind === 'knowledge_base' || kind === 'mcp_server' && multipleMcp ? 'multiple' : undefined} value={kind === 'knowledge_base' ? selectedKnowledgeResourceIds(value) : kind === 'mcp_server' && multipleMcp ? selectedMcpResourceIds(value) : value[kind]} disabled={disabled || loading || waitingDependency || options.length === 0} placeholder={t(waitingDependency ? 'agentSettings.resources.selectDependency' : 'agentSettings.resources.selectPlaceholder', { resource: dependsOn ? kindName(dependsOn as UserAgentResourceKind) : kindName(kind) })} aria-label={t('agentSettings.resources.selectAria', { resource: kindName(kind) })} onClear={() => { const next = { ...value }; delete next[kind]; if (kind === 'knowledge_base') next.knowledge_bases = []; if (kind === 'mcp_server') next.mcp_servers = []; onChange(next); }} onChange={(resourceId: string | string[]) => {
+          if (kind === 'knowledge_base') {
+            const ids = Array.isArray(resourceId) ? resourceId : [resourceId];
+            if (ids.length > 32) return;
+            const next = { ...value, knowledge_bases: ids }; delete next.knowledge_base; onChange(next);
+          } else if (kind === 'mcp_server' && multipleMcp) {
             const ids = Array.isArray(resourceId) ? resourceId : [resourceId];
             if (ids.length > 16) return;
             const next = { ...value, mcp_servers: ids }; delete next.mcp_server; onChange(next);

@@ -67,6 +67,7 @@ pub(crate) struct EngineKernelAssembly {
     pub kernel: Arc<KernelRegistry>,
     pub environment: CompilerEnvironment,
     pub wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    pub context_admission: Arc<nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
     #[cfg(feature = "browser-use")]
     pub browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     pub plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
@@ -140,10 +141,12 @@ pub struct EngineKernelSession {
     active: Arc<SessionCapabilityState>,
     kernel: Arc<KernelRegistry>,
     wave2: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    context_admission: Arc<nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
     #[cfg(feature = "browser-use")]
     browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
     plugin_product_plan: tokio::sync::OnceCell<EngineToolPlan>,
+    initial_capability_context: tokio::sync::OnceCell<Option<String>>,
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
     state: Mutex<State>,
@@ -295,11 +298,13 @@ impl EngineKernelSession {
             compiled,
             kernel: assembly.kernel.clone(),
             wave2: assembly.wave2.clone(),
+            context_admission: assembly.context_admission.clone(),
             #[cfg(feature = "browser-use")]
             browser: assembly.browser.clone(),
             git_root,
             plugin_product: assembly.plugin_product.clone(),
             plugin_product_plan: tokio::sync::OnceCell::new(),
+            initial_capability_context: tokio::sync::OnceCell::new(),
             robot: assembly.robot.clone(),
             robot_tools: tokio::sync::OnceCell::new(),
             state: Mutex::new(State::default()),
@@ -326,6 +331,38 @@ impl EngineKernelSession {
     }
     pub fn execution_constraints(&self) -> ExecutionConstraints {
         self.constraints
+    }
+
+    /// Frozen Session-start Context contributions assembled through the same
+    /// Kernel authority as tools. Engines consume this canonical projection;
+    /// they never hard-code Knowledge, Companion, or Plugin context sources.
+    pub async fn initial_capability_context(&self) -> Result<Option<String>, AppError> {
+        let context = self
+            .initial_capability_context
+            .get_or_try_init(|| async {
+                if self.constraints.restricted() {
+                    return Ok(None);
+                }
+                let active = self.active.snapshot().map_err(failure)?;
+                let registry = self.registry_snapshot()?;
+                let (contributions, _turn_context_ids) =
+                    nomifun_ai_agent::assemble_initial_capability_context(
+                        &self.kernel,
+                        &self.compiled,
+                        &active,
+                        registry.as_ref(),
+                        &self.principal,
+                        &self.session_id,
+                        &ScopeKey::from(format!("session:{}", self.session_id.as_ref())),
+                        Some(self.context_admission.as_ref()),
+                    )
+                    .await
+                    .map_err(failure)?;
+                nomifun_ai_agent::render_initial_capability_context_section(&contributions)
+                    .map_err(failure)
+            })
+            .await?;
+        Ok(context.clone())
     }
     /// Subtractive ceiling of this Session, not another Agent capability grant.
     pub fn allows_capability(&self, id: &nomifun_agent_contracts::CapabilityId) -> bool {

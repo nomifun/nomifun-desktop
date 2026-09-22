@@ -722,6 +722,7 @@ async fn build_nomi_core_agent_api_state(
         &conversation_owner, Arc::clone(&control_plane), &services.official_runtime, services.database.pool().clone(), services.encryption_key,
         super::engine_kernel_session::EngineKernelAssembly {
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
+            context_admission: Arc::clone(&platform_builtin_context_admission),
             #[cfg(feature = "browser-use")]
             browser: browser_owner,
             plugin_product: super::engine_plugin_product_tools::PluginProductOwner {
@@ -784,7 +785,6 @@ async fn build_nomi_core_agent_api_state(
             product_agent_resolver,
             plugin_tool_sessions,
             services.ssh_pool.clone(),
-            services.knowledge_service.clone(),
             services.plugin_runtime.clone(),
             #[cfg(feature = "browser-use")]
             services.browser_resources.clone(),

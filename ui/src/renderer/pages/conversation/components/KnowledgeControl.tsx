@@ -5,7 +5,7 @@
  */
 
 /**
- * KnowledgeControl — Per-session knowledge-base mounting popover.
+ * KnowledgeControl — Mutable product-owned knowledge-base binding popover.
  *
  * Trigger button + popover panel are deliberately aligned with the sibling
  * conversation-header capability controls: a compact
@@ -14,10 +14,8 @@
  * (icon-chip header + status pill + rounded `bg-fill-1` card sections), instead
  * of the earlier bespoke square icon-button + full-bleed-divider panel.
  *
- * Preserved behaviors from the original implementation:
- * - Three-target resolution: conversation → session, terminal → workpath,
- *   companion → per-profile
- * - Draft mode (Guid page pre-creation binding)
+ * Mutable binding behaviors retained only for their owning products:
+ * - terminal → workpath and companion → per-profile target resolution
  * - Binding read/write via `POST /api/knowledge/binding/{kind}/{target_id}`
  * - `knowledge.binding-changed` / base-created/updated/deleted WS refresh
  * - `disabledReason` tooltip, `applyNote`, `footer` passthrough
@@ -31,7 +29,7 @@ import { Button, Input, Message, Popover, Switch, Tooltip } from '@arco-design/w
 import { BookOne } from '@icon-park/react';
 import { useNavigate } from 'react-router-dom';
 import { ipcBridge } from '@/common';
-import type { CompanionId, ConversationId, KnowledgeBaseId, TerminalId } from '@/common/types/ids';
+import type { CompanionId, KnowledgeBaseId, TerminalId } from '@/common/types/ids';
 import type {
   IKnowledgeBase,
   IKnowledgeBinding,
@@ -55,27 +53,18 @@ import {
 } from '../Workspace/KnowledgePanel/knowledgeBindingTarget';
 
 export type KnowledgeTarget =
-  | { kind: 'conversation'; id: ConversationId }
   | { kind: 'terminal'; id: TerminalId }
   | { kind: 'companion'; id: CompanionId }
   | { kind: 'workpath'; id: string };
 
-/** Draft (pre-creation) mode: the binding lives in the parent's state and is
- * persisted by the parent once a target exists. */
-export type KnowledgeDraft = {
-  value: IKnowledgeBinding;
-  onChange: (next: IKnowledgeBinding) => void;
-};
-
 type KnowledgeControlProps = {
-  target?: KnowledgeTarget;
-  draft?: KnowledgeDraft;
+  target: KnowledgeTarget;
   disabledReason?: string;
   applyNote?: string;
   footer?: React.ReactNode;
 };
 
-export const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
+const defaultKnowledgeBinding = (): IKnowledgeBinding => ({
   enabled: false,
   writeback: false,
   writeback_eagerness: 'manual',
@@ -144,7 +133,7 @@ function kindLabel(kind: IKnowledgeBase['kind'], t: TFunction): string {
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
-const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disabledReason, applyNote, footer }) => {
+const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, disabledReason, applyNote, footer }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { sessions: terminalSessions } = useTerminalSessions();
@@ -174,44 +163,38 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
 
   // ─── Target resolution ───────────────────────────────────────────────────
   const resolved = useMemo((): ResolvedKnowledgeBindingTarget | null => {
-    if (!target) return null;
     if (target.kind === 'companion') return { kind: 'companion', target_id: target.id };
-    if (target.kind === 'conversation') {
-      return { kind: 'conversation', target_id: target.id };
-    }
     if (target.kind === 'terminal') {
       const session = terminalSessions.find((s) => s.terminal_id === target.id);
       if (!session) return null;
       return { kind: 'workpath', target_id: workpathKeyForTerminal(session) };
     }
     return { kind: 'workpath', target_id: target.id };
-  }, [target?.kind, target?.id, terminalSessions]);
+  }, [target.kind, target.id, terminalSessions]);
 
   const kind = resolved?.kind;
   const id = resolved?.target_id;
-  const targetUnresolved = !draft && !!target && target.kind !== 'companion' && !resolved;
+  const targetUnresolved = target.kind !== 'companion' && !resolved;
 
-  // Only workpath targets use a shared workspace scope. Conversation targets
-  // remain isolated so a binding never appears to apply to another session.
+  // Only workpath targets display a shared workspace scope.
   const workpathDisplay = workpathDisplayForKnowledgeTarget(resolved);
 
   // ─── State ────────────────────────────────────────────────────────────────
   const [bases, setBases] = useState<IKnowledgeBase[]>([]);
   const [basesLoaded, setBasesLoaded] = useState(false);
   const [persistedBinding, setPersistedBinding] = useState<IKnowledgeBinding>(defaultKnowledgeBinding);
-  const binding = draft ? draft.value : persistedBinding;
+  const binding = persistedBinding;
   const [searchQuery, setSearchQuery] = useState('');
-  const isDraftMode = !!draft;
 
   const reloadBinding = useCallback(async () => {
-    if (isDraftMode || !kind || !id) return;
+    if (!kind || !id) return;
     try {
       const next = await ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id });
       setPersistedBinding(next);
     } catch {
       /* ignore — keep current binding */
     }
-  }, [isDraftMode, kind, id]);
+  }, [kind, id]);
 
   // ─── Discoverability hint ─────────────────────────────────────────────────
   const [hintVisible, setHintVisible] = useState(false);
@@ -247,7 +230,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       try {
         const [list, b] = await Promise.all([
           ipcBridge.knowledge.listBases.invoke(),
-          isDraftMode || !kind || !id
+          !kind || !id
             ? Promise.resolve(null)
             : ipcBridge.knowledge.getBinding.invoke({ kind, target_id: id }),
         ]);
@@ -263,7 +246,7 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
     return () => {
       cancelled = true;
     };
-  }, [kind, id, isDraftMode]);
+  }, [kind, id]);
 
   // Keep base list fresh
   useEffect(() => {
@@ -282,30 +265,27 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   }, []);
 
   useEffect(() => {
-    if (isDraftMode || !kind || !id) return;
+    if (!kind || !id) return;
     const unsub = ipcBridge.knowledge.onBindingChanged.on((event) => {
       if (event.target_kind !== kind || event.target_id !== id) return;
       void reloadBinding();
     });
     return () => unsub();
-  }, [isDraftMode, kind, id, reloadBinding]);
+  }, [kind, id, reloadBinding]);
 
   // ─── Persist ──────────────────────────────────────────────────────────────
   const persist = async (next: IKnowledgeBinding) => {
-    if (draft) {
-      draft.onChange(next);
-      return;
-    }
     if (!kind || !id) return;
     setPersistedBinding(next);
     try {
       await ipcBridge.knowledge.setBinding.invoke({ kind, target_id: id, ...next });
       if (next.enabled !== binding.enabled) {
         // Terminal workpath bindings re-sync into the live PTY workspace
-        // immediately (backend binding hook); conversation targets apply on
-        // the next message — two different promises, two toasts.
+        // immediately through the backend binding hook. Companion profile
+        // rows are product-owned defaults; this control never mutates a live
+        // AgentSession.
         const enabledKey =
-          target?.kind === 'terminal' ? 'knowledge.control.enabledOkTerminal' : 'knowledge.control.enabledOk';
+          target.kind === 'terminal' ? 'knowledge.control.enabledOkTerminal' : 'knowledge.control.enabledOk';
         Message.success(next.enabled ? t(enabledKey) : t('knowledge.control.disabledOk'));
       }
     } catch (e) {
@@ -323,9 +303,8 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
       ...binding,
       kb_ids: nextIds,
       enabled: nextEnabled,
-      // An unmounted draft must be a genuinely optional, inert state. Do not
-      // carry a stale write-back policy into session creation after the final
-      // base is removed.
+      // An unmounted binding must be genuinely inert. Do not carry a stale
+      // write-back policy after the final base is removed.
       ...(nextEnabled
         ? {}
         : { writeback: false, writeback_eagerness: 'manual' as const }),
@@ -351,13 +330,9 @@ const KnowledgeControl: React.FC<KnowledgeControlProps> = ({ target, draft, disa
   // Knowledge has no live run-state — the dot is a binary enabled/off marker
   // (primary when mounted, gray otherwise).
   const dotColor = binding.enabled ? CAPABILITY_COLORS.primary : CAPABILITY_COLORS.off;
-  const statusText = draft
-    ? binding.enabled
-      ? t('guid.advanced.draftOn')
-      : t('guid.advanced.draftOff')
-    : binding.enabled
-      ? t('knowledge.control.mounted', { count: mountedCount })
-      : t('knowledge.control.off');
+  const statusText = binding.enabled
+    ? t('knowledge.control.mounted', { count: mountedCount })
+    : t('knowledge.control.off');
 
   // Compact segmented control (writeback disposition) — tinted track with a
   // primary active pill, sitting on the section's bg-fill-1 surface.

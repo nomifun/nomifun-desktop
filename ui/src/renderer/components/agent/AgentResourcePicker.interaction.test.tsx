@@ -323,6 +323,22 @@ describe('Agent resource picker', () => {
     expect(screen.getByRole('combobox', { name: 'Select Channel' }).textContent?.includes('Mochi Telegram')).toBe(true);
   });
 
+  test('shows every Knowledge base selected for the frozen Session', async () => {
+    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
+      requiredKinds={['knowledge_base']}
+      optionalKinds={['knowledge_base']}
+      capabilityIds={['knowledge']}
+      actionIds={['knowledge/search', 'knowledge/read']}
+      value={{ knowledge_bases: ['kb-1', 'kb-2'] }}
+      onChange={() => undefined}
+      loadInventory={async () => inventory}
+    /></MemoryRouter></I18nextProvider>);
+    await waitFor(() => expect(screen.getByText('Resources ready')).toBeTruthy());
+    const picker = screen.getByRole('combobox', { name: 'Select Knowledge base' });
+    expect(picker.textContent?.includes('Support handbook')).toBe(true);
+    expect(picker.textContent?.includes('Private notes')).toBe(true);
+  });
+
   test('offers the product configuration route when a required resource has no options', async () => {
     const Location = () => <span data-testid='location'>{useLocation().pathname}</span>;
     const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><AgentResourcePicker

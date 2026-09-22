@@ -115,21 +115,12 @@ pub enum AgentKillReason {
     /// from the completed turn could be mistaken for successor output. This is
     /// a deliberate protocol-boundary recycle, not a crash.
     TurnBoundaryRecycle,
-    /// The session's bound knowledge bases changed (a `挂载知识库` toggle, a
-    /// rebind, or a write-back mode switch). The agent bakes the knowledge
-    /// retrieval-protocol section at build time and is cached per
-    /// conversation, so the in-memory Agent runtime is recycled to force a rebuild —
-    /// honoring the UI contract that a binding change "takes effect on the
-    /// next message". The conversation (and any persisted ACP session) is
-    /// preserved; the rebuilt agent resumes and re-delivers the section.
-    KnowledgeBindingChanged,
     /// A deliberate administrative recycle so a conversation-level
     /// configuration change takes effect on the next build: a model /
     /// workspace / delegation update, a companion skill-snapshot refresh, a
     /// failover model switch, or a failed-edit session
-    /// rollback. Like [`Self::KnowledgeBindingChanged`] this recycles a
-    /// healthy runtime on purpose, so the restart governor must never count
-    /// it as a crash.
+    /// rollback. This recycles a healthy runtime on purpose, so the restart
+    /// governor must never count it as a crash.
     ConfigurationChanged,
     /// The owning conversation was deleted via `DELETE /api/conversations/{id}`.
     /// The agent process must be torn down so it stops emitting stream events
