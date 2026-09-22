@@ -77,7 +77,7 @@ graph has exactly seven canonical node kinds:
 | `image` | A real image asset, an empty image target, and its durable T2I/I2I composer draft. |
 | `video` | A real video asset or an empty T2V/I2V target with a durable composer draft. |
 | `audio` | A real audio asset or an empty TTS target with a durable composer draft. |
-| `panorama` | A real equirectangular panorama asset and view state. |
+| `timeline` | A durable image/video editing timeline and its clip arrangement. |
 | `config` | The auditable owner of an exact generation operation, parameters, task state, inputs, and results. |
 | `group` | A container created by grouping an existing selection; it is not presented as a generator. |
 

@@ -936,7 +936,7 @@ CREATE TABLE conversation_execution_links (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     conversation_id      TEXT NOT NULL,
     execution_id         TEXT NOT NULL,
-    relation             TEXT NOT NULL CHECK (relation IN ('lead', 'attempt')),
+    relation             TEXT NOT NULL CHECK (relation IN ('lead', 'attempt', 'automation')),
     step_id              TEXT
                          CHECK (
                              step_id IS NULL
@@ -963,7 +963,7 @@ CREATE TABLE conversation_execution_links (
     updated_at           INTEGER NOT NULL,
     CHECK (
         (relation = 'lead' AND step_id IS NULL AND attempt_id IS NULL)
-        OR (relation = 'attempt' AND step_id IS NOT NULL AND attempt_id IS NOT NULL)
+        OR (relation IN ('attempt', 'automation') AND step_id IS NOT NULL AND attempt_id IS NOT NULL)
     ),
     CHECK (length(conversation_id) = 36 AND lower(conversation_id) = conversation_id AND conversation_id GLOB '????????-????-7???-[89ab]???-????????????' AND replace(conversation_id, '-', '') NOT GLOB '*[^0-9a-f]*'),
     CHECK (length(execution_id) = 36 AND lower(execution_id) = execution_id AND execution_id GLOB '????????-????-7???-[89ab]???-????????????' AND replace(execution_id, '-', '') NOT GLOB '*[^0-9a-f]*')

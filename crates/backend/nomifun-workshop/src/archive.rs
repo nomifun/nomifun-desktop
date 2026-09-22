@@ -1157,9 +1157,6 @@ pub(crate) fn collect_document_asset_ids(
     for node in &document.nodes {
         match &node.data {
             CreativeNodeData::Image(data) => insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?,
-            CreativeNodeData::Panorama(data) => {
-                insert_optional_asset(&mut asset_ids, data.asset_id.as_deref())?
-            }
             CreativeNodeData::Config(data) => {
                 for asset_id in data.input_asset_ids.iter().chain(&data.result_asset_ids) {
                     insert_asset(&mut asset_ids, asset_id)?;
@@ -1314,7 +1311,6 @@ fn remap_node_references(
             }
             Ok(())
         }
-        CreativeNodeData::Panorama(data) => remap_optional_asset(&mut data.asset_id, asset_ids),
         CreativeNodeData::Config(data) => {
             remap_asset_vec(&mut data.input_asset_ids, asset_ids)?;
             remap_asset_vec(&mut data.result_asset_ids, asset_ids)?;

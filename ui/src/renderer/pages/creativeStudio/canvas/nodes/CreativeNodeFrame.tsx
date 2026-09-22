@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Check, Close, Error, Loading, Lock, Unlock, FileText, Pic, VideoTwo, Voice, PanoramaHorizontal, Folder, SettingTwo, Timeline } from '@icon-park/react';
+import { Check, Close, Error, Loading, Lock, Unlock, FileText, Pic, VideoTwo, Voice, Folder, SettingTwo, Timeline } from '@icon-park/react';
 import classNames from 'classnames';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
@@ -78,7 +78,7 @@ const statusIcon = (status: CreativeGenerationStatus) => {
 const finiteOr = (value: number, fallback: number) => (Number.isFinite(value) ? value : fallback);
 const NODE_ICONS = {
   text: FileText, image: Pic, video: VideoTwo, audio: Voice, timeline: Timeline,
-  panorama: PanoramaHorizontal, group: Folder, config: SettingTwo,
+  group: Folder, config: SettingTwo,
 };
 
 const CreativeNodeFrame: React.FC<CreativeNodeFrameProps> = ({

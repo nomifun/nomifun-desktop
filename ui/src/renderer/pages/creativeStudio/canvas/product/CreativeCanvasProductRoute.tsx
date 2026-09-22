@@ -15,7 +15,7 @@ import {
   Refresh,
   Ungroup,
 } from '@icon-park/react';
-import { Button, Modal, Tooltip } from '@arco-design/web-react';
+import { Tooltip } from '@arco-design/web-react';
 import type { TFunction } from 'i18next';
 import React, {
   useCallback,
@@ -313,11 +313,6 @@ interface ProductCreateNodeMenuState {
   connection: ConnectionCreateNodeIntent | null;
 }
 
-interface PendingPanoramaChoice {
-  asset: CreativeAsset;
-  worldPosition: CanvasPoint;
-}
-
 interface PendingImageCrop {
   nodeId: string;
   asset: CreativeAsset;
@@ -464,7 +459,7 @@ const invalidCanvasImageComposerReferences = (
     const issue = issueByConnectionId.get(connection.id);
     if (!issue || source?.type === 'text') continue;
     const assetId =
-      source && (source.type === 'image' || source.type === 'panorama')
+      source?.type === 'image'
         ? source.data.assetId
         : 'assetId' in issue
           ? issue.assetId
@@ -638,14 +633,6 @@ const centeredNodePosition = (
     y: worldPosition.y - size.height / 2,
   };
 };
-
-const isTwoToOneImage = (asset: CreativeAsset): boolean =>
-  asset.kind === 'image' &&
-  asset.width !== null &&
-  asset.height !== null &&
-  asset.width > 0 &&
-  asset.height > 0 &&
-  Math.abs(asset.width / asset.height - 2) <= 0.03;
 
 const connectionErrorMessage = (
   code: Extract<
@@ -976,8 +963,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     useState<CreativeCanvasContextMenuState | null>(null);
   const [createNodeMenu, setCreateNodeMenu] =
     useState<ProductCreateNodeMenuState | null>(null);
-  const [pendingPanoramaChoice, setPendingPanoramaChoice] =
-    useState<PendingPanoramaChoice | null>(null);
   const [assetImportBusy, setAssetImportBusy] = useState(false);
   const [previewImageNode, setPreviewImageNode] =
     useState<Extract<CreativeCanvasNode, { type: 'image' }> | null>(null);
@@ -1168,7 +1153,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           (assetId): assetId is string => Boolean(assetId)
         );
       }
-      return (node.type === 'image' || node.type === 'panorama' || node.type === 'audio')
+      return (node.type === 'image' || node.type === 'audio')
         && node.data.assetId ? [node.data.assetId] : [];
     }) ?? []),
   ])], [canvasState?.document.nodes, selectedCanvasImageReferenceAssetKey]);
@@ -1298,7 +1283,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     setCanvasReferenceAssets(new Map());
     setContextMenu(null);
     setCreateNodeMenu(null);
-    setPendingPanoramaChoice(null);
     setAssetImportBusy(false);
     setPreviewImageNode(null);
     setPendingImageCrop(null);
@@ -1906,7 +1890,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const insertAssetAtWorld = useCallback(
-    (asset: CreativeAsset, worldPosition: CanvasPoint, asPanorama = false) => {
+    (asset: CreativeAsset, worldPosition: CanvasPoint) => {
       const editor = editorRef.current;
       if (!editor) {
         throw new Error(
@@ -1916,30 +1900,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
         );
       }
       const state = editor.getState();
-      const kind = asPanorama ? 'panorama' : asset.kind;
-      const position = centeredNodePosition(kind, worldPosition);
-      const node = asPanorama
-        ? {
-            ...createCreativeCanvasProductNode(
-              'panorama',
-              state,
-              measuredSize(canvasHostRef.current),
-              { position }
-            ),
-            data: {
-              assetId: asset.id,
-              projection: 'equirectangular' as const,
-              yaw: 0,
-              pitch: 0,
-              fieldOfView: 75,
-            },
-          }
-        : creativeNodeFromAsset(
-            asset,
-            state,
-            measuredSize(canvasHostRef.current),
-            { position }
-          );
+      const position = centeredNodePosition(asset.kind, worldPosition);
+      const node = creativeNodeFromAsset(
+        asset,
+        state,
+        measuredSize(canvasHostRef.current),
+        { position }
+      );
       knownAssetsRef.current = new Map(knownAssetsRef.current).set(
         asset.id,
         asset
@@ -1948,13 +1915,9 @@ const CreativeCanvasProductRoute: React.FC = () => {
       setNotice(
         t('creativeStudio.canvas.notices.assetInserted', {
           title: asset.title,
-          kind: asPanorama
-            ? t('creativeStudio.canvas.nodeKinds.panorama', {
-                defaultValue: '全景图',
-              })
-            : t('creativeStudio.canvas.notices.assetKind', {
-                defaultValue: '素材',
-              }),
+          kind: t('creativeStudio.canvas.notices.assetKind', {
+            defaultValue: '素材',
+          }),
           defaultValue: '已将“{{title}}”插入为{{kind}}节点。',
         })
       );
@@ -1964,11 +1927,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
   );
 
   const importCanvasFile = useCallback(
-    async (
-      file: File,
-      worldPosition: CanvasPoint,
-      panoramaChoice: 'after-upload-if-2-to-1' | 'not-applicable'
-    ) => {
+    async (file: File, worldPosition: CanvasPoint) => {
       if (assetImportBusyRef.current) {
         setNotice(
           t('creativeStudio.canvas.notices.uploadBusy', {
@@ -1999,21 +1958,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
               })
             )
         );
-        if (
-          panoramaChoice === 'after-upload-if-2-to-1' &&
-          isTwoToOneImage(asset)
-        ) {
-          setPendingPanoramaChoice({
-            asset,
-            worldPosition: { ...worldPosition },
-          });
-          setNotice(
-            t('creativeStudio.canvas.notices.panoramaDetected', {
-              defaultValue: '检测到真实 2:1 图片，请选择普通图片或全景图节点。',
-            })
-          );
-          return;
-        }
         insertAssetAtWorld(asset, worldPosition);
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
@@ -4159,13 +4103,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                 `clipboard-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`,
                 { type: mediaType }
               );
-              await importCanvasFile(
-                file,
-                worldPosition,
-                mediaType.startsWith('image/')
-                  ? 'after-upload-if-2-to-1'
-                  : 'not-applicable'
-              );
+              await importCanvasFile(file, worldPosition);
               return;
             }
             if (item.types.includes('text/plain')) {
@@ -4289,11 +4227,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
           return;
         }
         case 'asset/import-file':
-          await importCanvasFile(
-            intent.file,
-            intent.worldPosition,
-            intent.panoramaChoice
-          );
+          await importCanvasFile(intent.file, intent.worldPosition);
           return;
         case 'asset/import-feedback': {
           const first = intent.rejected[0];
@@ -4428,20 +4362,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       dismissInteractionOverlays,
       save.revision,
     ]
-  );
-
-  const resolvePendingPanoramaChoice = useCallback(
-    (asPanorama: boolean) => {
-      const choice = pendingPanoramaChoice;
-      if (!choice) return;
-      setPendingPanoramaChoice(null);
-      try {
-        insertAssetAtWorld(choice.asset, choice.worldPosition, asPanorama);
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : String(error));
-      }
-    },
-    [insertAssetAtWorld, pendingPanoramaChoice]
   );
 
   useEffect(
@@ -5993,39 +5913,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         })}
         onChange={(event) => void handleImageNodeUploadChange(event)}
       />
-      <Modal
-        title={t('creativeStudio.canvas.panorama.dialogTitle', {
-          defaultValue: '选择 2:1 图片的节点类型',
-        })}
-        visible={pendingPanoramaChoice !== null}
-        closable={false}
-        maskClosable={false}
-        escToExit={false}
-        footer={
-          <div className={styles.panoramaActions}>
-            <Button onClick={() => resolvePendingPanoramaChoice(false)}>
-              {t('creativeStudio.canvas.panorama.asImage', {
-                defaultValue: '作为普通图片',
-              })}
-            </Button>
-            <Button
-              type="primary"
-              onClick={() => resolvePendingPanoramaChoice(true)}
-            >
-              {t('creativeStudio.canvas.panorama.asPanorama', {
-                defaultValue: '作为全景图',
-              })}
-            </Button>
-          </div>
-        }
-      >
-        <p className={styles.panoramaDescription}>
-          {t('creativeStudio.canvas.panorama.dialogDescription', {
-            defaultValue:
-              '图片已经真实上传并保存在资产库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。',
-          })}
-        </p>
-      </Modal>
     </main>
   );
 };

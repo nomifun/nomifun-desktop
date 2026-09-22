@@ -1,8 +1,6 @@
 import type { ConversationId } from '@/common/types/ids';
-import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 import { conversationTarget } from '@/common/types/ids';
 import { browserStorageKey } from '@/common/utils/browserStorageKey';
-import type { AgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
@@ -25,7 +23,6 @@ import { useWorkspaceCollapse } from '@/renderer/pages/conversation/hooks/useWor
 import { useWorkspacePanelTabs } from '@/renderer/pages/conversation/hooks/useWorkspacePanelTabs';
 import { PreviewPanel, PreviewProvider, usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { dispatchWorkspaceToggleEvent } from '@/renderer/utils/workspace/workspaceEvents';
-import { useConversationAgents } from '@/renderer/pages/conversation/hooks/useConversationAgents';
 import classNames from 'classnames';
 import { isDesktopShell, isMacOS, isWindows, openExternalUrl } from '@/renderer/utils/platform';
 import {
@@ -52,11 +49,6 @@ export interface ChatLayoutProps {
   title?: React.ReactNode;
   sider: React.ReactNode;
   siderTitle?: React.ReactNode;
-  backend?: string;
-  /** Preset info — when provided, the badge shows the preset identity instead of the backend. */
-  preset?: AgentInfo;
-  /** Fallback agent name (used when no preset, e.g. from conversation.extra.agent_name) */
-  agent_name?: string;
   headerExtra?: React.ReactNode;
   /** Product-owned controls occupying the same header slot as session controls. */
   headerControls?: React.ReactNode;
@@ -113,7 +105,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
   const { t } = useTranslation();
   const { conversation_id, workspacePath, isTemporaryWorkspace } = props;
   const workspaceTarget = conversation_id != null ? conversationTarget(conversation_id) : undefined;
-  const { backend, preset, agent_name, workspaceEnabled = true } = props;
+  const { workspaceEnabled = true } = props;
   const layout = useLayoutContext();
   // Native shell checks are limited to workspace chrome. Browser is a generic
   // current-AgentSession tool-rail surface in both the desktop shell and WebUI.
@@ -211,18 +203,6 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
       conversation_id,
       onRename: props.onRenameTitle,
     });
-
-  // Resolve backend display name from detected agents catalog (backend-authoritative).
-  // Custom agents live in the same catalog with `agent_source === 'custom'`,
-  // so no separate ConfigStorage fallback list is needed.
-  const { cliAgents } = useConversationAgents();
-  const backendAgentName = backend
-    ? cliAgents.find((a) => a.backend === backend || a.agent_type === backend)?.name
-    : undefined;
-  const capitalizedBackend = backend ? backend.charAt(0).toUpperCase() + backend.slice(1) : backend;
-
-  // Compute display name with fallback chain
-  const display_name = preset?.name || agent_name || backendAgentName || capitalizedBackend;
 
   const {
     splitRatio: workspaceWidthPxPref,
@@ -343,19 +323,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
           titleAreaMaxWidth={titleAreaMaxWidth}
           title={props.title}
           conversation_id={conversation_id}
-          leading={
-            props.headerLeading ??
-            ((backend || preset) && (
-              <AgentIdentityBadge
-                backend={backend}
-                agent_name={display_name}
-                name={display_name}
-                agentLogo={preset?.logo}
-                agentLogoIsEmoji={preset?.isEmoji}
-                className='max-w-180px'
-              />
-            ))
-          }
+          leading={props.headerLeading}
         />
       </FlexFullContainer>
       <div className='chat-layout-header-actions'>

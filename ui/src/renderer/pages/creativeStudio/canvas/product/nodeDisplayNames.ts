@@ -13,7 +13,6 @@ const KIND_LABELS = {
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
   timeline: 'creativeStudio.canvas.nodeKinds.timeline',
-  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   group: 'creativeStudio.canvas.nodeKinds.group',
 } as const;
 

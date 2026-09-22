@@ -48,12 +48,6 @@ const imageNode = (index: number, assetId: string | null) => {
   return node;
 };
 
-const panoramaNode = (index: number, assetId: string | null) => {
-  const node = testNode('panorama', index);
-  node.data.assetId = assetId;
-  return node;
-};
-
 describe('canvas image reference resolution', () => {
   test('video mentions compile in durable connection order and fail closed after disconnect or asset loss', () => {
     const target = testNode('video', 60);
@@ -117,19 +111,19 @@ describe('canvas image reference resolution', () => {
     }).allowed).toBe(false);
   });
 
-  test('derives direct image and panorama inputs in durable connection order', () => {
+  test('derives direct image inputs in durable connection order', () => {
     const personAsset = asset(101, { title: '人物图' });
-    const panoramaAsset = asset(102, { title: '   ' });
+    const landscapeAsset = asset(102, { title: '   ' });
     const ignoredAsset = asset(103);
     const target = imageNode(10, null);
     const person = imageNode(11, personAsset.id);
-    const panorama = panoramaNode(12, panoramaAsset.id);
+    const landscape = imageNode(12, landscapeAsset.id);
     const ignored = imageNode(13, ignoredAsset.id);
     const state = createInitialCanvasState({
       document: testDocument(
-        [target, person, panorama, ignored],
+        [target, person, landscape, ignored],
         [
-          testEdge(201, panorama.id, target.id),
+          testEdge(201, landscape.id, target.id),
           testEdge(202, target.id, ignored.id),
           testEdge(203, person.id, target.id),
         ]
@@ -138,7 +132,7 @@ describe('canvas image reference resolution', () => {
 
     const result = resolveCanvasImageReferences(state, target.id, [
       personAsset,
-      panoramaAsset,
+      landscapeAsset,
       ignoredAsset,
     ]);
 
@@ -157,9 +151,9 @@ describe('canvas image reference resolution', () => {
       {
         ordinal: 1,
         providerLabel: 'Reference 1',
-        sourceNodeId: panorama.id,
-        sourceNodeKind: 'panorama',
-        assetId: panoramaAsset.id,
+        sourceNodeId: landscape.id,
+        sourceNodeKind: 'image',
+        assetId: landscapeAsset.id,
         displayName: 'Reference 1',
       },
       {
@@ -182,7 +176,7 @@ describe('canvas image reference resolution', () => {
     const wrongKind = imageNode(24, wrongKindAsset.id);
     const sharedAsset = asset(305, { title: 'Shared' });
     const first = imageNode(25, sharedAsset.id);
-    const duplicate = panoramaNode(26, sharedAsset.id);
+    const duplicate = imageNode(26, sharedAsset.id);
     const missingSourceNodeId = testUuid(27);
     const connections = [
       testEdge(401, missingSourceNodeId, target.id),

@@ -13,7 +13,7 @@ import type { CanvasState } from '../core';
 
 type CanvasImageReferenceNodeKind = Extract<
   CreativeCanvasNodeKind,
-  'image' | 'panorama'
+  'image'
 >;
 
 /** Product-level decoded input budget; the backend enforces the same ceiling. */
@@ -122,7 +122,7 @@ export interface CanvasImageReferenceResolution {
 
 const isReferenceNode = (
   node: CanvasState['document']['nodes'][number]
-): node is CanvasImageReferenceNode => node.type === 'image' || node.type === 'panorama';
+): node is CanvasImageReferenceNode => node.type === 'image';
 
 const sourceAssetId = (node: CanvasImageReferenceNode): string | null => {
   const value = node.data.assetId;

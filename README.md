@@ -245,7 +245,7 @@ The companion you talk to every day quietly becomes the partner who *gets* you.
 
 - **Make it yours.** Upload a custom companion figure (DIY), or pick from an independent figure library decoupled from any single companion.
 - **A family, not a hive mind.** Run multiple companions side by side, each a complete individual with **its own** chat model, persona, memory, and domain knowledge bases. Memory belongs to exactly one companion — nothing you tell the work companion leaks into the one you chat with at home.
-- **Chat with them where you already work.** Companion chats now live in the main **Sessions** UI under a dedicated desktop-companion group, while `/nomi` stays focused on companion management.
+- **A place of their own.** Companion chat, identity and management now live together in **Desktop Companion**. Work Sessions stay focused on projects and tasks, while the native quick window lets you switch companions and reply without opening the full workspace.
 - **It learns you (opt-in, on by default after a one-time consent).** A background learner distills your usage into durable memories; a deterministic evolution engine mines your recurring multi-step tool sequences into **draft skills** it proposes for your review. Memory is fully **visible and editable**.
 - **Skills it writes itself.** Companions distill their own skills out of real work and discuss them with you before anything is kept.
 - **A super gateway, not just a buddy.** Each companion is a complete, independent individual that can connect to multiple IM channels. From anywhere with a network and a chat app, message your companion to drive your computer for you. Each companion can fully operate the desktop's capabilities.
@@ -283,7 +283,7 @@ databases from before the cutover must be backed up and rebuilt separately.
 > Technical contract: [`docs/guides/creative-studio.md`](docs/guides/creative-studio.md)
 
 Creative Studio is a persistent creative document system, not a disposable
-whiteboard. An infinite Canvas stores text, image, video, audio, panorama,
+whiteboard. An infinite Canvas stores text, image, video, audio, timeline,
 config, and group nodes. Media nodes own the visible creation
 surface; config nodes keep the exact provider/model/task, typed parameters,
 ordered inputs, task state, and results auditable. The **Canvas Assistant**

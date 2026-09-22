@@ -6,7 +6,7 @@ import { createCreativeCanvasProductNode, creativeNodeFromAsset } from './nodeFa
 import { createInitialCanvasState } from '../core';
 import type { CreativeAsset } from '../../assets';
 
-const t = ((key: string) => ({ text: '文本', image: '图片', video: '视频', audio: '音频', panorama: '全景', group: '节点组' })[key.split('.').at(-1)! as 'text']) as TFunction;
+const t = ((key: string) => ({ text: '文本', image: '图片', video: '视频', audio: '音频', timeline: '时间线', group: '节点组' })[key.split('.').at(-1)! as 'text']) as TFunction;
 test('numbers node kinds independently and uses a real filename when available', () => {
   const text = testNode('text', 1), image = testNode('image', 2), second = testNode('image', 3);
   image.data.assetId = 'asset';
@@ -17,7 +17,7 @@ test('numbers node kinds independently and uses a real filename when available',
 });
 test('empty media nodes start square while the timeline uses its editing layout', () => {
   const state = createInitialCanvasState();
-  for (const kind of ['text', 'image', 'video', 'audio', 'panorama', 'group'] as const) {
+  for (const kind of ['text', 'image', 'video', 'audio', 'group'] as const) {
     expect(createCreativeCanvasProductNode(kind, state, { width: 1000, height: 800 }).size)
       .toEqual({ width: 288, height: 288 });
   }

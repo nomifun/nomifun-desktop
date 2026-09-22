@@ -2,7 +2,6 @@ import type {
   GeneratedPluginDraft,
   PluginProjectDetail,
 } from '@/common/types/pluginPlatform';
-import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 import { Alert, Button, Input, Progress, Spin, Tag } from '@arco-design/web-react';
 import {
   ArrowLeft,
@@ -96,12 +95,6 @@ const PluginCreatorSurface: React.FC<PluginCreatorSurfaceProps> = ({
             <span className={styles.eyebrow}>{t('pluginWorkbench.product.aiCreator')}</span>
             <h2>{title || t('pluginWorkbench.product.untitled')}</h2>
             <p>{t('pluginWorkbench.product.autoSaved')}</p>
-            <AgentIdentityBadge
-              backend='nomi'
-              name={t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}
-              compact
-              className='mt-8px w-fit'
-            />
           </div>
         </div>
         <div className={styles.creatorStatus}>
