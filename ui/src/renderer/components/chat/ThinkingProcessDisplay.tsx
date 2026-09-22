@@ -6,6 +6,7 @@
 
 import { Spin } from '@arco-design/web-react';
 import { Brain, Right } from '@icon-park/react';
+import type { ThinkingContentDisplayLength } from '@/common/config/thinkingDisplay';
 import classNames from 'classnames';
 import React, { useEffect, useRef, useState } from 'react';
 
@@ -28,6 +29,8 @@ export interface ThinkingProcessDisplayProps {
   onExpandedChange?: (expanded: boolean) => void;
   runningFallbackLabel?: string;
   completedLabel?: string;
+  completedSummary?: string;
+  bodyLength?: ThinkingContentDisplayLength;
   formatElapsedTime?: (seconds: number) => string;
   className?: string;
   role?: React.AriaRole;
@@ -55,6 +58,8 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   onExpandedChange,
   runningFallbackLabel = 'Thinking...',
   completedLabel = 'Thought complete',
+  completedSummary = '',
+  bodyLength = 'full',
   formatElapsedTime = defaultFormatElapsedTime,
   className,
   role,
@@ -104,7 +109,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
   };
 
   const summaryText = isDone
-    ? completedLabel
+    ? [completedLabel, completedSummary].filter(Boolean).join(' · ')
     : `${subject.trim() || runningFallbackLabel} · ${formatElapsedTime(elapsedTime)}`;
 
   return (
@@ -116,6 +121,7 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
       )}
       data-thinking-process-state={state}
       data-thinking-process-disclosure={disclosure}
+      data-thinking-body-length={bodyLength}
       role={role}
     >
       <div
@@ -148,6 +154,8 @@ const ThinkingProcessDisplay: React.FC<ThinkingProcessDisplayProps> = ({
           className={classNames(
             styles.body,
             isProcessVariant && styles.bodyProcess,
+            bodyLength !== 'full' && styles.bodyLimited,
+            bodyLength === 'compact' && styles.bodyCompact,
             !resolvedExpanded && styles.collapsed
           )}
           data-thinking-process-body

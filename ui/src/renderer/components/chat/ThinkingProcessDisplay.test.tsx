@@ -47,4 +47,20 @@ describe('ThinkingProcessDisplay', () => {
     expect(html.includes('data-thinking-process-body')).toBe(true);
     expect(html.includes('已检查上下文')).toBe(true);
   });
+
+  test('applies the configured body length and completed excerpt without discarding content', () => {
+    const html = renderToStaticMarkup(
+      <ThinkingProcessDisplay
+        state='completed'
+        content='完整思考内容'
+        completedLabel='思考完成'
+        completedSummary='检查了关键路径'
+        bodyLength='compact'
+      />
+    );
+
+    expect(html.includes('data-thinking-body-length="compact"')).toBe(true);
+    expect(html.includes('思考完成 · 检查了关键路径')).toBe(true);
+    expect(html.includes('完整思考内容')).toBe(true);
+  });
 });

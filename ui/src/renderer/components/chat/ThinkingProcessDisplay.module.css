@@ -9,6 +9,7 @@
 
 .header {
   display: inline-flex;
+  max-width: 100%;
   align-items: center;
   gap: 6px;
   color: var(--color-text-3, #86909c);
@@ -82,12 +83,23 @@
   margin-left: 0;
 }
 
+.bodyLimited {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.bodyCompact {
+  max-height: 150px;
+}
+
 .collapsed {
   display: none;
 }
 
 .summary {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

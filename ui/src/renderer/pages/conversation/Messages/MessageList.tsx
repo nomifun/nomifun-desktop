@@ -16,6 +16,7 @@ import type {
 } from '@/common/chat/chatLib';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
+import { useThinkingDisplayPreferences } from '@/renderer/hooks/config/useThinkingDisplayPreferences';
 import { iconColors } from '@/renderer/styles/colors';
 import { CHAT_MESSAGE_JUMP_EVENT, type ChatMessageJumpDetail } from '@/renderer/utils/chat/chatMinimapEvents';
 import { Image } from '@arco-design/web-react';
@@ -700,6 +701,7 @@ const MessageList: React.FC<{
   const isMessageListLoading = useMessageListLoading();
   const conversationContext = useConversationContextSafe();
   const creationTaskOwnerMessageIds = useConversationCreationTaskOwnerMessageIds();
+  const thinkingDisplay = useThinkingDisplayPreferences();
   useAutoPreviewOfficeFiles(conversationContext);
   const workspaceRoots = useMemo(
     () => (conversationContext?.workspace ? [conversationContext.workspace] : []),
@@ -868,10 +870,11 @@ const MessageList: React.FC<{
       diffsChanges = [];
       diffsSourceMessageIds = [];
       diffsTurnId = undefined;
+      if (message.type === 'thinking' && !thinkingDisplay.visible) continue;
       result.push(message);
     }
     return result;
-  }, [list]);
+  }, [list, thinkingDisplay.visible]);
 
   const displayList = useMemo<IProcessedItem[]>(() => {
     const itemById = new Map<string, IRenderableItem>();
