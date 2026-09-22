@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  DEVELOPMENT_SCHEMA_FINGERPRINT,
   createMacosDevLifetime,
   developmentEnvironment,
   ensureGeneratedDevelopmentDataDirectory,
@@ -16,10 +17,15 @@ import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 
 describe('Windows development data generation', () => {
+  const generatedDirectory = (localAppData) => join(
+    localAppData,
+    `NomiFun-dev-schema-${DEVELOPMENT_SCHEMA_FINGERPRINT}`,
+  );
+
   test('uses a stable clean-start root without altering the input environment', () => {
     const input = { LOCALAPPDATA: 'C:\\Users\\developer\\AppData\\Local', NOMI_CHANNEL: 'stable' };
     const first = developmentEnvironment(input, 'win32');
-    expect(first.NOMIFUN_DATA_DIR).toBe(join(input.LOCALAPPDATA, 'NomiFun-dev-plugin-v1'));
+    expect(first.NOMIFUN_DATA_DIR).toBe(generatedDirectory(input.LOCALAPPDATA));
     expect(first.NOMI_CHANNEL).toBe('dev');
     expect(developmentEnvironment(input, 'win32')).toEqual(first);
     expect(input.NOMIFUN_DATA_DIR).toBeUndefined();
@@ -37,7 +43,7 @@ describe('Windows development data generation', () => {
     expect(() => developmentEnvironment({ NOMIFUN_DATA_DIR: ' ' }, 'win32')).toThrow('must not be empty');
     expect(() => developmentEnvironment({}, 'win32')).toThrow('LOCALAPPDATA');
     expect(developmentEnvironment({ localappdata: 'C:\\local' }, 'win32').NOMIFUN_DATA_DIR)
-      .toBe(join('C:\\local', 'NomiFun-dev-plugin-v1'));
+      .toBe(generatedDirectory('C:\\local'));
   });
 
   test('leaves other platforms data selection unchanged', () => {
@@ -56,9 +62,9 @@ describe('Windows development data generation', () => {
       source,
       'win32',
       (...args) => calls.push(args),
-    )).toBe(join(source.LOCALAPPDATA, 'NomiFun-dev-plugin-v1'));
+    )).toBe(generatedDirectory(source.LOCALAPPDATA));
     expect(calls).toEqual([[
-      join(source.LOCALAPPDATA, 'NomiFun-dev-plugin-v1'),
+      generatedDirectory(source.LOCALAPPDATA),
       { recursive: true },
     ]]);
   });
