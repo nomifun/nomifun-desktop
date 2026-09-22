@@ -7,6 +7,9 @@
 
 - AutoWork 只保留队列、claim、lease 与策略；执行统一提交到持久 `AgentExecution`，Attempt、retry、
   attention、cancel 与 canonical receipt 不再由 Requirements 维护第二套状态机。
+- 2026-09-22 产品边界修正：复用 `AgentExecution` 仅复用持久执行/回执能力，不改变 AutoWork 的
+  执行对象。AutoWork Attempt 复用用户绑定的主 AgentSession，以独立 `automation` link 绑定精确
+  Attempt；不得创建协作子 Session、投影协作画布或在终态向主会话重复投影 summary。
 - AutoWork 配置迁入 canonical Agent Store 的 append-only `automation/config-committed` 事实；REST、boot
   resume 与 runner 使用同一 owner-scoped CAS，不再依赖 `conversations.extra.autowork`。operation receipt
   保留原始 expected revision，A→B→重放 A 只返回历史回执，不回滚 Store head 或 live loop。
@@ -24,7 +27,8 @@
 
 ## 删除与保留
 
-- 删除 AutoWork 的 Conversation/Terminal dispatch、parallel attempt receipt、IDMM hook 与 Agent UI 控件。
+- 删除 AutoWork 自有的 Conversation/Terminal receipt 状态机、parallel attempt receipt、IDMM hook 与
+  Agent UI 控件；主 AgentSession 的实际 Turn 仍由 AgentExecution 通过 canonical Session owner 投递。
 - 保留 Requirements business facts、queue policy、AgentExecution DAG/Attempt，以及 terminal-specific legacy
   storage 作为后续 `UARC-053/054` 的明确迁移输入；未添加永久 compatibility translator。
 

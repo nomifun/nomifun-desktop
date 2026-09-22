@@ -17,7 +17,8 @@ use crate::models::{
 };
 use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::agent_execution::{
-    AdoptAgentExecutionStepOutputParams, AgentExecutionLeaseToken,
+    AdoptAgentExecutionStepOutputParams, AgentExecutionAttemptSessionKind,
+    AgentExecutionLeaseToken,
     AgentExecutionAttemptRecoveryDisposition, AgentExecutionAttemptRecoveryResult,
     AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
     AppendAgentExecutionStepsParams,
@@ -250,7 +251,7 @@ async fn active_attempt_conversation_tx(
          JOIN agent_executions execution ON execution.execution_id = link.execution_id \
          JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
          WHERE link.execution_id = ? AND link.step_id = ? AND link.attempt_id = ? \
-           AND link.relation = 'attempt' AND link.active = 1 \
+           AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
            AND execution.user_id = ? AND session.state = 'live' \
            AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
            AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
@@ -313,7 +314,7 @@ async fn reconcile_running_attempt_receipt_tx(
          FROM conversation_execution_links link \
          JOIN agent_sessions session ON session.agent_session_id = link.conversation_id \
          WHERE link.execution_id = ? AND link.step_id = ? AND link.attempt_id = ? \
-           AND link.relation = 'attempt' AND link.active = 1 \
+            AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
            AND session.state = 'live' \
            AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
            AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
@@ -382,7 +383,7 @@ async fn reconcile_running_attempt_receipt_tx(
         sqlx::query(
             "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
              WHERE execution_id = ? AND step_id = ? AND attempt_id = ? \
-               AND relation = 'attempt' AND active = 1",
+               AND relation IN ('attempt', 'automation') AND active = 1",
         )
         .bind(now)
         .bind(execution_id)
@@ -414,7 +415,7 @@ async fn reconcile_running_attempt_receipt_tx(
     sqlx::query(
         "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
          WHERE execution_id = ? AND step_id = ? AND attempt_id = ? \
-           AND relation = 'attempt' AND active = 1",
+           AND relation IN ('attempt', 'automation') AND active = 1",
     )
     .bind(now)
     .bind(execution_id)
@@ -601,17 +602,21 @@ async fn append_event_tx(
                 .bind(&on_behalf_of_user_id)
                 .fetch_all(&mut **tx)
                 .await?;
-                if links.len() != 1 {
-                    return Err(DbError::Conflict(
-                        "Agent caller must have exactly one active link to the execution"
-                            .to_owned(),
-                    ));
-                }
-                let (relation, linked_attempt_id) = &links[0];
                 lock_owned_lead_session_tx(tx, &on_behalf_of_user_id, conversation_id).await?;
-                if relation == "attempt" && linked_attempt_id != &actor_attempt_id {
+                let matching_links = links
+                    .iter()
+                    .filter(|(relation, linked_attempt_id)| match actor_attempt_id.as_ref() {
+                        Some(attempt_id) => {
+                            matches!(relation.as_str(), "attempt" | "automation")
+                                && linked_attempt_id.as_ref() == Some(attempt_id)
+                        }
+                        None => relation == "lead",
+                    })
+                    .count();
+                if matching_links != 1 {
                     return Err(DbError::Conflict(
-                        "Agent caller attempt does not match its active execution link".to_owned(),
+                        "Agent caller must have exactly one matching active link to the execution"
+                            .to_owned(),
                     ));
                 }
                 if let Some(attempt_id) = actor_attempt_id.as_deref() {
@@ -619,7 +624,7 @@ async fn append_event_tx(
                          "SELECT COUNT(*) FROM conversation_execution_links link \
                          JOIN agent_executions execution ON execution.execution_id = link.execution_id \
                          WHERE link.conversation_id = ? AND link.attempt_id = ? \
-                           AND link.relation = 'attempt' AND link.active = 1 \
+                           AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
                            AND execution.user_id = ? AND execution.deleted_at IS NULL",
                     )
                     .bind(conversation_id)
@@ -783,7 +788,7 @@ async fn terminate_unfinished_execution_children_tx(
     .await?;
     sqlx::query(
         "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
-         WHERE execution_id = ? AND relation = 'attempt' AND active = 1",
+         WHERE execution_id = ? AND relation IN ('attempt', 'automation') AND active = 1",
     )
     .bind(now)
     .bind(execution_id)
@@ -1344,7 +1349,7 @@ async fn attempt_details_tx(
     let links: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT step_id, attempt_id, conversation_id \
          FROM conversation_execution_links \
-         WHERE execution_id = ? AND relation = 'attempt' \
+         WHERE execution_id = ? AND relation IN ('attempt', 'automation') \
          ORDER BY active, updated_at",
     )
     .bind(execution_id)
@@ -1782,7 +1787,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         .await?;
         sqlx::query(
             "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
-             WHERE execution_id = ? AND relation = 'attempt' AND active = 1 \
+             WHERE execution_id = ? AND relation IN ('attempt', 'automation') AND active = 1 \
                AND EXISTS(SELECT 1 FROM agent_execution_attempts attempt \
                           WHERE attempt.execution_id = conversation_execution_links.execution_id \
                             AND attempt.step_id = conversation_execution_links.step_id \
@@ -2318,7 +2323,8 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             .await?;
             sqlx::query(
                 "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
-                 WHERE execution_id = ? AND step_id = ? AND relation = 'attempt' AND active = 1",
+                 WHERE execution_id = ? AND step_id = ? \
+                   AND relation IN ('attempt', 'automation') AND active = 1",
             )
             .bind(now)
             .bind(execution_id)
@@ -2565,7 +2571,8 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                AND step.superseded_in_revision IS NULL AND step.status = 'running' \
                AND step.kind = 'agent' \
                AND attempt.attempt_id = ? AND attempt.version = ? AND attempt.status = 'running' \
-               AND link.conversation_id = ? AND link.relation = 'attempt' AND link.active = 1 \
+               AND link.conversation_id = ? \
+               AND link.relation IN ('attempt', 'automation') AND link.active = 1 \
                AND session.state = 'live' \
                AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
                AND json_extract(session.owner_ref_json, '$.principal_id') = ? \
@@ -3264,7 +3271,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
                 (SELECT link.conversation_id FROM conversation_execution_links link \
                  WHERE link.execution_id = attempt.execution_id \
                    AND link.step_id = attempt.step_id AND link.attempt_id = attempt.attempt_id \
-                   AND link.relation = 'attempt' \
+                   AND link.relation IN ('attempt', 'automation') \
                  ORDER BY link.active DESC, link.updated_at DESC LIMIT 1) \
              FROM agent_execution_attempts attempt \
              WHERE attempt.execution_id = ? AND attempt.step_id = ? \
@@ -3786,6 +3793,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         attempt_id: &str,
         expected_attempt_version: i64,
         conversation_id: &str,
+        session_kind: AgentExecutionAttemptSessionKind,
         lease: Option<&AgentExecutionLeaseToken>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError> {
@@ -3829,17 +3837,36 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
         if attempt_result.rows_affected() != 1 {
             return Err(conflict("agent execution attempt"));
         }
+        if session_kind == AgentExecutionAttemptSessionKind::AutomationLead {
+            let exact_automation_lead: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM conversation_execution_links link \
+                 JOIN agent_executions execution ON execution.execution_id = link.execution_id \
+                 WHERE link.conversation_id = ? AND link.execution_id = ? \
+                   AND link.relation = 'lead' AND link.active = 1 \
+                   AND execution.user_id = ? AND execution.deleted_at IS NULL \
+                   AND json_extract(execution.initial_plan_input, '$.mode') = 'automation'",
+            )
+            .bind(conversation_id)
+            .bind(execution_id)
+            .bind(user_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if exact_automation_lead != 1 {
+                return Err(conflict("AutoWork lead AgentSession"));
+            }
+        }
         let link_result = sqlx::query(
             "INSERT INTO conversation_execution_links (\
                 conversation_id, execution_id, relation, step_id, attempt_id, \
                 active, created_at, updated_at\
-             ) SELECT session.agent_session_id, ?, 'attempt', ?, ?, 1, ?, ? \
+             ) SELECT session.agent_session_id, ?, ?, ?, ?, 1, ?, ? \
                FROM agent_sessions session \
               WHERE session.agent_session_id = ? AND session.state = 'live' \
                 AND json_extract(session.owner_ref_json, '$.principal_kind') = 'user' \
                 AND json_extract(session.owner_ref_json, '$.principal_id') = ?",
         )
         .bind(execution_id)
+        .bind(session_kind.relation())
         .bind(step_id)
         .bind(attempt_id)
         .bind(now)
@@ -3946,7 +3973,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             sqlx::query(
                 "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
                  WHERE execution_id = ? AND step_id = ? AND attempt_id = ? \
-                   AND relation = 'attempt' AND active = 1",
+                   AND relation IN ('attempt', 'automation') AND active = 1",
             )
             .bind(now)
             .bind(execution_id)
@@ -4161,7 +4188,7 @@ impl IAgentExecutionRepository for SqliteAgentExecutionRepository {
             sqlx::query(
                 "UPDATE conversation_execution_links SET active = 0, updated_at = ? \
                  WHERE execution_id = ? AND step_id = ? AND attempt_id = ? \
-                   AND relation = 'attempt' AND active = 1",
+                   AND relation IN ('attempt', 'automation') AND active = 1",
             )
             .bind(now)
             .bind(execution_id)

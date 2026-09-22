@@ -22,7 +22,8 @@ use nomifun_common::{
     StepFailurePolicy, apply_agent_role_context, generate_id, now_ms,
 };
 use nomifun_db::{
-    AgentExecutionAttemptRecoveryDisposition, AgentExecutionLeaseToken,
+    AgentExecutionAttemptRecoveryDisposition, AgentExecutionAttemptSessionKind,
+    AgentExecutionLeaseToken,
     AgentExecutionTurnAuthority, AttemptConversationEffectParams,
     CreateAgentExecutionAttemptParams, IAgentExecutionRepository, LoopRepeatResetParams,
     NewAgentExecutionEvent, RetryAgentExecutionStep,
@@ -32,13 +33,14 @@ use serde_json::json;
 use tokio::sync::{Notify, watch};
 
 use crate::attempt_runner::{
-    AttemptOutcome, AttemptRunner, MISSING_DELIVERY_RECEIPT_CODE,
+    AttemptOutcome, AttemptRunner, AttemptSessionTarget, MISSING_DELIVERY_RECEIPT_CODE,
 };
 use crate::artifact_contract::{requires_artifact_delivery, validate_required_artifacts};
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
 use crate::event_publisher::AgentExecutionEventPublisher;
+use crate::engine::is_automation_initial_plan;
 use crate::lifecycle::AgentExecutionLifecycle;
 
 pub(crate) const DEFAULT_MAX_PARALLEL: i64 = 4;
@@ -53,6 +55,32 @@ const EFFECT_RETRY_MIN: Duration = Duration::from_secs(1);
 const EFFECT_RETRY_MAX: Duration = Duration::from_secs(60);
 const CLEANUP_EFFECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_PARALLELISM: usize = 8;
+
+fn attempt_session_target(
+    initial_plan_input: &str,
+    lead_conversation_id: Option<&str>,
+) -> Result<(AttemptSessionTarget, AgentExecutionAttemptSessionKind), AppError> {
+    if is_automation_initial_plan(initial_plan_input)? {
+        let conversation_id = lead_conversation_id.ok_or_else(|| {
+            AppError::Internal("AutoWork AgentExecution has no bound lead AgentSession".to_owned())
+        })?;
+        Ok((
+            AttemptSessionTarget::AutomationLead {
+                conversation_id: conversation_id.to_owned(),
+            },
+            AgentExecutionAttemptSessionKind::AutomationLead,
+        ))
+    } else {
+        Ok((
+            AttemptSessionTarget::ChildAttempt,
+            AgentExecutionAttemptSessionKind::ChildAttempt,
+        ))
+    }
+}
+
+fn should_project_lead_report(initial_plan_input: &str) -> Result<bool, AppError> {
+    Ok(!is_automation_initial_plan(initial_plan_input)?)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttemptRetryClass {
@@ -617,6 +645,23 @@ impl ExecutionScheduler {
         {
             return Ok(());
         }
+        let execution_row = self
+            .inner
+            .deps
+            .repository
+            .get_execution(owner_id, &detail.execution.execution_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "Agent Execution {}",
+                    detail.execution.execution_id
+                ))
+            })?;
+        // An AutoWork Attempt already ran in the lead AgentSession. Projecting
+        // the aggregate summary back into that same Session would duplicate the
+        // assistant result that the user just watched in the main conversation.
+        let suppress_projection =
+            !should_project_lead_report(&execution_row.initial_plan_input)?;
         let mut after_sequence = 0;
         let mut requested_operation_id: Option<String> = None;
         let mut delivered_operation_ids = HashSet::new();
@@ -664,11 +709,13 @@ impl ExecutionScheduler {
         if delivered_operation_ids.contains(&operation_id) {
             return Ok(());
         }
-        self.inner
-            .deps
-            .conversation_effects
-            .report_lead(owner_id, detail, &operation_id)
-            .await?;
+        if !suppress_projection {
+            self.inner
+                .deps
+                .conversation_effects
+                .report_lead(owner_id, detail, &operation_id)
+                .await?;
+        }
         let current = self.detail(owner_id, &detail.execution.execution_id).await?;
         self.inner
             .deps
@@ -684,6 +731,7 @@ impl ExecutionScheduler {
                     json!({
                         "change":"lead_report_delivered",
                         "operation_id":operation_id,
+                        "projection_suppressed": suppress_projection,
                     }),
                 ),
             )
@@ -1661,6 +1709,17 @@ impl ExecutionScheduler {
             })
             .cloned()
             .ok_or_else(|| AppError::BadRequest(format!("step {} has no active participant", step.step_id)))?;
+        let execution_row = self
+            .inner
+            .deps
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let (session_target, session_kind) = attempt_session_target(
+            &execution_row.initial_plan_input,
+            detail.execution.lead_conversation_id.as_deref(),
+        )?;
         let model_pool = execution_model_pool(&detail.participants);
         let previous_attempts = detail
             .attempts
@@ -1677,6 +1736,7 @@ impl ExecutionScheduler {
             "delegation_policy": detail.execution.delegation_policy,
             "decision_policy": detail.execution.decision_policy,
             "timeout_ms": self.inner.deps.attempt_timeout.as_millis(),
+            "session_kind": session_kind.relation(),
         });
         let created = self
             .inner
@@ -1740,6 +1800,7 @@ impl ExecutionScheduler {
                         &callback_attempt_id,
                         expected_attempt_version,
                         &conversation_id,
+                        session_kind,
                         Some(&callback_lease),
                         &system_event(
                             AgentExecutionEventKind::AttemptChanged,
@@ -1775,6 +1836,7 @@ impl ExecutionScheduler {
             .attempt_runner
             .execute(
                 owner_id,
+                session_target,
                 &participant,
                 &model_pool,
                 detail.execution.work_dir.as_deref(),
@@ -3077,6 +3139,44 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::sync::Barrier;
 
+    #[test]
+    fn autowork_attempt_targets_the_bound_main_agent_session() {
+        let lead = "0190f5fe-7c00-7a00-8000-000000000071";
+        let automation = serde_json::json!({
+            "mode": "automation",
+            "source": {
+                "requirement_id": "0190f5fe-7c00-7a00-8000-000000000072",
+                "claim_generation": 1,
+                "operation_id": "autowork:test"
+            },
+            "plan": { "steps": [] }
+        })
+        .to_string();
+        assert_eq!(
+            attempt_session_target(&automation, Some(lead)).unwrap(),
+            (
+                AttemptSessionTarget::AutomationLead {
+                    conversation_id: lead.to_owned()
+                },
+                AgentExecutionAttemptSessionKind::AutomationLead,
+            )
+        );
+        assert!(!should_project_lead_report(&automation).unwrap());
+        assert!(attempt_session_target(&automation, None).is_err());
+        assert_eq!(
+            attempt_session_target(r#"{"mode":"explicit","plan":{"steps":[]}}"#, None)
+                .unwrap(),
+            (
+                AttemptSessionTarget::ChildAttempt,
+                AgentExecutionAttemptSessionKind::ChildAttempt,
+            )
+        );
+        assert!(
+            should_project_lead_report(r#"{"mode":"explicit","plan":{"steps":[]}}"#)
+                .unwrap()
+        );
+    }
+
     #[derive(Debug)]
     struct TestCleanup {
         link_id: i64,
@@ -3782,6 +3882,7 @@ mod tests {
         async fn execute(
             &self,
             _owner_id: &str,
+            session_target: AttemptSessionTarget,
             _participant: &ExecutionParticipant,
             _execution_model_pool: &[ExecutionModelRef],
             workspace_dir: Option<&str>,
@@ -3804,7 +3905,12 @@ mod tests {
                 .lock()
                 .expect("harness brief log is not poisoned")
                 .push((step_title.to_owned(), brief.to_owned()));
-            let conversation_id = nomifun_common::ConversationId::new().into_string();
+            let conversation_id = match session_target {
+                AttemptSessionTarget::ChildAttempt => {
+                    nomifun_common::ConversationId::new().into_string()
+                }
+                AttemptSessionTarget::AutomationLead { conversation_id } => conversation_id,
+            };
             let owner_id = self
                 .owner_id
                 .lock()
@@ -4219,7 +4325,7 @@ mod tests {
         repository.start_attempt(
             &owner, &execution_id, &step.step_id, created.step.version,
             attempt_id, created.current_attempt.as_ref().unwrap().attempt.version,
-            &conversation_id, None,
+            &conversation_id, AgentExecutionAttemptSessionKind::ChildAttempt, None,
             &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(attempt_id), json!({})),
         ).await.unwrap();
         let lease = AgentExecutionLeaseToken::new("effects-test".into());
