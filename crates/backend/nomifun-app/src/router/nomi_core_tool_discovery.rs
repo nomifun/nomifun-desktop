@@ -77,7 +77,6 @@ pub(crate) fn registration() -> anyhow::Result<PluginRegistration> {
         members: vec![RoleMemberContract {
             capability: CapabilityRef {
                 id: CAPABILITY_ID.into(),
-                version: "1.0.0".into(),
             },
             capability_manifest_digest: digest_payload(capability)?,
             requirement: RoleMemberRequirement::Required,

@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "ff831335aa83839b5f25b26e7e61c6155e71b827ef6bf137e9a2d8c886f481e3",
+  "target_first_party_contribution_digest": "010f993fab452e0035045f347a0f919a36f668006df29fd9b52c6195685a7c31",
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
@@ -13,8 +13,7 @@
       "enabled_capabilities": [
         {
           "capability": {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "id": "knowledge"
           },
           "action_allowlist": [
             "knowledge/autogen",
@@ -25,8 +24,7 @@
         },
         {
           "capability": {
-            "id": "project.memory",
-            "version": "1.0.0"
+            "id": "project.memory"
           },
           "action_allowlist": [
             "project.memory/read",
@@ -35,8 +33,7 @@
         },
         {
           "capability": {
-            "id": "web.research",
-            "version": "1.0.0"
+            "id": "web.research"
           },
           "action_allowlist": [
             "web.research/fetch",
@@ -45,8 +42,7 @@
         },
         {
           "capability": {
-            "id": "automation.schedule",
-            "version": "1.0.0"
+            "id": "automation.schedule"
           },
           "action_allowlist": [
             "automation.schedule/list"
@@ -54,8 +50,7 @@
         },
         {
           "capability": {
-            "id": "browser",
-            "version": "1.0.0"
+            "id": "browser"
           },
           "action_allowlist": [
             "browser/navigate",
@@ -65,8 +60,7 @@
         },
         {
           "capability": {
-            "id": "computer",
-            "version": "1.0.0"
+            "id": "computer"
           },
           "action_allowlist": [
             "computer/a11y.observe",
@@ -75,8 +69,7 @@
         },
         {
           "capability": {
-            "id": "workspace.artifacts",
-            "version": "1.0.0"
+            "id": "workspace.artifacts"
           },
           "action_allowlist": [
             "workspace.artifacts/read"
@@ -84,8 +77,7 @@
         },
         {
           "capability": {
-            "id": "workspace.files",
-            "version": "1.0.0"
+            "id": "workspace.files"
           },
           "action_allowlist": [
             "workspace.files/patch",
@@ -96,8 +88,7 @@
         },
         {
           "capability": {
-            "id": "workspace.process",
-            "version": "1.0.0"
+            "id": "workspace.process"
           },
           "action_allowlist": [
             "workspace.process/cancel",
@@ -111,8 +102,7 @@
         },
         {
           "capability": {
-            "id": "workspace.vcs",
-            "version": "1.0.0"
+            "id": "workspace.vcs"
           },
           "action_allowlist": [
             "workspace.vcs/commit",
@@ -123,8 +113,7 @@
         },
         {
           "capability": {
-            "id": "agent.collaboration",
-            "version": "1.0.0"
+            "id": "agent.collaboration"
           },
           "action_allowlist": [
             "agent/delegate",
@@ -134,8 +123,7 @@
         },
         {
           "capability": {
-            "id": "requirements",
-            "version": "1.0.0"
+            "id": "requirements"
           },
           "action_allowlist": [
             "requirements/claim",
@@ -146,8 +134,7 @@
         },
         {
           "capability": {
-            "id": "creation.media",
-            "version": "1.0.0"
+            "id": "creation.media"
           },
           "action_allowlist": [
             "creation.media/audio",
@@ -159,8 +146,7 @@
         },
         {
           "capability": {
-            "id": "agent.tool-discovery",
-            "version": "1.0.0"
+            "id": "agent.tool-discovery"
           },
           "action_allowlist": [
             "tool.discovery.rank"
@@ -183,8 +169,7 @@
       "enabled_capabilities": [
         {
           "capability": {
-            "id": "workspace.files",
-            "version": "1.0.0"
+            "id": "workspace.files"
           },
           "action_allowlist": [
             "workspace.files/patch",
@@ -195,8 +180,7 @@
         },
         {
           "capability": {
-            "id": "workspace.vcs",
-            "version": "1.0.0"
+            "id": "workspace.vcs"
           },
           "action_allowlist": [
             "workspace.vcs/commit",
@@ -207,8 +191,7 @@
         },
         {
           "capability": {
-            "id": "workspace.process",
-            "version": "1.0.0"
+            "id": "workspace.process"
           },
           "action_allowlist": [
             "workspace.process/cancel",
@@ -222,8 +205,7 @@
         },
         {
           "capability": {
-            "id": "workspace.artifacts",
-            "version": "1.0.0"
+            "id": "workspace.artifacts"
           },
           "action_allowlist": [
             "workspace.artifacts/publish",
@@ -232,8 +214,7 @@
         },
         {
           "capability": {
-            "id": "project.memory",
-            "version": "1.0.0"
+            "id": "project.memory"
           },
           "action_allowlist": [
             "project.memory/read",
@@ -242,8 +223,7 @@
         },
         {
           "capability": {
-            "id": "web.research",
-            "version": "1.0.0"
+            "id": "web.research"
           },
           "action_allowlist": [
             "web.research/fetch",
@@ -252,8 +232,7 @@
         },
         {
           "capability": {
-            "id": "agent.collaboration",
-            "version": "1.0.0"
+            "id": "agent.collaboration"
           },
           "action_allowlist": [
             "agent/delegate",
@@ -263,8 +242,7 @@
         },
         {
           "capability": {
-            "id": "agent.tool-discovery",
-            "version": "1.0.0"
+            "id": "agent.tool-discovery"
           },
           "action_allowlist": [
             "tool.discovery.rank"
@@ -306,8 +284,7 @@
       "enabled_capabilities": [
         {
           "capability": {
-            "id": "companion",
-            "version": "1.0.0"
+            "id": "companion"
           },
           "action_allowlist": [
             "companion/evolve",
@@ -316,8 +293,7 @@
         },
         {
           "capability": {
-            "id": "companion.memory",
-            "version": "1.0.0"
+            "id": "companion.memory"
           },
           "action_allowlist": [
             "companion.memory/recall",
@@ -326,8 +302,7 @@
         },
         {
           "capability": {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "id": "knowledge"
           },
           "action_allowlist": [
             "knowledge/read",
@@ -336,8 +311,7 @@
         },
         {
           "capability": {
-            "id": "channel.messaging",
-            "version": "1.0.0"
+            "id": "channel.messaging"
           },
           "action_allowlist": [
             "channel.messaging/reply"
@@ -345,8 +319,7 @@
         },
         {
           "capability": {
-            "id": "robot",
-            "version": "1.0.0"
+            "id": "robot"
           },
           "action_allowlist": [
             "robot/vision"
@@ -354,8 +327,7 @@
         },
         {
           "capability": {
-            "id": "automation.schedule",
-            "version": "1.0.0"
+            "id": "automation.schedule"
           },
           "action_allowlist": [
             "automation.schedule/create",
@@ -366,8 +338,7 @@
         },
         {
           "capability": {
-            "id": "agent.tool-discovery",
-            "version": "1.0.0"
+            "id": "agent.tool-discovery"
           },
           "action_allowlist": [
             "tool.discovery.rank"
@@ -389,8 +360,7 @@
       "enabled_capabilities": [
         {
           "capability": {
-            "id": "customer.service",
-            "version": "1.0.0"
+            "id": "customer.service"
           },
           "action_allowlist": [
             "customer.service/handoff",
@@ -399,8 +369,7 @@
         },
         {
           "capability": {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "id": "knowledge"
           },
           "action_allowlist": [
             "knowledge/read",
@@ -409,8 +378,7 @@
         },
         {
           "capability": {
-            "id": "channel.messaging",
-            "version": "1.0.0"
+            "id": "channel.messaging"
           },
           "action_allowlist": [
             "channel.messaging/reply"
@@ -429,8 +397,7 @@
       "enabled_capabilities": [
         {
           "capability": {
-            "id": "creation.media",
-            "version": "1.0.0"
+            "id": "creation.media"
           },
           "action_allowlist": [
             "creation.media/audio",
@@ -443,8 +410,7 @@
         },
         {
           "capability": {
-            "id": "creative.workshop",
-            "version": "1.0.0"
+            "id": "creative.workshop"
           },
           "action_allowlist": [
             "creative.workshop/asset.read",
@@ -456,8 +422,7 @@
         },
         {
           "capability": {
-            "id": "office",
-            "version": "1.0.0"
+            "id": "office"
           },
           "action_allowlist": [
             "office/document.edit",
@@ -468,8 +433,7 @@
         },
         {
           "capability": {
-            "id": "workspace.files",
-            "version": "1.0.0"
+            "id": "workspace.files"
           },
           "action_allowlist": [
             "workspace.files/patch",
@@ -480,8 +444,7 @@
         },
         {
           "capability": {
-            "id": "workspace.artifacts",
-            "version": "1.0.0"
+            "id": "workspace.artifacts"
           },
           "action_allowlist": [
             "workspace.artifacts/publish",
@@ -490,8 +453,7 @@
         },
         {
           "capability": {
-            "id": "workspace.process",
-            "version": "1.0.0"
+            "id": "workspace.process"
           },
           "action_allowlist": [
             "workspace.process/cancel",
@@ -505,8 +467,7 @@
         },
         {
           "capability": {
-            "id": "project.memory",
-            "version": "1.0.0"
+            "id": "project.memory"
           },
           "action_allowlist": [
             "project.memory/read",
@@ -515,8 +476,7 @@
         },
         {
           "capability": {
-            "id": "web.research",
-            "version": "1.0.0"
+            "id": "web.research"
           },
           "action_allowlist": [
             "web.research/fetch",
@@ -525,8 +485,7 @@
         },
         {
           "capability": {
-            "id": "agent.tool-discovery",
-            "version": "1.0.0"
+            "id": "agent.tool-discovery"
           },
           "action_allowlist": [
             "tool.discovery.rank"

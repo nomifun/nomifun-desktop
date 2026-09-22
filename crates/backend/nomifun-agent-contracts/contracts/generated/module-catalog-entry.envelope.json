@@ -2,8 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "capability": {
-      "id": "knowledge",
-      "version": "1.0.0"
+      "id": "knowledge"
     },
     "contract_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "contribution_id": "module:knowledge",
@@ -45,5 +44,5 @@
       "admitted": true
     }
   },
-  "payload_digest": "8d141dfd2782909f7bcb1d7ce22f080bcbe6630661a67fbf3ec7d7dce6529ba8"
+  "payload_digest": "76daf6de1703bcda4b852d932e32d4abffbebd54c177d57452a1c96e48d6967a"
 }

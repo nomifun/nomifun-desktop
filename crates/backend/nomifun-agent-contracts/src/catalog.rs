@@ -261,7 +261,6 @@ impl CapabilityCatalogPublication {
         self.entry.validate()?;
         let reference = CapabilityRef {
             id: self.manifest.id.clone(),
-            version: self.manifest.version.clone(),
         };
         let manifest_digest = digest_payload(&self.manifest).map_err(|error| {
             CapabilityCatalogContractError::InvalidField {
@@ -457,7 +456,6 @@ pub trait PluginProductCapabilityCatalogSink: Send + Sync {
 impl CapabilityCatalogEntry {
     pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
         validate_non_empty(self.capability.id.as_ref(), "capability.id")?;
-        validate_non_empty(self.capability.version.as_ref(), "capability.version")?;
         validate_digest(&self.contract_digest, "contract_digest")?;
         validate_non_empty(self.contribution_id.as_ref(), "contribution_id")?;
         self.provenance.validate()?;
@@ -631,7 +629,6 @@ impl CapabilityCatalogMaterializer {
         let entry = CapabilityCatalogEntry {
             capability: CapabilityRef {
                 id: input.manifest.id.clone(),
-                version: input.manifest.version.clone(),
             },
             contract_digest: digest_payload(&input.manifest).map_err(|error| {
                 CapabilityCatalogContractError::InvalidField {
@@ -678,7 +675,6 @@ pub struct CapabilityOperationLock {
 impl CapabilityOperationLock {
     pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
         validate_non_empty(self.capability.id.as_ref(), "capability.id")?;
-        validate_non_empty(self.capability.version.as_ref(), "capability.version")?;
         self.contribution.validate().map_err(|violation| {
             CapabilityCatalogContractError::InvalidField {
                 field: "contribution",

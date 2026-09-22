@@ -949,25 +949,25 @@ async fn main() -> anyhow::Result<()> {
         }
         draft["document"]["enabled_capabilities"] = if computer_denied {
             json!([{
-                "capability":{"id":"computer","version":"1.0.0"},
+                "capability":{"id":"computer"},
                 "action_allowlist":["computer/observe","computer/a11y.observe"]
             }])
         } else if computer_input {
             json!([{
-                "capability":{"id":"computer","version":"1.0.0"},
+                "capability":{"id":"computer"},
                 "action_allowlist":["computer/a11y.observe","computer/input","computer/launch"]
             }])
         } else if live_mode {
             json!([{
-                "capability":{"id":"browser","version":"1.0.0"},
+                "capability":{"id":"browser"},
                 "action_allowlist":["browser/observe","browser/navigate","browser/act"]
             },{
-                "capability":{"id":"workspace.files","version":"1.0.0"},
+                "capability":{"id":"workspace.files"},
                 "action_allowlist":["workspace.files/read","workspace.files/patch"]
             }])
         } else {
             json!([{
-                "capability":{"id":"browser","version":"1.0.0"},
+                "capability":{"id":"browser"},
                 "action_allowlist":["browser/observe","browser/navigate","browser/act"]
             }])
         };

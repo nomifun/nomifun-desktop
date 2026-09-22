@@ -84,6 +84,10 @@ export interface ExactCatalogRef<Kind extends string = string> {
   version: string;
 }
 
+export interface CapabilityRef {
+  id: CapabilityId;
+}
+
 export interface PresetRevisionRef {
   preset_id: AgentPresetId;
   revision: number;
@@ -151,7 +155,7 @@ export interface AgentResolvedSnapshot {
 }
 
 export interface CapabilitySelection {
-  capability: ExactCatalogRef<'capability'>;
+  capability: CapabilityRef;
   action_allowlist?: string[];
 }
 
@@ -254,7 +258,7 @@ export interface AgentPresetLibraryResponse {
   user_presets: AgentPresetSummary[];
   active_bindings: AgentBindingSummary[];
   fresh_start: {
-    data_generation: 4;
+    data_generation: number;
     legacy_data_imported: false;
     official_template_count: number;
     user_preset_count: number;
@@ -262,7 +266,7 @@ export interface AgentPresetLibraryResponse {
 }
 
 export interface CapabilityCatalogItem {
-  capability: ExactCatalogRef<'capability'>;
+  capability: CapabilityRef;
   kind: string;
   middleware_phase?: 'before_model' | 'before_tool';
   display_name: string;
@@ -274,8 +278,8 @@ export interface CapabilityCatalogItem {
   supported_surfaces: string[];
   required_runtime_features: string[];
   required_resource_kinds: string[];
-  required_capabilities: ExactCatalogRef<'capability'>[];
-  conflicting_capabilities: ExactCatalogRef<'capability'>[];
+  required_capabilities: CapabilityRef[];
+  conflicting_capabilities: CapabilityRef[];
   action_count: number;
   context_contributor_count: number;
 }
@@ -295,7 +299,7 @@ export interface CapabilityModuleAction {
 }
 
 export interface CapabilityModuleCatalogItem {
-  module: ExactCatalogRef<'capability'>;
+  module: CapabilityRef;
   display_name: string;
   description: string;
   source_package: ExactCatalogRef<'package'>;
@@ -306,8 +310,8 @@ export interface CapabilityModuleCatalogItem {
   event_schema_refs: string[];
   required_resource_kinds: string[];
   required_host_ports: ExactCatalogRef<'host_port'>[];
-  required_modules: ExactCatalogRef<'capability'>[];
-  conflicting_modules: ExactCatalogRef<'capability'>[];
+  required_modules: CapabilityRef[];
+  conflicting_modules: CapabilityRef[];
   supported_surfaces: string[];
 }
 
@@ -317,14 +321,14 @@ export interface SkillCatalogItem {
   description: string;
   source_package: ExactCatalogRef<'package'>;
   source_kind: string;
-  required_capabilities: ExactCatalogRef<'capability'>[];
+  required_capabilities: CapabilityRef[];
   supported_surfaces: string[];
 }
 
 export interface McpToolCatalogItem {
   server_id: string;
   canonical_tool_key: string;
-  capability: ExactCatalogRef<'capability'>;
+  capability: CapabilityRef;
   source_package: ExactCatalogRef<'package'>;
   schema_digest: DigestHex;
   materialization_version: string;
@@ -336,13 +340,13 @@ export interface RoleProviderCatalogItem {
   description: string;
   source_package: ExactCatalogRef<'package'>;
   source_kind: string;
-  supported_capabilities: ExactCatalogRef<'capability'>[];
+  supported_capabilities: CapabilityRef[];
 }
 
 /** Candidates only; the canonical compiler checks compatibility and authorization. */
 export interface RoleCatalogItem {
   role: ExactRoleContractRef;
-  capabilities: ExactCatalogRef<'capability'>[];
+  capabilities: CapabilityRef[];
   providers: RoleProviderCatalogItem[];
 }
 

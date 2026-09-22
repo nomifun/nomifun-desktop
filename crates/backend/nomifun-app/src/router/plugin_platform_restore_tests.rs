@@ -50,7 +50,6 @@ fn package(kind: &str) -> (PluginPackageArtifactV1, Vec<u8>) {
         implementation.package.id = package_id.into();
         let reference = CapabilityRef {
             id: implementation.id.clone(),
-            version: implementation.version.clone(),
         };
         if kind == "cycle" {
             implementation.requires = vec![reference.clone()];
@@ -163,7 +162,6 @@ async fn unscoped_kernel_failure_preserves_generation_until_bad_installation_is_
         KernelError::MissingCapabilityDependency {
             capability_id: "test.nomicore.independent.context".into(),
             dependency_id: "missing.context".into(),
-            dependency_version: "1.0.0".into(),
         },
         KernelError::DuplicatePackage {
             package_id: "test.nomicore.independent".into(),
@@ -360,9 +358,8 @@ async fn persisted_defaults_refresh_saves_but_do_not_reselect_frozen_nomi_sessio
         .unwrap();
     let mut draft = editor.draft;
     draft.document.enabled_capabilities = vec![nomifun_api_types::CapabilitySelectionDto {
-        capability: nomifun_api_types::ExactCatalogRefDto {
+        capability: nomifun_api_types::CapabilityRefDto {
             id: FACADE.into(),
-            version: "1.0.0".into(),
         },
         action_allowlist: BTreeSet::new(),
     }];

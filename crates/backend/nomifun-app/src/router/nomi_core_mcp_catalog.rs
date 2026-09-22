@@ -263,7 +263,6 @@ fn registration(
             capabilities: vec![CapabilityManifest {
                 id: capability_id.clone(),
                 contribution_id: format!("capability:{}", capability_id.as_ref()).into(),
-                version: VERSION.into(),
                 kind: CapabilityKind::Tool,
                 package: package.clone(),
                 display: display(&tool.display_name, &tool.description),
@@ -310,7 +309,6 @@ fn registration(
                 schema_digest: tool.lock.schema_digest.clone(),
                 capability: CapabilityRef {
                     id: capability_id.clone(),
-                    version: VERSION.into(),
                 },
                 materialization_version: VERSION.into(),
             }],

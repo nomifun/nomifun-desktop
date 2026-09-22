@@ -681,7 +681,6 @@ fn capability_manifest(
             "module:{}",
             spec.module_id
         )),
-        version: VersionString::from(PACKAGE_VERSION),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: display(spec.display_name, spec.description),

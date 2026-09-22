@@ -65,7 +65,6 @@ export const useOpenSshSession = () => {
                 {
                   capability: {
                     id: 'ssh' as AgentPresetDraft['document']['enabled_capabilities'][number]['capability']['id'],
-                    version: '1.0.0',
                   },
                   action_allowlist: ['ssh/exec'],
                 },

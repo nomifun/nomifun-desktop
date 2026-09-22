@@ -85,7 +85,6 @@ fn declare_capability(source_root: &Path) {
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.executor.echo"),
         contribution_id: "capability:example.executor.echo".into(),
-        version: "1.0.0".into(),
         kind: CapabilityKind::Tool,
         package,
         display: LocalizedMetadata {

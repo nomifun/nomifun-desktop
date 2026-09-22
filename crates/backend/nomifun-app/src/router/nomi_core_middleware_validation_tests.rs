@@ -40,7 +40,6 @@ fn product() -> ResolvedCapability {
         dependency_refs: Vec::new(),
         capability: CapabilityRef {
             id: "fixture.middleware".into(),
-            version: "1.0.0".into(),
         },
         source_package: PackageRef {
             id: "fixture".into(),
@@ -223,7 +222,7 @@ fn mount_snapshot(
     let registered = materialized.capability(&ID.into()).unwrap();
     let snapshot = compile_selection(
         &materialized,
-        CapabilityRef { id: registered.manifest.id.clone(), version: registered.manifest.version.clone() },
+        CapabilityRef { id: registered.manifest.id.clone() },
         action_allowlist, registered.contribution_lock.clone(), Vec::new(), ordered,
     );
     snapshot.validate().unwrap();

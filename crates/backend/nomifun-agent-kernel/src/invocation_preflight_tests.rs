@@ -91,7 +91,6 @@ async fn role_preflight_does_not_acquire_resources() {
     revision.payload.enabled_capabilities = vec![nomifun_agent_contracts::CapabilitySelection {
         capability: CapabilityRef {
             id: CapabilityId::from(SAMPLE_ROLE_TOOL),
-            version: VersionString::from(VERSION),
         },
         action_allowlist: BTreeSet::from([ActionId::from(SAMPLE_ROLE_ACTION)]),
     }];

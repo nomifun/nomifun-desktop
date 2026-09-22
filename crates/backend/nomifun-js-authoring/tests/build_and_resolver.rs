@@ -136,7 +136,6 @@ fn declare_test_capability(source_root: &std::path::Path) {
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.build.run"),
         contribution_id: "capability:example.build.run".into(),
-        version: "1.0.0".into(),
         kind: CapabilityKind::Tool,
         package,
         display: LocalizedMetadata {

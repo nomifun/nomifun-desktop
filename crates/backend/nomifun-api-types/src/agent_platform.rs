@@ -126,6 +126,12 @@ pub struct ExactCatalogRefDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CapabilityRefDto {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PresetRevisionRefDto {
     pub preset_id: String,
     pub revision: u64,
@@ -166,17 +172,17 @@ pub struct AgentBindingValueDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySelectionDto {
-    pub capability: ExactCatalogRefDto,
+    pub capability: CapabilityRefDto,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub action_allowlist: BTreeSet<String>,
 }
 
-/// vNext Agent authoring contract. A module grant names the exact Module
-/// version and the exact Action IDs it grants; omission never means "all".
+/// vNext Agent authoring contract. A module grant names the stable Module ID
+/// and the exact Action IDs it grants; omission never means "all".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCapabilityGrantDto {
-    pub module: ExactCatalogRefDto,
+    pub module: CapabilityRefDto,
     pub allowed_actions: BTreeSet<String>,
 }
 
@@ -204,7 +210,7 @@ pub struct CapabilityModuleActionDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityModuleCatalogItemDto {
-    pub module: ExactCatalogRefDto,
+    pub module: CapabilityRefDto,
     pub display_name: String,
     pub description: String,
     pub source_package: ExactCatalogRefDto,
@@ -215,8 +221,8 @@ pub struct CapabilityModuleCatalogItemDto {
     pub event_schema_refs: Vec<String>,
     pub required_resource_kinds: BTreeSet<String>,
     pub required_host_ports: Vec<ExactCatalogRefDto>,
-    pub required_modules: Vec<ExactCatalogRefDto>,
-    pub conflicting_modules: Vec<ExactCatalogRefDto>,
+    pub required_modules: Vec<CapabilityRefDto>,
+    pub conflicting_modules: Vec<CapabilityRefDto>,
     pub supported_surfaces: BTreeSet<String>,
 }
 
@@ -381,7 +387,7 @@ pub enum CatalogMaterializationStateDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityCatalogItemDto {
-    pub capability: ExactCatalogRefDto,
+    pub capability: CapabilityRefDto,
     pub kind: String,
     pub display_name: String,
     pub description: String,
@@ -393,8 +399,8 @@ pub struct CapabilityCatalogItemDto {
     pub supported_surfaces: BTreeSet<String>,
     pub required_runtime_features: BTreeSet<String>,
     pub required_resource_kinds: BTreeSet<String>,
-    pub required_capabilities: Vec<ExactCatalogRefDto>,
-    pub conflicting_capabilities: Vec<ExactCatalogRefDto>,
+    pub required_capabilities: Vec<CapabilityRefDto>,
+    pub conflicting_capabilities: Vec<CapabilityRefDto>,
     pub action_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub middleware_phase: Option<String>,
@@ -405,7 +411,7 @@ pub struct CapabilityCatalogItemDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentUiContributionDto {
-    pub capability: ExactCatalogRefDto,
+    pub capability: CapabilityRefDto,
     pub plugin_id: String,
     pub expected_release_digest: String,
     pub display_name: String,
@@ -446,7 +452,7 @@ pub struct SkillCatalogItemDto {
     pub description: String,
     pub source_package: ExactCatalogRefDto,
     pub source_kind: String,
-    pub required_capabilities: Vec<ExactCatalogRefDto>,
+    pub required_capabilities: Vec<CapabilityRefDto>,
     pub supported_surfaces: BTreeSet<String>,
 }
 
@@ -455,7 +461,7 @@ pub struct SkillCatalogItemDto {
 pub struct McpToolCatalogItemDto {
     pub server_id: String,
     pub canonical_tool_key: String,
-    pub capability: ExactCatalogRefDto,
+    pub capability: CapabilityRefDto,
     pub source_package: ExactCatalogRefDto,
     pub schema_digest: String,
     pub materialization_version: String,
@@ -469,7 +475,7 @@ pub struct RoleProviderCatalogItemDto {
     pub description: String,
     pub source_package: ExactCatalogRefDto,
     pub source_kind: String,
-    pub supported_capabilities: Vec<ExactCatalogRefDto>,
+    pub supported_capabilities: Vec<CapabilityRefDto>,
 }
 
 /// Registered candidates, not an authorization or environment compatibility verdict.
@@ -478,7 +484,7 @@ pub struct RoleProviderCatalogItemDto {
 #[serde(deny_unknown_fields)]
 pub struct RoleCatalogItemDto {
     pub role: ExactRoleContractRefDto,
-    pub capabilities: Vec<ExactCatalogRefDto>,
+    pub capabilities: Vec<CapabilityRefDto>,
     pub providers: Vec<RoleProviderCatalogItemDto>,
 }
 
@@ -1286,13 +1292,13 @@ mod snapshot_tests {
     #[test]
     fn module_grant_requires_an_explicit_action_set_and_rejects_legacy_names() {
         let grant = serde_json::from_value::<AgentCapabilityGrantDto>(json!({
-            "module": {"id": "workspace.files", "version": "1.0.0"},
+            "module": {"id": "workspace.files"},
             "allowed_actions": ["workspace.files/read", "workspace.files/patch"]
         }))
         .expect("module grant");
         assert_eq!(grant.allowed_actions.len(), 2);
         assert!(serde_json::from_value::<AgentCapabilityGrantDto>(json!({
-            "capability": {"id": "retired.file-read", "version": "1.0.0"},
+            "capability": {"id": "retired.file-read"},
             "action_allowlist": []
         }))
         .is_err());

@@ -946,7 +946,7 @@ UI Shell/Workbench 布局替换属于 UI contribution 与 Surface 架构；Brows
 Provider 与 native Surface 保持分离，并以同一个 Conversation BrowserWorkspace 汇合。浏览器输入权直接由
 Agent run lifecycle 派生：Agent 运行时用户只观看，run terminal 后用户才可操作，不建立 takeover/share/
 control-lease 兼容状态机。Agent click/type/wheel/drag 必须进入该 BrowserTab 的真实浏览器输入管线，DOM mutation
-不得冒充用户操作。新增 `nomi_local_websearch@1.0.0` 作为 Agent 工作台可选的普通 Capability 和同名 Tool，固定
+不得冒充用户操作。新增 `nomi_local_websearch` 作为 Agent 工作台可选的普通 Capability 和同名 Tool，固定
 使用隔离 Browser Search Provider；它不依赖模型原生 search、不覆盖厂商 `web.search` / `web_search`，也不并入
 Browser Role。
 
@@ -1044,7 +1044,7 @@ struct RoleMemberContract {
 }
 ```
 
-Role Contract 只登记 canonical Capability member、对应完整 `CapabilityManifest` digest、required/optional，以及 Computer 真正需要的 target-resource serialization；Tool Schema、EffectClass、错误与取消合同继续以现有 `CapabilityManifest` 和统一调用协议为唯一事实源，不在 Role Contract 复制第二份。Materializer 必须校验每个 member 的 exact Capability/version/manifest digest。
+Role Contract 只登记 canonical Capability member、对应完整 `CapabilityManifest` digest、required/optional，以及 Computer 真正需要的 target-resource serialization；Tool Schema、EffectClass、错误与取消合同继续以现有 `CapabilityManifest` 和统一调用协议为唯一事实源，不在 Role Contract 复制第二份。Materializer 必须按稳定 CapabilityId 校验 member，并用 manifest digest 与来源 Package/Release 精确冻结实现。
 
 不定义通用 lifecycle/concurrency policy enum。Browser lane/owner/close 继续是 Browser v1 的具名 conformance；Computer v1 只使用一个实际会被 Kernel 消费的 `serialized_target_resource_kind`，按 Snapshot 中的 exact target `ResourceId` 串行调用。
 
@@ -2407,7 +2407,7 @@ SDK `agentSession.subscribe(listener)` 返回退订函数，回调接收 `stream
 
 - 源文件 `nomifun.plugin.json` 可声明 `agent_view: { name, description }`，构建为本包 `${package.id}.ui.agent-session` capability。沿原制品、发布与 Catalog 主链，不设 UI 私有注册表；普通 HTML 不自动产生该贡献。一个产品可同时发布页面和 actions，页面声明本身不要求 Node service。
 - canonical `CapabilityContributions.ui_slot = agent_session` 标识当前支持的展示槽。发布验证要求 `kind = ui_contribution`、consumer 仅 `ui`、实际 HTML 存在；当前页面宿主不解释该贡献的执行依赖/资源图，故拒绝在该贡献混入 actions、Context、事件、资源、host port 或 requires/conflicts/runtime requirements。它们应通过产品既有独立 service/capability 接缝消费。这是当前页面形态的支持范围，不是宣称 UI 永久不能组合资源；没有消费者前不接受并静默忽略这些声明。
-- `GET /api/agent-catalog/ui/agent-session` 是同一 Catalog 的只读投影，返回精确 capability ID/version、plugin ID、活动 release digest 及展示信息。它不改变 Agent Tool 候选，不授予会话权限。Surface open 的 `agent_session.ui_capability` 可带精确引用，宿主按同一发布记录验证 slot、consumer、release 与现有 owner/Session/活动指针 CAS。
+- `GET /api/agent-catalog/ui/agent-session` 是同一 Catalog 的只读投影，返回精确 capability ID、plugin ID、活动 release digest 及展示信息。它不改变 Agent Tool 候选，不授予会话权限。Surface open 的 `agent_session.ui_capability` 可带精确引用，宿主按同一发布记录验证 slot、consumer、release 与现有 owner/Session/活动指针 CAS。
 - 实际 `/agent-sessions/:agentSessionId` 路由保留可信选择/恢复区域；显式选择后卸载内置内容并挂载既有隔离 Surface。临时选择只作用于本页面；用户也可显式保存“此 Agent 默认页面”，详见下述独立呈现绑定。内置页面保留原公共 AgentSession API，不新增业务执行器。
 - 撤下或改变 release 后卸载视图；当前路由内即使旧候选再次出现也须重新确认，不因刷新自动恢复。语言切换不重新授权；路由变化后迟到的 open 结果只关闭，不挂到新 Session。close/reload 不重发或取消 turn。关闭失败显示“服务端撤销未确认”，不把本地 iframe 卸载当成服务端成功撤权。
 
@@ -2415,7 +2415,7 @@ SDK `agentSession.subscribe(listener)` 返回退订函数，回调接收 `stream
 
 #### 预设级默认页面：独立呈现绑定
 
-`GET/PUT /api/agent-presets/{preset_id}/ui-binding` 读写原预设行的 `ui_binding_json`。内容是独立 `binding_version` 与可空 `selection`；非空选择绑定 plugin ID、capability ID/version 和不可变 release digest。PUT 必须提交 `expected_binding_version` 和显式 `selection`（`null` 恢复内置默认），采用原数据库单语句 CAS，校验预设与插件的同 owner；展示字段按当前 Catalog 规范化。未配置存储的宿主明确返回 503，不假装保存成功。
+`GET/PUT /api/agent-presets/{preset_id}/ui-binding` 读写原预设行的 `ui_binding_json`。内容是独立 `binding_version` 与可空 `selection`；非空选择绑定 plugin ID、capability ID 和不可变 release digest。PUT 必须提交 `expected_binding_version` 和显式 `selection`（`null` 恢复内置默认），采用原数据库单语句 CAS，校验预设与插件的同 owner；展示字段按当前 Catalog 规范化。未配置存储的宿主明确返回 503，不假装保存成功。
 
 `GET /api/agent-sessions/{id}/ui-binding` 从原 Session 元数据派生预设，不接受客户端自报 owner/目标预设。绑定不进入执行 Revision、Snapshot 或 Session 执行配置，不重新编译/启动 Agent。保存相同的当前页不重开 Surface；临时切回不清空持久默认。并发保存冲突由用户刷新后决定，不自动重试覆盖。
 

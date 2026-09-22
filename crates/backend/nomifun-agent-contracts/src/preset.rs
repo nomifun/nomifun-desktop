@@ -190,8 +190,7 @@ pub struct AgentBindingValue {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilitySelection {
-    /// Exact Capability Module revision. The historical field name remains on
-    /// the v1 wire until AgentPreset vNext switches the outer document.
+    /// Stable Capability Module identity.
     pub capability: CapabilityRef,
     /// Exact granted Action IDs. Empty means no Action authority, never all
     /// actions declared by the Module.
@@ -474,10 +473,6 @@ impl ResolvedCapability {
         validate_non_empty_canonical_value(
             self.capability.id.as_ref(),
             "capability.id",
-        )?;
-        validate_non_empty_canonical_value(
-            self.capability.version.as_ref(),
-            "capability.version",
         )?;
         validate_non_empty_canonical_value(
             self.source_package.id.as_ref(),
@@ -1275,10 +1270,9 @@ impl OfficialPresetSeedManifestPayload {
                     return Err(PresetContractViolation {
                         code: CanonicalErrorCode::from(CAPABILITY_NOT_MATERIALIZED),
                         message: format!(
-                            "{} references missing capability {}@{}",
+                            "{} references missing capability {}",
                             key.as_str(),
-                            selection.capability.id.as_ref(),
-                            selection.capability.version.as_ref()
+                            selection.capability.id.as_ref()
                         ),
                     });
                 }
@@ -1538,9 +1532,8 @@ mod tests {
     use super::*;
 
     fn capability(id: &str) -> CapabilityRef {
-        crate::ExactVersionRef {
+        CapabilityRef {
             id: crate::CapabilityId::from(id),
-            version: VersionString::from("1.0.0"),
         }
     }
 
@@ -1557,7 +1550,6 @@ mod tests {
             dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: capability_id.clone(),
-                version: VersionString::from("1.0.0"),
             },
             source_package,
             contribution_id: contribution_id.clone(),
@@ -1674,7 +1666,7 @@ mod tests {
         for case in 0..6 {
             let mut invalid = content.clone();
             match case {
-                0 => invalid.enabled_capabilities[0].dependency_refs[0].version = "wrong".into(),
+                0 => invalid.enabled_capabilities[0].dependency_refs[0].id = "wrong".into(),
                 1 => invalid.enabled_capabilities[0].dependency_refs.push(content.enabled_capabilities[1].capability.clone()),
                 2 => invalid.enabled_capabilities[1].dependency_refs.push(content.enabled_capabilities[0].capability.clone()),
                 3 => invalid.enabled_capabilities[0].dependency_refs.clear(),

@@ -189,7 +189,6 @@ fn contribution(
         )),
         capability: CapabilityRef {
             id: CapabilityId::from("fixture.echo"),
-            version: VersionString::from("1.0.0"),
         },
         contract_digest: DigestHex::from("e".repeat(64)),
         target,

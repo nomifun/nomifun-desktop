@@ -128,7 +128,6 @@ mod tests {
             enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
                     id: capability_id,
-                    version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action_id.clone()]),
             }],

@@ -15,7 +15,7 @@ await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { tr
 const role = { key: { role_id: 'test.context', contract_version: '1.0.0' }, contract_digest: asDigestHex('a'.repeat(64)) };
 const a: RoleProviderSelection = { role, provider_mount_id: 'provider-a' };
 const b: RoleProviderSelection = { role, provider_mount_id: 'provider-b' };
-const capability = { id: asCapabilityId('test.context.facade'), version: '1.0.0' };
+const capability = { id: asCapabilityId('test.context.facade') };
 const catalog: AgentCatalogResponse = { modules: [], capabilities: [], skills: [], mcp_tools: [], roles: [{ role, capabilities: [capability],
   providers: [a, b].map((selection, index) => ({ selection, display_name: `Provider ${index}`, description: '',
     source_package: { id: asPackageId('test.plugin'), version: '1.0.0' }, source_kind: 'managed_local', supported_capabilities: [capability] })) }] };

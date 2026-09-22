@@ -100,7 +100,6 @@ impl Fixture {
             members: vec![RoleMemberContract {
                 capability: CapabilityRef {
                     id: facade.id.clone(),
-                    version: facade.version.clone(),
                 },
                 capability_manifest_digest: digest_payload(&facade).unwrap(),
                 requirement: RoleMemberRequirement::Required,
@@ -132,7 +131,6 @@ impl Fixture {
         implementation.contribution_id = "capability:sample.provider.impl".into();
         let implementation_ref = CapabilityRef {
             id: implementation.id.clone(),
-            version: implementation.version.clone(),
         };
         provider.metadata.manifest.payload.contributions = PackageContributions {
             capabilities: if mapped {
@@ -233,7 +231,6 @@ impl Fixture {
                 .into_iter()
                 .map(|id| CapabilityRef {
                     id: id.into(),
-                    version: VERSION.into(),
                 })
                 .collect();
             if id == CHILD {
@@ -258,7 +255,6 @@ impl Fixture {
             .push(nomifun_agent_contracts::CapabilitySelection {
                 capability: CapabilityRef {
                     id: PEER.into(),
-                    version: VERSION.into(),
                 },
                 action_allowlist: BTreeSet::from([SAMPLE_ACTION.into()]),
             });
@@ -434,7 +430,6 @@ async fn dependency_is_private_unless_explicitly_selected_and_stale_graph_cannot
         .push(nomifun_agent_contracts::CapabilitySelection {
             capability: CapabilityRef {
                 id: CHILD.into(),
-                version: VERSION.into(),
             },
             action_allowlist: BTreeSet::from([SAMPLE_ACTION.into()]),
         });
@@ -510,7 +505,6 @@ fn provider_induced_cycle_is_rejected_and_dependency_changes_invalidate_clean_sa
         .capabilities[0]
         .requires = vec![CapabilityRef {
         id: PEER.into(),
-        version: VERSION.into(),
     }];
     refresh_manifest(provider);
     let registry = fixture.kernel.replace_all(changed.clone()).unwrap();
@@ -543,7 +537,6 @@ fn provider_induced_cycle_is_rejected_and_dependency_changes_invalidate_clean_sa
         .capabilities[0]
         .requires = vec![CapabilityRef {
         id: SAMPLE_CAPABILITY.into(),
-        version: VERSION.into(),
     }];
     refresh_manifest(provider);
     let registry = fixture.kernel.replace_all(changed).unwrap();
@@ -609,7 +602,6 @@ async fn recursive_dependency_roles_use_the_same_default_and_override_resolver()
         members: vec![RoleMemberContract {
             capability: CapabilityRef {
                 id: CHILD.into(),
-                version: VERSION.into(),
             },
             capability_manifest_digest: digest_payload(&child).unwrap(),
             requirement: RoleMemberRequirement::Required,

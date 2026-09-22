@@ -264,8 +264,9 @@ struct PackageContributions {
 
 - Package：schema/host contract、exact Package 与 Service dependencies、Runtime feature
   requirements、config schema 和 contributions；
-- Capability：稳定 ID/version、来源 Package、Kind、exact dependencies/conflicts、surface、
-  platform、Runtime feature 与执行 schema；
+- Capability：稳定 ID、来源 Package/Release 与合同 digest、Kind、按 ID 引用的
+  dependencies/conflicts、surface、platform、Runtime feature 与执行 schema；Capability
+  不维护独立版本号；
 - Skill：稳定 ID/version、来源 Package、body/resources、surface 和
   `requires_capabilities`；
 - MCP Mapping：Package、server、canonical tool key、schema hash、CapabilityId 和
@@ -487,7 +488,7 @@ computer.launch
 a11y.observe
 ```
 
-Browser Workspace v2 新增 `nomi_local_websearch@1.0.0`：它是 Agent 工作台可独立选择的 NomiFun 本地浏览器
+Browser Workspace v2 新增 `nomi_local_websearch`：它是 Agent 工作台可独立选择的 NomiFun 本地浏览器
 检索 Capability，Agent Tool 也精确命名为 `nomi_local_websearch`，固定使用隔离 Headless Browser Provider，
 不要求 Chat model 自身提供原生 web search。现有 `web.search` / `web_search` 保持厂商原生能力；两项 Capability
 身份不同，可独立或同时启用。`nomi_local_websearch` 不隐含 `browser.*`，也不由 `browser.*` 隐含。详见

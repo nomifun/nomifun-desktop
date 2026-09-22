@@ -6589,9 +6589,8 @@ fn plugin_capability_catalog_item(
         None => Some("CAPABILITY_CONSUMER_UNSUPPORTED".to_owned()),
     };
     Ok(CapabilityCatalogItemDto {
-        capability: nomifun_api_types::ExactCatalogRefDto {
+        capability: nomifun_api_types::CapabilityRefDto {
             id: manifest.id.as_ref().to_owned(),
-            version: manifest.version.as_ref().to_owned(),
         },
         kind: match manifest.kind {
             nomifun_agent_contracts::CapabilityKind::Tool => "tool",
@@ -6643,17 +6642,15 @@ fn plugin_capability_catalog_item(
         required_capabilities: manifest
             .requires
             .iter()
-            .map(|reference| nomifun_api_types::ExactCatalogRefDto {
+            .map(|reference| nomifun_api_types::CapabilityRefDto {
                 id: reference.id.as_ref().to_owned(),
-                version: reference.version.as_ref().to_owned(),
             })
             .collect(),
         conflicting_capabilities: manifest
             .conflicts
             .iter()
-            .map(|conflict| nomifun_api_types::ExactCatalogRefDto {
+            .map(|conflict| nomifun_api_types::CapabilityRefDto {
                 id: conflict.capability.id.as_ref().to_owned(),
-                version: conflict.capability.version.as_ref().to_owned(),
             })
             .collect(),
         action_count: manifest.contributions.actions.len() as u32,

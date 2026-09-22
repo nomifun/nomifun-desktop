@@ -230,9 +230,13 @@ CapabilityModuleManifest
 
 ```text
 AgentCapabilityGrant
-  module: ExactCapabilityRef
+  module: CapabilityRef（仅稳定 CapabilityId）
   allowed_actions[]
 ```
+
+Capability 不再拥有独立版本号。实现变更由来源 Package/Active Release 版本、manifest 与
+contract digest、ContributionLock 和 ResolvedSnapshot digest 精确冻结；工作台、Preset、
+依赖与冲突引用始终只使用稳定 CapabilityId，避免同时维护两套会漂移的身份。
 
 Context、middleware 和 event contribution 是模块合同的一部分。真正敏感且需要独立开关的行为必须
 建成 Action；工作台以“权限项”展示，Compiler 冻结精确 Action 授权集合。

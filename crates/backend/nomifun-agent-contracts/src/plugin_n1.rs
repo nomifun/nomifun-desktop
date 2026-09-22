@@ -731,10 +731,6 @@ impl PluginHostContributionRef {
             self.capability.id.as_ref(),
             "contribution.capability.id",
         )?;
-        validate_nonempty(
-            self.capability.version.as_ref(),
-            "contribution.capability.version",
-        )?;
         validate_digest(
             &self.contract_digest,
             "contribution.contract_digest",
@@ -3126,7 +3122,6 @@ fn validate_package_contributions(
             capability.contribution_id.as_ref(),
             "capability.contribution_id",
         )?;
-        validate_nonempty(capability.version.as_ref(), "capability.version")?;
         capability.validate_module_contract().map_err(|reason| {
             PluginN1ContractError::InvalidField {
                 field: "capability.module",
@@ -3289,7 +3284,6 @@ fn validate_package_contributions(
         }
         if !contributions.capabilities.iter().any(|capability| {
             capability.id == mapping.capability.id
-                && capability.version == mapping.capability.version
                 && capability.kind == crate::CapabilityKind::Tool
         }) {
             return Err(PluginN1ContractError::InvalidField {
@@ -3311,7 +3305,7 @@ fn validate_package_roles(
         reason: reason.into(),
     };
     let exact_capability = |reference: &CapabilityRef| contributions.capabilities.iter()
-        .find(|capability| capability.id == reference.id && capability.version == reference.version);
+        .find(|capability| capability.id == reference.id);
     let mut role_ids = BTreeSet::new();
     let mut facade_ids = BTreeSet::new();
     for contract in &contributions.role_contracts {
@@ -3515,7 +3509,6 @@ mod tests {
         let capability = CapabilityManifest {
             id: "example.csv.read".into(),
             contribution_id: ContributionId::from("capability:example.csv.read"),
-            version: "1.0.0".into(),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
@@ -3603,7 +3596,7 @@ mod tests {
         let contract = crate::RoleContractManifest {
             key: crate::RoleContractKey { role_id: "example.csv.reader".into(), contract_version: "1.0.0".into() },
             members: vec![crate::RoleMemberContract {
-                capability: CapabilityRef { id: facade.id.clone(), version: facade.version.clone() },
+                capability: CapabilityRef { id: facade.id.clone() },
                 capability_manifest_digest: digest_payload(&facade).unwrap(),
                 requirement: crate::RoleMemberRequirement::Required,
             }],
@@ -3613,7 +3606,7 @@ mod tests {
             role: crate::ExactRoleContractRef { key: contract.key.clone(), contract_digest: digest_payload(&contract).unwrap() },
             display: implementation.display.clone(),
             members: BTreeMap::from([(facade.id.clone(), crate::RoleProviderMemberContribution {
-                implementation: Some(CapabilityRef { id: implementation.id, version: implementation.version }),
+                implementation: Some(CapabilityRef { id: implementation.id }),
                 supported_platforms: vec![PlatformConstraint::Any], required_resource_kinds: BTreeSet::new(),
             })]),
         });
@@ -3633,12 +3626,11 @@ mod tests {
     }
 
     #[test]
-    fn user_role_mapping_requires_exact_direct_owned_capability() {
+    fn user_role_mapping_requires_direct_owned_capability() {
         for implementation in [
             None,
-            Some(CapabilityRef { id: "another.package.read".into(), version: "1.0.0".into() }),
-            Some(CapabilityRef { id: "example.csv.read".into(), version: "2.0.0".into() }),
-            Some(CapabilityRef { id: "example.csv.facade".into(), version: "1.0.0".into() }),
+            Some(CapabilityRef { id: "another.package.read".into() }),
+            Some(CapabilityRef { id: "example.csv.facade".into() }),
         ] {
             let mut manifest = role_manifest();
             manifest.package.contributions.role_providers[0].members.values_mut().next().unwrap().implementation = implementation;
@@ -3832,7 +3824,6 @@ mod tests {
                     ),
                     capability: CapabilityRef {
                         id: CapabilityId::from("example.csv.read"),
-                        version: VersionString::from("1.0.0"),
                     },
                     contract_digest: digest('c'),
                 },

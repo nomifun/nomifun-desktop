@@ -118,13 +118,10 @@ pub enum KernelError {
     },
     #[error("package dependency graph contains a cycle")]
     PackageDependencyCycle,
-    #[error(
-        "capability {capability_id:?} requires missing capability {dependency_id:?}@{dependency_version:?}"
-    )]
+    #[error("capability {capability_id:?} requires missing capability {dependency_id:?}")]
     MissingCapabilityDependency {
         capability_id: CapabilityId,
         dependency_id: CapabilityId,
-        dependency_version: VersionString,
     },
     #[error("capability dependency graph contains a cycle")]
     CapabilityDependencyCycle,
@@ -230,11 +227,8 @@ pub enum KernelError {
     InvalidPresetRevision { reason: String },
     #[error("preset surface {surface} is not declared")]
     SurfaceNotDeclared { surface: String },
-    #[error("capability {capability_id:?}@{version:?} is not materialized")]
-    CapabilityNotMaterialized {
-        capability_id: CapabilityId,
-        version: VersionString,
-    },
+    #[error("capability {capability_id:?} is not materialized")]
+    CapabilityNotMaterialized { capability_id: CapabilityId },
     #[error("skill {skill_id:?}@{version:?} is not materialized")]
     SkillNotMaterialized {
         skill_id: SkillId,

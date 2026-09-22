@@ -624,11 +624,6 @@ async function invokeInstalledPluginThroughAgent(context, expectedVersion) {
     draft.document.enabled_capabilities = [{
       capability: {
         id: PLUGIN_CAPABILITY_ID,
-        version: assertString(
-          capability.capability?.version,
-          'plugin_capability_version_missing',
-          'Applied Plugin capability version is missing',
-        ),
       },
       action_allowlist: [],
     }];

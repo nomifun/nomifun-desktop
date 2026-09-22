@@ -291,7 +291,7 @@ impl AgentControlPlane {
         let official_templates = self.templates.list()?;
         Ok(AgentPresetLibraryResponse {
             fresh_start: FreshStartPresentationDto {
-                data_generation: 4,
+                data_generation: nomifun_agent_contracts::AGENT_STORE_DATA_GENERATION,
                 legacy_data_imported: false,
                 official_template_count: official_templates.len() as u32,
                 user_preset_count: user_presets.len() as u32,
@@ -323,9 +323,8 @@ impl AgentControlPlane {
                     "CAPABILITY_NOT_MATERIALIZED",
                     axum::http::StatusCode::NOT_FOUND,
                     format!(
-                        "capability {}@{} is not materialized",
-                        reference.id.as_ref(),
-                        reference.version.as_ref()
+                        "capability {} is not materialized",
+                        reference.id.as_ref()
                     ),
                 )
             })?;
@@ -1673,9 +1672,8 @@ fn template_selection(
             "CAPABILITY_NOT_MATERIALIZED",
             axum::http::StatusCode::UNPROCESSABLE_ENTITY,
             format!(
-                "official template capability {}@{} is unavailable",
-                selection.capability.id.as_ref(),
-                selection.capability.version.as_ref()
+                "official template capability {} is unavailable",
+                selection.capability.id.as_ref()
             ),
         )
     })?;
@@ -2044,7 +2042,6 @@ mod tests {
         let manifest = CapabilityManifest {
             id: CapabilityId::from(id),
             contribution_id: ContributionId::from(format!("capability:{id}")),
-            version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
@@ -2150,7 +2147,6 @@ mod tests {
         );
         let reference = CapabilityRef {
             id: capability.manifest.id.clone(),
-            version: capability.manifest.version.clone(),
         };
         let catalog = CatalogSnapshot {
             capabilities: vec![capability],
@@ -2202,11 +2198,9 @@ mod tests {
         );
         let shared_ref = CapabilityRef {
             id: CapabilityId::from("knowledge"),
-            version: VersionString::from("1.0.0"),
         };
         let knowledge_only_ref = CapabilityRef {
             id: CapabilityId::from("knowledge.render.internal"),
-            version: VersionString::from("1.0.0"),
         };
 
         let agent_lock = control_plane
@@ -2460,7 +2454,7 @@ mod tests {
         // Any additional Module must prevent a personal revision from being
         // classified as the exact current official template.
         former.payload.enabled_capabilities.push(serde_json::from_value(json!({
-            "capability": { "id": "community.extra", "version": "1.0.0" },
+            "capability": { "id": "community.extra" },
             "action_allowlist": []
         })).unwrap());
         former.reference.revision += 1;

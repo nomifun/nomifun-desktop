@@ -23,7 +23,7 @@ await i18n.use(initReactI18next).init({
 afterEach(cleanup);
 
 const knowledge: CapabilityModuleCatalogItem = {
-  module: { id: asCapabilityId('knowledge'), version: '1.0.0' },
+  module: { id: asCapabilityId('knowledge') },
   display_name: 'Knowledge', description: 'Knowledge module',
   source_package: { id: asPackageId('nomifun.knowledge'), version: '1.0.0' },
   authoring_policy: 'direct', summary_kind: 'tool',

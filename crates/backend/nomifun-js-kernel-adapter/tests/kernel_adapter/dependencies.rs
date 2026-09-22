@@ -20,7 +20,6 @@ fn dependency_artifact_for(main: &[u8], mapped: bool, context: bool) -> PluginPa
     }
     parent.requires = vec![CapabilityRef {
         id: UI_TOOL_ID.into(),
-        version: VERSION.into(),
     }];
     let child = capabilities
         .iter_mut()
@@ -33,7 +32,6 @@ fn dependency_artifact_for(main: &[u8], mapped: bool, context: bool) -> PluginPa
     grandchild.contribution_id = "fixture.grandchild.contribution".into();
     child.requires = vec![CapabilityRef {
         id: GRANDCHILD.into(),
-        version: VERSION.into(),
     }];
     capabilities.push(grandchild);
     let base = PluginPackageArtifactV1::new(base.artifact_id, manifest, base.files).unwrap();
@@ -68,7 +66,6 @@ async fn dependency_contexts_cannot_start_js_through_direct_or_role_public_entri
             .into_iter()
             .map(|id| CapabilityRef {
                 id: id.into(),
-                version: VERSION.into(),
             }),
     );
     let artifact = PluginPackageArtifactV1::new(base.artifact_id, manifest, base.files).unwrap();

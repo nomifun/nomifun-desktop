@@ -500,7 +500,6 @@ mod tests {
         let mut manifest = CapabilityManifest {
             id: CapabilityId::from("mixed.module"),
             contribution_id: "capability:mixed.module".into(),
-            version: "1.0.0".into(),
             kind: CapabilityKind::Tool,
             package: PackageRef {
                 id: "fixture.package".into(),

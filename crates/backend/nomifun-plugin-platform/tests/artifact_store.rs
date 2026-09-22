@@ -58,7 +58,6 @@ fn manifest(main: &[u8]) -> ArtifactEnvelope<PluginPackageV1Manifest> {
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.csv.read"),
         contribution_id: "capability:example.csv.read".into(),
-        version: "1.0.0".into(),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: LocalizedMetadata {

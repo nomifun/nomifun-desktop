@@ -336,7 +336,6 @@ mod tests {
             dependency_refs: Vec::new(),
             capability: CapabilityRef {
                 id: capability_id.clone(),
-                version: "1.0.0".into(),
             },
             source_package: PackageRef {
                 id: "future.package".into(),
@@ -382,7 +381,6 @@ mod tests {
     ) {
         let capability = CapabilityRef {
             id: "future.module".into(),
-            version: "1.0.0".into(),
         };
         let payload = AgentPresetRevisionPayload {
             context_order: Vec::new(),
@@ -542,7 +540,6 @@ mod tests {
         let mut manifest = CapabilityManifest {
             id: "never-seen-before".into(),
             contribution_id: "capability:never-seen-before".into(),
-            version: "1.0.0".into(),
             kind: CapabilityKind::Tool,
             package: PackageRef {
                 id: "future.package".into(),

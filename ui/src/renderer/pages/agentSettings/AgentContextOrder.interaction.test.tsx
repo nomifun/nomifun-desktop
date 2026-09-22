@@ -17,7 +17,7 @@ import { asAgentPresetId, asDigestHex, type AgentPresetDraft } from '@/common/ty
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en } } }, interpolation: { escapeValue: false } });
 const item = (id: string, kind = 'context_contributor'): CapabilityCatalogItem => ({
-  capability: { id: asCapabilityId(id), version: '1.0.0' }, kind, display_name: id, description: '',
+  capability: { id: asCapabilityId(id) }, kind, display_name: id, description: '',
   source_package: { id: asPackageId('test'), version: '1.0.0' }, source_kind: 'managed_local',
   materialization_state: 'materialized', supported_surfaces: ['desktop'], required_runtime_features: [],
   required_resource_kinds: [], required_capabilities: [], conflicting_capabilities: [], action_count: 0, context_contributor_count: 1,

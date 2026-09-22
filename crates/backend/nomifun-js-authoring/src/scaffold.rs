@@ -195,7 +195,7 @@ type PluginToolInvocation = Readonly<{
   input: PluginJson;
   contribution: Readonly<{
     target: PluginTargetLock;
-    capability: Readonly<{ id: string; version: string }>;
+    capability: Readonly<{ id: string }>;
     contribution_id: string;
     contract_digest: string;
   }>;
