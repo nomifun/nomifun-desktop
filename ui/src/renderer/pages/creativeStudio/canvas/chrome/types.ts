@@ -80,7 +80,6 @@ export interface CreativeCanvasChromeProps {
 export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
   'text',
   'image',
-  'panorama',
   'video',
   'audio',
   'timeline',
@@ -93,7 +92,6 @@ export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
   'video',
   'audio',
   'timeline',
-  'panorama',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
 export const CREATIVE_CANVAS_CHROME_BACKGROUNDS = [

@@ -69,7 +69,7 @@ canonical 节点：
 | `image` | 真实图片素材、空图片承接节点及其持久 T2I/I2I Composer 草稿。 |
 | `video` | 真实视频素材或带持久 Composer 草稿的空 T2V/I2V 承接节点。 |
 | `audio` | 真实音频素材或带持久 Composer 草稿的空 TTS 承接节点。 |
-| `panorama` | 真实等距柱状全景素材及其查看状态。 |
+| `timeline` | 持久化的图片/视频编辑时间线及其片段排列。 |
 | `config` | exact 生成操作、参数、任务状态、输入与结果的可审计 owner。 |
 | `group` | 对已有选区执行分组后产生的容器；它不是生成器。 |
 

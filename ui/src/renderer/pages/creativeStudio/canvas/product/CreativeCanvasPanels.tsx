@@ -9,7 +9,6 @@ import {
   Group,
   Info,
   Lock,
-  PanoramaHorizontal,
   Pic,
   Redo,
   Robot,
@@ -44,7 +43,6 @@ const iconProps = {
 const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasUserNodeKind, string> = {
   text: 'creativeStudio.canvas.nodeKinds.text',
   image: 'creativeStudio.canvas.nodeKinds.image',
-  panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
   timeline: 'creativeStudio.canvas.nodeKinds.timeline',
@@ -54,7 +52,6 @@ const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasUserNodeKind, string> = {
 const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasUserNodeKind, string> = {
   text: '文本',
   image: '图片',
-  panorama: '全景图',
   video: '视频',
   audio: '音频',
   timeline: '时间线',
@@ -80,8 +77,6 @@ function nodeKindIcon(kind: CreativeCanvasUserNodeKind): React.ReactNode {
       return <FileText {...iconProps} />;
     case 'image':
       return <Pic {...iconProps} />;
-    case 'panorama':
-      return <PanoramaHorizontal {...iconProps} />;
     case 'video':
       return <VideoTwo {...iconProps} />;
     case 'audio':
@@ -114,12 +109,6 @@ export function creativeCanvasNodeDisplayName(
       );
     case 'image':
       return compactText(node.data.caption || node.data.alt) || nodeKindLabel('image', t);
-    case 'panorama':
-      return node.data.assetId
-        ? t('creativeStudio.canvas.nodes.connectedPanorama', {
-            defaultValue: '已连接全景素材',
-          })
-        : nodeKindLabel('panorama', t);
     case 'video':
       return node.data.assetId
         ? t('creativeStudio.canvas.nodes.connectedVideo', {
@@ -420,41 +409,6 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasUserNode; memberCount: 
                     defaultValue: '未解析',
                   })
             }
-          />
-        </>
-      );
-    case 'panorama':
-      return (
-        <>
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.assetId', {
-              defaultValue: '素材 ID',
-            })}
-            value={optionalValue(node.data.assetId, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.projection', {
-              defaultValue: '投影',
-            })}
-            value={t('creativeStudio.canvas.editor.projectionEquirectangular', {
-              defaultValue: '等距柱状投影',
-            })}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.viewAngle', {
-              defaultValue: '视角',
-            })}
-            value={t('creativeStudio.canvas.nodes.panorama.orientation', {
-              yaw: node.data.yaw,
-              pitch: node.data.pitch,
-              defaultValue: '偏航 {{yaw}}° · 俯仰 {{pitch}}°',
-            })}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.fieldOfView', {
-              defaultValue: '视野',
-            })}
-            value={`${node.data.fieldOfView}°`}
           />
         </>
       );
@@ -813,63 +767,6 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
               </option>
             </select>
           </PropertyEditorField>
-        </>
-      );
-    case 'panorama':
-      return (
-        <>
-          {([
-            [
-              t('creativeStudio.canvas.editor.horizontalAngle', {
-                defaultValue: '水平视角',
-              }),
-              'yaw',
-              -360,
-              360,
-            ],
-            [
-              t('creativeStudio.canvas.editor.verticalAngle', {
-                defaultValue: '垂直视角',
-              }),
-              'pitch',
-              -90,
-              90,
-            ],
-            [
-              t('creativeStudio.canvas.properties.fieldOfView', {
-                defaultValue: '视野',
-              }),
-              'fieldOfView',
-              10,
-              150,
-            ],
-          ] as const).map(([label, field, min, max]) => (
-            <PropertyEditorField key={field} label={label}>
-              <input
-                type='number'
-                min={min}
-                max={max}
-                value={node.data[field]}
-                onChange={(event) =>
-                  onUpdate(
-                    {
-                      ...node,
-                      data: {
-                        ...node.data,
-                        [field]: finiteNumber(
-                          event.currentTarget.valueAsNumber,
-                          node.data[field],
-                          min,
-                          max
-                        ),
-                      },
-                    },
-                    field
-                  )
-                }
-              />
-            </PropertyEditorField>
-          ))}
         </>
       );
     case 'video':

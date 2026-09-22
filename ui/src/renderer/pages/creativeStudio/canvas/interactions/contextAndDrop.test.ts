@@ -64,7 +64,6 @@ describe('canvas context, double-click and drop intents', () => {
       file: image,
       kind: 'image',
       worldPosition: { x: 50, y: 40 },
-      panoramaChoice: 'after-upload-if-2-to-1',
     });
     expect(result.rejected.map((item) => item.reason)).toEqual(['audio_unsupported']);
     expect(result.ignoredAcceptedFiles).toEqual([video]);

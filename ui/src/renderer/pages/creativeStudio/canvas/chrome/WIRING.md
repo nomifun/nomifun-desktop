@@ -57,7 +57,7 @@ while unpressed leaves the editor in its default selection mode. The bottom
 toolbar exposes one History icon for opening or closing the shared bottom
 panel.
 
-The bottom dock exposes text, image, video, audio, panorama, and
+The bottom dock exposes text, image, video, audio, timeline, and
 generation-config creation directly in the reference order. Group creation is
 intentionally not a node-creation tool; it remains a selection action.
 

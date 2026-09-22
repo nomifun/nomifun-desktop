@@ -16,7 +16,6 @@ export type CreativeCanvasBackground = 'dots' | 'lines' | 'blank';
 
 export type CreativeCanvasNodeKind =
   | 'image'
-  | 'panorama'
   | 'text'
   | 'config'
   | 'video'
@@ -112,14 +111,6 @@ export interface CreativeImageNodeData {
   fit: 'contain' | 'cover';
   naturalSize: CreativeSize | null;
   composer: CreativeImageComposerDraft | null;
-}
-
-export interface CreativePanoramaNodeData {
-  assetId: string | null;
-  projection: 'equirectangular';
-  yaw: number;
-  pitch: number;
-  fieldOfView: number;
 }
 
 export interface CreativeTextNodeData {
@@ -242,7 +233,6 @@ export interface CreativeGroupNodeData {
 
 export interface CreativeCanvasNodeDataByKind {
   image: CreativeImageNodeData;
-  panorama: CreativePanoramaNodeData;
   text: CreativeTextNodeData;
   config: CreativeConfigNodeData;
   video: CreativeVideoNodeData;

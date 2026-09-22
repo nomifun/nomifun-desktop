@@ -36,13 +36,6 @@ const expectedData: CreativeCanvasNodeDataByKind = {
     naturalSize: null,
     composer: null,
   },
-  panorama: {
-    assetId: null,
-    projection: 'equirectangular',
-    yaw: 0,
-    pitch: 0,
-    fieldOfView: 75,
-  },
   text: {
     text: '',
     format: 'plain',
@@ -129,12 +122,11 @@ describe('createCreativeCanvasProductNode', () => {
     expect(JSON.stringify(historical).includes('originalUrl')).toBe(false);
   });
 
-  test('builds all eight canonical payloads with independent bare UUIDv7 ids', () => {
+  test('builds all seven canonical payloads with independent bare UUIDv7 ids', () => {
     const state = createInitialCanvasState();
     const kinds: CreativeCanvasNodeKind[] = [
       'text',
       'image',
-      'panorama',
       'video',
       'audio',
       'timeline',
@@ -145,7 +137,7 @@ describe('createCreativeCanvasProductNode', () => {
       createCreativeCanvasProductNode(kind, state, VIEWPORT_SIZE, { cascadeIndex: 0 })
     );
 
-    expect(new Set(nodes.map((node) => node.id)).size).toBe(8);
+    expect(new Set(nodes.map((node) => node.id)).size).toBe(7);
     for (const node of nodes) {
       expect(UUID_V7.test(node.id)).toBe(true);
       expect(node.id.includes('node-')).toBe(false);
