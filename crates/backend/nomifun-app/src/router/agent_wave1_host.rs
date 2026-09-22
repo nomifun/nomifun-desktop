@@ -633,13 +633,22 @@ fn agent_knowledge_resource(
         .filter(|name| !name.trim().is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| knowledge_base_id.as_str().to_owned());
+    let (writeback, _) =
+        nomifun_agent_domain_wave1::agent_knowledge_writeback_policy(binding)
+            .map_err(Wave1HostPortError::invalid_request)?;
+    let policy_explicit =
+        nomifun_agent_domain_wave1::agent_knowledge_writeback_policy_is_explicit(binding);
+    let effective_operations = binding
+        .operations
+        .iter()
+        .filter(|operation| !policy_explicit || writeback || operation.as_str() != "write");
     nomifun_knowledge::AgentKnowledgeResource::from_operation_names(
         binding.binding_id.as_ref(),
         binding.owner_id.clone(),
         knowledge_base_id,
         name,
         PathBuf::from(root),
-        binding.operations.iter(),
+        effective_operations,
     )
     .map_err(wave1_application_error)
 }

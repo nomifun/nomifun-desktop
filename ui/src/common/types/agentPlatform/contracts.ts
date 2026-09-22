@@ -542,6 +542,12 @@ export interface CreateAgentSessionRequest {
   preset_id: AgentPresetId;
   title?: string;
   resource_selections?: AgentResourceSelection[];
+  /** Session-scoped disposition for selected Knowledge resources. This can
+   * narrow behavior only; the backend still derives Actions and write access. */
+  knowledge_policy?: {
+    writeback: boolean;
+    writeback_eagerness: 'manual' | 'auto';
+  };
   /** User-selected host directory candidate. The backend validates and freezes
    * the canonical workspace resource; this field is never authority by itself. */
   workspace?: string;

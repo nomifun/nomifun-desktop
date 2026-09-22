@@ -390,6 +390,7 @@ const createDeps = ({
   workspaceEnabled = true,
   resourceResolutionReady = true,
   resourceSelections = [],
+  knowledgePolicy,
   navigations = [],
 }: {
   selection: GuidAgentSelection;
@@ -401,6 +402,7 @@ const createDeps = ({
   workspaceEnabled?: boolean;
   resourceResolutionReady?: boolean;
   resourceSelections?: AgentResourceSelection[];
+  knowledgePolicy?: GuidSendDeps['knowledgePolicy'];
   navigations?: string[];
 }): GuidSendDeps => ({
   input,
@@ -417,6 +419,7 @@ const createDeps = ({
   workspaceEnabled,
   resourceResolutionReady,
   resourceSelections,
+  knowledgePolicy,
   autoWork: { enabled: false },
   setMentionOpen: noopDispatch<boolean>(),
   setMentionQuery: noopDispatch<string | null>(),
@@ -607,11 +610,16 @@ describe('useGuidSend HTTP behavior', () => {
       { resource_kind: 'knowledge_base', resource_id: '0190f5fe-7c00-7a00-8000-000000000201' },
       { resource_kind: 'workspace', resource_id: 'default-workspace' },
     ];
+    const knowledgePolicy = {
+      writeback: true,
+      writeback_eagerness: 'auto' as const,
+    };
     const hook = renderHook(() => useGuidSend(createDeps({
       selection: { kind: 'preset', presetId: PRESET_ID },
       selectedPreset: PRESET,
       workspaceEnabled: false,
       resourceSelections,
+      knowledgePolicy,
     })));
 
     await act(async () => { await hook.result.current.handleSend(); });
@@ -621,6 +629,7 @@ describe('useGuidSend HTTP behavior', () => {
       preset_id: PRESET_ID,
       title: INPUT,
       resource_selections: resourceSelections,
+      knowledge_policy: knowledgePolicy,
     });
     expect(Object.keys((calls[0].body as { resource_selections: object[] }).resource_selections[0])).toEqual(['resource_kind', 'resource_id']);
   });

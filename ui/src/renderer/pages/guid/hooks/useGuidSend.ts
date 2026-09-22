@@ -28,8 +28,11 @@ import type {
   GuidAgentSelection,
 } from '../types';
 import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
-import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
-import type { AgentResourceSelection } from '@/common/types/agentPlatform';
+import type {
+  AgentResourceSelection,
+  CreateAgentSessionRequest,
+  OfficialPresetTemplate,
+} from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 import type { GuidCollaborationConfig } from './useGuidCollaboration';
@@ -60,6 +63,8 @@ export type GuidSendDeps = {
   resourceResolutionReady: boolean;
   /** Product-selected resources. The backend derives ownership and operations. */
   resourceSelections: AgentResourceSelection[];
+  /** Session-scoped behavior for the exact selected Knowledge resources. */
+  knowledgePolicy?: NonNullable<CreateAgentSessionRequest['knowledge_policy']>;
   collaboration?: GuidCollaborationConfig;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
@@ -162,6 +167,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     workspaceEnabled,
     resourceResolutionReady,
     resourceSelections,
+    knowledgePolicy,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -218,6 +224,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         model: current_model.use_model,
       },
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
+      ...(knowledgePolicy ? { knowledge_policy: knowledgePolicy } : {}),
       ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
@@ -307,6 +314,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedTemplate,
     resourceResolutionReady,
     resourceSelections,
+    knowledgePolicy,
     workspaceEnabled,
     t,
   ]);

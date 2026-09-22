@@ -87,7 +87,7 @@ describe('KnowledgeControl search helpers', () => {
     expect(source.includes('knowledge-control-root-missing')).toBe(true);
     expect(
       source.includes(
-        '!targetUnresolved && (!rootMissing || isSelected) && handleToggleBase(base.knowledge_base_id)'
+        '!targetUnresolved && (!cannotSelect || isSelected) && handleToggleBase(base.knowledge_base_id)'
       )
     ).toBe(true);
     expect(source.includes("t('knowledge.mount.rootMissing'")).toBe(true);
@@ -99,7 +99,22 @@ describe('KnowledgeControl search helpers', () => {
     expect(
       source.includes("{ writeback: false, writeback_eagerness: 'manual' as const }")
     ).toBe(true);
-    expect(source.includes('targetUnresolved || binding.kb_ids.length === 0')).toBe(true);
+    expect(
+      source.includes('targetUnresolved || !writebackAvailable || binding.kb_ids.length === 0')
+    ).toBe(true);
+  });
+
+  test('supports a Guid draft without restoring mutable Conversation bindings', () => {
+    const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
+
+    expect(source.includes('export type KnowledgeDraft')).toBe(true);
+    expect(source.includes('const binding = draft?.value ?? persistedBinding;')).toBe(true);
+    expect(source.includes('draft.onChange(next);')).toBe(true);
+    expect(source.includes("target.kind === 'conversation'")).toBe(false);
+    expect(source.includes('requireWritableBases')).toBe(true);
+    expect(source.includes('writebackAvailable')).toBe(true);
+    expect(source.includes("base.tree_access !== 'editable'")).toBe(true);
+    expect(source.includes("t('knowledge.mount.writeAccessRequired')")).toBe(true);
   });
 
   test('refreshes the mounted binding when another surface changes the same target', () => {

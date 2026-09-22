@@ -652,7 +652,7 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
 }
 
 #[tokio::test]
-async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_before_answering() {
+async fn canonical_session_freezes_knowledge_writeback_and_executes_search_before_answering() {
     const TRUST: &str = "canonical-knowledge-tool";
     const QUERY: &str = "NOMIFUN_KNOWLEDGE_QUERY_9233";
     const RESULT_MARKER: &str = "KNOWLEDGE_TOOL_RESULT_9233";
@@ -891,13 +891,58 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
     document["instructions"] = Value::String(
         "Use the mounted Knowledge bases for covered questions.".to_owned(),
     );
+    let (status, read_only_preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets",
+        json!({
+            "display_name": "Read-only Knowledge Agent",
+            "description": "Canonical Knowledge regression fixture",
+            "document": document.clone()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_only_preset}");
+    let read_only_preset_id = read_only_preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .unwrap();
+    let (status, rejected_writeback) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({
+            "preset_id": read_only_preset_id,
+            "model": model,
+            "resource_selections": [{
+                "resource_kind": "knowledge_base",
+                "resource_id": base_a.knowledge_base_id
+            }],
+            "knowledge_policy": {
+                "writeback": true,
+                "writeback_eagerness": "auto"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected_writeback}");
+    assert_eq!(rejected_writeback["code"], "KNOWLEDGE_WRITEBACK_NOT_AVAILABLE");
+
+    document["enabled_capabilities"] = json!([{
+        "capability": {"id": "knowledge"},
+        "action_allowlist": [
+            "knowledge/autogen",
+            "knowledge/read",
+            "knowledge/search",
+            "knowledge/write"
+        ]
+    }]);
     let (status, preset) = call(
         router.clone(),
         "POST",
         "/api/agent-presets",
         json!({
-            "display_name": "Knowledge-only Agent",
-            "description": "Canonical Knowledge regression fixture",
+            "display_name": "Write-back Knowledge Agent",
+            "description": "Canonical Knowledge write-back fixture",
             "document": document
         }),
     )
@@ -916,7 +961,11 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
             "resource_selections": [
                 {"resource_kind": "knowledge_base", "resource_id": base_a.knowledge_base_id},
                 {"resource_kind": "knowledge_base", "resource_id": base_b.knowledge_base_id}
-            ]
+            ],
+            "knowledge_policy": {
+                "writeback": true,
+                "writeback_eagerness": "auto"
+            }
         }),
     )
     .await;
@@ -929,8 +978,29 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
     assert!(resources.iter().any(|resource| {
         resource["typed_parameters"]["knowledge_name"] == "Python handbook"
     }));
+    assert!(resources.iter().all(|resource| {
+        resource["typed_parameters"]["knowledge_writeback"] == "true"
+            && resource["typed_parameters"]["knowledge_writeback_eagerness"] == "auto"
+    }));
 
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (status, projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projection}");
+    assert_eq!(
+        projection["data"]["agent_snapshot"]["knowledge_policy"],
+        json!({
+            "enabled": true,
+            "writeback": true,
+            "eagerness": "auto",
+            "grounded": true
+        })
+    );
     let (status, retired_binding) = call(
         router.clone(),
         "POST",
@@ -1007,12 +1077,18 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
     let first = &requests[0];
     let prompt = first["messages"].to_string();
     assert!(prompt.contains("knowledge/search before answering from memory"), "{first}");
+    assert!(prompt.contains("write-back is enabled in automatic mode"), "{first}");
     assert!(prompt.contains("Python handbook"), "{first}");
     assert!(prompt.contains("Engineering notes"), "{first}");
     assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
         tool["function"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("Action: knowledge/search"))
+    }));
+    assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Action: knowledge/write"))
     }));
     assert!(requests[1].to_string().contains("knowledge-search-call"), "{}", requests[1]);
     assert!(requests[2].to_string().contains(RESULT_MARKER), "{}", requests[2]);

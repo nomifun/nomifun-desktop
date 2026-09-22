@@ -30,9 +30,11 @@ Turn 时只提交消息、附件与明确允许的 Turn 输入，不接受 `pres
 或 MCP overlay。
 
 知识库遵循同一边界：Agent 工作台决定 `knowledge` Actions 的能力上限，Guid 在创建
-会话前选择零到多个 `knowledge_base` 资源，后端校验归属并把精确资源冻结进
-`AgentBinding.typed_resource_bindings`。已有会话只读展示这组挂载；模型切换必须原样
-保留它们。终端的 workpath 知识挂载属于独立产品契约，仍可随工作路径动态更新。
+会话前通过右上角「知识库」控件选择零到多个 `knowledge_base` 资源及回血策略，后端
+校验归属与写权限，并把精确资源、`writeback` 与 `writeback_eagerness` 一起冻结进
+`AgentBinding.typed_resource_bindings`。关闭回血时运行时按只读策略执行；手动型只响应
+用户明确要求，自动型才允许按高标准自主沉淀。已有会话只读展示这组挂载；模型切换
+必须原样保留它们。终端的 workpath 知识挂载属于独立产品契约，仍可随工作路径动态更新。
 
 创意工坊任务只在已冻结为 Creative Studio Agent 的会话内继续复用该 Preset；从其他
 会话选择图像、视频或音乐模式会进入 Guid 创建新的 Creative Studio Session。
