@@ -51,15 +51,6 @@
   display: inline-flex;
   min-width: 0;
   align-items: center;
-  gap: 6px;
-}
-
-.agentEntryLabel {
-  flex: 0 0 auto;
-  color: var(--color-text-3);
-  font-size: 11px;
-  line-height: 16px;
-  white-space: nowrap;
 }
 
 @container (max-width: 420px) {

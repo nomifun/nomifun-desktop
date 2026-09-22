@@ -34,6 +34,8 @@ function mount({ preparing = false } = {}) {
 test('four direct scene buttons preserve the message, references and generation settings', () => {
   const { page, getDraft, switches } = mount();
   const group = page.getByTestId('composer-scene-selector');
+  expect(page.queryByText('使用 Agent')).toBeNull();
+  expect(page.getByRole('button', { name: '最简问答' })).toBeTruthy();
   expect(within(group).getAllByRole('button')).toHaveLength(4);
   expect(page.queryByRole('menu')).toBeNull();
   fireEvent.click(within(group).getByRole('button', { name: '日常对话' }));
