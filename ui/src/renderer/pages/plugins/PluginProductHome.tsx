@@ -103,6 +103,7 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
           <AgentIdentityBadge
             backend='nomi'
             name={t('pluginWorkbench.product.agentName', { defaultValue: 'General Agent' })}
+            compact
           />
         </div>
         <Input.TextArea

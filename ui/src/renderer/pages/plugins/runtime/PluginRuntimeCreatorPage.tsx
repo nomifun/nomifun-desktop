@@ -420,6 +420,7 @@ export default function PluginRuntimeCreatorPage({
             <AgentIdentityBadge
               backend='nomi'
               name={t('pluginRuntime.product.agentName', { defaultValue: 'General Agent' })}
+              compact
               className='mb-12px w-fit'
             />
             {modelNotice}
