@@ -8,15 +8,16 @@ use nomifun_api_types::AgentBindingValueDto;
 use nomifun_common::AppError;
 
 /// Resolve the single physical workspace root frozen into an Agent binding.
-/// Both AutoWork staging and AgentExecution admission call this function so no
-/// attachment write can precede the execution owner's exact authority check.
-pub fn resolve_frozen_automation_workspace(
+/// Interactive collaboration and AutoWork both call this authority boundary;
+/// neither may infer a workspace from mutable Conversation metadata or model
+/// input.
+pub fn resolve_frozen_execution_workspace(
     owner_id: &str,
     binding: &AgentBindingValueDto,
 ) -> Result<Option<String>, AppError> {
     if owner_id.is_empty() || owner_id.trim() != owner_id {
         return Err(AppError::Forbidden(
-            "AutoWork workspace authority requires a canonical owner".to_owned(),
+            "Agent execution workspace authority requires a canonical owner".to_owned(),
         ));
     }
     let mut roots = BTreeSet::new();
@@ -28,7 +29,7 @@ pub fn resolve_frozen_automation_workspace(
     }) {
         if resource.owner_id != owner_id {
             return Err(AppError::Forbidden(
-                "AutoWork workspace resource belongs to another owner".to_owned(),
+                "Agent execution workspace resource belongs to another owner".to_owned(),
             ));
         }
         let root = resource
@@ -36,7 +37,7 @@ pub fn resolve_frozen_automation_workspace(
             .get("workspace_root")
             .ok_or_else(|| {
                 AppError::Conflict(
-                    "AutoWork workspace resource has no frozen workspace_root".to_owned(),
+                    "Agent execution workspace resource has no frozen workspace_root".to_owned(),
                 )
             })?;
         validate_workspace_root(root)?;
@@ -44,10 +45,19 @@ pub fn resolve_frozen_automation_workspace(
     }
     if roots.len() > 1 {
         return Err(AppError::Conflict(
-            "AutoWork Agent binding contains conflicting workspace roots".to_owned(),
+            "Agent execution binding contains conflicting workspace roots".to_owned(),
         ));
     }
     Ok(roots.pop_first())
+}
+
+/// Backwards-compatible domain name for the AutoWork caller. The authority
+/// rule is shared with interactive Agent collaboration above.
+pub fn resolve_frozen_automation_workspace(
+    owner_id: &str,
+    binding: &AgentBindingValueDto,
+) -> Result<Option<String>, AppError> {
+    resolve_frozen_execution_workspace(owner_id, binding)
 }
 
 /// Revalidate a queue-supplied workspace against the same frozen binding used
@@ -59,7 +69,7 @@ pub fn admit_frozen_automation_workspace(
     requested: Option<&str>,
 ) -> Result<Option<String>, AppError> {
     let bound = binding
-        .map(|binding| resolve_frozen_automation_workspace(owner_id, binding))
+        .map(|binding| resolve_frozen_execution_workspace(owner_id, binding))
         .transpose()?
         .flatten();
     if let Some(requested) = requested {
