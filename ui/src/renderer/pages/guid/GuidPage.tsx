@@ -573,7 +573,6 @@ const GuidPage: React.FC = () => {
             value: advancedConfig.knowledge,
             onChange: advancedConfig.setKnowledge,
           }}
-          requireWritableBases={knowledgeRequiresWrite}
           writebackAvailable={knowledgeRequiresWrite}
           applyNote={t('knowledge.control.guidApplyNote')}
         />

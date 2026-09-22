@@ -652,11 +652,14 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
 }
 
 #[tokio::test]
-async fn canonical_session_freezes_knowledge_writeback_and_executes_search_before_answering() {
+async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatically() {
     const TRUST: &str = "canonical-knowledge-tool";
     const QUERY: &str = "NOMIFUN_KNOWLEDGE_QUERY_9233";
     const RESULT_MARKER: &str = "KNOWLEDGE_TOOL_RESULT_9233";
     const REPLY: &str = "KNOWLEDGE_SEARCH_WAS_USED";
+    const WRITEBACK_MARKER: &str = "AUTOMATIC_WRITEBACK_WAS_USED";
+    const DISABLED_REPLY: &str = "KNOWLEDGE_WAS_DISABLED";
+    const READ_ONLY_REPLY: &str = "KNOWLEDGE_WAS_READ_ONLY";
 
     async fn call(
         router: axum::Router,
@@ -696,24 +699,105 @@ async fn canonical_session_freezes_knowledge_writeback_and_executes_search_befor
         .respond_with(move |request: &wiremock::Request| {
             let body = request.body_json::<Value>().unwrap();
             captured.lock().unwrap().push(body.clone());
+            let body_text = body.to_string();
+            if body_text.contains("knowledge-base curator for NomiFun") {
+                let prompt = body["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .and_then(|message| message["content"].as_str())
+                    .expect("write-back request must carry the extraction prompt");
+                let marker = "- kb_id: ";
+                let start = prompt.find(marker).expect("mounted kb_id") + marker.len();
+                let kb_id = &prompt[start..start + 36];
+                let content = json!({
+                    "candidates": [{
+                        "kb_id": kb_id,
+                        "rel_path": "patterns/automatic-writeback.md",
+                        "content": format!("# Durable result\n\n{WRITEBACK_MARKER}")
+                    }]
+                })
+                .to_string();
+                let frame = json!({
+                    "id": "knowledge-writeback-round",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": content},
+                        "finish_reason": null
+                    }]
+                });
+                let done = json!({
+                    "id": "knowledge-writeback-round",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                return wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"
+                    ));
+            }
             let messages = body["messages"].as_array().unwrap();
             let tool_results = messages
                 .iter()
                 .filter(|message| message["role"] == "tool")
                 .collect::<Vec<_>>();
-            let (frame, finish_reason, response_id) = if tool_results.is_empty() {
-                let search = body["tools"]
-                    .as_array()
-                    .and_then(|tools| {
-                        tools.iter().find(|tool| {
-                            tool["function"]["description"]
-                                .as_str()
-                                .is_some_and(|description| {
-                                    description.contains("Action: knowledge/search")
-                                })
+            let search_tool = body["tools"].as_array().and_then(|tools| {
+                tools.iter().find(|tool| {
+                    tool["function"]["description"]
+                        .as_str()
+                        .is_some_and(|description| {
+                            description.contains("Action: knowledge/search")
                         })
-                    })
-                    .expect("the frozen Knowledge search Action must reach the model");
+                })
+            });
+            let write_tool_available = body["tools"].as_array().is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    tool["function"]["description"]
+                        .as_str()
+                        .is_some_and(|description| {
+                            description.contains("Action: knowledge/write")
+                        })
+                })
+            });
+            if search_tool.is_none() {
+                let frame = json!({
+                    "id": "knowledge-disabled-round",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": DISABLED_REPLY},
+                        "finish_reason": null
+                    }]
+                });
+                let done = json!({
+                    "id": "knowledge-disabled-round",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                return wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"
+                    ));
+            }
+            if !write_tool_available {
+                let frame = json!({
+                    "id": "knowledge-read-only-round",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": READ_ONLY_REPLY},
+                        "finish_reason": null
+                    }]
+                });
+                let done = json!({
+                    "id": "knowledge-read-only-round",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                return wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"
+                    ));
+            }
+            let (frame, finish_reason, response_id) = if tool_results.is_empty() {
+                let search = search_tool.expect("Knowledge search tool");
                 (
                     json!({
                         "id": "knowledge-search-round",
@@ -979,11 +1063,39 @@ async fn canonical_session_freezes_knowledge_writeback_and_executes_search_befor
         resource["typed_parameters"]["knowledge_name"] == "Python handbook"
     }));
     assert!(resources.iter().all(|resource| {
-        resource["typed_parameters"]["knowledge_writeback"] == "true"
+        resource["typed_parameters"]["knowledge_enabled"] == "true"
+            && resource["typed_parameters"]["knowledge_writeback"] == "true"
             && resource["typed_parameters"]["knowledge_writeback_eagerness"] == "auto"
     }));
 
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (status, consumers) = call(
+        router.clone(),
+        "GET",
+        &format!(
+            "/api/knowledge/bases/{}/consumers",
+            base_a.knowledge_base_id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{consumers}");
+    assert!(consumers["data"].as_array().unwrap().iter().any(|consumer| {
+        consumer["target_kind"] == "conversation"
+            && consumer["target_id"] == session_id
+            && consumer["enabled"] == true
+    }));
+    let (status, mounted_delete) = call(
+        router.clone(),
+        "DELETE",
+        &format!(
+            "/api/knowledge/bases/{}",
+            base_a.knowledge_base_id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{mounted_delete}");
     let (status, projection) = call(
         router.clone(),
         "GET",
@@ -1001,6 +1113,68 @@ async fn canonical_session_freezes_knowledge_writeback_and_executes_search_befor
             "grounded": true
         })
     );
+    let (status, disabled) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": false,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled}");
+    assert_eq!(disabled["data"]["enabled"], false);
+    assert_eq!(disabled["data"]["kb_ids"].as_array().unwrap().len(), 2);
+    let (status, disabled_projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled_projection}");
+    assert_eq!(
+        disabled_projection["data"]["agent_snapshot"]["knowledge_policy"],
+        json!({
+            "enabled": false,
+            "writeback": false,
+            "grounded": false
+        })
+    );
+
+    let (status, manual) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": true,
+            "writeback": true,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{manual}");
+    assert_eq!(manual["data"]["writeback_eagerness"], "manual");
+
+    let (status, automatic) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": true,
+            "writeback": true,
+            "writeback_eagerness": "auto",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{automatic}");
+    assert_eq!(automatic["data"]["writeback"], true);
+    assert_eq!(automatic["data"]["writeback_eagerness"], "auto");
     let (status, retired_binding) = call(
         router.clone(),
         "POST",
@@ -1072,14 +1246,24 @@ async fn canonical_session_freezes_knowledge_writeback_and_executes_search_befor
         );
     }
 
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while model_requests.lock().unwrap().len() < 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("automatic write-back extraction must run before the turn becomes idle");
+
     let requests = model_requests.lock().unwrap();
-    assert_eq!(requests.len(), 3, "search, read, and final model rounds are required");
+    assert_eq!(requests.len(), 4, "search, read, final, and automatic write-back rounds are required");
     let first = &requests[0];
     let prompt = first["messages"].to_string();
-    assert!(prompt.contains("knowledge/search before answering from memory"), "{first}");
+    assert!(prompt.contains("host performs one bounded search for every user turn"), "{first}");
     assert!(prompt.contains("write-back is enabled in automatic mode"), "{first}");
     assert!(prompt.contains("Python handbook"), "{first}");
     assert!(prompt.contains("Engineering notes"), "{first}");
+    assert!(prompt.contains("nomifun_knowledge_retrieval"), "{first}");
+    assert!(prompt.contains(RESULT_MARKER), "{first}");
     assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
         tool["function"]["description"]
             .as_str()
@@ -1092,6 +1276,160 @@ async fn canonical_session_freezes_knowledge_writeback_and_executes_search_befor
     }));
     assert!(requests[1].to_string().contains("knowledge-search-call"), "{}", requests[1]);
     assert!(requests[2].to_string().contains(RESULT_MARKER), "{}", requests[2]);
+    assert!(requests[3].to_string().contains(REPLY), "{}", requests[3]);
+    drop(requests);
+
+    let written = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let Ok(written) = services
+                .knowledge_service
+                .read_file(
+                    base_a.knowledge_base_id.as_str(),
+                    "patterns/automatic-writeback.md",
+                )
+                .await
+            {
+                break written;
+            }
+            if let Ok(written) = services
+                .knowledge_service
+                .read_file(
+                    base_b.knowledge_base_id.as_str(),
+                    "patterns/automatic-writeback.md",
+                )
+                .await
+            {
+                break written;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("automatic write-back must publish a durable Knowledge file");
+    assert!(written.content.contains(WRITEBACK_MARKER));
+
+    let (status, disabled_after_runtime) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": false,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled_after_runtime}");
+    let (status, disabled_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": {"content": "回答一个不应读取知识库的问题"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled_turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (status, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == DISABLED_REPLY)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("Knowledge-disabled reply must become durable");
+    let requests = model_requests.lock().unwrap();
+    let disabled_request = requests.last().unwrap();
+    assert!(!disabled_request.to_string().contains("nomifun_knowledge_retrieval"));
+    assert!(disabled_request["tools"].as_array().is_none_or(|tools| {
+        !tools.iter().any(|tool| {
+            tool["function"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Action: knowledge/"))
+        })
+    }));
+    drop(requests);
+
+    let (status, read_only) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": true,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_only}");
+    let (status, read_only_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": {"content": format!("再次查询 {QUERY}")}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_only_turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (_, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == READ_ONLY_REPLY)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("read-only Knowledge reply must become durable");
+    let requests = model_requests.lock().unwrap();
+    let read_only_request = requests.last().unwrap();
+    assert!(read_only_request.to_string().contains("nomifun_knowledge_retrieval"));
+    let tools = read_only_request["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Action: knowledge/search"))
+    }));
+    assert!(!tools.iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("Action: knowledge/write")
+                    || description.contains("Action: knowledge/autogen")
+            })
+    }));
     drop(requests);
 
     services.shutdown_browser_platform().await.unwrap();

@@ -34,14 +34,16 @@ function kindIcon(kind: string): React.ReactNode {
   }
 }
 
-// A legacy conversation row may still be visible while old local data is being
-// inspected, but canonical AgentSession resources are immutable. Do not offer
-// a mutation that the server correctly rejects; only live mutable targets can
-// be unmounted from this reverse-consumer view.
-const supportedBindingKinds = new Set<KnowledgeBindingKind>(['terminal', 'companion', 'workpath']);
+type SupportedConsumerKind = KnowledgeBindingKind | 'conversation';
+const supportedBindingKinds = new Set<SupportedConsumerKind>([
+  'conversation',
+  'terminal',
+  'companion',
+  'workpath',
+]);
 
-function isSupportedBindingKind(kind: string): kind is KnowledgeBindingKind {
-  return supportedBindingKinds.has(kind as KnowledgeBindingKind);
+function isSupportedBindingKind(kind: string): kind is SupportedConsumerKind {
+  return supportedBindingKinds.has(kind as SupportedConsumerKind);
 }
 
 function consumerKey(c: IKnowledgeConsumer, fallback = 0): string {
@@ -53,6 +55,8 @@ export function removeBaseFromBinding(binding: IKnowledgeBinding, baseId: Knowle
   return {
     ...binding,
     enabled: kbIds.length > 0 ? binding.enabled : false,
+    writeback: kbIds.length > 0 ? binding.writeback : false,
+    writeback_eagerness: kbIds.length > 0 ? binding.writeback_eagerness : 'manual',
     kb_ids: kbIds,
   };
 }
@@ -112,10 +116,31 @@ const KnowledgeConsumersSection: React.FC<KnowledgeConsumersSectionProps> = ({ b
       onOk: async () => {
         setRemovingKey(rowKey);
         try {
-          const binding = await ipcBridge.knowledge.getBinding.invoke({ kind: targetKind, target_id: targetId });
-          const next = removeBaseFromBinding(binding, baseId);
-          if (next.kb_ids.length !== binding.kb_ids.length || next.enabled !== binding.enabled) {
-            await ipcBridge.knowledge.setBinding.invoke({ kind: targetKind, target_id: targetId, ...next });
+          if (targetKind === 'conversation') {
+            const binding = await ipcBridge.agentPlatform.sessions.getKnowledge.invoke({
+              agent_session_id: targetId,
+            });
+            const next = removeBaseFromBinding(
+              { ...binding, channel_write_enabled: false },
+              baseId
+            );
+            if (next.kb_ids.length !== binding.kb_ids.length || next.enabled !== binding.enabled) {
+              await ipcBridge.agentPlatform.sessions.updateKnowledge.invoke({
+                agent_session_id: targetId,
+                binding: {
+                  enabled: next.enabled,
+                  writeback: next.writeback,
+                  writeback_eagerness: next.writeback_eagerness,
+                  kb_ids: next.kb_ids,
+                },
+              });
+            }
+          } else {
+            const binding = await ipcBridge.knowledge.getBinding.invoke({ kind: targetKind, target_id: targetId });
+            const next = removeBaseFromBinding(binding, baseId);
+            if (next.kb_ids.length !== binding.kb_ids.length || next.enabled !== binding.enabled) {
+              await ipcBridge.knowledge.setBinding.invoke({ kind: targetKind, target_id: targetId, ...next });
+            }
           }
           await refresh();
           ArcoMessage.success(t('knowledge.consumers.removeOk', { defaultValue: '已取消挂载' }));

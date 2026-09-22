@@ -607,6 +607,145 @@ async fn session_model_binding_replacement_rejects_an_active_turn_and_remote_pro
 }
 
 #[tokio::test]
+async fn session_resource_replacement_updates_json_and_resource_projection_atomically() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    sqlx::query("CREATE TABLE knowledge_bases (knowledge_base_id TEXT PRIMARY KEY) STRICT")
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        sqlx::query("INSERT INTO knowledge_bases (knowledge_base_id) VALUES (?)")
+        .bind(format!("0190f5fe-7c00-7a00-8000-00000000000{id}"))
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    }
+    let mut session = live_session(session_id());
+    let workspace = TypedResourceBinding {
+        binding_id: ResourceBindingId::from("workspace:default"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("default"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let knowledge_a = TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:a"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("0190f5fe-7c00-7a00-8000-00000000000a"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from(["read".to_owned(), "search".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    session.agent_binding.typed_resource_bindings =
+        vec![knowledge_a, workspace.clone()];
+    let created = store
+        .create_session(create_request(session, "resource-binding-replacement"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &created.session.agent_session_id,
+            "event-ready-resource-binding-replacement",
+            "runtime-supervisor",
+            "ready-resource-binding-replacement",
+            "session/ready",
+            "session-resource-binding-replacement",
+            Some(created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let expected = created.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement
+        .typed_resource_bindings
+        .retain(|resource| resource.resource_kind.as_ref() != "knowledge_base");
+    replacement.typed_resource_bindings.push(TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:b"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("0190f5fe-7c00-7a00-8000-00000000000b"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from([
+            "read".to_owned(),
+            "search".to_owned(),
+            "write".to_owned(),
+        ]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::from([("knowledge_enabled".to_owned(), "true".to_owned())]),
+    });
+    replacement
+        .typed_resource_bindings
+        .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+
+    let updated = store
+        .replace_session_resource_bindings(
+            &owner(),
+            &created.session.agent_session_id,
+            &expected,
+            replacement.clone(),
+            "knowledge_base",
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    let resources = store
+        .session_resources(&created.session.agent_session_id)
+        .await
+        .unwrap();
+    assert!(resources.contains(&workspace));
+    assert!(resources.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "knowledge_base"
+            && resource.resource_id.as_ref() == "0190f5fe-7c00-7a00-8000-00000000000b"
+            && resource.operations.contains("write")
+    }));
+    assert!(!resources.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "knowledge_base"
+            && resource.resource_id.as_ref() == "0190f5fe-7c00-7a00-8000-00000000000a"
+    }));
+}
+
+#[tokio::test]
+async fn session_resource_replacement_rejects_an_active_turn() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (active, _) = create_turn(
+        &store,
+        "active-resource-replacement",
+        "active-resource-replacement",
+    )
+    .await;
+    let expected = active.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement.typed_resource_bindings.push(TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:new"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("new"),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned(), "search".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    });
+
+    assert!(matches!(
+        store
+            .replace_session_resource_bindings(
+                &owner(),
+                &active.agent_session_id,
+                &expected,
+                replacement,
+                "knowledge_base",
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
+    ));
+}
+
+#[tokio::test]
 async fn the_same_product_resource_binding_can_be_frozen_into_distinct_sessions() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let binding = TypedResourceBinding {

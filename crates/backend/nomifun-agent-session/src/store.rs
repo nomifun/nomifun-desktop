@@ -1368,6 +1368,125 @@ impl AgentSessionStore {
         Ok(updated)
     }
 
+    /// Atomically replace one host-validated resource kind inside a local
+    /// AgentSession binding.
+    ///
+    /// This is the mutable-resource counterpart to model replacement: the
+    /// immutable Preset revision/Snapshot stay exact, every other resource
+    /// binding is byte-for-byte preserved, and the denormalized
+    /// `agent_session_resources` projection changes in the same transaction as
+    /// `agent_binding_json`. Active turns and Remote bindings remain immutable.
+    pub async fn replace_session_resource_bindings(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        expected: &AgentBindingValue,
+        replacement: AgentBindingValue,
+        resource_kind: &str,
+    ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
+        validate_principal(owner)?;
+        if resource_kind.trim().is_empty() || resource_kind != resource_kind.trim() {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession resource replacement requires a canonical resource kind"
+                    .to_owned(),
+            ));
+        }
+        if replacement.binding_version != expected.binding_version.checked_add(1).ok_or_else(|| {
+            SessionStoreError::Conflict(
+                "AgentSession binding version cannot advance".to_owned(),
+            )
+        })? {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession resource replacement must advance binding_version exactly once"
+                    .to_owned(),
+            ));
+        }
+        if replacement.preset_revision_ref != expected.preset_revision_ref
+            || replacement.resolved_snapshot_ref != expected.resolved_snapshot_ref
+        {
+            return Err(SessionStoreError::InvalidSession(
+                "AgentSession resource replacement must preserve its exact Revision/Snapshot"
+                    .to_owned(),
+            ));
+        }
+        let retained = |binding: &AgentBindingValue| {
+            binding
+                .typed_resource_bindings
+                .iter()
+                .filter(|resource| resource.resource_kind.as_ref() != resource_kind)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if retained(&replacement) != retained(expected) {
+            return Err(SessionStoreError::InvalidSession(format!(
+                "AgentSession {resource_kind} replacement changed another resource kind"
+            )));
+        }
+
+        let replacement_json = serde_json::to_string(&replacement)?;
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "live" {
+            return Err(SessionStoreError::Deleted(row.agent_session_id));
+        }
+        if row.remote_binding_id.is_some() || row.remote_binding_version.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "Remote AgentSession resource bindings are immutable".to_owned(),
+            ));
+        }
+        let current: AgentBindingValue = serde_json::from_str(
+            row.agent_binding_json.as_deref().ok_or_else(|| {
+                SessionStoreError::InvalidSession(
+                    "live AgentSession lost agent_binding".to_owned(),
+                )
+            })?,
+        )?;
+        if &current != expected {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession binding changed before resource replacement".to_owned(),
+            ));
+        }
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        if head.status == "running" || head.active_turn_id.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "wait for the active Turn before changing Session resources".to_owned(),
+            ));
+        }
+        let result = sqlx::query(
+            "UPDATE agent_sessions SET agent_binding_json = ? \
+             WHERE agent_session_id = ? AND state = 'live' AND agent_binding_json = ?",
+        )
+        .bind(replacement_json)
+        .bind(session_id.as_ref())
+        .bind(serde_json::to_string(expected)?)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession resource replacement lost its compare-and-swap boundary"
+                    .to_owned(),
+            ));
+        }
+        sqlx::query(
+            "DELETE FROM agent_session_resources WHERE session_id = ? AND resource_kind = ?",
+        )
+        .bind(session_id.as_ref())
+        .bind(resource_kind)
+        .execute(&mut *tx)
+        .await?;
+        let replacements = replacement
+            .typed_resource_bindings
+            .iter()
+            .filter(|resource| resource.resource_kind.as_ref() == resource_kind)
+            .cloned()
+            .collect::<Vec<_>>();
+        insert_session_resources_tx(&mut tx, session_id, owner, &replacements).await?;
+        let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
     pub async fn active_capability_ids(
         &self,
         session_id: &AgentSessionId,
@@ -4505,6 +4624,21 @@ async fn insert_session_resources_tx(
                 session_id.as_ref(),
                 binding.binding_id.as_ref()
             )));
+        }
+        if binding.resource_kind.as_ref() == "knowledge_base" {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM knowledge_bases WHERE knowledge_base_id = ?)",
+            )
+            .bind(binding.resource_id.as_ref())
+            .fetch_one(&mut **tx)
+            .await?;
+            if exists == 0 {
+                return Err(SessionStoreError::InvalidSession(format!(
+                    "Session {} selects unavailable Knowledge base {}",
+                    session_id.as_ref(),
+                    binding.resource_id.as_ref()
+                )));
+            }
         }
         let operations_json = serde_json::to_string(&binding.operations)?;
         let typed_parameters_json = serde_json::to_string(&binding.typed_parameters)?;

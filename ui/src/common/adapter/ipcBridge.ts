@@ -152,6 +152,7 @@ import type {
   AgentPresetLibraryResponse,
   AgentPresetRevision,
   AgentResolvedSnapshot,
+  AgentSessionKnowledgeBinding,
   AgentSessionContinuationView,
   AgentSessionId,
   CapabilityCatalogItem,
@@ -630,6 +631,13 @@ const fromRevokedInstallationToken = (): RevokeInstallationTokenResponse => ({
   continuation: remoteCredentialContinuation(),
 });
 
+const fromApiAgentSessionKnowledgeBinding = (
+  value: AgentSessionKnowledgeBinding
+): AgentSessionKnowledgeBinding => ({
+  ...value,
+  kb_ids: value.kb_ids.map(parseKnowledgeBaseId),
+});
+
 export const agentPlatform = {
   roleDefaults: httpGet<InstallationRoleBinding[], void>('/api/agent-role-defaults'),
   putRoleDefault: httpPut<InstallationRoleBinding, PutAgentRoleDefaultRequest>(
@@ -804,6 +812,31 @@ export const agentPlatform = {
     delete: httpDelete<IAgentSessionDeleteResult, { agent_session_id: string }>(
       (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}`
     ),
+    getKnowledge: withResponseMap(
+      httpGet<AgentSessionKnowledgeBinding, { agent_session_id: string }>(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/knowledge`
+      ),
+      fromApiAgentSessionKnowledgeBinding
+    ),
+    updateKnowledge: withResponseMap(
+      httpPut<
+        AgentSessionKnowledgeBinding,
+        { agent_session_id: string; binding: AgentSessionKnowledgeBinding }
+      >(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/knowledge`,
+        (params) => params.binding
+      ),
+      fromApiAgentSessionKnowledgeBinding
+    ),
+    onKnowledgeChanged: wsMappedEmitter<{
+      agent_session_id: AgentSessionId;
+    binding: AgentSessionKnowledgeBinding;
+  }>('agentSession.knowledgeChanged', (value) => ({
+      agent_session_id: value.agent_session_id as AgentSessionId,
+      binding: fromApiAgentSessionKnowledgeBinding(value.binding),
+    })),
   },
   installationToken: {
     status: withResponseMap(
@@ -5921,9 +5954,8 @@ export interface IKnowledgeBinding {
 export type KnowledgeWritebackEagerness = 'manual' | 'auto';
 
 /**
- * Mutable Knowledge-binding rows. Canonical AgentSession conversations are
- * deliberately absent: their Knowledge resources are frozen in
- * `agent_binding.typed_resource_bindings` when the Session is created.
+ * Mutable legacy product defaults. Canonical conversations use the dedicated
+ * AgentSession Knowledge command so there is never a second binding authority.
  */
 export type KnowledgeBindingKind = 'terminal' | 'companion' | 'workpath';
 export type KnowledgeBindingTarget =

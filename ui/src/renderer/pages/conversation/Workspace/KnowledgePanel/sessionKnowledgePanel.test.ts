@@ -43,7 +43,7 @@ describe('the async resolve window cannot desync the rail from the body', () => 
     // `files` while the rail keeps its own copy — icon active, file tree shown.
     expect(mounts.includes('function readSeed(')).toBe(true);
     expect(mounts.includes('function writeSeed(')).toBe(true);
-    expect(mounts.includes('const mountedIds = frozenIds ? [...frozenIds] : binding ? liveIds : seedIds;')).toBe(true);
+    expect(mounts.includes('const mountedIds = binding ? liveIds : seedIds;')).toBe(true);
   });
 
   test('a refresh never blanks the cached list', () => {
@@ -150,9 +150,11 @@ describe('expand-all is one level per root, not a recursive crawl', () => {
 });
 
 describe('mount detection', () => {
-  test('uses frozen conversation resources and keeps the binding switch only for workpaths', () => {
-    expect(mounts.includes("source?.kind === 'conversation' ? source.knowledgeBaseIds : null")).toBe(true);
-    expect(mounts.includes('frozenIds ? [...frozenIds]')).toBe(true);
+  test('uses the live AgentSession Knowledge command for conversations', () => {
+    expect(mounts.includes("target.kind === 'conversation'")).toBe(true);
+    expect(mounts.includes('sessions.getKnowledge')).toBe(true);
+    expect(mounts.includes('sessions.onKnowledgeChanged')).toBe(true);
+    expect(mounts.includes('frozenIds')).toBe(false);
     expect(mounts.includes('binding?.enabled ? binding.kb_ids : []')).toBe(true);
   });
 
@@ -164,6 +166,7 @@ describe('mount detection', () => {
 
   test('refreshes from the knowledge WS events instead of polling', () => {
     expect(mounts.includes('onBindingChanged')).toBe(true);
+    expect(mounts.includes('onKnowledgeChanged')).toBe(true);
     expect(mounts.includes('onBaseCreated')).toBe(true);
     expect(mounts.includes('onBaseUpdated')).toBe(true);
     expect(mounts.includes('onBaseDeleted')).toBe(true);

@@ -55,8 +55,9 @@ describe('ChatLayout advanced controls', () => {
     expect(source.includes("<AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />")).toBe(true);
     expect(source.includes("<IdmmControl target={{ id: conversation_id }} />")).toBe(true);
     expect(source.includes('(props.knowledgeEnabled ?? true) && (')).toBe(true);
-    expect(source.includes('<FrozenKnowledgeControl resources={props.knowledgeResources ?? []} />')).toBe(true);
-    expect(source.includes("<KnowledgeControl target={{ kind: 'conversation'")).toBe(false);
+    expect(source.includes("target={{ kind: 'conversation', id: conversation_id }}")).toBe(true);
+    expect(source.includes('writebackAvailable={props.knowledgeWritebackAvailable}')).toBe(true);
+    expect(source.includes('<FrozenKnowledgeControl')).toBe(false);
   });
 
   test('does not let workspace file-tree events auto-expand the conversation right rail', () => {

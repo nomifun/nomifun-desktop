@@ -18,10 +18,10 @@ import {
 /**
  * Which knowledge bases a session actually has mounted.
  *
- * Canonical conversations carry exact Knowledge resource IDs in their frozen
- * Agent binding. Terminals remain workpath-scoped and resolve their mutable
- * binding through `getBinding`. Both paths use `listBases` only for current
- * presentation metadata; it is never a second authority source for a Session.
+ * Canonical conversations resolve their live resource subset through the
+ * dedicated AgentSession Knowledge command. Terminals remain workpath-scoped.
+ * Both paths use `listBases` only for current presentation metadata; it is
+ * never a second authority source for a Session.
  *
  * Three properties matter and each cost a bug during review:
  *
@@ -61,6 +61,15 @@ const ensureSubscribed = () => {
     // The event carries the whole binding, so this is an update, not an
     // invalidation — no refetch needed.
     bindingCache.set(key, binding);
+    notifyTarget(key);
+  });
+  ipcBridge.agentPlatform.sessions.onKnowledgeChanged.on((payload) => {
+    const key = knowledgeBindingTargetKey({
+      kind: 'conversation',
+      target_id: payload.agent_session_id,
+    });
+    bindingCache.set(key, { ...payload.binding, channel_write_enabled: false });
+    writeSeed(key, mountedIdsOf(bindingCache.get(key)));
     notifyTarget(key);
   });
   const refreshBases = () => {
@@ -115,8 +124,8 @@ const mountedIdsOf = (binding: IKnowledgeBinding | undefined): KnowledgeBaseId[]
 
 export interface SessionKnowledgeMounts {
   /**
-   * True when a canonical conversation has frozen Knowledge resources, or a
-   * terminal workpath binding is enabled with at least one base.
+   * True when a canonical conversation or terminal workpath currently has an
+   * enabled binding with at least one base.
    *
    * Optimistic on the first render of a known session (seeded from
    * localStorage), then authoritative.
@@ -132,9 +141,7 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
 
   const target = useMemo(() => (source ? resolveKnowledgeBindingTarget(source) : null), [source]);
   const targetKey = target ? knowledgeBindingTargetKey(target) : null;
-  const frozenIds = source?.kind === 'conversation' ? source.knowledgeBaseIds : null;
-  const frozenKey = frozenIds?.join(',') ?? '';
-  const subscriptionKey = targetKey ?? (source?.kind === 'conversation' ? `frozen:${frozenKey}` : null);
+  const subscriptionKey = targetKey;
 
   useEffect(() => {
     if (!subscriptionKey) return undefined;
@@ -160,13 +167,19 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
     let cancelled = false;
     void (async () => {
       try {
-        const next = await ipcBridge.knowledge.getBinding.invoke({
-          kind: target.kind,
-          target_id: target.target_id,
-        });
+        const next = target.kind === 'conversation'
+          ? await ipcBridge.agentPlatform.sessions.getKnowledge.invoke({
+              agent_session_id: target.target_id,
+            })
+          : await ipcBridge.knowledge.getBinding.invoke({
+              kind: target.kind,
+              target_id: target.target_id,
+            });
         // A `binding-changed` event that landed mid-flight is newer than this
         // response — do not clobber it.
-        if (!bindingCache.has(targetKey)) bindingCache.set(targetKey, next);
+        if (!bindingCache.has(targetKey)) {
+          bindingCache.set(targetKey, { ...next, channel_write_enabled: false });
+        }
         if (!cancelled) writeSeed(targetKey, mountedIdsOf(bindingCache.get(targetKey)));
       } catch {
         // Re-arm so the next attempt tick retries instead of wedging.
@@ -185,7 +198,7 @@ export function useSessionKnowledgeMounts(source: SessionKnowledgeSource | undef
   const seedIds = useMemo(() => (targetKey ? readSeed(targetKey) : []), [targetKey, attempt]);
   // Before the binding resolves, trust the seed; afterwards the binding wins
   // (including when it says "nothing mounted any more").
-  const mountedIds = frozenIds ? [...frozenIds] : binding ? liveIds : seedIds;
+  const mountedIds = binding ? liveIds : seedIds;
   const hasMountedIds = mountedIds.length > 0;
 
   useEffect(() => {

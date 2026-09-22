@@ -9,8 +9,7 @@ import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import ChatTitleEditor from '@/renderer/pages/conversation/components/ChatTitleEditor';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
-import FrozenKnowledgeControl from '@/renderer/pages/conversation/components/FrozenKnowledgeControl';
-import type { TypedResourceBinding } from '@/common/types/agentPlatform';
+import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import WorkspacePanelHeader from './WorkspacePanelHeader';
 import WorkspaceToolRail, {
   WORKSPACE_PANEL_META_EVENT,
@@ -70,8 +69,8 @@ export interface ChatLayoutProps {
   hideAdvancedControls?: boolean;
   /** Whether this Agent's immutable capability ceiling includes Knowledge. */
   knowledgeEnabled?: boolean;
-  /** Exact Knowledge resources frozen into this AgentSession. */
-  knowledgeResources?: readonly TypedResourceBinding[];
+  /** Whether the immutable Agent ceiling grants write/autogen Knowledge Actions. */
+  knowledgeWritebackAvailable?: boolean;
   /**
    * Make the header title read-only (no click-to-rename). Used by single-session
    * surfaces like the companion chat, where the title tracks an external source
@@ -365,7 +364,11 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
             <AutoWorkControl target={{ kind: 'conversation', id: conversation_id }} />
             <IdmmControl target={{ id: conversation_id }} />
             {(props.knowledgeEnabled ?? true) && (
-              <FrozenKnowledgeControl resources={props.knowledgeResources ?? []} />
+              <KnowledgeControl
+                target={{ kind: 'conversation', id: conversation_id }}
+                writebackAvailable={props.knowledgeWritebackAvailable}
+                applyNote={t('knowledge.control.conversationApplyNote')}
+              />
             )}
           </>
         )}
