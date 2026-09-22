@@ -88,6 +88,9 @@ describe('conversation execution canvas integration', () => {
 
   test('projects linked executions for every conversation runtime and companion sessions', () => {
     const chatSource = readSource(new URL('../components/ChatConversation.tsx', import.meta.url));
+    const cohabitSource = readSource(
+      new URL('../../nomi/workspace/CompanionCohabitView.tsx', import.meta.url),
+    );
     const companionSource = readSource(
       new URL('../../nomi/companion/CompanionConversation.tsx', import.meta.url),
     );
@@ -97,7 +100,10 @@ describe('conversation execution canvas integration', () => {
     const hookSource = readSource(new URL('./useConversationExecution.ts', import.meta.url));
     const readOnlySource = readSource(new URL('./ReadOnlyConversationView.tsx', import.meta.url));
 
-    expect(chatSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length).toBeGreaterThanOrEqual(3);
+    const executionProviderCount =
+      (chatSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0) +
+      (cohabitSource.match(/<ExecutionProvider conversation=\{conversation\}>/g)?.length ?? 0);
+    expect(executionProviderCount).toBeGreaterThanOrEqual(3);
     expect(companionSource.includes('<ExecutionConversationLayout')).toBe(false);
     expect(companionPanelSource.includes('renderInExecutionShell')).toBe(true);
     expect(companionPanelSource.includes('<ExecutionConversationLayout')).toBe(true);

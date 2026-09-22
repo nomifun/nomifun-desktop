@@ -67,12 +67,60 @@
   "openChat": "打开聊天",
   "tabs": {
     "overview": "总览",
-    "memory": "记忆&知识库",
-    "remote": "远程控制",
+    "memory": "记忆与知识",
+    "remote": "连接与设备",
     "evolution": "进化",
     "skills": "技能",
     "history": "聊天历史",
-    "other": "其他"
+    "other": "迁移与删除"
+  },
+  "workspace": {
+    "cohabit": "相处",
+    "manage": "管理",
+    "modeLabel": "伙伴模式",
+    "quickWindow": "桌面快捷窗",
+    "switchCompanion": "切换伙伴",
+    "needsAttention": "需要处理",
+    "refresh": "刷新",
+    "sections": {
+      "profile": "伙伴档案",
+      "growth": "成长与能力",
+      "reach": "触达",
+      "records": "记录与安全"
+    }
+  },
+  "cohabit": {
+    "title": "和{{name}}相处",
+    "subtitle": "分享日常、聊聊想法，让伙伴真正陪在身边。",
+    "composerPlaceholder": "和{{name}}说点什么…",
+    "emptyTitle": "从和 {{name}} 的第一句话开始",
+    "emptyHint": "这里会延续桌面、消息渠道和机器人中的同一段相处历史。",
+    "infoTitle": "伙伴信息",
+    "currentState": "当前状态",
+    "desktopVisible": "桌面显示已开启",
+    "desktopHidden": "桌面显示已隐藏",
+    "manageState": "管理形象与状态",
+    "mind": "心智配置",
+    "agent": "伙伴 Agent",
+    "manageMind": "管理人格与模型",
+    "longMemory": "长期记忆",
+    "memoryCount": "{{count}} 条记忆",
+    "knowledgeReady": "专属知识库按需挂载",
+    "manageMemory": "查看记忆与知识",
+    "connections": "连接",
+    "robotOnline": "{{count}} 台机器人已绑定",
+    "noRobot": "尚未绑定机器人",
+    "channelsHint": "消息渠道与 MCP 在管理中配置",
+    "manageConnections": "管理连接与设备",
+    "growth": "成长",
+    "modelRequired": "先为伙伴配置主对话模型",
+    "modelRequiredHint": "配置后即可在这里延续桌面、IM 与机器人的同一段相处历史。",
+    "configureModel": "配置模型",
+    "sessionFailed": "伙伴会话暂时无法打开",
+    "sessionFailedHint": "检查模型与 Agent 配置后再试一次。"
+  },
+  "remote": {
+    "showAllPlatforms": "查看全部 {{count}} 个渠道"
   },
   "skills": {
     "sectionTitle": "技能",
@@ -178,6 +226,7 @@
     "personaTitle": "角色介绍",
     "modelSection": "模型配置",
     "modelSectionHint": "决定它用哪个模型思考与回应",
+    "modelMissingShort": "未配置",
     "fixedAgentHint": "桌面、IM 和机器人入口共用官方“伙伴” Agent；渠道和机器人均为可选连接。",
     "mainChatModel": "主对话模型",
     "modelMissing": "还没有为 {{companionName}} 配置聊天模型，它暂时无法学习和聊天。",
@@ -541,7 +590,20 @@
     "collapse": "收起",
     "dismiss": "忽略消息",
     "interrupt": "打断回复",
-    "attachImage": "添加图片"
+    "attachImage": "添加图片",
+    "quickEmpty": "和 {{name}} 说点什么，最近的相处会出现在这里。",
+    "quickEmptyTitle": "和 {{name}} 打个招呼",
+    "quickEmptyHint": "最近的相处会保留在这里，随时接着聊。",
+    "openFullCohabit": "打开完整相处页",
+    "manage": "管理伙伴",
+    "windowUnavailable": "桌面快捷窗暂时无法打开",
+    "switchCompanion": "切换伙伴",
+    "switchLabel": "切换",
+    "switchTo": "切换到 {{name}}",
+    "showAll": "查看全部 {{count}} 个伙伴",
+    "openQuickPanel": "打开最近对话",
+    "switchFailed": "没能切换伙伴，已为你打开完整相处页。",
+    "moveWindow": "拖动空白处移动窗口"
   },
   "characters": {
     "mochi": {

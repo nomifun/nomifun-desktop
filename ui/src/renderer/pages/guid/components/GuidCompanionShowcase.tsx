@@ -1,12 +1,9 @@
-import { ipcBridge } from '@/common';
 import type { ICompanionWithStatus } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
 import { useCompanions } from '@/renderer/pages/nomi/useNomi';
-import { getConversationCreateErrorMessage } from '@/renderer/pages/conversation/utils/conversationCreateError';
-import { Message } from '@arco-design/web-react';
 import { Add, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -188,33 +185,15 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
 export default function GuidCompanionShowcase() {
   const roster = useCompanions();
   const navigate = useNavigate();
-  const { t } = useTranslation();
   const [createOpen, setCreateOpen] = useState(false);
-  const [openingId, setOpeningId] = useState<CompanionId | null>(null);
-  const opening = useRef(false);
-  const active = useRef(true);
-  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const manage = (id?: CompanionId) => {
-    void navigate(id ? `/nomi?companion=${encodeURIComponent(id)}&tab=overview` : '/nomi');
+    void navigate(id ? `/nomi?companion=${encodeURIComponent(id)}&mode=manage&tab=overview` : '/nomi?mode=manage');
   };
-  const openChat = async (companion: ICompanionWithStatus) => {
-    if (opening.current) return;
-    const configured = companion.status ? companion.status.model_configured : companion.model !== null;
-    if (!configured) { Message.info(t('nomi.chat.modelMissing')); manage(companion.companion_id); return; }
-    opening.current = true;
-    setOpeningId(companion.companion_id);
-    try {
-      const thread = await ipcBridge.companion.ensureCompanionSession.invoke({ companion_id: companion.companion_id });
-      if (active.current) void navigate(`/conversation/${thread.conversation_id}`);
-    } catch (error) {
-      if (active.current) Message.error(getConversationCreateErrorMessage(error, t));
-    } finally {
-      opening.current = false;
-      if (active.current) setOpeningId(null);
-    }
+  const openChat = (companion: ICompanionWithStatus) => {
+    void navigate(`/nomi?companion=${encodeURIComponent(companion.companion_id)}&mode=cohabit`);
   };
   return <>
-    <GuidCompanionShowcaseView {...roster} openingId={openingId} onRetry={() => void roster.refresh()}
+    <GuidCompanionShowcaseView {...roster} onRetry={() => void roster.refresh()}
       onCreate={() => setCreateOpen(true)} onManage={manage} onOpenChat={(companion) => void openChat(companion)} />
     {createOpen && <Suspense fallback={null}><CreateCompanionModal visible onCancel={() => setCreateOpen(false)} onCreated={(profile) => manage(profile.companion_id)} /></Suspense>}
   </>;
