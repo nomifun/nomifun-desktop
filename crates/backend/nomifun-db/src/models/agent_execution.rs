@@ -147,8 +147,9 @@ pub struct AgentExecutionEventRow {
     pub published_at: Option<TimestampMs>,
 }
 
-/// Owner-facing attempt view. `conversation_id` is derived from the active
-/// attempt link; it is intentionally absent from the physical attempt table.
+/// Owner-facing attempt view. `conversation_id` is derived from the typed
+/// `attempt` or `automation` link; it is intentionally absent from the
+/// physical attempt table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionAttemptDetailRow {
     pub attempt: AgentExecutionAttemptRow,
@@ -156,7 +157,7 @@ pub struct AgentExecutionAttemptDetailRow {
 }
 
 /// Owner-facing step view. Current attempt data is derived by attempt_no and
-/// the attempt conversation is derived from `conversation_execution_links`.
+/// the concrete AgentSession is derived from `conversation_execution_links`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentExecutionStepDetailRow {
     pub step: AgentExecutionStepRow,

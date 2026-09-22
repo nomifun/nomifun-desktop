@@ -52,6 +52,33 @@ pub(crate) type AttemptStarted = Box<
 >;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AttemptSessionTarget {
+    /// Ordinary collaboration owns a separate immutable audit transcript.
+    ChildAttempt,
+    /// AutoWork drives the exact AgentSession selected by the user. The
+    /// Session is not created, renamed, or later cleaned up as an Attempt.
+    AutomationLead { conversation_id: String },
+}
+
+fn attempt_turn_input(
+    session_target: &AttemptSessionTarget,
+    canonical: bool,
+    brief: &str,
+    step_spec: &str,
+) -> Result<(String, &'static str, bool), AppError> {
+    if matches!(session_target, AttemptSessionTarget::AutomationLead { .. }) {
+        return Ok((step_spec.to_owned(), "autowork", true));
+    }
+    let content = if canonical {
+        serde_json::to_string(&json!({ "task_brief": brief, "step_spec": step_spec }))
+            .map_err(|error| AppError::Internal(format!("encode Attempt input: {error}")))?
+    } else {
+        step_spec.to_owned()
+    };
+    Ok((content, "agent_execution", false))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AttemptOutcome {
     pub conversation_id: String,
     pub text: Option<String>,
@@ -72,6 +99,7 @@ pub(crate) trait AttemptRunner: Send + Sync {
     async fn execute(
         &self,
         owner_id: &str,
+        session_target: AttemptSessionTarget,
         participant: &ExecutionParticipant,
         execution_model_pool: &[ExecutionModelRef],
         workspace_dir: Option<&str>,
@@ -307,6 +335,7 @@ impl AgentSessionAttemptRunner {
         authority: AgentExecutionTurnAuthority,
         content: &str,
         origin: &str,
+        hidden: bool,
         timeout: Duration,
     ) -> Result<AttemptOutcome, AppError> {
         let delivery = self
@@ -320,7 +349,7 @@ impl AgentSessionAttemptRunner {
                     content: content.to_owned(),
                     files: vec![],
                     inject_skills: vec![],
-                    hidden: false,
+                    hidden,
                     origin: Some(origin.to_owned()),
                     channel_platform: None,
                 },
@@ -443,6 +472,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
     async fn execute(
         &self,
         owner_id: &str,
+        session_target: AttemptSessionTarget,
         participant: &ExecutionParticipant,
         execution_model_pool: &[ExecutionModelRef],
         workspace_dir: Option<&str>,
@@ -511,50 +541,69 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                 .map_err(|error| AppError::Internal(format!("encode preset snapshot: {error}")))?;
         }
 
-        let request = CreateConversationRequest {
-            r#type: AgentType::Nomi,
-            name: Some(format!("协作 · {}", step_title.trim())),
-            model: Some(provider),
-            source: None,
-            channel_chat_id: None,
-            preset_id: None,
-                        delegation_policy: if delegation_depth >= MAX_AGENT_DELEGATION_DEPTH {
-                DelegationPolicy::Disabled
-            } else {
-                delegation_policy
-            },
-            execution_model_pool: Some(ExecutionModelPool::Range {
-                models: execution_model_pool.to_vec(),
-            }),
-            decision_policy,
-            execution_template_id: None,
-            extra,
-        };
-        let created = if let Some(snapshot) = participant.agent_snapshot.clone() {
-            self.session
-                .create_from_agent_snapshot_idempotent(
-                    owner_id,
-                    request,
-                    snapshot,
-                    attempt_creation_key,
-                )
-                .await
-        } else {
-            self.session
-                .create_idempotent(owner_id, request, attempt_creation_key)
-                .await
-        };
-        let conversation = match created {
-            Ok(conversation) => conversation,
-            Err(error) => {
-                if let Err(cleanup_error) = self
-                    .session
-                    .discard_unlinked_creation(owner_id, attempt_creation_key)
-                    .await
-                {
-                    tracing::warn!(%cleanup_error, "failed to discard partially-created attempt conversation");
+        let creates_child = matches!(&session_target, AttemptSessionTarget::ChildAttempt);
+        let conversation = match &session_target {
+            AttemptSessionTarget::ChildAttempt => {
+                let request = CreateConversationRequest {
+                    r#type: AgentType::Nomi,
+                    name: Some(format!("协作 · {}", step_title.trim())),
+                    model: Some(provider),
+                    source: None,
+                    channel_chat_id: None,
+                    preset_id: None,
+                    delegation_policy: if delegation_depth >= MAX_AGENT_DELEGATION_DEPTH {
+                        DelegationPolicy::Disabled
+                    } else {
+                        delegation_policy
+                    },
+                    execution_model_pool: Some(ExecutionModelPool::Range {
+                        models: execution_model_pool.to_vec(),
+                    }),
+                    decision_policy,
+                    execution_template_id: None,
+                    extra,
+                };
+                let created = if let Some(snapshot) = participant.agent_snapshot.clone() {
+                    self.session
+                        .create_from_agent_snapshot_idempotent(
+                            owner_id,
+                            request,
+                            snapshot,
+                            attempt_creation_key,
+                        )
+                        .await
+                } else {
+                    self.session
+                        .create_idempotent(owner_id, request, attempt_creation_key)
+                        .await
+                };
+                match created {
+                    Ok(conversation) => conversation,
+                    Err(error) => {
+                        if let Err(cleanup_error) = self
+                            .session
+                            .discard_unlinked_creation(owner_id, attempt_creation_key)
+                            .await
+                        {
+                            tracing::warn!(%cleanup_error, "failed to discard partially-created attempt conversation");
+                        }
+                        return Err(error);
+                    }
                 }
-                return Err(error);
+            }
+            AttemptSessionTarget::AutomationLead { conversation_id } => {
+                let conversation = self.session.get(owner_id, conversation_id).await?;
+                if conversation.conversation_id != *conversation_id {
+                    return Err(AppError::Conflict(
+                        "AutoWork Session lookup returned a different AgentSession".to_owned(),
+                    ));
+                }
+                if conversation.agent_snapshot.as_ref() != participant.agent_snapshot.as_ref() {
+                    return Err(AppError::Conflict(
+                        "AutoWork lead Agent snapshot changed after execution admission".to_owned(),
+                    ));
+                }
+                conversation
             }
         };
 
@@ -566,15 +615,17 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             // If the link commit succeeded but its acknowledgement was lost,
             // the Conversation deletion guard rejects this cleanup.  Otherwise
             // the creation key and row are removed together, leaving no orphan.
-            match self
-                .session
-                .discard_unlinked_creation(owner_id, attempt_creation_key)
-                .await
-            {
-                Ok(()) => {}
-                Err(AppError::Conflict(_)) => {}
-                Err(cleanup_error) => {
-                    tracing::warn!(%cleanup_error, "failed to discard unlinked attempt conversation");
+            if creates_child {
+                match self
+                    .session
+                    .discard_unlinked_creation(owner_id, attempt_creation_key)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(AppError::Conflict(_)) => {}
+                    Err(cleanup_error) => {
+                        tracing::warn!(%cleanup_error, "failed to discard unlinked attempt conversation");
+                    }
                 }
             }
             return Err(error);
@@ -585,17 +636,16 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         // Durable user input, not a replacement for the Agent's system rules.
         // JSON boundaries preserve arbitrary brief/step text without delimiters
         // that can be closed by the task itself. Retries encode the same input.
-        let task_input = if canonical {
-            serde_json::to_string(&json!({ "task_brief": brief, "step_spec": step_spec }))
-                .map_err(|error| AppError::Internal(format!("encode Attempt input: {error}")))?
-        } else { step_spec.to_owned() };
+        let (task_input, origin, hidden) =
+            attempt_turn_input(&session_target, canonical, brief, step_spec)?;
         self.deliver_turn(
             owner_id,
             &conversation.conversation_id,
             &operation_id,
             authority,
             &task_input,
-            "agent_execution",
+            origin,
+            hidden,
             timeout,
         )
         .await
@@ -617,6 +667,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             authority,
             input,
             "agent_execution_decision",
+            false,
             timeout,
         )
         .await
@@ -1056,8 +1107,10 @@ fn latest_error_summary(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{TimestampMs, generate_id};
+    use nomifun_common::{ConversationStatus, TimestampMs, generate_id};
     use sha2::{Digest, Sha256};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000201";
     const CURRENT_WIRE_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000211";
@@ -1066,6 +1119,116 @@ mod tests {
     const NEWER_USER_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000214";
     const OLDER_WIRE_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000215";
     const OLDER_USER_TURN_ID: &str = "0190f5fe-7c00-7a00-8000-000000000216";
+
+    struct RecordingSessionPort {
+        conversation: ConversationResponse,
+        create_calls: AtomicUsize,
+        delivered: Mutex<Option<(String, SendMessageRequest)>>,
+    }
+
+    #[async_trait]
+    impl AgentExecutionSessionPort for RecordingSessionPort {
+        async fn create_idempotent(
+            &self,
+            _owner_id: &str,
+            _request: CreateConversationRequest,
+            _creation_key: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            self.create_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::Conflict("unexpected child Session creation".to_owned()))
+        }
+
+        async fn create_from_agent_snapshot_idempotent(
+            &self,
+            _owner_id: &str,
+            _request: CreateConversationRequest,
+            _snapshot: AgentResolvedSnapshot,
+            _creation_key: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            self.create_calls.fetch_add(1, Ordering::SeqCst);
+            Err(AppError::Conflict("unexpected child Session creation".to_owned()))
+        }
+
+        async fn discard_unlinked_creation(
+            &self,
+            _owner_id: &str,
+            _creation_key: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn deliver_turn(
+            &self,
+            _owner_id: &str,
+            conversation_id: &str,
+            _operation_id: &str,
+            _authority: AgentExecutionTurnAuthority,
+            request: SendMessageRequest,
+        ) -> Result<AgentExecutionDelivery, AppError> {
+            *self.delivered.lock().unwrap() = Some((conversation_id.to_owned(), request));
+            Err(AppError::Conflict("captured AutoWork turn".to_owned()))
+        }
+
+        async fn delivery_result(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+        ) -> Result<Option<AgentExecutionDelivery>, AppError> {
+            Ok(None)
+        }
+
+        async fn list_messages(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _query: ListMessagesQuery,
+        ) -> Result<MessageListResponse, AppError> {
+            Err(AppError::Conflict("messages are not needed by this test".to_owned()))
+        }
+
+        async fn get(
+            &self,
+            _owner_id: &str,
+            conversation_id: &str,
+        ) -> Result<ConversationResponse, AppError> {
+            assert_eq!(conversation_id, self.conversation.conversation_id);
+            Ok(self.conversation.clone())
+        }
+
+        fn take_turn_tokens(&self, _conversation_id: &str) -> Option<i64> {
+            None
+        }
+
+        async fn cancel_for_execution(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+        ) -> Result<(), AppError> {
+            Ok(())
+        }
+
+        async fn steer_turn(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _request: SendMessageRequest,
+        ) -> Result<String, AppError> {
+            Ok(generate_id())
+        }
+
+        async fn project_assistant_message_idempotent(
+            &self,
+            _owner_id: &str,
+            _conversation_id: &str,
+            _operation_id: &str,
+            _content: &str,
+            _origin: &str,
+        ) -> Result<String, AppError> {
+            Ok(generate_id())
+        }
+    }
 
     fn sha256_hex(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
@@ -1164,6 +1327,130 @@ mod tests {
             projection.ingest_page(page);
         }
         projection.finish(Some(&workspace)).files
+    }
+
+    #[test]
+    fn autowork_turn_keeps_the_requirement_on_the_main_session_boundary() {
+        let target = AttemptSessionTarget::AutomationLead {
+            conversation_id: CONVERSATION_ID.to_owned(),
+        };
+        let (content, origin, hidden) =
+            attempt_turn_input(&target, true, "shared execution wrapper", "exact requirement")
+                .unwrap();
+        assert_eq!(content, "exact requirement");
+        assert_eq!(origin, "autowork");
+        assert!(hidden, "the queue instruction is not a user-authored chat message");
+
+        let (content, origin, hidden) = attempt_turn_input(
+            &AttemptSessionTarget::ChildAttempt,
+            true,
+            "shared execution wrapper",
+            "child step",
+        )
+        .unwrap();
+        assert!(content.contains("task_brief"));
+        assert_eq!(origin, "agent_execution");
+        assert!(!hidden);
+    }
+
+    #[tokio::test]
+    async fn autowork_reuses_the_bound_session_without_calling_session_creation() {
+        let conversation = ConversationResponse {
+            conversation_id: CONVERSATION_ID.to_owned(),
+            name: "main Agent".to_owned(),
+            r#type: AgentType::Nomi,
+            model: None,
+            status: ConversationStatus::Finished,
+            runtime: None,
+            source: None,
+            pinned: false,
+            pinned_at: None,
+            channel_chat_id: None,
+            preset_id: None,
+            preset_revision: None,
+            agent_snapshot: None,
+            delegation_policy: DelegationPolicy::Automatic,
+            execution_model_pool: None,
+            decision_policy: DecisionPolicy::Automatic,
+            execution_template_id: None,
+            linked_execution_id: None,
+            execution_step_id: None,
+            execution_attempt_id: None,
+            created_at: TimestampMs::from(1),
+            modified_at: TimestampMs::from(1),
+            extra: json!({}),
+        };
+        let session = Arc::new(RecordingSessionPort {
+            conversation,
+            create_calls: AtomicUsize::new(0),
+            delivered: Mutex::new(None),
+        });
+        let runner = AgentSessionAttemptRunner::new(session.clone());
+        let participant = ExecutionParticipant {
+            participant_id: generate_id(),
+            execution_id: generate_id(),
+            source_agent_id: generate_id(),
+            preset_id: None,
+            preset_revision: None,
+            agent_snapshot: None,
+            provider_id: Some(generate_id()),
+            model: Some("model".to_owned()),
+            role: Some("requirement_owner".to_owned()),
+            capability: None,
+            constraints: None,
+            description: None,
+            system_prompt: None,
+            enabled_skills: Vec::new(),
+            disabled_builtin_skills: Vec::new(),
+            sort_order: 0,
+            introduced_in_revision: 0,
+            retired_in_revision: None,
+            created_at: 1,
+        };
+        let execution_id = participant.execution_id.clone();
+        let step_id = generate_id();
+        let attempt_id = generate_id();
+        let callback_attempt_id = attempt_id.clone();
+        let outcome = runner
+            .execute(
+                "owner",
+                AttemptSessionTarget::AutomationLead {
+                    conversation_id: CONVERSATION_ID.to_owned(),
+                },
+                &participant,
+                &[],
+                None,
+                "Requirement",
+                AgentToolPolicy::Full,
+                DelegationPolicy::Automatic,
+                0,
+                DecisionPolicy::Automatic,
+                &attempt_id,
+                "shared wrapper",
+                "[AutoWork] perform exact requirement",
+                Duration::from_millis(1),
+                Box::new(move |conversation_id| {
+                    Box::pin(async move {
+                        assert_eq!(conversation_id, CONVERSATION_ID);
+                        Ok(AgentExecutionTurnAuthority {
+                            execution_id,
+                            step_id,
+                            attempt_id: callback_attempt_id,
+                            expected_step_version: 1,
+                            expected_attempt_version: 1,
+                            lease_owner: "lease".to_owned(),
+                        })
+                    })
+                }),
+            )
+            .await;
+        assert!(matches!(outcome, Err(AppError::Conflict(message)) if message == "captured AutoWork turn"));
+        assert_eq!(session.create_calls.load(Ordering::SeqCst), 0);
+        let (conversation_id, request) = session.delivered.lock().unwrap().take().unwrap();
+        assert_eq!(conversation_id, CONVERSATION_ID);
+        assert_eq!(request.origin.as_deref(), Some("autowork"));
+        assert!(request.hidden);
+        assert_eq!(request.content, "[AutoWork] perform exact requirement");
     }
 
     #[test]
