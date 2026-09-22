@@ -56,7 +56,7 @@ WebView2 DevTools Protocol 运输，它是观察、输入与生命周期实现�
 8. Conversation 中的内嵌 Browser Use 使用 Native Interactive Runtime；Knowledge、crawl、后台 automation
    使用 Headless Runtime。独立系统浏览器能力只附着用户授权的既有浏览器会话。三者按能力/消费者确定性分流，
    不根据错误自动换目标，不在运行中迁移页面。
-9. `nomi_local_websearch@1.0.0` 是 Agent 工作台中可选的 NomiFun 本地浏览器检索能力，Agent Tool 名也固定为
+9. `nomi_local_websearch` 是 Agent 工作台中可选的 NomiFun 本地浏览器检索能力，Agent Tool 名也固定为
    `nomi_local_websearch`。它始终由隔离的 Headless Browser Search Provider 执行，不占用、不读取 Conversation
    Browser，也不覆盖模型厂商的 `web_search` / Catalog `web.search`。
 10. Browser 不再拥有独立的全局用户产品入口。删除 `/browser` 页面、Browser 主侧栏入口和旧 Browser Settings。
@@ -1279,7 +1279,7 @@ crates/backend/nomifun-ai-agent/src/
 ```
 
 - `nomifun-agent-domain-wave1` 新增 capability/action/input/output contract；
-- first-party contribution 与 Agent Catalog 发布 `nomi_local_websearch@1.0.0`；
+- first-party contribution 与 Agent Catalog 发布 `nomi_local_websearch`；
 - `nomi_core_agent_projection.rs` 把它投影为普通 exact Tool，不检查 Chat route web-search feature；
 - `factory/nomi.rs` 只根据 capability allowlist 与 BrowserSearchProvider exact binding 注册它；
 - `web.search -> ChatRouteFeature::WebSearch` 和 `needs_web_search` 继续只服务厂商原生搜索；
@@ -1671,7 +1671,7 @@ nomi_local_websearch.*needs_web_search | nomi_local_websearch.*ChatRouteFeature:
 
 ### Phase 0：冻结简单合同
 
-- 固化本文、Browser Role Contract v2、`nomi_local_websearch@1.0.0`、BrowserWorkspace/RunGuard/Runtime DTO；
+- 固化本文、Browser Role Contract v2、`nomi_local_websearch`、BrowserWorkspace/RunGuard/Runtime DTO；
 - 用最小签名 macOS app 验证 WKWebView 的 AppKit pointer/key/text/drag、`event.isTrusted` 与 input gate；不通过就先
   裁决 Runtime Provider，不能把风险拖到移植末期；
 - 建 v2 module skeleton 与 architecture tests；
@@ -1710,7 +1710,7 @@ nomi_local_websearch.*needs_web_search | nomi_local_websearch.*ChatRouteFeature:
 
 ### Phase 3：Nomi Local Web Search
 
-- 发布 Agent 工作台可选的 `nomi_local_websearch@1.0.0`；
+- 发布 Agent 工作台可选的 `nomi_local_websearch`；
 - 新增独立 Tool、BrowserSearchProvider 与 SearchEngineAdapter；
 - 任意模型都走 search-only Headless Runtime，不读取模型 web-search feature；
 - 保留 `web.search` / `web_search` 原生能力；两种工具名不同，可独立或同时启用；
@@ -1778,7 +1778,7 @@ nomi_local_websearch.*needs_web_search | nomi_local_websearch.*ChatRouteFeature:
   是唯一有明确标记的 protocol fidelity 例外；
 - Windows 与 macOS 的 Agent input 和用户 input 都落在同一个 native BrowserTab handle；
 - popup、permission、download、upload、crash、cancel、close 都有 terminal result；
-- `nomi_local_websearch@1.0.0` 在任意模型下都解析到 BrowserSearchProvider，Snapshot 固定 exact runtime/adapter；
+- `nomi_local_websearch` 在任意模型下都解析到 BrowserSearchProvider，Snapshot 固定 exact runtime/adapter；
 - Agent Tool Registry 同时证明本地能力名精确为 `nomi_local_websearch`，没有覆盖或 alias 到 `web_search`；
 - Browser Search 的 search-only egress、ephemeral profile、result normalization、citation scope、typed challenge 与
   close proof 全部通过；
@@ -1810,7 +1810,7 @@ nomi_local_websearch.*needs_web_search | nomi_local_websearch.*ChatRouteFeature:
 
 1. v2 在开发 feature 下取得真实 Windows 证据；
 2. 一个切换提交把正式 Browser provider、Conversation UI 和工具路由指向 v2；
-3. 同一批切换发布独立 `nomi_local_websearch@1.0.0` Catalog/Tool，并保留原生 `web.search` 身份；
+3. 同一批切换发布独立 `nomi_local_websearch` Catalog/Tool，并保留原生 `web.search` 身份；
 4. 紧接的删除提交物理移除 v1 Browser 文件、配置、API、测试和文档，以及任何 Search alias/兼容桥；
 5. production 不保留 v1 fallback；
 6. 不创建 DB migration，不重写旧 Agent Snapshot，不导入旧 Browser Profile；
@@ -1834,7 +1834,7 @@ nomi_local_websearch.*needs_web_search | nomi_local_websearch.*ChatRouteFeature:
 - Browser UI 简单：Tab、导航、地址、单状态区和真实页面；
 - Browser 没有独立主侧栏页面或旧设置中心；
 - Headless system workload 与 Native Conversation workload 正确分层；
-- `nomi_local_websearch@1.0.0` 可在 Agent 工作台选择；无原生 search 的模型通过隔离 BrowserSearchProvider
+- `nomi_local_websearch` 可在 Agent 工作台选择；无原生 search 的模型通过隔离 BrowserSearchProvider
   获得精确同名 Tool 与 citation 合同，不覆盖厂商 `web_search`；
 - 没有 JPEG/screencast/iframe Browser Surface；
 - 没有新数据库表或迁移；

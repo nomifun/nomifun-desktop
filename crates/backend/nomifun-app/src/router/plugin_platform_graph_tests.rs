@@ -60,7 +60,6 @@ fn package(kind: &str) -> (nomifun_agent_contracts::PluginPackageArtifactV1, Vec
         members: vec![RoleMemberContract {
             capability: CapabilityRef {
                 id: facade.id.clone(),
-                version: facade.version.clone(),
             },
             capability_manifest_digest: digest_payload(&facade).unwrap(),
             requirement: RoleMemberRequirement::Required,
@@ -93,7 +92,6 @@ fn package(kind: &str) -> (nomifun_agent_contracts::PluginPackageArtifactV1, Vec
             .into_iter()
             .map(|c| CapabilityRef {
                 id: c.id.clone(),
-                version: c.version.clone(),
             })
             .collect();
         manifest.package.contributions.role_contracts.clear();
@@ -105,7 +103,6 @@ fn package(kind: &str) -> (nomifun_agent_contracts::PluginPackageArtifactV1, Vec
                 RoleProviderMemberContribution {
                     implementation: Some(CapabilityRef {
                         id: root.id.clone(),
-                        version: root.version.clone(),
                     }),
                     supported_platforms: root.supported_platforms.clone(),
                     required_resource_kinds: BTreeSet::new(),
@@ -233,9 +230,8 @@ async fn installed_heterogeneous_providers_freeze_private_graphs_across_save_ope
         .unwrap()
         .draft;
     draft.document.enabled_capabilities = vec![nomifun_api_types::CapabilitySelectionDto {
-        capability: nomifun_api_types::ExactCatalogRefDto {
+        capability: nomifun_api_types::CapabilityRefDto {
             id: FACADE.into(),
-            version: "1.0.0".into(),
         },
         action_allowlist: BTreeSet::from([ACTION.to_owned()]),
     }];

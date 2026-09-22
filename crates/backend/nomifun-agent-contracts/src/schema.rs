@@ -1,7 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_STORE_DATA_GENERATION: u32 = 5;
+pub const AGENT_STORE_DATA_GENERATION: u32 = 6;
 pub const AGENT_STORE_MIGRATION_HEAD: u32 = 1;
 pub const AGENT_STORE_PROJECTION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../schema/0001_agent_store.sql");
@@ -163,6 +163,57 @@ mod tests {
             .map(|(name, _, _, _)| (*name).to_owned())
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn capability_tables_use_stable_ids_and_package_provenance() {
+        let database = Connection::open_in_memory().expect("in-memory SQLite");
+        database
+            .execute_batch(AGENT_STORE_BASELINE_SQL)
+            .expect("Agent Store baseline");
+        for (table, expected) in [
+            (
+                "capability_definitions",
+                vec![
+                    "capability_id",
+                    "package_id",
+                    "package_version",
+                    "manifest_json",
+                    "manifest_digest",
+                ],
+            ),
+            (
+                "capability_catalog_entries",
+                vec![
+                    "capability_id",
+                    "contribution_id",
+                    "entry_json",
+                    "entry_digest",
+                ],
+            ),
+            (
+                "mcp_tool_materializations",
+                vec![
+                    "server_id",
+                    "canonical_tool_key",
+                    "schema_hash",
+                    "capability_id",
+                    "materialization_revision",
+                    "package_id",
+                    "package_version",
+                ],
+            ),
+        ] {
+            let sql = format!("SELECT name FROM pragma_table_info('{table}') ORDER BY cid");
+            let actual = database
+                .prepare(&sql)
+                .expect("table-info query")
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("table-info rows")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("column names");
+            assert_eq!(actual, expected, "{table}");
+        }
     }
 
     #[test]

@@ -83,7 +83,6 @@ fn revision_for_members(
         .map(|id| CapabilitySelection {
             capability: CapabilityRef {
                 id: (*id).into(),
-                version: VERSION.into(),
             },
             action_allowlist: if *id == MEMBERS[0] {
                 BTreeSet::from([TOOL_ACTION.into()])
@@ -226,7 +225,6 @@ async fn implicit_resource_factory_dependencies_are_locked_but_not_public_contri
         .unwrap()
         .requires = vec![CapabilityRef {
         id: CONTEXT_ID.into(),
-        version: VERSION.into(),
     }];
     artifact =
         PluginPackageArtifactV1::new(artifact.artifact_id, manifest, artifact.files).unwrap();
@@ -283,7 +281,6 @@ async fn implicit_resource_factory_dependencies_are_locked_but_not_public_contri
             .dependency_refs,
         vec![CapabilityRef {
             id: CONTEXT_ID.into(),
-            version: VERSION.into()
         }]
     );
     let active = SessionCapabilityState::new(&snapshot).snapshot().unwrap();

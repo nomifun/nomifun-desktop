@@ -27,10 +27,10 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const field = kind === 'context' ? 'context_order' : 'middleware_order';
   const labels = kind === 'context' ? 'contextOrder' : 'middlewareOrder';
-  const selected = new Map(document.enabled_capabilities.map(value => [value.capability.id, value.capability.version]));
+  const selected = new Set(document.enabled_capabilities.map(value => value.capability.id));
   const contexts = new Map(catalog.filter(item => (kind === 'context' ? item.kind === 'context_contributor' :
     item.kind === 'turn_middleware' || item.middleware_phase !== undefined) &&
-    selected.get(item.capability.id) === item.capability.version).map(item => [item.capability.id, item]));
+    selected.has(item.capability.id)).map(item => [item.capability.id, item]));
   // Retain unavailable explicit choices so a catalog refresh cannot silently change the draft.
   const explicit = document[field] ?? [];
   const ids = [...explicit, ...[...contexts.keys()].filter(id => !explicit.includes(id)).sort()];

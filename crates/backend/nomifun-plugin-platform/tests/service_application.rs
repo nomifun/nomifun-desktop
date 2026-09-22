@@ -323,7 +323,6 @@ fn callable_service_artifact() -> nomifun_agent_contracts::PluginReleaseArtifact
     let capability = CapabilityManifest {
         id: CapabilityId::from(CALLABLE_CAPABILITY_ID),
         contribution_id: "contribution:plugin.callable.echo".into(),
-        version: VersionString::from("1.0.0"),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: LocalizedMetadata {
@@ -474,7 +473,6 @@ fn agent_invocation(
         plugin_product_id: PluginProductId::from(plugin_product_id),
         capability: CapabilityRef {
             id: CapabilityId::from(CALLABLE_CAPABILITY_ID),
-            version: VersionString::from("1.0.0"),
         },
         action_id: ActionId::from(CALLABLE_ACTION_ID),
         action_allowlist,
@@ -646,7 +644,6 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
                 plugin_product_id: created.plugin.plugin_id.clone().into(),
             capability: CapabilityRef {
                 id: CapabilityId::from("plugin.missing"),
-                version: VersionString::from("1.0.0"),
             },
             action_id: ActionId::from("plugin.missing.invoke"),
             action_allowlist: std::collections::BTreeSet::new(),

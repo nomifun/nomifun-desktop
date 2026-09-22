@@ -18,7 +18,7 @@ import { providerSelectionKey, relevantRoleIds, selectRoleProvider } from './rol
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { agentSettings: en } } }, interpolation: { escapeValue: false } });
-const capability = { id: asCapabilityId('platform.search'), version: '1.0.0' };
+const capability = { id: asCapabilityId('platform.search') };
 const role = { key: { role_id: 'search', contract_version: '1.0.0' }, contract_digest: asDigestHex('a'.repeat(64)) };
 const selection: RoleProviderSelection = { role, provider_mount_id: 'user-search' };
 const capabilityModule: CapabilityModuleCatalogItem = {
@@ -73,8 +73,8 @@ describe('component implementation selection', () => {
   test('professional generation preset saves through the existing form without a chat model', () => {
     const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Creative', document: createEmptyAgentPresetDocument() };
     original.document.enabled_capabilities = [
-      { capability: { id: asCapabilityId('creation.media'), version: '1.0.0' }, action_allowlist: ['creation.media/music'] },
-      { capability: { id: asCapabilityId('workspace.files'), version: '1.0.0' }, action_allowlist: ['workspace.files/read'] },
+      { capability: { id: asCapabilityId('creation.media') }, action_allowlist: ['creation.media/music'] },
+      { capability: { id: asCapabilityId('workspace.files') }, action_allowlist: ['workspace.files/read'] },
     ];
     const mediaModule: CapabilityModuleCatalogItem = { ...capabilityModule,
       module: original.document.enabled_capabilities[0].capability, display_name: 'Media creation',
@@ -155,7 +155,7 @@ describe('component implementation selection', () => {
   });
 
   test('shows dependency Roles without adding tools, and retains missing Role choices', () => {
-    const caller = { id: asCapabilityId('acme.caller'), version: '1.0.0' };
+    const caller = { id: asCapabilityId('acme.caller') };
     const otherCatalog = structuredClone(catalog);
     otherCatalog.capabilities.push({ ...catalog.capabilities[0], capability: caller, required_capabilities: [capability] });
     otherCatalog.capabilities[0].required_capabilities = [caller]; // visibility traversal terminates on cycles

@@ -70,7 +70,7 @@ const initialEditors = () => [
 let editors: any[];
 try { editors = JSON.parse(localStorage.getItem(PREVIEW_KEY) || 'null') || initialEditors(); } catch { editors = initialEditors(); }
 const persist = () => localStorage.setItem(PREVIEW_KEY, JSON.stringify(editors));
-const library = () => ({ official_templates: Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value, role_coverage: seed.role_coverage[key as keyof typeof seed.role_coverage], immutable: true, forkable: true })), user_presets: editors.map((entry) => entry.preset), active_bindings: [], fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: Object.keys(seed.templates).length, user_preset_count: editors.length } });
+const library = () => ({ official_templates: Object.entries(seed.templates).map(([key, value]) => ({ template_key: key, seed: value, role_coverage: seed.role_coverage[key as keyof typeof seed.role_coverage], immutable: true, forkable: true })), user_presets: editors.map((entry) => entry.preset), active_bindings: [], fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: Object.keys(seed.templates).length, user_preset_count: editors.length } });
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(status < 400 ? { success: true, data } : { success: false, error: data }), { status, headers: { 'Content-Type': 'application/json' } });
 const hasUnavailableCapability = (document: any) => document.enabled_capabilities.some(
   ({ capability }: any) => catalog.capabilities.find((row) => row.capability.id === capability.id)?.materialization_state !== 'materialized'

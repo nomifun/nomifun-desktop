@@ -359,7 +359,6 @@
     "plugin": "Plugins & connections",
     "missingReason": "The source of this module is missing. Remove it, or restore the corresponding extension before using it.",
     "results": "Results: {{count}}",
-    "version": "Version",
     "noResultsHint": "Try another keyword, category or status filter.",
     "clearFilters": "Clear filters",
     "librarySearch": "Search Agents",

@@ -1310,7 +1310,6 @@ fn build_capability(
             if definition.module_actions.is_empty() { "capability" } else { "module" },
             definition.id
         )),
-        version: VersionString::from(CONTRACT_VERSION),
         kind: definition.kind,
         package: package.clone(),
         display: {
@@ -2365,7 +2364,6 @@ fn role_contracts_for_package(
         members.push(RoleMemberContract {
             capability: CapabilityRef {
                 id: capability.id.clone(),
-                version: capability.version.clone(),
             },
             capability_manifest_digest: digest_payload(capability)
                 .map_err(|error| format!("digest role member {capability_id}: {error}"))?,
@@ -2953,7 +2951,6 @@ mod tests {
             enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
                     id: CapabilityId::from(capability_id),
-                    version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
             }],
@@ -3491,7 +3488,6 @@ mod tests {
                 enabled_capabilities: vec![CapabilitySelection {
                     capability: CapabilityRef {
                         id: CapabilityId::from(BROWSER_MODULE_ID),
-                        version: VersionString::from(CONTRACT_VERSION),
                     },
                     action_allowlist: BTreeSet::from([
                         ActionId::from("browser/observe"),

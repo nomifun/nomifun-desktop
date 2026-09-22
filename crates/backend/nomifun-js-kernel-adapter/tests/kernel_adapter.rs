@@ -145,7 +145,6 @@ fn capability(
     CapabilityManifest {
         id: CapabilityId::from(id),
         contribution_id: contribution_id.into(),
-        version: VersionString::from(VERSION),
         kind,
         package: package.clone(),
         display: display(id, "JavaScript Kernel adapter fixture."),
@@ -318,7 +317,6 @@ fn revision(
     let selection = |id: &str, actions: &[&str]| CapabilitySelection {
         capability: CapabilityRef {
             id: CapabilityId::from(id),
-            version: VersionString::from(VERSION),
         },
         action_allowlist: actions
             .iter()

@@ -4093,7 +4093,7 @@ CREATE TABLE requirements (
 
 CREATE TABLE schema_metadata (
     singleton_key TEXT PRIMARY KEY CHECK (singleton_key = 'canonical'),
-    data_generation INTEGER NOT NULL CHECK (data_generation = 5),
+    data_generation INTEGER NOT NULL CHECK (data_generation = 6),
     root_instance_id TEXT NOT NULL,
     migration_head INTEGER NOT NULL CHECK (migration_head >= 1),
     seed_manifest_digest TEXT NOT NULL CHECK (length(seed_manifest_digest) = 64),
@@ -4438,7 +4438,7 @@ INSERT INTO "agent_metadata" (id, agent_id, icon, name, name_i18n, description, 
 
 INSERT INTO "requirement_display_sequence" (id, singleton_key, last_no) VALUES (1, 'requirements', 0);
 
-INSERT INTO "schema_metadata" (singleton_key, data_generation, root_instance_id, migration_head, seed_manifest_digest, canonical_schema_manifest_digest, projection_schema_version) VALUES ('canonical', 5, 'main-sqlite-agent-store', 1, '9a4f4144f2927e6d67b0dbf430e97d2859a8f5043a3e0fc4c43d59183fd093eb', '45613a5a716b2ed6c086a57cee8d0a361ce37a4084114c449dc1c0b07ef72312', 1);
+INSERT INTO "schema_metadata" (singleton_key, data_generation, root_instance_id, migration_head, seed_manifest_digest, canonical_schema_manifest_digest, projection_schema_version) VALUES ('canonical', 6, 'main-sqlite-agent-store', 1, '9cafc5df531a50ad4b63000a21938588d7ebada7010ff20a80449687f089fa1b', '00056199f1d6f9d9f79f285f3b32924993b8f39efd50ba9af0cc07c622adb65f', 1);
 
 INSERT INTO "system_settings" (id, singleton_key, language, notification_enabled, cron_notification_enabled, command_queue_enabled, save_upload_to_workspace, updated_at) VALUES (1, 'system', 'en-US', 1, 0, 0, 0, 1789741863859);
 

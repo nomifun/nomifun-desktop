@@ -454,7 +454,6 @@ fn contribution_ref(
         contribution_id,
         capability: nomifun_agent_contracts::CapabilityRef {
             id: capability,
-            version: manifest.version.clone(),
         },
         contract_digest,
     })

@@ -69,7 +69,6 @@ async fn initial_context_rejects_tool_dependencies_and_turn_contexts_use_distinc
         context.contributions.context_phase = phase;
         context.requires.push(CapabilityRef {
             id: CHILD.into(),
-            version: VERSION.into(),
         });
         capabilities.push(child);
         registration.metadata.manifest =
@@ -213,7 +212,6 @@ async fn nomi_tool_execution_consumes_a_managed_dependency_without_another_sessi
         .retain(|action| action.action_id.as_ref() == AGENT_ACTION);
     root.requires.push(CapabilityRef {
         id: CHILD.into(),
-        version: VERSION.into(),
     });
     capabilities.push(child);
     registration.metadata.manifest =

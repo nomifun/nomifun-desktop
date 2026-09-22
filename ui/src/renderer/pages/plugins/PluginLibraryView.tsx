@@ -33,7 +33,6 @@ import styles from './PluginWorkbenchPage.module.css';
 import {
   PluginLifecycleBadge,
   PluginStatePanel,
-  StatusBadge,
 } from './PluginWorkbenchState';
 
 export type PluginMountBusyAction =
@@ -349,10 +348,6 @@ const PluginMountDetail: React.FC<
               >
                 <div className={styles.capabilityHeader}>
                   <span className={styles.capabilityName}>{capability.display_name}</span>
-                  <StatusBadge
-                    label={`v${capability.capability_version}`}
-                    tone='info'
-                  />
                 </div>
                 <div className={`${styles.listMeta} ${styles.mono}`} title={capability.capability_id}>
                   {capability.capability_id}

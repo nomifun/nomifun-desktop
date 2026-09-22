@@ -31,7 +31,6 @@ impl Fixture {
         let manifest = CapabilityManifest {
             id: MEMBER.into(),
             contribution_id: format!("capability:{MEMBER}").into(),
-            version: "1.0.0".into(),
             kind: CapabilityKind::ContextContributor,
             package: PackageRef {
                 id: "platform.test".into(),
@@ -59,7 +58,6 @@ impl Fixture {
         };
         let reference = CapabilityRef {
             id: manifest.id.clone(),
-            version: manifest.version.clone(),
         };
         let digest = digest_payload(&manifest).unwrap();
         let artifact_digest = digest_payload(&"fixture artifact").unwrap();
@@ -299,7 +297,7 @@ impl Fixture {
         capability.contribution_lock.contract_digest = capability.schema_digest.clone();
         self.registry.capabilities.insert(id.into(), capability.clone());
         if selected {
-            let reference = CapabilityRef { id: id.into(), version: "1.0.0".into() };
+            let reference = CapabilityRef { id: id.into() };
             self.draft.document.enabled_capabilities.push(wire_cast(&CapabilitySelection {
                 capability: reference.clone(),
                 action_allowlist: middleware.then(|| {
@@ -327,7 +325,7 @@ impl Fixture {
         self.add_context(id, false);
         let provider = self.user_provider();
         provider.contribution.members.get_mut(&MEMBER.into()).unwrap().implementation = Some(CapabilityRef {
-            id: id.into(), version: "1.0.0".into(),
+            id: id.into(),
         });
         provider.provider.contribution_digest = digest_payload(&provider.contribution).unwrap();
         self.catalog.role_providers = self.registry.role_providers.values().cloned().collect();
@@ -377,7 +375,7 @@ fn selected_implementation_conflicts_are_checked_against_other_public_capabiliti
     fixture.map_user_context("fixture.implementation");
     fixture.registry.capabilities.get_mut(&"fixture.implementation".into()).unwrap()
         .manifest.conflicts.push(nomifun_agent_contracts::CapabilityConflict {
-            capability: CapabilityRef { id: "fixture.peer".into(), version: "1.0.0".into() },
+            capability: CapabilityRef { id: "fixture.peer".into() },
             reason: "requires exclusive context ownership".into(),
         });
     let rejected = fixture.compile(None);
@@ -414,7 +412,7 @@ async fn clean_save_rejects_legacy_conflicting_plan_without_rewriting_saved_revi
     // canonical conflict check, not rely solely on a Provider lock difference.
     fixture.registry.capabilities.get_mut(&"fixture.implementation".into()).unwrap()
         .manifest.conflicts.push(nomifun_agent_contracts::CapabilityConflict {
-            capability: CapabilityRef { id: "fixture.peer".into(), version: "1.0.0".into() },
+            capability: CapabilityRef { id: "fixture.peer".into() },
             reason: "legacy plan skipped implementation conflicts".into(),
         });
     assert!(!KernelAgentPresetCompiler::role_providers_unchanged(
@@ -472,7 +470,7 @@ fn conflicts_between_two_selected_roles_are_checked_after_both_providers_are_res
     assert_eq!(allowed.snapshot.unwrap().content.resolved_role_providers.len(), 2);
     fixture.registry.capabilities.get_mut(&"fixture.first-implementation".into()).unwrap()
         .manifest.conflicts.push(nomifun_agent_contracts::CapabilityConflict {
-            capability: CapabilityRef { id: "fixture.second-implementation".into(), version: "1.0.0".into() },
+            capability: CapabilityRef { id: "fixture.second-implementation".into() },
             reason: "these two selected implementations cannot coexist".into(),
         });
     let rejected = fixture.compile(None);

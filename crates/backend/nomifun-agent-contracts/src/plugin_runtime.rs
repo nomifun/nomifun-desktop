@@ -3028,7 +3028,6 @@ fn validate_contributions(
             capability.contribution_id.as_ref(),
             "capability.contribution_id",
         )?;
-        validate_nonempty(capability.version.as_ref(), "capability.version")?;
         if &capability.package != package {
             return Err(invalid(
                 "capability.package",
@@ -3270,7 +3269,6 @@ mod tests {
         let capability = CapabilityManifest {
             id: CapabilityId::from("plugin.example.search"),
             contribution_id: "capability:plugin.example.search".into(),
-            version: "1.0.0".into(),
             kind: CapabilityKind::Tool,
             package: manifest.contribution_package.clone(),
             display: LocalizedMetadata {
@@ -3474,7 +3472,7 @@ mod tests {
         no_slot.contributions.capabilities[0].contributions.ui_slot = None;
         assert!(no_slot.validate().is_err());
         let mut unused_graph = view.clone();
-        unused_graph.contributions.capabilities[0].requires.push(crate::CapabilityRef { id: "another.tool".into(), version: "1.0.0".into() });
+        unused_graph.contributions.capabilities[0].requires.push(crate::CapabilityRef { id: "another.tool".into() });
         assert!(unused_graph.validate().is_err());
     }
 

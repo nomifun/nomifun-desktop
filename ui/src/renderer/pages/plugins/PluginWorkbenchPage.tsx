@@ -236,7 +236,7 @@ const PluginWorkbenchPage: React.FC = () => {
         return;
       }
       const capabilityKeys = new Set(
-        mountDetail.capabilities.map((capability) => `${capability.capability_id}@${capability.capability_version}`)
+        mountDetail.capabilities.map((capability) => capability.capability_id)
       );
       try {
         const library = await agentPlatform.library.invoke();
@@ -252,7 +252,7 @@ const PluginWorkbenchPage: React.FC = () => {
             ...editor.draft.document.enabled_capabilities,
 
           ].filter((selection) =>
-            capabilityKeys.has(`${selection.capability.id}@${selection.capability.version}`)
+            capabilityKeys.has(selection.capability.id)
           );
           return selected.length ? [{
             presetId: preset.preset_id,

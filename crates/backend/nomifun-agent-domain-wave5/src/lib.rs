@@ -1503,7 +1503,6 @@ fn capability_manifest(
             "module:{}",
             spec.id
         )),
-        version: VersionString::from(VERSION),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: display(spec.display_name, spec.description),

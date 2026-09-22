@@ -89,7 +89,6 @@ fn conflict(target: &str) -> CapabilityConflict {
     CapabilityConflict {
         capability: CapabilityRef {
             id: target.into(),
-            version: VERSION.into(),
         },
         reason: "fixture incompatible implementation".into(),
     }

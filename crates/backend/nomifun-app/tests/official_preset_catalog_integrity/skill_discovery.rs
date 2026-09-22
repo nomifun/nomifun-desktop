@@ -2,9 +2,9 @@
 use super::*;
 use nomifun_agent_contracts::{CapabilityRef, LogicalArtifactRef, SkillDefinition};
 use nomifun_api_types::{
-    AgentPresetDocumentDto, CapabilitySelectionDto, CreateAgentPresetRequest,
+    AgentPresetDocumentDto, CapabilityRefDto, CapabilitySelectionDto, CreateAgentPresetRequest,
     CreateAgentSessionRequestDto, CreateAgentSessionResponseDto, SetPluginEnabledRequest,
-    SlashCommandItem,
+    ExactCatalogRefDto, SlashCommandItem,
 };
 
 const SKILL: &str = "test.release-gate.plugin.guide";
@@ -64,7 +64,6 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
         resources: Vec::new(),
         requires_capabilities: vec![CapabilityRef {
             id: tool.id.clone(),
-            version: tool.version.clone(),
         }],
         supported_surfaces: capability_surface_declarations(
             ["desktop", "headless"],
@@ -143,9 +142,8 @@ async fn cold_skill_commands_use_saved_binding_without_starting_runtime_or_conte
                 enabled_capabilities: [tool.id.as_ref(), CONTEXT]
                     .into_iter()
                     .map(|id| CapabilitySelectionDto {
-                        capability: ExactCatalogRefDto {
+                        capability: CapabilityRefDto {
                             id: id.into(),
-                            version: "1.0.0".into(),
                         },
                         action_allowlist: (id == tool.id.as_ref())
                             .then(|| {

@@ -45,7 +45,6 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
         RoleProviderMemberContribution {
             implementation: Some(CapabilityRef {
                 id: implementation.id.clone(),
-                version: implementation.version.clone(),
             }),
             supported_platforms: implementation.supported_platforms.clone(),
             required_resource_kinds: BTreeSet::new(),
@@ -134,9 +133,8 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
         .unwrap()
         .draft;
     draft.document.enabled_capabilities = vec![nomifun_api_types::CapabilitySelectionDto {
-        capability: nomifun_api_types::ExactCatalogRefDto {
+        capability: nomifun_api_types::CapabilityRefDto {
             id: CAPABILITY_ID.into(),
-            version: "1.0.0".into(),
         },
         action_allowlist: BTreeSet::from([discovery::ACTION_ID.to_owned()]),
     }];
@@ -177,9 +175,8 @@ async fn installed_discovery_is_selectable_and_saved_provider_is_used_without_fa
         .document
         .enabled_capabilities
         .push(nomifun_api_types::CapabilitySelectionDto {
-            capability: nomifun_api_types::ExactCatalogRefDto {
+            capability: nomifun_api_types::CapabilityRefDto {
                 id: "example.discovery".into(),
-                version: "1.0.0".into(),
             },
             action_allowlist: BTreeSet::from([discovery::ACTION_ID.to_owned()]),
         });

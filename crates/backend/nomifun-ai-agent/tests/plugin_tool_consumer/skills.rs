@@ -206,7 +206,6 @@ fn fixture(artifact: char) -> (PluginRegistration, Arc<SchemaMap>, SkillDefiniti
         resources: Vec::new(),
         requires_capabilities: vec![CapabilityRef {
             id: AGENT_TOOL.into(),
-            version: VERSION.into(),
         }],
         supported_surfaces: capability_surface_declarations(
             ["desktop"],

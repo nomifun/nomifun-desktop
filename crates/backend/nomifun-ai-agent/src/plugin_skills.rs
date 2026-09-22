@@ -111,7 +111,6 @@ impl SkillAccess {
             if active
                 .as_ref()
                 .is_some_and(|state| !state.active.contains(&required.id))
-                || frozen.capability.version != required.version
                 || live.contribution_lock != frozen.contribution_lock
                 || live.target_artifact_digest != frozen.target_artifact_digest
             {

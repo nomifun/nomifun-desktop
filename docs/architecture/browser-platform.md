@@ -74,7 +74,7 @@ The isolated file picker distinguishes Open and Save modes with a v2 private pro
 
 The shared `headless_page` engine now owns both restricted search extraction and anonymous rendered-HTML snapshots. Search retains its exact engine-origin allowlist and fixed public DNS policy. RenderContent uses SSRF-validated system DNS for public GET resources, forwards browser-computed CORS/referrer headers, waits for pending broker requests and bounded DOM quiet, and returns at most 256 KiB of UTF-8 HTML with a truncation flag. Both retain exact process/profile cleanup ownership and check the pinned browser product. NomiCore now wires Knowledge's typed port through a Kernel non-Agent operation to an independent HeadlessRenderRuntime when a verified installed release is supplied. Missing runtime remains explicitly unavailable, without HTTP fallback. In this environment, the public render smoke is blocked because system DNS maps example.com to a reserved Fake-IP address; that range remains denied.
 
-`nomi_local_websearch@1.0.0` is a separate optional capability in the Agent workbench's Web category. It does not alias `web.search` / `web_search`, require a model-native search feature, or grant Browser automation.
+`nomi_local_websearch` is a separate optional capability in the Agent workbench's Web category. It does not alias `web.search` / `web_search`, require a model-native search feature, or grant Browser automation.
 
 Its Headless owner uses an anonymous temporary context, an origin-restricted request broker, and exact process/profile cleanup. It never takes conversation tabs or login state. Runtime/adapter identity is frozen into the capability metadata and checked again for the Session and request.
 

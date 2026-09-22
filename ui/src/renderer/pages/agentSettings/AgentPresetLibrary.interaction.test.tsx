@@ -103,7 +103,7 @@ const library: AgentPresetLibraryResponse = {
   user_presets: [preset],
   active_bindings: [],
   fresh_start: {
-    data_generation: 4,
+    data_generation: 6,
     legacy_data_imported: false,
     official_template_count: 1,
     user_preset_count: 1,

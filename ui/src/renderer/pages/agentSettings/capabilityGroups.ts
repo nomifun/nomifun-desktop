@@ -3,7 +3,7 @@ import type {
   AgentPresetDocument,
   CapabilityCatalogItem,
   CapabilityModuleCatalogItem,
-  ExactCatalogRef,
+  CapabilityRef,
 } from '@/common/types/agentPlatform';
 import { capabilityReferenceKey } from './model';
 
@@ -19,7 +19,7 @@ export const MODULE_CATEGORIES = [
 ] as const;
 
 export type ModuleCategory = (typeof MODULE_CATEGORIES)[number];
-export type ModuleReference = ExactCatalogRef<'capability'>;
+export type ModuleReference = CapabilityRef;
 
 export type RequiredModuleReference = {
   module: ModuleReference;
@@ -97,13 +97,11 @@ export function requiredModuleReferences(
     .map((entry) => ({
       module: entry.module,
       requiredBy: [...entry.requiredBy.values()].sort((left, right) =>
-        String(left.id).localeCompare(String(right.id)) ||
-        left.version.localeCompare(right.version)
+        String(left.id).localeCompare(String(right.id))
       ),
     }))
     .sort((left, right) =>
-      String(left.module.id).localeCompare(String(right.module.id)) ||
-      left.module.version.localeCompare(right.module.version)
+      String(left.module.id).localeCompare(String(right.module.id))
     );
 }
 
