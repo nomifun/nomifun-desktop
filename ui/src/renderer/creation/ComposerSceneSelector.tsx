@@ -12,13 +12,11 @@ export function ComposerSceneHeader({ agent, sceneSelectionEnabled = true }: {
   agent?: ReactNode;
   sceneSelectionEnabled?: boolean;
 }) {
-  const { t } = useTranslation();
   const creation = useCreationComposer();
   const showSceneSelector = sceneSelectionEnabled && creation;
   if (!agent && !showSceneSelector) return null;
   return <div className={styles.header} data-composer-scene-header>
     {agent && <div className={styles.agent} data-agent-entry>
-      <span className={styles.agentLabel}>{t('agent.identity.label', { defaultValue: '使用 Agent' })}</span>
       {agent}
     </div>}
     {showSceneSelector && <ComposerSceneSelector />}

@@ -380,7 +380,7 @@ impl Fixture {
         .await;
         let mut draft = editor["draft"].clone();
         draft["document"]["enabled_capabilities"].as_array_mut().unwrap().push(json!({
-            "capability":{"id":target_capability(&target_id).id,"version":"1.0.0"},
+            "capability":{"id":target_capability(&target_id).id},
             "action_allowlist":[TARGET_ACTION]
         }));
         data(
@@ -413,7 +413,7 @@ impl Fixture {
             if !enabled.iter().any(|item| item["capability"]["id"] == *id) {
                 enabled
                     .push(json!({
-                        "capability":{"id":id,"version":"1.0.0"},
+                        "capability":{"id":id},
                         "action_allowlist":[middleware::BEFORE_ACTION_ID]
                     }));
             }

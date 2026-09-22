@@ -95,7 +95,7 @@ endpoint；仅连接并读取浏览器版本，不创建/附着页面，不启�
 
 ### 2.3 独立能力、会话 UI 与主文档 Agent 输入（2026-09-15）
 
-- 注册 `nomifun.system-browser` / `nomi_system_browser@1.0.0` / `nomi_system_browser.invoke`，共用严格输入 schema。
+- 注册 `nomifun.system-browser` / `nomi_system_browser` / `nomi_system_browser.invoke`，共用严格输入 schema。
   明确约束当前 Windows x64 Desktop target；macOS/Linux 不通过静态平台声明被假称支持。通用 Wave1 action host
   不能取得该会话 run；实际工具只在能力显式选中、冻结 annotation/贡献锁/运行时 digest 匹配时注册。
 - Agent factory 注入独立 Host/Workspace/Turn，不创建浏览器。workspace 和 begin-run 均查询持久会话 owner、source、

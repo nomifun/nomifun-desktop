@@ -169,7 +169,6 @@ fn selected_capability<'a>(
                 .capability(&resolved.capability.id)
                 .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                     capability_id: resolved.capability.id.clone(),
-                    version: resolved.capability.version.clone(),
                 })?;
             crate::plugin_tools::validate_exact_target(resolved, current)?;
             if current.manifest.contributions.actions == [action()] && !supports(&current.manifest)

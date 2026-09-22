@@ -32,12 +32,10 @@ mod catalog_materialization_tests {
         let artifact_digest = DigestHex::from("a".repeat(64));
         let capability_ref = CapabilityRef {
             id: CapabilityId::from("managed.catalog.run"),
-            version: VersionString::from("1.0.0"),
         };
         let manifest = CapabilityManifest {
             id: capability_ref.id.clone(),
             contribution_id: ContributionId::from("capability:managed.catalog.run"),
-            version: capability_ref.version.clone(),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
@@ -151,7 +149,6 @@ mod catalog_materialization_tests {
         let manifest = CapabilityManifest {
             id: CapabilityId::from("plugin-product.catalog.search"),
             contribution_id: ContributionId::from("capability:plugin-product.catalog.search"),
-            version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
@@ -235,7 +232,6 @@ mod catalog_materialization_tests {
         let snapshot = provider.snapshot().unwrap();
         let reference = CapabilityRef {
             id: CapabilityId::from("plugin-product.catalog.search"),
-            version: VersionString::from("1.0.0"),
         };
         assert_eq!(
             snapshot

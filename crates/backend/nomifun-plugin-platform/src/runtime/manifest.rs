@@ -168,7 +168,7 @@ impl PluginRuntimeSourceManifest {
             self.schemas.insert(output.clone(), action.output_schema.clone());
             self.contributions.capabilities.push(CapabilityManifest {
                 id: id.clone().into(), contribution_id: format!("capability:{id}").into(),
-                version: package.version.clone(), kind: if hook.is_some() { CapabilityKind::TurnMiddleware } else { CapabilityKind::Tool }, package: package.clone(),
+                kind: if hook.is_some() { CapabilityKind::TurnMiddleware } else { CapabilityKind::Tool }, package: package.clone(),
                 display: LocalizedMetadata { name: action.name.clone(), description: action.description.clone(), localized_names: BTreeMap::new(), localized_descriptions: BTreeMap::new() },
                 requires: vec![], conflicts: vec![], requires_runtime_features: vec![],
                 supported_surfaces: capability_surface_declarations(["desktop"], [CapabilityConsumer::Agent, CapabilityConsumer::Ui, CapabilityConsumer::PluginService]),

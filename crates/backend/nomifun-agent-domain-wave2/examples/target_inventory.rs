@@ -47,7 +47,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|capability| TargetCapabilityContribution {
                 capability: CapabilityRef {
                     id: capability.id.clone(),
-                    version: capability.version.clone(),
                 },
                 kind: capability.kind,
             })

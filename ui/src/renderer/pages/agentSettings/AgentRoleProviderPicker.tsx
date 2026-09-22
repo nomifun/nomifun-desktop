@@ -28,7 +28,7 @@ export default function AgentRoleProviderPicker({ document, catalog, disabled, o
         const selected = providers.find(item => providerSelectionKey(item.selection) === value);
         const missing = selection && !selected;
         const names = role?.capabilities.map(ref => catalog.capabilities.find(item =>
-          item.capability.id === ref.id && item.capability.version === ref.version)?.display_name ?? ref.id);
+          item.capability.id === ref.id)?.display_name ?? ref.id);
         const label = names?.join(' / ') || roleId;
         return <div key={roleId} className={styles.field}>
           <span>{label}</span>

@@ -329,6 +329,19 @@
         },
         "type": "object"
       },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -341,8 +354,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef",
-            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
+            "$ref": "#/$defs/CapabilityRef",
+            "description": "Stable Capability Module identity."
           }
         },
         "required": [
@@ -881,6 +894,19 @@
         },
         "type": "object"
       },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -893,8 +919,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef",
-            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
+            "$ref": "#/$defs/CapabilityRef",
+            "description": "Stable Capability Module identity."
           }
         },
         "required": [
@@ -1314,6 +1340,19 @@
         },
         "type": "object"
       },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -1326,8 +1365,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef",
-            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
+            "$ref": "#/$defs/CapabilityRef",
+            "description": "Stable Capability Module identity."
           }
         },
         "required": [
@@ -1983,6 +2022,19 @@
         ],
         "type": "string"
       },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "ChatRouteIdentity": {
         "additionalProperties": false,
         "description": "The immutable identity of one model route as selected by one Preset\nRevision.\n\nThis is deliberately a value object rather than four independently-carried\nfields.  Every layer that resolves or admits a Chat route must carry this\nexact identity unchanged.",
@@ -2259,7 +2311,7 @@
             ]
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "catalog_digest": {
             "type": [
@@ -2285,7 +2337,7 @@
           "dependency_refs": {
             "description": "Exact direct edges of the selected execution plan, not a second copy of\nthe dependency's descriptor or a grant to call arbitrary plan members.",
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -3179,6 +3231,19 @@
         ],
         "type": "object"
       },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "CapabilityReleaseState": {
         "enum": [
           "published_active",
@@ -3348,7 +3413,7 @@
         "type": "object"
       },
       "capability": {
-        "$ref": "#/$defs/ExactVersionRef"
+        "$ref": "#/$defs/CapabilityRef"
       },
       "contract_digest": {
         "type": "string"
@@ -4597,6 +4662,19 @@
   },
   "official_preset_seed": {
     "$defs": {
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "CapabilitySelection": {
         "additionalProperties": false,
         "properties": {
@@ -4609,8 +4687,8 @@
             "uniqueItems": true
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef",
-            "description": "Exact Capability Module revision. The historical field name remains on\nthe v1 wire until AgentPreset vNext switches the outer document."
+            "$ref": "#/$defs/CapabilityRef",
+            "description": "Stable Capability Module identity."
           }
         },
         "required": [
@@ -4834,7 +4912,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -4949,7 +5027,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -4972,15 +5050,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -4991,6 +5065,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -5112,7 +5199,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -5327,7 +5414,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -5379,7 +5466,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -5448,7 +5535,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -6749,6 +6836,19 @@
   },
   "plugin_host_request_envelope": {
     "$defs": {
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "ContextContributionInput": {
         "oneOf": [
           {
@@ -6899,7 +6999,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "contract_digest": {
             "type": "string"
@@ -8503,7 +8603,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -8618,7 +8718,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -8641,15 +8741,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -8660,6 +8756,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -8818,7 +8927,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -9154,7 +9263,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -9206,7 +9315,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -9275,7 +9384,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -9411,7 +9520,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -9526,7 +9635,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -9549,15 +9658,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -9568,6 +9673,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -9726,7 +9844,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -10007,7 +10125,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -10059,7 +10177,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -10128,7 +10246,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -11416,7 +11534,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -11531,7 +11649,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -11554,15 +11672,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -11573,6 +11687,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -11772,7 +11899,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -12317,7 +12444,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -12369,7 +12496,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -12458,7 +12585,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -12659,7 +12786,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -12774,7 +12901,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -12797,15 +12924,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -12816,6 +12939,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -12974,7 +13110,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -13478,7 +13614,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -13530,7 +13666,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -13575,7 +13711,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -13813,7 +13949,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -13928,7 +14064,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -13951,15 +14087,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -13970,6 +14102,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -14128,7 +14273,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -14509,7 +14654,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -14561,7 +14706,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -14606,7 +14751,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -15790,7 +15935,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "reason": {
             "type": "string"
@@ -15905,7 +16050,7 @@
           },
           "requires": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -15928,15 +16073,11 @@
             },
             "type": "array",
             "uniqueItems": true
-          },
-          "version": {
-            "type": "string"
           }
         },
         "required": [
           "id",
           "contribution_id",
-          "version",
           "kind",
           "package",
           "display",
@@ -15947,6 +16088,19 @@
           "supported_platforms",
           "config_schema",
           "contributions"
+        ],
+        "type": "object"
+      },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
         ],
         "type": "object"
       },
@@ -16105,7 +16259,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -16715,7 +16869,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -16767,7 +16921,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -16812,7 +16966,7 @@
           },
           "requires_capabilities": {
             "items": {
-              "$ref": "#/$defs/ExactVersionRef"
+              "$ref": "#/$defs/CapabilityRef"
             },
             "type": "array"
           },
@@ -17749,6 +17903,19 @@
         ],
         "type": "string"
       },
+      "CapabilityRef": {
+        "additionalProperties": false,
+        "description": "Stable capability identity.\n\nCapability implementations are frozen by their package/release provenance\nand contract digests. A second, independently maintained capability version\nwould duplicate that identity and make authoring references unnecessarily\nbrittle, so capability references intentionally contain only the stable ID.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
       "ExactRoleContractRef": {
         "additionalProperties": false,
         "properties": {
@@ -17816,7 +17983,7 @@
             "type": "string"
           },
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "materialization_version": {
             "type": "string"
@@ -17962,7 +18129,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "capability_manifest_digest": {
             "type": "string"
@@ -18014,7 +18181,7 @@
           "implementation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/ExactVersionRef"
+                "$ref": "#/$defs/CapabilityRef"
               },
               {
                 "type": "null"
@@ -18046,7 +18213,7 @@
         "additionalProperties": false,
         "properties": {
           "capability": {
-            "$ref": "#/$defs/ExactVersionRef"
+            "$ref": "#/$defs/CapabilityRef"
           },
           "kind": {
             "$ref": "#/$defs/CapabilityKind"
@@ -18110,16 +18277,12 @@
       "TargetVersionPolicy": {
         "additionalProperties": false,
         "properties": {
-          "capability_version": {
-            "type": "string"
-          },
           "package_version": {
             "type": "string"
           }
         },
         "required": [
-          "package_version",
-          "capability_version"
+          "package_version"
         ],
         "type": "object"
       }

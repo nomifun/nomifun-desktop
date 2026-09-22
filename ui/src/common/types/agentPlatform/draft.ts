@@ -3,6 +3,7 @@ import type {
 AgentPresetDocument,
 AgentPresetDraft,
 CapabilityId,
+CapabilityRef,
 CapabilitySelection,
 ExactCatalogRef,
 SkillCatalogItem
@@ -44,7 +45,7 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   },
 });
 
-const selection = (capability: ExactCatalogRef<'capability'>): CapabilitySelection => ({
+const selection = (capability: CapabilityRef): CapabilitySelection => ({
   capability,
   action_allowlist: [],
 });
@@ -61,21 +62,18 @@ export type CapabilityPlacement = 'enabled' | 'none';
 
 export function capabilityPlacement(
   document: AgentPresetDocument,
-  capability: CapabilityId | ExactCatalogRef<'capability'>
+  capability: CapabilityId | CapabilityRef
 ): CapabilityPlacement {
   const id = typeof capability === 'string' ? capability : capability.id;
-  const version = typeof capability === 'string' ? undefined : capability.version;
-  return document.enabled_capabilities.some(item => item.capability.id === id &&
-    (version === undefined || item.capability.version === version)) ? 'enabled' : 'none';
+  return document.enabled_capabilities.some(item => item.capability.id === id) ? 'enabled' : 'none';
 }
 
 export function placeCapability(
   document: AgentPresetDocument,
-  capability: ExactCatalogRef<'capability'>,
+  capability: CapabilityRef,
   placement: CapabilityPlacement
 ): AgentPresetDocument {
-  const existing = document.enabled_capabilities.find(item =>
-    item.capability.id === capability.id && item.capability.version === capability.version);
+  const existing = document.enabled_capabilities.find(item => item.capability.id === capability.id);
   const enabled = document.enabled_capabilities.filter(item => item.capability.id !== capability.id);
   if (placement === 'enabled') enabled.push(existing ?? selection(capability));
   const next = { ...document, enabled_capabilities: enabled.sort((a, b) => a.capability.id.localeCompare(b.capability.id)) };

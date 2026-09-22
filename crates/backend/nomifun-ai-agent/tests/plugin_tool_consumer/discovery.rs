@@ -57,7 +57,6 @@ fn builtin() -> (PluginRegistration, RoleContractManifest) {
         members: vec![RoleMemberContract {
             capability: CapabilityRef {
                 id: CAPABILITY_ID.into(),
-                version: VERSION.into(),
             },
             capability_manifest_digest: digest_payload(&capability).unwrap(),
             requirement: RoleMemberRequirement::Required,
@@ -110,7 +109,6 @@ fn provider(role: &RoleContractManifest, mapped: bool) -> RoleProviderContributi
             RoleProviderMemberContribution {
                 implementation: mapped.then(|| CapabilityRef {
                     id: IMPL.into(),
-                    version: VERSION.into(),
                 }),
                 supported_platforms: vec![PlatformConstraint::Any],
                 required_resource_kinds: BTreeSet::new(),

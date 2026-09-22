@@ -361,7 +361,6 @@ fn snapshot_matches_registry(
         let manifest_digest = digest_payload(&current.manifest)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
         if current.manifest.id != resolved.capability.id
-            || current.manifest.version != resolved.capability.version
             || current.manifest.package != resolved.source_package
             || current.contribution_id != resolved.contribution_id
             || current.contribution_lock != resolved.contribution_lock
@@ -399,9 +398,8 @@ pub(crate) fn validate_direct_catalog_availability(
             diagnostics.push(error_diagnostic(
                 CanonicalErrorCode::from("CAPABILITY_NOT_MATERIALIZED"),
                 format!(
-                    "capability {}@{} is not materialized",
-                    reference.id.as_ref(),
-                    reference.version.as_ref()
+                    "capability {} is not materialized",
+                    reference.id.as_ref()
                 ),
                 Some(reference.id.as_ref().to_owned()),
             ));
@@ -472,9 +470,8 @@ fn resolved_plugin_product_capability_for_selection(
     let required_resource_kinds = capability.entry.typed_resource_kinds.clone();
     if required_resource_kinds != manifest.contributions.resource_kinds {
         return Err(plugin_product_catalog_error(format!(
-            "Plugin Product capability {}@{} has inconsistent typed resource requirements",
-            selection.capability.id.as_ref(),
-            selection.capability.version.as_ref()
+            "Plugin Product capability {} has inconsistent typed resource requirements",
+            selection.capability.id.as_ref()
         )));
     }
 
@@ -531,9 +528,8 @@ fn plugin_product_publication_for<'a>(
             }
             if match_value.is_some() {
                 return Err(plugin_product_catalog_error(format!(
-                    "Plugin Product capability {}@{} appears in multiple publications",
-                    reference.id.as_ref(),
-                    reference.version.as_ref()
+                    "Plugin Product capability {} appears in multiple publications",
+                    reference.id.as_ref()
                 )));
             }
             match_value = Some((publication, capability));
@@ -541,9 +537,8 @@ fn plugin_product_publication_for<'a>(
     }
     if has_kernel_materialization && match_value.is_some() {
         return Err(plugin_product_catalog_error(format!(
-            "capability {}@{} is present in both the Kernel registry and a Plugin Product publication",
-            reference.id.as_ref(),
-            reference.version.as_ref()
+            "capability {} is present in both the Kernel registry and a Plugin Product publication",
+            reference.id.as_ref()
         )));
     }
     Ok(match_value)
@@ -584,9 +579,8 @@ fn plugin_product_catalog_operation_lock(
             != Some(&publication.active_release.release_digest)
     {
         return Err(plugin_product_catalog_error(format!(
-            "Catalog operation lock for Plugin Product capability {}@{} does not bind the exact Active Release",
-            capability.entry.capability.id.as_ref(),
-            capability.entry.capability.version.as_ref()
+            "Catalog operation lock for Plugin Product capability {} does not bind the exact Active Release",
+            capability.entry.capability.id.as_ref()
         )));
     }
     Ok(operation_lock)
@@ -640,25 +634,20 @@ fn contribution_locks_for_payload(
                     "CAPABILITY_NOT_MATERIALIZED",
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                     format!(
-                        "capability {}@{} has no formal Catalog entry",
-                        selection.capability.id.as_ref(),
-                        selection.capability.version.as_ref()
+                        "capability {} has no formal Catalog entry",
+                        selection.capability.id.as_ref()
                     ),
                 )
             })?;
         let kernel_capability = registry
             .capability(&selection.capability.id)
-            .filter(|materialized| {
-                materialized.manifest.version == selection.capability.version
-            })
             .ok_or_else(|| {
                 ControlPlaneError::canonical(
                     "CAPABILITY_NOT_MATERIALIZED",
                     axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                     format!(
-                        "capability {}@{} is not present in the canonical Kernel registry",
-                        selection.capability.id.as_ref(),
-                        selection.capability.version.as_ref()
+                        "capability {} is not present in the canonical Kernel registry",
+                        selection.capability.id.as_ref()
                     ),
                 )
             })?;
@@ -673,9 +662,8 @@ fn contribution_locks_for_payload(
                 "CAPABILITY_CATALOG_INVALID",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
-                    "capability {}@{} differs between the Catalog and canonical Kernel registry",
-                    selection.capability.id.as_ref(),
-                    selection.capability.version.as_ref()
+                    "capability {} differs between the Catalog and canonical Kernel registry",
+                    selection.capability.id.as_ref()
                 ),
             ));
         }
@@ -839,14 +827,12 @@ mod tests {
         };
         let capability_ref = CapabilityRef {
             id: CapabilityId::from("managed.example.run"),
-            version: VersionString::from("1.0.0"),
         };
         let capability_manifest = CapabilityManifest {
             id: capability_ref.id.clone(),
             contribution_id: ContributionId::from(
                 "capability:managed.example.run",
             ),
-            version: capability_ref.version.clone(),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
@@ -1066,7 +1052,6 @@ mod tests {
         let plugin_product_id = PluginProductId::from("plugin-example");
         let capability_ref = CapabilityRef {
             id: CapabilityId::from("plugin.example.search"),
-            version: VersionString::from("1.0.0"),
         };
         let action = CapabilityActionDescriptor {
             action_id: ActionId::from("plugin.example.search.invoke"),
@@ -1080,7 +1065,6 @@ mod tests {
         let manifest = CapabilityManifest {
             id: capability_ref.id.clone(),
             contribution_id: ContributionId::from("capability:plugin.example.search"),
-            version: capability_ref.version.clone(),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {

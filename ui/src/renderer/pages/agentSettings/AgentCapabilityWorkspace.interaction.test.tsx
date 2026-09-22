@@ -35,7 +35,7 @@ const moduleItem = (
   actions: Array<[string, string]> = [[`${id}/read`, 'read_local']],
   resources: string[] = []
 ): CapabilityModuleCatalogItem => ({
-  module: { id: asCapabilityId(id), version: '1.0.0' },
+  module: { id: asCapabilityId(id) },
   display_name: id,
   description: `${id} description`,
   source_package: { id: asPackageId(`nomifun.${id}`), version: '1.0.0' },
@@ -268,8 +268,8 @@ describe('Agent capability Module workbench', () => {
     get.mockRestore();
   });
 
-  test('preserves a missing exact grant until the user explicitly disables it', async () => {
-    const missing = { id: asCapabilityId('plugin.removed'), version: '3.0.0' };
+  test('preserves a missing grant until the user explicitly disables it', async () => {
+    const missing = { id: asCapabilityId('plugin.removed') };
     const screen = mount(documentWith([[missing, ['plugin.removed/run']]]));
     expect(screen.getByText('plugin.removed')).toBeTruthy();
     expect(screen.getAllByText(en.workbench.missingReason)).toHaveLength(2);

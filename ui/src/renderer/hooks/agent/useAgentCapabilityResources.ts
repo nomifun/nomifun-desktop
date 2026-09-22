@@ -5,16 +5,14 @@
  */
 
 import type {
+  CapabilityRef,
   CapabilityCatalogItem,
-  ExactCatalogRef,
 } from '@/common/types/agentPlatform';
 
-const referenceKey = (
-  reference: Pick<ExactCatalogRef<'capability'>, 'id' | 'version'>
-): string => `${reference.id}@${reference.version}`;
+const referenceKey = (reference: Pick<CapabilityRef, 'id'>): string => String(reference.id);
 
 export const requiredResourceKindsForCapabilityReferences = (
-  references: readonly Pick<ExactCatalogRef<'capability'>, 'id' | 'version'>[],
+  references: readonly Pick<CapabilityRef, 'id'>[],
   catalog: readonly CapabilityCatalogItem[]
 ): Set<string> => {
   const selected = new Set(references.map(referenceKey));

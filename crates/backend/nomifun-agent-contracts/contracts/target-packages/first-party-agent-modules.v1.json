@@ -2,8 +2,7 @@
   "schema_version": "1.0.0",
   "inventory_version": "2.0.0",
   "version_policy": {
-    "package_version": "1.0.0",
-    "capability_version": "1.0.0"
+    "package_version": "1.0.0"
   },
   "packages": [
     {
@@ -18,8 +17,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "web.research",
-            "version": "1.0.0"
+            "id": "web.research"
           },
           "kind": "tool"
         }
@@ -39,8 +37,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "agent.collaboration",
-            "version": "1.0.0"
+            "id": "agent.collaboration"
           },
           "kind": "tool"
         }
@@ -60,29 +57,25 @@
       "capabilities": [
         {
           "capability": {
-            "id": "workspace.files",
-            "version": "1.0.0"
+            "id": "workspace.files"
           },
           "kind": "tool"
         },
         {
           "capability": {
-            "id": "workspace.vcs",
-            "version": "1.0.0"
+            "id": "workspace.vcs"
           },
           "kind": "tool"
         },
         {
           "capability": {
-            "id": "workspace.process",
-            "version": "1.0.0"
+            "id": "workspace.process"
           },
           "kind": "tool"
         },
         {
           "capability": {
-            "id": "workspace.artifacts",
-            "version": "1.0.0"
+            "id": "workspace.artifacts"
           },
           "kind": "tool"
         }
@@ -102,8 +95,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "ssh",
-            "version": "1.0.0"
+            "id": "ssh"
           },
           "kind": "tool"
         }
@@ -123,8 +115,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "knowledge",
-            "version": "1.0.0"
+            "id": "knowledge"
           },
           "kind": "tool"
         }
@@ -144,8 +135,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "project.memory",
-            "version": "1.0.0"
+            "id": "project.memory"
           },
           "kind": "tool"
         }
@@ -165,8 +155,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "companion.memory",
-            "version": "1.0.0"
+            "id": "companion.memory"
           },
           "kind": "tool"
         }
@@ -186,8 +175,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "browser",
-            "version": "1.0.0"
+            "id": "browser"
           },
           "kind": "tool"
         }
@@ -203,10 +191,9 @@
           "members": [
             {
               "capability": {
-                "id": "browser",
-                "version": "1.0.0"
+                "id": "browser"
               },
-              "capability_manifest_digest": "726e720a44e00b3cc2898d6a43f9533da1a6a11d318f39884aef6cafd087cc62",
+              "capability_manifest_digest": "0b4f260dee2707c98834d458ce50a84423c69c7ce7def6e3077bc86c7876294a",
               "requirement": "required"
             }
           ],
@@ -220,7 +207,7 @@
               "role_id": "system.browser_use",
               "contract_version": "2.0.0"
             },
-            "contract_digest": "1a7c61259276061c62db34228d0766641800e8d8148765e95870b1ffe34ac74b"
+            "contract_digest": "d126627d165f2f8572a34c3e7e2bbe556ec522618f8e73b299b4f2866280cb36"
           },
           "display": {
             "name": "Browser Use",
@@ -262,8 +249,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "computer",
-            "version": "1.0.0"
+            "id": "computer"
           },
           "kind": "tool"
         }
@@ -279,10 +265,9 @@
           "members": [
             {
               "capability": {
-                "id": "computer",
-                "version": "1.0.0"
+                "id": "computer"
               },
-              "capability_manifest_digest": "eb64bcce44bb06c259b01865d68597eef4ce98f4af35c9da9049a2aabdadb950",
+              "capability_manifest_digest": "0fbc3af16699c855cd934d74a47f3d78fe6f0f338d1a45b6c371a2ecb82d6941",
               "requirement": "required"
             }
           ],
@@ -296,7 +281,7 @@
               "role_id": "system.computer_use",
               "contract_version": "1.0.0"
             },
-            "contract_digest": "c656c82c253d21b9baea10a39e2bbc1a3e1ce7ae2f1878d1f915ed8ee5ab459b"
+            "contract_digest": "92e2fbccfd92cb82cabef53f9f6df582e4af2dcfea161ecb05d2cbc71d19827b"
           },
           "display": {
             "name": "Computer Use",
@@ -337,8 +322,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "requirements",
-            "version": "1.0.0"
+            "id": "requirements"
           },
           "kind": "tool"
         }
@@ -358,8 +342,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "automation.schedule",
-            "version": "1.0.0"
+            "id": "automation.schedule"
           },
           "kind": "tool"
         }
@@ -379,8 +362,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "companion",
-            "version": "1.0.0"
+            "id": "companion"
           },
           "kind": "tool"
         }
@@ -400,8 +382,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "channel.messaging",
-            "version": "1.0.0"
+            "id": "channel.messaging"
           },
           "kind": "tool"
         }
@@ -421,8 +402,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "customer.service",
-            "version": "1.0.0"
+            "id": "customer.service"
           },
           "kind": "tool"
         }
@@ -442,8 +422,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "robot",
-            "version": "1.0.0"
+            "id": "robot"
           },
           "kind": "tool"
         }
@@ -463,8 +442,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "creation.media",
-            "version": "1.0.0"
+            "id": "creation.media"
           },
           "kind": "tool"
         }
@@ -484,8 +462,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "creative.workshop",
-            "version": "1.0.0"
+            "id": "creative.workshop"
           },
           "kind": "tool"
         }
@@ -505,8 +482,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "office",
-            "version": "1.0.0"
+            "id": "office"
           },
           "kind": "tool"
         }
@@ -526,8 +502,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "plugin.development",
-            "version": "1.0.0"
+            "id": "plugin.development"
           },
           "kind": "tool"
         }
@@ -547,8 +522,7 @@
       "capabilities": [
         {
           "capability": {
-            "id": "agent.tool-discovery",
-            "version": "1.0.0"
+            "id": "agent.tool-discovery"
           },
           "kind": "tool"
         }

@@ -124,9 +124,7 @@ pub fn compile_engine_tool_plan(
                     exposure.capability_id.as_ref()
                 ))
             })?;
-        if materialized.manifest.version != resolved.capability.version
-            || materialized.schema_digest != resolved.schema_digest
-        {
+        if materialized.schema_digest != resolved.schema_digest {
             return Err(EngineToolError::ToolPlan(format!(
                 "capability {} materialization differs from the compiled Snapshot",
                 exposure.capability_id.as_ref()
@@ -435,9 +433,7 @@ fn validate_binding_contract(
             binding.capability_id.as_ref()
         ))
     })?;
-    if materialized.schema_digest != binding.capability_contract_digest
-        || materialized.manifest.version != resolved.capability.version
-    {
+    if materialized.schema_digest != binding.capability_contract_digest {
         return Err(EngineToolError::ToolPlan(format!(
             "capability {} materialization differs from the Tool binding",
             binding.capability_id.as_ref()

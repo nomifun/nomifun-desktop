@@ -72,7 +72,6 @@ impl MaterializedCapability {
         CapabilityOperationLock {
             capability: CapabilityRef {
                 id: self.manifest.id.clone(),
-                version: self.manifest.version.clone(),
             },
             consumer,
             contribution: self.contribution_lock.clone(),
@@ -466,10 +465,6 @@ impl Materializer {
         for (key, pending) in pending_mcp_tools {
             let capability = capabilities
                 .get(&pending.mapping.capability.id)
-                .filter(|capability| {
-                    capability.manifest.version
-                        == pending.mapping.capability.version
-                })
                 .ok_or_else(|| KernelError::MissingMcpCapability {
                     server_id: key.0.clone(),
                     tool_key: key.1.clone(),
@@ -841,7 +836,6 @@ fn validate_registration(
 
     let host_ports = declared_host_ports(&registration.context);
     for capability in &manifest.contributions.capabilities {
-        validate_version("capability.version", &capability.version)?;
         capability
             .validate_module_contract()
             .map_err(|reason| KernelError::InvalidRegistration {
@@ -1042,18 +1036,10 @@ fn validate_capability_dependencies(
     let mut edges = Vec::new();
     for capability in capabilities.values() {
         for dependency in &capability.manifest.requires {
-            let Some(materialized) = capabilities.get(&dependency.id) else {
+            if !capabilities.contains_key(&dependency.id) {
                 return Err(KernelError::MissingCapabilityDependency {
                     capability_id: capability.manifest.id.clone(),
                     dependency_id: dependency.id.clone(),
-                    dependency_version: dependency.version.clone(),
-                });
-            };
-            if materialized.manifest.version != dependency.version {
-                return Err(KernelError::MissingCapabilityDependency {
-                    capability_id: capability.manifest.id.clone(),
-                    dependency_id: dependency.id.clone(),
-                    dependency_version: dependency.version.clone(),
                 });
             }
             edges.push((dependency.id.clone(), capability.manifest.id.clone()));
@@ -1070,9 +1056,7 @@ fn validate_skills(
 ) -> Result<(), KernelError> {
     for skill in skills.values() {
         for requirement in &skill.definition.requires_capabilities {
-            if !capabilities.get(&requirement.id).is_some_and(|capability| {
-                capability.manifest.version == requirement.version
-            }) {
+            if !capabilities.contains_key(&requirement.id) {
                 return Err(KernelError::MissingSkillCapability {
                     skill_id: skill.definition.id.clone(),
                     capability_id: requirement.id.clone(),
@@ -1090,10 +1074,6 @@ fn validate_mcp_mappings(
     for ((server_id, tool_key), mapping) in mappings {
         let Some(capability) = capabilities
             .get(&mapping.mapping.capability.id)
-            .filter(|capability| {
-                capability.manifest.version
-                    == mapping.mapping.capability.version
-            })
         else {
             return Err(KernelError::MissingMcpCapability {
                 server_id: server_id.clone(),
@@ -1185,9 +1165,7 @@ fn materialize_role_contracts(
                         ),
                     });
                 };
-                if capability.manifest.version != member.capability.version
-                    || capability.schema_digest != member.capability_manifest_digest
-                {
+                if capability.schema_digest != member.capability_manifest_digest {
                     return Err(KernelError::InvalidRoleContract {
                         role_id: role_id.clone(),
                         reason: format!(
@@ -1335,7 +1313,6 @@ fn materialize_role_providers(
                     .ok_or_else(|| invalid("implementation capability is not materialized"))?;
                 if implementation.mount_id != registration.mount_id
                     || implementation.manifest.package != package
-                    || implementation.manifest.version != implementation_ref.version
                     || capability_roles.contains_key(&implementation_ref.id)
                 {
                     return Err(invalid("implementation must be an exact direct capability owned by this Provider Mount"));

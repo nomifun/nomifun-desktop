@@ -359,7 +359,6 @@
     "plugin": "插件与连接",
     "missingReason": "这个模块的来源已不存在。可以将它移除，或恢复对应扩展后再使用。",
     "results": "共 {{count}} 项",
-    "version": "版本",
     "noResultsHint": "试试其他关键词，或调整分类与状态筛选。",
     "clearFilters": "清除筛选",
     "librarySearch": "搜索 Agent",

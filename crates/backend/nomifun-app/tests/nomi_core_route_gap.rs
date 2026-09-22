@@ -574,7 +574,7 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
     assert_eq!(status, StatusCode::OK, "{minimal}");
     let mut document = minimal["data"]["revision"]["document"].clone();
     document["enabled_capabilities"] = json!([{
-        "capability": {"id": "knowledge", "version": "1.0.0"},
+        "capability": {"id": "knowledge"},
         "action_allowlist": ["knowledge/read", "knowledge/search"]
     }]);
     document["instructions"] = Value::String(
@@ -1094,7 +1094,7 @@ async fn nomi_core_accepts_exact_module_action_grants() {
     ];
     created_value["data"]["draft"]["document"]["enabled_capabilities"] = json!(
         enabled.iter().map(|(id, action)| json!({
-            "capability": {"id": id, "version": "1.0.0"},
+            "capability": {"id": id},
             "action_allowlist": [action]
         })).collect::<Vec<_>>()
     );
@@ -1159,9 +1159,9 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let document = json!({
         "schema_version":"1.0.0", "model_route_refs":{}, "chat_route_records":{},
         "enabled_capabilities":[
-            {"capability":{"id":"knowledge","version":"1.0.0"},"action_allowlist":["knowledge/read","knowledge/search"]},
-            {"capability":{"id":"web.research","version":"1.0.0"},"action_allowlist":["web.research/fetch","web.research/search"]},
-            {"capability":{"id":"automation.schedule","version":"1.0.0"},"action_allowlist":["automation.schedule/list"]}
+            {"capability":{"id":"knowledge"},"action_allowlist":["knowledge/read","knowledge/search"]},
+            {"capability":{"id":"web.research"},"action_allowlist":["web.research/fetch","web.research/search"]},
+            {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/list"]}
         ],
         "skill_bindings":[], "system_role_provider_overrides":{}, "persona":"Research helper",
         "instructions":"Use only the selected capabilities.", "starter_prompts":[]
@@ -1179,7 +1179,7 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"], created["data"]["revision"]["document"]["enabled_capabilities"]);
     assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap().len(), 3);
     let mut invalid = document;
-    invalid["enabled_capabilities"] = json!([{"capability":{"id":"missing.capability","version":"1.0.0"}}]);
+    invalid["enabled_capabilities"] = json!([{"capability":{"id":"missing.capability"}}]);
     let (status, _) = call(router.clone(), "POST", "/api/agent-presets", json!({"display_name":"Must not persist", "document":invalid})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, after) = call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
@@ -2026,7 +2026,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         "display_name": "Personal model test", "document": {
             "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
             "enabled_capabilities": [{
-                "capability": { "id": "workspace.files", "version": "1.0.0" },
+                "capability": { "id": "workspace.files" },
                 "action_allowlist": ["workspace.files/read", "workspace.files/search"]
             }],
             "skill_bindings": [], "system_role_provider_overrides": {},

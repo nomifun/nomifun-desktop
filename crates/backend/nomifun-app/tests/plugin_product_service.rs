@@ -88,7 +88,7 @@ async fn published_service_preserves_authority_cancellation_and_disable_fences()
         cancellation: Default::default(),
         owner_user_id: services.authoritative_user_id.to_string(),
         plugin_product_id: id.clone().into(),
-        capability: CapabilityRef { id: capability(&id).id, version: "1.0.0".into() },
+        capability: CapabilityRef { id: capability(&id).id },
         action_id: ACTION.into(), action_allowlist: [ACTION.into()].into(),
         active_release: release,
         active_release_epoch: product["releases"]["active_release_epoch"].as_u64().unwrap(),

@@ -168,7 +168,6 @@ mod kind_invariance_tests {
         CapabilityManifest {
             id: "example.mixed".into(),
             contribution_id: "capability:example.mixed".into(),
-            version: "1.0.0".into(),
             kind,
             package: nomifun_agent_contracts::PackageRef {
                 id: "example.package".into(),
@@ -2284,7 +2283,6 @@ impl KernelNomiPluginToolSession {
                 .capability(&resolved.capability.id)
                 .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                     capability_id: resolved.capability.id.clone(),
-                    version: resolved.capability.version.clone(),
                 })?;
             validate_exact_target(resolved, current)?;
             let manifest = &current.manifest;
@@ -2570,7 +2568,6 @@ pub async fn assemble_initial_capability_context(
             .capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: resolved.capability.id.clone(),
-                version: resolved.capability.version.clone(),
             })?;
         validate_exact_target(resolved, current)?;
         if current.manifest.contributions.context_schema_refs.is_empty() {
@@ -2717,7 +2714,6 @@ async fn assemble_initial_platform_builtin_lifecycle(
             .capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: resolved.capability.id.clone(),
-                version: resolved.capability.version.clone(),
             })?;
         validate_exact_target(resolved, current)?;
         if is_turn_middleware(compiled, &current.manifest) {
@@ -2780,7 +2776,6 @@ fn turn_middleware_identities(
             .capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: resolved.capability.id.clone(),
-                version: resolved.capability.version.clone(),
             })?;
         if !is_turn_middleware(compiled, &current.manifest) {
             continue;
@@ -2816,7 +2811,6 @@ async fn lifecycle_context_contributors(
         let current = registry.capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: resolved.capability.id.clone(),
-                version: resolved.capability.version.clone(),
             })?;
         let schema_ref = if is_turn_middleware(compiled, &current.manifest) {
             Some(turn_middleware_schema_ref(&current.manifest)?)
@@ -3656,7 +3650,6 @@ pub(crate) fn validate_exact_target(
         ))
     })?;
     if current.manifest.id != resolved.capability.id
-        || current.manifest.version != resolved.capability.version
         || current.manifest.package != resolved.source_package
         || current.contribution_id != resolved.contribution_id
         || current.contribution_lock != resolved.contribution_lock

@@ -119,7 +119,6 @@ export interface PluginContributionProvenance {
 
 export interface PluginCapabilityContribution {
   capability_id: string;
-  capability_version: string;
   display_name: string;
   description?: string;
   provenance: PluginContributionProvenance;

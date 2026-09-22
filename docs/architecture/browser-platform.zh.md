@@ -171,7 +171,7 @@ NomiCore 的 Knowledge 已通过 typed port 接入 Kernel 非 Agent operation �
 只有安装版本验证成功才装配该 Provider，缺少运行时时仍明确 unavailable，不回退普通 HTTP。
 本机公网渲染测试因系统 DNS 把 example.com 映射到保留的 Fake-IP 而被阻断，没有放行该网段；本地检索公网回归通过。
 
-`nomi_local_websearch@1.0.0` 是 Agent 工作台“网页”分类中的独立可选能力。它不映射为 `web.search` / `web_search`，不要求模型原生搜索能力，也不隐含 Browser 自动化权限。
+`nomi_local_websearch` 是 Agent 工作台“网页”分类中的独立可选能力。它不映射为 `web.search` / `web_search`，不要求模型原生搜索能力，也不隐含 Browser 自动化权限。
 
 其 Headless owner 使用匿名临时 context、限定 origin 的请求转发与 exact process/profile 清理，不读取会话标签或登录态。Runtime/adapter 身份冻结在能力元数据中，会话构建和请求执行时再次校验。
 

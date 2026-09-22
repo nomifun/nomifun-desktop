@@ -27,7 +27,7 @@ const template: OfficialPresetTemplate = { template_key: 'chat.minimal', immutab
   seed: { enabled_capabilities: [], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] },
   role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] } };
 const otherTemplate = { ...template, template_key: 'coding.codex' } as OfficialPresetTemplate;
-const capability: CapabilityCatalogItem = { capability: { id: asCapabilityId('business.check'), version: '1.0.0' }, kind: 'tool',
+const capability: CapabilityCatalogItem = { capability: { id: asCapabilityId('business.check') }, kind: 'tool',
   display_name: 'Business check', description: 'Check business input', source_package: { id: asPackageId('test'), version: '1.0.0' },
   source_kind: 'plugin_product', materialization_state: 'materialized', supported_surfaces: ['desktop'], required_runtime_features: [],
   required_resource_kinds: [], required_capabilities: [], conflicting_capabilities: [], action_count: 1, context_contributor_count: 0 };
@@ -53,7 +53,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   let editor: AgentPresetEditorResponse | undefined = initialEditor;
   const library = spyOn(agentPlatform.library, 'invoke').mockImplementation(async () => ({
     official_templates: [template, otherTemplate], user_presets: editor ? [editor.preset] : [], active_bindings: [],
-    fresh_start: { data_generation: 4, legacy_data_imported: false, official_template_count: 2, user_preset_count: editor ? 1 : 0 },
+    fresh_start: { data_generation: 6, legacy_data_imported: false, official_template_count: 2, user_preset_count: editor ? 1 : 0 },
   } as AgentPresetLibraryResponse));
   spyOn(agentPlatform.catalog, 'invoke').mockResolvedValue({ modules: [capabilityModule], capabilities: [capability], skills: [], mcp_tools: [], roles: [] });
   const create = spyOn(agentPlatform.createPreset, 'invoke').mockRejectedValueOnce(error).mockImplementation(async request => {

@@ -2918,7 +2918,6 @@ fn contribution_identity_digest(
         "capabilities": contributions.capabilities.iter().map(|capability| json!({
             "id": capability.id,
             "contribution_id": capability.contribution_id,
-            "version": capability.version,
             "kind": capability.kind,
         })).collect::<Vec<_>>(),
         "skills": contributions.skills.iter().map(|skill| json!({
@@ -3416,7 +3415,6 @@ fn mount_detail(
                     .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
                 Ok(PluginCapabilityContributionDto {
                     capability_id: capability.id.as_ref().to_owned(),
-                    capability_version: capability.version.as_ref().to_owned(),
                     display_name: capability.display.name.clone(),
                     description: Some(capability.display.description.clone()),
                     provenance: nomifun_api_types::PluginContributionProvenanceDto {

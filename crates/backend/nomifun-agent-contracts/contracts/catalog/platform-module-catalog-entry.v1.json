@@ -1,7 +1,6 @@
 {
   "capability": {
-    "id": "knowledge",
-    "version": "1.0.0"
+    "id": "knowledge"
   },
   "contract_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "contribution_id": "module:knowledge",

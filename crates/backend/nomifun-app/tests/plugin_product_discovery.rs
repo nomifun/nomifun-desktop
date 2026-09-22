@@ -178,7 +178,6 @@ fn discovery_capability(id: &str) -> CapabilityManifest {
     CapabilityManifest {
         id: capability_id.clone().into(),
         contribution_id: format!("capability:{capability_id}").into(),
-        version: "1.0.0".into(),
         kind: CapabilityKind::Tool,
         package: PackageRef {
             id: format!("plugin.{id}").into(),
@@ -274,7 +273,7 @@ async fn published_discovery_is_consumed_by_nomi_and_conflicts_are_rejected_befo
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "capability":{"id":capability_id,"version":"1.0.0"},
+            "capability":{"id":capability_id},
             "action_allowlist":[discovery::ACTION_ID]
         }));
     let saved = data(
@@ -305,7 +304,7 @@ async fn published_discovery_is_consumed_by_nomi_and_conflicts_are_rejected_befo
         .as_array_mut()
         .unwrap()
         .push(json!({
-            "capability":{"id":discovery::CAPABILITY_ID,"version":"1.0.0"},
+            "capability":{"id":discovery::CAPABILITY_ID},
             "action_allowlist":[discovery::ACTION_ID]
         }));
     let (status, error) = request(

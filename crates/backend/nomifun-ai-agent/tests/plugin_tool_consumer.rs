@@ -334,7 +334,6 @@ fn tool_capability(
     CapabilityManifest {
         id: CapabilityId::from(id),
         contribution_id: format!("capability:{id}").into(),
-        version: VersionString::from(VERSION),
         kind: CapabilityKind::Tool,
         package: package.clone(),
         display: display(id),
@@ -365,7 +364,6 @@ fn context_capability(package: &PackageRef) -> CapabilityManifest {
     CapabilityManifest {
         id: CapabilityId::from(CONTEXT_CAPABILITY),
         contribution_id: format!("capability:{CONTEXT_CAPABILITY}").into(),
-        version: VersionString::from(VERSION),
         kind: CapabilityKind::ContextContributor,
         package: package.clone(),
         display: display(CONTEXT_CAPABILITY),
@@ -667,7 +665,6 @@ fn selection(id: &str, actions: &[&str]) -> CapabilitySelection {
     CapabilitySelection {
         capability: CapabilityRef {
             id: CapabilityId::from(id),
-            version: VersionString::from(VERSION),
         },
         action_allowlist: actions
             .iter()
@@ -1497,7 +1494,6 @@ fn plugin_product_fixture() -> (
         dependency_refs: Vec::new(),
         capability: CapabilityRef {
             id: capability_id,
-            version: VersionString::from(VERSION),
         },
         source_package: PackageRef {
             id: PackageId::from("plugin.fixture"),
