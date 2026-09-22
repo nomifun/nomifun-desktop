@@ -17,9 +17,9 @@ use nomifun_api_types::{
     ExecutionParticipant, ExecutionStep,
 };
 use nomifun_common::{
-    AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentStepMode, AppError,
-    ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus, StepFailurePolicy,
-    apply_agent_role_context, generate_id, now_ms,
+    AdaptationPolicy, AgentExecutionEventKind, AgentExecutionStatus, AgentStepMode,
+    AgentToolPolicy, AppError, ExecutionAttemptStatus, ExecutionStepKind, ExecutionStepStatus,
+    StepFailurePolicy, apply_agent_role_context, generate_id, now_ms,
 };
 use nomifun_db::{
     AgentExecutionAttemptRecoveryDisposition, AgentExecutionLeaseToken,
@@ -2728,6 +2728,7 @@ fn select_agent_steps(
         .collect();
     let mut selected_per_participant: HashMap<&str, i64> = HashMap::new();
     let mut active_count = 0usize;
+    let mut workspace_mutator_active = false;
     let mut active_step_ids: HashSet<&str> = HashSet::new();
     for attempt in detail.attempts.iter().filter(|attempt| {
         matches!(
@@ -2745,6 +2746,9 @@ fn select_agent_steps(
             continue;
         }
         active_count += 1;
+        workspace_mutator_active |= current_steps
+            .get(attempt.step_id.as_str())
+            .is_some_and(|step| step.tool_policy != AgentToolPolicy::ReadOnly);
         *selected_per_participant.entry(participant_id).or_default() += 1;
     }
     // Futures are reserved before their first poll, so a just-pushed Step may
@@ -2761,6 +2765,9 @@ fn select_agent_steps(
             continue;
         };
         active_count += 1;
+        workspace_mutator_active |= current_steps
+            .get(step_id.as_str())
+            .is_some_and(|step| step.tool_policy != AgentToolPolicy::ReadOnly);
         *selected_per_participant.entry(participant_id).or_default() += 1;
     }
     let mut selected = Vec::new();
@@ -2771,11 +2778,29 @@ fn select_agent_steps(
     if available == 0 {
         return selected;
     }
+    // All Steps in one AgentExecution share one canonical workspace. Full
+    // tools can write directly and ReadShell is explicitly not an OS
+    // read-only sandbox, so overlapping either class with a sibling can race
+    // patches, commands, tests, Git state, or source observations. Until a
+    // real per-Step worktree/merge owner exists, only ReadOnly siblings may
+    // overlap. This preserves useful parallel exploration while making coding
+    // execution deterministic instead of merely hoping writers touch
+    // different files.
+    if workspace_mutator_active {
+        return selected;
+    }
     for step in ready
         .into_iter()
         .filter(|step| step.kind == ExecutionStepKind::Agent)
         .filter(|step| !in_flight_step_ids.contains(&step.step_id))
     {
+        let workspace_mutator = step.tool_policy != AgentToolPolicy::ReadOnly;
+        if active_count > 0 && workspace_mutator {
+            continue;
+        }
+        if workspace_mutator && !selected.is_empty() {
+            continue;
+        }
         let Some(participant_id) = step.assigned_participant_id.as_deref() else {
             continue;
         };
@@ -2793,7 +2818,7 @@ fn select_agent_steps(
         }
         *count += 1;
         selected.push(step.clone());
-        if selected.len() == available {
+        if workspace_mutator || selected.len() == available {
             break;
         }
     }
@@ -3596,6 +3621,7 @@ mod tests {
             barrier: Arc<Barrier>,
             downstream_started_too_early: Arc<AtomicBool>,
         },
+        OverlapProbe,
         DeterministicFailure {
             failed_step: String,
         },
@@ -3640,6 +3666,20 @@ mod tests {
                 mode: HarnessRunnerMode::DeterministicFailure {
                     failed_step: failed_step.to_owned(),
                 },
+                calls: Arc::new(Mutex::new(Vec::new())),
+                briefs: Arc::new(Mutex::new(Vec::new())),
+                workspace_dirs: Arc::new(Mutex::new(Vec::new())),
+                completed_successes: Arc::new(AtomicUsize::new(0)),
+                active: Arc::new(AtomicUsize::new(0)),
+                max_active: Arc::new(AtomicUsize::new(0)),
+                pool: Arc::new(Mutex::new(None)),
+                owner_id: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn overlap_probe() -> Self {
+            Self {
+                mode: HarnessRunnerMode::OverlapProbe,
                 calls: Arc::new(Mutex::new(Vec::new())),
                 briefs: Arc::new(Mutex::new(Vec::new())),
                 workspace_dirs: Arc::new(Mutex::new(Vec::new())),
@@ -3816,7 +3856,7 @@ mod tests {
                 } => remaining_failures
                     .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok(),
-                HarnessRunnerMode::ParallelRoots { .. } => false,
+                HarnessRunnerMode::ParallelRoots { .. } | HarnessRunnerMode::OverlapProbe => false,
             };
             if failure {
                 let (error, error_code, retryable) = match &self.mode {
@@ -3856,6 +3896,9 @@ mod tests {
                 } else if matches!(step_title, "upstream-a" | "upstream-b") {
                     barrier.wait().await;
                 }
+            }
+            if matches!(&self.mode, HarnessRunnerMode::OverlapProbe) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             self.completed_successes.fetch_add(1, Ordering::SeqCst);
@@ -3921,13 +3964,14 @@ mod tests {
         }
     }
 
-    async fn make_scheduler_harness(
+    async fn make_scheduler_harness_with_policies(
         runner: Arc<HarnessAttemptRunner>,
         titles: &[&str],
         dependencies: &[(&str, &str)],
         max_parallel: i64,
         adaptation_policy: AdaptationPolicy,
         work_dir: Option<&str>,
+        tool_policies: &[(&str, AgentToolPolicy)],
     ) -> (
         ExecutionScheduler,
         Arc<SqliteAgentExecutionRepository>,
@@ -3984,7 +4028,16 @@ mod tests {
         let new_steps = step_ids
             .iter()
             .zip(titles.iter())
-            .map(|(step_id, title)| harness_step(step_id.clone(), &participant_id, title))
+            .map(|(step_id, title)| {
+                let mut step = harness_step(step_id.clone(), &participant_id, title);
+                if let Some((_, policy)) = tool_policies
+                    .iter()
+                    .find(|(policy_title, _)| policy_title == title)
+                {
+                    step.tool_policy = *policy;
+                }
+                step
+            })
             .collect::<Vec<_>>();
         let id_by_title = titles
             .iter()
@@ -4041,6 +4094,32 @@ mod tests {
             data_dir,
             owner,
         )
+    }
+
+    async fn make_scheduler_harness(
+        runner: Arc<HarnessAttemptRunner>,
+        titles: &[&str],
+        dependencies: &[(&str, &str)],
+        max_parallel: i64,
+        adaptation_policy: AdaptationPolicy,
+        work_dir: Option<&str>,
+    ) -> (
+        ExecutionScheduler,
+        Arc<SqliteAgentExecutionRepository>,
+        String,
+        TempDir,
+        String,
+    ) {
+        make_scheduler_harness_with_policies(
+            runner,
+            titles,
+            dependencies,
+            max_parallel,
+            adaptation_policy,
+            work_dir,
+            &[],
+        )
+        .await
     }
 
         #[tokio::test]
@@ -4205,13 +4284,18 @@ mod tests {
     async fn scheduler_harness_runs_ready_roots_in_parallel_then_unblocks_downstream() {
         let runner = Arc::new(HarnessAttemptRunner::parallel());
         let downstream_guard = runner.clone();
-        let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness(
+        let (scheduler, repository, execution_id, _data_dir, owner_id) = make_scheduler_harness_with_policies(
             runner,
             &["upstream-a", "upstream-b", "downstream"],
             &[("upstream-a", "downstream"), ("upstream-b", "downstream")],
             2,
             AdaptationPolicy::Fixed,
             None,
+            &[
+                ("upstream-a", AgentToolPolicy::ReadOnly),
+                ("upstream-b", AgentToolPolicy::ReadOnly),
+                ("downstream", AgentToolPolicy::ReadOnly),
+            ],
         )
         .await;
 
@@ -4238,6 +4322,37 @@ mod tests {
             .expect("downstream brief was recorded");
         assert!(downstream_brief.contains("- upstream-a: completed upstream-a"));
         assert!(downstream_brief.contains("- upstream-b: completed upstream-b"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn scheduler_serializes_workspace_mutators_but_keeps_read_only_parallelism() {
+        let runner = Arc::new(HarnessAttemptRunner::overlap_probe());
+        let runner_guard = runner.clone();
+        let (scheduler, repository, execution_id, _data_dir, owner_id) =
+            make_scheduler_harness_with_policies(
+                runner,
+                &["writer", "shell-verifier"],
+                &[],
+                2,
+                AdaptationPolicy::Fixed,
+                None,
+                &[
+                    ("writer", AgentToolPolicy::Full),
+                    ("shell-verifier", AgentToolPolicy::ReadShell),
+                ],
+            )
+            .await;
+
+        scheduler.start(owner_id.clone(), execution_id.clone());
+        let detail = wait_for_terminal(&repository, &owner_id, &execution_id).await;
+        assert_eq!(detail.execution.status, "completed");
+        assert_eq!(runner_guard.call_count("writer"), 1);
+        assert_eq!(runner_guard.call_count("shell-verifier"), 1);
+        assert_eq!(
+            runner_guard.max_active(),
+            1,
+            "Full and ReadShell Steps share one workspace and must never overlap",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

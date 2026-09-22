@@ -2988,6 +2988,13 @@ impl AgentExecutionEngine {
                 "Agent collaboration requires an immutable Agent Snapshot".into(),
             )
         })?;
+        // Collaboration is an execution mode of the calling AgentSession, not
+        // a detached blank project. Carry only the workspace authority frozen
+        // into that Session's immutable binding; never trust a model-supplied
+        // path or the mutable Conversation `extra` projection here. Without
+        // this, coding delegates run under the execution scratch directory and
+        // cannot observe or modify the project the user actually selected.
+        let work_dir = collaboration_workspace(owner_id, snapshot)?;
         let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
             AppError::Conflict(
                 "Agent collaboration Snapshot has no exact resolved model".into(),
@@ -3012,7 +3019,7 @@ impl AgentExecutionEngine {
                 &actor,
                 CreateAgentExecutionRequest {
                     goal: goal.clone(),
-                    work_dir: None,
+                    work_dir,
                     model_pool,
                     delegation_policy: nomifun_common::DelegationPolicy::Automatic,
                     adaptation_policy: nomifun_common::AdaptationPolicy::Adaptive,
@@ -3479,6 +3486,20 @@ fn automation_workspace(
         snapshot.canonical_binding.as_ref(),
         requested,
     )
+}
+
+fn collaboration_workspace(
+    owner_id: &str,
+    snapshot: &AgentResolvedSnapshot,
+) -> Result<Option<String>, AppError> {
+    snapshot
+        .canonical_binding
+        .as_ref()
+        .map(|binding| {
+            crate::automation::resolve_frozen_execution_workspace(owner_id, binding)
+        })
+        .transpose()
+        .map(Option::flatten)
 }
 
 fn collaboration_step(goal: &str) -> PlannedExecutionStep {
@@ -4236,12 +4257,18 @@ mod tests {
     use super::{
         AgentExecutionEngine, AutomationExecutionSource, InitialPlanningCommand,
         attempt_delegation_operation_id, automation_cancellation_replay_safe,
-        explicit_cancel_payload, is_automation_cancel_cas_conflict,
+        collaboration_workspace, explicit_cancel_payload, is_automation_cancel_cas_conflict,
         is_automation_outcome_unknown_error,
         reject_automation_manual_recovery_command, runtime_model_pair,
         validate_automation_source, validate_max_parallel,
     };
-    use nomifun_api_types::{ExecutionModelPool, ExecutionModelRef};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use nomifun_api_types::{
+        AgentBindingValueDto, AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelPool,
+        ExecutionModelRef, PresetRevisionRefDto, ResolvedSnapshotRefDto,
+        TypedResourceBindingDto,
+    };
     use nomifun_common::{
         AgentDelegationTask, AgentStepMode, AgentToolPolicy,
         MAX_AGENT_EXECUTION_PARALLELISM, ParallelDelegationRequest,
@@ -4318,6 +4345,65 @@ mod tests {
         assert_eq!(steps[2].depends_on, vec![0, 1]);
         assert_eq!(steps[2].agent_mode, Some(AgentStepMode::Synthesis));
         assert_eq!(steps[2].tool_policy, AgentToolPolicy::ReadOnly);
+    }
+
+    #[test]
+    fn collaboration_inherits_only_the_frozen_session_workspace() {
+        let workspace = std::env::temp_dir()
+            .join("nomifun-collaboration-workspace")
+            .to_string_lossy()
+            .into_owned();
+        let snapshot = AgentResolvedSnapshot {
+            canonical_binding: Some(AgentBindingValueDto {
+                preset_revision_ref: PresetRevisionRefDto {
+                    preset_id: nomifun_common::generate_id(),
+                    revision: 1,
+                    revision_digest: "a".repeat(64),
+                },
+                resolved_snapshot_ref: ResolvedSnapshotRefDto {
+                    snapshot_id: nomifun_common::generate_id(),
+                    snapshot_digest: "b".repeat(64),
+                },
+                typed_resource_bindings: vec![TypedResourceBindingDto {
+                    binding_id: "workspace-binding".to_owned(),
+                    resource_kind: "workspace".to_owned(),
+                    resource_id: "selected-workspace".to_owned(),
+                    owner_id: "owner".to_owned(),
+                    operations: BTreeSet::new(),
+                    connection_config_ref: None,
+                    typed_parameters: BTreeMap::from([(
+                        "workspace_root".to_owned(),
+                        workspace.clone(),
+                    )]),
+                }],
+                binding_version: 1,
+            }),
+            preset_id: nomifun_common::generate_id(),
+            preset_revision: 1,
+            preset_name: "coding".to_owned(),
+            routing_description: None,
+            instructions: String::new(),
+            resolved_agent_id: None,
+            resolved_agent_type: None,
+            resolved_agent_backend: None,
+            resolved_model: None,
+            included_skills: Vec::new(),
+            excluded_auto_skills: Vec::new(),
+            enabled_capabilities: Vec::new(),
+            enabled_capability_actions: BTreeMap::new(),
+            required_resource_kinds: BTreeSet::new(),
+            knowledge_policy: AgentKnowledgePolicy::default(),
+            warnings: Vec::new(),
+        };
+
+        assert_eq!(
+            collaboration_workspace("owner", &snapshot).unwrap(),
+            Some(workspace),
+        );
+        assert!(
+            collaboration_workspace("different-owner", &snapshot).is_err(),
+            "collaboration must not inherit another owner's workspace",
+        );
     }
 
     #[test]
