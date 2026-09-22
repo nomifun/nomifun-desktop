@@ -85,6 +85,56 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.endAt).toBe(35600);
   });
 
+  test('uses canonical turn timing instead of synthetic message timestamps', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user', 'user', { createdAt: 1_000 }),
+        item('turn-metadata', 'metadata', {
+          createdAt: 1_001,
+          turnStartedAt: 4_000_000,
+          turnEndedAt: 4_002_000,
+        }),
+        item('error', 'assistant', {
+          createdAt: 4_080_000,
+          processState: 'failed',
+          terminal: true,
+        }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual(['user', DISCLOSURE_1, 'error']);
+    const disclosure = result[1];
+    expect(disclosure.type).toBe('turn_disclosure');
+    if (disclosure.type !== 'turn_disclosure') return;
+    expect(disclosure.startAt).toBe(4_000_000);
+    expect(disclosure.endAt).toBe(4_002_000);
+    expect(disclosure.processItemIds).toEqual([]);
+    expect(disclosure.state).toBe('failed');
+  });
+
+  test('keeps a terminal error outside the process when partial text arrived later', () => {
+    const result = buildTurnDisclosureItems(
+      [
+        item('user', 'user', { createdAt: 1000 }),
+        item('terminal-error', 'assistant', {
+          createdAt: 1500,
+          processState: 'failed',
+          terminal: true,
+        }),
+        item('late-partial-text', 'assistant', { createdAt: 2000 }),
+      ],
+      { tailClosed: true }
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual(['user', DISCLOSURE_1, 'terminal-error']);
+    const disclosure = result[1];
+    expect(disclosure.type).toBe('turn_disclosure');
+    if (disclosure.type !== 'turn_disclosure') return;
+    expect(disclosure.processItemIds).toEqual(['late-partial-text']);
+    expect(disclosure.state).toBe('failed');
+  });
+
   test('keeps the final assistant answer outside the disclosure when earlier assistant text was intermediate', () => {
     const result = buildTurnDisclosureItems(
       [
@@ -294,7 +344,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemStates).toEqual({ tool: 'failed' });
   });
 
-  test('marks a closed failed process-only turn as processed while retaining failed details', () => {
+  test('keeps a closed failed process-only turn failed while retaining details', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -311,7 +361,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.state).toBe('completed');
+    expect(disclosure.state).toBe('failed');
     expect(disclosure.running).toBe(false);
     expect(disclosure.startAt).toBe(1000);
     expect(disclosure.endAt).toBe(3000);

@@ -21,7 +21,7 @@ use dashmap::DashMap;
 use futures_util::FutureExt;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
-    AgentRuntimeSessions, AgentStreamEvent, KernelNomiPluginToolSession,
+    AgentRuntimeSessions, AgentSendError, AgentStreamEvent, KernelNomiPluginToolSession,
     NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
     NomiPluginProductToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver, NomiPluginToolSession,
@@ -1331,6 +1331,8 @@ impl NomiCoreSessionOwner {
             session_id.as_ref(),
             operation_id.as_ref(),
         );
+        let error = AgentSendError::from_app_error(AppError::Conflict(message.to_owned()))
+            .into_stream_error();
         self.canonical
             .store()
             .append_turn_terminal(
@@ -1356,6 +1358,8 @@ impl NomiCoreSessionOwner {
                             StrictJsonValue(json!({
                                 "message": message,
                                 "code": "runtime_dispatch_failed",
+                                "error": error,
+                                "finished_at_ms": now_ms(),
                             })),
                         ),
                     },
@@ -4995,7 +4999,7 @@ fn session_projection_revision(session: &ConversationResponse) -> Result<String,
 #[cfg(test)]
 mod session_boundary_tests {
     use super::{
-        canonical_autowork_config_snapshot, companion_archive_message,
+        canonical_autowork_config_snapshot, canonical_message_response, companion_archive_message,
         cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
         freeze_selected_workspace, frozen_workspace_root, has_selected_workspace,
         initial_delivery_requested, NomiCoreSessionOwner,
@@ -5013,6 +5017,7 @@ mod session_boundary_tests {
         ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
     };
     use nomifun_api_types::{AgentBindingValueDto, AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelRef, MessageResponse};
+    use nomifun_agent_session::MessageProjection;
     use nomifun_common::{
         AgentType, ConversationSource, ConversationStatus, DecisionPolicy, DelegationPolicy,
         MessagePosition, MessageType, ProviderWithModel,
@@ -5092,6 +5097,58 @@ mod session_boundary_tests {
         assert_eq!(second.data["turn_id"], root_message_id);
         assert_eq!(second.data["type"], "content");
         assert_eq!(second.data["data"]["content"], "reply");
+    }
+
+    #[test]
+    fn failed_turn_summary_rehydrates_as_the_same_compact_error_message() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root_message_id = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let summary_message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
+        let message = canonical_message_response(
+            &session_id,
+            1_000,
+            MessageProjection {
+                session_id: session_id.clone(),
+                projection_id: "turn-summary-test".to_owned(),
+                first_seq: 2,
+                last_seq: 3,
+                presentation_intent: "turn_summary".to_owned(),
+                message_type: Some("agent_status".to_owned()),
+                message_status: Some("finish".to_owned()),
+                projection: json!({
+                    "correlation_id": summary_message_id,
+                    "presentation_intent": "turn_summary",
+                    "state": "failed",
+                    "source_message_id": root_message_id,
+                    "started_at_ms": 4_000_000,
+                    "finished_at_ms": 4_002_000,
+                    "error": {
+                        "message": "The provider is temporarily unavailable",
+                        "code": "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                        "ownership": "user_llm_provider",
+                        "retryable": true
+                    }
+                }),
+                semantic_digest: "digest".to_owned(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(message.r#type, MessageType::Tips);
+        assert_eq!(message.position, Some(MessagePosition::Center));
+        assert_eq!(message.content["type"], "error");
+        assert_eq!(message.content["turn_id"], root_message_id);
+        assert_eq!(message.content["started_at_ms"], 4_000_000);
+        assert_eq!(message.content["finished_at_ms"], 4_002_000);
+        assert_eq!(
+            message.content["error"]["code"],
+            "USER_LLM_PROVIDER_GATEWAY_ERROR"
+        );
+        let assistant_message_id =
+            NomiCoreSessionOwner::canonical_assistant_stream_message_id(root_message_id)
+                .unwrap();
+        assert_eq!(message.msg_id.as_deref(), Some(assistant_message_id.as_str()));
     }
 
     #[test]
@@ -10225,10 +10282,51 @@ fn canonical_message_response(
         }
         let stream_message_id =
             super::engine_journal::canonical_assistant_message_id(root_message_id)?;
+        let started_at_ms = document.get("started_at_ms").cloned().unwrap_or(Value::Null);
+        let finished_at_ms = document.get("finished_at_ms").cloned().unwrap_or(Value::Null);
+        if matches!(state, "failed" | "interrupted") {
+            let error = document.get("error").cloned().unwrap_or_else(|| {
+                json!({
+                    "message": "The upstream Agent failed while handling the request",
+                    "code": "UNKNOWN_UPSTREAM_ERROR",
+                    "ownership": "unknown_upstream",
+                    "retryable": true,
+                    "feedback_recommended": true,
+                    "resolution": {
+                        "kind": "send_feedback",
+                        "target": "feedback"
+                    }
+                })
+            });
+            let content = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("The upstream Agent failed while handling the request");
+            return Ok(Some(MessageResponse {
+                message_id: summary_message_id.to_owned(),
+                conversation_id: session_id.as_ref().to_owned(),
+                msg_id: Some(stream_message_id),
+                r#type: MessageType::Tips,
+                content: json!({
+                    "content": content,
+                    "type": "error",
+                    "error": error,
+                    "turn_id": root_message_id,
+                    "started_at_ms": started_at_ms,
+                    "finished_at_ms": finished_at_ms,
+                }),
+                position: Some(MessagePosition::Center),
+                status: Some(MessageStatus::Error),
+                hidden: false,
+                created_at: created_at.saturating_add(
+                    i64::try_from(projection.first_seq).unwrap_or(i64::MAX),
+                ),
+            }));
+        }
         let (activity_status, status) = match state {
             "running" => ("preparing", MessageStatus::Work),
             "completed" => ("prepared", MessageStatus::Finish),
-            "failed" | "cancelled" | "interrupted" => ("error", MessageStatus::Error),
+            "cancelled" => ("error", MessageStatus::Error),
             _ => return Ok(None),
         };
         return Ok(Some(MessageResponse {
@@ -10246,6 +10344,8 @@ fn canonical_message_response(
                 "turn_summary": true,
                 "started_seq": document.get("started_seq").cloned().unwrap_or(Value::Null),
                 "finished_seq": document.get("finished_seq").cloned().unwrap_or(Value::Null),
+                "started_at_ms": started_at_ms,
+                "finished_at_ms": finished_at_ms,
             }),
             position: Some(MessagePosition::Center),
             status: Some(status),
