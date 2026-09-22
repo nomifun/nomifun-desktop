@@ -38,12 +38,12 @@ export const getCharacter = (id?: string | null): CharacterMeta =>
  * The classic chibi window every character used before per-character desks.
  * Must match the creation-time `inner_size` in apps/desktop/src/main.rs —
  * applyDeskSize self-heals a mismatch with a visible startup resize.
- * Height = figure (150) + chrome (~64: hover chat bar reserve + hop headroom);
+ * Height = figure (120) + chrome (60: hover chat bar reserve + hop headroom);
  * the bubble's room is grown on demand (enterChatSize), not reserved here, so the
  * idle window hugs the figure instead of parking a tall transparent strip on the
  * desktop.
  */
-export const DEFAULT_DESK: CharacterDeskSpec = { windowWidth: 240, windowHeight: 214, figureHeight: 150 };
+export const DEFAULT_DESK: CharacterDeskSpec = { windowWidth: 200, windowHeight: 180, figureHeight: 120 };
 
 export const getDeskSpec = (id?: string | null): CharacterDeskSpec => getCharacter(id).desk ?? DEFAULT_DESK;
 
