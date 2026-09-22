@@ -20,11 +20,11 @@ describe('Plugin Workbench locale contract', () => {
     expect(flattenKeys(en).sort()).toEqual(flattenKeys(zh).sort());
   });
 
-  test('uses a concise product label in navigation while retaining the internal namespace title', () => {
+  test('identifies Plugins and Mini Apps in navigation while retaining the internal namespace title', () => {
     expect(zh.title).toBe('Plugin 工作台');
-    expect(zh.navigation.railTitle).toBe('插件');
+    expect(zh.navigation.railTitle).toBe('插件&小程序');
     expect(en.title).toBe('Plugin Workbench');
-    expect(en.navigation.railTitle).toBe('Plugins');
+    expect(en.navigation.railTitle).toBe('Plugins & Mini Apps');
   });
 
   test('states retained-data deletion separately from uninstall', () => {
