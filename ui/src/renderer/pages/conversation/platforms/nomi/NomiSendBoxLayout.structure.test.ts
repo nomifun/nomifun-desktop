@@ -113,7 +113,7 @@ describe('Nomi sendbox control layout', () => {
     expect(source.includes('return <div className={styles.embedded}>{content}</div>')).toBe(true);
   });
 
-  test('shows the frozen session model while keeping preset resource restrictions', () => {
+  test('allows idle-session model switches while keeping preset resource restrictions', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
@@ -123,7 +123,8 @@ describe('Nomi sendbox control layout', () => {
     expect(chatSource.includes('const hasPreset = Boolean(conversation.preset_id);')).toBe(true);
     expect(chatSource.includes('useAgentCapabilityResourceKinds')).toBe(false);
     expect(chatSource.includes('required_resource_kinds')).toBe(true);
-    expect(chatSource.includes('readOnly: true')).toBe(true);
+    expect(chatSource.includes('readOnly: true')).toBe(false);
+    expect(chatSource.includes('conversation.switchModel.invoke')).toBe(true);
 
     expect(nomiChatSource.includes('modelLocked')).toBe(false);
     expect(sendBoxSource.includes('hideAdvancedControls || modelLocked')).toBe(false);
@@ -135,6 +136,7 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('updateCapabilitySelection')).toBe(false);
     expect(selectorSource.includes('if (disabled) return trigger;')).toBe(true);
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
+    expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running)')).toBe(true);
   });
 
   test('exposes the shared Agent catalog in conversation controls', () => {

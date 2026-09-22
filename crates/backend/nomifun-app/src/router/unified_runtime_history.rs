@@ -1,4 +1,6 @@
 //! Read-only replay of closed Nomi turns from the existing Conversation owner.
+use std::collections::BTreeMap;
+
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 use nomifun_agent_runtime::{AgentEngineEvent, AgentPriorTask, replay_closed_turn};
 use nomifun_common::AppError;
@@ -25,6 +27,7 @@ pub(super) async fn load(
     let mut prior_task = None;
     let mut complete_window = !window.has_older;
     let mut oldest_operation = None;
+    let mut historical_compatibility = BTreeMap::new();
     for turn in window.turns {
         let root: serde_json::Value = serde_json::from_str(&turn.root_content_json)
             .map_err(|error| fail(error.to_string()))?;
@@ -80,10 +83,22 @@ pub(super) async fn load(
             // all subsequent turns; use the legacy data-only projection.
             return Ok(None);
         };
+        let recorded_snapshot = recorded.resolved_snapshot_ref();
+        let snapshot_compatible = if recorded_snapshot == snapshot {
+            true
+        } else if let Some(compatible) = historical_compatibility.get(recorded_snapshot) {
+            *compatible
+        } else {
+            let compatible = session_host
+                .historical_model_binding_compatible(admitted.session(), recorded_snapshot)
+                .await?;
+            historical_compatibility.insert(recorded_snapshot.clone(), compatible);
+            compatible
+        };
         if recorded.build_id().as_ref() != binding.build_id
             || recorded.build_digest().as_ref() != binding.build_digest
             || recorded.agent_session_id().as_ref() != conversation
-            || recorded.resolved_snapshot_ref() != snapshot
+            || !snapshot_compatible
             || recorded_operation.as_ref() != turn.operation_id
         {
             return Err(fail(

@@ -473,6 +473,140 @@ async fn session_resource_bindings_are_frozen_with_the_session_and_cannot_change
 }
 
 #[tokio::test]
+async fn session_model_binding_replacement_is_exact_and_preserves_resource_authority() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let mut session = live_session(session_id());
+    session.agent_binding.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId("binding-model-workspace".to_owned()),
+        resource_kind: ResourceKind("workspace".to_owned()),
+        resource_id: ResourceId("workspace-model".to_owned()),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned(), "patch".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    let created = store
+        .create_session(create_request(session, "model-binding-replacement"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &created.session.agent_session_id,
+            "event-ready-model-binding-replacement",
+            "runtime-supervisor",
+            "ready-model-binding-replacement",
+            "session/ready",
+            "session-model-binding-replacement",
+            Some(created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let expected = created.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref = PresetRevisionRef {
+        preset_id: AgentPresetId("model-variant".to_owned()),
+        revision: 1,
+        revision_digest: digest('c'),
+    };
+    replacement.resolved_snapshot_ref = ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId("snapshot-model-variant".to_owned()),
+        snapshot_digest: digest('d'),
+    };
+    replacement.binding_version += 1;
+
+    let updated = store
+        .replace_session_model_binding(
+            &owner(),
+            &created.session.agent_session_id,
+            &expected,
+            replacement.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    assert_eq!(
+        store
+            .session_resources(&created.session.agent_session_id)
+            .await
+            .unwrap(),
+        expected.typed_resource_bindings,
+    );
+
+    let mut stale_successor = replacement.clone();
+    stale_successor.resolved_snapshot_ref = ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId("snapshot-stale-successor".to_owned()),
+        snapshot_digest: digest('e'),
+    };
+    assert!(matches!(
+        store
+            .replace_session_model_binding(
+                &owner(),
+                &created.session.agent_session_id,
+                &expected,
+                stale_successor,
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("changed before")
+    ));
+}
+
+#[tokio::test]
+async fn session_model_binding_replacement_rejects_an_active_turn_and_remote_provenance() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (active, _) = create_turn(&store, "active-model-switch", "active-model-switch").await;
+    let expected = active.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref.preset_id = AgentPresetId("active-model-variant".to_owned());
+    replacement.preset_revision_ref.revision_digest = digest('c');
+    replacement.resolved_snapshot_ref.snapshot_id =
+        ResolvedSnapshotId("active-model-snapshot".to_owned());
+    replacement.resolved_snapshot_ref.snapshot_digest = digest('d');
+    replacement.binding_version += 1;
+    assert!(matches!(
+        store
+            .replace_session_model_binding(
+                &owner(),
+                &active.agent_session_id,
+                &expected,
+                replacement,
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
+    ));
+
+    let mut remote = live_session(session_id());
+    remote.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-model-binding"),
+        binding_version: 1,
+    });
+    let remote = store
+        .create_session(create_request(remote, "remote-model-binding"))
+        .await
+        .unwrap();
+    let expected = remote.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref.preset_id = AgentPresetId("remote-model-variant".to_owned());
+    replacement.preset_revision_ref.revision_digest = digest('e');
+    replacement.resolved_snapshot_ref.snapshot_id =
+        ResolvedSnapshotId("remote-model-snapshot".to_owned());
+    replacement.resolved_snapshot_ref.snapshot_digest = digest('f');
+    replacement.binding_version += 1;
+    assert!(matches!(
+        store
+            .replace_session_model_binding(
+                &owner(),
+                &remote.session.agent_session_id,
+                &expected,
+                replacement,
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("Remote")
+    ));
+}
+
+#[tokio::test]
 async fn the_same_product_resource_binding_can_be_frozen_into_distinct_sessions() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let binding = TypedResourceBinding {

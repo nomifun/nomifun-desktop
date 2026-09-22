@@ -15,7 +15,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use dashmap::DashMap;
 use futures_util::FutureExt;
@@ -6930,6 +6930,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
                 .delete(delete_nomi_core_agent_session),
         )
         .route(
+            "/api/agent-sessions/{agent_session_id}/model",
+            put(switch_nomi_core_agent_session_model),
+        )
+        .route(
             "/api/agent-sessions/{agent_session_id}/projection",
             get(get_nomi_core_agent_session_projection),
         )
@@ -9738,6 +9742,82 @@ async fn update_nomi_core_agent_session_metadata(
         .ok_or_else(|| AppError::Conflict(
             "updated AgentSession has no canonical projection".to_owned(),
         ))?;
+    Ok(Json(ApiResponse::ok(projection)))
+}
+
+async fn switch_nomi_core_agent_session_model(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(model): Json<AgentChatModelSelectionDto>,
+) -> Result<Json<ApiResponse<ConversationResponse>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let observation = state
+        .session_owner
+        .canonical()
+        .get(&authenticated_principal(&owner), &session_id)
+        .await?;
+    if observation.session.remote_binding_provenance.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_MODEL_IS_REMOTE_FROZEN",
+            "Remote AgentSession model selection is fixed by its Remote binding",
+        ));
+    }
+    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_TURN_ACTIVE",
+            "wait for the active Turn before switching models",
+        ));
+    }
+    let attempt_transcript: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
+         WHERE conversation_id = ? AND relation = 'attempt')",
+    )
+    .bind(session_id.as_ref())
+    .fetch_one(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if attempt_transcript != 0 {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+            "AgentExecution Attempt transcripts cannot change their model binding",
+        ));
+    }
+
+    let current_dto = agent_binding_dto(&observation.session.agent_binding)?;
+    let replacement_dto = state
+        .control_plane
+        .resolve_agent_session_model_binding(&owner.0, &current_dto, &model)
+        .await?;
+    let replacement: AgentBindingValue = serde_json::to_value(&replacement_dto)
+        .and_then(serde_json::from_value)
+        .map_err(|error| AppError::Conflict(format!(
+            "resolved Session model binding is invalid: {error}"
+        )))?;
+    if replacement != observation.session.agent_binding {
+        state
+            .session_owner
+            .canonical()
+            .store()
+            .replace_session_model_binding(
+                &authenticated_principal(&owner),
+                &session_id,
+                &observation.session.agent_binding,
+                replacement,
+            )
+            .await
+            .map_err(agent_session_store_error)?;
+    }
+    let projection = state
+        .session_owner
+        .canonical_conversation_projection(owner.as_ref(), &session_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict("model-switched AgentSession has no canonical projection".to_owned())
+        })?;
     Ok(Json(ApiResponse::ok(projection)))
 }
 

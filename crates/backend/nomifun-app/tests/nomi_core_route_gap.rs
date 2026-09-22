@@ -83,6 +83,7 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
     for path in [
         "/api/agent-sessions",
         "/api/agent-sessions/{agent_session_id}",
+        "/api/agent-sessions/{agent_session_id}/model",
         "/api/agent-session-messages/search",
         "/api/agent-sessions/{agent_session_id}/creation-tasks",
         "/api/creative-studio/canvas-agent-sessions/resolve",
@@ -336,6 +337,316 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
         let (status, _) = call(router.clone(), method, path, json!({})).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "retired route survived: {method} {path}");
     }
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn started_agent_session_switches_model_without_changing_agent_resources_or_history() {
+    const TRUST: &str = "started-session-model-switch";
+    const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";
+    const SECOND_REPLY: &str = "SECOND_MODEL_REPLY";
+
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
+    async fn wait_for_reply(router: axum::Router, session_id: &str, reply: &str) {
+        let mut last_history = Value::Null;
+        for _ in 0..600 {
+            let (status, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == reply)
+            {
+                return;
+            }
+            last_history = history;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let (_, events) = call(
+            router,
+            "GET",
+            &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=500"),
+            json!({}),
+        )
+        .await;
+        let failure = events["data"]["events"]
+            .as_array()
+            .and_then(|events| {
+                events
+                    .iter()
+                    .rev()
+                    .find(|event| event["kind"] == "turn/failed")
+            })
+            .and_then(|event| event["payload"]["value"]["message"].as_str());
+        panic!(
+            "reply {reply} did not become durable: failure={failure:?}; history={last_history}"
+        );
+    }
+
+    let upstream = wiremock::MockServer::start().await;
+    let model_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&model_requests);
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(move |request: &wiremock::Request| {
+            let body = request.body_json::<Value>().unwrap();
+            let reply = if body["model"] == "model-two" {
+                SECOND_REPLY
+            } else {
+                FIRST_REPLY
+            };
+            captured.lock().unwrap().push(body);
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {{\"id\":\"model-switch\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{reply}\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"model-switch\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+                ))
+        })
+        .mount(&upstream)
+        .await;
+
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (status, provider_one) = call(
+        router.clone(),
+        "POST",
+        "/api/providers",
+        json!({
+            "platform": "stepfun-plan",
+            "name": "Session model one",
+            "base_url": format!("{}/v1", upstream.uri()),
+            "auth_scheme": "bearer",
+            "credentials": { "api_keys": ["fixture-one"] },
+            "enabled": true,
+            "initial_model": {
+                "model": "model-one",
+                "enabled": true,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": [],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{provider_one}");
+    let (status, provider_two) = call(
+        router.clone(),
+        "POST",
+        "/api/providers",
+        json!({
+            "platform": "stepfun-plan",
+            "name": "Session model two",
+            "base_url": format!("{}/v1", upstream.uri()),
+            "auth_scheme": "bearer",
+            "credentials": { "api_keys": ["fixture-two"] },
+            "enabled": true,
+            "initial_model": {
+                "model": "model-two",
+                "enabled": true,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": [],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {}
+                }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{provider_two}");
+    let first_model = json!({
+        "provider_id": provider_one["data"]["provider_id"],
+        "model": "model-one"
+    });
+    let second_model = json!({
+        "provider_id": provider_two["data"]["provider_id"],
+        "model": "model-two"
+    });
+    let (status, preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/coding.codex",
+        json!({
+            "display_name": "Model-switch coding Agent",
+            "reuse_existing": false,
+            "model_route_refs": {},
+            "chat_route_records": {},
+            "model": first_model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let resources = json!([
+        {"resource_kind":"workspace", "resource_id":"default-workspace"},
+        {"resource_kind":"process_session", "resource_id":"managed-process-session"},
+        {"resource_kind":"project_memory", "resource_id":"default-project-memory"}
+    ]);
+    let (status, session) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({
+            "preset_id": preset_id,
+            "title": "Keep this conversation",
+            "model": first_model,
+            "resource_selections": resources
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (status, initial_projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{initial_projection}");
+    let workspace = initial_projection["data"]["extra"]["workspace"]
+        .as_str()
+        .expect("coding Session workspace");
+    tokio::fs::create_dir_all(workspace).await.unwrap();
+
+    let (status, first_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "first turn" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first_turn}");
+    wait_for_reply(router.clone(), session_id, FIRST_REPLY).await;
+    let (status, before) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+
+    let (status, switched) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/model"),
+        second_model.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{switched}");
+    assert_eq!(
+        switched["data"]["model"]["provider_id"],
+        second_model["provider_id"]
+    );
+    assert_eq!(switched["data"]["model"]["model"], "model-two");
+    for field in [
+        "preset_name",
+        "instructions",
+        "included_skills",
+        "enabled_capabilities",
+        "enabled_capability_actions",
+        "required_resource_kinds",
+    ] {
+        assert_eq!(
+            switched["data"]["agent_snapshot"][field],
+            before["data"]["agent_snapshot"][field],
+            "model switching must preserve Agent field {field}"
+        );
+    }
+    let before_binding = &before["data"]["agent_snapshot"]["canonical_binding"];
+    let switched_binding = &switched["data"]["agent_snapshot"]["canonical_binding"];
+    assert_eq!(
+        switched_binding["typed_resource_bindings"],
+        before_binding["typed_resource_bindings"]
+    );
+    assert_eq!(
+        switched_binding["binding_version"].as_u64(),
+        before_binding["binding_version"].as_u64().map(|version| version + 1)
+    );
+    let (status, repeated) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/model"),
+        second_model,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(
+        repeated["data"]["agent_snapshot"]["canonical_binding"]["binding_version"],
+        switched_binding["binding_version"],
+        "reselecting the current model must be idempotent"
+    );
+
+    let (status, second_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "second turn" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{second_turn}");
+    wait_for_reply(router.clone(), session_id, SECOND_REPLY).await;
+
+    let requests = model_requests.lock().unwrap();
+    let models = requests
+        .iter()
+        .map(|request| request["model"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(models, vec!["model-one", "model-two"]);
+    assert!(
+        requests[1].to_string().contains(FIRST_REPLY),
+        "the replacement Runtime must continue from the same durable history"
+    );
+    drop(requests);
+
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -1297,7 +1608,7 @@ async fn product_agent_selection_precedes_models_and_reports_host_capability_ava
 }
 
 #[tokio::test]
-async fn canonical_coding_session_has_no_in_place_binding_override_routes() {
+async fn canonical_coding_session_has_no_in_place_agent_or_resource_override_routes() {
     const TRUST: &str = "next-turn-kernel-binding";
     async fn post(router: axum::Router, path: &str, body: Value) -> Value {
         let response = router.oneshot(Request::builder().method("POST").uri(path)

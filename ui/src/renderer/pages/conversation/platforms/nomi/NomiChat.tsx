@@ -36,7 +36,7 @@ const NomiChat: React.FC<{
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
   isProcessing?: boolean;
-  /** Product-owned controls may occupy the rail; the Agent binding stays frozen. */
+  /** Product-owned controls may occupy the rail; Agent/resource authority stays frozen. */
   capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;

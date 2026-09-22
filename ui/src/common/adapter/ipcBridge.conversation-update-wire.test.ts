@@ -6,7 +6,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { parseConversationId } from '@/common/types/ids';
+import { parseConversationId, parseProviderId } from '@/common/types/ids';
 import { conversation } from './ipcBridge';
 
 const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000301';
@@ -45,7 +45,7 @@ describe('conversation update wire contract', () => {
     await expect(conversation.update.invoke({
         conversation_id: parseConversationId(CONVERSATION_ID),
         updates: { extra: { workspace: '/home/me/project' } } as never,
-      })).rejects.toThrow('AgentSession binding is immutable');
+      })).rejects.toThrow('AgentSession metadata cannot update');
     expect(calls).toHaveLength(0);
   });
 
@@ -59,5 +59,33 @@ describe('conversation update wire contract', () => {
 
     expect(JSON.parse(String(calls[0].body))).toEqual({ name: 'renamed', pinned: true });
     expect(calls[0].url.endsWith(`/api/agent-sessions/${CONVERSATION_ID}`)).toBe(true);
+  });
+
+  test('switches the exact Chat model through the dedicated Session route', async () => {
+    const calls = recordPatch();
+    const providerId = parseProviderId('0190f5fe-7c00-7a00-8000-000000000302');
+
+    await conversation.switchModel.invoke({
+      conversation_id: parseConversationId(CONVERSATION_ID),
+      provider_id: providerId,
+      model: 'step-3.7-flash',
+    });
+
+    expect(calls[0].method).toBe('PUT');
+    expect(calls[0].url.endsWith(`/api/agent-sessions/${CONVERSATION_ID}/model`)).toBe(true);
+    expect(JSON.parse(String(calls[0].body))).toEqual({
+      provider_id: providerId,
+      model: 'step-3.7-flash',
+    });
+  });
+
+  test('does not reopen the generic metadata PATCH for model changes', async () => {
+    const calls = recordPatch();
+
+    await expect(conversation.update.invoke({
+      conversation_id: parseConversationId(CONVERSATION_ID),
+      updates: { model: { provider_id: 'provider', model: 'model' } } as never,
+    })).rejects.toThrow('AgentSession metadata cannot update');
+    expect(calls).toHaveLength(0);
   });
 });

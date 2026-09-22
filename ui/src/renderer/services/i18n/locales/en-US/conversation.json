@@ -414,6 +414,7 @@
     "visionCapabilityUnavailable": "Model capabilities could not be verified. Wait for the model list to load and try again, or remove the image attachment.",
     "sendMessageTo": "Send message to {{model}}",
     "processing": "Processing...",
+    "modelSwitchAfterTurn": "Wait for the current task to finish before switching models.",
     "quotaExceededTitle": "Model quota reached",
     "quotaExceededBody": "The current model quota is exhausted. Switch to {{model}} to continue?",
     "quotaExceededNoFallback": "Model quota reached. Please switch to another available model.",
@@ -421,7 +422,7 @@
     "apiErrorNoCli": "API error occurred. No CLI agent available for fallback.",
     "apiErrorSwitchFailed": "Failed to create fallback conversation.",
     "apiErrorSwitched": "API error, auto-switched to {{cli}} CLI",
-    "frozenSessionConfigHint": "Agent, model, resources, and collaboration are frozen for this conversation. Start a new conversation to change them.",
+    "frozenSessionConfigHint": "Agent, resources, and collaboration are frozen for this conversation. Start a new conversation to change them.",
     "frozenAgentUnavailable": "This conversation no longer has a valid frozen Agent binding. Start a new conversation.",
     "speech": {
       "recordTooltip": "Start voice input",
