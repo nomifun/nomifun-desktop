@@ -72,6 +72,7 @@ test('allows Agent selection before model setup and prevents selecting incompati
     <ProductAgentBindingSelect targetKind='customer' targetId='019b0000-0000-7000-8000-000000000001' defaultTemplateKey='customer-service.default' />
   </I18nextProvider></SWRConfig>);
   await waitFor(() => expect(view.getByText('Choose a model later')).toBeTruthy());
+  expect(view.queryByText('Using Agent')).toBeNull();
   const selector = view.container.querySelector('.arco-select')!;
   expect(selector.className.includes('arco-select-disabled')).toBe(false);
   fireEvent.click(selector);
