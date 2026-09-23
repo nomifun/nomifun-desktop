@@ -13,7 +13,8 @@
   to { opacity: 1; transform: translateY(0); }
 }
 .stage { display: grid; align-items: end; gap: 16px; padding: 10px 12px 0; }
-.companion { display: flex; flex-direction: column; align-items: center; min-width: 0; border: 0; border-radius: 12px; background: transparent; color: var(--text-primary); cursor: pointer; padding: 0 0 5px; font: inherit; }
+.tile { display: flex; flex-direction: column; align-items: center; min-width: 0; }
+.companion { display: flex; flex-direction: column; align-items: center; width: 100%; min-width: 0; border: 0; border-radius: 12px; background: transparent; color: var(--text-primary); cursor: pointer; padding: 0 0 5px; font: inherit; }
 .figureSlot { position: relative; display: flex; justify-content: center; align-items: end; width: 100%; height: var(--figure-slot-height); padding-bottom: 20px; box-sizing: border-box; }
 .figureSlot > :first-child { position: relative; z-index: 1; flex: 0 0 auto; transition: transform 180ms ease; }
 .figureArtwork { display: inline-flex; align-items: end; justify-content: center; line-height: 0; }
@@ -23,9 +24,16 @@
 .companionName { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 1px 6px; font-size: 13px; line-height: 20px; border-bottom: 2px solid transparent; }
 .companion[aria-pressed='true'] .companionName { border-color: rgb(var(--primary-6)); color: rgb(var(--primary-6)); }
 .compactStage { display: flex; flex-wrap: wrap; align-items: center; align-content: flex-start; gap: 8px; padding: 12px 0 2px; }
+.compactTile { display: flex; align-items: center; gap: 2px; min-width: 0; }
 .compactCompanion { min-width: 0; max-width: 150px; display: flex; align-items: center; gap: 6px; background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 4px 8px; color: var(--text-primary); cursor: pointer; font: inherit; }
 .compactCompanion:hover, .compactCompanion[aria-pressed='true'] { background: var(--color-fill-2); }
 .compactCompanion .companionName { padding: 0; border: 0; }
+.floatingControl { display: inline-flex; align-items: center; justify-content: center; gap: 6px; color: var(--text-secondary); font-size: 11px; line-height: 20px; white-space: nowrap; }
+.floatingSwitch { position: relative; display: inline-flex; align-items: center; flex: 0 0 30px; width: 30px; height: 18px; padding: 2px; border: 0; border-radius: 999px; background: var(--color-border-3); cursor: pointer; transition: background-color 160ms ease; }
+.floatingSwitch[aria-checked='true'] { background: rgb(var(--primary-6)); }
+.floatingSwitch span { width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 16%); transition: transform 160ms ease; }
+.floatingSwitch[aria-checked='true'] span { transform: translateX(12px); }
+.floatingSwitch:disabled { cursor: wait; opacity: .65; }
 .smallAvatar { display: flex; flex: 0 0 40px; height: 40px; align-items: center; justify-content: center; overflow: hidden; border-radius: 10px; }
 .popover { z-index: 1300; width: 300px; max-width: calc(100vw - 24px); overflow-y: auto; border: 1px solid var(--color-border-2); border-radius: 14px; background: var(--bg-base); color: var(--text-primary); box-shadow: 0 8px 28px rgb(0 0 0 / 12%); font-family: inherit; padding: 8px; box-sizing: border-box; }
 .detail { width: 184px; display: flex; flex-direction: column; align-items: stretch; gap: 8px; padding: 14px; }
@@ -49,6 +57,7 @@
 .rosterRow { display: flex; align-items: center; min-width: 0; border-radius: 7px; padding-right: 3px; transition: background-color 140ms ease; }
 .rosterRow:hover { background: var(--color-fill-2); }
 .rosterRow[data-selected='true'] { background: color-mix(in srgb, rgb(var(--primary-6)) 10%, transparent); }
+.rosterRow > .floatingSwitch { margin-right: 4px; }
 .rosterChoice { display: flex; align-items: center; flex: 1; min-width: 0; height: 36px; gap: 7px; padding: 3px 4px; border: 0; border-radius: 7px; background: transparent; color: var(--text-primary); cursor: pointer; font: inherit; font-size: 12px; line-height: 20px; text-align: left; }
 .rosterAvatar { display: flex; align-items: center; justify-content: center; flex: 0 0 28px; height: 28px; border-radius: 7px; overflow: hidden; background: var(--color-fill-2); }
 .rosterAvatar * { animation: none !important; }
