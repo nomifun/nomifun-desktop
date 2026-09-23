@@ -171,7 +171,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.processItemIds).toEqual(['analysis', 'tool']);
     expect(disclosure.startAt).toBe(1000);
     expect(disclosure.endAt).toBe(3200);
@@ -191,7 +191,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.processItemIds).toEqual([]);
     expect(disclosure.sourceMessageIds).toEqual([]);
     expect(disclosure.startAt).toBe(1000);
@@ -213,7 +213,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.processItemIds).toEqual(['tool']);
     expect(disclosure.processItemStates).toEqual({ tool: 'completed' });
   });
@@ -320,7 +320,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.processItemIds).toEqual(['active-process', 'partial-answer']);
   });
 

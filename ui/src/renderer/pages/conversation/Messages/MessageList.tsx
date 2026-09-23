@@ -52,7 +52,7 @@ import {
 } from './components/toolGroupSummaryModel';
 import ProcessTraceItem from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
-import { deduplicateProcessText } from './processTraceDisplayModel';
+import { collapseProcessNarration, deduplicateProcessText } from './processTraceDisplayModel';
 import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileTargetLabel';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
@@ -102,6 +102,32 @@ type IMessageVO =
       created_at: number;
     };
 type ToolSummaryVO = Extract<IMessageVO, { type: 'tool_summary' }>;
+
+const coalesceToolProcessSummaries = (items: IRenderableItem[]): IRenderableItem[] => {
+  const summaries = items.filter(
+    (item): item is ToolSummaryVO => 'type' in item && item.type === 'tool_summary'
+  );
+  if (summaries.length < 2) return items;
+  const first = summaries[0];
+  const merged: ToolSummaryVO = {
+    ...first,
+    id: `${first.id}-coalesced`,
+    messages: summaries.flatMap((summary) => summary.messages),
+    sourceMessageIds: Array.from(new Set(summaries.flatMap((summary) => summary.sourceMessageIds))),
+    created_at: Math.min(...summaries.map((summary) => summary.created_at)),
+  };
+  let inserted = false;
+  const output: IRenderableItem[] = [];
+  for (const item of items) {
+    if (!('type' in item) || item.type !== 'tool_summary') {
+      output.push(item);
+    } else if (!inserted) {
+      output.push(merged);
+      inserted = true;
+    }
+  }
+  return output;
+};
 type IRenderableItem = IMessageVO;
 type ITurnProcessDisclosureVO = {
   type: 'turn_process_disclosure';
@@ -1271,8 +1297,16 @@ const MessageList: React.FC<{
   const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => {
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
       item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
-    const processItems = deduplicateProcessText(item.processItems, (processItem) =>
-      processItem.type === 'text' ? toDisplayText(processItem.content.content) : undefined
+    const processItems = coalesceToolProcessSummaries(
+      collapseProcessNarration(
+        deduplicateProcessText(item.processItems, (processItem) =>
+          processItem.type === 'text' ? toDisplayText(processItem.content.content) : undefined
+        ),
+        (processItem) =>
+          processItem.type === 'text' || processItem.type === 'thinking'
+            ? processItem.type
+            : undefined
+      )
     );
 
     return (

@@ -33,6 +33,7 @@ export interface TurnProcessDisclosureExpansionSnapshot {
   itemId: string;
   hasProcessItems: boolean;
   defaultCollapsed: boolean;
+  running: boolean;
 }
 
 const sanitizeDomId = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
@@ -47,6 +48,7 @@ export function shouldResetTurnProcessDisclosureExpansion(
   if (previous.itemId !== next.itemId) return true;
   if (previous.hasProcessItems !== next.hasProcessItems) return true;
   if (previous.defaultCollapsed !== next.defaultCollapsed) return true;
+  if (previous.running !== next.running) return true;
   return false;
 }
 
@@ -81,6 +83,7 @@ function TurnProcessDisclosure<T>({
     itemId: item.id,
     hasProcessItems,
     defaultCollapsed: item.defaultCollapsed,
+    running: item.running,
   });
 
   useEffect(() => {
@@ -88,11 +91,12 @@ function TurnProcessDisclosure<T>({
       itemId: item.id,
       hasProcessItems,
       defaultCollapsed: item.defaultCollapsed,
+      running: item.running,
     };
     const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
     expansionSnapshotRef.current = nextSnapshot;
     if (shouldReset) setExpanded(getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
-  }, [hasProcessItems, item.defaultCollapsed, item.id]);
+  }, [hasProcessItems, item.defaultCollapsed, item.id, item.running]);
 
   useEffect(() => {
     if (highlighted && hasProcessItems) setExpanded(true);
@@ -117,12 +121,18 @@ function TurnProcessDisclosure<T>({
 
   const durationEndAt = item.running ? now : item.endAt;
   const durationMs = durationEndAt - item.startAt;
-  const label = Number.isFinite(durationMs) && durationMs >= 0
+  const durationLabel = Number.isFinite(durationMs) && durationMs >= 0
     ? t('messages.turnDuration', {
         duration: formatTurnDuration(durationMs, t),
         defaultValue: 'Took {{duration}}',
       })
     : t('messages.turnDurationUnknown', { defaultValue: 'Time --' });
+  const label = item.running
+    ? t('messages.turnProcess.runningSummary', {
+        duration: durationLabel,
+        defaultValue: 'Processing · {{duration}}',
+      })
+    : durationLabel;
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
   const headerContent = (

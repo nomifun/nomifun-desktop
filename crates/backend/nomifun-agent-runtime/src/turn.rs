@@ -3496,6 +3496,9 @@ mod tests {
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(requests[0].input.instructions.iter().any(|instruction|
+            instruction.contains("Do not emit chain-of-thought")
+                && instruction.contains("reserve the final response for the result")));
         assert!(!requests[0].input.tools.iter().any(|tool| matches!(tool.name.as_str(),
             crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::tool_archive::SEARCH)));
         assert!(!requests[0].input.instructions.iter().any(|instruction|
