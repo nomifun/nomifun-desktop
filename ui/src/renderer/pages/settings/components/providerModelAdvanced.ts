@@ -81,6 +81,16 @@ export interface CatalogCapabilitySuggestion {
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
 export type ProviderConnectionInput = CanonicalProviderConnectionInput;
+export type ModelReasoningEffort = 'low' | 'medium' | 'high';
+
+const REASONING_EFFORT_PROTOCOLS = new Set([
+  'openai.chat_text',
+  'openai.responses',
+  'gemini.generate_text',
+]);
+
+export const protocolSupportsReasoningEffort = (protocol: string): boolean =>
+  REASONING_EFFORT_PROTOCOLS.has(protocol.trim());
 
 /** Persisted connection metadata used while resolving a capability. */
 export interface ProviderConnectionDescriptor {
@@ -732,6 +742,33 @@ export const withProviderParamChainRounds = (raw: string, enabled: boolean): str
   return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
 };
 
+export const providerParamReasoningEffort = (raw: string): ModelReasoningEffort | undefined => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return undefined;
+  const effort = parsed.value.reasoning_effort;
+  return typeof effort === 'string' && matchesReasoningEffort(effort) ? effort : undefined;
+};
+
+const matchesReasoningEffort = (value: string): value is ModelReasoningEffort =>
+  value === 'low' || value === 'medium' || value === 'high';
+
+/**
+ * Store one normalized model default in the canonical task-scoped params.
+ * `undefined` means Auto and removes the key so provider/system defaults stay
+ * authoritative. Malformed JSON is preserved byte-for-byte.
+ */
+export const withProviderParamReasoningEffort = (
+  raw: string,
+  effort: ModelReasoningEffort | undefined
+): string => {
+  const parsed = parseProviderParams(raw);
+  if (!parsed.ok) return raw;
+  const next = { ...parsed.value };
+  if (effort) next.reasoning_effort = effort;
+  else delete next.reasoning_effort;
+  return Object.keys(next).length > 0 ? JSON.stringify(next, null, 2) : '';
+};
+
 export const validateModelDefinition = (
   definition: ModelDefinitionDraft,
   manifests: ModelProtocolManifestMap,
@@ -812,8 +849,19 @@ export const validateModelDefinition = (
     ) {
       errors.push({ task: capability.task, code: 'cross_origin_consent_required' });
     }
-    if (!parseProviderParams(capability.providerParamsJson).ok) {
+    const providerParams = parseProviderParams(capability.providerParamsJson);
+    if (!providerParams.ok) {
       errors.push({ task: capability.task, code: 'invalid_provider_params' });
+    } else if (providerParams.value.reasoning_effort !== undefined) {
+      const effort = providerParams.value.reasoning_effort;
+      if (
+        capability.task !== 'chat' ||
+        !protocolSupportsReasoningEffort(capability.protocol) ||
+        typeof effort !== 'string' ||
+        !matchesReasoningEffort(effort)
+      ) {
+        errors.push({ task: capability.task, code: 'invalid_provider_params' });
+      }
     }
   }
   return { valid: errors.length === 0, errors };
