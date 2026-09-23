@@ -126,6 +126,14 @@ impl BrowserRuntime for Runtime {
         if let BrowserTabCommand::Activate { target } = &command {
             snapshot.active_tab_id = Some(target.tab_id.clone());
         }
+        if let BrowserTabCommand::Close { target } = &command {
+            let previous_count = snapshot.tabs.len();
+            snapshot.tabs.retain(|tab| tab.target != *target);
+            if snapshot.tabs.len() == previous_count { return Err(WorkspaceError::TabNotFound); }
+            if snapshot.active_tab_id.as_ref() == Some(&target.tab_id) {
+                snapshot.active_tab_id = snapshot.tabs.first().map(|tab| tab.target.tab_id.clone());
+            }
+        }
         if let BrowserTabCommand::SetZoom { target, percent } = &command {
             let tab = snapshot.tabs.iter_mut().find(|tab| tab.target == *target).ok_or(WorkspaceError::TabNotFound)?;
             tab.zoom_percent = *percent;
@@ -242,7 +250,7 @@ fn create() -> BrowserTabCommand {
 }
 
 #[tokio::test]
-async fn navigate_grant_can_activate_a_tab_without_granting_close() {
+async fn navigate_grant_can_activate_and_close_human_tabs_without_granting_agent_close() {
     let factory = Arc::new(Factory::default());
     let service = service(factory, &["managed"]);
     let resource = service
@@ -252,16 +260,22 @@ async fn navigate_grant_can_activate_a_tab_without_granting_close() {
         )
         .await
         .unwrap();
-    let target = resource.user_command(create()).await.unwrap().tabs[0].target.clone();
+    let first = resource.user_command(create()).await.unwrap().tabs[0].target.clone();
+    let second = resource.user_command(create()).await.unwrap().tabs[1].target.clone();
     let snapshot = resource
-        .user_command(BrowserTabCommand::Activate { target: target.clone() })
+        .user_command(BrowserTabCommand::Activate { target: second.clone() })
         .await
         .unwrap();
-    assert_eq!(snapshot.active_tab_id.as_deref(), Some(target.tab_id.as_str()));
+    assert_eq!(snapshot.active_tab_id.as_deref(), Some(second.tab_id.as_str()));
+    let closed = resource.user_command(BrowserTabCommand::Close { target: second }).await.unwrap();
+    assert_eq!(closed.tabs.len(), 1);
+    assert_eq!(closed.active_tab_id.as_deref(), Some(first.tab_id.as_str()));
+    let run = resource.begin_run().await.unwrap();
     assert_eq!(
-        resource.user_command(BrowserTabCommand::Close { target }).await,
+        resource.agent_command(&run, BrowserTabCommand::Close { target: first }).await,
         Err(WorkspaceError::ActionDenied)
     );
+    resource.finish_run(&run).await.unwrap();
 }
 
 #[tokio::test]
