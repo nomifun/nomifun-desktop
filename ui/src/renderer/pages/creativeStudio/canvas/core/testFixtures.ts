@@ -32,13 +32,6 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     naturalSize: null,
     composer: null,
   },
-  panorama: {
-    assetId: null,
-    projection: 'equirectangular',
-    yaw: 0,
-    pitch: 0,
-    fieldOfView: 75,
-  },
   text: {
     text: '',
     format: 'plain',

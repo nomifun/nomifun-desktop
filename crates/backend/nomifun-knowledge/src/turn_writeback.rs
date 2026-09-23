@@ -59,9 +59,9 @@ pub fn build_turn_writeback_prompt(
         WritebackEagerness::Manual => "manual",
         WritebackEagerness::Auto => "auto",
     };
-    // Production never reaches the Manual arm — the conversation crate skips
-    // scheduling the extractor entirely under that disposition — but a future
-    // caller that forgets the gate must still get the restrained instruction.
+    // Manual reaches this extractor only after the runtime has identified
+    // explicit save/record intent, and the prompt repeats that gate as defense
+    // in depth.
     let eagerness_rule = match eagerness {
         WritebackEagerness::Manual => {
             "Manual: the owner drives write-back. Return an EMPTY candidates array unless the user in THIS turn explicitly asked to record or save something; then extract only that."

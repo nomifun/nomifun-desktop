@@ -482,7 +482,6 @@
       "fitContain": "Fit entire image",
       "fitCover": "Fill and crop",
       "fitMode": "Fit mode",
-      "horizontalAngle": "Horizontal angle",
       "label": "Creative Studio infinite canvas",
       "loadFailed": "Could not load the canvas",
       "loading": "Loading canvas…",
@@ -490,9 +489,7 @@
       "markdown": "Markdown",
       "notFound": "Canvas not found",
       "plainText": "Plain text",
-      "projectionEquirectangular": "Equirectangular",
       "resizeHandle": "Resize node: {{corner}}",
-      "verticalAngle": "Vertical angle",
       "volumePercent": "Volume: {{percent}}%"
     },
     "errors": {
@@ -858,7 +855,6 @@
       "audio": "Audio",
       "group": "Group",
       "image": "Image",
-      "panorama": "Panorama",
       "text": "Text",
       "timeline": "Timeline",
       "video": "Video"
@@ -867,7 +863,6 @@
       "audio": {
         "empty": "Empty audio node"
       },
-      "connectedPanorama": "Panorama connected",
       "connectedVideo": "Video connected",
       "defaultGroupTitle": "Node group",
       "emptyText": "Empty text",
@@ -880,11 +875,6 @@
       },
       "lock": "Lock node",
       "locked": "Node locked",
-      "panorama": {
-        "empty": "Empty panorama node",
-        "fieldOfView": "Field of view: {{value}}°",
-        "orientation": "Yaw {{yaw}}° · Pitch {{pitch}}°"
-      },
       "status": {
         "canceled": "Canceled",
         "failed": "Failed",
@@ -974,7 +964,6 @@
       "maskTaskSubmitted": "The local-edit task was submitted. Its input node will continue to show the backend status.",
       "nodeCreatedAndConnected": "Node created and connected.",
       "nodeCreatedAtPosition": "Node created at the specified position.",
-      "panoramaDetected": "A 2:1 image was detected. Choose an image node or a panorama node.",
       "promptCopied": "Copied the prompt for \"{{title}}\" to the clipboard.",
       "propertiesOpened": "Opened the selected node in the Properties panel.",
       "remoteReloaded": "Reloaded the remote version.",
@@ -1019,12 +1008,6 @@
         "properties": "Properties"
       }
     },
-    "panorama": {
-      "asImage": "Use as image",
-      "asPanorama": "Use as panorama",
-      "dialogDescription": "The image has been uploaded and saved to the asset library. Its aspect ratio is close to 2:1. Choose whether to add it to this canvas as a regular image or an equirectangular panorama.",
-      "dialogTitle": "Choose a node type for this 2:1 image"
-    },
     "promptLibrary": "Prompt library",
     "promptLibraryDescription": "From NomiFun presets and text assets",
     "properties": {
@@ -1042,7 +1025,6 @@
       "editTitle": "Edit properties",
       "emptyDescription": "Select a node to view its saved properties.",
       "emptyTitle": "No node selected",
-      "fieldOfView": "Field of view",
       "fit": "Fit",
       "fontSize": "Font size",
       "format": "Format",
@@ -1061,7 +1043,6 @@
       "nodeId": "Node ID",
       "position": "Position",
       "posterAsset": "Poster asset",
-      "projection": "Projection",
       "prompt": "Prompt",
       "provider": "Provider",
       "readOnlyNote": "These properties are read-only because editing is not available here.",
@@ -1075,7 +1056,6 @@
       "taskId": "Task ID",
       "title": "Title",
       "trim": "Trim",
-      "viewAngle": "View angle",
       "volume": "Volume"
     },
     "resizeCorners": {

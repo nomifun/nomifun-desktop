@@ -1102,7 +1102,6 @@ mod tests {
 
         for node_type in [
             "image",
-            "panorama",
             "config",
             "video",
             "audio",

@@ -1,59 +1,27 @@
-# Unified Plugin Core 新会话 Goal 启动 Prompt
+# Unified Plugin Core：macOS 工作交接 Prompt
 
-将下面整段作为新 Codex 会话的第一条消息发送：
+> 本文件供另一台 Apple Silicon Mac 上的新 Codex 会话直接使用。产品与施工权威只有同目录 `README.zh.md`；实施事实和未完成门禁只有同目录 `STATUS.md`。本交接不创建第二套状态台账。
+
+将以下内容作为新会话的第一条消息：
 
 ---
 
-你正在仓库 `C:\Users\rika0\code\nomifun\bak\refactor\nomifun-desktop` 中执行一次最终的 Unified Plugin Core 重构。
+你在一台 Apple Silicon macOS 目标机上接续 NomiFun Unified Plugin Core 的最终验收与必要修复。所有开发只在 `rf/agent-capability-platform-v2` 分支进行；不要创建或切到其他开发分支，不改写历史，不 force-push。
 
-请先完整读取并以此为唯一 Plugin 架构与施工权威：
+先检查 `uname -s`、`uname -m`、Git 工作树和远端状态。若本机已有未提交用户改动，保留并避让；从 `origin/rf/agent-capability-platform-v2` 正常快进到最新提交。完整读取仓库根 `AGENTS.md`、`docs/specs/2026-09-22-unified-plugin-core/README.zh.md` 和同目录 `STATUS.md`。若历史 Plugin 文档与规格冲突，以 Unified Plugin Core 为准。不要重做已经完成的 N1/M1 设计或恢复任何旧兼容入口。
 
-`docs/specs/2026-09-22-unified-plugin-core/README.zh.md`
+Windows 端已实现并合入同一开发分支：唯一 `nomifun.plugin/v1` Package、本地 Plugin 身份、Action + Binding、单一 JS Runtime/SDK/Bridge/API/UI、generation DataRoot、SQLite/KV/Files/Cache、Preview、JS migration、单一 mutation journal、Chat/外部目录/ZIP/Backup 共用安装链、Agent/Desktop 消费者，以及旧 N1/M1 生产路径物理删除。此前 Windows Rust、Plugin HTTP E2E、UI、合同与边界检查已通过；本机的 macOS 原生运行和 DMG 证据仍缺失。Windows NSIS 候选安装冒烟因另一个开发树占用当前用户的 `nomifun://` 注册而停在安装前，不能视为通过。
 
-同时遵守仓库根目录 `AGENTS.md`，并读取与当前代码状态直接相关的现有 Plugin、Agent Action/Module、Desktop、DB、Runtime 和发布边界。若旧规格与 Unified Plugin Core 文档冲突，以 Unified Plugin Core 文档和其中列出的四项恒定产品目标为准。
+请直接执行 macOS 剩余工作：
 
-请立即创建一个 Goal，目标为：
+1. 在隔离的新 `NOMIFUN_DATA_DIR` 和工作目录下运行，绝不删除或覆盖本机现有 NomiFun/Plugin/Agent 用户数据。确认 Node、Rust、Bun、Xcode/macOS SDK 与 Apple Silicon target 可用；依赖安装使用锁文件。
+2. 跑 `cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check`、`bun run check`、`bun run test:plugin-sdk`、`cargo test -p nomifun-plugin-platform --tests -- --test-threads=1`、`cargo test -p nomifun-app --test plugin_e2e -- --test-threads=1`。如有平台问题，定位并修复源码，再运行直接相关的 Rust/UI/边界检查。Renderer 变更后必须跑 `bun run check:desktop-ui-boundary`，不得增加 880px 以下或移动端布局。
+3. 用 `bun run build:mac arm` 生成本机 arm64 `.app` 与 `.dmg`；记录完整命令、退出码、目标架构、app/DMG 路径、SHA-256、release-lock 路径及构建日志。默认包是未签名的工程验证包；只有本机确有签名/公证配置且当前 release 要求它们时才运行 `--signed`，不要把未签名结果写成签名发布证据。
+4. 用构建产生的真实 release lock 运行 `bun scripts/validation/check-macos-arm64-native.mjs --release-lock <绝对路径>`，并保留结构化结果。按需要加 `--run-startup --host-binary <同一构建的可执行文件>`；先阅读脚本的入参和检查范围，不把 preflight 冒充完整 Plugin 产品验收。
+5. 在目标机实际启动这个 `.app`，检查至少 880×600 的 Plugin Library/Creator/Import/Run/Config：UI-only 不起 Node，headless Service 能由真实 Agent Action 和 Desktop command 调用，mixed UI/Service 共享 DataRoot；Preview 使用临时副本；停用/回收/更新撤销旧访问。通过隔离 DataRoot 和实际进程/HTTP/UI 观察记录证据。已提交的 `plugin_e2e`、`migration`、`service_process` 测试可以提供可重复夹具，但仍需要原生 app/DMG 启动证据。
+6. 复核从 Windows 合入的 Agent/Knowledge/会话切换代码与 Plugin Binding 共存；若遇到冲突或回归，保持 Agent 真实消费者能力，不恢复 Plugin Product/Role/Provider 图或旧 API。每个修复同步更新测试、调用方与唯一 `STATUS.md`，在 `rf/agent-capability-platform-v2` 正常提交并推送。
+7. 终审按规格 §19–20 逐项列出证据。记录通过、失败、未运行与环境条件，提供确切命令和目标机日志位置。Windows 安装器完整冒烟仍是独立未完成门禁；在其与 macOS 证据均通过前，不把总 Goal 标为 complete。
 
-> 将当前 N1 安装聚合与 M1 发布聚合一次性 clean cut 为 Unified Plugin Core：一种 Plugin Package、一种本地 Plugin 身份、一套 JS Runtime/SDK、一个 generation 化 DataRoot、一条 Chat/Import 共用的 staging/validation/activation 链路，以及 Action + Binding 开放能力模型；完整接入 UI App、无 UI Agent/Desktop 增强、SQLite/KV/Files/Cache、配置/Credential、Preview、Migration、外部 Package/Backup，并物理删除旧双架构、兼容层、旧表、旧 API、旧 UI、旧合同、旧测试与过期文档。只有规格中的全部验收与完成审计通过后才将 Goal 标记为 complete。
-
-执行要求：
-
-1. 这不是规划任务。读取文档和审计现状后立即实施，并通过 Goal 持续工作直到真正完成或出现需要产品负责人决定的硬阻塞。
-2. 不要把工作拆成分期产品交付，不要保留可运行的双架构中间态。内部可以按依赖顺序提交原子改动，但最终合并边界必须是完整 clean cut。
-3. 不新增 N1/M1 adapter、旧 API alias、旧 manifest decoder、旧数据迁移器、feature flag 或“以后再删”的 TODO。
-4. Plugin 子系统允许 clean-start；不得删除或破坏非 Plugin 用户数据。任何实际破坏性文件或数据库操作前必须精确确认目标。
-5. 优先复用规格明确保留的底层机制：Artifact Store、安全路径原语、独立 Service process、取消/超时/进程回收、Surface MessageChannel、SQLite authorizer、Credential Store 和现有真实 Agent/Desktop 消费者。不要为了重构重写无关稳定基础设施。
-6. Plugin 作者合同必须保持简单：统一 Manifest、Action + Binding、内联 JSON Schema、统一 SDK；外部目录/ZIP 与 Chat 产物必须进入同一个 `install_artifact`。
-7. UI-only Plugin 必须零 Node 进程；有 Service 的 Plugin 使用每插件一个独立进程，不恢复 Shared Extension Host。
-8. Preview 必须使用与正式运行相同的 SDK/Bridge/Storage adapter，只绑定临时 DataRoot；Preview 数据永不合并回正式数据。
-9. 完整实现 generation 化 DataRoot、SQLite/KV/Files/Cache、JS migration、原子 Artifact/DataRoot 切换和单一 mutation journal。
-10. Action/Binding 要接入当前统一 Agent Module/Action 与 Desktop 的真实消费者，但不能让 Plugin Core 再依赖复杂 Role/Provider/Consumer 图。不要误删其他核心领域仍在使用的全局合同。
-11. 每次替换必须同步完成调用方改线、旧实现删除和测试更新；不要只增加 facade。
-12. 保持用户无关改动，提交前检查 staged/unstaged 文件。需要创建分支时使用 `codex/` 前缀，不重写共享历史。
-13. Renderer 或 UI 规则变化后运行 `bun run check:desktop-ui-boundary`；不增加移动端布局、手机快照或 880px 以下断点。
-14. 使用最小定向检查推进，但在最终完成前运行与改动范围匹配的完整 Rust、UI、合同生成、边界、打包和桌面验证。平台条件不足的检查必须如实记录，不能伪记通过。
-15. 允许使用子代理并行处理相互独立的只读审计、测试归类或明确隔离的实现任务；共享文件修改必须协调，主代理负责最终整合、删除审计和验证。
-16. 持续更新 `docs/specs/2026-09-22-unified-plugin-core/README.zh.md` 的状态或在同目录增加唯一状态台账，但不得创建互相冲突的计划真相源。
-17. 不要因为任务规模大、上下文压缩或一次检查失败而提前结束；保留进度并继续。只有全部验收、旧路径物理删除、文档与代码一致且无必要工作剩余时，才调用 Goal complete。
-
-开始时请先完成以下动作，然后直接进入实现：
-
-- 检查 Git 状态和当前分支；
-- 读取规格全文；
-- 建立现状 inventory：保留、重写、删除、真实消费者、DB 表、API、UI 路由和验证命令；
-- 把 inventory 与规格逐项对齐，防止误删 Agent/Desktop 当前真实能力；
-- 创建 Goal 并开始第一个能够同时落地新合同和删除旧入口的原子改动。
-
-最终交付必须包含：
-
-- Unified Plugin Core 全部生产实现；
-- 新 canonical DB schema 与 clean-start 边界；
-- 单一 Manifest、SDK、API、DTO、Bridge 和 UI；
-- Chat 与外部 Import 的真实共用链；
-- UI-only、headless、mixed Plugin 的真实运行证据；
-- DB/KV/Files/Cache、Preview、Migration、Crash recovery、权限与 Backup 证据；
-- 旧 N1/M1 生产代码、表、合同、路由、UI、测试、脚本和过期文档的删除证明；
-- 完整命令与测试结果；
-- 无剩余兼容层、双架构或隐含 TODO 的完成审计。
+最终向用户报告 macOS 目标机实际结果、commit SHA、未完成项及下一步。遇到真实产品选择或无法安全处理的用户数据时再请求决定；不要因为检查耗时或一次失败提前结束。
 
 ---

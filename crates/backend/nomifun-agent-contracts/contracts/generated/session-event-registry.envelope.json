@@ -81,6 +81,37 @@
         "replay_rule": "rebuild_projection"
       },
       {
+        "kind": "session/agent-binding-changed",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/session-agent-binding-changed/v1",
+        "producer": {
+          "allowed": [
+            "session_api"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "session/ready",
+            "turn/completed",
+            "turn/failed",
+            "turn/cancelled",
+            "session/agent-binding-changed"
+          ]
+        },
+        "correlation": "session",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": true,
+          "reducers": [
+            "session-head",
+            "message-projection"
+          ]
+        },
+        "replay_rule": "rehydrate_runtime_input"
+      },
+      {
         "kind": "turn/started",
         "version": 1,
         "persistence": "persistent",
@@ -979,5 +1010,5 @@
       }
     ]
   },
-  "payload_digest": "037432f33e1240cc5c18ace7a87e55cb2793e302b3f5d634a54e5188b03a3e0a"
+  "payload_digest": "5511cb7f5396d5cbb2dcf74e0c5002f280ac3adee43cb508c8bb3ba850972ebf"
 }

@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_WORKPATH_KEY } from '@/renderer/pages/conversation/SessionList/utils/workpathKey';
+import type { ConversationId } from '@/common/types/ids';
 import {
   knowledgeBindingTargetKey,
   resolveKnowledgeBindingTarget,
@@ -13,11 +14,14 @@ import {
 } from './knowledgeBindingTarget';
 
 describe('resolveKnowledgeBindingTarget', () => {
-  test('a canonical conversation has no mutable Knowledge-binding target', () => {
+  test('a canonical conversation resolves its dedicated live AgentSession target', () => {
     expect(resolveKnowledgeBindingTarget({
       kind: 'conversation',
-      knowledgeBaseIds: [],
-    })).toBeNull();
+      sessionId: '0190f5fe-7c00-7a00-8abc-012345678901' as ConversationId,
+    })).toEqual({
+      kind: 'conversation',
+      target_id: '0190f5fe-7c00-7a00-8abc-012345678901',
+    });
   });
 
   test('a terminal resolves through its own session object, never an id lookup', () => {
@@ -41,6 +45,7 @@ describe('knowledgeBindingTargetKey', () => {
   test('separates the two kinds that can share an id string', () => {
     expect(knowledgeBindingTargetKey({ kind: 'workpath', target_id: 'x' })).toBe('workpath:x');
     expect(knowledgeBindingTargetKey({ kind: 'companion', target_id: 'x' })).toBe('companion:x');
+    expect(knowledgeBindingTargetKey({ kind: 'conversation', target_id: 'x' })).toBe('conversation:x');
   });
 });
 

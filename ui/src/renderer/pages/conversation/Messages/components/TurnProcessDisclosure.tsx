@@ -5,9 +5,9 @@
  */
 
 import type { TurnDisclosureProcessState } from '../turnDisclosureModel';
-import { Down } from '@icon-park/react';
+import { Right } from '@icon-park/react';
 import classNames from 'classnames';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 export interface TurnProcessDisclosureView<T> {
@@ -23,11 +23,10 @@ export interface TurnProcessDisclosureView<T> {
 interface TurnProcessDisclosureProps<T> {
   item: TurnProcessDisclosureView<T>;
   highlighted?: boolean;
-  renderProcessItem: (item: T, expansionControls?: TurnProcessDisclosureExpansionControls) => React.ReactNode;
+  renderProcessItem: (item: T) => React.ReactNode;
   getProcessItemKey: (item: T) => string;
   getProcessItemState: (item: T) => TurnDisclosureProcessState;
   getProcessItemLayoutKind?: (item: T) => string;
-  getProcessItemCanExpandAll?: (item: T) => boolean;
 }
 
 export interface TurnProcessDisclosureExpansionSnapshot {
@@ -35,25 +34,6 @@ export interface TurnProcessDisclosureExpansionSnapshot {
   hasProcessItems: boolean;
   defaultCollapsed: boolean;
 }
-
-export interface TurnProcessDisclosureExpansionControls {
-  expanded: boolean;
-  onExpandedChange: (expanded: boolean) => void;
-}
-
-const labelKeyByState: Record<TurnDisclosureProcessState, string> = {
-  completed: 'messages.turnProcessed',
-  running: 'messages.turnProcessed',
-  failed: 'messages.turnProcessed',
-  canceled: 'messages.turnCanceled',
-};
-
-const defaultLabelByState: Record<TurnDisclosureProcessState, string> = {
-  completed: 'Processed {{duration}}',
-  running: 'Processed {{duration}}',
-  failed: 'Processed {{duration}}',
-  canceled: 'You stopped after {{duration}}',
-};
 
 const sanitizeDomId = (value: string): string => value.replace(/[^A-Za-z0-9_-]/g, '_');
 
@@ -71,7 +51,7 @@ export function shouldResetTurnProcessDisclosureExpansion(
 }
 
 const formatTurnDuration = (ms: number, t: ReturnType<typeof useTranslation>['t']): string => {
-  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
   const sUnit = t('common.unit.second_short', { defaultValue: 's' });
   const mUnit = t('common.unit.minute_short', { defaultValue: 'm' });
   const hUnit = t('common.unit.hour_short', { defaultValue: 'h' });
@@ -92,12 +72,10 @@ function TurnProcessDisclosure<T>({
   getProcessItemKey,
   getProcessItemState,
   getProcessItemLayoutKind,
-  getProcessItemCanExpandAll,
 }: TurnProcessDisclosureProps<T>) {
   const { t } = useTranslation();
   const hasProcessItems = item.processItems.length > 0;
   const [expanded, setExpanded] = useState(() => getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
-  const [expandAllProcessItemKeys, setExpandAllProcessItemKeys] = useState<Set<string>>(() => new Set());
   const [now, setNow] = useState(() => Date.now());
   const expansionSnapshotRef = useRef<TurnProcessDisclosureExpansionSnapshot>({
     itemId: item.id,
@@ -113,11 +91,7 @@ function TurnProcessDisclosure<T>({
     };
     const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
     expansionSnapshotRef.current = nextSnapshot;
-
-    if (shouldReset) {
-      setExpanded(getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
-      setExpandAllProcessItemKeys(new Set());
-    }
+    if (shouldReset) setExpanded(getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
   }, [hasProcessItems, item.defaultCollapsed, item.id]);
 
   useEffect(() => {
@@ -127,146 +101,71 @@ function TurnProcessDisclosure<T>({
   useEffect(() => {
     if (!item.running) return;
     setNow(Date.now());
-    const timer = window.setInterval(() => {
-      setNow(Date.now());
-    }, 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [item.running]);
 
   const currentItemKey = useMemo(() => {
-    const activeItem = item.processItems.findLast((processItem) => {
-      const state = getProcessItemState(processItem);
-      return state === 'running';
-    });
-    const failedItem =
-      activeItem ??
-      item.processItems.findLast((processItem) => {
-        const state = getProcessItemState(processItem);
-        return state === 'failed' || state === 'canceled';
-      });
-    const latestItem = failedItem ?? item.processItems.at(-1);
+    const runningItem = item.processItems.findLast(
+      (processItem) => getProcessItemState(processItem) === 'running'
+    );
+    const latestItem = runningItem ?? item.processItems.at(-1);
     return latestItem ? getProcessItemKey(latestItem) : undefined;
   }, [getProcessItemKey, getProcessItemState, item.processItems]);
 
-  const expandableProcessItemKeys = useMemo(() => {
-    if (!getProcessItemCanExpandAll) return [];
-    return item.processItems.filter(getProcessItemCanExpandAll).map(getProcessItemKey);
-  }, [getProcessItemCanExpandAll, getProcessItemKey, item.processItems]);
-
-  useEffect(() => {
-    if (!expandableProcessItemKeys.length) {
-      setExpandAllProcessItemKeys((previous) => (previous.size > 0 ? new Set() : previous));
-      return;
-    }
-
-    const validKeys = new Set(expandableProcessItemKeys);
-    setExpandAllProcessItemKeys((previous) => {
-      const next = new Set([...previous].filter((key) => validKeys.has(key)));
-      return next.size === previous.size ? previous : next;
-    });
-  }, [expandableProcessItemKeys]);
-
-  const hasExpandableProcessItems = expandableProcessItemKeys.length > 0;
-  const allExpandableProcessItemsExpanded =
-    hasExpandableProcessItems && expandableProcessItemKeys.every((itemKey) => expandAllProcessItemKeys.has(itemKey));
-
-  const handleToggleAllProcessItems = useCallback(() => {
-    if (allExpandableProcessItemsExpanded) {
-      setExpandAllProcessItemKeys(new Set());
-      return;
-    }
-    setExpandAllProcessItemKeys(new Set(expandableProcessItemKeys));
-  }, [allExpandableProcessItemsExpanded, expandableProcessItemKeys]);
-
-  const getExpansionControls = useCallback(
-    (itemKey: string): TurnProcessDisclosureExpansionControls => ({
-      expanded: expandAllProcessItemKeys.has(itemKey),
-      onExpandedChange: (nextExpanded) => {
-        setExpandAllProcessItemKeys((previous) => {
-          const next = new Set(previous);
-          if (nextExpanded) {
-            next.add(itemKey);
-          } else {
-            next.delete(itemKey);
-          }
-          return next;
-        });
-      },
-    }),
-    [expandAllProcessItemKeys]
-  );
-
   const durationEndAt = item.running ? now : item.endAt;
-  const duration = formatTurnDuration(durationEndAt - item.startAt, t);
-  // Defensive compatibility: historical or third-party callers may still
-  // provide an aggregate `failed` state. The header must remain lifecycle-only;
-  // detailed rows continue to render their own failure state below.
-  const displayState = item.state === 'failed' ? 'completed' : item.state;
-  const label = t(labelKeyByState[displayState], {
-    duration,
-    defaultValue: defaultLabelByState[displayState],
-  });
+  const durationMs = durationEndAt - item.startAt;
+  const label = Number.isFinite(durationMs) && durationMs >= 0
+    ? t('messages.turnDuration', {
+        duration: formatTurnDuration(durationMs, t),
+        defaultValue: 'Took {{duration}}',
+      })
+    : t('messages.turnDurationUnknown', { defaultValue: 'Time --' });
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
-  const hasHeaderActions = disclosureExpanded && hasExpandableProcessItems;
+  const headerContent = (
+    <>
+      <span className='turn-process-disclosure__label'>{label}</span>
+      {hasProcessItems && (
+        <Right
+          theme='outline'
+          size='13'
+          fill='currentColor'
+          className={classNames(
+            'turn-process-disclosure__arrow',
+            disclosureExpanded && 'turn-process-disclosure__arrow--open'
+          )}
+        />
+      )}
+    </>
+  );
 
   return (
-    <div className={classNames('turn-process-disclosure', `turn-process-disclosure--${displayState}`)}>
-      <div
-        className={classNames(
-          'turn-process-disclosure__header',
-          hasHeaderActions && 'turn-process-disclosure__header--with-actions',
-          !hasProcessItems && 'turn-process-disclosure__header--static'
-        )}
-      >
-        <button
-          type='button'
-          className='turn-process-disclosure__toggle'
-          onClick={() => {
-            if (hasProcessItems) setExpanded((value) => !value);
-          }}
-          aria-expanded={hasProcessItems ? disclosureExpanded : undefined}
-          aria-controls={hasProcessItems ? bodyId : undefined}
-        >
-          <span className='turn-process-disclosure__label'>{label}</span>
-          {hasProcessItems && (
-            <Down
-              theme='outline'
-              size='14'
-              fill='currentColor'
-              className={classNames(
-                'turn-process-disclosure__arrow',
-                disclosureExpanded && 'turn-process-disclosure__arrow--open'
-              )}
-            />
-          )}
-        </button>
-        {hasHeaderActions && (
-          <div className='turn-process-disclosure__header-actions'>
-            <button
-              type='button'
-              className='turn-process-disclosure__expand-thinking'
-              onClick={handleToggleAllProcessItems}
-            >
-              <Down
-                theme='outline'
-                size='14'
-                fill='currentColor'
-                className={classNames(
-                  'turn-process-disclosure__expand-thinking-icon',
-                  allExpandableProcessItemsExpanded && 'turn-process-disclosure__expand-thinking-icon--open'
-                )}
-              />
-              <span>
-                {allExpandableProcessItemsExpanded
-                  ? t('messages.turnProcess.collapseAllThinkingProcess', {
-                      defaultValue: 'Collapse all thinking process',
-                    })
-                  : t('messages.turnProcess.expandAllThinkingProcess', {
-                      defaultValue: 'Expand all thinking process',
-                    })}
-              </span>
-            </button>
+    <div
+      className={classNames(
+        'turn-process-disclosure',
+        `turn-process-disclosure--${item.state}`,
+        item.running && 'turn-process-disclosure--live'
+      )}
+    >
+      <div className={classNames('turn-process-disclosure__header', !hasProcessItems && 'turn-process-disclosure__header--static')}>
+        {hasProcessItems ? (
+          <button
+            type='button'
+            className='turn-process-disclosure__toggle'
+            onClick={() => setExpanded((value) => !value)}
+            aria-label={t(
+              disclosureExpanded ? 'messages.turnProcess.collapse' : 'messages.turnProcess.expand',
+              { defaultValue: disclosureExpanded ? 'Collapse thinking process' : 'Expand thinking process' }
+            )}
+            aria-expanded={disclosureExpanded}
+            aria-controls={bodyId}
+          >
+            {headerContent}
+          </button>
+        ) : (
+          <div className='turn-process-disclosure__toggle turn-process-disclosure__toggle--static'>
+            {headerContent}
           </div>
         )}
       </div>
@@ -276,9 +175,6 @@ function TurnProcessDisclosure<T>({
             const itemKey = getProcessItemKey(processItem);
             const state = getProcessItemState(processItem);
             const layoutKind = getProcessItemLayoutKind?.(processItem) ?? 'other';
-            const expansionControls = getProcessItemCanExpandAll?.(processItem)
-              ? getExpansionControls(itemKey)
-              : undefined;
             return (
               <div
                 key={itemKey}
@@ -289,7 +185,7 @@ function TurnProcessDisclosure<T>({
                   itemKey === currentItemKey && 'turn-process-disclosure__item--current'
                 )}
               >
-                {renderProcessItem(processItem, expansionControls)}
+                {renderProcessItem(processItem)}
               </div>
             );
           })}

@@ -316,7 +316,7 @@ pub struct CreativeNode {
 struct CreativeNodeWire {
     id: String,
     #[serde(rename = "type")]
-    node_type: CreativeNodeType,
+    node_type: CreativeNodeWireType,
     position: CreativePoint,
     size: CreativeSize,
     group_id: Option<String>,
@@ -325,42 +325,89 @@ struct CreativeNodeWire {
     data: Value,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CreativeNodeWireType {
+    Image,
+    Panorama,
+    Text,
+    Config,
+    Video,
+    Audio,
+    Timeline,
+    Group,
+}
+
 impl<'de> Deserialize<'de> for CreativeNode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let wire = CreativeNodeWire::deserialize(deserializer)?;
-        let data = match wire.node_type {
-            CreativeNodeType::Image => CreativeNodeData::Image(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+        let (node_type, data) = match wire.node_type {
+            CreativeNodeWireType::Image => (
+                CreativeNodeType::Image,
+                CreativeNodeData::Image(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Panorama => CreativeNodeData::Panorama(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Panorama => {
+                let retired: RetiredPanoramaNodeData =
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?;
+                retired.validate("data").map_err(D::Error::custom)?;
+                (
+                    CreativeNodeType::Image,
+                    CreativeNodeData::Image(CreativeImageNodeData {
+                        asset_id: retired.asset_id,
+                        caption: String::new(),
+                        alt: String::new(),
+                        fit: CreativeImageFit::Contain,
+                        natural_size: None,
+                        composer: None,
+                    }),
+                )
+            }
+            CreativeNodeWireType::Text => (
+                CreativeNodeType::Text,
+                CreativeNodeData::Text(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Text => CreativeNodeData::Text(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Config => (
+                CreativeNodeType::Config,
+                CreativeNodeData::Config(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Config => CreativeNodeData::Config(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Video => (
+                CreativeNodeType::Video,
+                CreativeNodeData::Video(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Video => CreativeNodeData::Video(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Audio => (
+                CreativeNodeType::Audio,
+                CreativeNodeData::Audio(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Audio => CreativeNodeData::Audio(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Timeline => (
+                CreativeNodeType::Timeline,
+                CreativeNodeData::Timeline(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
-            CreativeNodeType::Timeline => CreativeNodeData::Timeline(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
-            ),
-            CreativeNodeType::Group => CreativeNodeData::Group(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+            CreativeNodeWireType::Group => (
+                CreativeNodeType::Group,
+                CreativeNodeData::Group(
+                    serde_json::from_value(wire.data).map_err(D::Error::custom)?,
+                ),
             ),
         };
 
         Ok(Self {
             id: wire.id,
-            node_type: wire.node_type,
+            node_type,
             position: wire.position,
             size: wire.size,
             group_id: wire.group_id,
@@ -375,7 +422,6 @@ impl<'de> Deserialize<'de> for CreativeNode {
 #[serde(rename_all = "lowercase")]
 pub enum CreativeNodeType {
     Image,
-    Panorama,
     Text,
     Config,
     Video,
@@ -384,7 +430,7 @@ pub enum CreativeNodeType {
     Group,
 }
 
-/// Closed payload union for the eight canonical v1 node kinds. Untagged wire
+/// Closed payload union for the seven canonical v1 node kinds. Untagged wire
 /// encoding keeps the product JSON shape as `type + data`; [`CreativeNode`]'s
 /// custom deserializer selects exactly one strict payload from the sibling
 /// `type`, so kind/data drift is rejected before service validation.
@@ -392,7 +438,6 @@ pub enum CreativeNodeType {
 #[serde(untagged)]
 pub enum CreativeNodeData {
     Image(CreativeImageNodeData),
-    Panorama(CreativePanoramaNodeData),
     Text(CreativeTextNodeData),
     Config(CreativeConfigNodeData),
     Video(CreativeVideoNodeData),
@@ -405,7 +450,6 @@ impl CreativeNodeData {
     fn node_type(&self) -> CreativeNodeType {
         match self {
             Self::Image(_) => CreativeNodeType::Image,
-            Self::Panorama(_) => CreativeNodeType::Panorama,
             Self::Text(_) => CreativeNodeType::Text,
             Self::Config(_) => CreativeNodeType::Config,
             Self::Video(_) => CreativeNodeType::Video,
@@ -418,7 +462,6 @@ impl CreativeNodeData {
     fn validate(&self, path: &str) -> Result<(), String> {
         match self {
             Self::Image(data) => data.validate(path),
-            Self::Panorama(data) => data.validate(path),
             Self::Text(data) => data.validate(path),
             Self::Config(data) => data.validate(path),
             Self::Video(data) => data.validate(path),
@@ -628,18 +671,23 @@ pub enum CreativeImageFit {
     Cover,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Read-only compatibility payload for v1 documents saved before panorama
+/// nodes were retired. Deserialization immediately normalizes it to an image.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreativePanoramaNodeData {
-    pub asset_id: Option<String>,
-    pub projection: CreativePanoramaProjection,
-    pub yaw: f64,
-    pub pitch: f64,
-    pub field_of_view: f64,
+struct RetiredPanoramaNodeData {
+    asset_id: Option<String>,
+    projection: RetiredPanoramaProjection,
+    yaw: f64,
+    pitch: f64,
+    field_of_view: f64,
 }
 
-impl CreativePanoramaNodeData {
+impl RetiredPanoramaNodeData {
     fn validate(&self, path: &str) -> Result<(), String> {
+        match self.projection {
+            RetiredPanoramaProjection::Equirectangular => {}
+        }
         require_optional_id(&format!("{path}.assetId"), self.asset_id.as_deref())?;
         require_range(&format!("{path}.yaw"), self.yaw, -360.0, 360.0)?;
         require_range(&format!("{path}.pitch"), self.pitch, -90.0, 90.0)?;
@@ -652,9 +700,9 @@ impl CreativePanoramaNodeData {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum CreativePanoramaProjection {
+enum RetiredPanoramaProjection {
     Equirectangular,
 }
 
@@ -1749,7 +1797,6 @@ mod tests {
         let mut doc = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
         doc.nodes = vec![
             node("image", "image"),
-            node("panorama", "panorama"),
             node("text", "text"),
             node("config-a", "config"),
             node("config-b", "config"),
@@ -1881,10 +1928,9 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_node_payloads_round_trip_and_validate() {
+    fn all_seven_node_payloads_round_trip_and_validate() {
         for kind in [
             "image",
-            "panorama",
             "text",
             "config",
             "video",
@@ -1902,6 +1948,36 @@ mod tests {
             doc.validate_for_project(PROJECT_ID)
                 .unwrap_or_else(|error| panic!("{kind} payload must validate: {error}"));
         }
+    }
+
+    #[test]
+    fn retired_panorama_payloads_normalize_to_images_on_read() {
+        let parsed: CreativeNode =
+            serde_json::from_value(node_value("retired-panorama", "panorama")).unwrap();
+        assert_eq!(parsed.id, "retired-panorama");
+        assert_eq!(parsed.position, CreativePoint { x: 10.0, y: 20.0 });
+        assert_eq!(parsed.size, CreativeSize { width: 320.0, height: 180.0 });
+        assert_eq!(parsed.node_type, CreativeNodeType::Image);
+        let CreativeNodeData::Image(data) = &parsed.data else {
+            unreachable!()
+        };
+        assert_eq!(data.asset_id.as_deref(), Some("asset-panorama"));
+        assert_eq!(data.fit, CreativeImageFit::Contain);
+        assert_eq!(data.natural_size, None);
+
+        let normalized = serde_json::to_value(&parsed).unwrap();
+        assert_eq!(normalized["type"], "image");
+        assert!(normalized["data"].get("projection").is_none());
+        assert!(normalized["data"].get("fieldOfView").is_none());
+
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes = vec![parsed, node("text", "text")];
+        document.connections = vec![connection("retired-edge", "retired-panorama", "text")];
+        document.validate_for_project(PROJECT_ID).unwrap();
+
+        let mut invalid = node_value("retired-invalid", "panorama");
+        invalid["data"]["pitch"] = serde_json::json!(91);
+        assert!(serde_json::from_value::<CreativeNode>(invalid).is_err());
     }
 
     #[test]
@@ -2266,18 +2342,6 @@ mod tests {
         invalid_parameters["data"]["parameters"] = serde_json::json!([]);
         assert!(serde_json::from_value::<CreativeNode>(invalid_parameters).is_err());
 
-        let mut invalid_range = node("panorama", "panorama");
-        let CreativeNodeData::Panorama(data) = &mut invalid_range.data else {
-            unreachable!()
-        };
-        data.pitch = 91.0;
-        let mut doc = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
-        doc.nodes.push(invalid_range);
-        assert!(
-            doc.validate_for_project(PROJECT_ID)
-                .unwrap_err()
-                .contains("pitch")
-        );
     }
 
     #[test]

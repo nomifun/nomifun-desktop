@@ -87,7 +87,7 @@ describe('KnowledgeControl search helpers', () => {
     expect(source.includes('knowledge-control-root-missing')).toBe(true);
     expect(
       source.includes(
-        '!targetUnresolved && (!rootMissing || isSelected) && handleToggleBase(base.knowledge_base_id)'
+        '!targetUnresolved && !saving && (!cannotSelect || isSelected) && handleToggleBase(base.knowledge_base_id)'
       )
     ).toBe(true);
     expect(source.includes("t('knowledge.mount.rootMissing'")).toBe(true);
@@ -99,7 +99,27 @@ describe('KnowledgeControl search helpers', () => {
     expect(
       source.includes("{ writeback: false, writeback_eagerness: 'manual' as const }")
     ).toBe(true);
-    expect(source.includes('targetUnresolved || binding.kb_ids.length === 0')).toBe(true);
+    expect(
+      source.includes('targetUnresolved || saving || !binding.enabled || !writebackAvailable || selectedBasesHaveReadOnly || binding.kb_ids.length === 0')
+    ).toBe(true);
+  });
+
+  test('supports Guid drafts and the dedicated mutable AgentSession command', () => {
+    const source = readFileSync(new URL('./KnowledgeControl.tsx', import.meta.url), 'utf8');
+
+    expect(source.includes('export type KnowledgeDraft')).toBe(true);
+    expect(source.includes('const binding = draft?.value ?? persistedBinding;')).toBe(true);
+    expect(source.includes('draft.onChange(next);')).toBe(true);
+    expect(source.includes("target.kind === 'conversation'")).toBe(true);
+    expect(source.includes('sessions.getKnowledge.invoke')).toBe(true);
+    expect(source.includes('sessions.updateKnowledge.invoke')).toBe(true);
+    expect(source.includes('sessions.onKnowledgeChanged.on')).toBe(true);
+    expect(source.includes('requireWritableBases')).toBe(false);
+    expect(source.includes('writebackAvailable')).toBe(true);
+    expect(source.includes("base.tree_access !== 'editable'")).toBe(true);
+    expect(source.includes("t('knowledge.mount.writeAccessRequired')")).toBe(true);
+    expect(source.includes('missingSelectedIds.map')).toBe(true);
+    expect(source.includes("t('knowledge.control.missingSelection')")).toBe(true);
   });
 
   test('refreshes the mounted binding when another surface changes the same target', () => {

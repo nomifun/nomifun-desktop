@@ -482,7 +482,6 @@
       "fitContain": "完整显示",
       "fitCover": "填满裁切",
       "fitMode": "适配方式",
-      "horizontalAngle": "水平视角",
       "label": "创意工坊无限画布",
       "loadFailed": "画布载入失败",
       "loading": "正在载入画布…",
@@ -490,9 +489,7 @@
       "markdown": "Markdown",
       "notFound": "画布不存在",
       "plainText": "纯文本",
-      "projectionEquirectangular": "等距柱状投影",
       "resizeHandle": "调整节点大小：{{corner}}",
-      "verticalAngle": "垂直视角",
       "volumePercent": "音量 {{percent}}%"
     },
     "errors": {
@@ -858,7 +855,6 @@
       "audio": "音频",
       "group": "分组",
       "image": "图片",
-      "panorama": "全景图",
       "text": "文本",
       "timeline": "时间线",
       "video": "视频"
@@ -867,7 +863,6 @@
       "audio": {
         "empty": "空音频节点"
       },
-      "connectedPanorama": "已连接全景素材",
       "connectedVideo": "已连接视频素材",
       "defaultGroupTitle": "节点组",
       "emptyText": "空文本",
@@ -880,11 +875,6 @@
       },
       "lock": "锁定节点",
       "locked": "节点已锁定",
-      "panorama": {
-        "empty": "空全景图节点",
-        "fieldOfView": "视野 {{value}}°",
-        "orientation": "偏航 {{yaw}}° · 俯仰 {{pitch}}°"
-      },
       "status": {
         "canceled": "已取消",
         "failed": "失败",
@@ -974,7 +964,6 @@
       "maskTaskSubmitted": "局部编辑任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "nodeCreatedAndConnected": "已创建节点并完成连接。",
       "nodeCreatedAtPosition": "已在指定位置创建节点。",
-      "panoramaDetected": "检测到真实 2:1 图片，请选择普通图片或全景图节点。",
       "promptCopied": "已复制“{{title}}”的提示词到剪贴板。",
       "propertiesOpened": "已在属性面板打开所选节点。",
       "remoteReloaded": "已重新载入远端版本。",
@@ -1019,12 +1008,6 @@
         "properties": "属性"
       }
     },
-    "panorama": {
-      "asImage": "作为普通图片",
-      "asPanorama": "作为全景图",
-      "dialogDescription": "图片已经真实上传并保存在资产库中。检测到宽高比接近 2:1，请确认它应作为普通图片还是等距柱状全景图插入当前画布。",
-      "dialogTitle": "选择 2:1 图片的节点类型"
-    },
     "promptLibrary": "提示词库",
     "promptLibraryDescription": "来自 NomiFun 预设与文本素材",
     "properties": {
@@ -1042,7 +1025,6 @@
       "editTitle": "编辑",
       "emptyDescription": "属性面板只展示当前画布中的真实节点数据。",
       "emptyTitle": "未选择节点",
-      "fieldOfView": "视野",
       "fit": "适配",
       "fontSize": "字号",
       "format": "格式",
@@ -1061,7 +1043,6 @@
       "nodeId": "节点 ID",
       "position": "位置",
       "posterAsset": "封面素材",
-      "projection": "投影",
       "prompt": "提示词",
       "provider": "提供商",
       "readOnlyNote": "当前属性面板未连接 canonical 更新命令。",
@@ -1075,7 +1056,6 @@
       "taskId": "任务 ID",
       "title": "标题",
       "trim": "裁剪",
-      "viewAngle": "视角",
       "volume": "音量"
     },
     "resizeCorners": {

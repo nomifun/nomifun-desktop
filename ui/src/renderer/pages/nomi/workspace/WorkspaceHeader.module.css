@@ -1,0 +1,86 @@
+.header {
+  min-height: 78px;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--color-border-2);
+  background: var(--color-bg-1);
+}
+
+.identity {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.identityCopy { min-width: 0; }
+.name {
+  overflow: hidden;
+  color: var(--color-text-1);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 26px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.moodDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--success-6));
+}
+
+.modeSwitch {
+  display: flex;
+  align-items: center;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--color-fill-2);
+}
+
+.modeSwitch button {
+  min-width: 76px;
+  height: 30px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color .16s ease, color .16s ease, box-shadow .16s ease;
+}
+
+.modeSwitch button[aria-pressed='true'] {
+  background: rgb(var(--primary-1));
+  color: rgb(var(--primary-6));
+  box-shadow: 0 1px 5px rgb(0 0 0 / 6%);
+}
+
+.quickWindowButton { white-space: nowrap; }
+
+@container (max-width: 680px) {
+  .header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
+    padding-inline: 16px;
+  }
+  .modeSwitch { grid-column: 1 / -1; grid-row: 2; justify-self: stretch; }
+  .modeSwitch button { flex: 1; }
+  .quickWindowButton :global(.arco-btn-text) { display: none; }
+}

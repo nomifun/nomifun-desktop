@@ -562,6 +562,53 @@ impl AgentControlPlane {
         self.resolve_agent_session_binding_locked(owner, &prepared.preset.preset_id).await
     }
 
+    /// Resolve a complete target Agent identity for an existing Session while
+    /// preserving its current Chat model unless the caller explicitly selects
+    /// another one. Resources are intentionally left empty for the host-owned
+    /// resource resolver to re-admit; the client never supplies a binding.
+    pub async fn resolve_agent_session_agent_binding(
+        &self,
+        owner: &UserId,
+        current: &AgentBindingValueDto,
+        target_preset_id: &str,
+        explicit_model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let current_contract: AgentBindingValue = wire_cast(current)?;
+        let (current_revision, _) = self
+            .load_binding_artifacts(owner, &current_contract)
+            .await?;
+        let preserved_model = current_revision
+            .payload
+            .chat_route_records
+            .get(CHAT_MODEL_TASK)
+            .map(|route| nomifun_api_types::AgentChatModelSelectionDto {
+                provider_id: route.primary.provider_id.clone(),
+                model: route.primary.model.clone(),
+            });
+        let selected_model = explicit_model.or(preserved_model.as_ref());
+        let mut replacement = self
+            .resolve_agent_session_binding_with_model(owner, target_preset_id, selected_model)
+            .await?;
+        replacement.binding_version = current.binding_version.checked_add(1).ok_or_else(|| {
+            ControlPlaneError::canonical(
+                "AGENT_SESSION_BINDING_VERSION_EXHAUSTED",
+                axum::http::StatusCode::CONFLICT,
+                "AgentSession binding version cannot advance",
+            )
+        })?;
+        replacement.typed_resource_bindings.clear();
+        if replacement.preset_revision_ref == current.preset_revision_ref
+            && replacement.resolved_snapshot_ref == current.resolved_snapshot_ref
+        {
+            return Err(ControlPlaneError::canonical(
+                "AGENT_SESSION_AGENT_UNCHANGED",
+                axum::http::StatusCode::CONFLICT,
+                "the selected Agent is already active in this Session",
+            ));
+        }
+        Ok(replacement)
+    }
+
     /// Replace only the exact Chat route of an existing Session binding.
     ///
     /// Unlike new-Session resolution, this starts from the Session's saved

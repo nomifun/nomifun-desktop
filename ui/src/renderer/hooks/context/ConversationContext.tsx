@@ -79,6 +79,9 @@ export interface ConversationContextValue {
    * conversation.extra.mcp_statuses).
    */
   loadedMcpStatuses?: IConversationMcpStatus[];
+
+  /** Current binding identity for presentation of a durable Agent transition. */
+  currentAgent?: { presetId: string; label: string };
 }
 
 /**

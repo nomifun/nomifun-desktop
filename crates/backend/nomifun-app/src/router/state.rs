@@ -661,6 +661,7 @@ async fn build_nomi_core_agent_api_state(
         super::engine_kernel_session::EngineKernelAssembly {
             kernel: Arc::clone(&kernel), environment: environment.clone(), wave2: Arc::clone(&builtin_plan.wave2_owner),
             context_admission: Arc::clone(&platform_builtin_context_admission),
+            knowledge: Arc::clone(&services.knowledge_service),
             #[cfg(feature = "browser-use")]
             browser: browser_owner,
             hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(

@@ -381,6 +381,41 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged).toEqual([fetchedPersistedError]);
   });
 
+  test('replaces a live turn-status projection when the durable terminal becomes an error tip', () => {
+    const durableId = durableMessageId('failed-turn-summary');
+    const liveStatus = baseMessage({
+      id: 'live-failed-status',
+      message_id: durableId,
+      msg_id: 'failed-turn-stream',
+      type: 'agent_status',
+      position: 'center',
+      status: 'work',
+      content: { backend: 'nomi', status: 'preparing', turn_summary: true },
+    });
+    const durableError = fetchedMessage(baseMessage({
+      id: 'durable-failed-tip',
+      message_id: durableId,
+      msg_id: 'failed-turn-stream',
+      type: 'tips',
+      position: 'center',
+      status: 'error',
+      content: {
+        content: 'provider failed',
+        type: 'error',
+        started_at_ms: 4_000_000,
+        finished_at_ms: 4_002_000,
+      },
+    }));
+
+    const merged = mergeFetchedMessagesForConversation(
+      [liveStatus],
+      [durableError],
+      liveStatus.conversation_id
+    );
+
+    expect(merged).toEqual([durableError]);
+  });
+
   test('retains older persisted keyset pages in chronological position during a terminal refresh', () => {
     const olderUser = baseMessage({
       id: 'older-db-user',
@@ -1057,6 +1092,33 @@ describe('normalizeDbMessage', () => {
     sha256: 'c'.repeat(64),
   };
 
+  test('rehydrates the canonical Agent transition instead of leaving an empty success tip', () => {
+    const normalized = normalizeDbMessage(baseMessage({
+      id: 'agent-transition',
+      type: 'tips',
+      position: 'center',
+      content: {
+        type: 'success', content: '',
+        agent_transition: {
+          transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+          previous_agent_label: 'General', next_agent_label: 'chat.minimal',
+          previous_preset_id: 'source', next_preset_id: 'target',
+          next_template_key: 'chat.minimal',
+          effective_from: 'next_turn', handoff_mode: 'context_only',
+          completion_gate_inherited: false,
+        },
+      } as any,
+    }));
+
+    expect(normalized.type).toBe('tips');
+    if (normalized.type !== 'tips') return;
+    expect(normalized.content.agent_transition).toMatchObject({
+      next_agent_label: 'chat.minimal', next_preset_id: 'target',
+      next_template_key: 'chat.minimal',
+      effective_from: 'next_turn',
+    });
+  });
+
   test('keeps the owning turn identity supplied by the transport boundary', () => {
     const turnId = messageId('failed-turn');
     const normalized = normalizeDbMessage(
@@ -1070,12 +1132,18 @@ describe('normalizeDbMessage', () => {
           content: 'provider failed',
           type: 'error',
           error: { message: 'provider failed', code: 'USER_LLM_PROVIDER_RATE_LIMITED' },
+          started_at_ms: 4_000_000,
+          finished_at_ms: 4_002_000,
         } as any,
       })
     );
 
     expect(normalized.type).toBe('tips');
     expect(normalized.turn_id).toBe(turnId);
+    if (normalized.type !== 'tips') throw new Error('expected tips message');
+    expect(normalized.content.started_at_ms).toBe(4_000_000);
+    expect(normalized.content.finished_at_ms).toBe(4_002_000);
+    expect(normalized.content.error?.code).toBe('USER_LLM_PROVIDER_RATE_LIMITED');
   });
 
   test('keeps persisted turn identity for tools and text', () => {

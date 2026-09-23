@@ -139,26 +139,29 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running)')).toBe(true);
   });
 
-  test('exposes the shared Agent catalog in conversation controls', () => {
+  test('switches the current AgentSession in place instead of navigating back to Guid', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const agentSwitchBlock = chatSource.slice(
-      chatSource.indexOf('const startNewConversationWithAgent'),
+      chatSource.indexOf('const switchCurrentConversationAgent'),
       chatSource.indexOf('const frozenPresetId'),
     );
 
     expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
     expect(chatSource.includes('useAgentPresets()')).toBe(true);
-    expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(false);
-    expect(agentSwitchBlock.includes("navigate('/guid', { state })")).toBe(true);
-    expect(agentSwitchBlock.includes('selectedAgentPresetId: selection.presetId')).toBe(true);
-    expect(agentSwitchBlock.includes('selectedAgentTemplateKey: selection.templateKey')).toBe(true);
+    expect(agentSwitchBlock.includes('agentPlatform.sessions.previewAgentSwitch.invoke')).toBe(true);
+    expect(agentSwitchBlock.includes('agentPlatform.sessions.applyAgentSwitch.invoke')).toBe(true);
+    expect(agentSwitchBlock.includes("navigate('/guid', { state })")).toBe(false);
+    expect(agentSwitchBlock.includes('expected_binding_version')).toBe(true);
+    expect(agentSwitchBlock.includes('handoff_mode')).toBe(true);
     expect(agentSwitchBlock.includes('setAgentChoice(selection)')).toBe(false);
     expect(sendBoxSource.includes('preset_id: presetId')).toBe(false);
-    expect(agentSwitchBlock.includes('conversation.stop.invoke')).toBe(false);
+    expect(agentSwitchBlock.includes('creation.draft')).toBe(true);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
-    expect(sendBoxSource.includes('prefix={<ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
+    expect(sendBoxSource.includes('prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}')).toBe(true);
+    expect(sendBoxSource.includes('sideTools={compactProductComposer')).toBe(true);
+    expect(sendBoxSource.includes('showPinnedPlan={!compactProductComposer}')).toBe(true);
   });
 
   test('waits for passive readiness without requiring an unnecessary warmup POST', () => {

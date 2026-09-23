@@ -84,6 +84,8 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
         "/api/agent-sessions",
         "/api/agent-sessions/{agent_session_id}",
         "/api/agent-sessions/{agent_session_id}/model",
+        "/api/agent-sessions/{agent_session_id}/agent-switch/preview",
+        "/api/agent-sessions/{agent_session_id}/agent",
         "/api/agent-session-messages/search",
         "/api/agent-sessions/{agent_session_id}/creation-tasks",
         "/api/creative-studio/canvas-agent-sessions/resolve",
@@ -342,10 +344,11 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
 }
 
 #[tokio::test]
-async fn started_agent_session_switches_model_without_changing_agent_resources_or_history() {
+async fn started_agent_session_switches_model_then_agent_in_place_with_segmented_history() {
     const TRUST: &str = "started-session-model-switch";
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";
     const SECOND_REPLY: &str = "SECOND_MODEL_REPLY";
+    const THIRD_REPLY: &str = "TARGET_AGENT_REPLY";
 
     async fn call(
         router: axum::Router,
@@ -360,6 +363,38 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
                     .uri(path)
                     .header("x-nomi-local-trust", TRUST)
                     .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
+    async fn call_with_idempotency(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+        idempotency_key: &str,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", idempotency_key)
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -427,7 +462,9 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
         .and(wiremock::matchers::path("/v1/chat/completions"))
         .respond_with(move |request: &wiremock::Request| {
             let body = request.body_json::<Value>().unwrap();
-            let reply = if body["model"] == "model-two" {
+            let reply = if body.to_string().contains("third turn") {
+                THIRD_REPLY
+            } else if body["model"] == "model-two" {
                 SECOND_REPLY
             } else {
                 FIRST_REPLY
@@ -612,7 +649,7 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/model"),
-        second_model,
+        second_model.clone(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{repeated}");
@@ -635,28 +672,409 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
     assert_eq!(status, StatusCode::OK, "{second_turn}");
     wait_for_reply(router.clone(), session_id, SECOND_REPLY).await;
 
+    // Add one exact, canonical closed Turn with a structured plan so the switch
+    // exercises deterministic continue_task export/import without asking a
+    // model to author the handoff summary.
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    let session_contract = nomifun_agent_contracts::AgentSessionId::from(session_id.to_owned());
+    let second_operation = nomifun_agent_contracts::OperationId::from(
+        second_turn["data"]["operation_id"].as_str().unwrap().to_owned(),
+    );
+    let second_facts = store
+        .chat_causality_facts(&session_contract, &second_operation)
+        .await
+        .unwrap();
+    let source_engine_binding = second_facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.0 == "runtime/progress-recorded"
+                && event.correlation_id.as_ref() == second_operation.as_ref()
+        })
+        .filter_map(|event| second_facts.event_payloads.get(event.event_id.as_ref()))
+        .filter_map(|payload| payload.get("event"))
+        .filter_map(|event| {
+            serde_json::from_value::<nomifun_agent_runtime::AgentEngineEvent>(event.clone()).ok()
+        })
+        .find_map(|event| match event {
+            nomifun_agent_runtime::AgentEngineEvent::TurnStarted { binding, .. } => Some(binding),
+            _ => None,
+        })
+        .expect("source Turn engine binding");
+    assert_eq!(
+        source_engine_binding.resolved_snapshot_ref(),
+        &store
+            .get_live_session(&session_contract)
+            .await
+            .unwrap()
+            .agent_binding
+            .resolved_snapshot_ref,
+        "the synthetic handoff source must use the exact current binding",
+    );
+    let handoff_operation = nomifun_agent_contracts::OperationId::from(
+        uuid::Uuid::now_v7().to_string(),
+    );
+    let (_, handoff_started) = store
+        .start_turn(
+            &session_contract,
+            nomifun_agent_contracts::EventProducerId::from("session_api"),
+            nomifun_agent_contracts::IdempotencyKey::from(uuid::Uuid::now_v7().to_string()),
+            handoff_operation.clone(),
+            nomifun_agent_contracts::StrictJsonValue(json!({
+                "content": "continue this structured task"
+            })),
+        )
+        .await
+        .unwrap();
+    let handoff_started_event = handoff_started.ack.unwrap().event_id;
+    let handoff_events = vec![
+        nomifun_agent_runtime::AgentEngineEvent::TurnStarted {
+            binding: source_engine_binding,
+            turn_operation_id: handoff_operation.clone(),
+        },
+        nomifun_agent_runtime::AgentEngineEvent::PlanUpdated {
+            plan: nomifun_agent_runtime::AgentPlan {
+                revision: 1,
+                explanation: "Continue after the Agent boundary".to_owned(),
+                steps: vec![nomifun_agent_runtime::AgentPlanStep {
+                    step: "Re-read and verify the current workspace".to_owned(),
+                    status: nomifun_agent_runtime::AgentPlanStatus::Pending,
+                }],
+                needs_replan: true,
+                requirements: vec![nomifun_agent_runtime::AgentTaskRequirement {
+                    id: "req-handoff".to_owned(),
+                    description: "Keep the exact requirement across Agents".to_owned(),
+                    source: nomifun_agent_runtime::AgentInputCitation {
+                        input: 0,
+                        quote: "continue this structured task".to_owned(),
+                    },
+                    origin: None,
+                }],
+            },
+        },
+        nomifun_agent_runtime::AgentEngineEvent::TurnCompleted {
+            model_steps: 1,
+            finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+        },
+    ];
+    let mut handoff_cause = handoff_started_event;
+    for (index, event) in handoff_events.into_iter().enumerate() {
+        let event_id = nomifun_agent_contracts::EventId::from(format!(
+            "handoff-progress:{}:{index}",
+            handoff_operation.as_ref()
+        ));
+        store
+            .append_event(&nomifun_agent_contracts::SessionEventAppend {
+                agent_session_id: session_contract.clone(),
+                event_id: event_id.clone(),
+                producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+                idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
+                    "handoff-progress:{}:{index}",
+                    handoff_operation.as_ref()
+                )),
+                runtime_binding_id: None,
+                runtime_producer_seq: None,
+                semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                    kind: nomifun_agent_contracts::SessionEventKind(
+                        "runtime/progress-recorded".to_owned(),
+                    ),
+                    kind_version: 1,
+                    correlation_id: nomifun_agent_contracts::CorrelationId::from(
+                        handoff_operation.as_ref().to_owned(),
+                    ),
+                    causation_event_id: Some(handoff_cause),
+                    payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                        nomifun_agent_contracts::StrictJsonValue(json!({
+                            "runtime_binding_id": format!("nomi:{}", session_id),
+                            "producer_seq": index + 1,
+                            "event": event,
+                        })),
+                    ),
+                },
+            })
+            .await
+            .unwrap();
+        handoff_cause = event_id;
+    }
+    store
+        .append_turn_terminal(
+            &nomifun_agent_contracts::SessionEventAppend {
+                agent_session_id: session_contract.clone(),
+                event_id: nomifun_agent_contracts::EventId::from(format!(
+                    "handoff-terminal:{}",
+                    handoff_operation.as_ref()
+                )),
+                producer_id: nomifun_agent_contracts::EventProducerId::from(
+                    "runtime_supervisor",
+                ),
+                idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
+                    "handoff-terminal:{}",
+                    handoff_operation.as_ref()
+                )),
+                runtime_binding_id: None,
+                runtime_producer_seq: None,
+                semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                    kind: nomifun_agent_contracts::SessionEventKind("turn/completed".to_owned()),
+                    kind_version: 1,
+                    correlation_id: nomifun_agent_contracts::CorrelationId::from(
+                        handoff_operation.as_ref().to_owned(),
+                    ),
+                    causation_event_id: Some(handoff_cause),
+                    payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                        nomifun_agent_contracts::StrictJsonValue(json!({})),
+                    ),
+                },
+            },
+            &handoff_operation,
+        )
+        .await
+        .unwrap();
+
+    let (status, target_preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({
+            "display_name": "Target handoff Agent",
+            "reuse_existing": false,
+            "model_route_refs": {},
+            "chat_route_records": {},
+            "model": second_model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{target_preset}");
+    let target_preset_id = target_preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .unwrap();
+    let selection = json!({ "kind": "preset", "preset_id": target_preset_id });
+    let (status, preview) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/agent-switch/preview"),
+        json!({ "selection": selection }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    assert_eq!(preview["data"]["model"]["preserved"], true);
+    assert_eq!(preview["data"]["handoff"]["completion_gate_inherited"], false);
+    assert_eq!(preview["data"]["handoff"]["available"], true);
+    assert_eq!(preview["data"]["handoff"]["requirement_count"], 1);
+    let expected_binding_version = preview["data"]["expected_binding_version"]
+        .as_u64()
+        .unwrap();
+    let switch_request = json!({
+        "selection": selection,
+        "handoff_mode": "continue_task",
+        "expected_binding_version": expected_binding_version
+    });
+    let switch_key = uuid::Uuid::now_v7().to_string();
+    let (status, switched_agent) = call_with_idempotency(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/agent"),
+        switch_request.clone(),
+        &switch_key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{switched_agent}");
+    assert_eq!(switched_agent["data"]["conversation"]["conversation_id"], session_id);
+    assert_eq!(switched_agent["data"]["conversation"]["name"], "Keep this conversation");
+    assert_eq!(switched_agent["data"]["effective_from"], "next_turn");
+    assert_eq!(switched_agent["data"]["handoff"]["available"], true);
+    assert_eq!(switched_agent["data"]["handoff"]["completion_gate_inherited"], false);
+    assert_eq!(switched_agent["data"]["transition_id"], switch_key);
+    assert_eq!(
+        switched_agent["data"]["binding_version"],
+        expected_binding_version + 1
+    );
+    let (status, switched_capabilities) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/capabilities"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{switched_capabilities}");
+    assert_eq!(switched_capabilities["data"]["generation"], 1);
+    assert_eq!(
+        switched_capabilities["data"]["state_source"],
+        "canonical_agent_store"
+    );
+
+    let (status, replayed_switch) = call_with_idempotency(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/agent"),
+        switch_request,
+        &switch_key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed_switch}");
+    assert_eq!(replayed_switch["data"]["transition_id"], switch_key);
+    assert_eq!(
+        replayed_switch["data"]["binding_version"],
+        switched_agent["data"]["binding_version"]
+    );
+
+    let (status, raw_messages_after_switch) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/messages?after_seq=0&limit=500"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw_messages_after_switch}");
+    assert!(
+        raw_messages_after_switch["data"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["presentation_intent"] == "agent_transition"),
+        "{raw_messages_after_switch}"
+    );
+
+    let (status, history_after_switch) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history_after_switch}");
+    let history_items = history_after_switch["data"]["items"].as_array().unwrap();
+    assert!(history_items.iter().any(|message| message["content"]["content"] == FIRST_REPLY));
+    assert!(history_items.iter().any(|message| message["content"]["content"] == SECOND_REPLY));
+    assert!(
+        history_items.iter().any(|message| {
+            message["type"] == "tips"
+                && message["content"]["agent_transition"]["effective_from"] == "next_turn"
+                && message["content"]["agent_transition"]["next_preset_id"] == target_preset_id
+        }),
+        "{history_after_switch}"
+    );
+
+    let (status, third_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "third turn" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{third_turn}");
+    wait_for_reply(router.clone(), session_id, THIRD_REPLY).await;
+
+    let (status, events_after_switch) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=500"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events_after_switch}");
+    let transition = events_after_switch["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "session/agent-binding-changed")
+        .expect("canonical Agent transition event");
+    assert_eq!(transition["payload"]["value"]["effective_after_seq"].is_u64(), true);
+    let target_snapshot = switched_agent["data"]["conversation"]["agent_snapshot"]
+        ["canonical_binding"]["resolved_snapshot_ref"]["snapshot_digest"]
+        .clone();
+    assert!(events_after_switch["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "runtime/progress-recorded")
+        .filter_map(|event| event["payload"]["value"]["event"]["binding"]
+            ["resolved_snapshot_ref"]["snapshot_digest"].as_str())
+        .any(|digest| target_snapshot == digest));
+
     let requests = model_requests.lock().unwrap();
     let models = requests
         .iter()
         .map(|request| request["model"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(models, vec!["model-one", "model-two"]);
+    assert_eq!(models, vec!["model-one", "model-two", "model-two"]);
     assert!(
         requests[1].to_string().contains(FIRST_REPLY),
         "the replacement Runtime must continue from the same durable history"
     );
+    let target_request = requests[2].to_string();
+    assert!(target_request.contains(FIRST_REPLY));
+    assert!(target_request.contains(SECOND_REPLY));
+    assert!(target_request.contains("Historical cross-Agent handoff"));
+    assert!(target_request.contains("Keep the exact requirement across Agents"));
+    assert!(target_request.contains("not inherited by the target completion gate"));
+    assert!(
+        !requests[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool"),
+        "pre-transition tool authority must not enter target-Agent history"
+    );
     drop(requests);
+
+    let (status, minimal_preview) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/agent-switch/preview"),
+        json!({ "selection": { "kind": "template", "template_key": "chat.minimal" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minimal_preview}");
+    assert_eq!(minimal_preview["data"]["can_apply"], true);
+    let (status, minimal_switch) = call_with_idempotency(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/agent"),
+        json!({
+            "selection": { "kind": "template", "template_key": "chat.minimal" },
+            "handoff_mode": "context_only",
+            "expected_binding_version": minimal_preview["data"]["expected_binding_version"],
+        }),
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minimal_switch}");
+    assert_eq!(minimal_switch["data"]["conversation"]["extra"]["official_template_key"], "chat.minimal");
+    let minimal_preset_id = minimal_switch["data"]["conversation"]["preset_id"].as_str().unwrap();
+    let (status, localized_history) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{localized_history}");
+    assert!(localized_history["data"]["items"].as_array().unwrap().iter().any(|message| {
+        message["content"]["agent_transition"]["next_preset_id"] == minimal_preset_id
+            && message["content"]["agent_transition"]["next_template_key"] == "chat.minimal"
+    }), "{localized_history}");
 
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
 
 #[tokio::test]
-async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_before_answering() {
+async fn canonical_session_updates_knowledge_retrieves_and_writes_back_automatically() {
     const TRUST: &str = "canonical-knowledge-tool";
     const QUERY: &str = "NOMIFUN_KNOWLEDGE_QUERY_9233";
     const RESULT_MARKER: &str = "KNOWLEDGE_TOOL_RESULT_9233";
     const REPLY: &str = "KNOWLEDGE_SEARCH_WAS_USED";
+    const WRITEBACK_MARKER: &str = "AUTOMATIC_WRITEBACK_WAS_USED";
+    const DISABLED_REPLY: &str = "KNOWLEDGE_WAS_DISABLED";
+    const READ_ONLY_REPLY: &str = "KNOWLEDGE_WAS_READ_ONLY";
 
     async fn call(
         router: axum::Router,
@@ -696,24 +1114,105 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
         .respond_with(move |request: &wiremock::Request| {
             let body = request.body_json::<Value>().unwrap();
             captured.lock().unwrap().push(body.clone());
+            let body_text = body.to_string();
+            if body_text.contains("knowledge-base curator for NomiFun") {
+                let prompt = body["messages"]
+                    .as_array()
+                    .and_then(|messages| messages.last())
+                    .and_then(|message| message["content"].as_str())
+                    .expect("write-back request must carry the extraction prompt");
+                let marker = "- kb_id: ";
+                let start = prompt.find(marker).expect("mounted kb_id") + marker.len();
+                let kb_id = &prompt[start..start + 36];
+                let content = json!({
+                    "candidates": [{
+                        "kb_id": kb_id,
+                        "rel_path": "patterns/automatic-writeback.md",
+                        "content": format!("# Durable result\n\n{WRITEBACK_MARKER}")
+                    }]
+                })
+                .to_string();
+                let frame = json!({
+                    "id": "knowledge-writeback-round",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": content},
+                        "finish_reason": null
+                    }]
+                });
+                let done = json!({
+                    "id": "knowledge-writeback-round",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                return wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"
+                    ));
+            }
             let messages = body["messages"].as_array().unwrap();
             let tool_results = messages
                 .iter()
                 .filter(|message| message["role"] == "tool")
                 .collect::<Vec<_>>();
-            let (frame, finish_reason, response_id) = if tool_results.is_empty() {
-                let search = body["tools"]
-                    .as_array()
-                    .and_then(|tools| {
-                        tools.iter().find(|tool| {
-                            tool["function"]["description"]
-                                .as_str()
-                                .is_some_and(|description| {
-                                    description.contains("Action: knowledge/search")
-                                })
+            let search_tool = body["tools"].as_array().and_then(|tools| {
+                tools.iter().find(|tool| {
+                    tool["function"]["description"]
+                        .as_str()
+                        .is_some_and(|description| {
+                            description.contains("Action: knowledge/search")
                         })
-                    })
-                    .expect("the frozen Knowledge search Action must reach the model");
+                })
+            });
+            let write_tool_available = body["tools"].as_array().is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    tool["function"]["description"]
+                        .as_str()
+                        .is_some_and(|description| {
+                            description.contains("Action: knowledge/write")
+                        })
+                })
+            });
+            if search_tool.is_none() {
+                let frame = json!({
+                    "id": "knowledge-disabled-round",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": DISABLED_REPLY},
+                        "finish_reason": null
+                    }]
+                });
+                let done = json!({
+                    "id": "knowledge-disabled-round",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                return wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"
+                    ));
+            }
+            if !write_tool_available {
+                let frame = json!({
+                    "id": "knowledge-read-only-round",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"content": READ_ONLY_REPLY},
+                        "finish_reason": null
+                    }]
+                });
+                let done = json!({
+                    "id": "knowledge-read-only-round",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                });
+                return wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!(
+                        "data: {frame}\n\ndata: {done}\n\ndata: [DONE]\n\n"
+                    ));
+            }
+            let (frame, finish_reason, response_id) = if tool_results.is_empty() {
+                let search = search_tool.expect("Knowledge search tool");
                 (
                     json!({
                         "id": "knowledge-search-round",
@@ -891,13 +1390,58 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
     document["instructions"] = Value::String(
         "Use the mounted Knowledge bases for covered questions.".to_owned(),
     );
+    let (status, read_only_preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets",
+        json!({
+            "display_name": "Read-only Knowledge Agent",
+            "description": "Canonical Knowledge regression fixture",
+            "document": document.clone()
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_only_preset}");
+    let read_only_preset_id = read_only_preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .unwrap();
+    let (status, rejected_writeback) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({
+            "preset_id": read_only_preset_id,
+            "model": model,
+            "resource_selections": [{
+                "resource_kind": "knowledge_base",
+                "resource_id": base_a.knowledge_base_id
+            }],
+            "knowledge_policy": {
+                "writeback": true,
+                "writeback_eagerness": "auto"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected_writeback}");
+    assert_eq!(rejected_writeback["code"], "KNOWLEDGE_WRITEBACK_NOT_AVAILABLE");
+
+    document["enabled_capabilities"] = json!([{
+        "capability": {"id": "knowledge"},
+        "action_allowlist": [
+            "knowledge/autogen",
+            "knowledge/read",
+            "knowledge/search",
+            "knowledge/write"
+        ]
+    }]);
     let (status, preset) = call(
         router.clone(),
         "POST",
         "/api/agent-presets",
         json!({
-            "display_name": "Knowledge-only Agent",
-            "description": "Canonical Knowledge regression fixture",
+            "display_name": "Write-back Knowledge Agent",
+            "description": "Canonical Knowledge write-back fixture",
             "document": document
         }),
     )
@@ -916,7 +1460,11 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
             "resource_selections": [
                 {"resource_kind": "knowledge_base", "resource_id": base_a.knowledge_base_id},
                 {"resource_kind": "knowledge_base", "resource_id": base_b.knowledge_base_id}
-            ]
+            ],
+            "knowledge_policy": {
+                "writeback": true,
+                "writeback_eagerness": "auto"
+            }
         }),
     )
     .await;
@@ -929,8 +1477,119 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
     assert!(resources.iter().any(|resource| {
         resource["typed_parameters"]["knowledge_name"] == "Python handbook"
     }));
+    assert!(resources.iter().all(|resource| {
+        resource["typed_parameters"]["knowledge_enabled"] == "true"
+            && resource["typed_parameters"]["knowledge_writeback"] == "true"
+            && resource["typed_parameters"]["knowledge_writeback_eagerness"] == "auto"
+    }));
 
     let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (status, consumers) = call(
+        router.clone(),
+        "GET",
+        &format!(
+            "/api/knowledge/bases/{}/consumers",
+            base_a.knowledge_base_id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{consumers}");
+    assert!(consumers["data"].as_array().unwrap().iter().any(|consumer| {
+        consumer["target_kind"] == "conversation"
+            && consumer["target_id"] == session_id
+            && consumer["enabled"] == true
+    }));
+    let (status, mounted_delete) = call(
+        router.clone(),
+        "DELETE",
+        &format!(
+            "/api/knowledge/bases/{}",
+            base_a.knowledge_base_id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{mounted_delete}");
+    let (status, projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{projection}");
+    assert_eq!(
+        projection["data"]["agent_snapshot"]["knowledge_policy"],
+        json!({
+            "enabled": true,
+            "writeback": true,
+            "eagerness": "auto",
+            "grounded": true
+        })
+    );
+    let (status, disabled) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": false,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled}");
+    assert_eq!(disabled["data"]["enabled"], false);
+    assert_eq!(disabled["data"]["kb_ids"].as_array().unwrap().len(), 2);
+    let (status, disabled_projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled_projection}");
+    assert_eq!(
+        disabled_projection["data"]["agent_snapshot"]["knowledge_policy"],
+        json!({
+            "enabled": false,
+            "writeback": false,
+            "grounded": false
+        })
+    );
+
+    let (status, manual) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": true,
+            "writeback": true,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{manual}");
+    assert_eq!(manual["data"]["writeback_eagerness"], "manual");
+
+    let (status, automatic) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": true,
+            "writeback": true,
+            "writeback_eagerness": "auto",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{automatic}");
+    assert_eq!(automatic["data"]["writeback"], true);
+    assert_eq!(automatic["data"]["writeback_eagerness"], "auto");
     let (status, retired_binding) = call(
         router.clone(),
         "POST",
@@ -1002,20 +1661,190 @@ async fn canonical_session_mounts_multiple_knowledge_bases_and_executes_search_b
         );
     }
 
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while model_requests.lock().unwrap().len() < 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("automatic write-back extraction must run before the turn becomes idle");
+
     let requests = model_requests.lock().unwrap();
-    assert_eq!(requests.len(), 3, "search, read, and final model rounds are required");
+    assert_eq!(requests.len(), 4, "search, read, final, and automatic write-back rounds are required");
     let first = &requests[0];
     let prompt = first["messages"].to_string();
-    assert!(prompt.contains("knowledge/search before answering from memory"), "{first}");
+    assert!(prompt.contains("host performs one bounded search for every user turn"), "{first}");
+    assert!(prompt.contains("write-back is enabled in automatic mode"), "{first}");
     assert!(prompt.contains("Python handbook"), "{first}");
     assert!(prompt.contains("Engineering notes"), "{first}");
+    assert!(prompt.contains("nomifun_knowledge_retrieval"), "{first}");
+    assert!(prompt.contains(RESULT_MARKER), "{first}");
     assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
         tool["function"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("Action: knowledge/search"))
     }));
+    assert!(first["tools"].as_array().unwrap().iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Action: knowledge/write"))
+    }));
     assert!(requests[1].to_string().contains("knowledge-search-call"), "{}", requests[1]);
     assert!(requests[2].to_string().contains(RESULT_MARKER), "{}", requests[2]);
+    assert!(requests[3].to_string().contains(REPLY), "{}", requests[3]);
+    drop(requests);
+
+    let written = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if let Ok(written) = services
+                .knowledge_service
+                .read_file(
+                    base_a.knowledge_base_id.as_str(),
+                    "patterns/automatic-writeback.md",
+                )
+                .await
+            {
+                break written;
+            }
+            if let Ok(written) = services
+                .knowledge_service
+                .read_file(
+                    base_b.knowledge_base_id.as_str(),
+                    "patterns/automatic-writeback.md",
+                )
+                .await
+            {
+                break written;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("automatic write-back must publish a durable Knowledge file");
+    assert!(written.content.contains(WRITEBACK_MARKER));
+
+    let (status, disabled_after_runtime) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": false,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled_after_runtime}");
+    let (status, disabled_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": {"content": "回答一个不应读取知识库的问题"}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{disabled_turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (status, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{history}");
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == DISABLED_REPLY)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("Knowledge-disabled reply must become durable");
+    let requests = model_requests.lock().unwrap();
+    let disabled_request = requests.last().unwrap();
+    assert!(!disabled_request.to_string().contains("nomifun_knowledge_retrieval"));
+    assert!(disabled_request["tools"].as_array().is_none_or(|tools| {
+        !tools.iter().any(|tool| {
+            tool["function"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Action: knowledge/"))
+        })
+    }));
+    drop(requests);
+
+    let (status, read_only) = call(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/knowledge"),
+        json!({
+            "enabled": true,
+            "writeback": false,
+            "writeback_eagerness": "manual",
+            "kb_ids": [base_a.knowledge_base_id, base_b.knowledge_base_id]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_only}");
+    let (status, read_only_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": {"content": format!("再次查询 {QUERY}")}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{read_only_turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let (_, history) = call(
+                router.clone(),
+                "GET",
+                &format!("/api/agent-sessions/{session_id}/message-history?page_size=50"),
+                json!({}),
+            )
+            .await;
+            if history["data"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["content"]["content"] == READ_ONLY_REPLY)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("read-only Knowledge reply must become durable");
+    let requests = model_requests.lock().unwrap();
+    let read_only_request = requests.last().unwrap();
+    assert!(read_only_request.to_string().contains("nomifun_knowledge_retrieval"));
+    let tools = read_only_request["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Action: knowledge/search"))
+    }));
+    assert!(!tools.iter().any(|tool| {
+        tool["function"]["description"]
+            .as_str()
+            .is_some_and(|description| {
+                description.contains("Action: knowledge/write")
+                    || description.contains("Action: knowledge/autogen")
+            })
+    }));
     drop(requests);
 
     services.shutdown_browser_platform().await.unwrap();
@@ -2277,7 +3106,7 @@ async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let path = "/api/agent-presets/from-template/chat.minimal";
-    let request = json!({ "display_name": "Minimal", "reuse_existing": true,
+    let request = json!({ "display_name": "chat.minimal", "reuse_existing": true,
         "model": { "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" } });
     let (status, original) = call(router.clone(), path, request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{original}");
@@ -2302,7 +3131,16 @@ async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_
     assert_eq!(observed["data"]["session"]["agent_binding"], session["data"]["agent_binding"]);
     assert_eq!(observed["data"]["session"]["metadata"]["title"], "你好");
     assert_eq!(observed["data"]["session"]["agent_binding"]["preset_revision_ref"]["preset_id"], original_id);
-    assert_eq!(original["data"]["preset"]["display_name"], "Minimal");
+    assert_eq!(original["data"]["preset"]["display_name"], "chat.minimal");
+
+    let projection = router.clone().oneshot(Request::builder()
+        .uri(format!("/api/agent-sessions/{session_id}/projection"))
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(projection.status(), StatusCode::OK);
+    let projection: Value = serde_json::from_slice(&axum::body::to_bytes(
+        projection.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(projection["data"]["extra"]["official_template_key"], "chat.minimal");
 
     assert!(upstream.received_requests().await.unwrap().is_empty(),
         "Agent preparation must not execute the selected commercial model");

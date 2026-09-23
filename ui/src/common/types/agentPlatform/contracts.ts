@@ -2,6 +2,7 @@ import type {
   AgentId,
   AgentPresetId,
   AgentSessionId,
+  KnowledgeBaseId,
   MessageId,
   ProviderId,
   RemoteBindingId,
@@ -117,8 +118,9 @@ export interface AgentBindingValue {
 }
 
 /**
- * Consumer-neutral frozen Agent configuration returned with a Conversation,
- * Cron job, or execution projection.
+ * Consumer-neutral AgentSession configuration returned with a Conversation,
+ * Cron job, or execution projection. Preset/Snapshot identity is immutable;
+ * explicitly mutable product resource subsets advance `binding_version`.
  *
  * The renderer only uses this for historical identity presentation. It never
  * resolves a live AgentPreset from this object and never treats it as an
@@ -542,14 +544,105 @@ export interface CreateAgentSessionRequest {
   preset_id: AgentPresetId;
   title?: string;
   resource_selections?: AgentResourceSelection[];
+  /** Session-scoped disposition for selected Knowledge resources. This can
+   * narrow behavior only; the backend still derives Actions and write access. */
+  knowledge_policy?: {
+    writeback: boolean;
+    writeback_eagerness: 'manual' | 'auto';
+  };
   /** User-selected host directory candidate. The backend validates and freezes
    * the canonical workspace resource; this field is never authority by itself. */
   workspace?: string;
 }
 
+/** Live Knowledge selection owned by one AgentSession. Agent capabilities are
+ * still immutable; this value can only narrow/select resources within them. */
+export interface AgentSessionKnowledgeBinding {
+  enabled: boolean;
+  writeback: boolean;
+  writeback_eagerness: 'manual' | 'auto';
+  kb_ids: KnowledgeBaseId[];
+}
+
 export interface AgentResourceSelection {
   resource_kind: string;
   resource_id: string;
+}
+
+export type AgentSwitchSelection =
+  | { kind: 'preset'; preset_id: AgentPresetId }
+  | { kind: 'template'; template_key: OfficialPresetKey };
+
+export interface PreviewAgentSessionSwitchRequest {
+  selection: AgentSwitchSelection;
+  model?: { provider_id: ProviderId; model: string };
+}
+
+export interface AgentSwitchIdentity {
+  label: string;
+  preset_id: AgentPresetId;
+  preset_revision: number;
+  resolved_snapshot_ref: ResolvedSnapshotRef;
+  binding_version: number;
+}
+
+export interface AgentSwitchBlocker {
+  code: string;
+  message: string;
+  details?: unknown;
+}
+
+export interface AgentHandoffAvailability {
+  available: boolean;
+  requirement_count: number;
+  verified_artifact_count: number;
+  unresolved_item_count: number;
+  completion_gate_inherited: false;
+}
+
+export interface PreviewAgentSessionSwitchResponse {
+  current: AgentSwitchIdentity;
+  target: AgentSwitchIdentity;
+  model: {
+    provider_id: ProviderId;
+    model: string;
+    preserved: boolean;
+    compatible: boolean;
+    missing_features: string[];
+  };
+  resources: {
+    retained: AgentResourceSelection[];
+    dropped: AgentResourceSelection[];
+    missing_kinds: string[];
+  };
+  capabilities: {
+    gained: string[];
+    lost: string[];
+  };
+  handoff: AgentHandoffAvailability;
+  blockers: AgentSwitchBlocker[];
+  expected_binding_version: number;
+  can_apply: boolean;
+}
+
+export type AgentHandoffMode = 'continue_task' | 'context_only';
+
+export interface ApplyAgentSessionSwitchRequest {
+  selection: AgentSwitchSelection;
+  handoff_mode: AgentHandoffMode;
+  expected_binding_version: number;
+  model?: { provider_id: ProviderId; model: string };
+}
+
+export interface ApplyAgentSessionSwitchResponse<TConversation = unknown> {
+  conversation: TConversation;
+  transition_id: string;
+  previous_agent_label: string;
+  current_agent_label: string;
+  binding_version: number;
+  effective_from: 'next_turn';
+  handoff: AgentHandoffAvailability;
+  warnings: string[];
 }
 
 export interface CreateAgentSessionResponse {

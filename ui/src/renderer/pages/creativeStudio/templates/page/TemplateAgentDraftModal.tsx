@@ -9,7 +9,6 @@ import { MagicWand } from '@icon-park/react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { AgentIdentityBadge } from '@/renderer/components/agent/AgentBadge';
 
 import {
   CreativeModelSelect,
@@ -279,11 +278,6 @@ const TemplateAgentDraftModal: React.FC<TemplateAgentDraftModalProps> = ({
             defaultValue: 'Template draft requirements',
           })}
         >
-          <AgentIdentityBadge
-            backend='nomi'
-            name={t('creativeStudio.templates.agent.agentName', { defaultValue: 'Creative Studio Agent' })}
-            className='w-fit'
-          />
           <label>
             <span>
               {t('creativeStudio.templates.agent.requestLabel', {

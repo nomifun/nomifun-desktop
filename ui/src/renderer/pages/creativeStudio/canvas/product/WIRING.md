@@ -150,8 +150,8 @@ document controller:
 
 - `image-mask-edit` uploads the blue-marked reference as a hidden real asset.
 - `image-node-compose` submits exact `image_generation` / `t2i` only when the
-  active image node has neither a base asset nor directly connected image or
-  panorama assets. Otherwise it submits exact `image_edit` / `i2i`: the active
+  active image node has neither a base asset nor directly connected image
+  assets. Otherwise it submits exact `image_edit` / `i2i`: the active
   node's base image is pinned first and valid direct media inputs follow durable
   connection order. The inline composer shows that same ordered reference list.
   `@` selections persist occurrence-level node bindings and compile only those

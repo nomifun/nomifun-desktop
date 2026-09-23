@@ -68,11 +68,59 @@
   "tabs": {
     "overview": "Overview",
     "memory": "Memory & Knowledge",
-    "remote": "Remote control",
+    "remote": "Connections & Devices",
     "evolution": "Evolution",
     "skills": "Skills",
     "history": "Chat History",
-    "other": "Other"
+    "other": "Transfer & Delete"
+  },
+  "workspace": {
+    "cohabit": "Cohabit",
+    "manage": "Manage",
+    "modeLabel": "Companion mode",
+    "quickWindow": "Desktop quick window",
+    "switchCompanion": "Switch companion",
+    "needsAttention": "Needs attention",
+    "refresh": "Refresh",
+    "sections": {
+      "profile": "Companion profile",
+      "growth": "Growth & abilities",
+      "reach": "Reach",
+      "records": "Records & safety"
+    }
+  },
+  "cohabit": {
+    "title": "Spend time with {{name}}",
+    "subtitle": "Share everyday moments and ideas, with your companion truly by your side.",
+    "composerPlaceholder": "Say something to {{name}}…",
+    "emptyTitle": "Start with your first hello to {{name}}",
+    "emptyHint": "Desktop, messaging channels, and robots all continue the same shared history here.",
+    "infoTitle": "Companion info",
+    "currentState": "Current state",
+    "desktopVisible": "Visible on desktop",
+    "desktopHidden": "Hidden from desktop",
+    "manageState": "Manage figure & state",
+    "mind": "Mind configuration",
+    "agent": "Companion Agent",
+    "manageMind": "Manage persona & models",
+    "longMemory": "Long-term memory",
+    "memoryCount": "{{count}} memories",
+    "knowledgeReady": "Dedicated knowledge mounts on demand",
+    "manageMemory": "View memory & knowledge",
+    "connections": "Connections",
+    "robotOnline": "{{count}} robots bound",
+    "noRobot": "No robot bound",
+    "channelsHint": "Configure messaging channels and MCP in Manage",
+    "manageConnections": "Manage connections & devices",
+    "growth": "Growth",
+    "modelRequired": "Configure the main chat model first",
+    "modelRequiredHint": "Then desktop, IM, and robot entry points can continue the same shared history here.",
+    "configureModel": "Configure model",
+    "sessionFailed": "The companion conversation cannot open right now",
+    "sessionFailedHint": "Check the model and Agent configuration, then try again."
+  },
+  "remote": {
+    "showAllPlatforms": "View all {{count}} channels"
   },
   "skills": {
     "sectionTitle": "Skills",
@@ -178,6 +226,7 @@
     "personaTitle": "Character intro",
     "modelSection": "Model configuration",
     "modelSectionHint": "Which model it thinks and replies with",
+    "modelMissingShort": "Not configured",
     "fixedAgentHint": "Desktop, IM, and robot entry points share the official Companion Agent. Channels and robots are optional connections.",
     "mainChatModel": "Main chat model",
     "modelMissing": "No chat model configured for {{companionName}} yet — it can't learn or chat.",
@@ -541,7 +590,20 @@
     "collapse": "Collapse",
     "dismiss": "Dismiss",
     "interrupt": "Stop reply",
-    "attachImage": "Add image"
+    "attachImage": "Add image",
+    "quickEmpty": "Say something to {{name}} — your recent time together will appear here.",
+    "quickEmptyTitle": "Say hello to {{name}}",
+    "quickEmptyHint": "Your recent moments stay here, ready whenever you want to continue.",
+    "openFullCohabit": "Open full cohabit view",
+    "manage": "Manage companion",
+    "windowUnavailable": "The desktop quick window could not be opened",
+    "switchCompanion": "Switch companion",
+    "switchLabel": "Switch",
+    "switchTo": "Switch to {{name}}",
+    "showAll": "View all {{count}} companions",
+    "openQuickPanel": "Open recent conversations",
+    "switchFailed": "Couldn't switch companions, so the full cohabit view was opened instead.",
+    "moveWindow": "Drag an empty area to move the window"
   },
   "characters": {
     "mochi": {

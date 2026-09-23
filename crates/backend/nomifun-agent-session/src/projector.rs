@@ -172,6 +172,12 @@ pub(crate) fn payload_value(event: &SessionEventRecord, stored_body: Option<Valu
 }
 
 fn projection_identity(event: &SessionEventRecord) -> (String, String) {
+    if event.kind.0 == "session/agent-binding-changed" {
+        return (
+            format!("agent-transition:{}", event.correlation_id.0),
+            "agent_transition".to_owned(),
+        );
+    }
     if event.kind.0 == "turn/steer-accepted" {
         return (
             format!("message:{}", event.event_id.0),
@@ -206,6 +212,10 @@ fn apply_projection_semantics(
         "session/opening" => document.state = Some("opening".to_owned()),
         "session/ready" => document.state = Some("ready".to_owned()),
         "session/open-failed" => document.state = Some("open_failed".to_owned()),
+        "session/agent-binding-changed" => {
+            document.state = Some("completed".to_owned());
+            document.reference = Some(payload.clone());
+        }
         "turn/started" => document.state = Some("running".to_owned()),
         "turn/completed" => document.state = Some("completed".to_owned()),
         "turn/failed" => document.state = Some("failed".to_owned()),

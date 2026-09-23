@@ -5,6 +5,14 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **AutoWork once again runs in the bound main AgentSession.** Requirements
+  still use AgentExecution for durable Attempts, retries, recovery and terminal
+  receipts, but no longer create a `Collaboration · Requirement` child Session
+  or open the collaboration canvas. The hidden AutoWork turn and streamed Agent
+  result remain in the main conversation, internal automation links are never
+  cleaned up as child transcripts, and generic collaboration controls cannot
+  mutate the queue-owned execution.
+
 - **Intelligent Decision (IDMM) is restored on canonical AgentSessions.** Each
   Session can opt into a model-free rule guard or rules plus an explicitly
   selected bypass model. The supervisor recovers retryable provider faults and

@@ -108,6 +108,26 @@ pub struct AgentExecutionTurnAuthority {
     pub lease_owner: String,
 }
 
+/// How an AgentExecution Attempt obtains its canonical AgentSession.
+///
+/// Ordinary collaboration creates a dedicated immutable Attempt transcript.
+/// AutoWork instead drives the already-bound lead AgentSession so its main
+/// Agent, history, and visible conversation remain the actual work surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentExecutionAttemptSessionKind {
+    ChildAttempt,
+    AutomationLead,
+}
+
+impl AgentExecutionAttemptSessionKind {
+    pub const fn relation(self) -> &'static str {
+        match self {
+            Self::ChildAttempt => "attempt",
+            Self::AutomationLead => "automation",
+        }
+    }
+}
+
 impl std::fmt::Debug for AgentExecutionTurnAuthority {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -607,9 +627,12 @@ pub trait IAgentExecutionRepository: Send + Sync {
         params: &CreateAgentExecutionAttemptParams,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;
-    /// Atomically starts a queued Agent attempt and creates its conversation
-    /// link. Only step/attempt versions are CASed; the aggregate version is
-    /// advanced unconditionally to avoid parallel-step false conflicts.
+    /// Atomically starts a queued Agent attempt and creates its typed Session
+    /// link. Ordinary collaboration links a child Attempt transcript;
+    /// AutoWork links the exact existing lead without making it disposable
+    /// Attempt-session data. Only step/attempt versions are CASed; the
+    /// aggregate version is advanced unconditionally to avoid parallel-step
+    /// false conflicts.
     async fn start_attempt(
         &self,
         user_id: &str,
@@ -619,6 +642,7 @@ pub trait IAgentExecutionRepository: Send + Sync {
         attempt_id: &str,
         expected_attempt_version: i64,
         conversation_id: &str,
+        session_kind: AgentExecutionAttemptSessionKind,
         lease: Option<&AgentExecutionLeaseToken>,
         event: &NewAgentExecutionEvent,
     ) -> Result<AgentExecutionStepDetailRow, DbError>;

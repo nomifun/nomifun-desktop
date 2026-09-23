@@ -91,9 +91,9 @@ AutoWork 的管理面板（`/requirements/extensions?tab=autowork`）。列出�
 
 1. AutoWork 循环认领该 tag 中下一条 `pending` 需求。
 2. 它把该 claim generation 作为幂等 source 提交给 AgentExecution，并使用所选 Session 中冻结的 Agent Snapshot 与 Resource bindings。
-3. AgentExecution 统一拥有 Attempt Session、retry/adaptation、等待人工、取消与 canonical Turn receipt；绑定会话显示关联执行，并接收最终报告。
+3. AgentExecution 统一拥有 Attempt、retry/adaptation、等待人工、取消与 canonical Turn receipt，但 AutoWork Attempt **复用绑定的主 AgentSession**：需求作为隐藏的 `origin=autowork` Turn 注入，主 Agent 的流式工作与结果都留在主会话中，不创建“协作 · Requirement”子会话，也不打开协作画布。
 4. 成功回执把 Requirement 归约为 `done`；失败、效果不确定或不安全取消会归约为 `failed`/`needs_review` 并暂停 tag，不会自动重放效果。
-5. 会话头会明确显示 `Paused` 和原因。检查关联执行后点击 **恢复执行**；只有这次显式用户动作才会重排失败项并继续队列。
+5. 会话头会明确显示 `Paused` 和原因。检查主会话记录和对应 Requirement 后点击 **恢复执行**；只有这次显式用户动作才会重排失败项并继续队列。
 
 ## 启动恢复——它在你不在场时也会运行
 

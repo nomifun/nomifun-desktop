@@ -46,7 +46,7 @@ describe('MessageList turn completion disclosure structure', () => {
 
   test('does not reuse legacy process cards inside receipt expansion', () => {
     expect(source.includes('renderProcessTraceItem(')).toBe(true);
-    expect(source.includes('processItem,\n            \'list\',\n            workspaceRoots,')).toBe(true);
+    expect(source.includes("renderProcessTraceItem(processItem, 'list', workspaceRoots")).toBe(true);
     expect(source.includes('MessageToolGroupSummary')).toBe(false);
     expect(source.includes('defaultExpanded={true}')).toBe(false);
   });
@@ -81,7 +81,15 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('processItemStates: Record<string, TurnDisclosureProcessState>')).toBe(true);
     expect(source.includes('processItemStates: entry.processItemStates')).toBe(true);
     expect(source.includes('getDisclosureProcessItemState')).toBe(true);
-    expect(source.includes('getDisclosureProcessItemState(processItem),\n            expansionControls')).toBe(true);
+    expect(source.includes('getDisclosureProcessItemState(processItem))')).toBe(true);
+  });
+
+  test('uses canonical timing metadata without rendering a redundant status row', () => {
+    expect(source.includes('getProcessedItemTurnStartedAt')).toBe(true);
+    expect(source.includes('getProcessedItemTurnEndedAt')).toBe(true);
+    expect(source.includes("item.content.turn_summary ? 'metadata' : 'process'")).toBe(true);
+    expect(source.includes('turnStartedAt: getProcessedItemTurnStartedAt(item)')).toBe(true);
+    expect(source.includes('turnEndedAt: getProcessedItemTurnEndedAt(item)')).toBe(true);
   });
 
   test('keeps model activity receipts as static single-line status rows', () => {

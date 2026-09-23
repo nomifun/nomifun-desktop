@@ -22,7 +22,8 @@ use nomifun_common::{
     StepFailurePolicy, apply_agent_role_context, generate_id, now_ms,
 };
 use nomifun_db::{
-    AgentExecutionAttemptRecoveryDisposition, AgentExecutionLeaseToken,
+    AgentExecutionAttemptRecoveryDisposition, AgentExecutionAttemptSessionKind,
+    AgentExecutionLeaseToken,
     AgentExecutionTurnAuthority, AttemptConversationEffectParams,
     CreateAgentExecutionAttemptParams, IAgentExecutionRepository, LoopRepeatResetParams,
     NewAgentExecutionEvent, RetryAgentExecutionStep,
@@ -32,13 +33,14 @@ use serde_json::json;
 use tokio::sync::{Notify, watch};
 
 use crate::attempt_runner::{
-    AttemptOutcome, AttemptRunner, MISSING_DELIVERY_RECEIPT_CODE,
+    AttemptOutcome, AttemptRunner, AttemptSessionTarget, MISSING_DELIVERY_RECEIPT_CODE,
 };
 use crate::artifact_contract::{requires_artifact_delivery, validate_required_artifacts};
 use crate::control_steps::{self, ControlResolution};
 use crate::conversation_effect::{AttemptConversationEffects, PendingConversationEffect};
 use crate::domain_mapper;
 use crate::event_publisher::AgentExecutionEventPublisher;
+use crate::engine::is_automation_initial_plan;
 use crate::lifecycle::AgentExecutionLifecycle;
 
 pub(crate) const DEFAULT_MAX_PARALLEL: i64 = 4;
@@ -53,6 +55,32 @@ const EFFECT_RETRY_MIN: Duration = Duration::from_secs(1);
 const EFFECT_RETRY_MAX: Duration = Duration::from_secs(60);
 const CLEANUP_EFFECT_TIMEOUT: Duration = Duration::from_secs(2);
 const CLEANUP_PARALLELISM: usize = 8;
+
+fn attempt_session_target(
+    initial_plan_input: &str,
+    lead_conversation_id: Option<&str>,
+) -> Result<(AttemptSessionTarget, AgentExecutionAttemptSessionKind), AppError> {
+    if is_automation_initial_plan(initial_plan_input)? {
+        let conversation_id = lead_conversation_id.ok_or_else(|| {
+            AppError::Internal("AutoWork AgentExecution has no bound lead AgentSession".to_owned())
+        })?;
+        Ok((
+            AttemptSessionTarget::AutomationLead {
+                conversation_id: conversation_id.to_owned(),
+            },
+            AgentExecutionAttemptSessionKind::AutomationLead,
+        ))
+    } else {
+        Ok((
+            AttemptSessionTarget::ChildAttempt,
+            AgentExecutionAttemptSessionKind::ChildAttempt,
+        ))
+    }
+}
+
+fn should_project_lead_report(initial_plan_input: &str) -> Result<bool, AppError> {
+    Ok(!is_automation_initial_plan(initial_plan_input)?)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttemptRetryClass {
@@ -617,6 +645,23 @@ impl ExecutionScheduler {
         {
             return Ok(());
         }
+        let execution_row = self
+            .inner
+            .deps
+            .repository
+            .get_execution(owner_id, &detail.execution.execution_id)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "Agent Execution {}",
+                    detail.execution.execution_id
+                ))
+            })?;
+        // An AutoWork Attempt already ran in the lead AgentSession. Projecting
+        // the aggregate summary back into that same Session would duplicate the
+        // assistant result that the user just watched in the main conversation.
+        let suppress_projection =
+            !should_project_lead_report(&execution_row.initial_plan_input)?;
         let mut after_sequence = 0;
         let mut requested_operation_id: Option<String> = None;
         let mut delivered_operation_ids = HashSet::new();
@@ -664,11 +709,13 @@ impl ExecutionScheduler {
         if delivered_operation_ids.contains(&operation_id) {
             return Ok(());
         }
-        self.inner
-            .deps
-            .conversation_effects
-            .report_lead(owner_id, detail, &operation_id)
-            .await?;
+        if !suppress_projection {
+            self.inner
+                .deps
+                .conversation_effects
+                .report_lead(owner_id, detail, &operation_id)
+                .await?;
+        }
         let current = self.detail(owner_id, &detail.execution.execution_id).await?;
         self.inner
             .deps
@@ -684,6 +731,7 @@ impl ExecutionScheduler {
                     json!({
                         "change":"lead_report_delivered",
                         "operation_id":operation_id,
+                        "projection_suppressed": suppress_projection,
                     }),
                 ),
             )
@@ -1661,6 +1709,17 @@ impl ExecutionScheduler {
             })
             .cloned()
             .ok_or_else(|| AppError::BadRequest(format!("step {} has no active participant", step.step_id)))?;
+        let execution_row = self
+            .inner
+            .deps
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let (session_target, session_kind) = attempt_session_target(
+            &execution_row.initial_plan_input,
+            detail.execution.lead_conversation_id.as_deref(),
+        )?;
         let model_pool = execution_model_pool(&detail.participants);
         let previous_attempts = detail
             .attempts
@@ -1677,6 +1736,7 @@ impl ExecutionScheduler {
             "delegation_policy": detail.execution.delegation_policy,
             "decision_policy": detail.execution.decision_policy,
             "timeout_ms": self.inner.deps.attempt_timeout.as_millis(),
+            "session_kind": session_kind.relation(),
         });
         let created = self
             .inner
@@ -1740,6 +1800,7 @@ impl ExecutionScheduler {
                         &callback_attempt_id,
                         expected_attempt_version,
                         &conversation_id,
+                        session_kind,
                         Some(&callback_lease),
                         &system_event(
                             AgentExecutionEventKind::AttemptChanged,
@@ -1775,6 +1836,7 @@ impl ExecutionScheduler {
             .attempt_runner
             .execute(
                 owner_id,
+                session_target,
                 &participant,
                 &model_pool,
                 detail.execution.work_dir.as_deref(),
@@ -2882,20 +2944,58 @@ fn compose_brief(detail: &AgentExecutionDetail, step: &ExecutionStep) -> String 
     if !blockers.is_empty() {
         brief.push_str("\nUPSTREAM RESULTS:\n");
         for blocker in blockers {
-            let title = detail
+            let upstream = detail
                 .steps
                 .iter()
-                .find(|candidate| candidate.step_id == blocker)
+                .find(|candidate| candidate.step_id == blocker);
+            let title = upstream
                 .map(|candidate| candidate.title.as_str())
                 .unwrap_or("unknown step");
-            let output = detail
+            let step_status = upstream
+                .map(|candidate| candidate.status.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let latest = detail
                 .attempts
                 .iter()
                 .filter(|attempt| attempt.step_id == blocker)
-                .max_by_key(|attempt| attempt.attempt_no)
+                .max_by_key(|attempt| attempt.attempt_no);
+            let output = latest
                 .and_then(|attempt| attempt.output_summary.as_deref())
-                .unwrap_or("(no output)");
-            brief.push_str(&format!("- {title}: {output}\n"));
+                .unwrap_or("(no output summary)");
+            brief.push_str(&format!(
+                "- step_id={blocker}; title={title}; status={step_status}\n  Latest output summary: {output}\n"
+            ));
+            if let Some(attempt) = latest {
+                brief.push_str(&format!(
+                    "  Latest Attempt: attempt_no={}; status={}\n",
+                    attempt.attempt_no, attempt.status
+                ));
+            }
+            if let Some(reason) = latest.and_then(|attempt| {
+                attempt
+                    .error
+                    .as_deref()
+                    .or(attempt.question.as_deref())
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+            }) {
+                brief.push_str(&format!("  Waiting/blocked/error reason: {reason}\n"));
+            }
+            let verified_files = detail
+                .attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.step_id == blocker && attempt.status.is_terminal()
+                })
+                .max_by_key(|attempt| attempt.attempt_no)
+                .map(|attempt| attempt.output_files.as_slice())
+                .unwrap_or_default();
+            if !verified_files.is_empty() {
+                brief.push_str(&format!(
+                    "  Verified output files from the exact settled Attempt (historical delivery references; re-read under current permissions): {}\n",
+                    serde_json::to_string(verified_files).unwrap_or_else(|_| "[]".to_owned())
+                ));
+            }
         }
     }
     if let Some(previous) = detail
@@ -3077,6 +3177,44 @@ mod tests {
     use tempfile::{TempDir, tempdir};
     use tokio::sync::Barrier;
 
+    #[test]
+    fn autowork_attempt_targets_the_bound_main_agent_session() {
+        let lead = "0190f5fe-7c00-7a00-8000-000000000071";
+        let automation = serde_json::json!({
+            "mode": "automation",
+            "source": {
+                "requirement_id": "0190f5fe-7c00-7a00-8000-000000000072",
+                "claim_generation": 1,
+                "operation_id": "autowork:test"
+            },
+            "plan": { "steps": [] }
+        })
+        .to_string();
+        assert_eq!(
+            attempt_session_target(&automation, Some(lead)).unwrap(),
+            (
+                AttemptSessionTarget::AutomationLead {
+                    conversation_id: lead.to_owned()
+                },
+                AgentExecutionAttemptSessionKind::AutomationLead,
+            )
+        );
+        assert!(!should_project_lead_report(&automation).unwrap());
+        assert!(attempt_session_target(&automation, None).is_err());
+        assert_eq!(
+            attempt_session_target(r#"{"mode":"explicit","plan":{"steps":[]}}"#, None)
+                .unwrap(),
+            (
+                AttemptSessionTarget::ChildAttempt,
+                AgentExecutionAttemptSessionKind::ChildAttempt,
+            )
+        );
+        assert!(
+            should_project_lead_report(r#"{"mode":"explicit","plan":{"steps":[]}}"#)
+                .unwrap()
+        );
+    }
+
     #[derive(Debug)]
     struct TestCleanup {
         link_id: i64,
@@ -3205,6 +3343,116 @@ mod tests {
         ]
         .concat();
         assert_eq!(source.matches(&required_call).count(), 1);
+    }
+
+    #[test]
+    fn downstream_brief_carries_only_latest_settled_verified_output_files() {
+        let execution_id = generate_id();
+        let participant_id = generate_id();
+        let upstream_id = generate_id();
+        let downstream_id = generate_id();
+        let upstream_new = harness_step(upstream_id.clone(), &participant_id, "Produce asset");
+        let mut downstream_new = harness_step(
+            downstream_id.clone(),
+            &participant_id,
+            "Synthesize delivery",
+        );
+        downstream_new.agent_mode = Some(AgentStepMode::Synthesis);
+        let materialize_step = |step: NewAgentExecutionStep, status| ExecutionStep {
+            step_id: step.step_id,
+            execution_id: execution_id.clone(),
+            title: step.title,
+            spec: step.spec,
+            profile: None,
+            kind: step.kind,
+            agent_mode: step.agent_mode,
+            status,
+            tool_policy: step.tool_policy,
+            role: step.role,
+            fanout_group: step.fanout_group,
+            control_policy: None,
+            failure_policy: step.failure_policy,
+            assigned_participant_id: step.assigned_participant_id,
+            assignment_source: step.assignment_source,
+            assignment_score: step.assignment_score,
+            assignment_rationale: step.assignment_rationale,
+            assignment_locked: step.assignment_locked,
+            preset_prompt: step.preset_prompt,
+            graph_x: step.graph_x,
+            graph_y: step.graph_y,
+            dispatch_after: None,
+            introduced_in_revision: 1,
+            superseded_in_revision: None,
+            version: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let upstream = materialize_step(upstream_new, ExecutionStepStatus::Completed);
+        let downstream = materialize_step(downstream_new, ExecutionStepStatus::Pending);
+        let attempt = |attempt_no: i64, summary: &str, files: Vec<&str>| {
+            nomifun_api_types::ExecutionAttempt {
+                attempt_id: generate_id(),
+                execution_id: execution_id.clone(),
+                step_id: upstream_id.clone(),
+                attempt_no,
+                participant_id: Some(participant_id.clone()),
+                conversation_id: Some(generate_id()),
+                status: ExecutionAttemptStatus::Completed,
+                trigger_reason: "test".to_owned(),
+                effective_config: json!({}),
+                question: None,
+                error: None,
+                output_summary: Some(summary.to_owned()),
+                output_files: files.into_iter().map(str::to_owned).collect(),
+                tokens: None,
+                retry_after: None,
+                runtime_state: None,
+                started_at: Some(1),
+                finished_at: Some(2),
+                version: 1,
+                created_at: 1,
+                updated_at: 2,
+            }
+        };
+        let detail = AgentExecutionDetail {
+            execution: AgentExecution {
+                execution_id: execution_id.clone(),
+                goal: "Deliver a verified file".to_owned(),
+                lead_conversation_id: None,
+                work_dir: Some("/workspace".to_owned()),
+                delegation_policy: DelegationPolicy::Automatic,
+                adaptation_policy: AdaptationPolicy::Fixed,
+                decision_policy: DecisionPolicy::Automatic,
+                max_parallel: 1,
+                status: AgentExecutionStatus::Running,
+                summary: None,
+                version: 1,
+                plan_revision: 1,
+                event_sequence: 1,
+                created_at: 1,
+                updated_at: 1,
+            },
+            participants: Vec::new(),
+            steps: vec![upstream, downstream.clone()],
+            dependencies: vec![nomifun_api_types::ExecutionStepDependency {
+                execution_id: execution_id.clone(),
+                blocker_step_id: upstream_id.clone(),
+                blocked_step_id: downstream_id,
+                introduced_in_revision: 1,
+                superseded_in_revision: None,
+            }],
+            attempts: vec![
+                attempt(1, "old", vec!["/workspace/stale.txt"]),
+                attempt(2, "Done; prose mentions /workspace/fake.txt", vec!["/workspace/verified.txt"]),
+            ],
+        };
+        let brief = compose_brief(&detail, &downstream);
+        assert!(brief.contains("step_id="));
+        assert!(brief.contains("status=completed"));
+        assert!(brief.contains("/workspace/verified.txt"));
+        assert!(!brief.contains("/workspace/stale.txt"));
+        assert!(brief.contains("prose mentions /workspace/fake.txt"));
+        assert_eq!(brief.matches("Verified output files").count(), 1);
     }
 
     #[test]
@@ -3782,6 +4030,7 @@ mod tests {
         async fn execute(
             &self,
             _owner_id: &str,
+            session_target: AttemptSessionTarget,
             _participant: &ExecutionParticipant,
             _execution_model_pool: &[ExecutionModelRef],
             workspace_dir: Option<&str>,
@@ -3804,7 +4053,12 @@ mod tests {
                 .lock()
                 .expect("harness brief log is not poisoned")
                 .push((step_title.to_owned(), brief.to_owned()));
-            let conversation_id = nomifun_common::ConversationId::new().into_string();
+            let conversation_id = match session_target {
+                AttemptSessionTarget::ChildAttempt => {
+                    nomifun_common::ConversationId::new().into_string()
+                }
+                AttemptSessionTarget::AutomationLead { conversation_id } => conversation_id,
+            };
             let owner_id = self
                 .owner_id
                 .lock()
@@ -4219,7 +4473,7 @@ mod tests {
         repository.start_attempt(
             &owner, &execution_id, &step.step_id, created.step.version,
             attempt_id, created.current_attempt.as_ref().unwrap().attempt.version,
-            &conversation_id, None,
+            &conversation_id, AgentExecutionAttemptSessionKind::ChildAttempt, None,
             &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(attempt_id), json!({})),
         ).await.unwrap();
         let lease = AgentExecutionLeaseToken::new("effects-test".into());
@@ -4320,8 +4574,10 @@ mod tests {
         let downstream_brief = downstream_guard
             .brief_for("downstream")
             .expect("downstream brief was recorded");
-        assert!(downstream_brief.contains("- upstream-a: completed upstream-a"));
-        assert!(downstream_brief.contains("- upstream-b: completed upstream-b"));
+        assert!(downstream_brief.contains("title=upstream-a; status=completed"));
+        assert!(downstream_brief.contains("Latest output summary: completed upstream-a"));
+        assert!(downstream_brief.contains("title=upstream-b; status=completed"));
+        assert!(downstream_brief.contains("Latest output summary: completed upstream-b"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

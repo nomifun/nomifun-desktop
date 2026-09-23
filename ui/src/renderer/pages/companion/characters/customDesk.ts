@@ -7,29 +7,33 @@
 import type { CharacterDeskSpec, CustomFigureMeta } from './types';
 
 // Desktop figure heights (px) per size tier — the creation/library DEFAULTS.
-// Kept small so a new DIY pet doesn't sprawl (built-in chibi is 150px). A
+// The compact desktop silhouette keeps the always-on-top figure out of the
+// user's working area (built-in chibi is 120px). A
 // per-companion `sizePx` override (the 总览 size slider) supersedes these.
 // Read live at render time, so values flow through to existing companions with
 // no migration.
-export const FIGURE_HEIGHTS = { s: 150, m: 210, l: 280 } as const;
-/** 总览 size-slider bounds (logical px figure height). SIZE_MIN stays above
- *  BUST_MAX_SIZE(130) so the desktop figure is always full-body, never the
- *  head-bust crop. SIZE_MAX is the user-chosen ceiling. */
-export const SIZE_MIN = 140;
-export const SIZE_MAX = 400;
+export const FIGURE_HEIGHTS = { s: 120, m: 168, l: 224 } as const;
+/** 总览 size-slider bounds (logical px figure height). The desktop stage forces
+ *  full-body rendering, so the compact minimum does not become an avatar crop. */
+export const SIZE_MIN = 112;
+export const SIZE_MAX = 320;
 // Window-width cap, kept in sync with SIZE_MAX: otherwise a tall figure at the top
 // of the slider would be clamped DOWN by the width cap for many aspects. Still
 // bounds pathologically wide/landscape cutouts from sprawling across the desktop.
-export const MAX_WINDOW_WIDTH = 400;
-/** Never narrower than the classic chibi window — chat bar and bubble must fit. */
-export const MIN_WINDOW_WIDTH = 240;
-const SIDE_MARGIN = 14; // px each side
+export const MAX_WINDOW_WIDTH = 320;
+/** Compact floor that still leaves the hover chat bar a usable text field. */
+export const MIN_WINDOW_WIDTH = 200;
+const SIDE_MARGIN = 12; // px each side
 // IDLE window vertical chrome AROUND the figure: just the hover quick-input bar
 // reserve below (~48px) + a little headroom above for the hop/breath animation.
 // The bubble's headroom is NOT reserved here anymore — that left a big always-
 // transparent strip above the figure ("透明背景占住桌面空间"). The bubble grows the
 // window on demand (enterChatSize) and shrinks back (exitChatSize) instead.
-const CHROME_HEIGHT = 64;
+const CHROME_HEIGHT = 60;
+
+/** Keep persisted/manual overrides inside the current compact desktop contract. */
+export const clampDesktopFigureHeight = (height: number): number =>
+  Math.min(SIZE_MAX, Math.max(SIZE_MIN, height));
 
 /** Pure metadata → desk computation for DIY custom figures. */
 export function customDeskSpec(meta: CustomFigureMeta): CharacterDeskSpec {
@@ -39,7 +43,7 @@ export function customDeskSpec(meta: CustomFigureMeta): CharacterDeskSpec {
   // to [SIZE_MIN, SIZE_MAX]. Absent/degenerate ⇒ fall back to the tier height.
   let figureHeight: number =
     Number.isFinite(meta.sizePx) && (meta.sizePx as number) > 0
-      ? Math.min(SIZE_MAX, Math.max(SIZE_MIN, meta.sizePx as number))
+      ? clampDesktopFigureHeight(meta.sizePx as number)
       : (FIGURE_HEIGHTS[meta.sizeTier] ?? FIGURE_HEIGHTS.m);
   let windowWidth = Math.ceil(figureHeight * aspect) + SIDE_MARGIN * 2;
   if (windowWidth > MAX_WINDOW_WIDTH) {
