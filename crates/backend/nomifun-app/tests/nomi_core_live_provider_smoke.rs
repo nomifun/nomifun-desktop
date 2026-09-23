@@ -1419,44 +1419,34 @@ async fn wait_for_execution_marker(
 async fn run_live_agent_collaboration(
     router: &Router,
     session_id: &str,
-    provider_id: &str,
-    model: &str,
 ) -> Result<(), SmokeFailure> {
     let cursor = session_message_cursor(router, "cluster.cursor_before", session_id).await?;
-    let created = successful_json(
+    start_session_turn(
         router,
-        "cluster.create",
-        Method::POST,
-        "/api/agent-executions",
-        Some(json!({
-            "goal": "Run the commercial-model Agent collaboration acceptance step",
-            "model_pool": {
-                "mode": "single",
-                "model": {"provider_id": provider_id, "model": model}
-            },
-            "lead_model": {"provider_id": provider_id, "model": model},
-            "lead_conversation_id": session_id,
-            "delegation_policy": "automatic",
-            "adaptation_policy": "fixed",
-            "decision_policy": "ask_user",
-            "max_parallel": 1,
-            "steps": [{
-                "title": "Commercial model cluster step",
-                "spec": format!(
-                    "Do not call tools and do not ask a question. Reply with exactly {COLLABORATION_MODEL_MARKER} and no other text."
-                )
-            }]
-        })),
-        LOCAL_API_DEADLINE,
-        &[StatusCode::CREATED],
+        "cluster.trigger_turn",
+        session_id,
+        &uuid::Uuid::now_v7().to_string(),
+        format!(
+            "Use a subagent now to exercise the real persistent collaboration runtime. Invoke the Agent collaboration delegation Action exactly once with strategy=parallel, one task named marker, synthesize=false, and this exact task prompt: Do not call tools and do not ask a question. Reply with exactly {COLLABORATION_MODEL_MARKER} and no other text. Do not answer this parent turn in prose."
+        ),
     )
     .await?;
-    let execution = envelope_data("cluster.create", created)?;
+    let projection = successful_json(
+        router,
+        "cluster.link",
+        Method::GET,
+        format!("/api/agent-sessions/{session_id}/projection"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let projection = envelope_data("cluster.link", projection)?;
     let execution_id = required_string(
-        "cluster.create",
-        &execution,
-        "/execution_id",
-        "CLUSTER_EXECUTION_ID_MISSING",
+        "cluster.link",
+        &projection,
+        "/linked_execution_id",
+        "CLUSTER_LEAD_LINK_MISSING",
     )?;
     wait_for_execution_marker(
         router,
@@ -1474,26 +1464,6 @@ async fn run_live_agent_collaboration(
         TURN_RESULT_DEADLINE,
     )
     .await?;
-    let projection = successful_json(
-        router,
-        "cluster.link",
-        Method::GET,
-        format!("/api/agent-sessions/{session_id}/projection"),
-        None,
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let projection = envelope_data("cluster.link", projection)?;
-    if projection.get("linked_execution_id").and_then(Value::as_str)
-        != Some(execution_id.as_str())
-    {
-        return Err(SmokeFailure::new(
-            "cluster.link",
-            "CLUSTER_LEAD_LINK_MISSING",
-            StatusCode::CONFLICT.as_u16(),
-        ));
-    }
     Ok(())
 }
 
@@ -1805,13 +1775,7 @@ async fn run_selected_model_chain(
         &collaboration_preset_id,
     )
     .await?;
-    run_live_agent_collaboration(
-        router,
-        &collaboration_session_id,
-        &provider_id,
-        model,
-    )
-    .await?;
+    run_live_agent_collaboration(router, &collaboration_session_id).await?;
     run_live_autowork(router, &collaboration_session_id).await?;
     Ok(())
 }

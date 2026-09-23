@@ -147,6 +147,12 @@ impl EngineToolPlan {
         self.bindings.get(model_name)
     }
 
+    pub fn contains_capability(&self, capability_id: &str) -> bool {
+        self.bindings
+            .values()
+            .any(|binding| binding.capability_id.as_ref() == capability_id)
+    }
+
     pub fn model_definitions(&self) -> Vec<ChatToolDefinition> {
         self.bindings
             .values()
@@ -181,6 +187,23 @@ impl EngineToolPlan {
                     binding.capability_id.as_ref() == capability_id
                         && binding.action_id.as_ref() == action_id
                 })
+                .map(|(name, binding)| (name.clone(), binding.clone()))
+                .collect(),
+        }
+    }
+
+    /// Remove one already-admitted capability from the model-visible plan.
+    ///
+    /// Session policy can narrow an immutable Snapshot for a turn, but it must
+    /// never manufacture a binding or widen the Snapshot. Keeping this
+    /// projection on the canonical plan type also prevents hosts from
+    /// rebuilding bindings from lossy tool definitions.
+    pub fn without_capability(&self, capability_id: &str) -> Self {
+        Self {
+            bindings: self
+                .bindings
+                .iter()
+                .filter(|(_, binding)| binding.capability_id.as_ref() != capability_id)
                 .map(|(name, binding)| (name.clone(), binding.clone()))
                 .collect(),
         }
@@ -463,5 +486,15 @@ mod tests {
             plan.for_action("creation.media", "creation.media/image")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn capability_removal_only_narrows_the_tool_plan() {
+        let digest = input_schema_digest(&definition().input_schema).unwrap();
+        let plan = EngineToolPlan::new([binding_with_digest(digest)]).unwrap();
+        assert!(plan.contains_capability("workspace.files"));
+        assert!(!plan.contains_capability("creation.media"));
+        assert_eq!(plan.without_capability("creation.media"), plan);
+        assert!(plan.without_capability("workspace.files").is_empty());
     }
 }
