@@ -177,7 +177,7 @@ const buildEmptyRunningDisclosure = (
     state: 'running',
     processItemStates: {},
     running: true,
-    defaultCollapsed: false,
+    defaultCollapsed: true,
   };
 };
 
@@ -326,7 +326,7 @@ function buildSegmentOutput(
       processItems.map((entry) => [entry.id, getEffectiveProcessState(entry, stateOptions)])
     ),
     running: state === 'running',
-    defaultCollapsed: state !== 'running',
+    defaultCollapsed: true,
   };
 
   const output: TurnDisclosureOutputItem[] = [];
@@ -402,7 +402,7 @@ const coalesceTurnDisclosures = (
       state,
       processItemStates: { ...existing.processItemStates, ...item.processItemStates },
       running: state === 'running',
-      defaultCollapsed: state !== 'running',
+      defaultCollapsed: true,
     };
   }
 

@@ -6,8 +6,8 @@ describe('TurnProcessDisclosure expansion state', () => {
   test('resets the same turn when it finishes so the process collapses', () => {
     expect(
       shouldResetTurnProcessDisclosureExpansion(
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false },
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true }
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: true },
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: false }
       )
     ).toBe(true);
   });
@@ -15,8 +15,8 @@ describe('TurnProcessDisclosure expansion state', () => {
   test('preserves manual expansion while the turn lifecycle is unchanged', () => {
     expect(
       shouldResetTurnProcessDisclosureExpansion(
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false },
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false }
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: true },
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: true }
       )
     ).toBe(false);
   });
@@ -24,8 +24,8 @@ describe('TurnProcessDisclosure expansion state', () => {
   test('resets when a new turn disclosure replaces the current one', () => {
     expect(
       shouldResetTurnProcessDisclosureExpansion(
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false },
-        { itemId: 'turn-disclosure-2', hasProcessItems: true, defaultCollapsed: false }
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: true },
+        { itemId: 'turn-disclosure-2', hasProcessItems: true, defaultCollapsed: true, running: true }
       )
     ).toBe(true);
   });
@@ -33,8 +33,8 @@ describe('TurnProcessDisclosure expansion state', () => {
   test('resets when process items first arrive for the current turn', () => {
     expect(
       shouldResetTurnProcessDisclosureExpansion(
-        { itemId: 'turn-disclosure-1', hasProcessItems: false, defaultCollapsed: false },
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false }
+        { itemId: 'turn-disclosure-1', hasProcessItems: false, defaultCollapsed: true, running: true },
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: true }
       )
     ).toBe(true);
   });
