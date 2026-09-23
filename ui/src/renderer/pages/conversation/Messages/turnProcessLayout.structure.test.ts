@@ -78,7 +78,8 @@ describe('turn process disclosure result-first layout', () => {
     expect(processTraceSource.includes('turn-process-trace--thinking')).toBe(true);
     expect(processTraceSource.includes('Private reasoning omitted')).toBe(true);
     expect(processTraceSource.includes('<MessageThinking')).toBe(false);
-    expect(messageListSource.includes('isHiddenThinkingItem')).toBe(true);
+    expect(messageListSource.includes('isHiddenProcessItem')).toBe(true);
+    expect(messageListSource.includes("item.type !== 'thinking' && item.type !== 'text'")).toBe(true);
   });
 
   test('uses compact process rhythm and muted receipt rows', () => {
@@ -96,10 +97,13 @@ describe('turn process disclosure result-first layout', () => {
     ).toBe(true);
   });
 
-  test('shimmers only live duration and the current thinking paragraph', () => {
+  test('shimmers only live duration and the current thinking line', () => {
     expect(cssSource.includes('.turn-process-disclosure--live .turn-process-disclosure__label')).toBe(true);
     expect(cssSource.includes('@keyframes turn-process-shimmer')).toBe(true);
     expect(cssSource.includes('@keyframes turn-process-current-fade')).toBe(true);
+    expect(cssSource.includes('.turn-process-trace__thinking-last-line')).toBe(true);
+    expect(cssSource.includes('.turn-process-disclosure__item--current .turn-process-trace__row--running')).toBe(false);
+    expect(cssSource.includes('.turn-process-trace__row--current-activity .turn-process-trace__text')).toBe(true);
     expect(cssSource.includes('prefers-reduced-motion: reduce')).toBe(true);
   });
 

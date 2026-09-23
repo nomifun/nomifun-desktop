@@ -685,12 +685,6 @@ pub struct AppServices {
     pub instance_token_validator: Arc<InstanceTokenValidator>,
     /// Provider repository (exposed for the mint-time model-availability guard).
     pub provider_repo: Arc<dyn IProviderRepository>,
-    /// Unified loopback supply for NomiFun's managed free models.
-    pub managed_model_service: Arc<nomifun_system::ManagedModelService>,
-    /// Keeps the authenticated loopback OpenAI-compatible listener alive.
-    pub(crate) _managed_model_server: nomifun_system::ManagedModelServer,
-    /// Keeps the immediate + periodic managed catalog refresh loop alive.
-    pub(crate) _managed_model_refresh_task: nomifun_system::ManagedModelRefreshTask,
     /// Authoritative per-model catalog rows (capability profiles + health;
     /// the multimodal model hub reads/writes these).
     pub provider_model_repo: Arc<dyn IProviderModelRepository>,
@@ -1608,6 +1602,18 @@ impl AppServices {
             .map_err(|e| anyhow::anyhow!("Failed to load data encryption key: {e}"))?;
 
         let provider_repo = Arc::new(SqliteProviderRepository::new(database.pool().clone()));
+        let retired_provider_count =
+            nomifun_system::disable_retired_provider_platforms(provider_repo.as_ref())
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("Failed to disable retired built-in providers: {error}")
+                })?;
+        if retired_provider_count > 0 {
+            tracing::info!(
+                retired_provider_count,
+                "Disabled provider rows owned by removed built-in services"
+            );
+        }
         let provider_model_repo: Arc<dyn IProviderModelRepository> =
             Arc::new(SqliteProviderModelRepository::new(database.pool().clone()));
         let provider_model_capability_repo: Arc<dyn IProviderModelCapabilityRepository> = Arc::new(
@@ -1627,28 +1633,6 @@ impl AppServices {
             model_invoke_http.clone(),
             nomifun_model_invoke::AdapterRegistry::new(nomifun_model_invoke::default_adapters()),
         ));
-        // Start the stable managed-model loopback supply and provision its
-        // provider/model capability graph before agent factory construction.
-        // A seed catalog makes a fresh install usable without blocking boot on
-        // third-party discovery.
-        let (managed_model_service, managed_model_server) =
-            nomifun_system::start_and_provision_free_model_with_preferences(
-                provider_repo.clone(),
-                provider_model_repo.clone(),
-                provider_model_capability_repo.clone(),
-                Some(Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
-                    database.pool().clone(),
-                ))),
-                encryption_key,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to provision NomiFun free model service: {e}"))?;
-        // Refresh immediately, then about every six hours with jitter. Failed
-        // attempts retain the current catalog and use capped exponential
-        // backoff. ManagedModelService owns the single transactional graph
-        // write; there is deliberately no second profile/backfill writer.
-        let managed_model_refresh_task =
-            nomifun_system::ManagedModelRefreshTask::start(managed_model_service.clone());
         let agent_metadata_repo: Arc<dyn IAgentMetadataRepository> =
             Arc::new(SqliteAgentMetadataRepository::new(database.pool().clone()));
         let agent_registry = AgentRegistry::new(agent_metadata_repo);
@@ -2149,9 +2133,6 @@ impl AppServices {
             instance_token_repo,
             instance_token_validator,
             provider_repo: provider_repo_for_services,
-            managed_model_service,
-            _managed_model_server: managed_model_server,
-            _managed_model_refresh_task: managed_model_refresh_task,
             provider_model_repo: provider_model_repo.clone(),
             provider_model_capability_repo: provider_model_capability_repo.clone(),
             cookie_config: Arc::new(CookieConfig::from_env()),

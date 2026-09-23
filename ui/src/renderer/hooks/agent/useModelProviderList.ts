@@ -3,7 +3,6 @@ import type { IProvider } from '@/common/config/storage';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useCallback, useMemo } from 'react';
 import useSWR, { type SWRConfiguration } from 'swr';
-import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
 
 export interface ModelProviderListResult {
   /** Enabled providers in selector order. Task membership is filtered from
@@ -53,7 +52,7 @@ export const useModelProviderList = (): ModelProviderListResult => {
     // 过滤掉被禁用的 provider（默认为启用）。
     // 注意：不再按「是否有可用模型」过滤 —— 模型级别的可用性由
     // useModelsForTask（嵌套 task capability）决定，空组不会被渲染。
-    return orderModelSelectorProviders(configuredProviders.filter((p) => p.enabled !== false));
+    return configuredProviders.filter((p) => p.enabled !== false);
   }, [configuredProviders]);
 
   const formatModelLabel = useCallback((

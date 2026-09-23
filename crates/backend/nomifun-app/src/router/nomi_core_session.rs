@@ -99,6 +99,7 @@ use nomifun_db::{
 };
 use nomifun_db::models::{NomiRemoteEventRow, NomiRemoteSessionRow};
 use nomifun_agent_session::{MessageProjection, SessionObservation};
+use super::history_process_display::{HistoricalToolObservation, load_historical_tool_observations};
 use nomifun_realtime::UserEventSink;
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CompileRequest, CompiledSnapshot,
@@ -4906,7 +4907,8 @@ fn session_projection_revision(session: &ConversationResponse) -> Result<String,
 #[cfg(test)]
 mod session_boundary_tests {
     use super::{
-        canonical_autowork_config_snapshot, canonical_message_response, companion_archive_message,
+        canonical_autowork_config_snapshot, canonical_message_response,
+        canonical_message_response_with_observation, companion_archive_message,
         cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
         freeze_selected_workspace, frozen_workspace_root, has_selected_workspace,
         initial_delivery_requested, NomiCoreSessionOwner,
@@ -4925,9 +4927,10 @@ mod session_boundary_tests {
     };
     use nomifun_api_types::{AgentBindingValueDto, AgentKnowledgePolicy, AgentResolvedSnapshot, ExecutionModelRef, MessageResponse};
     use nomifun_agent_session::MessageProjection;
+    use super::super::history_process_display::HistoricalToolObservation;
     use nomifun_common::{
         AgentType, ConversationSource, ConversationStatus, DecisionPolicy, DelegationPolicy,
-        MessagePosition, MessageType, ProviderWithModel,
+        MessagePosition, MessageStatus, MessageType, ProviderWithModel,
     };
     use nomifun_common::paths::WorkspaceDirectoryCheck;
     use serde_json::json;
@@ -5056,6 +5059,67 @@ mod session_boundary_tests {
             NomiCoreSessionOwner::canonical_assistant_stream_message_id(root_message_id)
                 .unwrap();
         assert_eq!(message.msg_id.as_deref(), Some(assistant_message_id.as_str()));
+    }
+
+    #[test]
+    fn history_projects_thinking_and_expandable_tool_content() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let thinking_id = "0190f5fe-7c00-7a00-8abc-012345678914";
+        let thinking = canonical_message_response(
+            &session_id,
+            1_000,
+            MessageProjection {
+                session_id: session_id.clone(),
+                projection_id: format!("thinking:{thinking_id}"),
+                first_seq: 3,
+                last_seq: 3,
+                presentation_intent: "thinking".to_owned(),
+                message_type: None,
+                message_status: None,
+                projection: json!({
+                    "correlation_id": thinking_id, "content": "Inspect the workspace",
+                    "turn_id": root, "state": "recorded"
+                }),
+                semantic_digest: "digest".to_owned(),
+            },
+        ).unwrap().unwrap();
+        assert_eq!(thinking.r#type, MessageType::Thinking);
+        assert_eq!(thinking.content["content"], "Inspect the workspace");
+        assert_eq!(thinking.content["status"], "done");
+        assert_eq!(thinking.content["turn_id"], root);
+
+        let tool_id = "0190f5fe-7c00-7a00-8abc-012345678915";
+        let tool = canonical_message_response_with_observation(
+            &session_id,
+            1_000,
+            MessageProjection {
+                session_id: session_id.clone(),
+                projection_id: format!("tool:{tool_id}"),
+                first_seq: 4,
+                last_seq: 6,
+                presentation_intent: "tool".to_owned(),
+                message_type: None,
+                message_status: None,
+                projection: json!({
+                    "correlation_id": tool_id, "state": "recorded",
+                    "tool_summary": { "call_id": "call-1", "name": "read_file" }
+                }),
+                semantic_digest: "digest".to_owned(),
+            },
+            Some(&HistoricalToolObservation {
+                turn_id: Some(root.to_owned()),
+                args: Some(json!({"path": "src/app.ts"})),
+                output: Some("file contents".to_owned()),
+                is_error: Some(false),
+            }),
+        ).unwrap().unwrap();
+        assert_eq!(tool.r#type, MessageType::ToolCall);
+        assert_eq!(tool.status, Some(MessageStatus::Finish));
+        assert_eq!(tool.content["args"]["path"], "src/app.ts");
+        assert_eq!(tool.content["output"], "file contents");
+        assert_eq!(tool.content["status"], "completed");
+        assert_eq!(tool.content["turn_id"], root);
     }
 
     #[test]
@@ -11562,6 +11626,15 @@ fn canonical_message_response(
     created_at: i64,
     projection: MessageProjection,
 ) -> Result<Option<MessageResponse>, NomiCoreApiError> {
+    canonical_message_response_with_observation(session_id, created_at, projection, None)
+}
+
+fn canonical_message_response_with_observation(
+    session_id: &AgentSessionId,
+    created_at: i64,
+    projection: MessageProjection,
+    observation: Option<&HistoricalToolObservation>,
+) -> Result<Option<MessageResponse>, NomiCoreApiError> {
     let document = projection.projection.as_object().ok_or_else(|| {
         NomiCoreApiError::new(
             StatusCode::CONFLICT,
@@ -11689,17 +11762,66 @@ fn canonical_message_response(
                 MessagePosition::Left
             },
         ),
+        "thinking" => {
+            let Some(turn_id) = document.get("turn_id").and_then(Value::as_str) else {
+                return Ok(None);
+            };
+            if Uuid::parse_str(turn_id)
+                .ok()
+                .is_none_or(|uuid| uuid.get_version_num() != 7)
+            {
+                return Ok(None);
+            }
+            let content = document.get("content").and_then(Value::as_str).unwrap_or_default();
+            if content.trim().is_empty() {
+                return Ok(None);
+            }
+            (
+                MessageType::Thinking,
+                json!({ "content": content, "status": "done", "turn_id": turn_id }),
+                MessagePosition::Left,
+            )
+        }
         "tool" => (
             MessageType::ToolCall,
-            document
+            {
+                let mut summary = document
                 .get("tool_summary")
                 .cloned()
                 .unwrap_or_else(|| json!({
                     "call_id": message_id,
                     "name": "tool",
                     "args": {},
-                    "status": state,
-                })),
+                }));
+                if let Some(summary) = summary.as_object_mut() {
+                    let recorded_error = summary.get("error").and_then(Value::as_str).map(str::to_owned);
+                    summary.entry("status".to_owned()).or_insert_with(|| json!(
+                        if recorded_error.is_some() { "error" }
+                        else if state == "recorded" { "completed" }
+                        else { "running" }
+                    ));
+                    if let Some(error) = recorded_error {
+                        summary.entry("output".to_owned()).or_insert_with(|| json!(error));
+                    }
+                    if let Some(observation) = observation {
+                        if let Some(turn_id) = &observation.turn_id {
+                            summary.insert("turn_id".to_owned(), json!(turn_id));
+                        }
+                        if let Some(args) = &observation.args {
+                            summary.insert("args".to_owned(), args.clone());
+                        }
+                        if let Some(output) = &observation.output {
+                            summary.insert("output".to_owned(), json!(output));
+                        }
+                        if let Some(is_error) = observation.is_error {
+                            summary.insert("status".to_owned(), json!(
+                                if is_error { "error" } else { "completed" }
+                            ));
+                        }
+                    }
+                }
+                summary
+            },
             MessagePosition::Left,
         ),
         "agent_transition" => {
@@ -11739,6 +11861,11 @@ fn canonical_message_response(
         "failed" | "error" | "uncertain" => MessageStatus::Error,
         "accepted" | "completed" | "recorded" => MessageStatus::Finish,
         _ => MessageStatus::Pending,
+    };
+    let status = if message_type == MessageType::ToolCall && content.get("status").and_then(Value::as_str) == Some("error") {
+        MessageStatus::Error
+    } else {
+        status
     };
     Ok(Some(MessageResponse {
         message_id: message_id.to_owned(),
@@ -11869,10 +11996,18 @@ async fn get_nomi_core_agent_session_message_history(
         .message_history_before(&session_id, before_seq, page_size)
         .await
         .map_err(agent_session_store_error)?;
+    let observations = load_historical_tool_observations(
+        &state.session_owner.pool,
+        &session_id,
+        &projections,
+    ).await?;
     let mut items = Vec::new();
     let mut template_cache = HashMap::new();
     for projection in projections {
-        if let Some(mut message) = canonical_message_response(&session_id, created_at, projection)? {
+        let observation = observations.get(&projection.projection_id);
+        if let Some(mut message) = canonical_message_response_with_observation(
+            &session_id, created_at, projection, observation,
+        )? {
             decorate_agent_transition_template_keys(&state, &owner, &mut message, &mut template_cache).await;
             items.push(message);
         }
@@ -11938,7 +12073,11 @@ async fn get_nomi_core_agent_session_message(
                 "message projection does not exist",
             )
         })?;
-    let mut message = canonical_message_response(&session_id, created_at, projection)?
+    let observations = load_historical_tool_observations(
+        &state.session_owner.pool, &session_id, std::slice::from_ref(&projection),
+    ).await?;
+    let observation = observations.get(&projection.projection_id);
+    let mut message = canonical_message_response_with_observation(&session_id, created_at, projection, observation)?
         .ok_or_else(|| {
             NomiCoreApiError::new(
                 StatusCode::NOT_FOUND,

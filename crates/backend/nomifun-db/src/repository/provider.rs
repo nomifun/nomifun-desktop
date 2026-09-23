@@ -30,14 +30,6 @@ pub trait IProviderRepository: Send + Sync {
         clone_name: &str,
     ) -> Result<Provider, DbError>;
 
-    /// Atomically upsert one managed provider and make its model graph exactly
-    /// match `models`. Matching capability health observations are preserved.
-    async fn save_managed_graph(
-        &self,
-        params: CreateProviderParams<'_>,
-        models: &[NewProviderModel<'_>],
-    ) -> Result<Provider, DbError>;
-
     async fn delete(&self, id: &str) -> Result<(), DbError>;
 }
 

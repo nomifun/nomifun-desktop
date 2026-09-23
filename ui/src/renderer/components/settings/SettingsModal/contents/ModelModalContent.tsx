@@ -51,7 +51,6 @@ import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import ModelHubPageHeader from '@/renderer/pages/modelHub/ModelHubPageHeader';
 import { consumePendingDeepLink } from '@/renderer/hooks/system/useDeepLink';
-import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import { reorderById, reorderStrings } from './modelProviderOrdering';
 import { healthFailureHeadline } from './healthFailureHeadline';
 import {
@@ -474,10 +473,7 @@ const ModelModalContent: React.FC = () => {
   const [collapseKey, setCollapseKey] = useState<Record<string, boolean>>({});
   const [healthCheckLoading, setHealthCheckLoading] = useState<Record<string, boolean>>({});
   const { data, mutate } = useProvidersQuery();
-  // Managed providers have dedicated pages. Keeping them out of generic CRUD
-  // prevents exposing or accidentally overwriting their internal endpoint and
-  // per-boot credential.
-  const editableProviders = useMemo(() => (data ?? []).filter((provider) => !isManagedModelProvider(provider)), [data]);
+  const editableProviders = useMemo(() => data ?? [], [data]);
   const [message, messageContext] = useArcoMessage();
   const configurationTarget = useMemo(
     () => modelConfigurationTarget(searchParams),
@@ -662,18 +658,10 @@ const ModelModalContent: React.FC = () => {
     const reordered = reorderById(editableProviders, activeData.providerId, overData.providerId);
     if (reordered === editableProviders) return;
 
-    // Preserve every managed provider's full-list slot. Refill only editable
-    // slots and assign their full-list position as sort_order, avoiding a
-    // duplicate sort_order with a managed row (whose CRUD is protected).
-    let editableIndex = 0;
-    const nextArray = data.map((item, fullIndex) => {
-      if (isManagedModelProvider(item)) return item;
-      return { ...reordered[editableIndex++], sort_order: fullIndex };
-    });
-    const reorderedWithOrder = nextArray.filter((item) => !isManagedModelProvider(item));
+    const nextArray = reordered.map((item, index) => ({ ...item, sort_order: index }));
     void mutate(nextArray, false);
 
-    persistProviderOrder(reorderedWithOrder, editableProviders)
+    persistProviderOrder(nextArray, editableProviders)
       .then(() => {
         void mutate();
       })

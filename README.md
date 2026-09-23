@@ -163,7 +163,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · task-aware routing and Free Models</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/en/models.png" alt="NomiFun multi-model management"><br/><sub><b>Multi-model management · providers, capabilities, and task-aware routing</b></sub></td>
     <td width="50%"><img src="docs/images/readme/en/companions.png" alt="NomiFun desktop companions"><br/><sub><b>Desktop companions · persona, memory, models, and remote control</b></sub></td>
   </tr>
   <tr>
@@ -234,7 +234,6 @@ memory, tools, permissions, and execution runtime:
 | **Unified Plugins** | Creates or imports one package, validates and installs one Artifact, runs optional App/Service entrypoints, exposes Action/Binding capabilities, and provides generation-safe storage, backup, restore, and deletion. |
 | **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, and optional companion-in-the-workspace collaboration. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
-| **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
 
 ### 🐾 Desktop Companion — it grows with you
@@ -393,7 +392,7 @@ Every capability NomiFun has is exposed through a single, typed capability regis
 - **Graceful multimodal fallback** — if a selected provider/model rejects image input, NomiFun strips the images, retries in the same conversation, and leaves an inline notice instead of killing the session.
 - **Per-model context tuning** — override context-window limits per model when an upstream platform reports bad defaults or hides them, improving routing and long-context budgeting.
 
-### 🔌 Multi-model control plane — providers, capabilities, and Free Models
+### 🔌 Multi-model control plane — providers, capabilities, and routing
 
 NomiFun separates provider credentials from model records and capabilities. Extend the
 catalog with native providers, compatible protocols, custom base URLs, or local and
@@ -407,13 +406,6 @@ usable for a task only when its configured provider and protocol declare that ta
 Creative Studio carries the exact `{ provider, model, task }` identity into every
 media operation, so a same-named model from another provider is never substituted
 silently.
-
-**NomiFun Free Models** are available through a built-in managed provider. You
-can enable it, refresh its catalog, run a health check, and activate an available
-model without first creating a separate provider entry or supplying your own API
-key. These are online third-party inference services: availability, limits, and
-data-handling terms can change, so review the in-product notice before sending
-sensitive content.
 
 For your own providers, pick by region, price, quota, capability, and data policy,
 then add the credentials on **Models & Agents**. The following services are

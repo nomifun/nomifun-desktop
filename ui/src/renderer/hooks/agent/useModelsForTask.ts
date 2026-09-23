@@ -13,7 +13,6 @@ import type {
 import { modelSupportsTask } from '@/common/utils/providerModels';
 import { useCallback, useMemo } from 'react';
 import { useProvidersQuery } from './useModelProviderList';
-import { orderModelSelectorProviders } from './modelSelectorProviderOrdering';
 
 /** One enabled provider's enabled task-capable models, in stored model order. */
 export interface TaskModelGroup {
@@ -39,8 +38,9 @@ export const buildTaskModelGroups = (
   requiredTraits: readonly ModelTrait[] = [],
   requiredTechnicalCapabilities: readonly ModelTechnicalCapability[] = []
 ): TaskModelGroup[] =>
-  orderModelSelectorProviders(providers.filter((provider) => provider.enabled !== false)).flatMap(
-    (provider) => {
+  providers
+    .filter((provider) => provider.enabled !== false)
+    .flatMap((provider) => {
       const models = provider.models
         .filter(
           (model) =>
@@ -49,8 +49,7 @@ export const buildTaskModelGroups = (
         )
         .map((model) => model.model);
       return models.length === 0 ? [] : [{ provider, models }];
-    }
-  );
+    });
 
 /**
  * Single runtime selector source for every modality. The provider response

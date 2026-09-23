@@ -1,0 +1,77 @@
+import { cleanup, fireEvent, render } from '@testing-library/react';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
+import type { IMessageText, IMessageThinking, IMessageToolCall, IMessageToolGroup } from '@/common/chat/chatLib';
+import { parseConversationId } from '@/common/types/ids';
+import ProcessTraceItem from './ProcessTraceItem';
+
+const i18n = createInstance();
+await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: {} } } });
+const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051');
+
+afterEach(cleanup);
+
+describe('replayed process trace', () => {
+  test('whitespace-only assistant fragments leave no blank process block', () => {
+    const item: IMessageText = {
+      id: 'empty-fragment', type: 'text', conversation_id: conversationId,
+      position: 'left', created_at: 1, content: { content: '\n \n\n' },
+    };
+    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
+    expect(container.childElementCount).toBe(0);
+  });
+
+  test('only the final logical thinking line gets the live animation target', () => {
+    const item: IMessageThinking = {
+      id: 'thinking', type: 'thinking', conversation_id: conversationId,
+      position: 'left', created_at: 1,
+      content: { content: 'Earlier result\nCalling the file tool', status: 'thinking' },
+    };
+    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
+    const lastLine = container.querySelector('.turn-process-trace__thinking-last-line');
+    expect(lastLine?.textContent).toBe('Calling the file tool');
+    expect(container.querySelector('.turn-process-trace__paragraph')?.textContent).toBe('Earlier result\nCalling the file tool');
+  });
+
+  test('a rehydrated tool row opens its saved input and output', () => {
+    const item: IMessageToolCall = {
+      id: 'saved-tool', type: 'tool_call', conversation_id: conversationId,
+      position: 'left', created_at: 2,
+      content: {
+        call_id: 'call-1', name: 'read_file', status: 'completed',
+        args: { path: 'src/app.ts' }, output: 'file contents', artifacts: [],
+      },
+    };
+    const { getByRole, getByText } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+    const toggle = getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(getByText('src/app.ts')).toBeDefined();
+    expect(getByText('file contents')).toBeDefined();
+  });
+
+  test('a mixed tool group marks only its last running call as current activity', () => {
+    const item: IMessageToolGroup = {
+      id: 'mixed-tools', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 3,
+      content: [
+        { call_id: 'first', name: 'first_tool', description: 'finished result', status: 'Success', render_output_as_markdown: false },
+        { call_id: 'second', name: 'second_tool', description: 'working now', status: 'Executing', render_output_as_markdown: false },
+      ],
+    };
+    const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
+    const active = container.querySelector('.turn-process-trace__row--current-activity');
+    expect(active?.textContent).toContain('second_tool');
+    expect(active?.textContent).not.toContain('first_tool');
+    expect(container.querySelector('.turn-process-trace__row--completed')?.textContent).toContain('first_tool');
+    const settled = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} stateOverride='completed' /></I18nextProvider>
+    );
+    expect(settled.container.querySelectorAll('.turn-process-trace__row--completed')).toHaveLength(2);
+    expect(settled.container.querySelector('.turn-process-trace__row--current-activity')).toBeNull();
+  });
+});

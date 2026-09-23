@@ -424,7 +424,6 @@ async fn verify(
     );
     let mut session_id = None;
     let result=tokio::time::timeout(std::time::Duration::from_secs(180),async {
-        api(&server,"POST","/api/model-services/free/activate",json!({"enabled":false})).await?;
         let provider=api(&server,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"Native frontend live fixture","base_url":"https://api.stepfun.com/step_plan/v1","auth_scheme":"bearer","credentials":{"api_keys":[key]},"enabled":true,"initial_model":{"model":"step-3.7-flash","enabled":true,"capabilities":[{"task":"chat","traits":["function_calling","reasoning","streaming"],"protocol":"openai.chat_text","connection_role":"default","provider_params":{"temperature":0.0},"output_limit":4096}]}})).await?;
         let provider=text(&provider,"provider_id")?;
         let editor=api(&server,"POST","/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"Frontend browser live fixture","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"step-3.7-flash"}})).await?;

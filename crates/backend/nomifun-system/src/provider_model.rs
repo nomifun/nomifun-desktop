@@ -17,9 +17,9 @@ use nomifun_model_invoke::{
 };
 use reqwest::Url;
 
-use crate::managed_model::is_managed_provider_platform;
 use crate::provider_connection::{normalize_auth_scheme, validate_role};
 use crate::provider_deletion::SharedProviderDeletionCoordinator;
+use crate::provider::is_retired_provider_platform;
 
 #[derive(Clone)]
 pub struct ProviderModelService {
@@ -53,14 +53,36 @@ impl ProviderModelService {
     ) -> Result<Vec<ProviderModelResponse>, AppError> {
         if let Some(provider_id) = provider_id {
             validate_provider_id(provider_id)?;
+            if self
+                .provider_repo
+                .find_by_id(provider_id)
+                .await?
+                .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
+            {
+                return Ok(Vec::new());
+            }
         }
-        let (models, capabilities) = match provider_id {
+        let (mut models, mut capabilities) = match provider_id {
             Some(provider_id) => (
                 self.model_repo.list_for_provider(provider_id).await?,
                 self.capability_repo.list_for_provider(provider_id).await?,
             ),
             None => (self.model_repo.list().await?, self.capability_repo.list().await?),
         };
+        if provider_id.is_none() {
+            let retired_provider_ids = self
+                .provider_repo
+                .list()
+                .await?
+                .into_iter()
+                .filter(|provider| is_retired_provider_platform(&provider.platform))
+                .map(|provider| provider.provider_id)
+                .collect::<HashSet<_>>();
+            models.retain(|model| !retired_provider_ids.contains(&model.provider_id));
+            capabilities.retain(|capability| {
+                !retired_provider_ids.contains(&capability.provider_id)
+            });
+        }
         rows_to_model_responses(models, capabilities)
     }
 
@@ -70,6 +92,14 @@ impl ProviderModelService {
         model: &str,
     ) -> Result<Option<ProviderModelResponse>, AppError> {
         validate_provider_id(provider_id)?;
+        if self
+            .provider_repo
+            .find_by_id(provider_id)
+            .await?
+            .is_some_and(|provider| is_retired_provider_platform(&provider.platform))
+        {
+            return Ok(None);
+        }
         let Some(row) = self.model_repo.get(provider_id, model).await? else {
             return Ok(None);
         };
@@ -94,10 +124,9 @@ impl ProviderModelService {
             .ok_or_else(|| {
                 AppError::NotFound(format!("Provider {} not found", req.provider_id))
             })?;
-        if is_managed_provider_platform(&provider.platform) {
+        if is_retired_provider_platform(&provider.platform) {
             return Err(AppError::Forbidden(
-                "Managed model providers must be changed through their dedicated model-service API"
-                    .into(),
+                "Models owned by a retired built-in provider cannot be modified".into(),
             ));
         }
 
@@ -177,10 +206,9 @@ impl ProviderModelService {
             .find_by_id(provider_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if is_managed_provider_platform(&provider.platform) {
+        if is_retired_provider_platform(&provider.platform) {
             return Err(AppError::Forbidden(
-                "Managed model providers must be changed through their dedicated model-service API"
-                    .into(),
+                "Models owned by a retired built-in provider cannot be modified".into(),
             ));
         }
         let lifecycle_barrier = self.deletion_coordinator.provider_lifecycle_barrier();

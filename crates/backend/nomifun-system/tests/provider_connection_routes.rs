@@ -28,7 +28,6 @@ fn build_state(db: &nomifun_db::Database) -> SystemRouterState {
         TEST_KEY,
         http_client.clone(),
         VersionCheckService::new(http_client, "0.1.0".to_owned()),
-        None,
         std::env::temp_dir(),
         std::env::temp_dir(),
         false,

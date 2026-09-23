@@ -24,15 +24,7 @@ await testI18n.use(initReactI18next).init({
   fallbackLng: 'zh-CN',
   resources: {
     'zh-CN': {
-      translation: {
-        settings: {
-          modelHub: {
-            free: {
-              title: 'NomiFun Free Model',
-            },
-          },
-        },
-      },
+      translation: {},
     },
   },
 });
