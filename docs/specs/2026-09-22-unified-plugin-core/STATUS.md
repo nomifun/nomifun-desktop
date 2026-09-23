@@ -4,7 +4,7 @@
 
 ## 状态
 
-- Goal：`active`。Unified Plugin Core 源码 clean cut 已完成；合并远端新增提交后的 Windows 包与候选安装闭环、目标 release 要求的 macOS 真机证据仍待完成，因此不得标记 `complete`。
+- Goal：`active`。Unified Plugin Core 源码 clean cut 已完成；macOS arm64 App/DMG 原生包与启动证据已通过，Plugin 产品 UI 因目标 Mac 锁屏仍待验收；Windows 候选安装闭环也独立未完成，因此不得标记 `complete`。
 - 开发分支：`rf/agent-capability-platform-v2`。Unified Plugin Core 的两个提交已快进进入此分支，随后正常合并远端在此期间新增的 Agent、Knowledge、会话切换、Canvas 与 UI 提交。后续只在本开发分支施工。
 - 起始工作树：只有本规格目录为未跟踪内容；未发现或覆盖用户无关代码改动。
 - 最终边界：没有双架构、feature flag、旧 decoder、旧 API alias 或可运行兼容层。Plugin 子系统 clean-start，不转换 N1/M1 Plugin 行，也不触碰非 Plugin 用户数据。
@@ -94,7 +94,7 @@
 - 完整候选冒烟需要用户明确允许临时处理现有协议注册，或在无既有 NomiFun 注册的干净 Windows 账户/主机运行。结构化结果输出到命令 stdout；隔离运行目录限定在 `build.noindex`，不纳入 Git。
 - 上一轮主机是 Windows，当时无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
 - macOS 目标机接续操作已写入同目录 [`PROMPT-START.zh.md`](PROMPT-START.zh.md)，供另一台 Apple Silicon 机器在同一 `rf/agent-capability-platform-v2` 分支执行。
-- 因 Windows 候选环境保护与 macOS 目标机证据两项外部条件，Goal 保持 `active`；没有已知源码、测试、删除或文档待办。
+- Windows 候选环境保护仍是独立未完成门禁；macOS 包/启动证据见下方，Plugin 产品 UI 仍待目标机解锁。Goal 保持 `active`，没有已知 Plugin 源码或测试失败。
 
 ## macOS arm64 目标机接续（2026-09-23，进行中）
 
@@ -102,5 +102,13 @@
 - 从 `origin/rf/agent-capability-platform-v2` 正常快进到 `e4cf0f86facb6a9d4ac366ad9a411f102b6e249b`。本机预存的 `scripts/run-dev.mjs` 与 `scripts/run-dev.test.mjs` 未提交改动未被覆盖，也不纳入本次修复。
 - 隔离根目录：`/Users/muri/.codex/validation/unified-plugin-core-macos-20260923.Mj7t4D`；其 `data/` 与 `work/` 专用于本轮，`logs/` 保存各命令输出和退出码。既有 NomiFun/Plugin/Agent 用户数据未被删除或覆盖。
 - `cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check`、`bun run check`（含桌面 UI 最低 880×600 和 Unified Plugin 边界）、`bun run test:plugin-sdk` 均退出 0；对应日志分别为 `logs/contract.log`、`logs/check.log`、`logs/plugin-sdk.log`。
-- 首轮 `cargo test -p nomifun-plugin-platform --tests -- --test-threads=1` 在 macOS 专属 Service 进程环境断言失败：Node 即使通过 `env -i` 启动，也会注入 `__CF_USER_TEXT_ENCODING`。只在 macOS 测试断言中允许这个精确键；生产 `env_clear`、Host 环境白名单与敏感变量检查保持不变。定向 `service_process` 7/7 和 Plugin Platform 全套重跑已通过；详见 `logs/service-process-retest.log`、`logs/plugin-platform-tests-retest.log`。HTTP E2E、arm64 App/DMG、release lock 和真机产品流仍在执行，未提前记为通过。
-- 原生预检脚本检查 Git 跟踪工作树必须干净。为避让上述用户改动，另建同一 HEAD 的 detached **只读验收检出** `source/`；不创建或切换开发分支，后续预检将明确给出实际构建的 artifact root。
+- 首轮 `cargo test -p nomifun-plugin-platform --tests -- --test-threads=1` 在 macOS 专属 Service 进程环境断言失败：Node 即使通过 `env -i` 启动，也会注入 `__CF_USER_TEXT_ENCODING`。只在 macOS 测试断言中允许这个精确键；生产 `env_clear`、Host 环境白名单与敏感变量检查保持不变。定向 `service_process` 7/7 和 Plugin Platform 全套 57/57 重跑已通过；详见 `logs/service-process-retest.log`、`logs/plugin-platform-tests-retest.log`。
+- 原生预检脚本检查 Git 跟踪工作树必须干净。为避让上述用户改动，另建同一 HEAD 的 detached 验收检出 `source/`，只在其中安装锁定依赖与生成未跟踪构建物，不改跟踪源码；没有创建或切换开发分支。
+- `cargo test -p nomifun-app --test plugin_e2e -- --test-threads=1` 为 8/8；`cargo test -p nomifun-app --lib engine_plugin_bindings -- --test-threads=1` 为 4/4，覆盖真实 Agent tool/context/hook 消费、取消与更新失效。Agent 选择、Knowledge 面板、会话跳转和 Plugin 导航的定向 UI 为 61/61，Plugin Bridge/边界 10/10。日志为 `logs/plugin-e2e.log`、`logs/agent-plugin-binding-targeted.log`、`logs/agent-knowledge-plugin-ui.log` 和 `logs/plugin-ui-targeted.log`。
+- 在原工作树执行 `bun run build:mac arm` 时 App/DMG 已生成，但最终 release-lock 签发因两个预存用户改动使 Git 跟踪工作树不洁而拒绝，命令退出 3。该次不能作为通过的包证据，日志 `logs/build-mac-arm.log`；旧同名 dist 产物在构建前保存到 `work/previous-dist/`，首次产物保存到 `work/first-build/`。
+- 同一提交的干净验收检出先执行 `bun install --frozen-lockfile` 和 `bun run check`（均退出 0），再执行 `bun run build:mac arm`（退出 0）。构建源提交 `d312868712910b9b6ed6b632a534a4e71d7ea56e`，目标 `aarch64-apple-darwin`，App 的 Mach-O 仅 `arm64`；完整构建日志 `logs/clean-build-mac-arm.log`。
+- App：`source/target/aarch64-apple-darwin/release/bundle/macos/NomiFun.app`，其 `Contents/MacOS/nomifun-desktop` SHA-256 为 `484d6488c7572312e4e670fdac2735c16651af2cf4949aa9f4fd27cdf2bcd91a`。DMG：`source/dist/desktop/NomiFun_0.7.6_aarch64.dmg`，SHA-256 为 `19eb17be9e3dff35dad1bcc1f8dccabff9d9de53f05571e4628865d7322fa9be`。真实 lock：`source/dist/desktop/NomiFun_0.7.6_aarch64.release-lock.json`，SHA-256 为 `c6cf0bdfa9ae831eb678f3e4112ea49aec7c680856efa55fb6b0ee43e1dac03b`；其中 host/package 哈希与独立计算一致。
+- 本轮为**未签名工程验证包**：App/CEF nested 仅 ad hoc 签名；未运行 Developer ID、DMG 签名、公证或 Gatekeeper 发布评估，不得写成签名发布结果。
+- `bun scripts/validation/check-macos-arm64-native.mjs --release-lock <上述绝对 lock> --run-startup --host-binary <同一 App 可执行文件> --report <logs/macos-native-preflight.json> --log <logs/clean-build-mac-arm.log>` 退出 0。结构化结果 26 项、无失败/阻塞：原生 arm64、lock 来源、App/CEF helper、DMG verify/mount 同一性、空/新建 DataRoot 两次 HTTP 200 与进程树清理均通过；DMG 签名/公证和生命周期检查明确为 `not_required`。该脚本是 Host/package preflight，不是 Plugin 产品验收。
+- 从上述 `.app` 在本轮 `data/` 与 `work/app/` 实际启动 PID 15062，`data/port.json` 指向 `127.0.0.1:55102`；外部 `GET /health` 为 200，未获 WebView local-trust 的 `GET /api/plugins` 为预期 403。隔离 DB 恰有七张 Unified Plugin 表且初始 Plugin 行数为零；初始进程树 Node 数为零。日志为 `logs/native-app.log`、`logs/process-tree-initial.json`、`logs/native-health-body.json`。UI 工具报告 macOS 当前锁屏；已请求目标机手动解锁，Library/Creator/Import/Run/Config 和 DataRoot 操作仍待可见 UI 验收，不能记为通过。
+- 同一 DMG 已只读挂载到 `work/mounted-dmg/`，其中 App 可执行文件 SHA-256 与 lock 完全一致，架构为 arm64。前一 App 在 PID 15062 收到终止信号并清理退出后，直接从挂载 App 启动 PID 15462；新 `port.json` 为 `127.0.0.1:55264`，`GET /health` 为 200，初始进程树仅 App 加三个 CEF Helper，Node 数为零。证据：`logs/native-dmg-app.log`、`logs/native-dmg-health-body.json`、`logs/process-tree-dmg-initial.json`。这证明 DMG 内 App 可以原生启动，但无 Plugin 安装/调用的 UI 验收仍受锁屏阻塞。
