@@ -3,18 +3,20 @@ import { httpRequest } from '@/common/adapter/httpBridge';
 export type BrowserTarget = { tab_id: string; runtime_generation: number; document_generation: number };
 export type BrowserPermission = { request_id: string; kind: string; origin: string };
 export type BrowserDialog = { request_id: string; target: BrowserTarget; kind: 'alert' | 'confirm' | 'prompt' | 'before_unload'; message: string; default_text: string; origin: string; text_truncated: boolean };
-export type BrowserTab = { target: BrowserTarget; title: string; url: string; lifecycle: 'loading' | 'ready' | 'failed' | 'crashed'; can_go_back: boolean; can_go_forward: boolean; blocked_permissions?: string[]; permission_requests?: BrowserPermission[]; script_dialog?: BrowserDialog };
+export type BrowserTab = { target: BrowserTarget; title: string; url: string; lifecycle: 'loading' | 'ready' | 'failed' | 'crashed'; can_go_back: boolean; can_go_forward: boolean; zoom_percent: number; blocked_permissions?: string[]; permission_requests?: BrowserPermission[]; script_dialog?: BrowserDialog };
 export type BrowserDownload = { id: string; tab_id: string; filename: string; state: 'choosing' | 'in_progress' | 'cancelling' | 'completed' | 'cancelled' | 'failed'; received_bytes: number; total_bytes: number | null; can_cancel: boolean };
 export type BrowserProviderKind = 'managed' | 'attached_chrome';
 export type AttachedProviderState = 'connected' | 'connection_lost' | 'disconnecting' | 'cleanup_failed';
 export type AttachedProviderSnapshot = { incarnation: string; state: AttachedProviderState; chromium_major: number };
 export type BrowserActionGrant = 'browser/observe' | 'browser/navigate' | 'browser/act' | 'browser/render_content' | 'browser/download' | 'browser/upload' | 'browser/evaluate';
 export type BrowserSnapshot = { agent_session_id: string; resource_binding_id: string; provider_id: string; provider_kind: BrowserProviderKind; allowed_actions: BrowserActionGrant[]; run: { revision: number; input_state: 'user_ready' | 'agent_running'; input_gate_failed: boolean }; runtime: { runtime_generation: number; revision: number; active_tab_id: string | null; tabs: BrowserTab[]; downloads: BrowserDownload[] } | null };
-export type BrowserCommand = { command: 'create'; url: string } | { command: 'close_all' | 'open_downloads' | 'clear_site_data'; runtime_generation: number } | { command: 'activate' | 'close' | 'back' | 'forward' | 'reload' | 'stop_loading' | 'open_external'; target: BrowserTarget } | { command: 'navigate'; target: BrowserTarget; url: string } | { command: 'permission'; target: BrowserTarget; request_id: string; allow: boolean } | { command: 'dialog'; target: BrowserTarget; request_id: string; accept: boolean; text?: string } | { command: 'cancel_download'; target: BrowserTarget; download_id: string };
+export type BrowserCommand = { command: 'create'; url: string } | { command: 'close_all' | 'open_downloads' | 'clear_site_data'; runtime_generation: number } | { command: 'activate' | 'close' | 'back' | 'forward' | 'reload' | 'stop_loading' | 'open_external'; target: BrowserTarget } | { command: 'navigate'; target: BrowserTarget; url: string } | { command: 'set_zoom'; target: BrowserTarget; percent: number } | { command: 'permission'; target: BrowserTarget; request_id: string; allow: boolean } | { command: 'dialog'; target: BrowserTarget; request_id: string; accept: boolean; text?: string } | { command: 'cancel_download'; target: BrowserTarget; download_id: string };
 
 export function browserCommandAction(command: BrowserCommand): BrowserActionGrant {
   switch (command.command) {
     case 'create':
+    case 'activate':
+    case 'set_zoom':
     case 'navigate':
     case 'back':
     case 'forward':

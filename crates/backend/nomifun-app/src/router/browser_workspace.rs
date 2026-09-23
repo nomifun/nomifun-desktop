@@ -116,7 +116,7 @@ impl IntoResponse for BrowserApiError {
                 StatusCode::NOT_FOUND
             }
             WorkspaceError::ActionDenied => StatusCode::FORBIDDEN,
-            WorkspaceError::InvalidUrl => StatusCode::BAD_REQUEST,
+            WorkspaceError::InvalidUrl | WorkspaceError::InvalidZoom => StatusCode::BAD_REQUEST,
             WorkspaceError::NativeCommandFailed => StatusCode::BAD_GATEWAY,
             WorkspaceError::Admission(
                 RunAdmissionError::InputGateFailed | RunAdmissionError::WorkerFailed,

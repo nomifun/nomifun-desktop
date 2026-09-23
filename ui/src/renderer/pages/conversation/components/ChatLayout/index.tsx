@@ -397,8 +397,8 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                   // The file preview's translateX entrance animation would
                   // temporarily place their measured slot outside the window.
                   browserOpen ? 'browser-capability-surface' : 'preview-panel',
-                  'flex flex-col relative overflow-visible rounded-[15px]',
-                  'mb-[12px] mr-[12px] ml-[8px]'
+                  'flex flex-col relative overflow-visible',
+                  !browserOpen && 'rounded-[15px] mb-[12px] mr-[12px] ml-[8px]'
                 )}
                 style={{
                   flexGrow: 1,
@@ -416,7 +416,7 @@ const ChatLayoutInner: React.FC<ChatLayoutProps> = (props) => {
                   lineClassName: 'opacity-30 group-hover:opacity-100 group-active:opacity-100',
                   lineStyle: { width: '2px' },
                 })}
-                <div className='h-full w-full overflow-hidden rounded-[15px]'>
+                <div className={classNames('h-full w-full overflow-hidden', !browserOpen && 'rounded-[15px]')}>
                   {browserOpen && conversation_id ? <BrowserPanel panelId={browserPanelId} agentSessionId={conversation_id} hostSurfaceAvailable={isDesktopRuntime} linkRequest={browserLinkRequest} onLinkAvailabilityChange={setBrowserLinkAvailable} onLinkConsumed={(id, handled) => setBrowserLinkRequest(current => {
                     if (current?.id !== id) return current;
                     if (!handled) void openExternalUrl(current.url).catch(() => {});

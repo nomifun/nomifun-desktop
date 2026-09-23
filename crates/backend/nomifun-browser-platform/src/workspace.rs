@@ -369,6 +369,11 @@ impl BrowserResource {
         command: BrowserTabCommand,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
         self.authority.authorize(action_for_tab_command(&command))?;
+        if let BrowserTabCommand::SetZoom { percent, .. } = &command {
+            if !(50..=200).contains(percent) {
+                return Err(WorkspaceError::InvalidZoom);
+            }
+        }
         if self.closing.load(Ordering::Acquire) {
             return Err(WorkspaceError::WorkspaceClosed);
         }
@@ -385,7 +390,7 @@ impl BrowserResource {
         run: &BrowserRunGuard,
         command: BrowserTabCommand,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
-        if matches!(command, BrowserTabCommand::Permission { .. } | BrowserTabCommand::Dialog { .. } | BrowserTabCommand::CancelDownload { .. } | BrowserTabCommand::OpenExternal { .. } | BrowserTabCommand::CloseAll { .. } | BrowserTabCommand::OpenDownloads { .. } | BrowserTabCommand::ClearSiteData { .. }) {
+        if matches!(command, BrowserTabCommand::Permission { .. } | BrowserTabCommand::Dialog { .. } | BrowserTabCommand::CancelDownload { .. } | BrowserTabCommand::OpenExternal { .. } | BrowserTabCommand::CloseAll { .. } | BrowserTabCommand::OpenDownloads { .. } | BrowserTabCommand::ClearSiteData { .. } | BrowserTabCommand::SetZoom { .. }) {
             return Err(WorkspaceError::UnsupportedAction);
         }
         self.authority.authorize(action_for_tab_command(&command))?;
@@ -759,12 +764,14 @@ fn ensure_same_authority(
 fn action_for_tab_command(command: &BrowserTabCommand) -> BrowserCapabilityAction {
     match command {
         BrowserTabCommand::Create { .. }
+        | BrowserTabCommand::Activate { .. }
+        | BrowserTabCommand::SetZoom { .. }
         | BrowserTabCommand::Navigate { .. }
         | BrowserTabCommand::Back { .. }
         | BrowserTabCommand::Forward { .. }
         | BrowserTabCommand::Reload { .. }
         | BrowserTabCommand::StopLoading { .. } => BrowserCapabilityAction::Navigate,
-        BrowserTabCommand::Activate { .. } | BrowserTabCommand::Close { .. } => {
+        BrowserTabCommand::Close { .. } => {
             BrowserCapabilityAction::Act
         }
         BrowserTabCommand::OpenDownloads { .. }
