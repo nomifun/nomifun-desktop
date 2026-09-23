@@ -106,12 +106,14 @@ function TurnProcessDisclosure<T>({
   }, [item.running]);
 
   const currentItemKey = useMemo(() => {
-    const runningItem = item.processItems.findLast(
-      (processItem) => getProcessItemState(processItem) === 'running'
-    );
-    const latestItem = runningItem ?? item.processItems.at(-1);
-    return latestItem ? getProcessItemKey(latestItem) : undefined;
-  }, [getProcessItemKey, getProcessItemState, item.processItems]);
+    if (!item.running) return undefined;
+    const latestItem = item.processItems.at(-1);
+    if (!latestItem || getProcessItemState(latestItem) !== 'running') return undefined;
+    const latestKind = getProcessItemLayoutKind?.(latestItem);
+    return latestKind === 'thinking' || latestKind === 'tool'
+      ? getProcessItemKey(latestItem)
+      : undefined;
+  }, [getProcessItemKey, getProcessItemLayoutKind, getProcessItemState, item.processItems, item.running]);
 
   const durationEndAt = item.running ? now : item.endAt;
   const durationMs = durationEndAt - item.startAt;

@@ -4,7 +4,7 @@
     "ledger_version": "1.0.0",
     "artifacts": {
       "canonical_api_inventory": "8f8505ae9eeed1e8aef81e79815b10b78f429bbf3cda40dadcf4a3259cc244d6",
-      "canonical_schema_manifest": "c7f9aa3c0fe4cc651524bfd466c1bc957dc6bef0cf8cb1109e711b373d39eeed",
+      "canonical_schema_manifest": "b635f714ac9e0c861c2414a252d3346608753dc39021c30c8e6f4d6126acc69d",
       "capability_catalog_entry": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168",
       "cargo_lock": "4b571089928fc57a60b27e6934bb7aa2ceb103350a48a8279faf5d0cb700730d",
       "coding_codex_native_contract": "361913c8b085e0a3af7c8331f36044ae794f40f8310a1ef470ae3c7fc381be50",
@@ -15,15 +15,15 @@
       "official_preset_seed_manifest": "ba59a95420466040585ac27ed17f2eb714d8e810424eb1711e0ee2d1ce7532d0",
       "package_schema": "cb03f0e6ae6e74d1736879253ae9c7145d67116ed5464f346ef5435ea62ea687",
       "platform_validation_contract": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
-      "platform_validation_fixture": "3f090cccde9912da3770b69e3b59ef9c28646eb399c8eac4c2997552e867fafc",
+      "platform_validation_fixture": "035d0ac727410593279cd3e4457c4b0bbc793ed45c7a5e9241b78a90e3623a7c",
       "plugin_contract": "aed271dcd6570f0352d3657c657ecfbc21c4d53569c16d4a8e13443b050b3c25",
       "plugin_schema": "5d69c74023d5ad1dfdce99d8b81b3253eb86c4fda1f085de3d7a97c02744d609",
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
       "runtime_protocol": "20e94f072c58c2317428f43c134ac9d05d028ec1d07b8d0d7e9cbae2d87ee3aa",
       "rust_contract_schema": "4a903e8d1deac9393a28aaa2dec448c7e301ad50f94807f6157fa59a9fac0042",
-      "session_event_registry": "5511cb7f5396d5cbb2dcf74e0c5002f280ac3adee43cb508c8bb3ba850972ebf",
+      "session_event_registry": "d895ce3c25ec8e14807a11d6b661dcba0b7c42649ac1e1a919032fa87ba75df4",
       "target_first_party_inventory": "051ff7bd4cc01ce69fb24abedd9b16cd8342b2e2c4703dd26668a102d7bf4b5c"
     }
   },
-  "payload_digest": "5368755f2530e934c8a6f34d3c49efd29dfee03cc49e220d26dc86c2d9456483"
+  "payload_digest": "a376ea20c6b406cc20ec2fee59f9476f1836e24bee986d849735464ead9a459a"
 }

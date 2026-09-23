@@ -330,6 +330,32 @@
         "replay_rule": "rebuild_projection"
       },
       {
+        "kind": "thinking/content-part",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/thinking-content-part/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/started"
+          ]
+        },
+        "correlation": "message",
+        "idempotency": "producer_scoped_required",
+        "projector": {
+          "required": true,
+          "reducers": [
+            "message-projection"
+          ]
+        },
+        "replay_rule": "rebuild_projection"
+      },
+      {
         "kind": "message/completed",
         "version": 1,
         "persistence": "persistent",
@@ -1010,5 +1036,5 @@
       }
     ]
   },
-  "payload_digest": "5511cb7f5396d5cbb2dcf74e0c5002f280ac3adee43cb508c8bb3ba850972ebf"
+  "payload_digest": "d895ce3c25ec8e14807a11d6b661dcba0b7c42649ac1e1a919032fa87ba75df4"
 }

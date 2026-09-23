@@ -1,7 +1,7 @@
 //! Engine-neutral journal backed exclusively by the canonical Agent Store.
 //!
 //! Runtime-private records are durable `runtime/progress-recorded` facts.
-//! User-visible assistant text and Turn terminals are projected from the same
+//! User-visible assistant text, thinking, and Turn terminals are projected from the same
 //! ordered event stream; no Conversation delivery/runtime table participates.
 
 use std::{
@@ -55,6 +55,7 @@ struct Cursor {
     assistant_text: Vec<u8>,
     last_assistant_event_id: Option<EventId>,
     assistant_message_id: Option<String>,
+    thinking_messages: BTreeMap<u16, (String, u64)>,
     tool_message_ids: BTreeMap<String, String>,
 }
 
@@ -342,6 +343,53 @@ impl EngineTurnJournal {
         cursor.assistant_parts = part;
         cursor.assistant_text.extend_from_slice(text.as_bytes());
         cursor.last_assistant_event_id = Some(event_id);
+        Ok(())
+    }
+
+    async fn append_thinking_part(
+        journal: &Journal,
+        cursor: &mut Cursor,
+        step: u16,
+        text: &str,
+    ) -> Result<(), AppError> {
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        let (message_id, previous_parts) = cursor
+            .thinking_messages
+            .entry(step)
+            .or_insert_with(|| (Uuid::now_v7().to_string(), 0));
+        let part = previous_parts.saturating_add(1);
+        let identity = format!(
+            "thinking-part:{}:{}:{step}:{part}",
+            journal.session.as_ref(),
+            journal.operation.as_ref(),
+        );
+        let (payload_ref, payload) = canonical_event_payload(
+            &journal.session,
+            json!({ "content": text, "turn_id": journal.root.as_ref() }),
+        )?;
+        let append = SessionEventAppend {
+            agent_session_id: journal.session.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("thinking/content-part".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(message_id.clone()),
+                causation_event_id: Some(journal.turn_started.clone()),
+                payload: payload_ref,
+            },
+        };
+        journal
+            .store
+            .append_event_with_payload(&append, payload.as_ref())
+            .await
+            .map_err(failure)?;
+        *previous_parts = part;
         Ok(())
     }
 
@@ -728,6 +776,9 @@ impl EngineTurnJournal {
             if let Some(AgentEngineEvent::OutputTextDelta { text, .. }) = &runtime_event {
                 Self::append_assistant_part(&journal, &mut cursor, text).await?;
             }
+            if let Some(AgentEngineEvent::ReasoningDelta { step, text }) = &runtime_event {
+                Self::append_thinking_part(&journal, &mut cursor, *step, text).await?;
+            }
             if kind == EngineJournalWrite::Terminal {
                 Self::append_terminal(
                     &journal,
@@ -909,4 +960,48 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
         pending_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
     }));
     (journal, pool)
+}
+
+#[cfg(test)]
+mod history_display_tests {
+    use super::*;
+    use super::super::runtime_event_buffer::AgentEventBuffer;
+
+    #[tokio::test]
+    async fn buffered_thinking_survives_a_cold_history_read() {
+        let (journal, pool) = test_fixture().await;
+        let mut buffer = AgentEventBuffer::default();
+        assert!(buffer.project(&AgentEngineEvent::ReasoningDelta {
+            step: 1,
+            text: "Inspect the workspace. ".to_owned(),
+        }).is_empty());
+        let mut records = Vec::new();
+        buffer.flush(&mut records);
+        assert_eq!(records.len(), 1);
+        journal.append(
+            serde_json::to_string(&records[0]).unwrap(),
+            None,
+            EngineJournalWrite::Progress,
+        ).await.unwrap();
+
+        let store = AgentSessionStore::from_pool(pool).await.unwrap();
+        let (history, _, _) = store
+            .message_history_before(&journal.0.session, None, 50)
+            .await
+            .unwrap();
+        let thinking = history.iter().find(|projection| projection.presentation_intent == "thinking")
+            .expect("thinking projection is present in a new history reader");
+        assert_eq!(thinking.projection["content"], "Inspect the workspace. ");
+        assert_eq!(thinking.projection["turn_id"], journal.0.root.as_ref());
+        store.rebuild_projections(&journal.0.session).await.unwrap();
+        let (rebuilt, _, _) = store
+            .message_history_before(&journal.0.session, None, 50)
+            .await
+            .unwrap();
+        assert_eq!(
+            rebuilt.iter().find(|projection| projection.presentation_intent == "thinking")
+                .unwrap().projection["content"],
+            "Inspect the workspace. "
+        );
+    }
 }

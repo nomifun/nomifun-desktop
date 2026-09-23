@@ -531,6 +531,29 @@ describe('mergeFetchedMessagesForConversation', () => {
     expect(merged[0]).toEqual(fetchedPersistedThinking);
   });
 
+  test('replaces settled live thinking with durable per-step thinking after navigation', () => {
+    const turnId = messageId('thinking-turn-root');
+    const live = baseMessage({
+      id: 'live-thinking', msg_id: 'live-stream', turn_id: turnId,
+      type: 'thinking', created_at: 2000,
+      content: { content: 'Inspect the workspace', status: 'thinking' },
+    });
+    const persisted = baseMessage({
+      id: 'durable-thinking-step-1', msg_id: 'durable-thinking-step-1', turn_id: turnId,
+      type: 'thinking', created_at: 2000,
+      content: { content: 'Inspect the workspace', status: 'done' },
+    });
+    const terminal = baseMessage({
+      id: 'turn-summary', msg_id: 'turn-summary', turn_id: turnId,
+      type: 'agent_status', position: 'center', created_at: 3000,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, finished_at_ms: 3000 },
+    });
+    const merged = mergeFetchedMessagesForConversation(
+      [live], fetchedMessages([persisted, terminal]), live.conversation_id
+    );
+    expect(merged.map((message) => message.id)).toEqual(['durable-thinking-step-1', 'turn-summary']);
+  });
+
   test('keeps a longer streaming thinking snapshot if the fetched row is stale', () => {
     const streamingThinking = baseMessage({
       id: 'client-streaming-thinking-id',

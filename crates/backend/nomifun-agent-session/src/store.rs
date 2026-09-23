@@ -2545,7 +2545,7 @@ impl AgentSessionStore {
     }
 
     /// Read the renderer-facing conversation history. In addition to canonical
-    /// message/tool projections, expose one derived lifecycle summary for every
+    /// message/tool/thinking projections, expose one derived lifecycle summary for every
     /// durable Turn. The summary is reconstructed from `agent_turns`, so older
     /// Sessions created before this view existed receive the same cold-reload
     /// behavior without mutating their event log or projection tables.
@@ -2576,7 +2576,7 @@ impl AgentSessionStore {
                     projection_json, semantic_digest \
              FROM agent_messages \
              WHERE session_id = ? AND first_seq < ? \
-               AND presentation_intent IN ('message', 'tool', 'agent_transition') \
+               AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking') \
              ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
         )
         .bind(session_id.as_ref())
@@ -2618,7 +2618,7 @@ impl AgentSessionStore {
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
-               AND presentation_intent IN ('message', 'tool', 'agent_transition')",
+               AND presentation_intent IN ('message', 'tool', 'agent_transition', 'thinking')",
         )
         .bind(session_id.as_ref())
         .fetch_one(&mut *tx)

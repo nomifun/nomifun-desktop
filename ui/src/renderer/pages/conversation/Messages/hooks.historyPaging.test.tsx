@@ -82,6 +82,41 @@ test('an old page cannot re-enter after A to B to A navigation', async () => {
   expect(h.hook.result.current.hasMore).toBe(true);
 });
 
+test('cold history continues until the newest tool-heavy request has its user boundary', async () => {
+  const h = mountHistory();
+  const tool = {
+    ...message(30), type: 'tool_call' as const, position: 'left' as const,
+    content: { call_id: 'call-30', name: 'read_file', status: 'completed' as const, args: { path: 'src/app.ts' } },
+  } as TMessage;
+  await h.reply(0, [tool], true);
+  expect(h.requests).toHaveLength(2);
+  expect(h.hook.result.current.messages).toHaveLength(0);
+  expect(h.requests[1].query.cursor).toBe(`30:${tool.message_id}`);
+  const request = { ...message(10), position: 'right' as const, content: { content: 'Inspect the project' } } as TMessage;
+  await h.reply(1, [request], false);
+  expect(h.hook.result.current.messages.map((item) => item.type)).toEqual(['text', 'tool_call']);
+  expect(h.hook.result.current.loading).toBe(false);
+});
+
+test('background tool history stops after the turn-start receipt without loading the whole session', async () => {
+  const h = mountHistory();
+  const tool = {
+    ...message(30), type: 'tool_call' as const, position: 'left' as const,
+    content: { call_id: 'call-30', name: 'read_file', status: 'completed' as const },
+  } as TMessage;
+  await h.reply(0, [tool], true);
+  const summary = {
+    ...message(20), type: 'agent_status' as const, position: 'center' as const,
+    content: { backend: 'nomi', status: 'prepared' as const, turn_summary: true },
+  } as TMessage;
+  await h.reply(1, [summary], true);
+  expect(h.requests).toHaveLength(3);
+  await h.reply(2, [message(10)], true);
+  expect(h.requests).toHaveLength(3);
+  expect(h.hook.result.current.loading).toBe(false);
+  expect(h.hook.result.current.hasMore).toBe(true);
+});
+
 test('new conversation pagination does not inherit old loading ownership', async () => {
   const h = mountHistory();
   await h.reply(0, [message(20)]);

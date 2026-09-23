@@ -808,6 +808,22 @@ export function normalizeDbMessage(msg: TMessage): TMessage {
 /** Initial / per-page window size for keyset (windowed) history loading. */
 const HISTORY_WINDOW_SIZE = 60;
 
+const isVisibleUserRequest = (message: TMessage): boolean =>
+  message.type === 'text' && message.position === 'right' && message.hidden !== true;
+
+const hasProcessHistory = (messages: TMessage[]): boolean =>
+  messages.some((message) =>
+    message.type === 'thinking' ||
+    message.type === 'tool_call' ||
+    message.type === 'tool_group'
+  );
+
+const hasTurnStartReceipt = (messages: TMessage[]): boolean =>
+  messages.some((message) =>
+    (message.type === 'agent_status' && message.content.turn_summary === true) ||
+    (message.type === 'tips' && message.content.started_at_ms !== undefined)
+  );
+
 const getPersistedMessageId = (message: TMessage): MessageId => {
   if (!message.message_id) {
     throw new TypeError('Fetched message is missing its durable message_id');
@@ -886,6 +902,18 @@ export const mergeFetchedMessagesForConversation = (
 
   const dbIds = new Set(orderedMessages.map(getPersistedMessageId));
   const dbKeys = new Set(orderedMessages.map(getFetchedMergeKey).filter((key): key is string => Boolean(key)));
+  const durableEvidence = [...orderedMessages, ...sameConversation.filter((message) => Boolean(message.message_id))];
+  const settledTurnIds = new Set(durableEvidence.flatMap((message) => {
+    if (!message.turn_id) return [];
+    if (message.type === 'agent_status' && message.content.turn_summary && message.content.finished_at_ms) {
+      return [message.turn_id];
+    }
+    if (message.type === 'tips' && message.content.finished_at_ms) return [message.turn_id];
+    return [];
+  }));
+  const persistedThinkingTurnIds = new Set(durableEvidence.flatMap((message) =>
+    message.type === 'thinking' && message.turn_id ? [message.turn_id] : []
+  ));
   const streamingByKey = new Map<string, TMessage>();
 
   for (const message of sameConversation) {
@@ -925,6 +953,10 @@ export const mergeFetchedMessagesForConversation = (
   });
 
   const streamingOnly = sameConversation.filter((message) => {
+    if (
+      message.type === 'thinking' && !message.message_id && message.turn_id &&
+      settledTurnIds.has(message.turn_id) && persistedThinkingTurnIds.has(message.turn_id)
+    ) return false;
     if (message.message_id && dbIds.has(message.message_id)) return false;
     const key = getFetchedMergeKey(message);
     if (key && dbKeys.has(key)) return false;
@@ -986,17 +1018,37 @@ export const useMessageLstCache = (key: ConversationId) => {
     scope.older = null;
     publishPaging();
     setLoading(true);
+    const newestWindow: TMessage[] = [];
     try {
-      const result = await ipcBridge.database.getConversationMessages.invoke({
-        conversation_id: key, cursor: '', page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
-      });
-      if (!isCurrent()) return;
-      const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
-      scope.cursor = messages.length ? messageCursorOf(messages[0]) : null;
-      scope.hasMore = Boolean(result.has_more) && scope.cursor !== null;
-      mergeIntoList(messages, revision);
+      let cursor = '';
+      let completeNewestRequest = false;
+      let needsCompleteRequest = false;
+      let turnStartReceiptSeen = false;
+      let pagesAfterTurnStartReceipt = 0;
+      do {
+        const result = await ipcBridge.database.getConversationMessages.invoke({
+          conversation_id: key, cursor, page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
+        });
+        if (!isCurrent()) return;
+        const messages = result.items.map(normalizeDbMessage).sort(compareTranscriptOrder);
+        newestWindow.push(...messages);
+        if (!cursor) needsCompleteRequest = hasProcessHistory(messages);
+        completeNewestRequest ||= messages.some(isVisibleUserRequest);
+        if (turnStartReceiptSeen) pagesAfterTurnStartReceipt += 1;
+        turnStartReceiptSeen ||= hasTurnStartReceipt(messages);
+        const oldest = messages[0];
+        const nextCursor = oldest ? messageCursorOf(oldest) : null;
+        scope.cursor = nextCursor;
+        scope.hasMore = Boolean(result.has_more) && nextCursor !== null;
+        if (!scope.hasMore || !nextCursor || nextCursor === cursor) break;
+        cursor = nextCursor;
+      } while (needsCompleteRequest && !completeNewestRequest && pagesAfterTurnStartReceipt === 0);
+      mergeIntoList(newestWindow, revision);
     } catch (error) {
-      if (isCurrent()) console.error('[useMessageLstCache] Failed to load messages from database:', error);
+      if (isCurrent()) {
+        if (newestWindow.length) mergeIntoList(newestWindow, revision);
+        console.error('[useMessageLstCache] Failed to load messages from database:', error);
+      }
     } finally {
       if (isCurrent()) {
         scope.loadingNewest = false;

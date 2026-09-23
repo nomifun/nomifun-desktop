@@ -258,11 +258,11 @@ const getProcessedItemTurnEndedAt = (item: IRenderableItem): number | undefined 
 const isTerminalAssistantItem = (item: IRenderableItem): boolean =>
   item.type === 'tips' && item.content.type === 'error';
 
-const isHiddenThinkingItem = (item: IRenderableItem): boolean => {
-  if (item.type !== 'thinking') return false;
+const isHiddenProcessItem = (item: IRenderableItem): boolean => {
+  if (item.type !== 'thinking' && item.type !== 'text') return false;
   const text = toDisplayText(item.content.content).trim();
   if (!text) return true;
-  return /^\[Private reasoning omitted(?: from replay)?\]$/i.test(text);
+  return item.type === 'thinking' && /^\[Private reasoning omitted(?: from replay)?\]$/i.test(text);
 };
 
 const getProcessedItemMsgId = (item: IRenderableItem): MessageId | undefined => {
@@ -945,7 +945,7 @@ const MessageList: React.FC<{
 
         const processItems = entry.processItemIds
           .map((id) => itemById.get(id))
-          .filter((item): item is IRenderableItem => item !== undefined && !isHiddenThinkingItem(item));
+          .filter((item): item is IRenderableItem => item !== undefined && !isHiddenProcessItem(item));
 
         return {
           type: 'turn_process_disclosure',
@@ -1268,7 +1268,10 @@ const MessageList: React.FC<{
         item={item}
         highlighted={highlighted}
         renderProcessItem={(processItem) =>
-          renderProcessTraceItem(processItem, 'list', workspaceRoots, getDisclosureProcessItemState(processItem))
+          renderProcessTraceItem(
+            processItem, 'list', workspaceRoots,
+            item.running ? undefined : getDisclosureProcessItemState(processItem)
+          )
         }
         getProcessItemKey={getProcessedItemAnchorId}
         getProcessItemState={getDisclosureProcessItemState}
