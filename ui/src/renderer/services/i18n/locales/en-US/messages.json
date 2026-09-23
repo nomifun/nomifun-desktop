@@ -41,6 +41,14 @@
     "fileChanged": "Edited {{target}} {{stats}}",
     "preparingAction": "Preparing next action",
     "preparedAction": "Prepared next action",
+    "analyzingRequest": "Analyzing the request",
+    "analyzedRequest": "Analyzed the request",
+    "analyzeRequest": "Analyze the request",
+    "preparingResponse": "Preparing the result",
+    "preparedResponse": "Prepared the result",
+    "prepareResponse": "Prepare the result",
+    "failedOperations": "{{count}} operations did not complete",
+    "repeatedOperation": "{{label}} · {{count}} times",
     "contextCompressed": "Context compressed",
     "searchedTarget": "Searched {{target}}",
     "agentConnecting": "Connecting {{target}}",
@@ -52,8 +60,9 @@
   "turnDuration": "Took {{duration}}",
   "turnDurationUnknown": "Time --",
   "turnProcess": {
-    "expand": "Expand thinking process",
-    "collapse": "Collapse thinking process"
+    "expand": "Expand execution progress",
+    "collapse": "Collapse execution progress",
+    "runningSummary": "Processing · {{duration}}"
   },
   "knowledgeWriteback": {
     "started": "Preparing knowledge write-back",

@@ -11,7 +11,7 @@ import { useConversationContextSafe } from '@/renderer/hooks/context/Conversatio
 import { usePreviewLauncher } from '@/renderer/hooks/file/usePreviewLauncher';
 import { extractContentFromDiff } from '@/renderer/utils/file/diffUtils';
 import { getFileTypeInfo } from '@/renderer/utils/file/fileType';
-import { Code, Edit, Info, Right, Terminal } from '@icon-park/react';
+import { Attention, Code, Edit, Info, Right, Terminal } from '@icon-park/react';
 import classNames from 'classnames';
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -33,40 +33,6 @@ import {
 } from './toolGroupSummaryModel';
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
-
-const PROCESS_TEXT_PREVIEW_CHARS = 180;
-
-const ProcessTextTrace: React.FC<{ content: string }> = ({ content }) => {
-  const { t } = useTranslation();
-  const [expanded, setExpanded] = useState(false);
-  const text = content.trim();
-  const compact = text.replace(/\s+/g, ' ');
-  const hasMore = Array.from(compact).length > PROCESS_TEXT_PREVIEW_CHARS;
-  const preview = hasMore
-    ? `${Array.from(compact).slice(0, PROCESS_TEXT_PREVIEW_CHARS).join('')}…`
-    : compact;
-
-  return (
-    <div className='turn-process-trace'>
-      <div className='turn-process-trace__paragraph-row'>
-        <TraceRowIcon kind='system' />
-        <div className='turn-process-trace__paragraph'>
-          {expanded ? text : preview}
-          {hasMore && (
-            <button
-              type='button'
-              className='turn-process-trace__text-toggle'
-              aria-expanded={expanded}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              {t(expanded ? 'messages.processReceipt.collapseText' : 'messages.processReceipt.expandText')}
-            </button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
 
 export type ProcessTraceRenderableItem =
   | TMessage
@@ -91,6 +57,7 @@ type TranslationFn = ReturnType<typeof useTranslation>['t'];
 
 type ProcessTraceVariant = 'list' | 'receipt';
 type ProcessTraceIconKind = 'system' | 'tool' | 'command' | 'file' | 'edit';
+type LabeledToolRow = { row: ToolReceiptDetailRow; label: string };
 
 type ProcessTraceRow = {
   key: string;
@@ -115,6 +82,25 @@ const compactReceiptText = (value: unknown, fallback: string): string => {
 };
 
 const joinCompactText = (parts: Array<string | undefined>): string => parts.filter(Boolean).join(' ');
+
+const compactRepeatedToolRows = (rows: LabeledToolRow[], t: TranslationFn): LabeledToolRow[] => {
+  const grouped = new Map<string, { item: LabeledToolRow; count: number }>();
+  for (const item of rows) {
+    const key = [item.row.state, item.row.action, item.row.target ?? '', item.label].join('\u0000');
+    const existing = grouped.get(key);
+    if (existing) existing.count += 1;
+    else grouped.set(key, { item, count: 1 });
+  }
+  if (grouped.size === rows.length) return rows;
+  return Array.from(grouped.values()).map(({ item, count }) => count === 1 ? item : ({
+    ...item,
+    label: t('messages.processReceipt.repeatedOperation', {
+      label: item.label,
+      count,
+      defaultValue: '{{label}} · {{count}} times',
+    }),
+  }));
+};
 
 const TraceRowIcon: React.FC<{ kind?: ProcessTraceIconKind }> = ({ kind = 'system' }) => {
   const props = {
@@ -538,6 +524,53 @@ const ProcessTraceRows: React.FC<{ rows: ProcessTraceRow[] }> = ({ rows }) => {
   );
 };
 
+const FailedToolTraceGroup: React.FC<{
+  rows: Array<{ row: ToolReceiptDetailRow; label: string }>;
+  workspaceRoots: string[];
+}> = ({ rows, workspaceRoots }) => {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  if (!rows.length) return null;
+
+  return (
+    <div className='turn-process-trace-tool turn-process-trace-tool--failed-group'>
+      <button
+        type='button'
+        className='turn-process-trace__row turn-process-trace-tool__toggle turn-process-trace__row--failed'
+        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={expanded}
+      >
+        <span className='turn-process-trace__row-icon' aria-hidden='true'>
+          <Attention theme='outline' size='13' fill='currentColor' />
+        </span>
+        <span className='turn-process-trace__text'>
+          {t('messages.processReceipt.failedOperations', {
+            count: rows.length,
+            defaultValue: '{{count}} operations did not complete',
+          })}
+        </span>
+        <Right
+          theme='outline'
+          size='12'
+          className={classNames('turn-process-trace-tool__arrow', expanded && 'turn-process-trace-tool__arrow--open')}
+        />
+      </button>
+      {expanded && (
+        <div className='turn-process-trace-detail'>
+          {rows.map(({ row, label }) => (
+            <ToolTraceRow
+              key={row.key}
+              row={row}
+              label={label}
+              workspaceRoots={workspaceRoots}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ToolProcessTraceRows: React.FC<{
   messages: ToolProcessMessage[];
   variant?: ProcessTraceVariant;
@@ -574,20 +607,27 @@ const ToolProcessTraceRows: React.FC<{
   );
 
   const fileRows = rows.filter(({ row }) => isFileReceiptRow(row)).map(({ row }) => row);
-  const nonFileRows = rows.filter(({ row }) => !isFileReceiptRow(row));
+  const failedRows = rows.filter(({ row }) => row.state === 'failed');
+  const ungroupedVisibleRows = failedRows.length > 1
+    ? rows.filter(({ row }) => row.state !== 'failed')
+    : rows;
+  const visibleRows = compactRepeatedToolRows(ungroupedVisibleRows, t);
+  const nonFileRows = visibleRows.filter(({ row }) => !isFileReceiptRow(row));
+  const visibleFileRows = visibleRows.filter(({ row }) => isFileReceiptRow(row)).map(({ row }) => row);
   const currentActivityKey = rows.findLast(({ row }) => row.state === 'running')?.row.key;
 
-  if (shouldShowFileListDetail(fileRows)) {
+  if (shouldShowFileListDetail(visibleFileRows)) {
     return (
       <div className='turn-process-trace'>
         <ToolFileGroupTraceRow
-          rows={fileRows}
+          rows={visibleFileRows}
           workspaceRoots={workspaceRoots}
-          currentActivity={fileRows.some((row) => row.key === currentActivityKey)}
+          currentActivity={visibleFileRows.some((row) => row.key === currentActivityKey)}
         />
         {nonFileRows.map(({ row, label }) => (
           <ToolTraceRow key={row.key} row={row} label={label} workspaceRoots={workspaceRoots} currentActivity={row.key === currentActivityKey} />
         ))}
+        {failedRows.length > 1 && <FailedToolTraceGroup rows={failedRows} workspaceRoots={workspaceRoots} />}
       </div>
     );
   }
@@ -598,7 +638,7 @@ const ToolProcessTraceRows: React.FC<{
 
   return (
     <div className='turn-process-trace'>
-      {rows.map(({ row, label }) => (
+      {visibleRows.map(({ row, label }) => (
         <ToolTraceRow
           key={row.key}
           row={row}
@@ -608,6 +648,7 @@ const ToolProcessTraceRows: React.FC<{
           currentActivity={row.key === currentActivityKey}
         />
       ))}
+      {failedRows.length > 1 && <FailedToolTraceGroup rows={failedRows} workspaceRoots={workspaceRoots} />}
     </div>
   );
 };
@@ -741,21 +782,35 @@ const ProcessTraceItem: React.FC<{
   switch (item.type) {
     case 'text':
       if (!toDisplayText(item.content.content).trim()) return null;
-      return <ProcessTextTrace content={toDisplayText(item.content.content)} />;
+      return (
+        <ProcessTraceRows
+          rows={[{
+            key: item.id,
+            state,
+            label: state === 'running'
+              ? t('messages.processReceipt.preparingResponse', { defaultValue: 'Preparing the result' })
+              : state === 'completed'
+                ? t('messages.processReceipt.preparedResponse', { defaultValue: 'Prepared the result' })
+                : t('messages.processReceipt.prepareResponse', { defaultValue: 'Prepare the result' }),
+          }]}
+        />
+      );
     case 'thinking':
       {
         const content = toDisplayText(item.content.content).trim();
         if (!content || /^\[Private reasoning omitted(?: from replay)?\]$/i.test(content)) return null;
-        const lastLineStart = content.lastIndexOf('\n') + 1;
         return (
-          <div className='turn-process-trace turn-process-trace--thinking'>
-            <div className='turn-process-trace__paragraph-row turn-process-trace__paragraph-row--thinking'>
-              <div className='turn-process-trace__paragraph'>
-                {content.slice(0, lastLineStart)}
-                <span className='turn-process-trace__thinking-last-line'>{content.slice(lastLineStart)}</span>
-              </div>
-            </div>
-          </div>
+          <ProcessTraceRows
+            rows={[{
+              key: item.id,
+              state,
+              label: state === 'running'
+                ? t('messages.processReceipt.analyzingRequest', { defaultValue: 'Analyzing the request' })
+                : state === 'completed'
+                  ? t('messages.processReceipt.analyzedRequest', { defaultValue: 'Analyzed the request' })
+                  : t('messages.processReceipt.analyzeRequest', { defaultValue: 'Analyze the request' }),
+            }]}
+          />
         );
       }
     case 'tips':

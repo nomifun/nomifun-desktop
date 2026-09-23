@@ -8,6 +8,7 @@ import { describe, expect, test } from 'bun:test';
 import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 import {
   deduplicateProcessText,
+  collapseProcessNarration,
   shouldShowFileListDetail,
   shouldShowToolRowDetail,
 } from './processTraceDisplayModel';
@@ -67,6 +68,21 @@ describe('process trace display model', () => {
     ];
     expect(deduplicateProcessText(items, (item) => item.kind === 'text' ? item.content : undefined))
       .toEqual([items[0], items[1], items[3]]);
+  });
+
+  test('keeps only the latest narration status while preserving every tool receipt', () => {
+    const items = [
+      { kind: 'thinking', content: 'first private snapshot' },
+      { kind: 'tool', content: 'read_file' },
+      { kind: 'thinking', content: 'latest private snapshot' },
+      { kind: 'text', content: 'first public narration' },
+      { kind: 'tool', content: 'write_file' },
+      { kind: 'text', content: 'latest public narration' },
+    ];
+
+    expect(collapseProcessNarration(items, (item) =>
+      item.kind === 'text' || item.kind === 'thinking' ? item.kind : undefined
+    )).toEqual([items[1], items[2], items[4], items[5]]);
   });
 
 });

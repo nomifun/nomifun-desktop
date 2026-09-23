@@ -41,6 +41,14 @@
     "fileChanged": "已编辑 {{target}} {{stats}}",
     "preparingAction": "正在准备下一步操作",
     "preparedAction": "已准备下一步操作",
+    "analyzingRequest": "正在分析请求",
+    "analyzedRequest": "已分析请求",
+    "analyzeRequest": "分析请求",
+    "preparingResponse": "正在整理结果",
+    "preparedResponse": "已整理结果",
+    "prepareResponse": "整理结果",
+    "failedOperations": "{{count}} 项操作未完成",
+    "repeatedOperation": "{{label}} · {{count}} 次",
     "contextCompressed": "上下文已自动压缩",
     "searchedTarget": "已搜索 {{target}}",
     "agentConnecting": "正在连接 {{target}}",
@@ -52,8 +60,9 @@
   "turnDuration": "用时 {{duration}}",
   "turnDurationUnknown": "用时 --",
   "turnProcess": {
-    "expand": "展开思考过程",
-    "collapse": "收起思考过程"
+    "expand": "展开执行进度",
+    "collapse": "收起执行进度",
+    "runningSummary": "处理中 · {{duration}}"
   },
   "knowledgeWriteback": {
     "started": "正在准备回写知识库",
