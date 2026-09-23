@@ -350,7 +350,18 @@ impl EngineKernelSession {
             process_selected,
             route_image_input,
             creation_turn_root: Arc::new(Mutex::new(None)),
-            active: Arc::new(SessionCapabilityState::new(&compiled)),
+            active: Arc::new(
+                SessionCapabilityState::from_committed(
+                    &compiled,
+                    session.active_set_generation(),
+                    session
+                        .active_capability_ids()
+                        .iter()
+                        .cloned()
+                        .map(nomifun_agent_contracts::CapabilityId::from),
+                )
+                .map_err(failure)?,
+            ),
             compiled,
             kernel: assembly.kernel.clone(),
             wave2: assembly.wave2.clone(),

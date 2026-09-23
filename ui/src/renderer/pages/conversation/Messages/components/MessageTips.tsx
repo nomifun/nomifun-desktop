@@ -20,6 +20,7 @@ import { useConversationContextSafe } from '@/renderer/hooks/context/Conversatio
 import { useMessageList } from '../hooks';
 import { parseMessageFileMarker } from './messageFileMarker';
 import { MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
+import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 
 const icon = {
   success: <CheckOne theme='filled' size='16' fill={theme.Color.FunctionalColor.success} className='m-t-2px' />,
@@ -89,8 +90,21 @@ const useErrorRetry = (message: IMessageTips): (() => void) | null => {
 
 const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const { t } = useTranslation();
+  const currentAgent = useConversationContextSafe()?.currentAgent;
   const { type } = message.content;
-  const content = toDisplayText(message.content.content);
+  const transition = message.content.agent_transition;
+  const content = transition
+    ? t('conversation.chat.agentSwitch.transitionMarker', {
+        from: transition.previous_template_key
+          ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[transition.previous_template_key]}.name`)
+          : currentAgent && currentAgent.presetId === transition.previous_preset_id
+            ? currentAgent.label : transition.previous_agent_label,
+        to: transition.next_template_key
+          ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[transition.next_template_key]}.name`)
+          : currentAgent && currentAgent.presetId === transition.next_preset_id
+            ? currentAgent.label : transition.next_agent_label,
+      })
+    : toDisplayText(message.content.content);
   const structuredError = type === 'error' ? message.content.error : undefined;
   const { json, data } = useFormatContent(content);
   const retry = useErrorRetry(message);
@@ -108,6 +122,16 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const recoveryButton = retryButton;
 
   const displayContent = json ? '' : content;
+  if (transition) {
+    return (
+      <div className='agent-transition-boundary' role='note' aria-label={content}>
+        <span className='agent-transition-boundary__rule' aria-hidden='true' />
+        <span className='agent-transition-boundary__label'>{content}</span>
+        <span className='agent-transition-boundary__rule' aria-hidden='true' />
+      </div>
+    );
+  }
+  if (type !== 'error' && !content.trim()) return null;
   if (type === 'error') {
     const code = structuredError?.code;
     const ownership = structuredError?.ownership;

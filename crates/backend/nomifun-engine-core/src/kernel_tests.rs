@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn session_enabled_set_is_frozen_and_snapshot_copies_cannot_expand_it() {
+    fn committed_session_generation_can_narrow_but_never_expand_the_snapshot_ceiling() {
         let fixture = kernel_fixture();
         let original = fixture.active.snapshot().unwrap();
         assert_eq!(original.generation, 0);
@@ -374,7 +374,8 @@ mod tests {
             &forged,
             &fixture.materialized,
             [read_exposure(fixture.action_id.clone())],
-        ).is_err());
+        )
+        .is_ok());
         forged = original;
         forged.active.clear();
         assert!(compile_engine_tool_plan(
@@ -382,7 +383,8 @@ mod tests {
             &forged,
             &fixture.materialized,
             std::iter::empty(),
-        ).is_err());
+        )
+        .is_ok());
     }
 
     #[test]

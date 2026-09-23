@@ -32,16 +32,29 @@ use nomifun_ai_agent::{
     SessionControlSink,
 };
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentSessionId, ArtifactId, ContributionSourceKind,
+    AgentBindingValue, AgentHandoffBindingRefV1, AgentHandoffCompletionAccountV1,
+    AgentHandoffCompletionCriterionV1, AgentHandoffEnvelopeV1, AgentHandoffInputCitationV1,
+    AgentHandoffMode, AgentHandoffPlanStepV1, AgentHandoffPlanV1,
+    AgentHandoffRequirementOriginV1, AgentHandoffRequirementV1,
+    AgentHandoffVerifiedArtifactV1, AgentSessionId, ArtifactId, ContributionSourceKind,
     DeleteAgentSessionCommand, EffectClass, OperationId, PrincipalRef, RemoteBindingProvenance,
-    ResolvedCapability, ScopeKey, StrictJsonValue, UserId,
+    ResolvedCapability, ScopeKey, SessionPayloadBody, StrictJsonValue, UserId, digest_bytes,
+    digest_payload,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
 };
+use nomifun_agent_runtime::{
+    AgentCompletionReport, AgentCriterionDisposition, AgentEngineEvent, AgentInputCitation,
+    AgentPlan, AgentPlanStatus, AgentTaskRequirement,
+};
 use super::nomi_core_control_plane::control_plane_router_without_legacy_skills;
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentResourceSelectionDto,
+    AgentBindingValueDto, AgentHandoffAvailabilityDto, AgentHandoffModeDto,
+    AgentResourceSelectionDto, AgentSwitchBlockerDto, AgentSwitchCapabilityDiffDto,
+    AgentSwitchIdentityDto, AgentSwitchModelPreviewDto, AgentSwitchResourceDiffDto,
+    AgentSwitchSelectionDto, ApplyAgentSessionSwitchRequestDto,
+    ApplyAgentSessionSwitchResponseDto,
     AgentSessionKnowledgeBindingDto, AgentSessionKnowledgePolicyDto,
     AgentSessionKnowledgeWritebackEagernessDto,
     ApiResponse, ConversationListResponse, ConversationResponse,
@@ -52,6 +65,7 @@ use nomifun_api_types::{
     ErrorResponse, ForkAgentSessionRequestDto,
     ForkAgentSessionResponseDto, ListMessagesQuery, MessageListResponse, MessageResponse,
     MessageSearchItem, MessageSearchResponse, SearchMessagesQuery,
+    PreviewAgentSessionSwitchRequestDto, PreviewAgentSessionSwitchResponseDto,
     RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveRequestDto,
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto,
@@ -1955,6 +1969,10 @@ impl NomiCoreSessionOwner {
             snapshot,
             Some(&agent_name),
         )?;
+        if let Some(template_key) = official_template.as_ref() {
+            projected.projection.request.extra["official_template_key"] =
+                Value::String(template_key.as_str().to_owned());
+        }
         let runtime_host = self.official_runtime.get().ok_or_else(|| {
             AppError::Conflict(
                 "canonical AgentSession projection requires the assembled Runtime host"
@@ -6991,6 +7009,14 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             put(switch_nomi_core_agent_session_model),
         )
         .route(
+            "/api/agent-sessions/{agent_session_id}/agent-switch/preview",
+            post(preview_nomi_core_agent_session_agent_switch),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/agent",
+            put(apply_nomi_core_agent_session_agent_switch),
+        )
+        .route(
             "/api/agent-sessions/{agent_session_id}/knowledge",
             get(get_nomi_core_agent_session_knowledge)
                 .put(update_nomi_core_agent_session_knowledge),
@@ -10041,6 +10067,1420 @@ async fn update_nomi_core_agent_session_knowledge(
     Ok(Json(ApiResponse::ok(updated_binding)))
 }
 
+#[derive(Clone)]
+struct PreparedAgentSessionSwitch {
+    preview: PreviewAgentSessionSwitchResponseDto,
+    expected: AgentBindingValue,
+    replacement: AgentBindingValue,
+    source_label: String,
+    target_label: String,
+    handoff: Option<AgentHandoffEnvelopeV1>,
+    active_capability_ids: Vec<String>,
+}
+
+fn handoff_mode(mode: AgentHandoffModeDto) -> AgentHandoffMode {
+    match mode {
+        AgentHandoffModeDto::ContinueTask => AgentHandoffMode::ContinueTask,
+        AgentHandoffModeDto::ContextOnly => AgentHandoffMode::ContextOnly,
+    }
+}
+
+fn handoff_citation(source: &AgentInputCitation) -> AgentHandoffInputCitationV1 {
+    AgentHandoffInputCitationV1 {
+        input: source.input,
+        quote: source.quote.clone(),
+    }
+}
+
+fn handoff_requirement(requirement: &AgentTaskRequirement) -> AgentHandoffRequirementV1 {
+    AgentHandoffRequirementV1 {
+        id: requirement.id.clone(),
+        description: requirement.description.clone(),
+        source: handoff_citation(&requirement.source),
+        origin: requirement
+            .origin
+            .as_ref()
+            .map(|origin| AgentHandoffRequirementOriginV1 {
+                turn_operation_id: origin.turn_operation_id.clone(),
+                requirement_id: origin.requirement_id.clone(),
+                source: handoff_citation(&origin.source),
+            }),
+    }
+}
+
+fn handoff_plan(plan: &AgentPlan) -> AgentHandoffPlanV1 {
+    AgentHandoffPlanV1 {
+        revision: plan.revision,
+        explanation: plan.explanation.clone(),
+        steps: plan
+            .steps
+            .iter()
+            .map(|step| AgentHandoffPlanStepV1 {
+                step: step.step.clone(),
+                status: match step.status {
+                    AgentPlanStatus::Pending => "pending",
+                    AgentPlanStatus::InProgress => "in_progress",
+                    AgentPlanStatus::Completed => "completed",
+                    AgentPlanStatus::Blocked => "blocked",
+                }
+                .to_owned(),
+            })
+            .collect(),
+        needs_replan: plan.needs_replan,
+    }
+}
+
+fn handoff_completion(report: &AgentCompletionReport) -> AgentHandoffCompletionAccountV1 {
+    AgentHandoffCompletionAccountV1 {
+        plan_revision: report.plan_revision,
+        observation_revision: report.observation_revision,
+        workspace_epoch: report.workspace_epoch,
+        summary: report.summary.clone(),
+        criteria: report
+            .criteria
+            .iter()
+            .map(|criterion| AgentHandoffCompletionCriterionV1 {
+                step: criterion.step.clone(),
+                disposition: match criterion.disposition {
+                    AgentCriterionDisposition::Supported => "supported",
+                    AgentCriterionDisposition::Unverified => "unverified",
+                    AgentCriterionDisposition::Blocked => "blocked",
+                    AgentCriterionDisposition::ScopeChanged => "scope_changed",
+                }
+                .to_owned(),
+                evidence_call_ids: criterion.evidence_call_ids.clone(),
+                rationale: criterion.rationale.clone(),
+                requirement_ids: criterion.requirement_ids.clone(),
+                scope_change: criterion.scope_change.as_ref().map(handoff_citation),
+            })
+            .collect(),
+    }
+}
+
+async fn deterministic_agent_handoff(
+    state: &NomiCoreAgentApiState,
+    session_id: &AgentSessionId,
+    source: &AgentBindingValue,
+    target: &AgentBindingValue,
+) -> Result<(Option<AgentHandoffEnvelopeV1>, bool), NomiCoreApiError> {
+    let operation_id: Option<String> = sqlx::query_scalar(
+        "SELECT operation_id FROM agent_turns \
+         WHERE session_id = ? AND state IN ('completed', 'failed', 'cancelled') \
+         ORDER BY finished_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(session_id.as_ref())
+    .fetch_optional(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(format!("read latest closed Agent Turn: {error}")))?;
+    let Some(operation_id) = operation_id else {
+        return Ok((None, false));
+    };
+    let operation = OperationId::from(operation_id.clone());
+    let facts = state
+        .session_owner
+        .canonical()
+        .store()
+        .chat_causality_facts(session_id, &operation)
+        .await
+        .map_err(agent_session_store_error)?;
+    let terminal = facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.correlation_id.as_ref() == operation_id
+                && matches!(
+                    event.kind.0.as_str(),
+                    "turn/completed" | "turn/failed" | "turn/cancelled"
+                )
+        })
+        .min_by_key(|event| event.seq)
+        .ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::CONFLICT,
+                "AGENT_SESSION_HANDOFF_SOURCE_INVALID",
+                "latest closed Turn has no canonical terminal boundary",
+            )
+        })?;
+    let mut engine_events = Vec::new();
+    for event in facts.events.iter().filter(|event| {
+        event.kind.0 == "runtime/progress-recorded"
+            && event.correlation_id.as_ref() == operation_id
+            && event.seq < terminal.seq
+    }) {
+        let Some(value) = facts
+            .event_payloads
+            .get(event.event_id.as_ref())
+            .and_then(|payload| payload.get("event"))
+        else {
+            continue;
+        };
+        if value
+            .get("event")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind.starts_with("host_"))
+        {
+            continue;
+        }
+        let parsed = serde_json::from_value::<AgentEngineEvent>(value.clone()).map_err(|error| {
+            NomiCoreApiError::with_details(
+                StatusCode::CONFLICT,
+                "AGENT_SESSION_HANDOFF_SOURCE_INVALID",
+                "latest closed Turn contains an invalid Runtime event",
+                json!({ "operation_id": operation_id, "error": error.to_string() }),
+            )
+        })?;
+        engine_events.push(parsed);
+    }
+    let exact_source = engine_events.first().is_some_and(|event| match event {
+        AgentEngineEvent::TurnStarted {
+            binding,
+            turn_operation_id,
+        } => {
+            binding.agent_session_id() == session_id
+                && binding.resolved_snapshot_ref() == &source.resolved_snapshot_ref
+                && turn_operation_id.as_ref() == operation_id
+        }
+        _ => false,
+    });
+    if !exact_source {
+        return Ok((None, false));
+    }
+    if !matches!(
+        engine_events.last(),
+        Some(
+            AgentEngineEvent::TurnCompleted { .. }
+                | AgentEngineEvent::TurnFailed { .. }
+                | AgentEngineEvent::TurnCancelled { .. }
+        )
+    ) {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_HANDOFF_SOURCE_INVALID",
+            "latest closed Turn has no exact Runtime terminal record",
+        ));
+    }
+    let plan_entry = engine_events
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, event)| match event {
+            AgentEngineEvent::PlanUpdated { plan } => Some((index, plan.clone())),
+            _ => None,
+        });
+    let completion_entry = engine_events
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, event)| match event {
+            AgentEngineEvent::CompletionReported { report } => Some((index, report.clone())),
+            _ => None,
+        });
+    let plan = plan_entry.as_ref().map(|(_, plan)| plan.clone());
+    let completion = completion_entry.and_then(|(completion_index, report)| {
+        plan_entry
+            .as_ref()
+            .is_some_and(|(plan_index, plan)| {
+                completion_index > *plan_index
+                    && report.plan_revision == plan.revision
+                    && report.requirements == plan.requirements
+            })
+            .then_some(report)
+    });
+    let running_processes = engine_events.iter().rev().find_map(|event| match event {
+        AgentEngineEvent::WorkStatus { status } => Some(!status.running_processes.is_empty()),
+        _ => None,
+    }).unwrap_or(false);
+
+    let mut publish_calls = BTreeSet::new();
+    let mut verified_artifacts = Vec::new();
+    for event in &engine_events {
+        match event {
+            AgentEngineEvent::ToolStarted {
+                call_id, action_id, ..
+            } if action_id.as_ref() == "workspace.artifacts/publish" => {
+                publish_calls.insert(call_id.as_ref().to_owned());
+            }
+            AgentEngineEvent::ToolCompleted { result, .. }
+                if !result.is_error && publish_calls.contains(result.call_id.as_ref()) =>
+            {
+                if let Ok(artifact) =
+                    serde_json::from_str::<nomifun_file::PublishedWorkspaceArtifact>(
+                        &result.output_text(),
+                    )
+                {
+                    verified_artifacts.push(AgentHandoffVerifiedArtifactV1 {
+                        artifact_id: artifact.artifact_id,
+                        source_path: artifact.source_path,
+                        relative_path: artifact.relative_path,
+                        mime_type: artifact.mime_type,
+                        size_bytes: artifact.size_bytes,
+                        sha256: artifact.sha256,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    verified_artifacts.sort_by(|left, right| left.artifact_id.cmp(&right.artifact_id));
+    verified_artifacts.dedup_by(|left, right| left.artifact_id == right.artifact_id);
+
+    let requirements = plan
+        .as_ref()
+        .map(|plan| plan.requirements.iter().map(handoff_requirement).collect())
+        .unwrap_or_default();
+    let mut unresolved_items = Vec::new();
+    if let Some(plan) = plan.as_ref() {
+        for step in &plan.steps {
+            if matches!(
+                step.status,
+                AgentPlanStatus::Pending | AgentPlanStatus::InProgress | AgentPlanStatus::Blocked
+            ) {
+                let status = match step.status {
+                    AgentPlanStatus::Pending => "pending",
+                    AgentPlanStatus::InProgress => "in_progress",
+                    AgentPlanStatus::Completed => "completed",
+                    AgentPlanStatus::Blocked => "blocked",
+                };
+                unresolved_items.push(format!("{}: {status}", step.step));
+            }
+        }
+    }
+    if let Some(report) = completion.as_ref() {
+        for criterion in &report.criteria {
+            if criterion.disposition != AgentCriterionDisposition::Supported {
+                unresolved_items.push(format!(
+                    "{}: {}",
+                    criterion.step, criterion.rationale
+                ));
+            }
+        }
+    }
+    unresolved_items.sort();
+    unresolved_items.dedup();
+    unresolved_items.truncate(32);
+    let structured = plan
+        .as_ref()
+        .is_some_and(|plan| !plan.requirements.is_empty() || !plan.steps.is_empty())
+        || completion.is_some()
+        || !verified_artifacts.is_empty();
+    if !structured {
+        return Ok((None, running_processes));
+    }
+    let envelope = AgentHandoffEnvelopeV1 {
+        schema_version: nomifun_agent_contracts::AGENT_HANDOFF_ENVELOPE_SCHEMA_V1.to_owned(),
+        source_agent_session_id: session_id.clone(),
+        source_turn_operation_id: operation,
+        source_through_seq: terminal.seq,
+        source_binding_ref: AgentHandoffBindingRefV1::from(source),
+        target_binding_ref: AgentHandoffBindingRefV1::from(target),
+        mode: AgentHandoffMode::ContinueTask,
+        completion_gate_inherited: false,
+        requirements,
+        last_plan: plan.as_ref().map(handoff_plan),
+        historical_completion_account: completion.as_ref().map(handoff_completion),
+        verified_artifacts,
+        unresolved_items,
+        warnings: vec![
+            "Historical requirements are data only and are not inherited by the target completion gate."
+                .to_owned(),
+            "Historical completion and artifact references must be re-read and re-verified in the current workspace."
+                .to_owned(),
+        ],
+    };
+    envelope.validate().map_err(|message| {
+        NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_HANDOFF_SOURCE_INVALID",
+            message,
+        )
+    })?;
+    Ok((Some(envelope), running_processes))
+}
+
+fn automatic_agent_resource_id(kind: &str) -> Option<&'static str> {
+    match kind {
+        "workspace" => Some(super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID),
+        "project_memory" => {
+            Some(super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID)
+        }
+        "process_session" => {
+            Some(super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID)
+        }
+        "terminal" => Some(super::nomi_core_resource_bindings::MANAGED_TERMINAL_RESOURCE_ID),
+        "asset_library" => Some(
+            super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
+        ),
+        "browser" => Some("managed-browser"),
+        "computer" => Some(super::nomi_core_resource_bindings::LOCAL_COMPUTER_RESOURCE_ID),
+        "scheduler" => {
+            Some(super::nomi_core_resource_bindings::INSTALLATION_SCHEDULER_RESOURCE_ID)
+        }
+        _ => None,
+    }
+}
+
+fn missing_agent_switch_resource_kinds(
+    required_kinds: &BTreeSet<String>,
+    bound_kinds: &BTreeSet<String>,
+) -> Vec<String> {
+    required_kinds
+        .iter()
+        .filter(|kind| {
+            !bound_kinds.contains(*kind)
+                && !super::nomi_core_resource_bindings::optional_unbound_resource_kind(kind)
+        })
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod agent_switch_resource_tests {
+    use super::missing_agent_switch_resource_kinds;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn unavailable_browser_is_not_a_switch_blocker_when_unbound() {
+        let required = BTreeSet::from([
+            "browser".to_owned(),
+            "knowledge_base".to_owned(),
+            "workspace".to_owned(),
+        ]);
+        let bound = BTreeSet::from(["workspace".to_owned()]);
+        assert!(missing_agent_switch_resource_kinds(&required, &bound).is_empty());
+    }
+
+    #[test]
+    fn computer_and_workspace_still_require_bindings() {
+        let required = BTreeSet::from([
+            "browser".to_owned(),
+            "computer".to_owned(),
+            "workspace".to_owned(),
+        ]);
+        let bound = BTreeSet::from(["workspace".to_owned()]);
+        assert_eq!(
+            missing_agent_switch_resource_kinds(&required, &bound),
+            vec!["computer".to_owned()]
+        );
+        assert_eq!(
+            missing_agent_switch_resource_kinds(&required, &BTreeSet::new()),
+            vec!["computer".to_owned(), "workspace".to_owned()]
+        );
+    }
+}
+
+async fn agent_switch_recovery_blocker(
+    state: &NomiCoreAgentApiState,
+    session_id: &AgentSessionId,
+) -> Result<Option<AgentSwitchBlockerDto>, NomiCoreApiError> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT seq, inline_json FROM agent_events \
+         WHERE session_id = ? AND kind = 'runtime/progress-recorded' \
+           AND seq > COALESCE((SELECT MAX(seq) FROM agent_events \
+             WHERE session_id = ? AND kind = 'session/agent-binding-changed'), 0) \
+         ORDER BY seq ASC",
+    )
+    .bind(session_id.as_ref())
+    .bind(session_id.as_ref())
+    .fetch_all(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(format!("read Agent patch recovery: {error}")))?;
+    agent_switch_recovery_blocker_from_rows(rows)
+}
+
+fn agent_switch_recovery_blocker_from_rows(
+    rows: Vec<(i64, String)>,
+) -> Result<Option<AgentSwitchBlockerDto>, NomiCoreApiError> {
+    let mut latest_state: Option<(i64, nomifun_agent_runtime::AgentPatchRecoveryState)> = None;
+    let mut latest_patch_dispatch = 0_i64;
+    for (seq, raw) in rows {
+        let payload: Value = serde_json::from_str(&raw).map_err(|error| {
+            AppError::Internal(format!("decode Agent patch recovery event: {error}"))
+        })?;
+        let Some(event) = payload.get("event") else {
+            continue;
+        };
+        if event.get("event").and_then(Value::as_str) == Some("host_tool_dispatch")
+            && event
+                .get("dispatch")
+                .and_then(|dispatch| dispatch.get("action_id"))
+                .and_then(Value::as_str)
+                == Some("workspace.files/patch")
+        {
+            latest_patch_dispatch = seq;
+        }
+        if let Ok(AgentEngineEvent::PatchRecoveryUpdated { state }) =
+            serde_json::from_value::<AgentEngineEvent>(event.clone())
+        {
+            state.validate().map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_HANDOFF_RECOVERY_PENDING",
+                    error.to_string(),
+                )
+            })?;
+            latest_state = Some((seq, state));
+        }
+    }
+    let pending = latest_state
+        .as_ref()
+        .is_some_and(|(_, state)| state.has_pending());
+    let uncovered = latest_patch_dispatch > latest_state.as_ref().map_or(0, |(seq, _)| *seq);
+    Ok((pending || uncovered).then(|| AgentSwitchBlockerDto {
+        code: "AGENT_SESSION_HANDOFF_RECOVERY_PENDING".to_owned(),
+        message: "Resolve the pending Patch recovery before switching Agents".to_owned(),
+        details: Some(json!({
+            "pending": pending,
+            "uncovered_patch_dispatch": uncovered,
+            "recovery": "complete_or_explicitly_clear_patch_recovery",
+        })),
+    }))
+}
+
+async fn agent_switch_blockers(
+    state: &NomiCoreAgentApiState,
+    owner: &AuthenticatedOwner,
+    observation: &SessionObservation,
+    source_has_running_processes: bool,
+) -> Result<Vec<AgentSwitchBlockerDto>, NomiCoreApiError> {
+    let session_id = &observation.session.agent_session_id;
+    let mut blockers = Vec::new();
+    if observation.session.remote_binding_provenance.is_some() {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_SESSION_AGENT_IS_REMOTE_FROZEN".to_owned(),
+            message: "Remote AgentSession Agent bindings cannot be changed locally".to_owned(),
+            details: None,
+        });
+    }
+    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_SESSION_TURN_ACTIVE".to_owned(),
+            message: "Wait for the active Turn before switching Agents".to_owned(),
+            details: observation
+                .head
+                .active_turn_id
+                .as_ref()
+                .map(|turn_id| json!({ "active_turn_id": turn_id })),
+        });
+    }
+    let attempt: Option<String> = sqlx::query_scalar(
+        "SELECT execution_id FROM conversation_execution_links \
+         WHERE conversation_id = ? AND relation IN ('attempt', 'automation') \
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(session_id.as_ref())
+    .fetch_optional(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if let Some(execution_id) = attempt {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_EXECUTION_ATTEMPT_READ_ONLY".to_owned(),
+            message: "AgentExecution Attempt audit Sessions cannot switch Agents".to_owned(),
+            details: Some(json!({ "execution_id": execution_id })),
+        });
+    }
+    let active_execution: Option<(String, String)> = sqlx::query_as(
+        "SELECT execution.execution_id, execution.status \
+         FROM conversation_execution_links link \
+         JOIN agent_executions execution ON execution.execution_id = link.execution_id \
+         WHERE link.conversation_id = ? AND link.relation = 'lead' AND link.active = 1 \
+           AND execution.user_id = ? AND execution.deleted_at IS NULL \
+           AND execution.status NOT IN ('completed', 'completed_with_failures', 'failed', 'cancelled') \
+         ORDER BY link.updated_at DESC, link.id DESC LIMIT 1",
+    )
+    .bind(session_id.as_ref())
+    .bind(owner.as_ref())
+    .fetch_optional(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if let Some((execution_id, status)) = active_execution {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_EXECUTION_ACTIVE".to_owned(),
+            message: "Wait for or cancel the active AgentExecution before switching Agents"
+                .to_owned(),
+            details: Some(json!({ "execution_id": execution_id, "status": status })),
+        });
+    }
+    let product_resource = observation
+        .session
+        .agent_binding
+        .typed_resource_bindings
+        .iter()
+        .find(|binding| {
+            matches!(
+                binding.resource_kind.as_ref(),
+                "companion" | "companion_memory" | "customer" | "canvas" | "channel"
+            )
+        });
+    let cron_bound: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM cron_jobs WHERE conversation_id = ?)",
+    )
+    .bind(session_id.as_ref())
+    .fetch_one(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if product_resource.is_some() || cron_bound != 0 {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED".to_owned(),
+            message: "This product-bound Session owns a fixed Agent identity".to_owned(),
+            details: Some(json!({
+                "resource_kind": product_resource.map(|binding| binding.resource_kind.as_ref()),
+                "cron_bound": cron_bound != 0,
+            })),
+        });
+    }
+    if state
+        .session_owner
+        .canonical()
+        .store()
+        .has_unsettled_effects(session_id)
+        .await
+        .map_err(agent_session_store_error)?
+        || source_has_running_processes
+    {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_SESSION_EFFECTS_UNSETTLED".to_owned(),
+            message: "Settle effects and descendant processes before switching Agents".to_owned(),
+            details: Some(json!({ "source_has_running_processes": source_has_running_processes })),
+        });
+    }
+    if let Some(blocker) = agent_switch_recovery_blocker(state, session_id).await? {
+        blockers.push(blocker);
+    }
+    Ok(blockers)
+}
+
+async fn prepare_agent_session_switch(
+    state: &NomiCoreAgentApiState,
+    owner: &AuthenticatedOwner,
+    session_id: &AgentSessionId,
+    selection: &AgentSwitchSelectionDto,
+    explicit_model: Option<&AgentChatModelSelectionDto>,
+) -> Result<PreparedAgentSessionSwitch, NomiCoreApiError> {
+    let principal = authenticated_principal(owner);
+    let observation = state
+        .session_owner
+        .canonical()
+        .get(&principal, session_id)
+        .await?;
+    let current_dto = agent_binding_dto(&observation.session.agent_binding)?;
+    let (_, current_revision, current_snapshot) = state
+        .control_plane
+        .saved_binding_artifacts(&owner.0, &current_dto)
+        .await?;
+    let current_knowledge =
+        agent_session_knowledge_binding(&observation.session.agent_binding)?;
+    let current_model = current_revision
+        .payload
+        .chat_route_records
+        .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+        .map(|route| AgentChatModelSelectionDto {
+            provider_id: route.primary.provider_id.clone(),
+            model: route.primary.model.clone(),
+        });
+    let target_preset_id = match selection {
+        AgentSwitchSelectionDto::Preset { preset_id } => preset_id.clone(),
+        AgentSwitchSelectionDto::Template { template_key } => state
+            .control_plane
+            .create_from_template(
+                &owner.0,
+                template_key,
+                CreateAgentPresetFromTemplateRequest {
+                    model: explicit_model.cloned().or_else(|| current_model.clone()),
+                    reuse_existing: true,
+                    display_name: template_key.clone(),
+                    description: None,
+                    model_route_refs: BTreeMap::new(),
+                    chat_route_records: BTreeMap::new(),
+                },
+            )
+            .await?
+            .preset
+            .preset_id,
+    };
+    let raw_target = state
+        .control_plane
+        .resolve_agent_session_agent_binding(
+            &owner.0,
+            &current_dto,
+            &target_preset_id,
+            explicit_model,
+        )
+        .await
+        .map_err(|error| {
+            if error.code().as_ref().starts_with("MODEL_") {
+                NomiCoreApiError::with_details(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "AGENT_SESSION_MODEL_INCOMPATIBLE",
+                    "The current model cannot satisfy the target Agent",
+                    json!({
+                        "control_plane_code": error.code().as_ref(),
+                        "control_plane_details": error.details(),
+                        "recovery": "select_compatible_model",
+                        "settings_section": "chat",
+                    }),
+                )
+            } else {
+                error.into()
+            }
+        })?;
+    let (_, target_revision, target_snapshot) = state
+        .control_plane
+        .saved_binding_artifacts(&owner.0, &raw_target)
+        .await?;
+    state
+        .product_agent_resolver
+        .official_runtime
+        .validate_agent(&target_snapshot)?;
+    let current_label = state
+        .control_plane
+        .editor(
+            &owner.0,
+            current_revision.reference.preset_id.as_ref(),
+            Some(current_revision.reference.revision),
+        )
+        .await?
+        .preset
+        .display_name;
+    let target_label = state
+        .control_plane
+        .editor(
+            &owner.0,
+            target_revision.reference.preset_id.as_ref(),
+            Some(target_revision.reference.revision),
+        )
+        .await?
+        .preset
+        .display_name;
+
+    let target_kinds = target_snapshot
+        .content
+        .required_resource_kinds
+        .iter()
+        .map(|kind| kind.as_ref().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut selections = Vec::new();
+    let mut selected_keys = BTreeSet::new();
+    let selected_workspace = observation
+        .session
+        .agent_binding
+        .typed_resource_bindings
+        .iter()
+        .find(|binding| binding.resource_kind.as_ref() == "workspace")
+        .and_then(|binding| binding.typed_parameters.get("workspace_root"))
+        .cloned();
+    for binding in &observation.session.agent_binding.typed_resource_bindings {
+        let kind = binding.resource_kind.as_ref();
+        if !target_kinds.contains(kind) {
+            continue;
+        }
+        let resource_id = if kind == "workspace" && selected_workspace.is_some() {
+            super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID.to_owned()
+        } else {
+            binding.resource_id.as_ref().to_owned()
+        };
+        if selected_keys.insert((kind.to_owned(), resource_id.clone())) {
+            selections.push(AgentResourceSelectionDto {
+                resource_kind: kind.to_owned(),
+                resource_id,
+            });
+        }
+    }
+    for kind in &target_kinds {
+        if selections
+            .iter()
+            .any(|selection| selection.resource_kind == *kind)
+        {
+            continue;
+        }
+        if let Some(resource_id) = automatic_agent_resource_id(kind) {
+            selections.push(AgentResourceSelectionDto {
+                resource_kind: kind.clone(),
+                resource_id: resource_id.to_owned(),
+            });
+        }
+    }
+    selections.sort_by(|left, right| {
+        left.resource_kind
+            .cmp(&right.resource_kind)
+            .then_with(|| left.resource_id.cmp(&right.resource_id))
+    });
+
+    let mut blockers = Vec::new();
+    let mut replacement_dto = match state
+        .resource_bindings
+        .resolve_for_saved_binding(
+            &state.control_plane,
+            &owner.0,
+            raw_target.clone(),
+            &selections,
+        )
+        .await
+    {
+        Ok(binding) => binding,
+        Err(error) => {
+            blockers.push(AgentSwitchBlockerDto {
+                code: if matches!(
+                    error.code(),
+                    "PRESET_RESOURCE_NOT_BOUND" | "RESOURCE_SELECTION_REQUIRED"
+                ) {
+                    "AGENT_SESSION_RESOURCE_REQUIRED".to_owned()
+                } else {
+                    error.code().to_owned()
+                },
+                message: error.message().to_owned(),
+                details: Some(json!({
+                    "resource_details": error.details(),
+                    "settings_section": "agents",
+                    "recovery": "configure_target_agent_resources",
+                })),
+            });
+            raw_target
+        }
+    };
+    if let Some(workspace) = selected_workspace.as_deref() {
+        freeze_selected_workspace(
+            &mut replacement_dto,
+            owner.as_ref(),
+            workspace,
+            WorkspaceDirectoryCheck::Runtime,
+        )?;
+    }
+    if replacement_dto.typed_resource_bindings.iter().any(|resource| {
+        resource.resource_kind == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+    }) {
+        if current_knowledge.enabled {
+            freeze_agent_session_knowledge_policy(
+                &mut replacement_dto,
+                Some(&AgentSessionKnowledgePolicyDto {
+                    writeback: current_knowledge.writeback,
+                    writeback_eagerness: current_knowledge.writeback_eagerness,
+                }),
+            )?;
+        } else {
+            for resource in replacement_dto.typed_resource_bindings.iter_mut().filter(
+                |resource| {
+                    resource.resource_kind
+                        == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+                },
+            ) {
+                resource.typed_parameters.insert(
+                    nomifun_agent_domain_wave1::KNOWLEDGE_ENABLED_PARAMETER.to_owned(),
+                    "false".to_owned(),
+                );
+                resource.typed_parameters.insert(
+                    nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_PARAMETER.to_owned(),
+                    "false".to_owned(),
+                );
+                resource.typed_parameters.insert(
+                    nomifun_agent_domain_wave1::KNOWLEDGE_WRITEBACK_EAGERNESS_PARAMETER.to_owned(),
+                    "manual".to_owned(),
+                );
+            }
+        }
+    }
+    replacement_dto.binding_version = observation
+        .session
+        .agent_binding
+        .binding_version
+        .checked_add(1)
+        .ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::CONFLICT,
+                "AGENT_SESSION_BINDING_CHANGED",
+                "AgentSession binding version cannot advance",
+            )
+        })?;
+    let replacement: AgentBindingValue = serde_json::to_value(&replacement_dto)
+        .and_then(serde_json::from_value)
+        .map_err(|error| {
+            AppError::Conflict(format!("resolved Session Agent binding is invalid: {error}"))
+        })?;
+    let (handoff, running_processes) = deterministic_agent_handoff(
+        state,
+        session_id,
+        &observation.session.agent_binding,
+        &replacement,
+    )
+    .await?;
+    blockers.extend(
+        agent_switch_blockers(state, owner, &observation, running_processes).await?,
+    );
+
+    let source_capabilities = current_snapshot
+        .content
+        .contributions()
+        .map(|capability| capability.capability.id.as_ref().to_owned())
+        .collect::<BTreeSet<_>>();
+    let target_capabilities = target_snapshot
+        .content
+        .contributions()
+        .map(|capability| capability.capability.id.as_ref().to_owned())
+        .collect::<BTreeSet<_>>();
+    let active_capability_ids = target_snapshot
+        .content
+        .enabled_capabilities
+        .iter()
+        .filter(|capability| capability.consumption.is_contribution())
+        .map(|capability| capability.capability.id.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let current_resources = observation
+        .session
+        .agent_binding
+        .typed_resource_bindings
+        .iter()
+        .map(|resource| AgentResourceSelectionDto {
+            resource_kind: resource.resource_kind.as_ref().to_owned(),
+            resource_id: resource.resource_id.as_ref().to_owned(),
+        })
+        .collect::<BTreeSet<_>>();
+    let target_resources = replacement
+        .typed_resource_bindings
+        .iter()
+        .map(|resource| AgentResourceSelectionDto {
+            resource_kind: resource.resource_kind.as_ref().to_owned(),
+            resource_id: resource.resource_id.as_ref().to_owned(),
+        })
+        .collect::<BTreeSet<_>>();
+    let bound_kinds = replacement
+        .typed_resource_bindings
+        .iter()
+        .map(|binding| binding.resource_kind.as_ref().to_owned())
+        .collect::<BTreeSet<_>>();
+    let missing_kinds = missing_agent_switch_resource_kinds(&target_kinds, &bound_kinds);
+    if !missing_kinds.is_empty()
+        && !blockers
+            .iter()
+            .any(|blocker| blocker.code == "AGENT_SESSION_RESOURCE_REQUIRED")
+    {
+        blockers.push(AgentSwitchBlockerDto {
+            code: "AGENT_SESSION_RESOURCE_REQUIRED".to_owned(),
+            message: "The target Agent requires additional configured resources".to_owned(),
+            details: Some(json!({
+                "missing_resource_kinds": missing_kinds,
+                "settings_section": "agents",
+            })),
+        });
+    }
+    let target_model = target_revision
+        .payload
+        .chat_route_records
+        .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
+        .map(|route| AgentChatModelSelectionDto {
+            provider_id: route.primary.provider_id.clone(),
+            model: route.primary.model.clone(),
+        })
+        .or_else(|| explicit_model.cloned())
+        .or_else(|| current_model.clone())
+        .ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "AGENT_SESSION_MODEL_INCOMPATIBLE",
+                "The target Agent has no compatible Chat model",
+            )
+        })?;
+    let handoff_view = AgentHandoffAvailabilityDto {
+        available: handoff.is_some(),
+        requirement_count: handoff.as_ref().map_or(0, |handoff| handoff.requirements.len()),
+        verified_artifact_count: handoff
+            .as_ref()
+            .map_or(0, |handoff| handoff.verified_artifacts.len()),
+        unresolved_item_count: handoff
+            .as_ref()
+            .map_or(0, |handoff| handoff.unresolved_items.len()),
+        completion_gate_inherited: false,
+    };
+    let preview = PreviewAgentSessionSwitchResponseDto {
+        current: AgentSwitchIdentityDto {
+            label: current_label.clone(),
+            preset_id: current_revision.reference.preset_id.as_ref().to_owned(),
+            preset_revision: current_revision.reference.revision,
+            resolved_snapshot_ref: serde_json::to_value(&current_snapshot.snapshot_ref)
+                .and_then(serde_json::from_value)?,
+            binding_version: observation.session.agent_binding.binding_version,
+        },
+        target: AgentSwitchIdentityDto {
+            label: target_label.clone(),
+            preset_id: target_revision.reference.preset_id.as_ref().to_owned(),
+            preset_revision: target_revision.reference.revision,
+            resolved_snapshot_ref: serde_json::to_value(&target_snapshot.snapshot_ref)
+                .and_then(serde_json::from_value)?,
+            binding_version: replacement.binding_version,
+        },
+        model: AgentSwitchModelPreviewDto {
+            provider_id: target_model.provider_id.clone(),
+            model: target_model.model.clone(),
+            preserved: explicit_model.is_none()
+                && current_model.as_ref().is_some_and(|current| current == &target_model),
+            compatible: true,
+            missing_features: Vec::new(),
+        },
+        resources: AgentSwitchResourceDiffDto {
+            retained: current_resources
+                .intersection(&target_resources)
+                .cloned()
+                .collect(),
+            dropped: current_resources
+                .difference(&target_resources)
+                .cloned()
+                .collect(),
+            missing_kinds,
+        },
+        capabilities: AgentSwitchCapabilityDiffDto {
+            gained: target_capabilities
+                .difference(&source_capabilities)
+                .cloned()
+                .collect(),
+            lost: source_capabilities
+                .difference(&target_capabilities)
+                .cloned()
+                .collect(),
+        },
+        handoff: handoff_view,
+        expected_binding_version: observation.session.agent_binding.binding_version,
+        can_apply: blockers.is_empty(),
+        blockers,
+    };
+    Ok(PreparedAgentSessionSwitch {
+        preview,
+        expected: observation.session.agent_binding,
+        replacement,
+        source_label: current_label,
+        target_label,
+        handoff,
+        active_capability_ids,
+    })
+}
+
+async fn preview_nomi_core_agent_session_agent_switch(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(request): Json<PreviewAgentSessionSwitchRequestDto>,
+) -> Result<Json<ApiResponse<PreviewAgentSessionSwitchResponseDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let prepared = prepare_agent_session_switch(
+        &state,
+        &owner,
+        &session_id,
+        &request.selection,
+        request.model.as_ref(),
+    )
+    .await?;
+    Ok(Json(ApiResponse::ok(prepared.preview)))
+}
+
+fn agent_switch_blocker_error(blocker: &AgentSwitchBlockerDto) -> NomiCoreApiError {
+    let status = if matches!(
+        blocker.code.as_str(),
+        "AGENT_SESSION_MODEL_INCOMPATIBLE" | "AGENT_SESSION_RESOURCE_REQUIRED"
+    ) {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::CONFLICT
+    };
+    NomiCoreApiError::with_details(
+        status,
+        blocker.code.clone(),
+        blocker.message.clone(),
+        blocker.details.clone().unwrap_or(Value::Null),
+    )
+}
+
+fn agent_switch_store_error(error: nomifun_agent_session::SessionStoreError) -> NomiCoreApiError {
+    let message = error.to_string();
+    let code = match &error {
+        nomifun_agent_session::SessionStoreError::Conflict(reason)
+            if reason.contains("active Turn") =>
+        {
+            "AGENT_SESSION_TURN_ACTIVE"
+        }
+        nomifun_agent_session::SessionStoreError::Conflict(reason)
+            if reason.contains("Remote") =>
+        {
+            "AGENT_SESSION_AGENT_IS_REMOTE_FROZEN"
+        }
+        nomifun_agent_session::SessionStoreError::Conflict(reason)
+            if reason.contains("unsettled effects") =>
+        {
+            "AGENT_SESSION_EFFECTS_UNSETTLED"
+        }
+        nomifun_agent_session::SessionStoreError::Conflict(reason)
+            if reason.contains("binding changed") || reason.contains("compare-and-swap") =>
+        {
+            "AGENT_SESSION_BINDING_CHANGED"
+        }
+        nomifun_agent_session::SessionStoreError::IdempotencyConflict(_) => {
+            "IDEMPOTENCY_CONFLICT"
+        }
+        nomifun_agent_session::SessionStoreError::InvalidPayload(_) => {
+            "AGENT_SESSION_HANDOFF_SOURCE_INVALID"
+        }
+        _ => "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED",
+    };
+    NomiCoreApiError::with_details(StatusCode::CONFLICT, code, message, Value::Null)
+}
+
+fn agent_switch_idempotency_key(headers: &HeaderMap) -> Result<String, NomiCoreApiError> {
+    let value = headers
+        .get("Idempotency-Key")
+        .ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::BAD_REQUEST,
+                "NOMI_CORE_INVALID_REQUEST",
+                "Agent switching requires a UUIDv7 Idempotency-Key",
+            )
+        })?
+        .to_str()
+        .map_err(|_| {
+            NomiCoreApiError::new(
+                StatusCode::BAD_REQUEST,
+                "NOMI_CORE_INVALID_REQUEST",
+                "Idempotency-Key must be visible ASCII",
+            )
+        })?;
+    let value = canonical_nonempty(value, "Idempotency-Key")?;
+    let uuid = Uuid::parse_str(&value).map_err(|_| {
+        NomiCoreApiError::new(
+            StatusCode::BAD_REQUEST,
+            "NOMI_CORE_INVALID_REQUEST",
+            "Agent switching Idempotency-Key must be a canonical UUIDv7",
+        )
+    })?;
+    if uuid.get_version_num() != 7 || uuid.hyphenated().to_string() != value {
+        return Err(NomiCoreApiError::new(
+            StatusCode::BAD_REQUEST,
+            "NOMI_CORE_INVALID_REQUEST",
+            "Agent switching Idempotency-Key must be a canonical UUIDv7",
+        ));
+    }
+    Ok(value)
+}
+
+async fn replay_agent_session_switch(
+    state: &NomiCoreAgentApiState,
+    owner: &AuthenticatedOwner,
+    session_id: &AgentSessionId,
+    idempotency_key: &str,
+    request_digest: &nomifun_agent_contracts::DigestHex,
+) -> Result<Option<ApplyAgentSessionSwitchResponseDto>, NomiCoreApiError> {
+    let existing: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT session_id, kind, inline_json FROM agent_events \
+         WHERE producer_id = 'session_api' AND idempotency_key = ? LIMIT 1",
+    )
+    .bind(idempotency_key)
+    .fetch_optional(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(format!("read Agent switch replay: {error}")))?;
+    let Some((existing_session_id, kind, raw)) = existing else {
+        return Ok(None);
+    };
+    if existing_session_id != session_id.as_ref() || kind != "session/agent-binding-changed" {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "IDEMPOTENCY_CONFLICT",
+            "Idempotency-Key was already used by another command",
+        ));
+    }
+    let transition: nomifun_agent_contracts::AgentBindingChangedPayloadV1 =
+        serde_json::from_str(&raw).map_err(|error| {
+            AppError::Internal(format!("decode Agent switch replay: {error}"))
+        })?;
+    if &transition.request_digest != request_digest {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "IDEMPOTENCY_CONFLICT",
+            "Idempotency-Key was replayed with a different Agent switch request",
+        ));
+    }
+    let handoff = if let Some(payload_id) = transition.handoff_payload_id.as_ref() {
+        let stored: Option<(Vec<u8>, String)> = sqlx::query_as(
+            "SELECT body, digest FROM agent_payloads WHERE payload_id = ? AND session_id = ?",
+        )
+        .bind(payload_id.as_ref())
+        .bind(session_id.as_ref())
+        .fetch_optional(&state.session_owner.pool)
+        .await
+        .map_err(|error| AppError::Internal(format!("read replayed Agent handoff: {error}")))?;
+        let (body, stored_digest) = stored.ok_or_else(|| {
+            AppError::Conflict("replayed Agent switch lost its handoff payload".to_owned())
+        })?;
+        if transition.handoff_payload_digest.as_ref().map(|digest| digest.as_ref())
+            != Some(stored_digest.as_str())
+        {
+            return Err(AppError::Conflict(
+                "replayed Agent handoff digest differs from its transition".to_owned(),
+            )
+            .into());
+        }
+        let body: SessionPayloadBody = serde_json::from_slice(&body).map_err(|error| {
+            AppError::Internal(format!("decode replayed Agent handoff: {error}"))
+        })?;
+        match body {
+            SessionPayloadBody::Json(value) => {
+                let bytes = nomifun_agent_contracts::canonical_json_bytes(&value.0)
+                    .map_err(|error| AppError::Internal(error.to_string()))?;
+                if digest_bytes(&bytes).as_ref() != stored_digest {
+                    return Err(AppError::Conflict(
+                        "replayed Agent handoff body failed digest verification".to_owned(),
+                    )
+                    .into());
+                }
+                let envelope = serde_json::from_value::<AgentHandoffEnvelopeV1>(value.0)
+                    .map_err(|error| {
+                        AppError::Internal(format!("decode replayed Agent handoff: {error}"))
+                    })?;
+                envelope.validate().map_err(AppError::Conflict)?;
+                Some(envelope)
+            }
+            _ => {
+                return Err(AppError::Conflict(
+                    "replayed Agent handoff is not canonical JSON".to_owned(),
+                )
+                .into());
+            }
+        }
+    } else {
+        None
+    };
+    let conversation = state
+        .session_owner
+        .canonical_conversation_projection(owner.as_ref(), session_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "replayed Agent-switched Session has no canonical projection".to_owned(),
+            )
+        })?;
+    Ok(Some(ApplyAgentSessionSwitchResponseDto {
+        conversation,
+        transition_id: transition.transition_id.as_ref().to_owned(),
+        previous_agent_label: transition.previous_agent_label,
+        current_agent_label: transition.next_agent_label,
+        binding_version: transition.next_binding_ref.binding_version,
+        effective_from: "next_turn".to_owned(),
+        handoff: AgentHandoffAvailabilityDto {
+            available: handoff.is_some(),
+            requirement_count: handoff
+                .as_ref()
+                .map_or(0, |handoff| handoff.requirements.len()),
+            verified_artifact_count: handoff
+                .as_ref()
+                .map_or(0, |handoff| handoff.verified_artifacts.len()),
+            unresolved_item_count: handoff
+                .as_ref()
+                .map_or(0, |handoff| handoff.unresolved_items.len()),
+            completion_gate_inherited: false,
+        },
+        warnings: handoff
+            .is_some()
+            .then(|| {
+                vec![
+                    "Task facts were handed off as data only; source requirements were not inherited by the target completion gate."
+                        .to_owned(),
+                ]
+            })
+            .unwrap_or_default(),
+    }))
+}
+
+async fn apply_nomi_core_agent_session_agent_switch(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<ApplyAgentSessionSwitchRequestDto>,
+) -> Result<Json<ApiResponse<ApplyAgentSessionSwitchResponseDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let idempotency_key = agent_switch_idempotency_key(&headers)?;
+    let request_digest = digest_payload(&request)
+        .map_err(|error| AppError::Internal(format!("digest Agent switch request: {error}")))?;
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .write_owned()
+        .await;
+    if let Some(replayed) = replay_agent_session_switch(
+        &state,
+        &owner,
+        &session_id,
+        &idempotency_key,
+        &request_digest,
+    )
+    .await?
+    {
+        return Ok(Json(ApiResponse::ok(replayed)));
+    }
+    let current = state
+        .session_owner
+        .canonical()
+        .get(&authenticated_principal(&owner), &session_id)
+        .await?;
+    if request.expected_binding_version != current.session.agent_binding.binding_version {
+        return Err(NomiCoreApiError::with_details(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_BINDING_CHANGED",
+            "AgentSession binding changed after preview",
+            json!({
+                "expected_binding_version": request.expected_binding_version,
+                "actual_binding_version": current.session.agent_binding.binding_version,
+            }),
+        ));
+    }
+    let prepared = prepare_agent_session_switch(
+        &state,
+        &owner,
+        &session_id,
+        &request.selection,
+        request.model.as_ref(),
+    )
+    .await?;
+    if request.expected_binding_version != prepared.expected.binding_version {
+        return Err(NomiCoreApiError::with_details(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_BINDING_CHANGED",
+            "AgentSession binding changed after preview",
+            json!({
+                "expected_binding_version": request.expected_binding_version,
+                "actual_binding_version": prepared.expected.binding_version,
+            }),
+        ));
+    }
+    if let Some(blocker) = prepared.preview.blockers.first() {
+        return Err(agent_switch_blocker_error(blocker));
+    }
+    let mode = handoff_mode(request.handoff_mode);
+    if mode == AgentHandoffMode::ContinueTask && prepared.handoff.is_none() {
+        return Err(NomiCoreApiError::with_details(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED",
+            "No structured latest-Turn task state is available for continue_task",
+            json!({
+                "supported_handoff_modes": ["context_only"],
+                "completion_gate_inherited": false,
+            }),
+        ));
+    }
+    let transition_id = OperationId::from(idempotency_key.clone());
+    state
+        .session_owner
+        .runtime_sessions
+        .terminate_and_wait_result(
+            session_id.as_ref(),
+            Some(AgentKillReason::ConfigurationChanged),
+        )
+        .await
+        .map_err(|error| {
+            NomiCoreApiError::with_details(
+                StatusCode::CONFLICT,
+                "AGENT_SESSION_AGENT_SWITCH_UNSUPPORTED",
+                "The old Agent Runtime could not prove a complete teardown",
+                json!({
+                    "stage": "runtime_teardown",
+                    "reason": error.to_string(),
+                    "recovery": "retry_after_runtime_is_idle",
+                }),
+            )
+        })?;
+    super::hosted_effect_receipts::HostedEffectReceipts::new(state.session_owner.pool.clone())
+        .ensure_settled(owner.as_ref(), session_id.as_ref())
+        .await
+        .map_err(|error| {
+            NomiCoreApiError::with_details(
+                StatusCode::CONFLICT,
+                "AGENT_SESSION_EFFECTS_UNSETTLED",
+                "AgentSession effects are not fully settled",
+                json!({
+                    "stage": "effect_settlement",
+                    "reason": error.to_string(),
+                    "recovery": "wait_or_reconcile_effects",
+                }),
+            )
+        })?;
+    let transitioned = state
+        .session_owner
+        .canonical()
+        .store()
+        .replace_session_agent_binding(
+            &authenticated_principal(&owner),
+            &session_id,
+            nomifun_agent_session::ReplaceSessionAgentBinding {
+                expected: prepared.expected,
+                replacement: prepared.replacement,
+                previous_agent_label: prepared.source_label.clone(),
+                next_agent_label: prepared.target_label.clone(),
+                transition_id: transition_id.clone(),
+                request_digest,
+                idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(idempotency_key),
+                handoff_mode: mode,
+                handoff: (mode == AgentHandoffMode::ContinueTask)
+                    .then_some(prepared.handoff.clone())
+                    .flatten(),
+                initial_active_capability_ids: prepared.active_capability_ids,
+            },
+        )
+        .await
+        .map_err(agent_switch_store_error)?;
+    let conversation = state
+        .session_owner
+        .canonical_conversation_projection(owner.as_ref(), &session_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "Agent-switched AgentSession has no canonical projection".to_owned(),
+            )
+        })?;
+    let handoff_view = AgentHandoffAvailabilityDto {
+        available: mode == AgentHandoffMode::ContinueTask,
+        requirement_count: prepared
+            .handoff
+            .as_ref()
+            .map_or(0, |handoff| handoff.requirements.len()),
+        verified_artifact_count: prepared
+            .handoff
+            .as_ref()
+            .map_or(0, |handoff| handoff.verified_artifacts.len()),
+        unresolved_item_count: prepared
+            .handoff
+            .as_ref()
+            .map_or(0, |handoff| handoff.unresolved_items.len()),
+        completion_gate_inherited: false,
+    };
+    let warnings = (mode == AgentHandoffMode::ContinueTask)
+        .then(|| {
+            vec![
+                "Task facts were handed off as data only; source requirements were not inherited by the target completion gate."
+                    .to_owned(),
+            ]
+        })
+        .unwrap_or_default();
+    let response = ApplyAgentSessionSwitchResponseDto {
+        conversation: conversation.clone(),
+        transition_id: transitioned.transition.transition_id.as_ref().to_owned(),
+        previous_agent_label: prepared.source_label,
+        current_agent_label: prepared.target_label,
+        binding_version: transitioned.session.agent_binding.binding_version,
+        effective_from: "next_turn".to_owned(),
+        handoff: handoff_view,
+        warnings,
+    };
+    state.session_owner.user_events.send_to_user(
+        owner.as_ref(),
+        WebSocketMessage::new(
+            "agentSession.agentChanged",
+            json!({
+                "agent_session_id": session_id,
+                "transition_id": response.transition_id,
+                "previous_agent_label": response.previous_agent_label,
+                "current_agent_label": response.current_agent_label,
+                "binding_version": response.binding_version,
+                "effective_from": response.effective_from,
+                "conversation": conversation,
+            }),
+        ),
+    );
+    Ok(Json(ApiResponse::ok(response)))
+}
+
 async fn get_nomi_core_agent_session(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -10290,6 +11730,36 @@ fn canonical_message_response(
                 })),
             MessagePosition::Left,
         ),
+        "agent_transition" => {
+            let reference = document
+                .get("reference")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    NomiCoreApiError::new(
+                        StatusCode::CONFLICT,
+                        "AGENT_SESSION_MESSAGE_PROJECTION_INVALID",
+                        "Agent transition projection lost its canonical reference",
+                    )
+                })?;
+            (
+                MessageType::Tips,
+                json!({
+                    "type": "success",
+                    "content": "",
+                    "agent_transition": {
+                        "transition_id": reference.get("transition_id"),
+                        "previous_agent_label": reference.get("previous_agent_label"),
+                        "next_agent_label": reference.get("next_agent_label"),
+                        "previous_preset_id": reference.get("previous_binding_ref").and_then(|value| value.pointer("/preset_revision_ref/preset_id")),
+                        "next_preset_id": reference.get("next_binding_ref").and_then(|value| value.pointer("/preset_revision_ref/preset_id")),
+                        "effective_from": "next_turn",
+                        "handoff_mode": reference.get("handoff_mode"),
+                        "completion_gate_inherited": false,
+                    }
+                }),
+                MessagePosition::Center,
+            )
+        }
         _ => return Ok(None),
     };
     let status = match state {
@@ -10314,6 +11784,62 @@ fn canonical_message_response(
             i64::try_from(projection.first_seq).unwrap_or(i64::MAX),
         ),
     }))
+}
+
+/** Resolve presentation provenance for both sides of an old or new Agent boundary. */
+async fn decorate_agent_transition_template_keys(
+    state: &NomiCoreAgentApiState,
+    owner: &AuthenticatedOwner,
+    message: &mut MessageResponse,
+    cache: &mut HashMap<String, Option<String>>,
+) {
+    let Some(transition) = message
+        .content
+        .get_mut("agent_transition")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    for side in ["previous", "next"] {
+        let label_field = format!("{side}_agent_label");
+        let Some(label) = transition.get(&label_field).and_then(Value::as_str) else {
+            continue;
+        };
+        if !nomifun_agent_contracts::OfficialPresetKey::ALL
+            .iter()
+            .any(|key| key.as_str() == label)
+        {
+            continue;
+        }
+        let preset_field = format!("{side}_preset_id");
+        let Some(preset_id) = transition
+            .get(&preset_field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let template_key = if let Some(cached) = cache.get(&preset_id) {
+            cached.clone()
+        } else {
+            let resolved = match state
+                .control_plane
+                .internal_official_template(&owner.0, &preset_id)
+                .await
+            {
+                Ok(key) => key.map(|key| key.as_str().to_owned()),
+                Err(error) => {
+                    tracing::warn!(preset_id, code = %error.code().as_ref(), "Agent transition template presentation unavailable");
+                    None
+                }
+            };
+            cache.insert(preset_id, resolved.clone());
+            resolved
+        };
+        if let Some(template_key) = template_key {
+            transition.insert(format!("{side}_template_key"), Value::String(template_key));
+        }
+    }
 }
 
 async fn get_nomi_core_agent_session_message_history(
@@ -10372,8 +11898,10 @@ async fn get_nomi_core_agent_session_message_history(
         .await
         .map_err(agent_session_store_error)?;
     let mut items = Vec::new();
+    let mut template_cache = HashMap::new();
     for projection in projections {
-        if let Some(message) = canonical_message_response(&session_id, created_at, projection)? {
+        if let Some(mut message) = canonical_message_response(&session_id, created_at, projection)? {
+            decorate_agent_transition_template_keys(&state, &owner, &mut message, &mut template_cache).await;
             items.push(message);
         }
     }
@@ -10438,7 +11966,7 @@ async fn get_nomi_core_agent_session_message(
                 "message projection does not exist",
             )
         })?;
-    let message = canonical_message_response(&session_id, created_at, projection)?
+    let mut message = canonical_message_response(&session_id, created_at, projection)?
         .ok_or_else(|| {
             NomiCoreApiError::new(
                 StatusCode::NOT_FOUND,
@@ -10446,6 +11974,7 @@ async fn get_nomi_core_agent_session_message(
                 "message projection is not user-visible",
             )
         })?;
+    decorate_agent_transition_template_keys(&state, &owner, &mut message, &mut HashMap::new()).await;
     Ok(Json(ApiResponse::ok(message)))
 }
 
@@ -12456,8 +13985,12 @@ fn nomi_core_remote_admission_error(
 
 #[cfg(test)]
 mod cancel_error_tests {
-    use super::{cancel_error_is_known_rejection, remote_delivery_terminal_event_type};
+    use super::{
+        agent_switch_recovery_blocker_from_rows, cancel_error_is_known_rejection,
+        remote_delivery_terminal_event_type,
+    };
     use nomifun_common::AppError;
+    use serde_json::json;
 
     #[test]
     fn only_precondition_errors_become_cancel_rejected() {
@@ -12497,6 +14030,44 @@ mod cancel_error_tests {
             remote_delivery_terminal_event_type(true, None),
             ("turn/unknown", "unknown", false)
         );
+    }
+
+    #[test]
+    fn pending_or_uncovered_patch_recovery_blocks_agent_switching() {
+        let pending = nomifun_agent_runtime::AgentEngineEvent::PatchRecoveryUpdated {
+            state: nomifun_agent_runtime::AgentPatchRecoveryState {
+                version: 1,
+                targets: vec!["src/lib.rs".to_owned()],
+                target_budget_exceeded: false,
+            },
+        };
+        let pending = serde_json::to_string(&json!({ "event": pending })).unwrap();
+        let blocker = agent_switch_recovery_blocker_from_rows(vec![(1, pending)])
+            .unwrap()
+            .expect("pending recovery blocker");
+        assert_eq!(blocker.code, "AGENT_SESSION_HANDOFF_RECOVERY_PENDING");
+        assert_eq!(blocker.details.unwrap()["pending"], true);
+
+        let cleared = nomifun_agent_runtime::AgentEngineEvent::PatchRecoveryUpdated {
+            state: nomifun_agent_runtime::AgentPatchRecoveryState::default(),
+        };
+        let cleared = serde_json::to_string(&json!({ "event": cleared })).unwrap();
+        assert!(
+            agent_switch_recovery_blocker_from_rows(vec![(2, cleared.clone())])
+                .unwrap()
+                .is_none()
+        );
+        let dispatch = json!({
+            "event": {
+                "event": "host_tool_dispatch",
+                "dispatch": { "action_id": "workspace.files/patch" }
+            }
+        })
+        .to_string();
+        let blocker = agent_switch_recovery_blocker_from_rows(vec![(2, cleared), (3, dispatch)])
+            .unwrap()
+            .expect("uncovered patch dispatch blocker");
+        assert_eq!(blocker.details.unwrap()["uncovered_patch_dispatch"], true);
     }
 }
 

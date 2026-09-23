@@ -35,6 +35,7 @@ const NomiChat: React.FC<{
   loadedSkills?: string[];
   loadedMcpStatuses?: IConversationMcpStatus[];
   agent_name?: string;
+  currentAgent?: ConversationContextValue['currentAgent'];
   isProcessing?: boolean;
   /** Product-owned controls may occupy the rail; Agent/resource authority stays frozen. */
   capabilityControls?: React.ReactNode;
@@ -62,6 +63,7 @@ const NomiChat: React.FC<{
   loadedSkills,
   loadedMcpStatuses,
   agent_name,
+  currentAgent,
   isProcessing,
   capabilityControls,
   modelSelectionHint,
@@ -97,6 +99,7 @@ const NomiChat: React.FC<{
       stopNotice: turnActivity.stopNotice,
       loadedSkills,
       loadedMcpStatuses,
+      currentAgent,
     };
   }, [
     conversation_id,
@@ -108,6 +111,7 @@ const NomiChat: React.FC<{
     turnActivity.stopNotice,
     loadedSkills,
     loadedMcpStatuses,
+    currentAgent,
   ]);
 
   return (

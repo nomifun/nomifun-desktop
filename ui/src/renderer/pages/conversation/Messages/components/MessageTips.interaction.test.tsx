@@ -11,16 +11,18 @@ import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { IMessageText, IMessageTips } from '@/common/chat/chatLib';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { ConversationProvider, type ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
+import { ThemeProvider } from '@/renderer/hooks/context/ThemeContext';
 import { emitter } from '@/renderer/utils/emitter';
 import conversation from '@/renderer/services/i18n/locales/en-US/conversation.json';
 import common from '@/renderer/services/i18n/locales/en-US/common.json';
+import agentSettings from '@/renderer/services/i18n/locales/en-US/agentSettings.json';
 import { MessageListProvider } from '../hooks';
 import MessageTips from './MessageTips';
 
 const testI18n = createInstance();
 await testI18n.use(initReactI18next).init({
   lng: 'en-US',
-  resources: { 'en-US': { translation: { conversation, common, settings: { oneClickFeedback: 'Report Issue' } } } },
+  resources: { 'en-US': { translation: { conversation, common, agentSettings, settings: { oneClickFeedback: 'Report Issue' } } } },
   interpolation: { escapeValue: false },
 });
 
@@ -37,15 +39,31 @@ const error: IMessageTips = {
     error: { code: 'NOMIFUN_STREAM_BROKEN', message: 'Stream ended', detail: 'Diagnostic text', retryable: true },
   },
 };
+const transition: IMessageTips = {
+  id: 'transition', conversation_id: conversationId, type: 'tips', position: 'center', created_at: 3,
+  content: {
+    type: 'success', content: '',
+    agent_transition: {
+      transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+      previous_agent_label: 'Research Agent',
+      next_agent_label: 'Coding Agent',
+      effective_from: 'next_turn',
+      handoff_mode: 'continue_task',
+      completion_gate_inherited: false,
+    },
+  },
+};
 
 function mount(message = error, context: Partial<ConversationContextValue> = {}) {
   const result = render(
     <I18nextProvider i18n={testI18n}>
-      <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', ...context }}>
-        <MessageListProvider initialValue={[request, message]}>
-          <MessageTips message={message} />
-        </MessageListProvider>
-      </ConversationProvider>
+      <ThemeProvider>
+        <ConversationProvider value={{ conversation_id: conversationId, type: 'nomi', ...context }}>
+          <MessageListProvider initialValue={[request, message]}>
+            <MessageTips message={message} />
+          </MessageListProvider>
+        </ConversationProvider>
+      </ThemeProvider>
     </I18nextProvider>
   );
   return { ...result, page: within(result.container) };
@@ -54,6 +72,47 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test('renders a canonical Agent transition as a localized non-conversation boundary', () => {
+    const { page, container } = mount(transition);
+    expect(page.getByText('Research Agent → Coding Agent · effective from the next message')).toBeDefined();
+    expect(page.getByRole('note').classList.contains('agent-transition-boundary')).toBe(true);
+    expect(container.querySelector('.bg-message-tips')).toBeNull();
+  });
+
+  test('uses the verified current binding label for an existing transition', () => {
+    const message: IMessageTips = {
+      ...transition,
+      content: {
+        ...transition.content,
+        agent_transition: {
+          ...transition.content.agent_transition!,
+          next_agent_label: 'chat.minimal',
+          next_preset_id: 'official-target',
+        },
+      },
+    };
+    const { page } = mount(message, { currentAgent: { presetId: 'official-target', label: 'Minimal' } });
+    expect(page.getByText('Research Agent → Minimal · effective from the next message')).toBeDefined();
+  });
+
+  test('keeps an older official transition localized after switching again', () => {
+    const message: IMessageTips = {
+      ...transition,
+      content: {
+        ...transition.content,
+        agent_transition: {
+          ...transition.content.agent_transition!,
+          previous_agent_label: 'assistant.general',
+          next_agent_label: 'chat.minimal',
+          previous_template_key: 'assistant.general',
+          next_template_key: 'chat.minimal',
+        },
+      },
+    };
+    const { page } = mount(message, { currentAgent: { presetId: 'newer-agent', label: 'Another Agent' } });
+    expect(page.getByText('General → Minimal · effective from the next message')).toBeDefined();
+  });
+
   test('starts collapsed and exposes the full diagnosis and feedback only when expanded', () => {
     const { page } = mount();
     expect(page.getByRole('alert').textContent).toBe('Response interrupted');

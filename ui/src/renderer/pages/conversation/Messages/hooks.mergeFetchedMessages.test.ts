@@ -1057,6 +1057,33 @@ describe('normalizeDbMessage', () => {
     sha256: 'c'.repeat(64),
   };
 
+  test('rehydrates the canonical Agent transition instead of leaving an empty success tip', () => {
+    const normalized = normalizeDbMessage(baseMessage({
+      id: 'agent-transition',
+      type: 'tips',
+      position: 'center',
+      content: {
+        type: 'success', content: '',
+        agent_transition: {
+          transition_id: '0190f5fe-7c00-7a00-8000-000000000053',
+          previous_agent_label: 'General', next_agent_label: 'chat.minimal',
+          previous_preset_id: 'source', next_preset_id: 'target',
+          next_template_key: 'chat.minimal',
+          effective_from: 'next_turn', handoff_mode: 'context_only',
+          completion_gate_inherited: false,
+        },
+      } as any,
+    }));
+
+    expect(normalized.type).toBe('tips');
+    if (normalized.type !== 'tips') return;
+    expect(normalized.content.agent_transition).toMatchObject({
+      next_agent_label: 'chat.minimal', next_preset_id: 'target',
+      next_template_key: 'chat.minimal',
+      effective_from: 'next_turn',
+    });
+  });
+
   test('keeps the owning turn identity supplied by the transport boundary', () => {
     const turnId = messageId('failed-turn');
     const normalized = normalizeDbMessage(

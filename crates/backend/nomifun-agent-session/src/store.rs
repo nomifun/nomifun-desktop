@@ -7,7 +7,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 #[cfg(test)]
 use nomifun_agent_contracts::AGENT_STORE_BASELINE_SQL;
 use nomifun_agent_contracts::{
-    ActionId, AgentBindingValue, AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId,
+    ActionId, AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffBindingRefV1,
+    AgentHandoffMode, AgentSessionDeletedState, AgentSessionDeletingRecord, AgentSessionId,
     AgentSessionLiveRecord, AgentSessionTombstone, ArtifactId, CapabilityId, ChatRouteIdentity,
     CompactionCompletedPayload, ConnectionConfigRef, CorrelationId, DeleteAgentSessionCommand,
     DigestHex, EventId,
@@ -40,8 +41,9 @@ use crate::types::{
     EffectStrategy, EffectTerminalState, EnabledAgentSessionAutomationConfig, ForkRequest,
     ForkResult, MessageProjection, ResourceCleanupUncertainty, RuntimeAppendContext,
     RuntimeEventAppendResult, SessionCreateResult, SessionEventAppendResult, SessionEventPage,
-    SessionHeadProjection, SessionObservation, SessionRehydrationInput, TurnReceipt,
-    TurnReceiptStatus, UpdateAgentSessionMetadata,
+    ReplaceSessionAgentBinding, SessionAgentBindingTransitionResult, SessionHeadProjection,
+    SessionObservation, SessionRehydrationInput, TurnReceipt, TurnReceiptStatus,
+    UpdateAgentSessionMetadata,
 };
 
 pub const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
@@ -1487,6 +1489,435 @@ impl AgentSessionStore {
         Ok(updated)
     }
 
+    /// Atomically transition a local idle AgentSession to one complete,
+    /// host-resolved Agent binding. Binding JSON, the denormalized resource
+    /// projection, optional bounded handoff payload, transition audit event,
+    /// runtime-checkpoint discard, and the next active capability generation
+    /// commit or roll back together.
+    pub async fn replace_session_agent_binding(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        request: ReplaceSessionAgentBinding,
+    ) -> Result<SessionAgentBindingTransitionResult, SessionStoreError> {
+        validate_principal(owner)?;
+        validate_uuidv7(request.transition_id.as_ref(), "transition_id")?;
+        let next_version = request
+            .expected
+            .binding_version
+            .checked_add(1)
+            .ok_or_else(|| {
+                SessionStoreError::Conflict(
+                    "AgentSession binding version cannot advance".to_owned(),
+                )
+            })?;
+        if request.replacement.binding_version != next_version {
+            return Err(SessionStoreError::InvalidSession(
+                "Agent replacement must advance binding_version exactly once".to_owned(),
+            ));
+        }
+        if request.replacement.preset_revision_ref == request.expected.preset_revision_ref
+            && request.replacement.resolved_snapshot_ref
+                == request.expected.resolved_snapshot_ref
+        {
+            return Err(SessionStoreError::InvalidSession(
+                "Agent replacement requires a different exact Revision/Snapshot".to_owned(),
+            ));
+        }
+        if [
+            request.previous_agent_label.as_str(),
+            request.next_agent_label.as_str(),
+        ]
+        .into_iter()
+        .any(|label| label.trim().is_empty() || label != label.trim() || label.len() > 256)
+        {
+            return Err(SessionStoreError::InvalidSession(
+                "Agent transition labels must be canonical and bounded".to_owned(),
+            ));
+        }
+        match (request.handoff_mode, request.handoff.as_ref()) {
+            (AgentHandoffMode::ContinueTask, Some(handoff)) => {
+                handoff.validate().map_err(SessionStoreError::InvalidPayload)?;
+                if handoff.source_agent_session_id != *session_id
+                    || handoff.source_binding_ref
+                        != AgentHandoffBindingRefV1::from(&request.expected)
+                    || handoff.target_binding_ref
+                        != AgentHandoffBindingRefV1::from(&request.replacement)
+                {
+                    return Err(SessionStoreError::InvalidPayload(
+                        "Agent handoff identity differs from the exact transition".to_owned(),
+                    ));
+                }
+            }
+            (AgentHandoffMode::ContextOnly, None) => {}
+            _ => {
+                return Err(SessionStoreError::InvalidPayload(
+                    "continue_task requires one handoff envelope; context_only forbids it"
+                        .to_owned(),
+                ));
+            }
+        }
+
+        let mut active_ids = request.initial_active_capability_ids.clone();
+        if active_ids.iter().any(|id| {
+            id.trim().is_empty() || id.trim() != id || id.len() > 256
+        }) {
+            return Err(SessionStoreError::InvalidSession(
+                "target active capability IDs must be canonical and bounded".to_owned(),
+            ));
+        }
+        active_ids.sort();
+        active_ids.dedup();
+        if active_ids.len() > 128 {
+            return Err(SessionStoreError::InvalidSession(
+                "target active capability set exceeds 128 IDs".to_owned(),
+            ));
+        }
+
+        let handoff_payload = request
+            .handoff
+            .as_ref()
+            .map(|handoff| -> Result<SessionPayloadRecord, SessionStoreError> {
+                let body = serde_json::to_value(handoff)?;
+                let logical_bytes = canonical_json_bytes(&body)?;
+                Ok(SessionPayloadRecord {
+                    payload_id: ArtifactId::from(format!(
+                        "agent-handoff:{}",
+                        request.transition_id.as_ref()
+                    )),
+                    agent_session_id: session_id.clone(),
+                    media_type: "application/vnd.nomifun.agent-handoff+json;version=1".to_owned(),
+                    byte_len: logical_bytes.len() as u64,
+                    digest: digest_bytes(&logical_bytes),
+                    body: SessionPayloadBody::Json(StrictJsonValue(body)),
+                })
+            })
+            .transpose()?;
+        let producer_id = EventProducerId::from("session_api");
+        let transition_event_id = EventId::from(format!(
+            "agent-binding-changed:{}",
+            request.transition_id.as_ref()
+        ));
+        let mut tx = self.begin_write_transaction().await?;
+
+        if let Some(existing) = event_by_producer_key_tx(
+            &mut tx,
+            producer_id.as_ref(),
+            request.idempotency_key.as_ref(),
+        )
+        .await?
+        {
+            let record = event_from_row(existing)?;
+            if record.agent_session_id != *session_id
+                || record.kind.0 != "session/agent-binding-changed"
+            {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "Agent switch idempotency key was used by another command".to_owned(),
+                ));
+            }
+            let payload = payload_value_for_event_tx(&mut tx, &record).await?;
+            let transition: AgentBindingChangedPayloadV1 = serde_json::from_value(payload)?;
+            if transition.transition_id != request.transition_id
+                || transition.request_digest != request.request_digest
+                || transition.previous_binding_ref
+                    != AgentHandoffBindingRefV1::from(&request.expected)
+                || transition.next_binding_ref
+                    != AgentHandoffBindingRefV1::from(&request.replacement)
+                || transition.previous_agent_label != request.previous_agent_label
+                || transition.next_agent_label != request.next_agent_label
+                || transition.handoff_mode != request.handoff_mode
+                || transition.handoff_payload_digest
+                    != handoff_payload.as_ref().map(|payload| payload.digest.clone())
+            {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "Agent switch idempotency key was replayed with different input".to_owned(),
+                ));
+            }
+            let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+            if session.agent_binding != request.replacement {
+                return Err(SessionStoreError::IdempotencyConflict(
+                    "replayed Agent switch no longer matches the live binding".to_owned(),
+                ));
+            }
+            let active = event_by_kind_correlation_tx(
+                &mut tx,
+                session_id.as_ref(),
+                "capability/active-set-committed",
+                request.transition_id.as_ref(),
+            )
+            .await?
+            .ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "replayed Agent switch lost its active-set commit".to_owned(),
+                )
+            })?;
+            let discard = event_by_kind_causation_tx(
+                &mut tx,
+                session_id.as_ref(),
+                "runtime/binding-discarded",
+                record.event_id.as_ref(),
+            )
+            .await?;
+            let transition_ack = event_ack(&record);
+            let active_set_ack = event_ack(&event_from_row(active)?);
+            let runtime_discard_ack = discard
+                .map(event_from_row)
+                .transpose()?
+                .map(|event| event_ack(&event));
+            tx.commit().await?;
+            return Ok(SessionAgentBindingTransitionResult {
+                session,
+                transition,
+                transition_ack,
+                runtime_discard_ack,
+                active_set_ack,
+                duplicate: true,
+            });
+        }
+
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "live" {
+            return Err(SessionStoreError::Deleted(row.agent_session_id));
+        }
+        if row.remote_binding_id.is_some() || row.remote_binding_version.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "Remote AgentSession Agent binding is immutable".to_owned(),
+            ));
+        }
+        let current: AgentBindingValue = serde_json::from_str(
+            row.agent_binding_json.as_deref().ok_or_else(|| {
+                SessionStoreError::InvalidSession(
+                    "live AgentSession lost agent_binding".to_owned(),
+                )
+            })?,
+        )?;
+        if current != request.expected {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession binding changed before Agent replacement".to_owned(),
+            ));
+        }
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        if head.status == "running" || head.active_turn_id.is_some() {
+            return Err(SessionStoreError::Conflict(
+                "wait for the active Turn before switching Agents".to_owned(),
+            ));
+        }
+        if let Some(handoff) = request.handoff.as_ref() {
+            let source: Option<(String, String)> = sqlx::query_as(
+                "SELECT kind, correlation_id FROM agent_events \
+                 WHERE session_id = ? AND seq = ?",
+            )
+            .bind(session_id.as_ref())
+            .bind(as_i64(handoff.source_through_seq, "handoff source sequence")?)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if source.as_ref().is_none_or(|(kind, correlation)| {
+                !matches!(kind.as_str(), "turn/completed" | "turn/failed" | "turn/cancelled")
+                    || correlation != handoff.source_turn_operation_id.as_ref()
+            }) {
+                return Err(SessionStoreError::InvalidPayload(
+                    "Agent handoff source is not the exact canonical closed Turn boundary"
+                        .to_owned(),
+                ));
+            }
+        }
+        let unsettled: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM agent_effects \
+             WHERE session_id = ? AND state IN ('pending', 'unknown'))",
+        )
+        .bind(session_id.as_ref())
+        .fetch_one(&mut *tx)
+        .await?;
+        if unsettled != 0 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession has unsettled effects".to_owned(),
+            ));
+        }
+        let next_generation = head
+            .active_set_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                SessionStoreError::Conflict(
+                    "AgentSession active capability generation cannot advance".to_owned(),
+                )
+            })?;
+        let transition = AgentBindingChangedPayloadV1 {
+            transition_id: request.transition_id.clone(),
+            request_digest: request.request_digest,
+            previous_binding_ref: AgentHandoffBindingRefV1::from(&request.expected),
+            next_binding_ref: AgentHandoffBindingRefV1::from(&request.replacement),
+            previous_agent_label: request.previous_agent_label,
+            next_agent_label: request.next_agent_label,
+            handoff_mode: request.handoff_mode,
+            handoff_payload_id: handoff_payload
+                .as_ref()
+                .map(|payload| payload.payload_id.clone()),
+            handoff_payload_digest: handoff_payload
+                .as_ref()
+                .map(|payload| payload.digest.clone()),
+            completion_gate_inherited: false,
+            effective_after_seq: head.last_seq,
+        };
+
+        let replacement_json = serde_json::to_string(&request.replacement)?;
+        let result = sqlx::query(
+            "UPDATE agent_sessions SET agent_binding_json = ? \
+             WHERE agent_session_id = ? AND state = 'live' AND agent_binding_json = ?",
+        )
+        .bind(replacement_json)
+        .bind(session_id.as_ref())
+        .bind(serde_json::to_string(&request.expected)?)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SessionStoreError::Conflict(
+                "Agent replacement lost its compare-and-swap boundary".to_owned(),
+            ));
+        }
+        sqlx::query("DELETE FROM agent_session_resources WHERE session_id = ?")
+            .bind(session_id.as_ref())
+            .execute(&mut *tx)
+            .await?;
+        insert_session_resources_tx(
+            &mut tx,
+            session_id,
+            owner,
+            &request.replacement.typed_resource_bindings,
+        )
+        .await?;
+        if let Some(payload) = handoff_payload.as_ref() {
+            insert_payload_tx(&mut tx, payload).await?;
+        }
+
+        let transition_append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: transition_event_id.clone(),
+            producer_id,
+            idempotency_key: request.idempotency_key.clone(),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("session/agent-binding-changed".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(request.transition_id.as_ref().to_owned()),
+                causation_event_id: None,
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(
+                    serde_json::to_value(&transition)?,
+                )),
+            },
+        };
+        let transition_result = self
+            .append_event_tx(&mut tx, &transition_append, None)
+            .await?;
+        let transition_ack = required_ack(transition_result)?;
+
+        let runtime_discard_ack = if let Some(runtime_bound_event_id) =
+            head.runtime_bound_event_id.as_deref()
+        {
+            let bound = event_by_event_id_tx(&mut tx, runtime_bound_event_id)
+                .await?
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "runtime head references a missing bound event".to_owned(),
+                    )
+                })?;
+            let bound = event_from_row(bound)?;
+            let runtime_binding_id = bound.runtime_binding_id.clone().ok_or_else(|| {
+                SessionStoreError::InvalidEvent(
+                    "runtime/bound event has no runtime binding identity".to_owned(),
+                )
+            })?;
+            let maximum: Option<i64> = sqlx::query_scalar(
+                "SELECT MAX(runtime_producer_seq) FROM agent_events WHERE runtime_binding_id = ?",
+            )
+            .bind(runtime_binding_id.as_ref())
+            .fetch_one(&mut *tx)
+            .await?;
+            let runtime_producer_seq = maximum
+                .map(|value| as_u64(value, "runtime producer sequence"))
+                .transpose()?
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    SessionStoreError::Conflict(
+                        "runtime producer sequence cannot advance".to_owned(),
+                    )
+                })?;
+            let append = SessionEventAppend {
+                agent_session_id: session_id.clone(),
+                event_id: EventId::from(format!(
+                    "agent-switch-runtime-discard:{}",
+                    request.transition_id.as_ref()
+                )),
+                producer_id: EventProducerId::from("runtime_supervisor"),
+                idempotency_key: IdempotencyKey::from(format!(
+                    "{}:runtime-discard",
+                    request.idempotency_key.as_ref()
+                )),
+                runtime_binding_id: Some(runtime_binding_id.clone()),
+                runtime_producer_seq: Some(runtime_producer_seq),
+                semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                    kind: SessionEventKind("runtime/binding-discarded".to_owned()),
+                    kind_version: 1,
+                    correlation_id: CorrelationId::from(runtime_binding_id.as_ref().to_owned()),
+                    causation_event_id: Some(transition_event_id.clone()),
+                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                        "reason": "agent_binding_changed",
+                        "previous_resolved_snapshot_ref": request.expected.resolved_snapshot_ref,
+                        "next_resolved_snapshot_ref": request.replacement.resolved_snapshot_ref,
+                    }))),
+                },
+            };
+            Some(required_ack(
+                self.append_event_tx(&mut tx, &append, None).await?,
+            )?)
+        } else {
+            None
+        };
+
+        let active_set_digest = digest_payload(&active_ids)?.0;
+        let active_append = SessionEventAppend {
+            agent_session_id: session_id.clone(),
+            event_id: EventId::from(format!(
+                "agent-switch-active-set:{}",
+                request.transition_id.as_ref()
+            )),
+            producer_id: EventProducerId::from("capability_host"),
+            idempotency_key: IdempotencyKey::from(format!(
+                "{}:active-set",
+                request.idempotency_key.as_ref()
+            )),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                kind: SessionEventKind("capability/active-set-committed".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(request.transition_id.as_ref().to_owned()),
+                causation_event_id: Some(transition_event_id),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "generation": next_generation,
+                    "active_capability_ids": active_ids,
+                    "active_set_digest": active_set_digest,
+                    "delta": [],
+                }))),
+            },
+        };
+        let active_set_ack = required_ack(
+            self.append_event_tx(&mut tx, &active_append, None).await?,
+        )?;
+        let session = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(SessionAgentBindingTransitionResult {
+            session,
+            transition,
+            transition_ack,
+            runtime_discard_ack,
+            active_set_ack,
+            duplicate: false,
+        })
+    }
+
     pub async fn active_capability_ids(
         &self,
         session_id: &AgentSessionId,
@@ -2078,7 +2509,7 @@ impl AgentSessionStore {
                     projection_json, semantic_digest \
              FROM agent_messages \
              WHERE session_id = ? AND first_seq < ? \
-               AND presentation_intent IN ('message', 'tool') \
+               AND presentation_intent IN ('message', 'tool', 'agent_transition') \
              ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
         )
         .bind(session_id.as_ref())
@@ -2094,7 +2525,7 @@ impl AgentSessionStore {
             .collect::<Result<Vec<_>, _>>()?;
         let total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
-               AND presentation_intent IN ('message', 'tool')",
+               AND presentation_intent IN ('message', 'tool', 'agent_transition')",
         )
         .bind(session_id.as_ref())
         .fetch_one(&mut *tx)
@@ -2135,7 +2566,7 @@ impl AgentSessionStore {
                     projection_json, semantic_digest \
              FROM agent_messages \
              WHERE session_id = ? AND first_seq < ? \
-               AND presentation_intent IN ('message', 'tool') \
+               AND presentation_intent IN ('message', 'tool', 'agent_transition') \
              ORDER BY first_seq DESC, projection_id DESC LIMIT ?",
         )
         .bind(session_id.as_ref())
@@ -2176,7 +2607,7 @@ impl AgentSessionStore {
 
         let message_total = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM agent_messages WHERE session_id = ? \
-               AND presentation_intent IN ('message', 'tool')",
+               AND presentation_intent IN ('message', 'tool', 'agent_transition')",
         )
         .bind(session_id.as_ref())
         .fetch_one(&mut *tx)
@@ -5891,6 +6322,46 @@ async fn event_by_producer_key_tx(
     )
     .bind(producer_id)
     .bind(idempotency_key)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn event_by_kind_correlation_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+    kind: &str,
+    correlation_id: &str,
+) -> Result<Option<StoredEventRow>, SessionStoreError> {
+    Ok(sqlx::query_as::<_, StoredEventRow>(
+        "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                correlation_id, causation_event_id, inline_json, payload_id \
+         FROM agent_events WHERE session_id = ? AND kind = ? AND correlation_id = ? \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(kind)
+    .bind(correlation_id)
+    .fetch_optional(&mut **tx)
+    .await?)
+}
+
+async fn event_by_kind_causation_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    session_id: &str,
+    kind: &str,
+    causation_event_id: &str,
+) -> Result<Option<StoredEventRow>, SessionStoreError> {
+    Ok(sqlx::query_as::<_, StoredEventRow>(
+        "SELECT session_id, seq, event_id, producer_id, idempotency_key, \
+                runtime_binding_id, runtime_producer_seq, kind, kind_version, \
+                correlation_id, causation_event_id, inline_json, payload_id \
+         FROM agent_events WHERE session_id = ? AND kind = ? AND causation_event_id = ? \
+         ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(kind)
+    .bind(causation_event_id)
     .fetch_optional(&mut **tx)
     .await?)
 }
