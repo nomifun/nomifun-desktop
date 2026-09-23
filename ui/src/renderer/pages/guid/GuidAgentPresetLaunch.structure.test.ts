@@ -88,7 +88,7 @@ describe('Guid workbench Agent launch behavior', () => {
     ).toBe(true);
     expect(
       selectionUtils.includes(
-        "templateKey: 'chat.minimal',"
+        "templateKey: 'assistant.general',"
       )
     ).toBe(true);
     expect(selectionUtils.includes("kind: 'template',")).toBe(true);

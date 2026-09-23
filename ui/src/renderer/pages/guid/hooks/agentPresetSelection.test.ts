@@ -45,10 +45,10 @@ describe('Guid Agent selection contract', () => {
     expect(getAgentPresetKey(stablePreset)).toBe(stablePreset.preset_id);
   });
 
-  test('normalizes legacy or invalid selections to the first official Agent', () => {
+  test('normalizes legacy or invalid selections to the general Agent', () => {
     expect(DEFAULT_GUID_AGENT_SELECTION).toEqual({
       kind: 'template',
-      templateKey: 'chat.minimal',
+      templateKey: 'assistant.general',
     });
     expect(normalizeGuidAgentSelection({ kind: 'default' })).toEqual(
       DEFAULT_GUID_AGENT_SELECTION
@@ -118,7 +118,7 @@ describe('Guid Agent selection contract', () => {
     expect(page.includes('agentSelection.loadError,')).toBe(true);
   });
 
-  test('defaults to chat.minimal and persists only catalog-backed selections', () => {
+  test('defaults to assistant.general and persists only catalog-backed selections', () => {
     const selection = readSource(new URL('./useGuidAgentSelection.ts', import.meta.url));
     const selectionUtils = readSource(new URL('./agentSelectionUtils.ts', import.meta.url));
     const configKeys = readSource(
@@ -132,7 +132,7 @@ describe('Guid Agent selection contract', () => {
     ).toBe(true);
     expect(
       selectionUtils.includes(
-        "templateKey: 'chat.minimal',"
+        "templateKey: 'assistant.general',"
       )
     ).toBe(true);
     expect(configKeys.includes("| { kind: 'default' }")).toBe(false);
