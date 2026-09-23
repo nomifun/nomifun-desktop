@@ -165,6 +165,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_tool_discovery.rs"),
                     include_str!("engine_robot_tools.rs"),
                     include_str!("engine_browser_tools.rs"),
+                    include_str!("automatic_collaboration_route.rs"),
                     include_str!("../browser_workspace_provider.rs"),
                     include_str!("../../../nomifun-browser-platform/src/product.rs"),
                     include_str!("../../../nomifun-browser-platform/src/bound_resource.rs"),
@@ -662,24 +663,38 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if !message.inject_skills.is_empty() {
             instructions.push(format!("For this accepted request, the user explicitly requested these already-selected Skills: {}", serde_json::to_string(&message.inject_skills).map_err(error)?));
         }
-        let mut turn_plan = self
+        let turn_plan = self
             .resources
             .retain_active_tools(&self.full_plan, &capabilities.active)?;
-        let automatic_creation_route =
-            super::automatic_creation_route::classify(&message.content).filter(|route| {
-                turn_plan
-                    .model_name_for_action(
-                        super::engine_creation_tools::CREATION_CAPABILITY_ID,
-                        route.action_id(),
-                    )
-                    .is_some()
-            });
-        if let Some(route) = automatic_creation_route.as_ref() {
-            turn_plan = turn_plan.for_action(
-                super::engine_creation_tools::CREATION_CAPABILITY_ID,
-                route.action_id(),
-            );
-            instructions.push(route.instruction().to_owned());
+        let collaboration = super::automatic_collaboration_route::route(
+            &message.content,
+            self.options.delegation_policy,
+            turn_plan,
+        );
+        let mut turn_plan = collaboration.tool_plan;
+        let mut tool_choice = collaboration.tool_choice;
+        instructions.extend(collaboration.instructions);
+        // An explicit collaboration request owns this turn. Otherwise retain
+        // the existing high-confidence media route as another narrowing of
+        // the already-admitted immutable ToolPlan.
+        if !collaboration.forced {
+            let automatic_creation_route =
+                super::automatic_creation_route::classify(&message.content).filter(|route| {
+                    turn_plan
+                        .model_name_for_action(
+                            super::engine_creation_tools::CREATION_CAPABILITY_ID,
+                            route.action_id(),
+                        )
+                        .is_some()
+                });
+            if let Some(route) = automatic_creation_route.as_ref() {
+                turn_plan = turn_plan.for_action(
+                    super::engine_creation_tools::CREATION_CAPABILITY_ID,
+                    route.action_id(),
+                );
+                instructions.push(route.instruction().to_owned());
+                tool_choice = ChatToolChoice::Auto;
+            }
         }
         let request = ChatModelRequest {
             contract_version: CHAT_MODEL_CONTRACT_VERSION.into(),
@@ -696,7 +711,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 instructions,
                 messages,
                 tools: Vec::new(),
-                tool_choice: ChatToolChoice::Auto,
+                tool_choice,
                 max_output_tokens: None,
                 reasoning: None,
                 prompt_cache: PromptCachePolicy::Disabled,

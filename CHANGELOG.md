@@ -5,6 +5,14 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Explicit multi-Agent and subagent requests launch real collaboration again.**
+  The unified Runtime now consumes each Session's delegation policy, restores
+  the collaboration guidance lost with the legacy Runtime removal, and routes
+  high-confidence requests such as “设计一个多 Agent 集群测试” or “use a
+  subagent” to the canonical `agent/delegate` Action. Disabled delegation is
+  removed from the model-visible tool plan instead of being advertised and
+  rejected only after a call.
+
 - **The anonymous NomiFun Free Models service has been removed.** The built-in
   provider, public upstream proxy, catalog refresh scheduler, health endpoints,
   model-hub page, and no-key product claims are gone. Provider rows created by
