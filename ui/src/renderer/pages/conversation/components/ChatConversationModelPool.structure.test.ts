@@ -15,7 +15,7 @@ describe('Versioned Conversation model authority', () => {
     expect(source.includes('ipcBridge.conversation.switchModel.invoke')).toBe(true);
     expect(source.includes('ipcBridge.conversation.update.invoke')).toBe(false);
     expect(source.includes('ipcBridge.conversation.stop.invoke')).toBe(false);
-    expect(source.includes('modelSelectionDisabled={modelSwitching}')).toBe(true);
+    expect(source.includes('modelSelectionDisabled={modelSwitching || agentSwitch?.applying === true}')).toBe(true);
     expect(source.includes("enabled_capabilities.includes('agent.collaboration')")).toBe(true);
     expect(source.includes('const collaborationControlNode = collaborationAvailable ?')).toBe(true);
   });

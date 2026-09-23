@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    ActionId, AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
+    ActionId, AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffEnvelopeV1,
+    AgentHandoffMode, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
     AgentSessionTombstone,
     CanonicalErrorCode, CapabilityId, ChatRouteIdentity, CompactionCompletedPayload, CorrelationId,
     DigestHex, EffectClass,
@@ -169,6 +170,37 @@ pub struct UpdateAgentSessionMetadata {
     pub archived: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pinned: Option<bool>,
+}
+
+/// Host-resolved full Agent transition. The Store accepts exact facts only; it
+/// never resolves a Preset, model, resource selection, or handoff summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceSessionAgentBinding {
+    pub expected: AgentBindingValue,
+    pub replacement: AgentBindingValue,
+    pub previous_agent_label: String,
+    pub next_agent_label: String,
+    pub transition_id: OperationId,
+    pub request_digest: DigestHex,
+    pub idempotency_key: IdempotencyKey,
+    pub handoff_mode: AgentHandoffMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<AgentHandoffEnvelopeV1>,
+    #[serde(default)]
+    pub initial_active_capability_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAgentBindingTransitionResult {
+    pub session: AgentSessionLiveRecord,
+    pub transition: AgentBindingChangedPayloadV1,
+    pub transition_ack: SessionEventAck,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_discard_ack: Option<SessionEventAck>,
+    pub active_set_ack: SessionEventAck,
+    pub duplicate: bool,
 }
 
 /// The durable outcome of a canonical turn.

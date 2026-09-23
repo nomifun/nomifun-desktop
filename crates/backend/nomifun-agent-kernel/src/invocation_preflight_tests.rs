@@ -17,6 +17,32 @@ fn fixture() -> (KernelRegistry, crate::CompiledSnapshot, PrincipalRef) {
     (registry, compiled, owner)
 }
 
+#[test]
+fn committed_session_capability_state_preserves_generation_and_rejects_foreign_ids() {
+    let (_, compiled, _) = fixture();
+    let capability = compiled
+        .content()
+        .capability_allowlist
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    let committed = SessionCapabilityState::from_committed(&compiled, 7, [capability.clone()])
+        .unwrap()
+        .snapshot()
+        .unwrap();
+    assert_eq!(committed.generation, 7);
+    assert_eq!(committed.active, BTreeSet::from([capability]));
+    assert!(matches!(
+        SessionCapabilityState::from_committed(
+            &compiled,
+            8,
+            [CapabilityId::from("foreign.capability")],
+        ),
+        Err(KernelError::CapabilityNotInPreset { .. })
+    ));
+}
+
 #[tokio::test]
 async fn preflight_never_dispatches_and_invoke_rechecks_owner_authority() {
     let (registry, compiled, owner) = fixture();

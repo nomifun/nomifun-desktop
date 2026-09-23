@@ -54,6 +54,11 @@ const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 7] = [
     "ssh_host",
     "browser",
 ];
+
+pub(crate) fn optional_unbound_resource_kind(kind: &str) -> bool {
+    OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind)
+}
+
 const MAX_SESSION_KNOWLEDGE_BASES: usize = 32;
 
 fn resource_kind_allows_multiple(kind: &str) -> bool {

@@ -4,7 +4,7 @@
     "ledger_version": "1.0.0",
     "artifacts": {
       "canonical_api_inventory": "ae0ae25648dcda0908ada7e07a8da5843fcf9cc1241320c0d8fa04dd7b0bbb1d",
-      "canonical_schema_manifest": "ca6bcb61e4c6caf392ae36e5538b4105451cd8df9cae8043a7d708c502ffc9e5",
+      "canonical_schema_manifest": "9167afb546a9054ee0f794c43734b3c62a1c2573b64e90bafb0c1acaa8015357",
       "capability_catalog_entry": "76daf6de1703bcda4b852d932e32d4abffbebd54c177d57452a1c96e48d6967a",
       "cargo_lock": "4bfb360566a48f6226c0896f47538d4690641b87ebd49562fa8fbd24e30a1455",
       "coding_codex_native_contract": "361913c8b085e0a3af7c8331f36044ae794f40f8310a1ef470ae3c7fc381be50",
@@ -15,7 +15,7 @@
       "official_preset_seed_manifest": "9cafc5df531a50ad4b63000a21938588d7ebada7010ff20a80449687f089fa1b",
       "package_schema": "fce6628f2760457e0e11236ea519a77163286277c9c8d188596279af6cad3905",
       "platform_validation_contract": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
-      "platform_validation_fixture": "e4320752bc3f82cfd58128527d088755669644d17500a8a69d8c26e236c7fe66",
+      "platform_validation_fixture": "3a296b6aea130400272e48a0559b028978333eb02243badd3cedb0c05ef9d7fa",
       "plugin_n1_contract": "a8a838368f774cfc36bb3655a799030242ee2c39f817df87e0b6f9113f216154",
       "plugin_n1_schema": "e3bf17d36ccec3397131283bb0322e765b2566a3f3df279acb3f9379a32b72f0",
       "plugin_runtime_contract": "acd2bff815bad0c48516feb4bf8de1593989661e64b47f42b9a62eed9cd77039",
@@ -23,9 +23,9 @@
       "runtime_feature_inventory": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
       "runtime_protocol": "5f9ac6cedd82034001057cd768296727b2f36d40d9f086d375afff4ee60c1565",
       "rust_contract_schema": "6d4aff81f6b4a9d33fe4829484e0dc1cd769e5b38ebcc3aa799b426cd237ff0d",
-      "session_event_registry": "037432f33e1240cc5c18ace7a87e55cb2793e302b3f5d634a54e5188b03a3e0a",
+      "session_event_registry": "5511cb7f5396d5cbb2dcf74e0c5002f280ac3adee43cb508c8bb3ba850972ebf",
       "target_first_party_inventory": "010f993fab452e0035045f347a0f919a36f668006df29fd9b52c6195685a7c31"
     }
   },
-  "payload_digest": "2a97f75797ea055c3a61748fbafe1a96e241661f74b2b2bc996466b173279e8f"
+  "payload_digest": "b05571dfb0c25cd92104467258eee08eec799b7f4af0b0efd666d794551028ef"
 }

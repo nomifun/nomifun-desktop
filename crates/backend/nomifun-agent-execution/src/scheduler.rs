@@ -2944,20 +2944,58 @@ fn compose_brief(detail: &AgentExecutionDetail, step: &ExecutionStep) -> String 
     if !blockers.is_empty() {
         brief.push_str("\nUPSTREAM RESULTS:\n");
         for blocker in blockers {
-            let title = detail
+            let upstream = detail
                 .steps
                 .iter()
-                .find(|candidate| candidate.step_id == blocker)
+                .find(|candidate| candidate.step_id == blocker);
+            let title = upstream
                 .map(|candidate| candidate.title.as_str())
                 .unwrap_or("unknown step");
-            let output = detail
+            let step_status = upstream
+                .map(|candidate| candidate.status.to_string())
+                .unwrap_or_else(|| "unknown".to_owned());
+            let latest = detail
                 .attempts
                 .iter()
                 .filter(|attempt| attempt.step_id == blocker)
-                .max_by_key(|attempt| attempt.attempt_no)
+                .max_by_key(|attempt| attempt.attempt_no);
+            let output = latest
                 .and_then(|attempt| attempt.output_summary.as_deref())
-                .unwrap_or("(no output)");
-            brief.push_str(&format!("- {title}: {output}\n"));
+                .unwrap_or("(no output summary)");
+            brief.push_str(&format!(
+                "- step_id={blocker}; title={title}; status={step_status}\n  Latest output summary: {output}\n"
+            ));
+            if let Some(attempt) = latest {
+                brief.push_str(&format!(
+                    "  Latest Attempt: attempt_no={}; status={}\n",
+                    attempt.attempt_no, attempt.status
+                ));
+            }
+            if let Some(reason) = latest.and_then(|attempt| {
+                attempt
+                    .error
+                    .as_deref()
+                    .or(attempt.question.as_deref())
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+            }) {
+                brief.push_str(&format!("  Waiting/blocked/error reason: {reason}\n"));
+            }
+            let verified_files = detail
+                .attempts
+                .iter()
+                .filter(|attempt| {
+                    attempt.step_id == blocker && attempt.status.is_terminal()
+                })
+                .max_by_key(|attempt| attempt.attempt_no)
+                .map(|attempt| attempt.output_files.as_slice())
+                .unwrap_or_default();
+            if !verified_files.is_empty() {
+                brief.push_str(&format!(
+                    "  Verified output files from the exact settled Attempt (historical delivery references; re-read under current permissions): {}\n",
+                    serde_json::to_string(verified_files).unwrap_or_else(|_| "[]".to_owned())
+                ));
+            }
         }
     }
     if let Some(previous) = detail
@@ -3305,6 +3343,116 @@ mod tests {
         ]
         .concat();
         assert_eq!(source.matches(&required_call).count(), 1);
+    }
+
+    #[test]
+    fn downstream_brief_carries_only_latest_settled_verified_output_files() {
+        let execution_id = generate_id();
+        let participant_id = generate_id();
+        let upstream_id = generate_id();
+        let downstream_id = generate_id();
+        let upstream_new = harness_step(upstream_id.clone(), &participant_id, "Produce asset");
+        let mut downstream_new = harness_step(
+            downstream_id.clone(),
+            &participant_id,
+            "Synthesize delivery",
+        );
+        downstream_new.agent_mode = Some(AgentStepMode::Synthesis);
+        let materialize_step = |step: NewAgentExecutionStep, status| ExecutionStep {
+            step_id: step.step_id,
+            execution_id: execution_id.clone(),
+            title: step.title,
+            spec: step.spec,
+            profile: None,
+            kind: step.kind,
+            agent_mode: step.agent_mode,
+            status,
+            tool_policy: step.tool_policy,
+            role: step.role,
+            fanout_group: step.fanout_group,
+            control_policy: None,
+            failure_policy: step.failure_policy,
+            assigned_participant_id: step.assigned_participant_id,
+            assignment_source: step.assignment_source,
+            assignment_score: step.assignment_score,
+            assignment_rationale: step.assignment_rationale,
+            assignment_locked: step.assignment_locked,
+            preset_prompt: step.preset_prompt,
+            graph_x: step.graph_x,
+            graph_y: step.graph_y,
+            dispatch_after: None,
+            introduced_in_revision: 1,
+            superseded_in_revision: None,
+            version: 1,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let upstream = materialize_step(upstream_new, ExecutionStepStatus::Completed);
+        let downstream = materialize_step(downstream_new, ExecutionStepStatus::Pending);
+        let attempt = |attempt_no: i64, summary: &str, files: Vec<&str>| {
+            nomifun_api_types::ExecutionAttempt {
+                attempt_id: generate_id(),
+                execution_id: execution_id.clone(),
+                step_id: upstream_id.clone(),
+                attempt_no,
+                participant_id: Some(participant_id.clone()),
+                conversation_id: Some(generate_id()),
+                status: ExecutionAttemptStatus::Completed,
+                trigger_reason: "test".to_owned(),
+                effective_config: json!({}),
+                question: None,
+                error: None,
+                output_summary: Some(summary.to_owned()),
+                output_files: files.into_iter().map(str::to_owned).collect(),
+                tokens: None,
+                retry_after: None,
+                runtime_state: None,
+                started_at: Some(1),
+                finished_at: Some(2),
+                version: 1,
+                created_at: 1,
+                updated_at: 2,
+            }
+        };
+        let detail = AgentExecutionDetail {
+            execution: AgentExecution {
+                execution_id: execution_id.clone(),
+                goal: "Deliver a verified file".to_owned(),
+                lead_conversation_id: None,
+                work_dir: Some("/workspace".to_owned()),
+                delegation_policy: DelegationPolicy::Automatic,
+                adaptation_policy: AdaptationPolicy::Fixed,
+                decision_policy: DecisionPolicy::Automatic,
+                max_parallel: 1,
+                status: AgentExecutionStatus::Running,
+                summary: None,
+                version: 1,
+                plan_revision: 1,
+                event_sequence: 1,
+                created_at: 1,
+                updated_at: 1,
+            },
+            participants: Vec::new(),
+            steps: vec![upstream, downstream.clone()],
+            dependencies: vec![nomifun_api_types::ExecutionStepDependency {
+                execution_id: execution_id.clone(),
+                blocker_step_id: upstream_id.clone(),
+                blocked_step_id: downstream_id,
+                introduced_in_revision: 1,
+                superseded_in_revision: None,
+            }],
+            attempts: vec![
+                attempt(1, "old", vec!["/workspace/stale.txt"]),
+                attempt(2, "Done; prose mentions /workspace/fake.txt", vec!["/workspace/verified.txt"]),
+            ],
+        };
+        let brief = compose_brief(&detail, &downstream);
+        assert!(brief.contains("step_id="));
+        assert!(brief.contains("status=completed"));
+        assert!(brief.contains("/workspace/verified.txt"));
+        assert!(!brief.contains("/workspace/stale.txt"));
+        assert!(brief.contains("prose mentions /workspace/fake.txt"));
+        assert_eq!(brief.matches("Verified output files").count(), 1);
     }
 
     #[test]
@@ -4426,8 +4574,10 @@ mod tests {
         let downstream_brief = downstream_guard
             .brief_for("downstream")
             .expect("downstream brief was recorded");
-        assert!(downstream_brief.contains("- upstream-a: completed upstream-a"));
-        assert!(downstream_brief.contains("- upstream-b: completed upstream-b"));
+        assert!(downstream_brief.contains("title=upstream-a; status=completed"));
+        assert!(downstream_brief.contains("Latest output summary: completed upstream-a"));
+        assert!(downstream_brief.contains("title=upstream-b; status=completed"));
+        assert!(downstream_brief.contains("Latest output summary: completed upstream-b"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

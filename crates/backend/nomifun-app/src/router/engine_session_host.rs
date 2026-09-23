@@ -5,8 +5,9 @@
 use std::sync::{Arc, Weak};
 
 use nomifun_agent_contracts::{
-    AgentBindingValue, AgentPresetRevision, PrincipalRef, ResolvedSnapshotEnvelope,
-    ResolvedSnapshotRef,
+    AgentBindingChangedPayloadV1, AgentBindingValue, AgentHandoffBindingRefV1,
+    AgentHandoffEnvelopeV1, AgentHandoffMode, AgentPresetRevision, PrincipalRef,
+    ResolvedSnapshotEnvelope, ResolvedSnapshotRef, SessionPayloadBody, digest_bytes,
 };
 use nomifun_agent_control_plane::{AgentControlPlane, AuthenticatedOwner};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
@@ -50,6 +51,8 @@ pub struct AdmittedEngineSession {
     snapshot: ResolvedSnapshotEnvelope,
     principal: PrincipalRef,
     workspace: String,
+    active_set_generation: u64,
+    active_capability_ids: Vec<String>,
 }
 
 /// Canonical accepted root from the existing delivery owner. Read-only facts,
@@ -109,6 +112,12 @@ impl AdmittedEngineSession {
     }
     pub fn workspace(&self) -> &str {
         &self.workspace
+    }
+    pub fn active_set_generation(&self) -> u64 {
+        self.active_set_generation
+    }
+    pub fn active_capability_ids(&self) -> &[String] {
+        &self.active_capability_ids
     }
     pub fn execution_constraints(&self) -> Result<nomifun_api_types::ExecutionConstraints, AppError> {
         nomifun_api_types::ExecutionConstraints::from_extra(&self.response.extra)
@@ -188,6 +197,107 @@ impl EngineSessionHost {
             ));
         }
         super::engine_model_facts::load(&self.pool, session).await
+    }
+
+    /// Read the latest canonical cross-Agent handoff for the exact current
+    /// binding. The payload is bounded data only; it is never converted into an
+    /// AgentPriorTask, current requirement ledger, capability grant, or replay.
+    pub async fn read_agent_handoff(
+        &self,
+        session: &AdmittedEngineSession,
+    ) -> Result<Option<AgentHandoffEnvelopeV1>, AppError> {
+        let row: Option<(String, i64)> = sqlx::query_as(
+            "SELECT inline_json, seq FROM agent_events \
+             WHERE session_id = ? AND kind = 'session/agent-binding-changed' \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(&session.response.conversation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| AppError::Internal(format!("read Agent handoff transition: {error}")))?;
+        let Some((raw, transition_seq)) = row else {
+            return Ok(None);
+        };
+        let transition: AgentBindingChangedPayloadV1 = serde_json::from_str(&raw)
+            .map_err(|error| AppError::Conflict(format!("Agent handoff transition is invalid: {error}")))?;
+        let current_ref = AgentHandoffBindingRefV1::from(&session.agent_binding);
+        let target_reached_current = transition.next_binding_ref.binding_version
+            < current_ref.binding_version
+            || transition.next_binding_ref == current_ref;
+        if !target_reached_current || transition.completion_gate_inherited
+        {
+            return Err(AppError::Conflict(
+                "Agent handoff transition differs from the exact current binding".to_owned(),
+            ));
+        }
+        if transition.handoff_mode == AgentHandoffMode::ContextOnly {
+            if transition.handoff_payload_id.is_some() || transition.handoff_payload_digest.is_some()
+            {
+                return Err(AppError::Conflict(
+                    "context-only Agent transition unexpectedly carries a handoff payload"
+                        .to_owned(),
+                ));
+            }
+            return Ok(None);
+        }
+        let (Some(payload_id), Some(expected_digest)) = (
+            transition.handoff_payload_id.as_ref(),
+            transition.handoff_payload_digest.as_ref(),
+        ) else {
+            return Err(AppError::Conflict(
+                "continue-task Agent transition lost its handoff payload reference".to_owned(),
+            ));
+        };
+        let payload: Option<(Vec<u8>, String)> = sqlx::query_as(
+            "SELECT body, digest FROM agent_payloads WHERE payload_id = ? AND session_id = ?",
+        )
+        .bind(payload_id.as_ref())
+        .bind(&session.response.conversation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| AppError::Internal(format!("read Agent handoff payload: {error}")))?;
+        let Some((body, stored_digest)) = payload else {
+            return Err(AppError::Conflict(
+                "Agent handoff payload is missing".to_owned(),
+            ));
+        };
+        if stored_digest != expected_digest.as_ref() {
+            return Err(AppError::Conflict(
+                "Agent handoff payload digest differs from the transition event".to_owned(),
+            ));
+        }
+        let body: SessionPayloadBody = serde_json::from_slice(&body).map_err(|error| {
+            AppError::Conflict(format!("Agent handoff payload body is invalid: {error}"))
+        })?;
+        let SessionPayloadBody::Json(value) = body else {
+            return Err(AppError::Conflict(
+                "Agent handoff payload is not canonical JSON".to_owned(),
+            ));
+        };
+        let logical = nomifun_agent_contracts::canonical_json_bytes(&value.0)
+            .map_err(|error| AppError::Conflict(error.to_string()))?;
+        if digest_bytes(&logical) != *expected_digest {
+            return Err(AppError::Conflict(
+                "Agent handoff payload body failed digest verification".to_owned(),
+            ));
+        }
+        let envelope: AgentHandoffEnvelopeV1 = serde_json::from_value(value.0)
+            .map_err(|error| AppError::Conflict(format!("Agent handoff is invalid: {error}")))?;
+        envelope
+            .validate()
+            .map_err(|error| AppError::Conflict(format!("Agent handoff is invalid: {error}")))?;
+        if envelope.target_binding_ref != transition.next_binding_ref
+            || envelope.source_binding_ref != transition.previous_binding_ref
+            || envelope.source_agent_session_id.as_ref() != session.response.conversation_id
+            || i64::try_from(envelope.source_through_seq)
+                .ok()
+                .is_none_or(|source| source >= transition_seq)
+        {
+            return Err(AppError::Conflict(
+                "Agent handoff identity or source boundary is invalid".to_owned(),
+            ));
+        }
+        Ok(Some(envelope))
     }
 
     /// Accept a prior turn's immutable Snapshot only when the control plane
@@ -641,6 +751,18 @@ impl EngineSessionHost {
             ));
         }
         provider.validate_snapshot(&snapshot)?;
+        let head = owner
+            .canonical()
+            .store()
+            .head(&session_id)
+            .await
+            .map_err(|error| conflict(&error.to_string()))?;
+        let active_capability_ids = owner
+            .canonical()
+            .store()
+            .active_capability_ids(&session_id)
+            .await
+            .map_err(|error| conflict(&error.to_string()))?;
         let workspace = std::path::PathBuf::from(&options.workspace);
         if !workspace.is_absolute() {
             return Err(conflict("runtime workspace is not an absolute host path"));
@@ -674,6 +796,8 @@ impl EngineSessionHost {
             snapshot,
             principal,
             workspace,
+            active_set_generation: head.active_set_generation,
+            active_capability_ids,
         })
     }
 }

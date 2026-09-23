@@ -84,6 +84,8 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
         "/api/agent-sessions",
         "/api/agent-sessions/{agent_session_id}",
         "/api/agent-sessions/{agent_session_id}/model",
+        "/api/agent-sessions/{agent_session_id}/agent-switch/preview",
+        "/api/agent-sessions/{agent_session_id}/agent",
         "/api/agent-session-messages/search",
         "/api/agent-sessions/{agent_session_id}/creation-tasks",
         "/api/creative-studio/canvas-agent-sessions/resolve",
@@ -342,10 +344,11 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
 }
 
 #[tokio::test]
-async fn started_agent_session_switches_model_without_changing_agent_resources_or_history() {
+async fn started_agent_session_switches_model_then_agent_in_place_with_segmented_history() {
     const TRUST: &str = "started-session-model-switch";
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";
     const SECOND_REPLY: &str = "SECOND_MODEL_REPLY";
+    const THIRD_REPLY: &str = "TARGET_AGENT_REPLY";
 
     async fn call(
         router: axum::Router,
@@ -360,6 +363,38 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
                     .uri(path)
                     .header("x-nomi-local-trust", TRUST)
                     .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let body = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, body)
+    }
+
+    async fn call_with_idempotency(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+        idempotency_key: &str,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", idempotency_key)
                     .body(Body::from(serde_json::to_vec(&body).unwrap()))
                     .unwrap(),
             )
@@ -427,7 +462,9 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
         .and(wiremock::matchers::path("/v1/chat/completions"))
         .respond_with(move |request: &wiremock::Request| {
             let body = request.body_json::<Value>().unwrap();
-            let reply = if body["model"] == "model-two" {
+            let reply = if body.to_string().contains("third turn") {
+                THIRD_REPLY
+            } else if body["model"] == "model-two" {
                 SECOND_REPLY
             } else {
                 FIRST_REPLY
@@ -612,7 +649,7 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
         router.clone(),
         "PUT",
         &format!("/api/agent-sessions/{session_id}/model"),
-        second_model,
+        second_model.clone(),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{repeated}");
@@ -635,17 +672,395 @@ async fn started_agent_session_switches_model_without_changing_agent_resources_o
     assert_eq!(status, StatusCode::OK, "{second_turn}");
     wait_for_reply(router.clone(), session_id, SECOND_REPLY).await;
 
+    // Add one exact, canonical closed Turn with a structured plan so the switch
+    // exercises deterministic continue_task export/import without asking a
+    // model to author the handoff summary.
+    let store = nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    )
+    .await
+    .unwrap();
+    let session_contract = nomifun_agent_contracts::AgentSessionId::from(session_id.to_owned());
+    let second_operation = nomifun_agent_contracts::OperationId::from(
+        second_turn["data"]["operation_id"].as_str().unwrap().to_owned(),
+    );
+    let second_facts = store
+        .chat_causality_facts(&session_contract, &second_operation)
+        .await
+        .unwrap();
+    let source_engine_binding = second_facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.0 == "runtime/progress-recorded"
+                && event.correlation_id.as_ref() == second_operation.as_ref()
+        })
+        .filter_map(|event| second_facts.event_payloads.get(event.event_id.as_ref()))
+        .filter_map(|payload| payload.get("event"))
+        .filter_map(|event| {
+            serde_json::from_value::<nomifun_agent_runtime::AgentEngineEvent>(event.clone()).ok()
+        })
+        .find_map(|event| match event {
+            nomifun_agent_runtime::AgentEngineEvent::TurnStarted { binding, .. } => Some(binding),
+            _ => None,
+        })
+        .expect("source Turn engine binding");
+    assert_eq!(
+        source_engine_binding.resolved_snapshot_ref(),
+        &store
+            .get_live_session(&session_contract)
+            .await
+            .unwrap()
+            .agent_binding
+            .resolved_snapshot_ref,
+        "the synthetic handoff source must use the exact current binding",
+    );
+    let handoff_operation = nomifun_agent_contracts::OperationId::from(
+        uuid::Uuid::now_v7().to_string(),
+    );
+    let (_, handoff_started) = store
+        .start_turn(
+            &session_contract,
+            nomifun_agent_contracts::EventProducerId::from("session_api"),
+            nomifun_agent_contracts::IdempotencyKey::from(uuid::Uuid::now_v7().to_string()),
+            handoff_operation.clone(),
+            nomifun_agent_contracts::StrictJsonValue(json!({
+                "content": "continue this structured task"
+            })),
+        )
+        .await
+        .unwrap();
+    let handoff_started_event = handoff_started.ack.unwrap().event_id;
+    let handoff_events = vec![
+        nomifun_agent_runtime::AgentEngineEvent::TurnStarted {
+            binding: source_engine_binding,
+            turn_operation_id: handoff_operation.clone(),
+        },
+        nomifun_agent_runtime::AgentEngineEvent::PlanUpdated {
+            plan: nomifun_agent_runtime::AgentPlan {
+                revision: 1,
+                explanation: "Continue after the Agent boundary".to_owned(),
+                steps: vec![nomifun_agent_runtime::AgentPlanStep {
+                    step: "Re-read and verify the current workspace".to_owned(),
+                    status: nomifun_agent_runtime::AgentPlanStatus::Pending,
+                }],
+                needs_replan: true,
+                requirements: vec![nomifun_agent_runtime::AgentTaskRequirement {
+                    id: "req-handoff".to_owned(),
+                    description: "Keep the exact requirement across Agents".to_owned(),
+                    source: nomifun_agent_runtime::AgentInputCitation {
+                        input: 0,
+                        quote: "continue this structured task".to_owned(),
+                    },
+                    origin: None,
+                }],
+            },
+        },
+        nomifun_agent_runtime::AgentEngineEvent::TurnCompleted {
+            model_steps: 1,
+            finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+        },
+    ];
+    let mut handoff_cause = handoff_started_event;
+    for (index, event) in handoff_events.into_iter().enumerate() {
+        let event_id = nomifun_agent_contracts::EventId::from(format!(
+            "handoff-progress:{}:{index}",
+            handoff_operation.as_ref()
+        ));
+        store
+            .append_event(&nomifun_agent_contracts::SessionEventAppend {
+                agent_session_id: session_contract.clone(),
+                event_id: event_id.clone(),
+                producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+                idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
+                    "handoff-progress:{}:{index}",
+                    handoff_operation.as_ref()
+                )),
+                runtime_binding_id: None,
+                runtime_producer_seq: None,
+                semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                    kind: nomifun_agent_contracts::SessionEventKind(
+                        "runtime/progress-recorded".to_owned(),
+                    ),
+                    kind_version: 1,
+                    correlation_id: nomifun_agent_contracts::CorrelationId::from(
+                        handoff_operation.as_ref().to_owned(),
+                    ),
+                    causation_event_id: Some(handoff_cause),
+                    payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                        nomifun_agent_contracts::StrictJsonValue(json!({
+                            "runtime_binding_id": format!("nomi:{}", session_id),
+                            "producer_seq": index + 1,
+                            "event": event,
+                        })),
+                    ),
+                },
+            })
+            .await
+            .unwrap();
+        handoff_cause = event_id;
+    }
+    store
+        .append_turn_terminal(
+            &nomifun_agent_contracts::SessionEventAppend {
+                agent_session_id: session_contract.clone(),
+                event_id: nomifun_agent_contracts::EventId::from(format!(
+                    "handoff-terminal:{}",
+                    handoff_operation.as_ref()
+                )),
+                producer_id: nomifun_agent_contracts::EventProducerId::from(
+                    "runtime_supervisor",
+                ),
+                idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(format!(
+                    "handoff-terminal:{}",
+                    handoff_operation.as_ref()
+                )),
+                runtime_binding_id: None,
+                runtime_producer_seq: None,
+                semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+                    kind: nomifun_agent_contracts::SessionEventKind("turn/completed".to_owned()),
+                    kind_version: 1,
+                    correlation_id: nomifun_agent_contracts::CorrelationId::from(
+                        handoff_operation.as_ref().to_owned(),
+                    ),
+                    causation_event_id: Some(handoff_cause),
+                    payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                        nomifun_agent_contracts::StrictJsonValue(json!({})),
+                    ),
+                },
+            },
+            &handoff_operation,
+        )
+        .await
+        .unwrap();
+
+    let (status, target_preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({
+            "display_name": "Target handoff Agent",
+            "reuse_existing": false,
+            "model_route_refs": {},
+            "chat_route_records": {},
+            "model": second_model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{target_preset}");
+    let target_preset_id = target_preset["data"]["preset"]["preset_id"]
+        .as_str()
+        .unwrap();
+    let selection = json!({ "kind": "preset", "preset_id": target_preset_id });
+    let (status, preview) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/agent-switch/preview"),
+        json!({ "selection": selection }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["data"]["can_apply"], true, "{preview}");
+    assert_eq!(preview["data"]["model"]["preserved"], true);
+    assert_eq!(preview["data"]["handoff"]["completion_gate_inherited"], false);
+    assert_eq!(preview["data"]["handoff"]["available"], true);
+    assert_eq!(preview["data"]["handoff"]["requirement_count"], 1);
+    let expected_binding_version = preview["data"]["expected_binding_version"]
+        .as_u64()
+        .unwrap();
+    let switch_request = json!({
+        "selection": selection,
+        "handoff_mode": "continue_task",
+        "expected_binding_version": expected_binding_version
+    });
+    let switch_key = uuid::Uuid::now_v7().to_string();
+    let (status, switched_agent) = call_with_idempotency(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/agent"),
+        switch_request.clone(),
+        &switch_key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{switched_agent}");
+    assert_eq!(switched_agent["data"]["conversation"]["conversation_id"], session_id);
+    assert_eq!(switched_agent["data"]["conversation"]["name"], "Keep this conversation");
+    assert_eq!(switched_agent["data"]["effective_from"], "next_turn");
+    assert_eq!(switched_agent["data"]["handoff"]["available"], true);
+    assert_eq!(switched_agent["data"]["handoff"]["completion_gate_inherited"], false);
+    assert_eq!(switched_agent["data"]["transition_id"], switch_key);
+    assert_eq!(
+        switched_agent["data"]["binding_version"],
+        expected_binding_version + 1
+    );
+    let (status, switched_capabilities) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/capabilities"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{switched_capabilities}");
+    assert_eq!(switched_capabilities["data"]["generation"], 1);
+    assert_eq!(
+        switched_capabilities["data"]["state_source"],
+        "canonical_agent_store"
+    );
+
+    let (status, replayed_switch) = call_with_idempotency(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/agent"),
+        switch_request,
+        &switch_key,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{replayed_switch}");
+    assert_eq!(replayed_switch["data"]["transition_id"], switch_key);
+    assert_eq!(
+        replayed_switch["data"]["binding_version"],
+        switched_agent["data"]["binding_version"]
+    );
+
+    let (status, raw_messages_after_switch) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/messages?after_seq=0&limit=500"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{raw_messages_after_switch}");
+    assert!(
+        raw_messages_after_switch["data"]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["presentation_intent"] == "agent_transition"),
+        "{raw_messages_after_switch}"
+    );
+
+    let (status, history_after_switch) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{history_after_switch}");
+    let history_items = history_after_switch["data"]["items"].as_array().unwrap();
+    assert!(history_items.iter().any(|message| message["content"]["content"] == FIRST_REPLY));
+    assert!(history_items.iter().any(|message| message["content"]["content"] == SECOND_REPLY));
+    assert!(
+        history_items.iter().any(|message| {
+            message["type"] == "tips"
+                && message["content"]["agent_transition"]["effective_from"] == "next_turn"
+                && message["content"]["agent_transition"]["next_preset_id"] == target_preset_id
+        }),
+        "{history_after_switch}"
+    );
+
+    let (status, third_turn) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "third turn" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{third_turn}");
+    wait_for_reply(router.clone(), session_id, THIRD_REPLY).await;
+
+    let (status, events_after_switch) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/events?after_seq=0&limit=500"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{events_after_switch}");
+    let transition = events_after_switch["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["kind"] == "session/agent-binding-changed")
+        .expect("canonical Agent transition event");
+    assert_eq!(transition["payload"]["value"]["effective_after_seq"].is_u64(), true);
+    let target_snapshot = switched_agent["data"]["conversation"]["agent_snapshot"]
+        ["canonical_binding"]["resolved_snapshot_ref"]["snapshot_digest"]
+        .clone();
+    assert!(events_after_switch["data"]["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "runtime/progress-recorded")
+        .filter_map(|event| event["payload"]["value"]["event"]["binding"]
+            ["resolved_snapshot_ref"]["snapshot_digest"].as_str())
+        .any(|digest| target_snapshot == digest));
+
     let requests = model_requests.lock().unwrap();
     let models = requests
         .iter()
         .map(|request| request["model"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(models, vec!["model-one", "model-two"]);
+    assert_eq!(models, vec!["model-one", "model-two", "model-two"]);
     assert!(
         requests[1].to_string().contains(FIRST_REPLY),
         "the replacement Runtime must continue from the same durable history"
     );
+    let target_request = requests[2].to_string();
+    assert!(target_request.contains(FIRST_REPLY));
+    assert!(target_request.contains(SECOND_REPLY));
+    assert!(target_request.contains("Historical cross-Agent handoff"));
+    assert!(target_request.contains("Keep the exact requirement across Agents"));
+    assert!(target_request.contains("not inherited by the target completion gate"));
+    assert!(
+        !requests[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["role"] == "tool"),
+        "pre-transition tool authority must not enter target-Agent history"
+    );
     drop(requests);
+
+    let (status, minimal_preview) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{session_id}/agent-switch/preview"),
+        json!({ "selection": { "kind": "template", "template_key": "chat.minimal" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minimal_preview}");
+    assert_eq!(minimal_preview["data"]["can_apply"], true);
+    let (status, minimal_switch) = call_with_idempotency(
+        router.clone(),
+        "PUT",
+        &format!("/api/agent-sessions/{session_id}/agent"),
+        json!({
+            "selection": { "kind": "template", "template_key": "chat.minimal" },
+            "handoff_mode": "context_only",
+            "expected_binding_version": minimal_preview["data"]["expected_binding_version"],
+        }),
+        &uuid::Uuid::now_v7().to_string(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{minimal_switch}");
+    assert_eq!(minimal_switch["data"]["conversation"]["extra"]["official_template_key"], "chat.minimal");
+    let minimal_preset_id = minimal_switch["data"]["conversation"]["preset_id"].as_str().unwrap();
+    let (status, localized_history) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/message-history?page_size=100"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{localized_history}");
+    assert!(localized_history["data"]["items"].as_array().unwrap().iter().any(|message| {
+        message["content"]["agent_transition"]["next_preset_id"] == minimal_preset_id
+            && message["content"]["agent_transition"]["next_template_key"] == "chat.minimal"
+    }), "{localized_history}");
 
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
@@ -2701,7 +3116,7 @@ async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_
     })).await;
     assert_eq!(status, StatusCode::CREATED, "{provider}");
     let path = "/api/agent-presets/from-template/chat.minimal";
-    let request = json!({ "display_name": "Minimal", "reuse_existing": true,
+    let request = json!({ "display_name": "chat.minimal", "reuse_existing": true,
         "model": { "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" } });
     let (status, original) = call(router.clone(), path, request.clone()).await;
     assert_eq!(status, StatusCode::OK, "{original}");
@@ -2726,7 +3141,16 @@ async fn official_agent_launch_reuses_current_configuration_and_opens_canonical_
     assert_eq!(observed["data"]["session"]["agent_binding"], session["data"]["agent_binding"]);
     assert_eq!(observed["data"]["session"]["metadata"]["title"], "你好");
     assert_eq!(observed["data"]["session"]["agent_binding"]["preset_revision_ref"]["preset_id"], original_id);
-    assert_eq!(original["data"]["preset"]["display_name"], "Minimal");
+    assert_eq!(original["data"]["preset"]["display_name"], "chat.minimal");
+
+    let projection = router.clone().oneshot(Request::builder()
+        .uri(format!("/api/agent-sessions/{session_id}/projection"))
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(projection.status(), StatusCode::OK);
+    let projection: Value = serde_json::from_slice(&axum::body::to_bytes(
+        projection.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(projection["data"]["extra"]["official_template_key"], "chat.minimal");
 
     assert!(upstream.received_requests().await.unwrap().is_empty(),
         "Agent preparation must not execute the selected commercial model");

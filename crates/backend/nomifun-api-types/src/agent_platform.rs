@@ -866,7 +866,7 @@ pub struct RemoteMutationResponseDto {
     pub session_status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceSelectionDto {
     pub resource_kind: String,
@@ -964,6 +964,136 @@ pub struct AgentChatModelSelectionDto {
     pub provider_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
     pub model: String,
+}
+
+/// Product identity only. Exact Revision/Snapshot/binding facts remain
+/// server-resolved for both preview and apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentSwitchSelectionDto {
+    Preset {
+        #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
+        preset_id: String,
+    },
+    Template {
+        template_key: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewAgentSessionSwitchRequestDto {
+    pub selection: AgentSwitchSelectionDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchIdentityDto {
+    pub label: String,
+    pub preset_id: String,
+    pub preset_revision: u64,
+    pub resolved_snapshot_ref: ResolvedSnapshotRefDto,
+    pub binding_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchModelPreviewDto {
+    pub provider_id: String,
+    pub model: String,
+    pub preserved: bool,
+    pub compatible: bool,
+    #[serde(default)]
+    pub missing_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchResourceDiffDto {
+    #[serde(default)]
+    pub retained: Vec<AgentResourceSelectionDto>,
+    #[serde(default)]
+    pub dropped: Vec<AgentResourceSelectionDto>,
+    #[serde(default)]
+    pub missing_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchCapabilityDiffDto {
+    #[serde(default)]
+    pub gained: Vec<String>,
+    #[serde(default)]
+    pub lost: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchBlockerDto {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHandoffAvailabilityDto {
+    pub available: bool,
+    pub requirement_count: usize,
+    pub verified_artifact_count: usize,
+    pub unresolved_item_count: usize,
+    /// False in v1: handoff requirements are historical data until a target
+    /// Turn establishes fresh accepted-input provenance.
+    pub completion_gate_inherited: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewAgentSessionSwitchResponseDto {
+    pub current: AgentSwitchIdentityDto,
+    pub target: AgentSwitchIdentityDto,
+    pub model: AgentSwitchModelPreviewDto,
+    pub resources: AgentSwitchResourceDiffDto,
+    pub capabilities: AgentSwitchCapabilityDiffDto,
+    pub handoff: AgentHandoffAvailabilityDto,
+    #[serde(default)]
+    pub blockers: Vec<AgentSwitchBlockerDto>,
+    pub expected_binding_version: u64,
+    pub can_apply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHandoffModeDto {
+    ContinueTask,
+    ContextOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyAgentSessionSwitchRequestDto {
+    pub selection: AgentSwitchSelectionDto,
+    pub handoff_mode: AgentHandoffModeDto,
+    pub expected_binding_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyAgentSessionSwitchResponseDto {
+    pub conversation: crate::ConversationResponse,
+    pub transition_id: String,
+    pub previous_agent_label: String,
+    pub current_agent_label: String,
+    pub binding_version: u64,
+    pub effective_from: String,
+    pub handoff: AgentHandoffAvailabilityDto,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1249,6 +1379,39 @@ mod snapshot_tests {
             serde_json::from_value::<CreateAgentSessionRequestDto>(request).is_err(),
             "agent_binding must remain a server-owned output"
         );
+    }
+
+    #[test]
+    fn agent_switch_requests_accept_selection_only_and_reject_client_bindings() {
+        let preview = serde_json::from_value::<PreviewAgentSessionSwitchRequestDto>(json!({
+            "selection": { "kind": "preset", "preset_id": PRESET_ID }
+        }))
+        .expect("selection-only preview");
+        assert!(matches!(preview.selection, AgentSwitchSelectionDto::Preset { .. }));
+
+        let apply = serde_json::from_value::<ApplyAgentSessionSwitchRequestDto>(json!({
+            "selection": { "kind": "template", "template_key": "coding.codex" },
+            "handoff_mode": "context_only",
+            "expected_binding_version": 4
+        }))
+        .expect("bounded apply command");
+        assert_eq!(apply.handoff_mode, AgentHandoffModeDto::ContextOnly);
+
+        for forbidden in ["agent_binding", "resolved_snapshot_ref", "typed_resource_bindings"] {
+            let mut request = json!({
+                "selection": { "kind": "preset", "preset_id": PRESET_ID },
+                "handoff_mode": "continue_task",
+                "expected_binding_version": 4
+            });
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert(forbidden.to_owned(), json!({}));
+            assert!(
+                serde_json::from_value::<ApplyAgentSessionSwitchRequestDto>(request).is_err(),
+                "clients must not submit {forbidden}"
+            );
+        }
     }
 
     #[test]

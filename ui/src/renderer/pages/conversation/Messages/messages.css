@@ -15,6 +15,32 @@
   line-height: var(--conversation-message-line-height);
 }
 
+/* Agent switches are session boundaries, not successful chat messages. */
+.agent-transition-boundary {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  margin: 6px 0;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.agent-transition-boundary__rule {
+  flex: 1;
+  min-width: 18px;
+  height: 1px;
+  background: var(--color-border-2);
+}
+
+.agent-transition-boundary__label {
+  max-width: 70%;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
 /* Errors share the message text axis; execution time remains in its own row. */
 .message-error-note {
   box-sizing: border-box;

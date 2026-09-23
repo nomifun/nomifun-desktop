@@ -271,6 +271,7 @@ const getProcessedItemRole = (item: IRenderableItem): TurnDisclosureInputItem['r
     case 'text':
       return item.position === 'right' ? 'user' : 'assistant';
     case 'tips':
+      if (item.content.agent_transition) return 'other';
       if (isContextCompressionTip(item)) return 'process';
       return 'assistant';
     case 'thinking':
