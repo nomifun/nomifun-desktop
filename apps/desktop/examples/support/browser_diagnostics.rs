@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 pub async fn verify(view: &tauri::Webview, url: &str) -> Result<Value, String> {
     let metadata=Arc::new(Mutex::new(BrowserTabSnapshot {
         target:BrowserTabTarget {tab_id:view.label().into(),runtime_generation:1,document_generation:1},
-        title:String::new(),url:url.into(),lifecycle:BrowserTabLifecycle::Ready,can_go_back:false,can_go_forward:false,
+        title:String::new(),url:url.into(),lifecycle:BrowserTabLifecycle::Ready,can_go_back:false,can_go_forward:false,zoom_percent:100,
         blocked_permissions:vec![],permission_requests:vec![],script_dialog:None,diagnostics:Default::default(),
     }));
     windows::diagnostics::install(view,metadata.clone()).await;

@@ -12,7 +12,7 @@ import { BackendHttpError } from '@/common/adapter/httpBridge';
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', interpolation: { escapeValue: false }, resources: { 'en-US': { translation: { browserWorkspace: words } } } });
 const target = { tab_id: 'browser-1', runtime_generation: 1, document_generation: 1 };
-const initial: BrowserSnapshot = { agent_session_id: 'session-1', resource_binding_id: 'browser-binding-1', provider_id: 'managed', provider_kind: 'managed', allowed_actions: ['browser/observe', 'browser/navigate', 'browser/act', 'browser/render_content', 'browser/download', 'browser/upload', 'browser/evaluate'], run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false }] } };
+const initial: BrowserSnapshot = { agent_session_id: 'session-1', resource_binding_id: 'browser-binding-1', provider_id: 'managed', provider_kind: 'managed', allowed_actions: ['browser/observe', 'browser/navigate', 'browser/act', 'browser/render_content', 'browser/download', 'browser/upload', 'browser/evaluate'], run: { revision: 1, input_state: 'user_ready', input_gate_failed: false }, runtime: { runtime_generation: 1, revision: 1, active_tab_id: 'browser-1', downloads: [], tabs: [{ target, title: 'Fixture', url: 'http://localhost:3000/', lifecycle: 'ready', can_go_back: false, can_go_forward: false, zoom_percent: 100 }] } };
 const originalRect = HTMLElement.prototype.getBoundingClientRect;
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
 const originalSecureContext = Object.getOwnPropertyDescriptor(window, 'isSecureContext');
@@ -162,12 +162,67 @@ test('exact Action grants disable unsupported controls before dispatch', async (
   await screen.ready();
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
   expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(false);
-  for (const tab of screen.getAllByRole('tab')) expect((tab as HTMLButtonElement).disabled).toBe(true);
+  for (const tab of screen.getAllByRole('tab')) expect((tab as HTMLButtonElement).disabled).toBe(false);
   expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(true);
   fireEvent.change(screen.getByRole('textbox', { name: words.address }), { target: { value: 'https://example.test' } });
   fireEvent.submit(screen.getByRole('textbox', { name: words.address }).closest('form')!);
   await waitFor(() => expect(screen.commands.some(command => command.command === 'navigate')).toBe(true));
   expect(screen.commands.every(command => command.command === 'navigate')).toBe(true);
+});
+
+test('a navigation-only Agent can switch tabs and the active page follows the returned snapshot', async () => {
+  const secondTarget = { ...target, tab_id: 'browser-2' };
+  let current: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'], runtime: { ...initial.runtime!, tabs: [
+    initial.runtime!.tabs[0]!,
+    { ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second', url: 'https://second.example/' },
+  ] } };
+  const sent: BrowserCommand[] = [];
+  const screen = fixture({
+    async ensure() { return current; },
+    async command(_id, command) {
+      sent.push(command);
+      if (command.command === 'activate') current = { ...current, runtime: { ...current.runtime!, revision: current.runtime!.revision + 1, active_tab_id: command.target.tab_id } };
+      return current;
+    },
+  });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('tab', { name: 'Second' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true'));
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('https://second.example/');
+  fireEvent.click(screen.getByRole('tab', { name: 'Fixture' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Fixture' }).getAttribute('aria-selected')).toBe('true'));
+  expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost:3000/');
+  expect(sent).toEqual([{ command: 'activate', target: secondTarget }, { command: 'activate', target }]);
+});
+
+test('limited Browser guidance opens from the address icon and closes without a permanent row', async () => {
+  const limited: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'] };
+  const visibility: boolean[] = [];
+  const screen = fixture({
+    async ensure() { return limited; },
+    async update(_id, _sequence, _bounds, visible) { visibility.push(visible); },
+  });
+  await screen.ready();
+  await waitFor(() => expect(visibility.at(-1)).toBe(true));
+  const trigger = screen.getByRole('button', { name: words.limitedAccessStatus });
+  expect(screen.queryByRole('tooltip')).toBeNull();
+  expect(screen.queryByText(words.limitedAccessHint)).toBeNull();
+  fireEvent.mouseEnter(trigger);
+  const tooltip = await screen.findByRole('tooltip');
+  await waitFor(() => expect(visibility.at(-1)).toBe(false));
+  expect(tooltip.textContent).toContain(words.limitedAccessStatus);
+  expect(tooltip.textContent).toContain(words.provider.managed);
+  expect(tooltip.textContent).toContain(words.limitedAccessHint);
+  fireEvent.mouseLeave(trigger, { relatedTarget: tooltip });
+  fireEvent.mouseEnter(tooltip, { relatedTarget: trigger });
+  expect(screen.getByRole('tooltip')).toBeTruthy();
+  fireEvent.mouseLeave(tooltip, { relatedTarget: document.body });
+  expect(screen.queryByRole('tooltip')).toBeNull();
+  await waitFor(() => expect(visibility.at(-1)).toBe(true));
+  act(() => trigger.focus());
+  expect(await screen.findByRole('tooltip')).toBeTruthy();
+  fireEvent.keyDown(trigger, { key: 'Escape' });
+  expect(screen.queryByRole('tooltip')).toBeNull();
 });
 
 test('backend Action denial is terminal capability guidance, not a retryable panel failure', () => {
@@ -261,11 +316,78 @@ test('the Browser menu exposes keyboard focus, disabled semantics and Escape res
   expect(trigger.getAttribute('aria-expanded')).toBe('false');
   fireEvent.keyDown(trigger, { key: 'ArrowDown' });
   const popup = await screen.findByRole('menu', { name: words.menu });
-  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: words.copyAddress })));
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: words.zoomOut })));
   expect(trigger.getAttribute('aria-expanded')).toBe('true');
   fireEvent.keyDown(popup, { key: 'Escape' });
   expect(screen.queryByRole('menu', { name: words.menu })).toBeNull();
   expect(document.activeElement).toBe(trigger);
+});
+
+test('page zoom controls update the active native tab and reset to 100%', async () => {
+  let current: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'] };
+  const sent: BrowserCommand[] = [];
+  const screen = fixture({
+    async ensure() { return current; },
+    async command(_id, command) {
+      sent.push(command);
+      if (command.command === 'set_zoom') current = { ...current, runtime: { ...current.runtime!, revision: current.runtime!.revision + 1, tabs: current.runtime!.tabs.map(tab => tab.target.tab_id === command.target.tab_id ? { ...tab, zoom_percent: command.percent } : tab) } };
+      return current;
+    },
+  });
+  await screen.ready();
+  const menuButton = screen.getByRole('button', { name: words.menu });
+  fireEvent.click(menuButton);
+  let reset = screen.getByRole('menuitem', { name: words.zoomReset });
+  expect(reset.textContent).toBe('100%');
+  expect((reset as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole('menuitem', { name: words.zoomIn }));
+  expect(screen.queryByRole('menu')).toBeNull();
+  await waitFor(() => expect((menuButton as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(menuButton);
+  reset = screen.getByRole('menuitem', { name: words.zoomReset });
+  expect(reset.textContent).toBe('110%');
+  fireEvent.click(reset);
+  expect(screen.queryByRole('menu')).toBeNull();
+  await waitFor(() => expect((menuButton as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(menuButton);
+  reset = screen.getByRole('menuitem', { name: words.zoomReset });
+  expect(reset.textContent).toBe('100%');
+  fireEvent.click(screen.getByRole('menuitem', { name: words.zoomOut }));
+  expect(screen.queryByRole('menu')).toBeNull();
+  await waitFor(() => expect((menuButton as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(menuButton);
+  expect(screen.getByRole('menuitem', { name: words.zoomReset }).textContent).toBe('90%');
+  expect(sent).toEqual([
+    { command: 'set_zoom', target, percent: 110 },
+    { command: 'set_zoom', target, percent: 100 },
+    { command: 'set_zoom', target, percent: 90 },
+  ]);
+});
+
+test('page zoom follows each tab and a native zoom failure leaves the browser available', async () => {
+  const secondTarget = { ...target, tab_id: 'browser-2' };
+  let current: BrowserSnapshot = { ...initial, runtime: { ...initial.runtime!, tabs: [
+    initial.runtime!.tabs[0]!,
+    { ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second', zoom_percent: 125 },
+  ] } };
+  const screen = fixture({
+    async ensure() { return current; },
+    async command(_id, command) {
+      if (command.command === 'set_zoom') throw new Error('native zoom failed');
+      if (command.command === 'activate') current = { ...current, runtime: { ...current.runtime!, revision: current.runtime!.revision + 1, active_tab_id: command.target.tab_id } };
+      return current;
+    },
+  });
+  await screen.ready();
+  fireEvent.click(screen.getByRole('tab', { name: 'Second' }));
+  await waitFor(() => expect(screen.getByRole('tab', { name: 'Second' }).getAttribute('aria-selected')).toBe('true'));
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.getByRole('menuitem', { name: words.zoomReset }).textContent).toBe('125%');
+  fireEvent.click(screen.getByRole('menuitem', { name: words.zoomIn }));
+  expect(await screen.findByText(words.zoomFailed)).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: words.menu }));
+  expect(screen.getByRole('menuitem', { name: words.zoomReset }).textContent).toBe('125%');
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 
 test('reload shortcut uses the existing exact-target command and ignores repeats', async () => {

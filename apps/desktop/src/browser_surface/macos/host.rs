@@ -98,6 +98,7 @@ impl DesktopBrowserRuntime {
             lifecycle: BrowserTabLifecycle::Loading,
             can_go_back: false,
             can_go_forward: false,
+            zoom_percent: 100,
             blocked_permissions: vec![],
             permission_requests: vec![],
             script_dialog: None,
@@ -911,6 +912,24 @@ impl DesktopBrowserRuntime {
             BrowserTabCommand::Activate { target } => {
                 state.active = Some(target.tab_id);
                 self.apply_surface(&state).await?;
+            }
+            BrowserTabCommand::SetZoom { target, percent } => {
+                if !(50..=200).contains(&percent) { return Err(WorkspaceError::InvalidZoom); }
+                if !state.input_enabled || state.active.as_ref() != Some(&target.tab_id) {
+                    return Err(WorkspaceError::NotActionable);
+                }
+                let tab = self.target(&state, &target)?;
+                let origin = url::Url::parse(&tab.metadata.lock().unwrap().url).ok().map(|url| url.origin());
+                tab.view.page.set_zoom_factor(f64::from(percent) / 100.0).await.map_err(native_error)?;
+                // CEF shares host zoom across pages from the same origin.
+                for tab in state.tabs.values() {
+                    let mut metadata = tab.metadata.lock().unwrap();
+                    if metadata.target.tab_id == target.tab_id || origin.as_ref().is_some_and(|origin| {
+                        url::Url::parse(&metadata.url).ok().is_some_and(|url| &url.origin() == origin)
+                    }) {
+                        metadata.zoom_percent = percent;
+                    }
+                }
             }
             BrowserTabCommand::Close {..} | BrowserTabCommand::CloseAll {..} | BrowserTabCommand::ClearSiteData {..} => unreachable!("close is handled before native input locks"),
             BrowserTabCommand::Navigate { target, url } => {

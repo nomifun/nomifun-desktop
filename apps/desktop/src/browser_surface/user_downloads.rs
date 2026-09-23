@@ -1045,6 +1045,7 @@ mod tests {
                 lifecycle: nomifun_browser_platform::runtime::BrowserTabLifecycle::Ready,
                 can_go_back: false,
                 can_go_forward: false,
+                zoom_percent: 100,
                 blocked_permissions: vec![],
                 permission_requests: vec![],
                 script_dialog: None,

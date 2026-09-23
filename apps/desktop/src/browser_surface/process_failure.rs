@@ -115,6 +115,7 @@ mod tests {
             lifecycle: BrowserTabLifecycle::Ready,
             can_go_back: true,
             can_go_forward: false,
+            zoom_percent: 100,
             blocked_permissions: vec!["camera".into()],
             permission_requests: vec![],
             script_dialog: None,

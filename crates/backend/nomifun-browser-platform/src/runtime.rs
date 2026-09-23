@@ -47,6 +47,8 @@ pub enum WorkspaceError {
     StaleTarget,
     #[error("The browser URL is not allowed.")]
     InvalidUrl,
+    #[error("The browser zoom must be between 50% and 200%.")]
+    InvalidZoom,
     #[error("Upload files must be regular files inside the authorized workspace; links and special paths are not accepted.")]
     UploadPathDenied,
     #[error("The browser upload file count or byte limit has been reached.")]
@@ -84,6 +86,7 @@ impl WorkspaceError {
             Self::TabLimit => "BROWSER_TAB_LIMIT",
             Self::StaleTarget => "BROWSER_STALE_TARGET",
             Self::InvalidUrl => "BROWSER_INVALID_URL",
+            Self::InvalidZoom => "BROWSER_INVALID_ZOOM",
             Self::UploadPathDenied => "BROWSER_UPLOAD_PATH_DENIED",
             Self::UploadLimit => "BROWSER_UPLOAD_LIMIT",
             Self::DownloadLimit => "BROWSER_DOWNLOAD_LIMIT",
@@ -440,6 +443,8 @@ pub struct BrowserTabSnapshot {
     pub lifecycle: BrowserTabLifecycle,
     pub can_go_back: bool,
     pub can_go_forward: bool,
+    /// Native page zoom for this tab, as a whole-number percentage.
+    pub zoom_percent: u16,
     pub blocked_permissions: Vec<String>,
     pub permission_requests: Vec<BrowserPermissionRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -517,6 +522,11 @@ pub enum BrowserTabCommand {
     Activate {
         target: BrowserTabTarget,
     },
+    /// Human-only native page zoom. It does not change website data.
+    SetZoom {
+        target: BrowserTabTarget,
+        percent: u16,
+    },
     Close {
         target: BrowserTabTarget,
     },
@@ -567,6 +577,7 @@ impl BrowserTabCommand {
         match self {
             Self::Create { .. } | Self::CloseAll { .. } | Self::OpenDownloads { .. } | Self::ClearSiteData { .. } => None,
             Self::Activate { target }
+            | Self::SetZoom { target, .. }
             | Self::Close { target }
             | Self::Navigate { target, .. }
             | Self::Back { target }

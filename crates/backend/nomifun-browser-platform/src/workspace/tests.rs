@@ -123,6 +123,13 @@ impl BrowserRuntime for Runtime {
             snapshot.tabs.clear();
             snapshot.active_tab_id = None;
         }
+        if let BrowserTabCommand::Activate { target } = &command {
+            snapshot.active_tab_id = Some(target.tab_id.clone());
+        }
+        if let BrowserTabCommand::SetZoom { target, percent } = &command {
+            let tab = snapshot.tabs.iter_mut().find(|tab| tab.target == *target).ok_or(WorkspaceError::TabNotFound)?;
+            tab.zoom_percent = *percent;
+        }
         if let BrowserTabCommand::Create { url } = command {
             let id = format!("tab-{}", snapshot.tabs.len());
             let runtime_generation = snapshot.runtime_generation;
@@ -137,6 +144,7 @@ impl BrowserRuntime for Runtime {
                 lifecycle: BrowserTabLifecycle::Ready,
                 can_go_back: false,
                 can_go_forward: false,
+                zoom_percent: 100,
                 blocked_permissions: vec![],
                 permission_requests: vec![],
                 script_dialog: None,
@@ -231,6 +239,54 @@ fn create() -> BrowserTabCommand {
     BrowserTabCommand::Create {
         url: "http://localhost:3000".into(),
     }
+}
+
+#[tokio::test]
+async fn navigate_grant_can_activate_a_tab_without_granting_close() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory, &["managed"]);
+    let resource = service
+        .ensure(
+            authority("alice", "tab-switch", "managed", [BrowserCapabilityAction::Navigate]),
+            BrowserProfile::Ephemeral,
+        )
+        .await
+        .unwrap();
+    let target = resource.user_command(create()).await.unwrap().tabs[0].target.clone();
+    let snapshot = resource
+        .user_command(BrowserTabCommand::Activate { target: target.clone() })
+        .await
+        .unwrap();
+    assert_eq!(snapshot.active_tab_id.as_deref(), Some(target.tab_id.as_str()));
+    assert_eq!(
+        resource.user_command(BrowserTabCommand::Close { target }).await,
+        Err(WorkspaceError::ActionDenied)
+    );
+}
+
+#[tokio::test]
+async fn page_zoom_is_bounded_and_only_available_to_the_human_owner() {
+    let factory = Arc::new(Factory::default());
+    let service = service(factory, &["managed"]);
+    let resource = service
+        .ensure(
+            authority("alice", "page-zoom", "managed", [BrowserCapabilityAction::Navigate]),
+            BrowserProfile::Ephemeral,
+        )
+        .await
+        .unwrap();
+    let target = resource.user_command(create()).await.unwrap().tabs[0].target.clone();
+    let command = |percent| BrowserTabCommand::SetZoom { target: target.clone(), percent };
+    let zoomed = resource.user_command(command(125)).await.unwrap();
+    assert_eq!(zoomed.tabs[0].zoom_percent, 125);
+    assert_eq!(serde_json::to_value(&zoomed).unwrap()["tabs"][0]["zoom_percent"], 125);
+    for percent in [49, 201] {
+        assert_eq!(resource.user_command(command(percent)).await, Err(WorkspaceError::InvalidZoom));
+    }
+    assert_eq!(resource.snapshot().await.unwrap().runtime.unwrap().tabs[0].zoom_percent, 125);
+    let run = resource.begin_run().await.unwrap();
+    assert_eq!(resource.agent_command(&run, command(100)).await, Err(WorkspaceError::UnsupportedAction));
+    resource.finish_run(&run).await.unwrap();
 }
 
 #[tokio::test]

@@ -447,6 +447,7 @@ impl DesktopBrowserRuntime {
             lifecycle: BrowserTabLifecycle::Loading,
             can_go_back: false,
             can_go_forward: false,
+            zoom_percent: 100,
             blocked_permissions: vec![],
             permission_requests: vec![],
             script_dialog: None,
@@ -687,6 +688,7 @@ impl DesktopBrowserRuntime {
             lifecycle: BrowserTabLifecycle::Loading,
             can_go_back: false,
             can_go_forward: false,
+            zoom_percent: 100,
             blocked_permissions: vec![],
             permission_requests: vec![],
             script_dialog: None,
@@ -1554,6 +1556,15 @@ impl DesktopBrowserRuntime {
             BrowserTabCommand::Activate { target } => {
                 state.active = Some(target.tab_id);
                 self.apply_surface(&state).await?;
+            }
+            BrowserTabCommand::SetZoom { target, percent } => {
+                if !(50..=200).contains(&percent) { return Err(WorkspaceError::InvalidZoom); }
+                if !state.input_enabled || state.active.as_ref() != Some(&target.tab_id) {
+                    return Err(WorkspaceError::NotActionable);
+                }
+                let tab = self.target(&state, &target)?;
+                tab.view.set_zoom(f64::from(percent) / 100.0).map_err(native_error)?;
+                tab.metadata.lock().unwrap_or_else(|error| error.into_inner()).zoom_percent = percent;
             }
             BrowserTabCommand::Close {..} | BrowserTabCommand::CloseAll {..} | BrowserTabCommand::ClearSiteData {..} => unreachable!("close is handled before native input locks"),
             BrowserTabCommand::Navigate { target, url } => {
