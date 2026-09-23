@@ -30,7 +30,6 @@ import {
   NomiSettingRow,
 } from '@/renderer/components/base/NomiSettingLayout';
 import TaskModelSelect from '@/renderer/components/model/TaskModelSelect';
-import { orderModelSelectorProviders } from '@/renderer/hooks/agent/modelSelectorProviderOrdering';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useModelsForTask } from '@/renderer/hooks/agent/useModelsForTask';
@@ -226,10 +225,7 @@ const ModalityModelsPanel: React.FC<ModalityModelsPanelProps> = ({
   const [message, messageContext] = useArcoMessage({ maxCount: 2 });
   const { data: providerData, mutate } = useProvidersQuery();
   const providerLabel = useModelSelectorProviderLabel();
-  const providers = useMemo(
-    () => orderModelSelectorProviders(providerData ?? []),
-    [providerData],
-  );
+  const providers = useMemo(() => providerData ?? [], [providerData]);
   const [defaultModel, setDefaultModel] = useState(
     () => configService.get('nomi.defaultModel') ?? null,
   );

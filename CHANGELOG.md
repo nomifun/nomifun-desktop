@@ -5,6 +5,12 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **The anonymous NomiFun Free Models service has been removed.** The built-in
+  provider, public upstream proxy, catalog refresh scheduler, health endpoints,
+  model-hub page, and no-key product claims are gone. Provider rows created by
+  older builds are disabled and hidden as compatibility tombstones so immutable
+  Agent and execution history remains structurally valid.
+
 - **AutoWork once again runs in the bound main AgentSession.** Requirements
   still use AgentExecution for durable Attempts, retries, recovery and terminal
   receipts, but no longer create a `Collaboration · Requirement` child Session

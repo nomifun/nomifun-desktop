@@ -7100,7 +7100,6 @@ dependencies = [
  "axum",
  "dirs 6.0.0",
  "futures",
- "getrandom 0.2.17",
  "http-body-util",
  "nomifun-api-types",
  "nomifun-auth",

@@ -25,7 +25,6 @@ const SECTIONS = [
   'music',
   'embedding',
   'rerank',
-  'free',
   'failover',
 ] as const;
 
@@ -35,7 +34,7 @@ const GROUPS = [
     key: 'capability',
     sections: ['chat', 'realtime', 'asr', 'tts', 'vision', 'image', 'image-edit', 'video', 'music', 'embedding', 'rerank'],
   },
-  { key: 'advanced', sections: ['free', 'failover'] },
+  { key: 'advanced', sections: ['failover'] },
 ] as const;
 
 const hubOf = (locale: unknown): Record<string, string> =>
@@ -60,14 +59,6 @@ describe('model hub is a capability-first view', () => {
     expect(sectionKeys).toEqual([...SECTIONS]);
   });
 
-  test('the free-model section sits in the last group, below the capabilities', () => {
-    // Same rule the provider groups inside every capability section follow:
-    // NomiFun-managed models rank below what the user configured.
-    const advanced = GROUPS[GROUPS.length - 1].sections as readonly string[];
-    expect(advanced.includes('free')).toBe(true);
-    expect(SECTIONS.indexOf('free')).toBeGreaterThan(SECTIONS.indexOf('embedding'));
-  });
-
   test('the default section is 对话, not the provider list', () => {
     expect(src.includes("resolveSection(searchParams.get('section')) ?? 'chat'")).toBe(true);
   });
@@ -81,10 +72,9 @@ describe('model hub is a capability-first view', () => {
     // The global-IDMM concept is gone entirely, so the section is named after
     // what actually remains.
     expect(src.includes("global: 'failover'")).toBe(true);
-    // `models` / `free` are still real keys, so they resolve as-is.
-    for (const stillReal of ['models', 'free'] as const) {
-      expect(SECTIONS.includes(stillReal)).toBe(true);
-    }
+    expect(src.includes("free: 'chat'")).toBe(true);
+    expect(SECTIONS.includes('models')).toBe(true);
+    expect((SECTIONS as readonly string[]).includes('free')).toBe(false);
     expect(src.includes("searchParams.get('section') === 'agents'")).toBe(true);
   });
 
