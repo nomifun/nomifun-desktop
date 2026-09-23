@@ -28,7 +28,6 @@ const renderPage = () => render(
       <MemoryRouter initialEntries={['/settings/execution-engines']}>
         <Routes>
           <Route path='/settings/execution-engines' element={<ExecutionEngineSettings />} />
-          <Route path='/settings/javascript-runtime' element={<h1>Node.js settings</h1>} />
           <Route path='/agent' element={<h1>Agent workbench</h1>} />
         </Routes>
       </MemoryRouter>
@@ -61,9 +60,6 @@ describe('Nomi Runtime diagnostics', () => {
     expect(screen.queryByRole('region', { name: 'Nomi Runtime' })).toBeNull();
     await act(async () => { reject(new Error('offline')); });
     expect(await screen.findByText(copy.loadError)).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('link', { name: copy.javascriptLink }));
-    expect(await screen.findByRole('heading', { name: 'Node.js settings' })).toBeTruthy();
   });
 
   test('marks cached diagnostics stale after a failed refresh and recovers on retry', async () => {

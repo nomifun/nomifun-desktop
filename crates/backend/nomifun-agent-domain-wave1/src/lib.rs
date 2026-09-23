@@ -21,7 +21,7 @@ use nomifun_agent_contracts::{
     InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginDesiredState,
-    PluginEffectiveState, PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
+    PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateCompareAndSwapOutcome, PluginStateEntry,
     PluginStateHandleDescriptor, PluginStateMethod, PrincipalRef, ResolvedSnapshotRef,
@@ -576,7 +576,7 @@ fn registration_for(
         source_identity: spec.id.to_owned(),
         source_digest: None,
     };
-    let mount_id = PluginMountId::from(spec.mount_id);
+    let mount_id = AgentModuleId::from(spec.mount_id);
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
         mount_id: mount_id.clone(),

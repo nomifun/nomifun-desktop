@@ -62,6 +62,19 @@ pub(crate) const CANONICAL_AGENT_STORE_TABLES: &[&str] = &[
     "agent_messages",
 ];
 
+/// Unified Plugin Core tables use canonical TEXT identities, physical
+/// ownership foreign keys and composite keys. Plugin business data is outside
+/// the core database in generation DataRoots.
+pub(crate) const CANONICAL_PLUGIN_TABLES: &[&str] = &[
+    "plugins",
+    "plugin_artifacts",
+    "plugin_drafts",
+    "plugin_credential_bindings",
+    "plugin_grants",
+    "plugin_library_state",
+    "plugin_mutations",
+];
+
 /// Hard ceiling for product-owned SQLite B-trees on one table.
 ///
 /// `PRAGMA index_list` includes UNIQUE auto-indexes, so this is a physical
@@ -109,7 +122,6 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "installation_identity",
     "installation_role_bindings",
     "instance_access_token",
-    "javascript_runtime_selection",
     "knowledge_bases",
     "knowledge_binding_bases",
     "knowledge_bindings",
@@ -120,39 +132,12 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "knowledge_tags",
     "knowledge_tree_operations",
     "mcp_servers",
-    "plugin_build_operation_lineage",
-    "plugin_catalog_publications",
-    "plugin_credential_bindings",
-    "plugin_deletion_intents",
-    "plugin_kv",
-    "plugin_library_state",
-    "plugin_products",
-    "plugin_projects",
-    "plugin_publish_authorizations",
-    "plugin_release_artifacts",
-    "plugin_releases",
-    "plugin_service_test_receipts",
-    "plugin_source_mutation_commits",
-    "plugin_source_mutation_intents",
-    "plugin_surface_sessions",
     "nomi_remote_events",
     "nomi_remote_sessions",
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
     "product_agent_selections",
     "oauth_tokens",
-    "plugin_artifacts",
-    "plugin_candidate_test_receipts",
-    "plugin_credential_binding_mutations",
-    "plugin_dependency_mutation_commits",
-    "plugin_dependency_mutation_intents",
-    "plugin_mount_credential_bindings",
-    "plugin_mount_kv",
-    "plugin_mount_revisions",
-    "plugin_mounts",
-    "plugin_product_documents",
-    "plugin_ready_candidates",
-    "product_operations",
     "provider_connections",
     "provider_model_capabilities",
     "provider_models",
@@ -215,24 +200,11 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_sources", "knowledge_source_id"),
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
-    ("plugin_build_operation_lineage", "operation_id"),
-    ("plugin_products", "plugin_product_id"),
-    ("plugin_projects", "project_id"),
-    ("plugin_publish_authorizations", "authorization_id"),
-    ("plugin_release_artifacts", "artifact_id"),
-    ("plugin_releases", "release_id"),
-    ("plugin_service_test_receipts", "receipt_id"),
-    ("plugin_source_mutation_intents", "intent_id"),
-    ("plugin_surface_sessions", "surface_session_id"),
+    ("plugins", "plugin_id"),
+    ("plugin_drafts", "draft_id"),
+    ("plugin_mutations", "mutation_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_remote_sessions", "agent_session_id"),
-    ("plugin_artifacts", "artifact_id"),
-    ("plugin_candidate_test_receipts", "receipt_id"),
-    ("plugin_dependency_mutation_intents", "intent_id"),
-    ("plugin_mount_revisions", "mount_revision_id"),
-    ("plugin_mounts", "mount_id"),
-    ("plugin_ready_candidates", "candidate_id"),
-    ("product_operations", "operation_id"),
     ("remote_bindings", "remote_binding_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
@@ -321,31 +293,17 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "operation_id"),
     ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
-    ("plugin_build_operation_lineage", "operation_id"),
-    ("plugin_products", "plugin_product_id"),
-    ("plugin_projects", "project_id"),
-    ("plugin_publish_authorizations", "authorization_id"),
-    ("plugin_release_artifacts", "artifact_id"),
-    ("plugin_releases", "release_id"),
-    ("plugin_service_test_receipts", "receipt_id"),
-    ("plugin_source_mutation_intents", "intent_id"),
-    ("plugin_surface_sessions", "surface_session_id"),
+    ("plugins", "plugin_id"),
+    ("plugins", "package_id"),
+    ("plugin_drafts", "draft_id"),
+    ("plugin_mutations", "mutation_id"),
     ("nomi_wave1_memory_action_receipts", "capability_id"),
     ("nomi_wave1_memory_action_receipts", "process_lease_id"),
     ("nomi_wave4_action_receipts", "capability_id"),
     ("nomi_wave4_action_receipts", "process_lease_id"),
     ("product_agent_selections", "target_id"),
     ("nomi_remote_events", "event_id"),
-    ("plugin_artifacts", "artifact_id"),
     ("plugin_artifacts", "package_id"),
-    ("plugin_candidate_test_receipts", "receipt_id"),
-    ("plugin_dependency_mutation_intents", "intent_id"),
-    ("plugin_mount_revisions", "mount_revision_id"),
-    ("plugin_mounts", "mount_id"),
-    ("plugin_mounts", "package_id"),
-    ("plugin_projects", "package_id"),
-    ("plugin_ready_candidates", "candidate_id"),
-    ("product_operations", "operation_id"),
     ("remote_bindings", "remote_binding_id"),
     ("provider_connections", "connection_id"),
     ("providers", "provider_id"),
@@ -483,10 +441,11 @@ const UPSERT_CONFLICT_KEYS: &[UniqueKeyContract] = &[
     ),
     unique_key!("oauth_tokens", "server_url"),
     unique_key!("plugin_artifacts", "artifact_digest"),
-    unique_key!("plugin_catalog_publications", "plugin_product_id"),
-    unique_key!("plugin_mount_kv", "mount_id", "namespace", "key"),
-    unique_key!("plugin_release_artifacts", "artifact_digest"),
-    unique_key!("plugin_surface_sessions", "plugin_product_id"),
+    unique_key!("plugins", "owner_user_id", "package_id"),
+    unique_key!("plugin_credential_bindings", "owner_user_id", "plugin_id", "slot"),
+    unique_key!("plugin_grants", "owner_user_id", "plugin_id", "permission"),
+    unique_key!("plugin_library_state", "owner_user_id", "plugin_id"),
+    unique_key!("plugin_mutations", "owner_user_id", "plugin_id"),
     unique_key!(
         "product_agent_selections",
         "owner_user_id",
@@ -755,79 +714,32 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     external_ref!("installation_role_bindings", "provider_mount_id", Text, false, Opaque, KeepHistory),
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_product_documents", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_library_state", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_products", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_products", "icon_asset_id" => "workshop_assets", "asset_id", true, SetNull),
-    text_ref!("plugin_products", "ready_release_id" => "plugin_releases", "release_id", true, Restrict),
-    text_ref!("plugin_products", "active_release_id" => "plugin_releases", "release_id", true, Restrict),
-    text_ref!("plugin_products", "previous_release_id" => "plugin_releases", "release_id", true, Restrict),
-    text_ref!("plugin_projects", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_projects", "plugin_product_id" => "plugin_products", "plugin_product_id", true, Cascade)
+    text_ref!("plugins", "owner_user_id" => "users", "user_id", false, Cascade),
+    opaque_text_ref!("plugins", "active_artifact_digest" => "plugin_artifacts", "artifact_digest", false, Restrict),
+    opaque_text_ref!("plugins", "previous_artifact_digest" => "plugin_artifacts", "artifact_digest", true, Restrict),
+    text_ref!("plugin_drafts", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_drafts", "plugin_id" => "plugins", "plugin_id", true, SetNull)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_source_mutation_intents", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_source_mutation_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Restrict)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_source_mutation_intents", "project_id" => "plugin_projects", "project_id", false, Restrict)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
-    text_ref!("plugin_source_mutation_commits", "project_id" => "plugin_projects", "project_id", false, Restrict),
-    text_ref!("plugin_source_mutation_commits", "intent_id" => "plugin_source_mutation_intents", "intent_id", false, Cascade),
-    text_ref!("plugin_release_artifacts", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_releases", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_releases", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Restrict)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_releases", "artifact_id" => "plugin_release_artifacts", "artifact_id", false, Restrict),
-    text_ref!("plugin_releases", "project_id" => "plugin_projects", "project_id", true, Restrict)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
-    text_ref!("plugin_releases", "origin_operation_id" => "product_operations", "operation_id", false, KeepHistory),
-    text_ref!("plugin_service_test_receipts", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_service_test_receipts", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_service_test_receipts", "release_id" => "plugin_releases", "release_id", false, Restrict)
-        .with_aggregate_scope(
-            "parent.owner_user_id = child.owner_user_id \
-             AND parent.plugin_product_id = child.plugin_product_id",
-        ),
     text_ref!("plugin_credential_bindings", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_credential_bindings", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
+    text_ref!("plugin_credential_bindings", "plugin_id" => "plugins", "plugin_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     external_ref!("plugin_credential_bindings", "credential_id", Text, false, Opaque, KeepHistory),
-    text_ref!("plugin_deletion_intents", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_deletion_intents", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.lifecycle = 'deleting'"),
-    text_ref!("plugin_deletion_intents", "operation_id" => "product_operations", "operation_id", false, Restrict)
-        .with_aggregate_scope("parent.owner_kind = 'plugin' AND parent.owner_id = child.plugin_product_id AND parent.kind = 'plugin_permanent_delete'"),
-    text_ref!("plugin_kv", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_kv", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
+    text_ref!("plugin_grants", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_grants", "plugin_id" => "plugins", "plugin_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_build_operation_lineage", "owner_user_id" => "users", "user_id", false, KeepHistory),
-    text_ref!("plugin_build_operation_lineage", "plugin_product_id" => "plugin_products", "plugin_product_id", false, KeepHistory)
+    opaque_text_ref!("plugin_grants", "confirmed_artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
+    text_ref!("plugin_library_state", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_library_state", "plugin_id" => "plugins", "plugin_id", false, Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_build_operation_lineage", "project_id" => "plugin_projects", "project_id", false, KeepHistory)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.plugin_product_id = child.plugin_product_id"),
-    text_ref!("plugin_build_operation_lineage", "operation_id" => "product_operations", "operation_id", false, KeepHistory),
-    text_ref!("plugin_publish_authorizations", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_publish_authorizations", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_catalog_publications", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_catalog_publications", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_catalog_publications", "active_release_id" => "plugin_releases", "release_id", false, Restrict)
-        .with_aggregate_scope(
-            "parent.owner_user_id = child.owner_user_id \
-             AND parent.plugin_product_id = child.plugin_product_id",
-        ),
-    text_ref!("plugin_surface_sessions", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_surface_sessions", "conversation_id" => "agent_sessions", "agent_session_id", true, Cascade)
-        .with_aggregate_scope("json_extract(parent.owner_ref_json, '$.principal_id') = child.owner_user_id"),
-    text_ref!("plugin_surface_sessions", "plugin_product_id" => "plugin_products", "plugin_product_id", false, Cascade)
-        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
-    text_ref!("plugin_surface_sessions", "active_release_id" => "plugin_releases", "release_id", false, Restrict)
-        .with_aggregate_scope(
-            "parent.owner_user_id = child.owner_user_id \
-             AND parent.plugin_product_id = child.plugin_product_id",
-        ),
-    // Delivery receipts intentionally survive Terminal/Requirement deletion so
+    text_ref!("plugin_mutations", "owner_user_id" => "users", "user_id", false, Cascade),
+    text_ref!("plugin_mutations", "plugin_id" => "plugins", "plugin_id", false, KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
+    opaque_text_ref!("plugin_mutations", "old_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
+    opaque_text_ref!("plugin_mutations", "old_previous_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
+    opaque_text_ref!("plugin_mutations", "new_artifact_digest" => "plugin_artifacts", "artifact_digest", true, KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),    // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
     text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, KeepHistory),
     text_ref!("terminal_turn_admissions", "requirement_id" => "requirements", "requirement_id", false, KeepHistory),
@@ -1013,35 +925,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("requirement_tags", "paused_requirement_id" => "requirements", "requirement_id", true, SetNull),
     text_ref!("tag_settings", "webhook_id" => "webhooks", "webhook_id", true, SetNull),
     text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, Restrict),
-    text_ref!("plugin_projects", "linked_mount_id" => "plugin_mounts", "mount_id", true, SetNull),
-    text_ref!("plugin_projects", "auto_apply_mount_id" => "plugin_mounts", "mount_id", true, SetNull),
-    text_ref!("plugin_projects", "ready_candidate_id" => "plugin_ready_candidates", "candidate_id", true, SetNull),
-    text_ref!("plugin_dependency_mutation_intents", "project_id" => "plugin_projects", "project_id", false, Restrict),
-    text_ref!("plugin_dependency_mutation_intents", "owner_user_id" => "users", "user_id", false, Cascade),
-    text_ref!("plugin_dependency_mutation_commits", "project_id" => "plugin_projects", "project_id", false, Restrict),
-    text_ref!("plugin_dependency_mutation_commits", "intent_id" => "plugin_dependency_mutation_intents", "intent_id", false, Cascade),
-    text_ref!("plugin_ready_candidates", "project_id" => "plugin_projects", "project_id", false, Cascade),
-    text_ref!("plugin_ready_candidates", "origin_operation_id" => "product_operations", "operation_id", false, KeepHistory),
-    text_ref!("plugin_ready_candidates", "artifact_id" => "plugin_artifacts", "artifact_id", false, KeepHistory),
-    opaque_text_ref!("plugin_ready_candidates", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
-    text_ref!("plugin_candidate_test_receipts", "candidate_id" => "plugin_ready_candidates", "candidate_id", false, Cascade),
-    text_ref!("plugin_candidate_test_receipts", "artifact_id" => "plugin_artifacts", "artifact_id", false, KeepHistory),
-    opaque_text_ref!("plugin_candidate_test_receipts", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
-    text_ref!("plugin_mount_revisions", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
-    text_ref!("plugin_mount_revisions", "artifact_id" => "plugin_artifacts", "artifact_id", false, KeepHistory),
-    opaque_text_ref!("plugin_mount_revisions", "artifact_digest" => "plugin_artifacts", "artifact_digest", false, KeepHistory),
-    text_ref!("plugin_mounts", "current_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, Restrict),
-    text_ref!("plugin_mounts", "previous_revision_id" => "plugin_mount_revisions", "mount_revision_id", true, Restrict),
-    text_ref!("plugin_credential_binding_mutations", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
-    text_ref!("plugin_mount_credential_bindings", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
-    external_ref!("plugin_mount_credential_bindings", "credential_id", Text, false, Opaque, KeepHistory),
-    text_ref!("plugin_mount_kv", "mount_id" => "plugin_mounts", "mount_id", false, Cascade),
-    text_ref!("product_operations", "owner_id" => "plugin_projects", "project_id", false, KeepHistory)
-        .with_child_predicate("child.owner_kind = 'plugin_project'"),
-    text_ref!("product_operations", "owner_id" => "plugin_mounts", "mount_id", false, KeepHistory)
-        .with_child_predicate("child.owner_kind = 'plugin_mount'"),
-    text_ref!("product_operations", "owner_id" => "plugin_products", "plugin_product_id", false, KeepHistory)
-        .with_child_predicate("child.owner_kind = 'plugin'"),
     text_ref!("terminal_scrollback", "terminal_id" => "terminal_sessions", "terminal_id", false, Cascade),
     text_ref!("remote_bindings", "owner_user_id" => "users", "user_id", false, Cascade),
     text_ref!("nomi_remote_sessions", "owner_user_id" => "users", "user_id", false, Cascade),
@@ -1065,13 +948,6 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
 /// each entry yields one column named `value`, including one row per array
 /// element where necessary.
 pub(crate) const JSON_LOGICAL_REFERENCES: &[JsonLogicalReference] = &[
-    // Keep a withdrawn/deleted page choice visible for explicit user repair.
-    // It is not a live Surface grant and never authorizes a missing product.
-    json_text_ref!(
-        "agent_presets", "display_json", "$.ui_binding.selection.plugin_id",
-        "SELECT json_extract(display_json, '$.ui_binding.selection.plugin_id') AS value FROM agent_presets" =>
-        "plugin_products", "plugin_product_id", KeepHistory, AllowMissingHistoricalParent
-    ),
     json_text_ref!(
         "terminal_sessions", "idmm", "$.fault_watch.bypass_model.provider_id",
         "SELECT json_extract(idmm, '$.fault_watch.bypass_model.provider_id') AS value FROM terminal_sessions WHERE idmm IS NOT NULL" =>
@@ -1220,6 +1096,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
         .chain(std::iter::once(&CS_NOTES_FTS_TABLE))
         .chain(FTS_SHADOW_TABLES.iter())
         .chain(CANONICAL_AGENT_STORE_TABLES.iter())
+        .chain(CANONICAL_PLUGIN_TABLES.iter())
         .map(|value| (*value).to_owned())
         .collect();
     if actual_tables != expected_tables {
@@ -1298,7 +1175,6 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_logical_reference_registry(pool).await?;
     validate_logical_reference_coverage(pool).await?;
     validate_json_logical_reference_registry(pool).await?;
-    require_plugin_kv_tombstone_schema(pool).await?;
     require_workshop_asset_origin_id_contract(pool).await?;
     require_prompt_library_asset_identity_contract(pool).await?;
     require_column(pool, "workshop_assets", "deleted_at", "INTEGER", false).await?;
@@ -1353,8 +1229,6 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
 /// the dataset rather than rewrite IDs.
 pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError> {
     validate_id_value_contract(pool).await?;
-    validate_agent_ui_binding_scope(pool).await?;
-    validate_plugin_kv_tombstone_values(pool).await?;
     validate_workshop_asset_origin_values(pool).await?;
     validate_creation_task_result_asset_ids(pool).await?;
     let findings = audit_logical_reference_orphans(pool).await?;
@@ -1378,64 +1252,6 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
     Err(DbError::Init(format!(
         "v3 ID data contract audit failed: {details}"
     )))
-}
-
-/// KEEP_HISTORY permits a removed product, not a reference to another owner.
-/// JSON references use the registry for identity/delete semantics and this
-/// aggregate check for restore/import scope validation.
-async fn validate_agent_ui_binding_scope(pool: &SqlitePool) -> Result<(), DbError> {
-    let invalid: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM agent_presets preset JOIN plugin_products plugin
-         ON plugin.plugin_product_id = json_extract(preset.display_json, '$.ui_binding.selection.plugin_id')
-         WHERE json_extract(preset.owner_ref_json, '$.user_id') <> plugin.owner_user_id",
-    ).fetch_one(pool).await?;
-    if invalid != 0 {
-        return Err(DbError::Init(format!(
-            "Agent UI binding contains {invalid} cross-owner plugin reference(s)"
-        )));
-    }
-    Ok(())
-}
-
-async fn require_plugin_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), DbError> {
-    for (column, expected_default) in [
-        ("key_generation", "1"),
-        ("is_tombstone", "0"),
-    ] {
-        require_column(pool, "plugin_kv", column, "INTEGER", true).await?;
-        let actual_default: Option<String> = sqlx::query_scalar(&format!(
-            "SELECT dflt_value FROM pragma_table_info('plugin_kv') WHERE name = ?"
-        ))
-        .bind(column)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
-        if actual_default.as_deref() != Some(expected_default) {
-            return Err(DbError::Init(format!(
-                "v3 schema plugin_kv.{column} must default to {expected_default}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_plugin_kv_tombstone_values(pool: &SqlitePool) -> Result<(), DbError> {
-    let invalid: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM plugin_kv
-         WHERE key_generation < 1
-            OR revision < 1
-            OR key_generation > revision
-            OR is_tombstone NOT IN (0, 1)
-            OR (is_tombstone = 1 AND value_json <> 'null')",
-    )
-    .fetch_one(pool)
-    .await?;
-    if invalid != 0 {
-        return Err(DbError::Init(format!(
-            "Plugin KV tombstone contract rejected {invalid} row(s)"
-        )));
-    }
-    Ok(())
 }
 
 /// Read-only database orphan audit. Cross-store registry entries are skipped;
@@ -1751,78 +1567,6 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_plugin_source_build_start_guard",
-            &[
-                "BEFORE INSERT ON PRODUCT_OPERATIONS",
-                "NEW.OWNER_KIND = 'PLUGIN'",
-                "NEW.KIND = 'BUILD'",
-                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN BUILD IS FENCED BY A SOURCE MUTATION INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_source_commit_cleanup",
-            &[
-                "AFTER UPDATE ON PLUGIN_PROJECTS",
-                "FROM PLUGIN_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
-                "DELETE FROM PLUGIN_SOURCE_MUTATION_COMMITS",
-            ],
-        ),
-        (
-            "trg_plugin_source_commit_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_SOURCE_MUTATION_COMMITS",
-                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN SOURCE COMMIT MARKER MUST BIND A DURABLE INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_source_intent_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_SOURCE_MUTATION_INTENTS",
-                "FROM PLUGIN_PRODUCTS PRODUCT",
-                "JOIN PLUGIN_PROJECTS PROJECT",
-                "PRODUCT.PRODUCT_REVISION = NEW.EXPECTED_PRODUCT_REVISION",
-                "PROJECT.PROJECT_REVISION = NEW.EXPECTED_PROJECT_REVISION",
-                "RAISE(ABORT, 'PLUGIN SOURCE INTENT MUST BIND THE EXACT EDITABLE PROJECT HEAD')",
-            ],
-        ),
-        (
-            "trg_plugin_source_product_delete_guard",
-            &[
-                "BEFORE DELETE ON PLUGIN_PRODUCTS",
-                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_source_product_update_guard",
-            &[
-                "BEFORE UPDATE ON PLUGIN_PRODUCTS",
-                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN PRODUCT IS FENCED BY A SOURCE MUTATION INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_source_project_delete_guard",
-            &[
-                "BEFORE DELETE ON PLUGIN_PROJECTS",
-                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN PROJECT DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_source_project_update_guard",
-            &[
-                "BEFORE UPDATE ON PLUGIN_PROJECTS",
-                "FROM PLUGIN_SOURCE_MUTATION_INTENTS INTENT",
-                "FROM PLUGIN_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
-                "NEW.PROJECT_REVISION = OLD.PROJECT_REVISION + 1",
-                "NEW.SOURCE_HEAD_DIGEST = INTENT.NEXT_SOURCE_DIGEST",
-                "RAISE(ABORT, 'PLUGIN PROJECT IS FENCED BY A SOURCE MUTATION INTENT')",
-            ],
-        ),
-        (
             "trg_nomi_remote_events_append_only_delete",
             &[
                 "BEFORE DELETE ON NOMI_REMOTE_EVENTS",
@@ -1861,352 +1605,64 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
-            "trg_plugin_auto_apply_dependency_fence",
+            "trg_plugins_identity_immutable",
             &[
-                "BEFORE UPDATE OF APPLY_MODE, AUTO_APPLY_MOUNT_ID, AUTO_APPLY_AUTHORIZATION_REVISION, AUTO_APPLY_AUTHORIZED_AT ON PLUGIN_PROJECTS",
-                "FROM PLUGIN_DEPENDENCY_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN AUTO APPLY AUTHORIZATION IS FENCED BY A DEPENDENCY MUTATION')",
+                "BEFORE UPDATE ON PLUGINS",
+                "NEW.PLUGIN_ID IS NOT OLD.PLUGIN_ID",
+                "NEW.OWNER_USER_ID IS NOT OLD.OWNER_USER_ID",
+                "NEW.PACKAGE_ID IS NOT OLD.PACKAGE_ID",
+                "RAISE(ABORT, 'PLUGIN IDENTITY IS IMMUTABLE')",
             ],
         ),
         (
-            "trg_plugin_candidate_imported_provenance_guard",
+            "trg_plugins_revision_monotonic",
             &[
-                "BEFORE INSERT ON PLUGIN_READY_CANDIDATES",
-                "NEW.IMPORTED_TEST_PROVENANCE_JSON IS NOT NULL",
-                "NEW.ORIGIN_KIND <> 'IMPORT'",
-                "RAISE(ABORT, 'ONLY IMPORTED PLUGIN CANDIDATES CAN CARRY SOURCE TEST PROVENANCE')",
-            ],
-        ),
-        (
-            "trg_plugin_candidate_receipts_exact_insert",
-            &[
-                "BEFORE INSERT ON PLUGIN_CANDIDATE_TEST_RECEIPTS",
-                "CANDIDATE.CANDIDATE_ID = NEW.CANDIDATE_ID",
-                "CANDIDATE.CANDIDATE_DIGEST = NEW.CANDIDATE_DIGEST",
-                "CANDIDATE.ARTIFACT_ID = NEW.ARTIFACT_ID",
-                "CANDIDATE.ARTIFACT_DIGEST = NEW.ARTIFACT_DIGEST",
-                "RAISE(ABORT, 'PLUGIN CANDIDATE TEST RECEIPT MUST BIND ONE EXACT CANDIDATE')",
-            ],
-        ),
-        (
-            "trg_plugin_candidate_receipts_immutable",
-            &[
-                "BEFORE UPDATE ON PLUGIN_CANDIDATE_TEST_RECEIPTS",
-                "RAISE(ABORT, 'PLUGIN CANDIDATE TEST RECEIPTS ARE IMMUTABLE')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_credential_binding_delete_guard",
-            &[
-                "BEFORE DELETE ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
-                "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
-                "MUTATION.EXPECTED_CURRENT_ARTIFACT_DIGEST IS MOUNT.CURRENT_ARTIFACT_DIGEST",
-                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING DELETE REQUIRES A WHOLE-GROUP CAS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_credential_binding_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
-                "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
-                "MUTATION.TARGET_BINDINGS_REVISION = MOUNT.CREDENTIAL_BINDINGS_REVISION + 1",
-                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING INSERT REQUIRES A WHOLE-GROUP CAS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_credential_binding_update_guard",
-            &[
-                "BEFORE UPDATE ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
-                "LEFT JOIN PLUGIN_CREDENTIAL_BINDING_MUTATIONS MUTATION",
-                "MUTATION.EXPECTED_BINDINGS_REVISION = MOUNT.CREDENTIAL_BINDINGS_REVISION",
-                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING UPDATE REQUIRES A WHOLE-GROUP CAS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_credential_binding_updated_at_monotonic",
-            &[
-                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNT_CREDENTIAL_BINDINGS",
-                "NEW.UPDATED_AT < OLD.UPDATED_AT",
-                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING UPDATED_AT CANNOT MOVE BACKWARDS')",
-            ],
-        ),
-        (
-            "trg_plugin_dependency_commit_cleanup",
-            &[
-                "AFTER UPDATE ON PLUGIN_PROJECTS",
-                "DELETE FROM PLUGIN_DEPENDENCY_MUTATION_COMMITS",
-                "WHERE PROJECT_ID = NEW.PROJECT_ID",
-            ],
-        ),
-        (
-            "trg_plugin_dependency_commit_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_DEPENDENCY_MUTATION_COMMITS",
-                "INTENT.INTENT_ID = NEW.INTENT_ID",
-                "RAISE(ABORT, 'PLUGIN DEPENDENCY COMMIT MARKER MUST BIND A DURABLE INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_dependency_intent_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_DEPENDENCY_MUTATION_INTENTS",
-                "PROJECT.SOURCE_HEAD_DIGEST = NEW.EXPECTED_SOURCE_DIGEST",
-                "RAISE(ABORT, 'PLUGIN DEPENDENCY INTENT MUST BIND THE EXACT MANAGED PROJECT HEAD')",
-            ],
-        ),
-        (
-            "trg_plugin_dependency_project_delete_guard",
-            &[
-                "BEFORE DELETE ON PLUGIN_PROJECTS",
-                "FROM PLUGIN_DEPENDENCY_MUTATION_INTENTS INTENT",
-                "RAISE(ABORT, 'PLUGIN PROJECT DELETE IS FENCED BY A DEPENDENCY MUTATION INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_dependency_project_update_guard",
-            &[
-                "BEFORE UPDATE ON PLUGIN_PROJECTS",
-                "FROM PLUGIN_DEPENDENCY_MUTATION_COMMITS COMMIT_MARKER",
-                "NEW.BUILD_GENERATION = INTENT.EXPECTED_BUILD_GENERATION + 1",
-                "NEW.DISPLAY_NAME = OLD.DISPLAY_NAME",
-                "RAISE(ABORT, 'PLUGIN PROJECT IS FENCED BY A DEPENDENCY MUTATION INTENT')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_kv_updated_at_monotonic",
-            &[
-                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNT_KV",
-                "NEW.UPDATED_AT < OLD.UPDATED_AT",
-                "RAISE(ABORT, 'PLUGIN KV UPDATED_AT CANNOT MOVE BACKWARDS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_binding_revision_cleanup",
-            &[
-                "AFTER UPDATE OF CREDENTIAL_BINDINGS_REVISION ON PLUGIN_MOUNTS",
-                "DELETE FROM PLUGIN_CREDENTIAL_BINDING_MUTATIONS",
-                "WHERE MOUNT_ID = NEW.MOUNT_ID",
-            ],
-        ),
-        (
-            "trg_plugin_mount_binding_revision_guard",
-            &[
-                "BEFORE UPDATE OF CREDENTIAL_BINDINGS_REVISION ON PLUGIN_MOUNTS",
-                "MUTATION.TARGET_BINDINGS_REVISION = NEW.CREDENTIAL_BINDINGS_REVISION",
-                "MUTATION.UPDATED_AT = NEW.UPDATED_AT",
-                "RAISE(ABORT, 'PLUGIN MOUNT CREDENTIAL BINDINGS REVISION REQUIRES A WHOLE-GROUP CAS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_binding_revision_shape_guard",
-            &[
-                "BEFORE UPDATE OF CREDENTIAL_BINDINGS_REVISION ON PLUGIN_MOUNTS",
-                "NEW.CREDENTIAL_BINDINGS_REVISION <> OLD.CREDENTIAL_BINDINGS_REVISION + 1",
-                "RAISE(ABORT, 'PLUGIN MOUNT CREDENTIAL BINDINGS REVISION MUST ADVANCE BY ONE')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_config_revision_guard",
-            &[
-                "BEFORE UPDATE OF CONFIG_JSON, CONFIG_SCHEMA_DIGEST, CONFIG_REVISION ON PLUGIN_MOUNTS",
-                "NEW.CONFIG_REVISION <= OLD.CONFIG_REVISION",
-                "RAISE(ABORT, 'PLUGIN MOUNT CONFIG CHANGES REQUIRE AN ADVANCING CONFIG REVISION')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_config_revision_shape_guard",
-            &[
-                "BEFORE UPDATE OF CONFIG_SCHEMA_DIGEST, CONFIG_REVISION ON PLUGIN_MOUNTS",
-                "NEW.CONFIG_REVISION = 0 AND NEW.CONFIG_SCHEMA_DIGEST IS NOT NULL",
-                "RAISE(ABORT, 'PLUGIN MOUNT CONFIG SCHEMA REQUIRES A POSITIVE CONFIG REVISION')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_pointer_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_MOUNTS",
-                "NEW.CURRENT_REVISION_ID IS NOT NULL",
-                "NEW.PREVIOUS_REVISION_ID IS NOT NULL",
-                "RAISE(ABORT, 'PLUGIN MOUNT MUST BE CREATED WITHOUT EXECUTABLE POINTERS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_pointer_update_guard",
-            &[
-                "BEFORE UPDATE OF CURRENT_ARTIFACT_DIGEST, PREVIOUS_ARTIFACT_DIGEST, CURRENT_REVISION_ID, PREVIOUS_REVISION_ID ON PLUGIN_MOUNTS",
-                "REVISION.MOUNT_REVISION_ID = NEW.CURRENT_REVISION_ID",
-                "REVISION.MOUNT_REVISION_ID = NEW.PREVIOUS_REVISION_ID",
-                "REVISION.MOUNT_ID = NEW.MOUNT_ID",
-                "RAISE(ABORT, 'PLUGIN MOUNT EXECUTABLE POINTERS REQUIRE EXACT MOUNT REVISIONS')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_revision_authorization_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_MOUNT_REVISIONS",
-                "NEW.APPLY_AUTHORIZATION_KIND = 'STANDING_AUTO'",
-                "PROJECT.AUTO_APPLY_AUTHORIZATION_REVISION = NEW.AUTO_APPLY_AUTHORIZATION_REVISION",
-                "RAISE(ABORT, 'PLUGIN MOUNT REVISION REQUIRES AN EXACT APPLY AUTHORIZATION')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_revision_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_MOUNT_REVISIONS",
-                "CANDIDATE.CANDIDATE_ID = NEW.CANDIDATE_KEY",
-                "CANDIDATE.ARTIFACT_ID = NEW.ARTIFACT_ID",
-                "CANDIDATE.BASE_TARGET_DIGEST IS MOUNT.CURRENT_ARTIFACT_DIGEST",
-                "ARTIFACT.PACKAGE_ID = MOUNT.PACKAGE_ID",
-                "NEW.REVISION = MOUNT.REVISION + 1",
-                "RAISE(ABORT, 'PLUGIN MOUNT REVISION REQUIRES EXACT CANDIDATE, BASE, ARTIFACT, AND NEXT REVISION')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_revisions_immutable",
-            &[
-                "BEFORE UPDATE ON PLUGIN_MOUNT_REVISIONS",
-                "RAISE(ABORT, 'PLUGIN MOUNT REVISIONS ARE IMMUTABLE')",
-            ],
-        ),
-        (
-            "trg_plugin_mount_transition_shape_guard",
-            &[
-                "BEFORE UPDATE OF CURRENT_ARTIFACT_DIGEST, PREVIOUS_ARTIFACT_DIGEST, CURRENT_REVISION_ID, PREVIOUS_REVISION_ID, REVISION ON PLUGIN_MOUNTS",
+                "BEFORE UPDATE ON PLUGINS",
                 "NEW.REVISION <> OLD.REVISION + 1",
-                "NEW.CURRENT_REVISION_ID IS OLD.PREVIOUS_REVISION_ID",
-                "NEW.PREVIOUS_REVISION_ID IS OLD.CURRENT_REVISION_ID",
-                "REVISION.REVISION = NEW.REVISION",
-                "RAISE(ABORT, 'PLUGIN MOUNT TRANSITION MUST BE EXACT APPLY, RESTORE, OR UNINSTALL')",
+                "RAISE(ABORT, 'PLUGIN REVISION MUST ADVANCE EXACTLY ONCE')",
             ],
         ),
         (
-            "trg_plugin_mount_updated_at_monotonic",
+            "trg_plugin_drafts_identity_immutable",
             &[
-                "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNTS",
-                "NEW.UPDATED_AT < OLD.UPDATED_AT",
-                "RAISE(ABORT, 'PLUGIN MOUNT UPDATED_AT CANNOT MOVE BACKWARDS')",
+                "BEFORE UPDATE ON PLUGIN_DRAFTS",
+                "NEW.DRAFT_ID IS NOT OLD.DRAFT_ID",
+                "RAISE(ABORT, 'PLUGIN DRAFT IDENTITY IS IMMUTABLE AND TIME IS MONOTONIC')",
             ],
         ),
         (
-            "trg_plugin_project_auto_apply_insert_guard",
+            "trg_plugin_credential_bindings_updated_at_monotonic",
             &[
-                "BEFORE INSERT ON PLUGIN_PROJECTS",
-                "NEW.APPLY_MODE = 'ASK_BEFORE_APPLY'",
-                "RAISE(ABORT, 'PLUGIN PROJECT MUST BEGIN WITHOUT STANDING AUTO APPLY AUTHORIZATION')",
+                "BEFORE UPDATE ON PLUGIN_CREDENTIAL_BINDINGS",
+                "NEW.UPDATED_AT_MS < OLD.UPDATED_AT_MS",
+                "RAISE(ABORT, 'PLUGIN CREDENTIAL BINDING TIME IS MONOTONIC')",
             ],
         ),
         (
-            "trg_plugin_project_auto_apply_revision_guard",
+            "trg_plugin_grants_artifact_guard",
             &[
-                "BEFORE UPDATE OF APPLY_MODE, AUTO_APPLY_MOUNT_ID, AUTO_APPLY_AUTHORIZATION_REVISION, AUTO_APPLY_AUTHORIZED_AT ON PLUGIN_PROJECTS",
-                "NEW.AUTO_APPLY_AUTHORIZATION_REVISION <> OLD.AUTO_APPLY_AUTHORIZATION_REVISION + 1",
-                "RAISE(ABORT, 'PLUGIN AUTO APPLY AUTHORIZATION REVISION MUST ADVANCE EXACTLY ONCE')",
+                "BEFORE INSERT ON PLUGIN_GRANTS",
+                "ARTIFACT.ARTIFACT_DIGEST = NEW.CONFIRMED_ARTIFACT_DIGEST",
+                "RAISE(ABORT, 'PLUGIN GRANT MUST REFERENCE A STORED ARTIFACT')",
             ],
         ),
         (
-            "trg_plugin_project_auto_apply_update_guard",
+            "trg_plugin_grants_update_artifact_guard",
             &[
-                "BEFORE UPDATE OF APPLY_MODE, AUTO_APPLY_MOUNT_ID, AUTO_APPLY_AUTHORIZATION_REVISION, AUTO_APPLY_AUTHORIZED_AT, LINKED_MOUNT_ID, MANAGED_SOURCE_PATH, SOURCE_HEAD_DIGEST, DEPENDENCY_LOCK_DIGEST ON PLUGIN_PROJECTS",
-                "NEW.AUTO_APPLY_MOUNT_ID = NEW.LINKED_MOUNT_ID",
-                "RAISE(ABORT, 'PLUGIN AUTO APPLY AUTHORIZATION HAS AN INVALID PROJECT SHAPE')",
+                "BEFORE UPDATE ON PLUGIN_GRANTS",
+                "ARTIFACT.ARTIFACT_DIGEST = NEW.CONFIRMED_ARTIFACT_DIGEST",
+                "RAISE(ABORT, 'PLUGIN GRANT MUST REFERENCE A STORED ARTIFACT')",
             ],
         ),
         (
-            "trg_plugin_project_initial_pointer_guard",
+            "trg_plugin_mutations_identity_immutable",
             &[
-                "BEFORE INSERT ON PLUGIN_PROJECTS",
-                "NEW.LINKED_MOUNT_ID IS NOT NULL",
-                "NEW.READY_CANDIDATE_ID IS NOT NULL",
-                "RAISE(ABORT, 'PLUGIN PROJECT MUST BE CREATED WITHOUT LINKED OR READY POINTERS')",
+                "BEFORE UPDATE ON PLUGIN_MUTATIONS",
+                "NEW.MUTATION_ID IS NOT OLD.MUTATION_ID",
+                "NEW.PLUGIN_ID IS NOT OLD.PLUGIN_ID",
+                "RAISE(ABORT, 'PLUGIN MUTATION IDENTITY IS IMMUTABLE AND TIME IS MONOTONIC')",
             ],
-        ),
-        (
-            "trg_plugin_project_metadata_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_PROJECTS",
-                "NEW.DISPLAY_NAME = 'PLUGIN RUNTIME PROJECT'",
-                "RAISE(ABORT, 'PLUGIN PROJECT DISPLAY METADATA MUST BE EXPLICIT')",
-            ],
-        ),
-        (
-            "trg_plugin_project_metadata_update_guard",
-            &[
-                "BEFORE UPDATE OF DISPLAY_NAME, DESCRIPTION ON PLUGIN_PROJECTS",
-                "NEW.DISPLAY_NAME = 'PLUGIN RUNTIME PROJECT'",
-                "RAISE(ABORT, 'PLUGIN PROJECT DISPLAY METADATA MUST BE EXPLICIT')",
-            ],
-        ),
-        (
-            "trg_plugin_project_ready_candidate_update_guard",
-            &[
-                "BEFORE UPDATE OF READY_CANDIDATE_ID ON PLUGIN_PROJECTS",
-                "CANDIDATE.CANDIDATE_ID = NEW.READY_CANDIDATE_ID",
-                "CANDIDATE.PROJECT_ID = NEW.PROJECT_ID",
-                "CANDIDATE.BUILD_GENERATION = NEW.BUILD_GENERATION",
-                "RAISE(ABORT, 'PLUGIN PROJECT READY POINTER REQUIRES ITS EXACT CURRENT-GENERATION CANDIDATE')",
-            ],
-        ),
-        (
-            "trg_plugin_ready_candidate_insert_guard",
-            &[
-                "BEFORE INSERT ON PLUGIN_READY_CANDIDATES",
-                "PROJECT.PROJECT_ID = NEW.PROJECT_ID",
-                "PROJECT.PACKAGE_ID = ARTIFACT.PACKAGE_ID",
-                "PROJECT.BUILD_GENERATION = NEW.BUILD_GENERATION",
-                "OPERATION.KIND = NEW.ORIGIN_KIND",
-                "OPERATION.OWNER_KIND = 'PLUGIN_PROJECT'",
-                "OPERATION.OWNER_ID = PROJECT.PROJECT_ID",
-                "OPERATION.KIND IN ('BUILD', 'IMPORT')",
-                "OPERATION.STATE = 'SUCCEEDED'",
-                "NEW.ORIGIN_KIND = 'IMPORT'",
-                "NEW.BUILD_GENERATION > 0",
-                "RAISE(ABORT, 'PLUGIN READY CANDIDATE REQUIRES EXACT PROJECT GENERATION, ARTIFACT, AND SUCCESSFUL ORIGIN OPERATION')",
-            ],
-        ),
-        (
-            "trg_product_operation_log_insert_guard",
-            &[
-                "BEFORE INSERT ON PRODUCT_OPERATIONS",
-                "FROM JSON_EACH(NEW.BOUNDED_LOG_TAIL_JSON) ENTRY",
-                "LENGTH(ENTRY.VALUE) > 4096",
-                "RAISE(ABORT, 'PRODUCT OPERATION LOG TAIL LINES MUST BE BOUNDED STRINGS')",
-            ],
-        ),
-        (
-            "trg_product_operation_log_update_guard",
-            &[
-                "BEFORE UPDATE OF BOUNDED_LOG_TAIL_JSON ON PRODUCT_OPERATIONS",
-                "FROM JSON_EACH(NEW.BOUNDED_LOG_TAIL_JSON) ENTRY",
-                "LENGTH(ENTRY.VALUE) > 4096",
-                "RAISE(ABORT, 'PRODUCT OPERATION LOG TAIL LINES MUST BE BOUNDED STRINGS')",
-            ],
-        ),
-        (
-            "trg_product_operation_result_guard",
-            &[
-                "BEFORE UPDATE OF RESULT_ARTIFACT_DIGESTS_JSON ON PRODUCT_OPERATIONS",
-                "FROM JSON_EACH(NEW.RESULT_ARTIFACT_DIGESTS_JSON) ENTRY",
-                "LENGTH(ENTRY.VALUE) <> 64",
-                "RAISE(ABORT, 'PRODUCT OPERATION RESULT ARTIFACTS MUST BE BOUNDED SHA-256 FACTS')",
-            ],
-        ),
-        (
-            "trg_product_operation_result_insert_guard",
-            &[
-                "BEFORE INSERT ON PRODUCT_OPERATIONS",
-                "NEW.RESULT_ARTIFACT_DIGESTS_JSON <> '{}'",
-                "RAISE(ABORT, 'PRODUCT OPERATION MUST BEGIN WITHOUT RESULT ARTIFACTS')",
-            ],
-        ),
-        (
-            "trg_product_operations_terminal_immutable",
-            &[
-                "BEFORE UPDATE ON PRODUCT_OPERATIONS",
-                "OLD.STATE <> 'RUNNING'",
-                "RAISE(ABORT, 'TERMINAL PRODUCT OPERATIONS ARE IMMUTABLE')",
-            ],
-        ),
-        (
+        ),        (
             "trg_requirements_absorb_done_cancelled",
             &[
                 "BEFORE UPDATE OF STATUS ON REQUIREMENTS",
@@ -2513,6 +1969,7 @@ async fn validate_index_budget(pool: &SqlitePool) -> Result<(), DbError> {
     for table in PRODUCT_TABLES
         .iter()
         .chain(CANONICAL_AGENT_STORE_TABLES.iter())
+        .chain(CANONICAL_PLUGIN_TABLES.iter())
     {
         let sql = format!("PRAGMA index_list({})", quote_sqlite_identifier(table));
         let rows = sqlx::query(&sql).fetch_all(pool).await?;
@@ -2598,7 +2055,7 @@ async fn validate_logical_reference_coverage(pool: &SqlitePool) -> Result<(), Db
         .collect();
     let exempt: BTreeSet<(&str, &str)> = NON_REFERENCE_ID_COLUMNS.iter().copied().collect();
     let mut missing = Vec::new();
-    for table in PRODUCT_TABLES {
+    for table in PRODUCT_TABLES.iter().chain(CANONICAL_PLUGIN_TABLES.iter()) {
         for column in table_info(pool, table).await? {
             if column.name != "id"
                 && column.name.ends_with("_id")

@@ -1,5 +1,8 @@
 # R11 审计记录：清理证明与安全准入
 
+> 归档边界（2026-09-23）：本文涉及旧 Plugin Runtime Host 的路径仅为历史证据；当前
+> Plugin 使用每实例独立 Service process 与 Unified Plugin Core 生命周期，不存在旧 Host。
+
 日期：2026-09-12。续接入口：[全局台账](audit-progress.zh.md)。
 
 ## R11-01：非 Running 不等于已完成清理

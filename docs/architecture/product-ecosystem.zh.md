@@ -1,6 +1,6 @@
 # NomiFun 产品生态架构
 
-本文说明 NomiFun Desktop、Mobile、小智云台、Plugin Product 和伙伴渠道如何组成
+本文说明 NomiFun Desktop、Mobile、小智云台、Unified Plugin 和伙伴渠道如何组成
 同一个产品系统。本文聚焦产品分工、通信方式与信任边界；具体操作和接口细节以文末
 链接的使用指南为准。
 
@@ -10,7 +10,7 @@ English: [product-ecosystem.md](product-ecosystem.md)
 
 | 产品 | 核心职责 | 文档入口 |
 |---|---|---|
-| [NomiFun Desktop](https://github.com/nomifun/nomifun-desktop) | 数据、模型、Agent、任务、工具、Skill、知识库、伙伴和 Plugin Product 的本地事实源与执行中枢 | [架构总览](overview.zh.md) · [WebUI 远程访问](../guides/webui-remote-access.zh.md) · [小智接入](../guides/xiaozhi-robot.zh.md) |
+| [NomiFun Desktop](https://github.com/nomifun/nomifun-desktop) | 数据、模型、Agent、任务、工具、Skill、知识库、伙伴和 Unified Plugin 的本地事实源与执行中枢 | [架构总览](overview.zh.md) · [WebUI 远程访问](../guides/webui-remote-access.zh.md) · [小智接入](../guides/xiaozhi-robot.zh.md) |
 | [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | 直连已授权 Desktop 实例的 Android / iOS / H5 交互端 | [Mobile README](https://github.com/nomifun/nomifun-mobile#readme) |
 | [NomiFun 小智云台](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | 为 Desktop 伙伴提供语音、屏幕、运动和设备工具的 ESP32-S3 硬件端 | [固件 README](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop 接入指南](../guides/xiaozhi-robot.zh.md) |
 | [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | 可选的自托管 NomiRelay 网络承载，把 NAT 后的 Desktop 或其他服务提供给跨网络客户端 | [产品页](https://www.nomifun.com/zh/products/net-infra/) · [门户接入文档](https://www.nomifun.com/zh/docs/guides/net-infra/) · [中继接入文档](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
@@ -22,7 +22,7 @@ English: [product-ecosystem.md](product-ecosystem.md)
 
   NomiFun Mobile  ───────────────┐
   小智云台 ──────────────────────┤
-  Plugin Product ────────────────┼──▶ NomiFun Desktop
+  Unified Plugin ────────────────┼──▶ NomiFun Desktop
   伙伴 IM 渠道 ──────────────────┘       │
                                          ├─ 数据与会话事实源
                                          ├─ 模型与 Agent 运行时
@@ -72,17 +72,18 @@ Desktop WebUI 监听器的机器上运行 `nfagent`。Mobile 随后只连接 Rel
 知识库、模型、ASR、TTS、会话和工具编排。设备绑定到指定伙伴后，物理形态、桌面端和
 手机端共享同一个受治理运行时，而不是另建一个割裂的机器人账号。
 
-### Plugin Product 是受治理的本地软件
+### Unified Plugin 是受治理的本地软件
 
-Plugin Product 以可编辑项目创建或导入，经测试后发布为不可变 Release，并进入
-Desktop 管理的 Plugin Library。Desktop 将项目源码与活动 Release 分离，并统一治理
-UI Surface、Service 生命周期、Capability、分享、备份和回滚。
+Plugin 由 Chat 创建，或从一个 Package 目录/ZIP 导入；两种来源进入同一 Artifact
+校验与安装链。一种本地 Plugin 身份只指向一个 Active Artifact 和一个 generation
+DataRoot。Desktop 统一治理 App Surface、独立 Service 进程、Action/Binding、存储、
+Package 导出、Backup、恢复与删除。
 
 ## 架构的先进性、独特性与创新性
 
 ### 一张能力图，多种入口
 
-Desktop 伙伴、内置 Agent、受支持的 Agent CLI、Mobile、硬件、Plugin Product、MCP/REST
+Desktop 伙伴、内置 Agent、受支持的 Agent CLI、Mobile、硬件、Unified Plugin、MCP/REST
 调用方和 IM 渠道最终都汇入 Desktop 管理的能力。模型、Skill、知识库、需求、任务和
 工具配置一次即可跨界面复用，不需要每个终端重复实现、重复配置和重复存储。
 
@@ -132,7 +133,7 @@ IM 渠道和实体设备之间切换，同时保留同一份身份、记忆、�
 
 ### 2026 年初创新功能已上线
 
-1. Desktop Plugin Product，取代历史上的 Agent 生成应用模型。
+1. Desktop Unified Plugin，取代历史上的 Agent 生成应用模型。
 2. 安全可控的客服集群系统。
 3. NomiFun Mobile 直连 Desktop；局域网路径无 NomiFun 云端中转服务器。
 4. NomiFun 独创的多 Agent 协作交互模式，由唯一、可审计的 `AgentExecution`

@@ -61,14 +61,6 @@
     "editTagsTitle": "标签",
     "editTagsDesc": "为该技能打上标签，让它出现在对应的人群与场景筛选下。",
     "detailTitle": "技能详情",
-    "freezeTitle": "发布不可变 Agent Skill",
-    "freezeHelp": "预览并将完整 Skill 冻结为 Plugin 候选。在插件工作台审核、应用并启用后，再于 Agent 工作台选择并发布新 revision；已有会话保持不变。现有 Plugin Package v1 启用时需要托管 Node 运行环境，这不是安装执行引擎。",
-    "freezePreview": "预览冻结文件",
-    "freezeTarget": "选择要更新的已有 Skill 项目",
-    "freezeConfirm": "本操作仅创建或替换所选项目的待发布候选，不自动启用、不修改 Agent、不授予能力，也不执行脚本。源文件变化后必须重新预览。",
-    "freezePublish": "确认并创建候选",
-    "freezeReady": "冻结候选已创建。请先在插件工作台审核，再为 Agent 选择。",
-    "freezeOpen": "打开插件工作台",
     "detailLocation": "位置",
     "detailInstructions": "技能说明",
     "detailPreview": "预览",
@@ -1266,8 +1258,7 @@
   "executionEngines": {
     "title": "Nomi Runtime",
     "subtitle": "查看唯一官方 Agent Runtime 的构建、健康和恢复诊断。",
-    "scope": "所有 Agent 都由 Nomi Runtime 执行。它随应用更新，不属于 Agent 配置；JavaScript Runtime 为插件提供 Node.js，继续独立管理。",
-    "javascriptLink": "管理 JavaScript 运行时 →",
+    "scope": "所有 Agent 都由 Nomi Runtime 执行；Plugin JavaScript authority 由 Host 管理，用户不能选择或热切换。",
     "refresh": "刷新诊断",
     "loading": "正在读取 Nomi Runtime 诊断…",
     "loadError": "无法刷新 Nomi Runtime 诊断，请检查服务连接后重试。已显示的信息可能已过期。",
@@ -1290,76 +1281,6 @@
     "configureTitle": "配置 Agent 可以做什么",
     "configureHint": "在 Agent 工作台选择能力模块、精确操作、Skill 和模型路由。Nomi Runtime 本身没有选择器。",
     "configureLink": "打开 Agent 工作台 →"
-  },
-  "runtimeManager": {
-    "title": "JavaScript 运行时",
-    "subtitle": "管理 NomiFun Plugin 和 PluginRuntime 使用的 Node.js 运行时。",
-    "separateHint": "JavaScript Runtime 是插件宿主依赖，不执行 Agent，也不会替代 Nomi Runtime。",
-    "railTitle": "JavaScript 运行时",
-    "desktopOnlyTitle": "仅支持桌面端",
-    "desktopOnlyBody": "Node.js 运行时路径和本机进程只在 NomiFun 桌面端可管理。",
-    "loading": "正在读取运行时状态…",
-    "currentTitle": "当前运行时",
-    "currentDescription": "所有 JavaScript Host 共用一个已提交的 Node.js 运行时。",
-    "noSelection": "尚未选择兼容的 Node.js 运行时",
-    "noSelectionBody": "请选择本机 Node.js，或确认下载官方 Node.js LTS。",
-    "candidatesTitle": "可用运行时",
-    "candidatesDescription": "可扫描 PATH、选择绝对路径，或使用已下载的受管运行时。",
-    "candidatesEmpty": "尚未发现 Node.js 运行时。",
-    "unknownVersion": "未知版本",
-    "diagnostics": "查看诊断信息",
-    "statusError": "运行时状态包含错误：{{code}}",
-    "source": {
-      "manualPath": "手动路径",
-      "processPath": "当前 PATH",
-      "managed": "NomiFun 受管"
-    },
-    "compatibility": {
-      "recommended": "推荐",
-      "compatible": "兼容",
-      "incompatible": "不兼容"
-    },
-    "candidate": {
-      "current": "当前使用",
-      "pending": "待裁决",
-      "selected": "当前运行时",
-      "use": "使用此运行时"
-    },
-    "downloadTitle": "官方 Node.js LTS",
-    "downloadDescription": "下载前需要确认官方发行物和当前平台目标。",
-    "download": {
-      "downloading": "正在下载并校验官方 Node.js…",
-      "ready": "下载和校验完成，可选择使用。",
-      "failed": "下载失败。",
-      "unavailable": "当前无法获取官方 Node.js LTS 信息。"
-    },
-    "switch": {
-      "title": "运行时切换待裁决",
-      "description": "候选运行时验证存在局部结果，请选择继续使用新运行时或恢复原运行时。",
-      "noParticipants": "没有可展示的参与者结果。",
-      "participantPlugin": "Plugin",
-      "participantPluginRuntime": "PluginRuntime Service",
-      "participantBuild": "构建基础",
-      "passed": "通过",
-      "failed": "失败",
-      "notCovered": "未覆盖"
-    },
-    "confirm": {
-      "downloadTitle": "下载并使用官方 Node.js？",
-      "downloadBody": "NomiFun 将下载并校验 Node.js {{version}} 官方发行物（{{target}}），随后尝试将其设为全局 JavaScript 运行时。",
-      "nonRecommendedTitle": "使用非推荐 Node.js 版本？",
-      "nonRecommendedBody": "Node.js {{version}} 满足最低兼容条件，但不是当前测试基线。是否继续？"
-    },
-    "actions": {
-      "refresh": "刷新",
-      "choosePath": "选择 node.exe",
-      "scan": "重新扫描",
-      "download": "下载并使用",
-      "useDownloaded": "使用已下载版本",
-      "continue": "继续使用新版本",
-      "restore": "恢复原版本",
-      "cancel": "取消"
-    }
   },
   "taskModel": {
     "providerPlaceholder": "选择服务商",

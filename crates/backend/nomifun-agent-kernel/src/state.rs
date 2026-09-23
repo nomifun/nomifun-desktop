@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use nomifun_agent_contracts::{
     PluginStateCompareAndSwapOutcome, PluginStateDeleteResponse, PluginStateEntry,
     PluginStateHandleDescriptor, PluginStateMethod, PluginStateNamespace, PluginStateSetResponse,
-    PackageId, PluginMountId, ScopeKey, StateKey, StrictJsonValue, VersionString,
+    PackageId, AgentModuleId, ScopeKey, StateKey, StrictJsonValue, VersionString,
 };
 use thiserror::Error;
 
@@ -37,7 +37,7 @@ pub enum PluginStateError {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StateIdentity {
     pub package_id: PackageId,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub scope_key: ScopeKey,
     pub state_key: StateKey,
 }
@@ -79,7 +79,7 @@ impl PluginStateSnapshot {
     pub fn entry(
         &self,
         package_id: &PackageId,
-        mount_id: &PluginMountId,
+        mount_id: &AgentModuleId,
         scope_key: &ScopeKey,
         state_key: &StateKey,
     ) -> Option<&PluginStateEntry> {
@@ -94,7 +94,7 @@ impl PluginStateSnapshot {
     pub fn revision(
         &self,
         package_id: &PackageId,
-        mount_id: &PluginMountId,
+        mount_id: &AgentModuleId,
         scope_key: &ScopeKey,
         state_key: &StateKey,
     ) -> u64 {
@@ -233,7 +233,7 @@ impl PluginStateStore {
     pub(crate) fn handle(
         self: &Arc<Self>,
         package_id: PackageId,
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         writer_package_version: VersionString,
     ) -> PluginStateHandle {
         PluginStateHandle {
@@ -250,7 +250,7 @@ impl PluginStateStore {
     fn identity(
         &self,
         package_id: &PackageId,
-        mount_id: &PluginMountId,
+        mount_id: &AgentModuleId,
         scope_key: &ScopeKey,
         state_key: &StateKey,
     ) -> Result<StateIdentity, PluginStateError> {
@@ -583,7 +583,7 @@ mod tests {
         let store = PluginStateStore::new(persistence).unwrap();
         store.handle(
             PackageId::from("sample.echo"),
-            PluginMountId::from("sample-echo"),
+            AgentModuleId::from("sample-echo"),
             VersionString::from("1.0.0"),
         )
     }
@@ -645,7 +645,7 @@ mod tests {
         );
         let reopened = reopened_store.handle(
             PackageId::from("sample.echo"),
-            PluginMountId::from("sample-echo"),
+            AgentModuleId::from("sample-echo"),
             VersionString::from("1.0.0"),
         );
         assert_eq!(
@@ -684,12 +684,12 @@ mod tests {
         let store = PluginStateStore::new(persistence).unwrap();
         let first = store.handle(
             PackageId::from("sample.echo"),
-            PluginMountId::from("sample-echo"),
+            AgentModuleId::from("sample-echo"),
             VersionString::from("1.0.0"),
         );
         let other = store.handle(
             PackageId::from("other.package"),
-            PluginMountId::from("other-mount"),
+            AgentModuleId::from("other-mount"),
             VersionString::from("1.0.0"),
         );
         let scope = ScopeKey::from("same-scope");

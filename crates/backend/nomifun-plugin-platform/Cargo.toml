@@ -8,12 +8,11 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 getrandom.workspace = true
+fs2.workspace = true
 libc.workspace = true
 jsonschema.workspace = true
 nomifun-api-types.workspace = true
 nomifun-db.workspace = true
-nomifun-js-authoring.workspace = true
-nomifun-js-host.workspace = true
 nomifun-js-runtime.workspace = true
 nomi-process-runtime.workspace = true
 rusqlite = { workspace = true, features = ["hooks"] }

@@ -32,8 +32,6 @@ pub mod knowledge_completer;
 pub mod one_shot;
 pub mod plugin_tools;
 pub mod tool_discovery;
-pub use plugin_tools::model_middleware;
-pub use plugin_tools::tool_middleware;
 pub mod plugin_skills;
 mod plugin_tool_error_projection;
 pub mod protocol;
@@ -111,9 +109,7 @@ pub use plugin_tools::{
     NomiPlatformBuiltinLifecycleInvocation,
     NomiPlatformBuiltinLifecycleInvoker,
     NomiHostedSessionBindings, NomiPluginToolSession, NomiPluginToolSessionProvider,
-    NomiPluginToolSessionRequest, NomiPluginProductToolAction,
-    NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
-    NomiPluginProductToolSchemaResolver,
+    NomiPluginToolSessionRequest,
 };
 pub use factory::build_agent_model_config_resolver;
 pub use knowledge_completer::LiveKnowledgeCompleter;

@@ -70,8 +70,9 @@ pub(crate) struct EngineKernelAssembly {
     pub context_admission: Arc<nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
     #[cfg(feature = "browser-use")]
     pub browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
-    pub plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
+    pub hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
     pub robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
+    pub agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
 }
 
 fn constraints_allow_action(
@@ -144,11 +145,11 @@ pub struct EngineKernelSession {
     context_admission: Arc<nomifun_ai_agent::NomiPlatformBuiltinContextAdmission>,
     #[cfg(feature = "browser-use")]
     browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
-    plugin_product: super::engine_plugin_product_tools::PluginProductOwner,
-    plugin_product_plan: tokio::sync::OnceCell<EngineToolPlan>,
+    hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
     initial_capability_context: tokio::sync::OnceCell<Option<String>>,
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
+    plugin_bindings: Arc<super::engine_plugin_bindings::FrozenAgentPluginBindings>,
     state: Mutex<State>,
 }
 
@@ -164,6 +165,12 @@ impl EngineKernelSession {
     ) -> Result<Self, AppError> {
         let mut binding = session.agent_binding().clone();
         let constraints = ExecutionConstraints::from_extra(&session.session().extra)?;
+        let plugin_bindings = Arc::new(
+            super::engine_plugin_bindings::FrozenAgentPluginBindings::freeze(
+                assembly.agent_plugins.clone(),
+                constraints.restricted(),
+            )?,
+        );
         let snapshot = session.snapshot();
         let session_id = AgentSessionId::from(session.session().conversation_id.clone());
         let principal = session.principal();
@@ -302,11 +309,11 @@ impl EngineKernelSession {
             #[cfg(feature = "browser-use")]
             browser: assembly.browser.clone(),
             git_root,
-            plugin_product: assembly.plugin_product.clone(),
-            plugin_product_plan: tokio::sync::OnceCell::new(),
+            hosted_effects: assembly.hosted_effects.clone(),
             initial_capability_context: tokio::sync::OnceCell::new(),
             robot: assembly.robot.clone(),
             robot_tools: tokio::sync::OnceCell::new(),
+            plugin_bindings,
             state: Mutex::new(State::default()),
         })
     }
@@ -393,43 +400,34 @@ impl EngineKernelSession {
         self.kernel.snapshot().map_err(failure)
     }
 
-    /// Plugin Product actions from the immutable enabled capability set.
-    /// Reading their schemas does not activate capabilities or start Services.
-    pub async fn plugin_product_tool_plan(&self) -> Result<EngineToolPlan, AppError> {
-        if self.constraints.restricted() {
-            return Ok(EngineToolPlan::default());
-        }
-        let plan = self
-            .plugin_product_plan
-            .get_or_try_init(|| async {
-                let exposures = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    self.plugin_product
-                        .exposures(&self.principal.principal_id, &self.compiled),
-                )
-                .await
-                .map_err(|_| failure("Plugin Product schema resolution timed out"))??;
-                self.compile_tool_plan(exposures)
-            })
-            .await?;
-        Ok(plan.clone())
+    /// Unified Plugin Actions are supplied by the Action/Binding adapter.
+    pub async fn plugin_action_tool_plan(&self) -> Result<EngineToolPlan, AppError> {
+        Ok(self.plugin_bindings.tool_plan())
     }
 
     pub fn wrap_model_middleware(
         &self,
         inner: Arc<dyn nomifun_chat_model_broker::EngineModelPort>,
     ) -> Result<Arc<dyn nomifun_chat_model_broker::EngineModelPort>, AppError> {
-        if self.constraints.restricted() {
-            return Ok(inner);
-        }
-        super::engine_plugin_middleware::model_port(
-            inner,
-            self.plugin_product.clone(),
-            self.compiled.clone(),
-            self.active.clone(),
-            self.principal.clone(),
-            self.session_id.clone(),
-        )
+        Ok(self.plugin_bindings.wrap_model(inner))
+    }
+
+    pub async fn plugin_context_for_turn(
+        &self,
+        turn: &nomifun_ai_agent::context_contributor::TurnContext,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<String>, AppError> {
+        self.plugin_bindings
+            .context_for_turn(turn, cancellation)
+            .await
+    }
+
+    pub fn retain_active_tools(
+        &self,
+        full: &EngineToolPlan,
+        active: &std::collections::BTreeSet<nomifun_agent_contracts::CapabilityId>,
+    ) -> Result<EngineToolPlan, AppError> {
+        self.plugin_bindings.retain_active(full, active)
     }
 
     pub fn tool_discovery_port(
@@ -440,7 +438,6 @@ impl EngineKernelSession {
         }
         super::engine_tool_discovery::port(
             self.kernel.clone(),
-            self.plugin_product.clone(),
             self.compiled.clone(),
             self.active.clone(),
             self.principal.clone(),
@@ -457,8 +454,7 @@ impl EngineKernelSession {
         }
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            self.plugin_product
-                .receipts
+            self.hosted_effects
                 .context(&self.principal.principal_id, self.session_id.as_ref()),
         )
         .await
@@ -472,8 +468,7 @@ impl EngineKernelSession {
         if let Some(root) = &self.git_root {
             self.wave2.ensure_workspace_git_evidence(root).await?;
         }
-        self.plugin_product
-            .receipts
+        self.hosted_effects
             .ensure_settled(&self.principal.principal_id, self.session_id.as_ref())
             .await
     }
@@ -520,7 +515,7 @@ impl EngineKernelSession {
                     std::time::Duration::from_secs(30),
                     super::engine_robot_tools::FrozenTools::resolve(
                         owner,
-                        self.plugin_product.receipts.clone(),
+                        self.hosted_effects.clone(),
                         self.principal.clone(),
                         self.session_id.clone(),
                         &self.compiled,
@@ -702,17 +697,30 @@ impl EngineKernelSession {
                 "tool surface already installed or resources closed",
             ));
         }
-        let exposures = plan.model_definitions().into_iter().map(|definition| {
-            let binding = plan
+        let kernel_plan = EngineToolPlan::new(plan.model_definitions().into_iter().filter_map(
+            |definition| {
+                let binding = plan
+                    .binding(&definition.name)
+                    .expect("plan definitions have bindings");
+                (!self.plugin_bindings.contains_tool_binding(binding)).then(|| binding.clone())
+            },
+        ))
+        .map_err(failure)?;
+        let exposures = kernel_plan.model_definitions().into_iter().map(|definition| {
+            let binding = kernel_plan
                 .binding(&definition.name)
-                .expect("plan definitions have bindings");
+                .expect("kernel plan definitions have bindings");
             EngineToolExposure {
                 definition,
                 capability_id: binding.capability_id.clone(),
                 action_id: binding.action_id.clone(),
             }
         });
-        if plan != self.compile_tool_plan(exposures)? {
+        let canonical = self
+            .compile_tool_plan(exposures)?
+            .merged(&self.plugin_bindings.tool_plan())
+            .map_err(failure)?;
+        if plan != canonical {
             return Err(failure(
                 "tool plan differs from the canonical Session mapping",
             ));
@@ -733,20 +741,6 @@ impl EngineKernelSession {
                     "Robot tools require the exact host-frozen device surface",
                 ));
             }
-            if self
-                .compiled
-                .resolved_capability(&binding.capability_id)
-                .is_some_and(|selected| selected.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::PluginProductActiveRelease)
-                && self
-                    .plugin_product_plan
-                    .get()
-                    .and_then(|frozen| frozen.binding(&definition.name))
-                    != Some(binding)
-            {
-                return Err(failure(
-                    "Plugin Product tools require the exact host-resolved schema surface",
-                ));
-            }
         }
         let invoker = KernelEngineToolInvoker::for_session(
             self.kernel.clone(),
@@ -754,7 +748,7 @@ impl EngineKernelSession {
             self.active.clone(),
             self.principal.clone(),
             self.session_id.clone(),
-            plan.clone(),
+            kernel_plan,
         )
         .map_err(failure)?;
         let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(
@@ -780,26 +774,9 @@ impl EngineKernelSession {
             }) as Arc<dyn nomifun_engine_core::EngineToolInvoker>,
             None => invoker,
         };
-        let invoker = super::engine_plugin_product_tools::SessionTools {
-            owner: self.plugin_product.clone(),
-            inner: invoker,
-            snapshot: self.compiled.clone(),
-            active: self.active.clone(),
-            principal: self.principal.clone(),
-            session: self.session_id.clone(),
-            plan: plan.clone(),
-        };
-        // Check the exact frozen mapping BEFORE Robot/Plugin Product/media adapters;
-        // none may dispatch using a caller-supplied capability/effect label.
-        let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> =
-            super::engine_plugin_middleware::tool_invoker(
-                Arc::new(invoker),
-                self.plugin_product.clone(),
-                self.compiled.clone(),
-                self.active.clone(),
-                self.principal.clone(),
-                self.session_id.clone(),
-            )?;
+        let invoker = self.plugin_bindings.wrap_tools(invoker);
+        // Check the exact frozen mapping before host adapters; none may
+        // dispatch using caller-supplied capability or effect labels.
         let invoker = ConstrainedTools {
             inner: invoker,
             plan,

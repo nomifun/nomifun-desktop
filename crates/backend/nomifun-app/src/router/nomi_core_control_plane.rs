@@ -133,15 +133,6 @@ struct PersistedPresetDisplay {
     description: Option<String>,
     #[serde(default)]
     session_only: bool,
-    #[serde(default = "empty_ui_binding")]
-    ui_binding: nomifun_api_types::AgentUiBindingDto,
-}
-
-fn empty_ui_binding() -> nomifun_api_types::AgentUiBindingDto {
-    nomifun_api_types::AgentUiBindingDto {
-        binding_version: 0,
-        selection: None,
-    }
 }
 
 fn parse_preset_owner(value: &str) -> Result<UserId, ControlPlaneError> {
@@ -160,7 +151,6 @@ fn preset_display(preset: &StoredPreset) -> PersistedPresetDisplay {
         display_name: preset.preset.display_name.clone(),
         description: preset.preset.description.clone(),
         session_only: preset.session_only,
-        ui_binding: empty_ui_binding(),
     }
 }
 
@@ -514,45 +504,6 @@ async fn remote_row(
         })
     })
     .transpose()
-}
-
-#[async_trait]
-impl nomifun_agent_control_plane::AgentUiBindingStore for NomiCoreControlPlaneStore {
-    async fn load(&self, owner: &UserId, preset: &AgentPresetId)
-        -> Result<nomifun_api_types::AgentUiBindingDto, ControlPlaneError> {
-        let value: Option<String> = sqlx::query_scalar(
-            "SELECT json_extract(display_json, '$.ui_binding') FROM agent_presets \
-             WHERE preset_id = ? \
-               AND json_extract(owner_ref_json, '$.user_id') = ? \
-               AND retired_at_ms IS NULL",
-        ).bind(preset.as_ref()).bind(owner.as_ref()).fetch_optional(&self.pool).await.map_err(sql)?;
-        decode(&value.ok_or_else(|| not_found("AgentPreset"))?, "Agent UI binding")
-    }
-
-    async fn put(&self, owner: &UserId, preset: &AgentPresetId,
-        selection: Option<nomifun_api_types::AgentUiContributionDto>, expected_version: u64)
-        -> Result<nomifun_api_types::AgentUiBindingDto, ControlPlaneError> {
-        let expected = i64::try_from(expected_version).ok().filter(|version| *version < i64::MAX)
-            .ok_or_else(|| ControlPlaneError::canonical("AGENT_UI_BINDING_VERSION_CONFLICT", StatusCode::CONFLICT, "invalid or exhausted page binding version"))?;
-        let binding = nomifun_api_types::AgentUiBindingDto { binding_version: expected_version + 1, selection };
-        let plugin = binding.selection.as_ref().map(|selection| selection.plugin_id.as_str());
-        // The same statement checks live preset ownership, product ownership and
-        // CAS. No snapshot, Session or execution revision is rewritten.
-        let changed = sqlx::query(
-            "UPDATE agent_presets \
-             SET display_json = json_set(display_json, '$.ui_binding', json(?)) \
-             WHERE preset_id = ? AND json_extract(owner_ref_json, '$.user_id') = ?
-             AND retired_at_ms IS NULL \
-             AND json_extract(display_json, '$.ui_binding.binding_version') = ?
-             AND (? IS NULL OR EXISTS (SELECT 1 FROM plugin_products WHERE plugin_product_id = ? AND owner_user_id = ?))",
-        ).bind(wire(&binding)?).bind(preset.as_ref()).bind(owner.as_ref()).bind(expected)
-            .bind(plugin).bind(plugin).bind(owner.as_ref()).execute(&self.pool).await.map_err(sql)?;
-        if changed.rows_affected() != 1 {
-            return Err(ControlPlaneError::canonical("AGENT_UI_BINDING_VERSION_CONFLICT", StatusCode::CONFLICT,
-                "page choice or ownership changed; reload before saving"));
-        }
-        Ok(binding)
-    }
 }
 
 #[async_trait]

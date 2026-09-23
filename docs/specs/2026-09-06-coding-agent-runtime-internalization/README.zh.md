@@ -1,5 +1,10 @@
 # NomiFun Coding Agent Runtime 内化阶段文档入口
 
+> Plugin 退役边界（2026-09-23）：本目录保留 Coding Engine 的历史设计与证据，但所有
+> MiniApp、PluginMount、旧 Plugin Product/Release/Host、N1/M1 与旧测试/gate 名称仅描述
+> 当时状态，不是当前开发入口。Plugin 唯一权威为
+> `../2026-09-22-unified-plugin-core/README.zh.md`。
+
 > 阶段代号：`CAR`（Coding Agent Runtime Internalization）
 >
 > 文档日期：2026-09-06

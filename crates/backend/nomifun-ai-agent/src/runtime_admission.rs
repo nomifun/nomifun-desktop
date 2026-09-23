@@ -11,10 +11,6 @@ use nomifun_common::AppError;
 use serde_json::Value;
 
 pub trait RuntimeAdmission: Send + Sync {
-    fn supports_tool_hooks(&self) -> bool {
-        false
-    }
-
     fn validate_snapshot(&self, snapshot: &ResolvedSnapshotEnvelope) -> Result<(), AppError>;
 
     fn validate_session_extra(&self, extra: &Value) -> Result<(), AppError>;
@@ -24,7 +20,6 @@ pub struct RuntimeSupport {
     pub enabled_capabilities: Option<BTreeSet<String>>,
     pub skills: bool,
     pub mcp: bool,
-    pub plugin_products: bool,
 }
 
 impl RuntimeSupport {
@@ -33,7 +28,6 @@ impl RuntimeSupport {
             enabled_capabilities: None,
             skills: true,
             mcp: true,
-            plugin_products: true,
         }
     }
 
@@ -42,7 +36,6 @@ impl RuntimeSupport {
             enabled_capabilities: Some(capabilities.into_iter().collect()),
             skills: false,
             mcp: false,
-            plugin_products: false,
         }
     }
 
@@ -56,10 +49,6 @@ fn unsupported(feature: &str) -> AppError {
 }
 
 impl RuntimeAdmission for RuntimeSupport {
-    fn supports_tool_hooks(&self) -> bool {
-        self.plugin_products
-    }
-
     fn validate_snapshot(&self, snapshot: &ResolvedSnapshotEnvelope) -> Result<(), AppError> {
         let content = &snapshot.content;
         if let Some(supported) = &self.enabled_capabilities {
@@ -78,14 +67,6 @@ impl RuntimeAdmission for RuntimeSupport {
                         entry.contribution_lock.source_kind == ContributionSourceKind::McpBinding
                     }),
                 "MCP",
-            ),
-            (
-                self.plugin_products,
-                content.enabled_capabilities.iter().any(|entry| {
-                    entry.contribution_lock.source_kind
-                        == ContributionSourceKind::PluginProductActiveRelease
-                }),
-                "Plugin Products",
             ),
         ] {
             if !allowed && selected {

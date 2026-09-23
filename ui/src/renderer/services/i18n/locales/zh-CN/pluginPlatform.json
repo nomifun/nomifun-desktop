@@ -1,0 +1,187 @@
+{
+  "actions": {
+    "back": "返回插件",
+    "cancel": "取消",
+    "configure": "配置与授权",
+    "create": "创建插件",
+    "delete": "永久删除",
+    "disabled": "已停用",
+    "edit": "继续编辑",
+    "enable": "启用",
+    "enabled": "已启用",
+    "exportBackup": "导出备份",
+    "exportPackage": "导出 Package",
+    "import": "导入",
+    "open": "打开",
+    "refresh": "刷新",
+    "restore": "恢复上一版本",
+    "restoreTrash": "从回收站恢复",
+    "save": "保存",
+    "trash": "移入回收站"
+  },
+  "shape": {
+    "ui_only": "UI App",
+    "headless": "后台能力",
+    "mixed": "App + Service",
+    "ui": "UI",
+    "service": "Service"
+  },
+  "service": {
+    "stopped": "已停止",
+    "starting": "启动中",
+    "running": "运行中",
+    "failed": "失败"
+  },
+  "readOnly": {
+    "title": "WebUI 中的插件访问为只读",
+    "body": "远程 WebUI 可以查看 Plugin、Action、Binding、配置与授权状态。创建、导入、运行 UI Surface 或 Desktop command，以及修改本机代码、数据、配置或生命周期，仅可在桌面 App 中进行。",
+    "draft": "请在桌面 App 中打开此草稿并继续编辑。"
+  },
+  "library": {
+    "title": "插件",
+    "subtitle": "App 与系统能力共用同一种 Package、一个本地身份、一个 DataRoot 和一套生命周期。",
+    "search": "搜索插件与草稿",
+    "loading": "正在加载插件…",
+    "loadFailed": "无法加载插件。",
+    "mutationFailed": "插件已在别处变化或操作失败，请刷新后重试。",
+    "draft": "草稿",
+    "untitled": "未命名插件",
+    "unsaved": "尚未安装",
+    "continue": "继续创建",
+    "trashed": "位于回收站",
+    "openApp": "可以打开",
+    "toggle": "启用或停用 {{name}}",
+    "emptyTitle": "创建第一个插件",
+    "emptyBody": "通过 Chat 创建 App，或导入 Plugin Package / Backup。"
+  },
+  "creator": {
+    "title": "创建插件",
+    "subtitle": "Chat 直接编辑标准 Package 文件；预览与正式运行使用同一 SDK 和存储适配器。",
+    "modelRequired": "生成或修改插件前，请先连接 Chat 模型。",
+    "placeholder": "描述想要的 App 或系统能力，也可以提出修改要求…",
+    "send": "发送",
+    "stop": "停止",
+    "generating": "正在更新 Package 文件…",
+    "files": "Package 文件",
+    "binaryFile": "该二进制资源仅显示文件名，不能作为文本编辑。",
+    "saveFile": "保存文件",
+    "fileSaveFailed": "文件保存失败，请刷新草稿后重试。",
+    "save": "保存并打开",
+    "discard": "丢弃草稿",
+    "loadFailed": "无法加载草稿。",
+    "generateFailed": "未能生成 Package；草稿已保留。",
+    "saveFailed": "校验或激活失败；已安装插件及其数据没有变化。",
+    "operationFailed": "草稿操作失败，请刷新后重试。"
+  },
+  "preview": {
+    "title": "预览",
+    "temporary": "预览使用临时 DataRoot；其中的 Database、KV、Files 和 Cache 永不合并到正式数据。",
+    "permissions": "预览默认关闭所有访问；只为本次会话启用确实需要的权限。",
+    "credentialUnavailable": "Credential 槽位 {{slot}} 引用了不可用的 Host Credential。",
+    "open": "打开预览",
+    "reload": "重新加载预览",
+    "empty": "打开预览，用临时存储测试 UI。",
+    "failed": "预览校验或启动失败；正式数据没有变化。"
+  },
+  "permissions": {
+    "title": "确认新增访问",
+    "added": "新增权限：{{permissions}}",
+    "secrets": "新增 Credential 槽位：{{slots}}",
+    "localCode": "此 Package 包含本机 Service。启用后会在独立进程运行可信本机 JavaScript，并拥有界面列出的访问。",
+    "confirm": "确认并继续"
+  },
+  "import": {
+    "title": "导入插件",
+    "body": "选择标准 Plugin Package 目录、ZIP 或 Plugin Backup；Host 会让所有来源经过同一条 staging 与安装链路。",
+    "directory": "Package 目录",
+    "zip": "Package ZIP",
+    "backup": "Plugin Backup",
+    "package": "Plugin Package",
+    "checking": "正在 staging 与校验…",
+    "invalid": "所选内容不是有效的 Plugin Package 或 Backup。",
+    "failed": "安装失败；现有代码与数据保持不变。",
+    "shape": "{{ui}} · {{service}}",
+    "permissions": "请求的权限",
+    "trustedService": "此 Package 包含可信本机 Service 代码，安装前请检查它的权限。",
+    "backupDisclosure": "此 Backup 包含当前 Database 与 Files（{{files}} 个文件，Database {{bytes}} 字节）和非秘密配置；不含 Cache 与 Preview 数据。",
+    "rebindCredentials": "不包含 Credential 值；导入后需重新绑定：{{slots}}",
+    "createCopy": "创建拥有新身份与新数据的独立副本",
+    "install": "安装并启用"
+  },
+  "config": {
+    "title": "配置与授权",
+    "values": "非秘密配置（JSON）",
+    "schema": "配置 Schema",
+    "invalidJson": "配置必须是有效 JSON。",
+    "objectRequired": "配置必须是 JSON object。",
+    "secretBoundary": "秘密值绝不进入 Config；下方只能填写 Host Credential Store 引用。",
+    "credentialReference": "选择 Host Credential",
+    "credentialSlot": "{{slot}} 的 Credential 引用",
+    "credentialRequired": "必须绑定 Credential 槽位 {{slot}}。",
+    "credentialUnavailable": "不可用",
+    "credentialUnavailableSelected": "Credential 槽位 {{slot}} 必须选择可用的 Host Credential。",
+    "grantPermission": "允许 {{permission}}"
+  },
+  "detail": {
+    "loadFailed": "无法加载插件。",
+    "notFound": "插件不存在。",
+    "operationFailed": "操作失败或插件已在别处变化，请刷新后重试。",
+    "saved": "插件已通过校验、完成激活并保存。",
+    "disabledTitle": "此 App 已停用",
+    "disabledBody": "启用后才能打开 UI；持久数据仍然保留。",
+    "headlessTitle": "后台能力插件",
+    "headlessBody": "此插件没有 UI；启用后的 Action 与 Binding 会增强已注册的 Agent、Desktop 或自动化扩展点。",
+    "actions": "Actions",
+    "bindings": "Bindings",
+    "noActions": "此插件未声明 Action。",
+    "noBindings": "此插件未声明 Binding。",
+    "available": "可用",
+    "storage": "存储与版本",
+    "configuration": "配置状态",
+    "configurationValid": "有效",
+    "configurationInvalid": "无效",
+    "artifact": "当前 Artifact",
+    "dataGeneration": "Data generation",
+    "dataVersion": "Data version",
+    "credentials": "Credential 槽位",
+    "permissions": "权限",
+    "granted": "已授权",
+    "denied": "未授权",
+    "noPermissions": "未请求 Host 权限。"
+  },
+  "command": {
+    "run": "在 Desktop 运行",
+    "input": "Desktop command JSON 输入",
+    "result": "Desktop command 结果",
+    "invalidJson": "Desktop command 输入必须是有效 JSON。",
+    "failed": "Desktop command 执行失败或已不可用。"
+  },
+  "dialog": {
+    "destination": "目标路径",
+    "restore": {
+      "title": "恢复上一版本",
+      "withData": "同时恢复上一代数据",
+      "dataLoss": "恢复上一代数据会丢弃更新后写入的数据。",
+      "acknowledge": "我了解较新的插件数据将会丢失"
+    },
+    "export_package": {
+      "title": "导出 Plugin Package",
+      "disclosure": "Package 仅含代码、资源和可选 Source；绝不包含用户数据、配置、Cache 或 Credential 值。"
+    },
+    "export_backup": {
+      "title": "导出 Plugin Backup",
+      "disclosure": "Backup 包含当前 Package、当前 DataRoot、非秘密配置、Grant 和 Credential 槽位名；不含 Credential 值、Cache、Preview 数据和旧 generation。"
+    },
+    "trash": {
+      "title": "把插件移入回收站",
+      "body": "UI、Action、Binding、Service、Grant 与 Credential 访问会立即撤销；数据保留到永久删除。"
+    },
+    "delete": {
+      "title": "永久删除插件",
+      "body": "这会永久删除该插件实例、数据 generation、Files、配置、Grant 与 Credential 绑定，且无法撤销。内容寻址的共享 Artifact 缓存不含用户数据，可由 Host 保留或回收。"
+    },
+    "command": {
+      "title": "运行 Desktop command"
+    }
+  }
+}

@@ -11,15 +11,12 @@ mod kernel_catalog;
 mod routes;
 mod role_defaults;
 pub use role_defaults::InstallationRoleBindingStore;
-mod ui_bindings;
-pub use ui_bindings::AgentUiBindingStore;
 mod service;
 mod store;
 mod wire;
 
 pub use catalog::{
-    CatalogProvider, CatalogSnapshot, PluginProductCatalogPublicationSource,
-    OfficialTemplateCatalog, SharedPluginProductCatalogPublications, StaticCatalogProvider,
+    CatalogProvider, CatalogSnapshot, OfficialTemplateCatalog, StaticCatalogProvider,
 };
 pub use compiler::{CanonicalRegistryProvider, PresetRevisionCompiler};
 pub use continuation::{
@@ -29,7 +26,7 @@ pub use continuation::{
 pub use error::ControlPlaneError;
 pub use kernel_catalog::{
     KernelCatalogProvider, materialize_capability_catalog_entries,
-    materialize_catalog_snapshot, materialize_catalog_snapshot_with_plugin_products,
+    materialize_catalog_snapshot,
 };
 pub use impact::{
     ControlPlaneRevisionImpactCatalogProvider, RevisionImpactCatalogProvider,

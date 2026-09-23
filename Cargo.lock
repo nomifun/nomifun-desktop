@@ -5858,6 +5858,7 @@ dependencies = [
  "jsonschema",
  "rusqlite",
  "schemars 1.2.1",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -6067,9 +6068,6 @@ dependencies = [
  "nomifun-creation",
  "nomifun-db",
  "nomifun-engine-core",
- "nomifun-js-host",
- "nomifun-js-kernel-adapter",
- "nomifun-js-runtime",
  "nomifun-knowledge",
  "nomifun-model-invoke",
  "nomifun-net",
@@ -6126,6 +6124,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "git2",
+ "hex",
  "http-body-util",
  "if-addrs",
  "image",
@@ -6166,9 +6165,6 @@ dependencies = [
  "nomifun-file",
  "nomifun-gateway",
  "nomifun-idmm",
- "nomifun-js-authoring",
- "nomifun-js-host",
- "nomifun-js-kernel-adapter",
  "nomifun-js-runtime",
  "nomifun-knowledge",
  "nomifun-mcp",
@@ -6211,6 +6207,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "walkdir",
  "windows-sys 0.61.2",
  "wiremock",
  "zeroize",
@@ -6710,89 +6707,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomifun-js-authoring"
-version = "0.7.6"
-dependencies = [
- "base64 0.22.1",
- "flate2",
- "hex",
- "nomi-process-runtime",
- "nomifun-agent-contracts",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "unicode-normalization",
- "ureq",
- "url",
- "uuid",
- "walkdir",
-]
-
-[[package]]
-name = "nomifun-js-host"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "dunce",
- "hex",
- "nomi-process-runtime",
- "nomifun-agent-contracts",
- "nomifun-js-runtime",
- "same-file",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "nomifun-js-kernel-adapter"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "hex",
- "nomifun-agent-contracts",
- "nomifun-agent-kernel",
- "nomifun-js-host",
- "nomifun-js-runtime",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
-]
-
-[[package]]
 name = "nomifun-js-runtime"
 version = "0.7.6"
 dependencies = [
  "async-trait",
  "dunce",
- "flate2",
- "hex",
- "nomifun-agent-contracts",
- "nomifun-api-types",
- "nomifun-net",
- "reqwest 0.12.28",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "which 7.0.3",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -6938,6 +6863,7 @@ name = "nomifun-plugin-platform"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "fs2",
  "getrandom 0.2.17",
  "hex",
  "jsonschema",
@@ -6948,8 +6874,6 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
- "nomifun-js-authoring",
- "nomifun-js-host",
  "nomifun-js-runtime",
  "rusqlite",
  "serde",

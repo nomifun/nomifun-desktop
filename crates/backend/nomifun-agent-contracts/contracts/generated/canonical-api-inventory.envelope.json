@@ -20,25 +20,25 @@
         "canonical_errors": []
       },
       {
-        "operation_id": "plugin_mounts.get",
+        "operation_id": "plugins.list",
         "method": "GET",
-        "path": "/api/plugins/installations/{mount_id}",
+        "path": "/api/plugins",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
       },
       {
-        "operation_id": "plugin_mounts.config.get",
+        "operation_id": "plugins.get",
         "method": "GET",
-        "path": "/api/plugins/installations/{mount_id}/config",
+        "path": "/api/plugins/{plugin_id}",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
       },
       {
-        "operation_id": "plugin_mounts.config.put",
+        "operation_id": "plugins.config.put",
         "method": "PUT",
-        "path": "/api/plugins/installations/{mount_id}/config",
+        "path": "/api/plugins/{plugin_id}/config",
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
@@ -433,5 +433,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "ae0ae25648dcda0908ada7e07a8da5843fcf9cc1241320c0d8fa04dd7b0bbb1d"
+  "payload_digest": "8f8505ae9eeed1e8aef81e79815b10b78f429bbf3cda40dadcf4a3259cc244d6"
 }

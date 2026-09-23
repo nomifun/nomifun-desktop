@@ -8,7 +8,7 @@ use axum::http::Method;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use axum::{Router, middleware};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use nomifun_ai_agent::agent_routes;
 use nomifun_agent_contracts::{
@@ -245,6 +245,15 @@ fn admit_headless_installation_owner(
         state.clone(),
         installation_token_trust_resolve_middleware,
     ))
+}
+
+fn is_plugin_surface_asset_path(path: &str) -> bool {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    matches!(segments.next(), Some("api"))
+        && matches!(segments.next(), Some("plugins" | "plugin-drafts"))
+        && segments.next().is_some()
+        && matches!(segments.next(), Some("surface"))
+        && matches!(segments.next(), Some("assets"))
 }
 
 /// Fallible Nomi-core router assembly with the current product routes
@@ -792,48 +801,22 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Plugin reads require the installation owner identity. Mutations are a
-    // separate route group because they additionally require local trust.
-    let plugin_runtime_read_authenticated = admit_headless_installation_owner(
+    // Unified Plugin reads require the installation owner identity. Mutations
+    // additionally require local product trust.
+    let plugin_assets_public = super::plugin::asset_routes(states.plugin.clone());
+    let plugin_read_authenticated = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin_runtime::plugin_m1_read_routes(states.plugin_runtime.clone())
-                .merge(super::plugin_platform::plugin_read_routes(states.plugin.clone().with_runtime(services.plugin_runtime.clone()))),
+            super::plugin::read_routes(states.plugin.clone()),
             &auth_mw_state,
             &instance_owner_state,
         ),
         &installation_token_trust_state,
     );
-    let plugin_runtime_surface =
-        super::plugin_runtime::plugin_m1_surface_routes(states.plugin_runtime.clone());
-    let plugin_runtime_write_local = admit_headless_installation_owner(
+    let plugin_write_local = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin_runtime::plugin_m1_write_routes(states.plugin_runtime).route_layer(
+            super::plugin::write_routes(states.plugin).route_layer(
                 middleware::from_fn(require_local_product_trust_middleware),
             ),
-            &auth_mw_state,
-            &instance_owner_state,
-        ),
-        &installation_token_trust_state,
-    );
-
-    let plugin_authenticated = admit_headless_installation_owner(
-        protect_instance_owner(
-            super::plugin_platform::plugin_routes(states.plugin.clone().with_runtime(services.plugin_runtime.clone()))
-                .merge(super::skill_publication::routes(states.skill.skill_paths.clone(), states.plugin.service.clone())).route_layer(
-                middleware::from_fn(require_local_product_trust_middleware),
-            ),
-            &auth_mw_state,
-            &instance_owner_state,
-        ),
-        &installation_token_trust_state,
-    );
-
-    let javascript_runtime_authenticated = admit_headless_installation_owner(
-        protect_instance_owner(
-            super::javascript_runtime::javascript_runtime_routes(
-                states.javascript_runtime,
-            )
-            .route_layer(middleware::from_fn(require_local_product_trust_middleware)),
             &auth_mw_state,
             &instance_owner_state,
         ),
@@ -1105,10 +1088,9 @@ fn create_nomi_core_router_with_all_state(
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
         .merge(ssh_host_authenticated)
-        .merge(plugin_runtime_read_authenticated)
-        .merge(plugin_runtime_write_local)
-        .merge(plugin_authenticated)
-        .merge(javascript_runtime_authenticated)
+        .merge(plugin_assets_public)
+        .merge(plugin_read_authenticated)
+        .merge(plugin_write_local)
         .merge(agent_authenticated)
         .merge(nomi_core_agent_authenticated)
         .merge(idmm_authenticated)
@@ -1165,7 +1147,6 @@ fn create_nomi_core_router_with_all_state(
     let router = router
     .merge(ws_routes)
     .merge(office_proxy)
-    .merge(plugin_runtime_surface)
     .merge(public_assets)
     .merge(companion_public)
     .merge(workshop_public);
@@ -1211,12 +1192,16 @@ fn create_nomi_core_router_with_all_state(
     // Permissive CORS for the desktop's own cross-origin webview (its document
     // origin is `tauri://` / `http://tauri.localhost`, not the loopback port).
     // Safe even on the LAN-bound listener: the trust secret rides a header (not
-    // a cookie), so an `Any`-origin attacker page can neither read it nor read
-    // cross-origin responses. Remote browsers are served same-origin and do not
-    // rely on CORS.
+    // a cookie), so an attacker page can neither read it nor read authenticated
+    // cross-origin responses. The one exception is a Plugin Surface asset:
+    // its sandboxed iframe has the opaque `null` origin, and its bearer URL must
+    // never be readable from an ordinary web origin even if that URL leaks.
+    // Remote browsers are served same-origin and do not rely on CORS.
     if services.auth_policy.allows_local_webview() {
         let cors = CorsLayer::new()
-            .allow_origin(Any)
+            .allow_origin(AllowOrigin::predicate(|origin, request| {
+                !is_plugin_surface_asset_path(request.uri.path()) || origin.as_bytes() == b"null"
+            }))
             .allow_methods([
                 Method::GET,
                 Method::POST,

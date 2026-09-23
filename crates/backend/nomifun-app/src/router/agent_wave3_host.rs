@@ -1,6 +1,6 @@
 //! Canonical Nomi composition for the Creative Studio Wave 3 capabilities.
 //!
-//! This is the only application seam that connects the four Wave 3 product
+//! This is the only application seam that connects the three Wave 3 product
 //! Modules to their real domain owners.
 
 use std::collections::BTreeSet;
@@ -14,7 +14,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_domain_wave3::{
     CREATION_MEDIA_MODULE_ID, CREATIVE_WORKSHOP_MODULE_ID, OFFICE_MODULE_ID,
-    PLUGIN_DEVELOPMENT_MODULE_ID, Wave3CapabilityOperation, Wave3HostPort,
+    Wave3CapabilityOperation, Wave3HostPort,
     Wave3HostPortError, Wave3HostRequest, Wave3OwnerBindings, composed_host_port,
 };
 use nomifun_agent_kernel::PluginRegistration;
@@ -25,18 +25,15 @@ use nomifun_office::{
     OfficeRevisionDraft, OfficeSheetEditRequest, OfficeSlidesEditRequest, bounded_preview,
     build_document_revision, build_sheet_revision, build_slides_revision,
 };
-use nomifun_plugin_platform::runtime::PluginRuntimeApplicationService;
 use nomifun_workshop::{WorkshopService, service::NewTextAsset};
 
 use super::agent_wave3_creation_host::Wave3CreationHost;
-use super::agent_wave3_plugin_host::NomiWave3PluginHost;
 use super::agent_wave3_workshop_host::NomiWave3WorkshopHost;
 
-pub(crate) const NOMI_WAVE3_MODULE_IDS: [&str; 4] = [
+pub(crate) const NOMI_WAVE3_MODULE_IDS: [&str; 3] = [
     CREATION_MEDIA_MODULE_ID,
     CREATIVE_WORKSHOP_MODULE_ID,
     OFFICE_MODULE_ID,
-    PLUGIN_DEVELOPMENT_MODULE_ID,
 ];
 
 pub(crate) fn approved_capability_ids() -> BTreeSet<CapabilityId> {
@@ -47,11 +44,10 @@ pub(crate) fn approved_capability_ids() -> BTreeSet<CapabilityId> {
 }
 
 /// Build host-backed registrations from the exact application service
-/// singletons already used by the Creative Studio and Plugin HTTP products.
+/// singletons already used by the Creative Studio and Office products.
 pub(crate) fn registrations(
     creation: Arc<CreationService>,
     workshop: Arc<WorkshopService>,
-    plugin_runtime: Arc<PluginRuntimeApplicationService>,
     model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
     pool: nomifun_db::SqlitePool,
     owner_id: Arc<str>,
@@ -67,10 +63,9 @@ pub(crate) fn registrations(
                 Wave3CreationHost::new(creation, model_invoke, pool, owner_id).into_host_port(),
             )
             .with_workshop(workshop_host.into_port())
-            .with_office(office_host.into_port())
-            .with_plugin(NomiWave3PluginHost::new(plugin_runtime).into_port()),
+            .with_office(office_host.into_port()),
     );
-    nomifun_agent_domain_wave3::registrations_with_host_port(host)
+    Ok(nomifun_agent_domain_wave3::registrations_with_host_port(host)?)
 }
 
 /// Resolve only the schema bytes belonging to the exact Wave 3 target locked

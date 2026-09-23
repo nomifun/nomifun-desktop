@@ -1,1027 +1,1695 @@
-//! End-to-end coverage for the clean-start Plugin M1 HTTP surface.
+//! End-to-end evidence for the production Unified Plugin Core HTTP boundary.
 
 mod common;
 
-use axum::body::Body;
-use axum::http::{Method, Request, StatusCode, header};
-use http_body_util::BodyExt;
-use nomifun_db::{
-    IPluginRuntimeRepository, PluginRuntimeProjectSourceState, SqlitePluginRuntimeRepository,
-    UpdatePluginRuntimeProjectSourceParams,
-};
-use nomifun_plugin_platform::runtime::{PluginRuntimeSourceFileInput, PluginRuntimeSourceStore};
-use serde_json::{Value, json};
-use tower::ServiceExt;
+use std::fs::{self, File};
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-const LOCAL_TRUST: &str = "plugin-m1-local-trust";
+use axum::http::StatusCode;
+use base64::Engine as _;
+use http_body_util::BodyExt as _;
+use nomifun_agent_contracts::PluginId;
+use nomifun_plugin_platform::PluginServiceObservation;
+use serde_json::{Value, json};
+use tower::ServiceExt as _;
+use uuid::Uuid;
+
+use common::{body_json, get_with_token, json_with_token, setup_and_login};
+
+const LOCAL_TRUST: &str = "plugin-e2e-local-desktop";
+
+struct Harness {
+    app: axum::Router,
+    services: nomifun_app::compatibility::AppServices,
+    token: String,
+    csrf: String,
+    files: tempfile::TempDir,
+}
+
+impl Harness {
+    async fn new() -> Self {
+        let (mut app, services) = common::build_local_trust_app(LOCAL_TRUST).await;
+        let (token, csrf) =
+            setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+        Self {
+            app,
+            services,
+            token,
+            csrf,
+            files: tempfile::tempdir().unwrap(),
+        }
+    }
+
+    async fn json(&self, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
+        let mut request = json_with_token(
+            method,
+            uri,
+            body,
+            &self.token,
+            &self.csrf,
+        );
+        request
+            .headers_mut()
+            .insert("x-nomi-local-trust", LOCAL_TRUST.parse().unwrap());
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        (status, body_json(response).await)
+    }
+
+    async fn get_json(&self, uri: &str) -> (StatusCode, Value) {
+        let mut request = get_with_token(uri, &self.token);
+        request
+            .headers_mut()
+            .insert("x-nomi-local-trust", LOCAL_TRUST.parse().unwrap());
+        let response = self
+            .app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        (status, body_json(response).await)
+    }
+
+    async fn get_public_bytes(&self, uri: &str) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        self.get_public_bytes_with_origin(uri, "null").await
+    }
+
+    async fn get_public_bytes_with_origin(
+        &self,
+        uri: &str,
+        origin: &str,
+    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(uri)
+                    .header("host", "127.0.0.1:5197")
+                    .header("origin", origin)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, bytes.to_vec())
+    }
+
+    fn package_path(&self, name: &str) -> PathBuf {
+        self.files.path().join(name)
+    }
+
+    async fn install_directory(&self, source: &Path) -> Value {
+        let source_path = source.to_string_lossy().into_owned();
+        let (status, inspection) = self
+            .json(
+                "POST",
+                "/api/plugins/import/inspect",
+                json!({"source_path":source_path,"kind":"directory"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "inspection failed: {inspection}");
+        let confirmation = inspection["data"]["permission_expansion"]["confirmation_id"]
+            .as_str()
+            .map(str::to_owned);
+        let (status, installed) = self
+            .json(
+                "POST",
+                "/api/plugins/import",
+                json!({
+                    "source_path": source.to_string_lossy(),
+                    "kind":"directory",
+                    "create_copy":false,
+                    "permission_confirmation_id":confirmation,
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "install failed: {installed}");
+        assert_eq!(installed["data"]["result"]["outcome"], "installed");
+        installed["data"]["result"]["plugin"].clone()
+    }
+
+    async fn open_surface(&self, plugin_id: &str, revision: u64) -> Value {
+        let (status, response) = self
+            .json(
+                "POST",
+                &format!("/api/plugins/{plugin_id}/surface/open"),
+                json!({"expected_revision":revision}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "surface open failed: {response}");
+        response["data"].clone()
+    }
+
+    async fn close_surface(&self, route: &str, descriptor: &Value) {
+        let (status, response) = self
+            .json(
+                "POST",
+                route,
+                json!({
+                    "surface_session_id":descriptor["surface_session_id"],
+                    "surface_generation":descriptor["surface_generation"],
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "surface close failed: {response}");
+    }
+
+    async fn bridge(&self, route: &str, descriptor: &Value, target: Value) -> (StatusCode, Value) {
+        self.json(
+            "POST",
+            route,
+            json!({
+                "plugin_id":descriptor["plugin_id"],
+                "draft_id":descriptor["draft_id"],
+                "artifact_digest":descriptor["artifact_digest"],
+                "surface_session_id":descriptor["surface_session_id"],
+                "surface_generation":descriptor["surface_generation"],
+                "is_preview":descriptor["is_preview"],
+                "request":{
+                    "call_id":Uuid::now_v7().to_string(),
+                    "target":target,
+                }
+            }),
+        )
+        .await
+    }
+}
+
+async fn create_chat_provider(
+    harness: &Harness,
+    base_url: &str,
+    name: &str,
+    model: &str,
+) -> String {
+    let (status, provider) = harness
+        .json(
+            "POST",
+            "/api/providers",
+            json!({
+                "platform":"openai",
+                "name":name,
+                "base_url":base_url,
+                "auth_scheme":"bearer",
+                "credentials":{"api_keys":["test-only"]},
+                "enabled":true,
+                "initial_model":{
+                    "model":model,
+                    "enabled":true,
+                    "capabilities":[{
+                        "task":"chat",
+                        "traits":[],
+                        "protocol":"openai.chat_text",
+                        "connection_role":"default",
+                        "provider_params":{}
+                    }]
+                }
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "provider create failed: {provider}");
+    provider["data"]["provider_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn openai_sse_text(text: &str) -> String {
+    format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id":"draft-generation",
+            "choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]
+        }),
+        json!({
+            "id":"draft-generation",
+            "choices":[{"index":0,"delta":{},"finish_reason":"stop"}]
+        })
+    )
+}
+
+fn write_ui_package(
+    root: &Path,
+    package_id: &str,
+    secret_slots: &[&str],
+    permissions: &[&str],
+) {
+    write_package_files(
+        root,
+        json!({
+            "schema":"nomifun.plugin/v1",
+            "id":package_id,
+            "version":"1.0.0",
+            "name":"Unified UI fixture",
+            "description":"A UI-only Unified Plugin fixture.",
+            "hostApi":">=1 <2",
+            "entrypoints":{"ui":"ui/index.html"},
+            "actions":{},
+            "bindings":[],
+            "dataVersion":0,
+            "migrations":[],
+            "configSchema":{"type":"object"},
+            "secrets":secret_slots,
+            "permissions":permissions,
+        }),
+        true,
+        None,
+    );
+}
+
+fn write_service_package(root: &Path, package_id: &str, mode: &str, mixed: bool) {
+    let action_name = format!("{mode} echo");
+    let service_mode = if mode == "headless" { "continuous" } else { "onDemand" };
+    write_package_files(
+        root,
+        json!({
+            "schema":"nomifun.plugin/v1",
+            "id":package_id,
+            "version":"1.0.0",
+            "name":action_name,
+            "description":"A dedicated Service Action fixture.",
+            "hostApi":">=1 <2",
+            "entrypoints": if mixed {
+                json!({"ui":"ui/index.html","service":"service/main.mjs","serviceMode":service_mode})
+            } else {
+                json!({"service":"service/main.mjs","serviceMode":service_mode})
+            },
+            "actions":{
+                "echo":{
+                    "name":action_name,
+                    "description":"Returns its input from the isolated Plugin Service.",
+                    "input":{"type":"object"},
+                    "output":{"type":"object"},
+                    "effect":"read"
+                }
+            },
+            "bindings":[{"point":"desktop.command","action":"echo"}],
+            "dataVersion":0,
+            "migrations":[],
+            "configSchema":{"type":"object"},
+            "secrets":[],
+            "permissions":[],
+        }),
+        mixed,
+        Some(format!(
+            r#"export async function activate(ctx) {{
+  return {{
+    async invoke(action, input) {{
+      if (action !== "echo") throw new Error("unsupported action");
+      await ctx.storage.kv.set("last-input", input);
+      return {{ mode: {mode:?}, input, pluginId: ctx.pluginId }};
+    }}
+  }};
+}}
+"#
+        )),
+    );
+}
+
+fn write_package_files(root: &Path, manifest: Value, with_ui: bool, service: Option<String>) {
+    fs::create_dir_all(root).unwrap();
+    fs::write(
+        root.join("nomifun.plugin.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    if with_ui {
+        fs::create_dir_all(root.join("ui")).unwrap();
+        fs::write(
+            root.join("ui/index.html"),
+            b"<!doctype html><html><head><title>Unified fixture</title><link rel=\"stylesheet\" href=\"./style.css\"><script type=\"module\" src=\"./app.js\"></script></head><body><main>fixture</main></body></html>",
+        )
+        .unwrap();
+        fs::write(root.join("ui/app.js"), b"document.body.dataset.plugin = 'ready';\n").unwrap();
+        fs::write(root.join("ui/style.css"), b"main { display: block; }\n").unwrap();
+    }
+    if let Some(service) = service {
+        fs::create_dir_all(root.join("service")).unwrap();
+        fs::write(root.join("service/main.mjs"), service).unwrap();
+    }
+}
+
+fn installed_identity(detail: &Value) -> (String, u64) {
+    (
+        detail["summary"]["plugin_id"].as_str().unwrap().to_owned(),
+        detail["summary"]["revision"].as_u64().unwrap(),
+    )
+}
+
+fn assert_bridge_success(response: &Value) -> &Value {
+    assert_eq!(response["data"]["outcome"], "success", "bridge failed: {response}");
+    &response["data"]["result"]
+}
+
+fn surface_asset_path(descriptor: &Value) -> String {
+    surface_asset_path_for(descriptor, descriptor["entrypoint"].as_str().unwrap())
+}
+
+fn surface_asset_path_for(descriptor: &Value, asset: &str) -> String {
+    let owner = if descriptor["is_preview"] == true {
+        format!(
+            "/api/plugin-drafts/{}",
+            descriptor["draft_id"].as_str().unwrap()
+        )
+    } else {
+        format!(
+            "/api/plugins/{}",
+            descriptor["plugin_id"].as_str().unwrap()
+        )
+    };
+    format!(
+        "{owner}/surface/assets/{}/{}/{}/{}",
+        descriptor["surface_session_id"].as_str().unwrap(),
+        descriptor["surface_generation"].as_u64().unwrap(),
+        descriptor["artifact_digest"].as_str().unwrap(),
+        asset,
+    )
+}
+
+async fn seed_surface_data(harness: &Harness, plugin_id: &str, descriptor: &Value) {
+    let route = format!("/api/plugins/{plugin_id}/surface/bridge");
+    for target in [
+        json!({"target":"kv","request":{"operation":"set","key":"counter","value":7}}),
+        json!({"target":"db","request":{"operation":"execute","sql":"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)","parameters":[]}}),
+        json!({"target":"db","request":{"operation":"execute","sql":"INSERT INTO notes (body) VALUES (?1)","parameters":["persisted"]}}),
+        json!({"target":"files","request":{"operation":"write","path":"notes/state.txt","content_base64":base64::engine::general_purpose::STANDARD.encode(b"persisted-file"),"overwrite":false}}),
+    ] {
+        let (status, response) = harness.bridge(&route, descriptor, target).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_bridge_success(&response);
+    }
+}
+
+async fn assert_surface_data(harness: &Harness, plugin_id: &str, descriptor: &Value) {
+    let route = format!("/api/plugins/{plugin_id}/surface/bridge");
+    let (status, response) = harness
+        .bridge(
+            &route,
+            descriptor,
+            json!({"target":"kv","request":{"operation":"get","key":"counter"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(assert_bridge_success(&response)["result"]["value"], 7);
+
+    let (status, response) = harness
+        .bridge(
+            &route,
+            descriptor,
+            json!({"target":"db","request":{"operation":"query","sql":"SELECT body FROM notes ORDER BY id","parameters":[]}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        assert_bridge_success(&response)["result"]["rows"][0]["body"],
+        "persisted"
+    );
+
+    let (status, response) = harness
+        .bridge(
+            &route,
+            descriptor,
+            json!({"target":"files","request":{"operation":"read","path":"notes/state.txt"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let encoded = assert_bridge_success(&response)["result"]["content_base64"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
+        b"persisted-file"
+    );
+}
 
 #[tokio::test]
-async fn plugin_routes_expose_the_clean_start_runtime_chain() {
-    let (router, services) = common::build_local_trust_app(LOCAL_TRUST).await;
-    let owner_id = services.authoritative_user_id.to_string();
-    let owner_jwt = services
-        .jwt_service
-        .sign(&owner_id, "admin")
-        .expect("owner JWT");
+async fn ui_only_surface_uses_one_sdk_persists_storage_and_library_pin_is_cas_guarded() {
+    let harness = Harness::new().await;
+    let package = harness.package_path("ui-only");
+    write_ui_package(&package, "e2e.ui-only", &[], &[]);
+    fs::create_dir_all(package.join("source")).unwrap();
+    fs::write(package.join("source/original.ts"), "export const privateSource = true;").unwrap();
+    let detail = harness.install_directory(&package).await;
+    let (plugin_id, revision) = installed_identity(&detail);
+    assert_eq!(detail["summary"]["has_service"], false);
+    assert_eq!(detail["summary"]["runtime"]["state"], "stopped");
 
-    let retired_tables: i64 = nomifun_db::sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'table' AND name IN ('miniapps', 'plugins')",
-    )
-    .fetch_one(services.database.pool())
-    .await
-    .expect("retired product tables");
-    assert_eq!(retired_tables, 0, "the clean-start schema must not recreate retired roots");
-
-    let response = request(&router, Method::GET, "/api/plugins/runtimes", None)
-        .header("authorization", format!("Bearer {owner_jwt}"))
-        .send()
+    let descriptor = harness.open_surface(&plugin_id, revision).await;
+    let (status, headers, html) = harness
+        .get_public_bytes(&surface_asset_path(&descriptor))
         .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let library = response_json(response).await;
-    assert_eq!(library["data"]["library_revision"], 0);
-    assert_eq!(library["data"]["plugins"], json!([]));
-
-    let create_body = json!({
-        "expected_library_revision": 0,
-        "display_name": "M1 Notes",
-        "description": "clean-start project",
-        "service_source": null
-    });
-    let response = request(
-        &router,
-        Method::POST,
-        "/api/plugins/runtimes/projects",
-        Some(create_body.clone()),
-    )
-    .header("authorization", format!("Bearer {owner_jwt}"))
-    .send()
-    .await;
+    assert_eq!(status, StatusCode::OK);
+    let csp = headers["content-security-policy"].to_str().unwrap();
+    assert!(csp.contains("http://127.0.0.1:5197"));
+    assert_eq!(headers["access-control-allow-origin"], "null");
+    let (_, hostile_headers, _) = harness
+        .get_public_bytes_with_origin(
+            &surface_asset_path(&descriptor),
+            "https://attacker.invalid",
+        )
+        .await;
+    assert_ne!(
+        hostile_headers.get("access-control-allow-origin"),
+        Some(&axum::http::HeaderValue::from_static("*"))
+    );
+    assert_ne!(
+        hostile_headers.get("access-control-allow-origin"),
+        Some(&axum::http::HeaderValue::from_static(
+            "https://attacker.invalid"
+        ))
+    );
+    let html = String::from_utf8(html).unwrap();
+    assert!(html.contains("Object.defineProperty(window, 'nomi'"));
+    let (status, _, script) = harness
+        .get_public_bytes(&surface_asset_path_for(&descriptor, "ui/app.js"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8(script).unwrap().contains("plugin = 'ready'"));
     assert_eq!(
-        response.status(),
-        StatusCode::FORBIDDEN,
-        "an owner JWT alone must not authorize host-local creation"
+        harness
+            .get_public_bytes(&surface_asset_path_for(&descriptor, "source/original.ts"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "source/** must remain authoring-only and outside the Runtime asset surface"
+    );
+    assert_eq!(
+        harness
+            .get_public_bytes(&surface_asset_path_for(&descriptor, "nomifun.plugin.json"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+    );
+    let mut wrong_owner = surface_asset_path_for(&descriptor, "ui/app.js");
+    wrong_owner = wrong_owner.replacen(&plugin_id, &Uuid::now_v7().to_string(), 1);
+    assert_eq!(harness.get_public_bytes(&wrong_owner).await.0, StatusCode::NOT_FOUND);
+    seed_surface_data(&harness, &plugin_id, &descriptor).await;
+    harness
+        .close_surface(
+            &format!("/api/plugins/{plugin_id}/surface/close"),
+            &descriptor,
+        )
+        .await;
+
+    let reopened = harness.open_surface(&plugin_id, revision).await;
+    assert_surface_data(&harness, &plugin_id, &reopened).await;
+    let runtime = harness.services.plugin_service_runtime.get().unwrap();
+    assert_eq!(
+        runtime
+            .observation(&PluginId::from(plugin_id.clone()))
+            .await,
+        PluginServiceObservation::Stopped,
+        "UI-only Plugins must not own a Node process"
     );
 
-    let response = request(
-        &router,
-        Method::POST,
-        "/api/plugins/runtimes/projects",
-        Some(create_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let created = response_json(response).await;
-    let plugin_id = created["data"]["plugin"]["plugin_id"]
-        .as_str()
-        .expect("created plugin_id")
-        .to_owned();
-    nomifun_common::PluginProductId::parse(plugin_id.clone())
-        .expect("canonical Plugin UUIDv7");
-    assert_eq!(created["data"]["plugin"]["display_name"], "M1 Notes");
-    assert_eq!(created["data"]["source_state"], "editable");
-    assert_eq!(created["data"]["project_revision"], 1);
-    assert_eq!(created["data"]["build_generation"], 1);
-    assert_eq!(created["data"]["plugin"]["surface_available"], false);
+    let (status, library) = harness.get_json("/api/plugins/library-state").await;
+    assert_eq!(status, StatusCode::OK);
+    let library_revision = library["data"]["revision"].as_u64().unwrap();
+    assert_eq!(library["data"]["items"].as_array().unwrap().len(), 1);
+    let (status, pinned) = harness
+        .json(
+            "PUT",
+            "/api/plugins/library-state",
+            json!({
+                "expected_revision":library_revision,
+                "collections":[],
+                "items":[{"plugin_id":plugin_id,"pinned":true}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "pin failed: {pinned}");
+    assert_eq!(pinned["data"]["items"][0]["pinned"], true);
+    let (status, _) = harness
+        .json(
+            "PUT",
+            "/api/plugins/library-state",
+            json!({
+                "expected_revision":library_revision,
+                "collections":[],
+                "items":[{"plugin_id":plugin_id,"pinned":false}]
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "stale library CAS must fail");
+}
 
-    let unified = request(&router, Method::GET, "/api/plugins", None)
-        .header("authorization", format!("Bearer {owner_jwt}"))
-        .send().await;
-    assert_eq!(unified.status(), StatusCode::OK);
-    let unified = response_json(unified).await;
-    assert_eq!(unified["data"]["runtimes"][0]["plugin_id"], plugin_id);
-    assert!(unified["data"]["runtimes"][0].get("miniapp_id").is_none());
-
-    let response = request(
-        &router,
-        Method::GET,
-        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
-        None,
-    )
-    .header("authorization", format!("Bearer {owner_jwt}"))
-    .send()
-    .await;
+#[tokio::test]
+async fn package_and_backup_round_trip_data_without_credential_plaintext() {
+    const SECRET: &str = "E2E-CREDENTIAL-PLAINTEXT-MUST-NOT-EXPORT";
+    let harness = Harness::new().await;
+    let package = harness.package_path("backup-source");
+    write_ui_package(&package, "e2e.backup", &["api_key"], &["network"]);
+    let (status, first_inspection) = harness
+        .json(
+            "POST",
+            "/api/plugins/import/inspect",
+            json!({"source_path":package.to_string_lossy(),"kind":"directory"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        response.status(),
-        StatusCode::OK,
-        "owner-scoped reads do not require local trust"
+        first_inspection["data"]["permission_expansion"]["added_secret_slots"][0],
+        "api_key"
     );
-    assert_eq!(response_json(response).await["data"], created["data"]);
+    assert_eq!(
+        first_inspection["data"]["permission_expansion"]["added_permissions"][0],
+        "network"
+    );
+    let detail = harness.install_directory(&package).await;
+    let (plugin_id, revision) = installed_identity(&detail);
+    let surface = harness.open_surface(&plugin_id, revision).await;
+    seed_surface_data(&harness, &plugin_id, &surface).await;
+    harness
+        .close_surface(
+            &format!("/api/plugins/{plugin_id}/surface/close"),
+            &surface,
+        )
+        .await;
 
-    let product_owner: String = nomifun_db::sqlx::query_scalar(
-        "SELECT owner_user_id FROM plugin_products WHERE plugin_product_id = ?",
+    let provider_id = Uuid::now_v7().to_string();
+    let encrypted = nomifun_common::encrypt_string(
+        &json!({"api_keys":[SECRET]}).to_string(),
+        &harness.services.encryption_key,
     )
-    .bind(&plugin_id)
-    .fetch_one(services.database.pool())
+    .unwrap();
+    nomifun_db::sqlx::query(
+        "INSERT INTO providers
+         (provider_id, platform, name, base_url, auth_scheme, credentials_encrypted,
+          enabled, created_at, updated_at)
+         VALUES (?, 'openai', 'Plugin E2E', 'https://example.invalid', 'bearer', ?, 1, 1, 1)",
+    )
+    .bind(&provider_id)
+    .bind(encrypted)
+    .execute(harness.services.database.pool())
     .await
-    .expect("M1 product owner");
-    assert_eq!(product_owner, owner_id);
+    .unwrap();
+    let (status, credential_references) =
+        harness.get_json("/api/plugins/credentials").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(credential_references["data"].as_array().unwrap().iter().any(|reference| {
+        reference["credential_id"] == format!("provider:{provider_id}")
+            && reference["label"] == "Plugin E2E"
+            && reference["enabled"] == true
+    }));
+    assert!(!credential_references.to_string().contains(SECRET));
+    let (status, configured) = harness
+        .json(
+            "PUT",
+            &format!("/api/plugins/{plugin_id}/config"),
+            json!({
+                "expected_revision":revision,
+                "config":{"restored":true},
+                "credential_bindings":{"api_key":format!("provider:{provider_id}")},
+                "grants":{"network":true}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "configure failed: {configured}");
+    let mut configured_revision = configured["data"]["summary"]["revision"]
+        .as_u64()
+        .unwrap();
 
-    for (method, path) in [
-        (Method::POST, "/api/plugins/runtimes".to_owned()),
-        (Method::GET, format!("/api/plugins/runtimes/{plugin_id}")),
+    let manifest_path = package.join("nomifun.plugin.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["version"] = json!("1.0.1");
+    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let (status, update_inspection) = harness
+        .json(
+            "POST",
+            "/api/plugins/import/inspect",
+            json!({"source_path":package.to_string_lossy(),"kind":"directory"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "update inspect failed: {update_inspection}");
+    assert!(update_inspection["data"]["permission_expansion"].is_null());
+    let (status, updated) = harness
+        .json(
+            "POST",
+            "/api/plugins/import",
+            json!({
+                "source_path":package.to_string_lossy(),
+                "kind":"directory",
+                "expected_plugin_revision":configured_revision,
+                "create_copy":false
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "update import failed: {updated}");
+    assert_eq!(
+        updated["data"]["result"]["plugin"]["config"]["values"]["restored"],
+        true,
+        "Package updates must preserve the local instance config"
+    );
+    configured_revision = updated["data"]["result"]["plugin"]["summary"]["revision"]
+        .as_u64()
+        .unwrap();
+
+    let package_zip = harness.files.path().join("plugin-package.zip");
+    let backup_zip = harness.files.path().join("plugin-backup.zip");
+    for (route, destination, body) in [
         (
-            Method::PUT,
-            format!("/api/plugins/runtimes/{plugin_id}"),
+            "export",
+            &package_zip,
+            json!({"expected_revision":configured_revision,"destination_path":package_zip.to_string_lossy(),"include_source":true}),
         ),
         (
-            Method::DELETE,
-            format!("/api/plugins/runtimes/{plugin_id}"),
+            "backup",
+            &backup_zip,
+            json!({"expected_revision":configured_revision,"destination_path":backup_zip.to_string_lossy()}),
         ),
-        (
-            Method::GET,
-            format!("/api/plugins/runtimes/{plugin_id}/serve"),
-        ),
-        (
-            Method::POST,
-            format!("/api/plugins/runtimes/{plugin_id}/workspace"),
-        ),
-        (Method::POST, "/api/plugins/runtimes/validate".to_owned()),
-        (Method::POST, "/api/plugins/runtimes/import".to_owned()),
     ] {
-        let response = request(&router, method.clone(), &path, Some(json!({})))
-            .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-            .send()
+        let (status, exported) = harness
+            .json(
+                "POST",
+                &format!("/api/plugins/{plugin_id}/{route}"),
+                body,
+            )
             .await;
+        assert_eq!(status, StatusCode::OK, "export failed: {exported}");
+        assert!(destination.is_file());
+    }
+    assert_zip_has_no_secret(&package_zip, SECRET, &provider_id);
+    assert_zip_has_no_secret(&backup_zip, SECRET, &provider_id);
+    let package_entries = zip_entries(&package_zip);
+    assert!(!package_entries.iter().any(|name| name.ends_with("data.sqlite")));
+    assert!(zip_entries(&backup_zip).iter().any(|name| name.ends_with("data.sqlite")));
+
+    let (status, package_inspection) = harness
+        .json(
+            "POST",
+            "/api/plugins/import/inspect",
+            json!({"source_path":package_zip.to_string_lossy(),"kind":"zip"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "package inspect failed: {package_inspection}");
+    let (status, confirmation_required) = harness
+        .json(
+            "POST",
+            "/api/plugins/import",
+            json!({
+                "source_path":package_zip.to_string_lossy(),
+                "kind":"zip",
+                "create_copy":true
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        confirmation_required["data"]["result"]["outcome"],
+        "confirmation_required"
+    );
+    let copy_confirmation = confirmation_required["data"]["result"]["confirmation"]
+        ["confirmation_id"]
+        .as_str()
+        .unwrap();
+    let (status, package_copy) = harness
+        .json(
+            "POST",
+            "/api/plugins/import",
+            json!({
+                "source_path":package_zip.to_string_lossy(),
+                "kind":"zip",
+                "create_copy":true,
+                "permission_confirmation_id":copy_confirmation
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "package re-import failed: {package_copy}");
+    assert_eq!(package_copy["data"]["result"]["outcome"], "installed");
+    assert_eq!(
+        package_copy["data"]["result"]["plugin"]["config"]["values"],
+        json!({}),
+        "Package copies must not inherit another local instance's user config"
+    );
+
+    let backup_path = backup_zip.to_string_lossy().into_owned();
+    let (status, inspection) = harness
+        .json(
+            "POST",
+            "/api/plugins/import/inspect",
+            json!({"source_path":backup_path,"kind":"backup"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "backup inspect failed: {inspection}");
+    assert_eq!(inspection["data"]["backup"]["includes_data"], true);
+    assert_eq!(
+        inspection["data"]["backup"]["credential_slots_to_rebind"][0],
+        "api_key"
+    );
+    let confirmation = inspection["data"]["permission_expansion"]["confirmation_id"]
+        .as_str()
+        .map(str::to_owned);
+    let (status, imported) = harness
+        .json(
+            "POST",
+            "/api/plugins/import",
+            json!({
+                "source_path":backup_zip.to_string_lossy(),
+                "kind":"backup",
+                "create_copy":true,
+                "permission_confirmation_id":confirmation,
+                "credential_bindings":{"api_key":format!("provider:{provider_id}")}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "backup restore failed: {imported}");
+    let restored = &imported["data"]["result"]["plugin"];
+    let (restored_id, restored_revision) = installed_identity(restored);
+    assert_ne!(restored_id, plugin_id);
+    assert_eq!(restored["config"]["values"]["restored"], true);
+    assert_eq!(restored["credential_bindings"][0]["status"], "bound");
+    assert_eq!(
+        restored["credential_bindings"][0]["credential_id"],
+        format!("provider:{provider_id}")
+    );
+    let restored_surface = harness.open_surface(&restored_id, restored_revision).await;
+    assert_surface_data(&harness, &restored_id, &restored_surface).await;
+}
+
+#[tokio::test]
+async fn headless_and_mixed_service_actions_publish_desktop_commands_and_lifecycle_revokes_them() {
+    let harness = Harness::new().await;
+    let headless_path = harness.package_path("headless");
+    let mixed_path = harness.package_path("mixed");
+    write_service_package(&headless_path, "e2e.headless", "headless", false);
+    write_service_package(&mixed_path, "e2e.mixed", "mixed", true);
+    let headless = harness.install_directory(&headless_path).await;
+    let mixed = harness.install_directory(&mixed_path).await;
+    let (headless_id, headless_revision) = installed_identity(&headless);
+    let (mixed_id, mixed_revision) = installed_identity(&mixed);
+    assert_eq!(headless["summary"]["has_ui"], false);
+    assert_eq!(mixed["summary"]["has_ui"], true);
+    assert_eq!(headless["summary"]["runtime"]["state"], "running");
+    assert_eq!(mixed["summary"]["runtime"]["state"], "stopped");
+
+    let (status, commands) = harness.get_json("/api/plugins/desktop/commands").await;
+    assert_eq!(status, StatusCode::OK);
+    let command_ids = commands["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|command| command["action_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let headless_action = format!("plugin:{headless_id}/echo");
+    let mixed_action = format!("plugin:{mixed_id}/echo");
+    assert!(command_ids.contains(&headless_action));
+    assert!(command_ids.contains(&mixed_action));
+    for (action, mode) in [(&headless_action, "headless"), (&mixed_action, "mixed")] {
+        let (status, invoked) = harness
+            .json(
+                "POST",
+                "/api/plugins/desktop/commands/invoke",
+                json!({"action_id":action,"input":{"value":mode}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "command failed: {invoked}");
+        assert_eq!(invoked["data"]["mode"], mode);
+        assert_eq!(invoked["data"]["input"]["value"], mode);
+    }
+
+    let mixed_surface = harness.open_surface(&mixed_id, mixed_revision).await;
+    let (status, action_result) = harness
+        .bridge(
+            &format!("/api/plugins/{mixed_id}/surface/bridge"),
+            &mixed_surface,
+            json!({"target":"actions","action":"echo","input":{"value":"surface"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(assert_bridge_success(&action_result)["result"]["mode"], "mixed");
+    let (status, shared_storage) = harness
+        .bridge(
+            &format!("/api/plugins/{mixed_id}/surface/bridge"),
+            &mixed_surface,
+            json!({"target":"kv","request":{"operation":"get","key":"last-input"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        assert_bridge_success(&shared_storage)["result"]["value"]["value"],
+        "surface",
+        "UI and Service must observe the same generation DataRoot"
+    );
+
+    let (status, disabled) = harness
+        .json(
+            "PUT",
+            &format!("/api/plugins/{mixed_id}/enabled"),
+            json!({"expected_revision":mixed_revision,"enabled":false}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "disable failed: {disabled}");
+    let (status, _) = harness
+        .bridge(
+            &format!("/api/plugins/{mixed_id}/surface/bridge"),
+            &mixed_surface,
+            json!({"target":"config"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "disable must revoke Surface admission");
+    assert_command_absent(&harness, &mixed_action).await;
+
+    let (status, enabled) = harness
+        .json(
+            "PUT",
+            &format!("/api/plugins/{mixed_id}/enabled"),
+            json!({"expected_revision":2,"enabled":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "re-enable failed: {enabled}");
+    let (status, trashed) = harness
+        .json(
+            "POST",
+            &format!("/api/plugins/{mixed_id}/trash"),
+            json!({"expected_revision":3}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "trash failed: {trashed}");
+    assert_command_absent(&harness, &mixed_action).await;
+    assert_eq!(
+        harness
+            .services
+            .plugin_service_runtime
+            .get()
+            .unwrap()
+            .observation(&PluginId::from(mixed_id.clone()))
+            .await,
+        PluginServiceObservation::Stopped,
+        "Trash must stop the mixed Plugin process"
+    );
+    let mixed_root = harness.services.plugin_data_roots.root().join(&mixed_id);
+    assert!(mixed_root.exists());
+    let (status, deleted) = harness
+        .json(
+            "DELETE",
+            &format!("/api/plugins/{mixed_id}"),
+            json!({"expected_revision":4,"acknowledge_permanent_delete":true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "permanent delete failed: {deleted}");
+    assert!(!mixed_root.exists());
+    assert_eq!(
+        harness
+            .get_json(&format!("/api/plugins/{mixed_id}"))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+
+    let (status, disabled) = harness
+        .json(
+            "PUT",
+            &format!("/api/plugins/{headless_id}/enabled"),
+            json!({"expected_revision":headless_revision,"enabled":false}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "headless disable failed: {disabled}");
+    assert_command_absent(&harness, &headless_action).await;
+    assert_eq!(
+        harness
+            .services
+            .plugin_service_runtime
+            .get()
+            .unwrap()
+            .observation(&PluginId::from(headless_id))
+            .await,
+        PluginServiceObservation::Stopped,
+        "Disable must stop the headless Plugin process"
+    );
+}
+
+async fn assert_command_absent(harness: &Harness, action_id: &str) {
+    let (status, commands) = harness.get_json("/api/plugins/desktop/commands").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        commands["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command["action_id"] != action_id)
+    );
+    let (status, _) = harness
+        .json(
+            "POST",
+            "/api/plugins/desktop/commands/invoke",
+            json!({"action_id":action_id,"input":{}}),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "revoked Actions remain fenced tombstones, never invokable"
+    );
+}
+
+#[tokio::test]
+async fn draft_preview_uses_temporary_data_root_without_polluting_installed_data() {
+    let harness = Harness::new().await;
+    let package = harness.package_path("preview-base");
+    write_ui_package(&package, "e2e.preview", &[], &[]);
+    let detail = harness.install_directory(&package).await;
+    let (plugin_id, revision) = installed_identity(&detail);
+    let production = harness.open_surface(&plugin_id, revision).await;
+    let (status, response) = harness
+        .bridge(
+            &format!("/api/plugins/{plugin_id}/surface/bridge"),
+            &production,
+            json!({"target":"kv","request":{"operation":"set","key":"scope","value":"production"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_bridge_success(&response);
+    harness
+        .close_surface(
+            &format!("/api/plugins/{plugin_id}/surface/close"),
+            &production,
+        )
+        .await;
+
+    let (status, draft) = harness
+        .json(
+            "POST",
+            "/api/plugin-drafts",
+            json!({"plugin_id":plugin_id,"expected_plugin_revision":revision}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "draft create failed: {draft}");
+    let draft_id = draft["data"]["summary"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, preview) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/preview"),
+            json!({"expected_revision":1,"config":{},"access":{"permissions":[],"credential_bindings":{}}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {preview}");
+    let descriptor = preview["data"]["descriptor"].clone();
+    let (status, response) = harness
+        .bridge(
+            &format!("/api/plugin-drafts/{draft_id}/surface/bridge"),
+            &descriptor,
+            json!({"target":"kv","request":{"operation":"set","key":"scope","value":"preview"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_bridge_success(&response);
+    let preview_revision = preview["data"]["draft_revision"].as_u64().unwrap();
+    let (status, reloaded_preview) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/preview"),
+            json!({"expected_revision":preview_revision,"config":{},"access":{"permissions":[],"credential_bindings":{}}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "Preview reload failed: {reloaded_preview}");
+    let reloaded_descriptor = reloaded_preview["data"]["descriptor"].clone();
+    assert_eq!(
+        reloaded_descriptor["surface_session_id"],
+        descriptor["surface_session_id"],
+    );
+    assert!(
+        reloaded_descriptor["surface_generation"].as_u64().unwrap()
+            > descriptor["surface_generation"].as_u64().unwrap()
+    );
+    assert_eq!(
+        harness
+            .bridge(
+                &format!("/api/plugin-drafts/{draft_id}/surface/bridge"),
+                &descriptor,
+                json!({"target":"kv","request":{"operation":"get","key":"scope"}}),
+            )
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+    );
+    let (status, response) = harness
+        .bridge(
+            &format!("/api/plugin-drafts/{draft_id}/surface/bridge"),
+            &reloaded_descriptor,
+            json!({"target":"kv","request":{"operation":"get","key":"scope"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(assert_bridge_success(&response)["result"]["value"], "preview");
+    let (status, configured) = harness
+        .json(
+            "PUT",
+            &format!("/api/plugins/{plugin_id}/config"),
+            json!({
+                "expected_revision":revision,
+                "config":{},
+                "credential_bindings":{},
+                "grants":{}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "configure failed: {configured}");
+    let configured_revision = configured["data"]["summary"]["revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        harness
+            .bridge(
+                &format!("/api/plugin-drafts/{draft_id}/surface/bridge"),
+                &reloaded_descriptor,
+                json!({"target":"kv","request":{"operation":"get","key":"scope"}}),
+            )
+            .await
+            .0,
+        StatusCode::NOT_FOUND,
+        "installed Plugin lifecycle changes must revoke related Preview admission"
+    );
+
+    let reopened = harness.open_surface(&plugin_id, configured_revision).await;
+    let (status, response) = harness
+        .bridge(
+            &format!("/api/plugins/{plugin_id}/surface/bridge"),
+            &reopened,
+            json!({"target":"kv","request":{"operation":"get","key":"scope"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        assert_bridge_success(&response)["result"]["value"],
+        "production"
+    );
+    let preview_staging = harness
+        .services
+        .plugin_data_roots
+        .root()
+        .join(&draft_id)
+        .join("staging");
+    assert!(preview_staging.is_dir());
+    assert_eq!(fs::read_dir(preview_staging).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn draft_generation_is_single_flight_cancellable_and_failure_persistent() {
+    let harness = Harness::new().await;
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string("data: [DONE]\n\n"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let provider_id = create_chat_provider(
+        &harness,
+        &format!("{}/v1", upstream.uri()),
+        "Draft cancellation fixture",
+        "draft-model",
+    )
+    .await;
+
+    let (status, created) = harness.json("POST", "/api/plugin-drafts", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "Draft create failed: {created}");
+    let draft_id = created["data"]["summary"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let initial_revision = created["data"]["summary"]["revision"].as_u64().unwrap();
+    let original_files = created["data"]["files"].clone();
+
+    let app = harness.app.clone();
+    let token = harness.token.clone();
+    let csrf = harness.csrf.clone();
+    let generation_uri = format!("/api/plugin-drafts/{draft_id}/generate");
+    let generation_provider = provider_id.clone();
+    let generation = tokio::spawn(async move {
+        let mut request = json_with_token(
+            "POST",
+            &generation_uri,
+            json!({
+                "expected_revision":initial_revision,
+                "provider_id":generation_provider,
+                "model":"draft-model",
+                "requirement":"Create a cancellable Plugin"
+            }),
+            &token,
+            &csrf,
+        );
+        request
+            .headers_mut()
+            .insert("x-nomi-local-trust", LOCAL_TRUST.parse().unwrap());
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        (status, body_json(response).await)
+    });
+
+    let generating = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (status, detail) = harness
+                .get_json(&format!("/api/plugin-drafts/{draft_id}"))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            if detail["data"]["summary"]["status"] == "generating" {
+                break detail;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("generation never entered its persisted Generating state");
+    let generating_revision = generating["data"]["summary"]["revision"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(generating_revision, initial_revision + 1);
+
+    let (duplicate_status, _) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/generate"),
+            json!({
+                "expected_revision":generating_revision,
+                "provider_id":provider_id,
+                "model":"draft-model",
+                "requirement":"A second concurrent request"
+            }),
+        )
+        .await;
+    assert_eq!(duplicate_status, StatusCode::CONFLICT);
+
+    let (stale_status, _) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/cancel"),
+            json!({"expected_revision":initial_revision}),
+        )
+        .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+
+    let mut other_app = harness.app.clone();
+    let (other_token, other_csrf) = setup_and_login(
+        &mut other_app,
+        &harness.services,
+        "draft-generation-other-owner",
+        "StrongP@ss2",
+    )
+    .await;
+    let other_cancel = json_with_token(
+        "POST",
+        &format!("/api/plugin-drafts/{draft_id}/cancel"),
+        json!({"expected_revision":generating_revision}),
+        &other_token,
+        &other_csrf,
+    );
+    let other_cancel = other_app.oneshot(other_cancel).await.unwrap();
+    assert!(
+        matches!(
+            other_cancel.status(),
+            StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+        ),
+        "another owner must not cancel this Draft"
+    );
+
+    let (cancel_status, cancelled) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/cancel"),
+            json!({"expected_revision":generating_revision}),
+        )
+        .await;
+    assert_eq!(cancel_status, StatusCode::OK, "cancel failed: {cancelled}");
+    assert_eq!(cancelled["data"]["summary"]["status"], "ready");
+    assert_eq!(
+        cancelled["data"]["summary"]["revision"],
+        generating_revision + 1
+    );
+
+    let (generation_status, generation_result) = tokio::time::timeout(
+        Duration::from_secs(5),
+        generation,
+    )
+    .await
+    .expect("cancel did not drop the model request")
+    .unwrap();
+    assert_eq!(generation_status, StatusCode::OK, "{generation_result}");
+    assert_eq!(generation_result["data"]["summary"]["status"], "ready");
+    assert_eq!(generation_result["data"]["files"], original_files);
+
+    let ready_revision = cancelled["data"]["summary"]["revision"].as_u64().unwrap();
+    let (failed_status, failed_response) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/generate"),
+            json!({
+                "expected_revision":ready_revision,
+                "provider_id":"0190f5fe-7c00-7a00-8000-ffffffffffff",
+                "model":"missing",
+                "requirement":"This provider is unavailable"
+            }),
+        )
+        .await;
+    assert_eq!(failed_status, StatusCode::BAD_GATEWAY, "{failed_response}");
+    let (status, failed) = harness
+        .get_json(&format!("/api/plugin-drafts/{draft_id}"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(failed["data"]["summary"]["status"], "failed");
+    assert_eq!(
+        failed["data"]["summary"]["error_code"],
+        "PLUGIN_GENERATION_FAILED"
+    );
+    assert_eq!(
+        failed["data"]["summary"]["revision"],
+        ready_revision + 2
+    );
+}
+
+#[tokio::test]
+async fn draft_generation_parse_and_artifact_failures_persist_failed_state() {
+    let harness = Harness::new().await;
+    let (status, created) = harness.json("POST", "/api/plugin-drafts", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "Draft create failed: {created}");
+    let draft_id = created["data"]["summary"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut revision = created["data"]["summary"]["revision"].as_u64().unwrap();
+    let original_files = created["data"]["files"].clone();
+
+    let cases = [
+        (
+            "parse-failure",
+            "not-json".to_owned(),
+            StatusCode::BAD_GATEWAY,
+            "PLUGIN_GENERATION_FAILED",
+        ),
+        (
+            "artifact-failure",
+            json!({
+                "assistant_message":"invalid artifact",
+                "files":{
+                    "nomifun.plugin.json":"{}",
+                    "ui/index.html":"<!doctype html><main>invalid</main>"
+                }
+            })
+            .to_string(),
+            StatusCode::BAD_REQUEST,
+            "PLUGIN_INVALID_INPUT",
+        ),
+    ];
+
+    for (index, (model, output, expected_status, expected_error)) in
+        cases.into_iter().enumerate()
+    {
+        let upstream = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/v1/chat/completions"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(openai_sse_text(&output)),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let provider_id = create_chat_provider(
+            &harness,
+            &format!("{}/v1", upstream.uri()),
+            &format!("Draft failure fixture {index}"),
+            model,
+        )
+        .await;
+        let (generation_status, generation) = harness
+            .json(
+                "POST",
+                &format!("/api/plugin-drafts/{draft_id}/generate"),
+                json!({
+                    "expected_revision":revision,
+                    "provider_id":provider_id,
+                    "model":model,
+                    "requirement":"Exercise a terminal generation failure"
+                }),
+            )
+            .await;
+        assert_eq!(generation_status, expected_status, "{generation}");
+
+        let (status, detail) = harness
+            .get_json(&format!("/api/plugin-drafts/{draft_id}"))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(detail["data"]["summary"]["status"], "failed");
+        assert_eq!(detail["data"]["summary"]["error_code"], expected_error);
+        assert_eq!(
+            detail["data"]["files"], original_files,
+            "failed generation must not publish a partial tree"
+        );
+        let next_revision = detail["data"]["summary"]["revision"].as_u64().unwrap();
+        assert_eq!(next_revision, revision + 2);
+        revision = next_revision;
+    }
+}
+
+#[tokio::test]
+async fn successful_draft_generation_publishes_one_exact_package_tree() {
+    let harness = Harness::new().await;
+    let (status, created) = harness.json("POST", "/api/plugin-drafts", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "Draft create failed: {created}");
+    let draft_id = created["data"]["summary"]["draft_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let initial_revision = created["data"]["summary"]["revision"].as_u64().unwrap();
+    let (status, edited) = harness
+        .json(
+            "PUT",
+            &format!("/api/plugin-drafts/{draft_id}/files"),
+            json!({
+                "expected_revision":initial_revision,
+                "path":"source/obsolete.ts",
+                "content_base64":base64::engine::general_purpose::STANDARD.encode("obsolete")
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "Draft edit failed: {edited}");
+    let edited_revision = edited["data"]["summary"]["revision"].as_u64().unwrap();
+
+    let manifest = json!({
+        "schema":"nomifun.plugin/v1",
+        "id":"local.generated.exact",
+        "version":"1.0.0",
+        "name":"Exact generated Plugin",
+        "description":"Exact tree fixture",
+        "hostApi":">=1 <2",
+        "entrypoints":{"ui":"ui/index.html"},
+        "actions":{},
+        "bindings":[],
+        "dataVersion":0,
+        "migrations":[],
+        "configSchema":{
+            "type":"object",
+            "properties":{"label":{"type":"string"}},
+            "required":["label"],
+            "additionalProperties":false
+        },
+        "secrets":[],
+        "permissions":[]
+    })
+    .to_string();
+    let generated = json!({
+        "assistant_message":"Created an exact package",
+        "files":{
+            "nomifun.plugin.json":manifest,
+            "ui/index.html":"<!doctype html><main>exact replacement</main>"
+        }
+    })
+    .to_string();
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(openai_sse_text(&generated)),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let provider_id = create_chat_provider(
+        &harness,
+        &format!("{}/v1", upstream.uri()),
+        "Exact Draft generation fixture",
+        "exact-draft-model",
+    )
+    .await;
+    let (status, generated) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/generate"),
+            json!({
+                "expected_revision":edited_revision,
+                "provider_id":provider_id,
+                "model":"exact-draft-model",
+                "requirement":"Replace the complete package"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "generation failed: {generated}");
+    assert_eq!(generated["data"]["summary"]["status"], "ready");
+    let paths = generated["data"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(paths, vec!["nomifun.plugin.json", "ui/index.html"]);
+    assert_eq!(
+        generated["data"]["summary"]["revision"],
+        edited_revision + 2
+    );
+    let generated_revision = generated["data"]["summary"]["revision"]
+        .as_u64()
+        .unwrap();
+    let (status, preview) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/preview"),
+            json!({
+                "expected_revision":generated_revision,
+                "config":{"label":"configured before save"},
+                "access":{"permissions":[],"credential_bindings":{}}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "generated Preview failed: {preview}");
+    let (status, saved) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/save"),
+            json!({
+                "expected_revision":generated_revision,
+                "config":{"label":"configured before save"},
+                "credential_bindings":{}
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "generated Draft save failed: {saved}");
+    assert_eq!(saved["data"]["result"]["outcome"], "installed");
+    assert_eq!(
+        saved["data"]["result"]["plugin"]["config"]["values"]["label"],
+        "configured before save"
+    );
+    assert_eq!(saved["data"]["result"]["plugin"]["summary"]["has_ui"], true);
+    assert_eq!(
+        saved["data"]["result"]["plugin"]["summary"]["runtime"]["state"],
+        "stopped",
+        "Chat-created UI-only Plugins must still use zero Node processes"
+    );
+    let saved_plugin = &saved["data"]["result"]["plugin"];
+    let (plugin_id, plugin_revision) = installed_identity(saved_plugin);
+    let descriptor = harness.open_surface(&plugin_id, plugin_revision).await;
+    seed_surface_data(&harness, &plugin_id, &descriptor).await;
+    harness
+        .close_surface(
+            &format!("/api/plugins/{plugin_id}/surface/close"),
+            &descriptor,
+        )
+        .await;
+    let reopened = harness.open_surface(&plugin_id, plugin_revision).await;
+    assert_surface_data(&harness, &plugin_id, &reopened).await;
+    assert_eq!(
+        harness
+            .services
+            .plugin_service_runtime
+            .get()
+            .unwrap()
+            .observation(&PluginId::from(plugin_id))
+            .await,
+        PluginServiceObservation::Stopped,
+        "Chat-created UI-only Plugins must persist DB/KV/Files across Surface restart without Node"
+    );
+}
+
+#[tokio::test]
+async fn chat_generated_headless_action_reaches_the_live_binding_registry() {
+    let harness = Harness::new().await;
+    let manifest = json!({
+        "schema":"nomifun.plugin/v1",
+        "id":"local.generated.agent-tool",
+        "version":"1.0.0",
+        "name":"Generated Agent Tool",
+        "description":"Headless Action generated through Chat.",
+        "hostApi":">=1 <2",
+        "entrypoints":{"service":"service/main.mjs","serviceMode":"continuous"},
+        "actions":{
+            "echo":{
+                "name":"Generated echo",
+                "description":"Returns the selected Agent input.",
+                "input":{"type":"object"},
+                "output":{"type":"object"},
+                "effect":"read"
+            }
+        },
+        "bindings":[
+            {"point":"agent.tool","action":"echo"},
+            {"point":"desktop.command","action":"echo"}
+        ],
+        "dataVersion":0,
+        "migrations":[],
+        "configSchema":{"type":"object"},
+        "secrets":[],
+        "permissions":[]
+    });
+    let service = r#"export async function activate(ctx) {
+  return {
+    async invoke(action, input) {
+      if (action !== "echo") throw new Error("unsupported action");
+      return { source: "chat", input, pluginId: ctx.pluginId };
+    }
+  };
+}
+"#;
+    let generated = json!({
+        "assistant_message":"Created a headless Agent Action",
+        "files":{
+            "nomifun.plugin.json":manifest.to_string(),
+            "service/main.mjs":service
+        }
+    })
+    .to_string();
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/chat/completions"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(openai_sse_text(&generated)),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let provider_id = create_chat_provider(
+        &harness,
+        &format!("{}/v1", upstream.uri()),
+        "Generated headless Action fixture",
+        "headless-draft-model",
+    )
+    .await;
+    let (status, created) = harness.json("POST", "/api/plugin-drafts", json!({})).await;
+    assert_eq!(status, StatusCode::OK, "Draft create failed: {created}");
+    let draft_id = created["data"]["summary"]["draft_id"].as_str().unwrap();
+    let revision = created["data"]["summary"]["revision"].as_u64().unwrap();
+    let (status, generated) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/generate"),
+            json!({
+                "expected_revision":revision,
+                "provider_id":provider_id,
+                "model":"headless-draft-model",
+                "requirement":"Create a headless Agent echo Action"
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "generation failed: {generated}");
+    let generated_revision = generated["data"]["summary"]["revision"]
+        .as_u64()
+        .unwrap();
+    let save_body = json!({
+        "expected_revision":generated_revision,
+        "config":{},
+        "credential_bindings":{}
+    });
+    let (status, confirmation) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/save"),
+            save_body.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "save confirmation failed: {confirmation}");
+    assert_eq!(confirmation["data"]["result"]["outcome"], "confirmation_required");
+    let confirmation_id = confirmation["data"]["result"]["confirmation"]["confirmation_id"]
+        .as_str()
+        .unwrap();
+    let mut confirmed_save = save_body;
+    confirmed_save.as_object_mut().unwrap().insert(
+        "permission_confirmation_id".into(),
+        json!(confirmation_id),
+    );
+    let (status, saved) = harness
+        .json(
+            "POST",
+            &format!("/api/plugin-drafts/{draft_id}/save"),
+            confirmed_save,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "confirmed save failed: {saved}");
+    assert_eq!(saved["data"]["result"]["outcome"], "installed");
+    let detail = &saved["data"]["result"]["plugin"];
+    assert_eq!(detail["summary"]["has_ui"], false);
+    assert_eq!(detail["summary"]["has_service"], true);
+    assert_eq!(detail["summary"]["runtime"]["state"], "running");
+    let (plugin_id, _) = installed_identity(detail);
+    let action_id = format!("plugin:{plugin_id}/echo");
+    let (status, commands) = harness.get_json("/api/plugins/desktop/commands").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(commands["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|command| command["action_id"] == action_id));
+    let (status, invoked) = harness
+        .json(
+            "POST",
+            "/api/plugins/desktop/commands/invoke",
+            json!({"action_id":action_id,"input":{"selected":true}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "generated Action failed: {invoked}");
+    assert_eq!(invoked["data"]["source"], "chat");
+    assert_eq!(invoked["data"]["input"]["selected"], true);
+}
+
+fn zip_entries(path: &Path) -> Vec<String> {
+    let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+    (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_owned())
+        .collect()
+}
+
+fn assert_zip_has_no_secret(path: &Path, plaintext: &str, credential_id: &str) {
+    let mut archive = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        if entry.is_dir() {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
         assert!(
-            matches!(
-                response.status(),
-                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
-            ),
-            "{method} {path} must not reach the retired Plugin chain: {}",
-            response.status()
+            !bytes.windows(plaintext.len()).any(|window| window == plaintext.as_bytes()),
+            "{} leaked credential plaintext",
+            entry.name()
+        );
+        assert!(
+            !bytes
+                .windows(credential_id.len())
+                .any(|window| window == credential_id.as_bytes()),
+            "{} leaked a Host Credential identity",
+            entry.name()
         );
     }
-
-    services
-        .shutdown_browser_platform()
-        .await
-        .expect("background cleanup");
-    services.database.close().await;
-}
-
-#[tokio::test]
-async fn ui_only_plugin_completes_publish_enable_surface_and_rollback_chain() {
-    let (router, services) = common::build_local_trust_app(LOCAL_TRUST).await;
-    let owner_id = services.authoritative_user_id.to_string();
-    let owner_jwt = services
-        .jwt_service
-        .sign(&owner_id, "admin")
-        .expect("owner JWT");
-    let create = request(
-        &router,
-        Method::POST,
-        "/api/plugins/runtimes/projects",
-        Some(json!({
-            "expected_library_revision": 0,
-            "display_name": "Surface Notes",
-            "description": "UI-only lifecycle",
-            "service_source": null
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(create.status(), StatusCode::OK);
-    let created = response_json(create).await["data"].clone();
-    let plugin_id = created["plugin"]["plugin_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-
-    let build_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": created["plugin"]["product_revision"],
-        "project_id": created["project_id"],
-        "expected_project_revision": created["project_revision"],
-        "expected_build_generation": created["build_generation"],
-        "expected_source_snapshot_digest": created["source_snapshot_digest"],
-        "expected_dependency_lock_digest": created["dependency_lock_digest"]
-    });
-    let build = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/build"),
-        Some(build_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(build.status(), StatusCode::OK);
-    let ready = response_json(build).await["data"].clone();
-    assert_eq!(ready["plugin"]["surface_available"], false);
-    assert!(ready["ready"]["release"]["release_id"].as_str().is_some());
-
-    let premature_auto = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/publish-mode"),
-        Some(json!({
-            "plugin_id": plugin_id,
-            "expected_product_revision": ready["plugin"]["product_revision"],
-            "expected_pointer_revision": ready["plugin"]["releases"]["pointer_revision"],
-            "mode": "auto_ui_only"
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(premature_auto.status(), StatusCode::BAD_REQUEST);
-
-    let publish_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": ready["plugin"]["product_revision"],
-        "expected_pointer_revision": ready["plugin"]["releases"]["pointer_revision"],
-        "expected_active_release_epoch": ready["plugin"]["releases"]["active_release_epoch"],
-        "ready_release_id": ready["ready"]["release"]["release_id"],
-        "expected_ready_release_digest": ready["ready"]["release"]["release_digest"],
-        "acknowledge_test_warning": false
-    });
-    let publish = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/publish"),
-        Some(publish_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(publish.status(), StatusCode::OK);
-    let published = response_json(publish).await["data"].clone();
-    assert_eq!(published["plugin"]["lifecycle"], "disabled");
-    assert_eq!(published["plugin"]["surface_available"], false);
-    assert!(published["plugin"]["releases"]["active"].is_object());
-    assert!(published["ready"].is_null());
-
-    let enable_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": published["plugin"]["product_revision"],
-        "expected_pointer_revision": published["plugin"]["releases"]["pointer_revision"],
-        "expected_active_release_digest": published["plugin"]["releases"]["active"]["release_digest"],
-        "enabled": true
-    });
-    let enable = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/enabled"),
-        Some(enable_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(enable.status(), StatusCode::OK);
-    let enabled = response_json(enable).await["data"].clone();
-    assert_eq!(enabled["plugin"]["lifecycle"], "enabled");
-    assert_eq!(enabled["plugin"]["surface_available"], true);
-    assert_eq!(
-        enabled["plugin"]["releases"]["active_release_epoch"],
-        1
-    );
-
-    let old_surface_get = request(
-        &router,
-        Method::GET,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface"),
-        None,
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(old_surface_get.status(), StatusCode::NOT_FOUND);
-
-    let wrong_method = request(
-        &router,
-        Method::GET,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
-        None,
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
-
-    let owner_only = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
-        Some(json!({ "plugin_id": plugin_id })),
-    )
-    .header("authorization", format!("Bearer {owner_jwt}"))
-    .send()
-    .await;
-    assert_eq!(
-        owner_only.status(),
-        StatusCode::FORBIDDEN,
-        "Surface capability signing must require host-local trust"
-    );
-
-    let mismatched_open = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
-        Some(json!({
-            "plugin_id": "0190f5fe-7c00-7000-8000-000000000452"
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(mismatched_open.status(), StatusCode::BAD_REQUEST);
-    let open_session_count: i64 =
-        nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM plugin_surface_sessions")
-            .fetch_one(services.database.pool())
-            .await
-            .unwrap();
-    assert_eq!(
-        open_session_count, 0,
-        "failed Surface open attempts must not sign or persist a capability"
-    );
-
-    let surface = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
-        Some(json!({ "plugin_id": plugin_id })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(surface.status(), StatusCode::OK);
-    let descriptor = response_json(surface).await["data"].clone();
-    let capability = descriptor["surface_capability"].as_str().unwrap();
-    let epoch = descriptor["active_release_epoch"].as_u64().unwrap();
-    let digest = descriptor["expected_release_digest"].as_str().unwrap();
-    let entrypoint = descriptor["ui_entrypoint"].as_str().unwrap();
-    let asset = request(
-        &router,
-        Method::GET,
-        &format!(
-            "/api/plugins/runtimes/{plugin_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
-        ),
-        None,
-    )
-    .send()
-    .await;
-    assert_eq!(asset.status(), StatusCode::OK);
-    assert_eq!(
-        asset.headers()[header::CONTENT_TYPE],
-        "text/html; charset=utf-8"
-    );
-    let asset_body = asset
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
-    assert!(String::from_utf8_lossy(&asset_body).contains("Surface Notes"));
-
-    let bridge_path = format!("/api/plugins/runtimes/{plugin_id}/surface/bridge");
-    let bridge_set = request(
-        &router,
-        Method::POST,
-        &bridge_path,
-        Some(json!({
-            "surface_capability": capability,
-            "active_release_epoch": epoch,
-            "expected_release_digest": digest,
-            "request": {
-                "call_id": "set-preference",
-                "target": {
-                    "target": "host_kv",
-                    "request": {
-                        "operation": "set",
-                        "key": "preference",
-                        "value": {"density": "compact"}
-                    }
-                }
-            }
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(bridge_set.status(), StatusCode::OK);
-    assert_eq!(response_json(bridge_set).await["data"]["outcome"], "written");
-
-    let bridge_get = request(
-        &router,
-        Method::POST,
-        &bridge_path,
-        Some(json!({
-            "surface_capability": capability,
-            "active_release_epoch": epoch,
-            "expected_release_digest": digest,
-            "request": {
-                "call_id": "get-preference",
-                "target": {
-                    "target": "host_kv",
-                    "request": {
-                        "operation": "get",
-                        "key": "preference"
-                    }
-                }
-            }
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(bridge_get.status(), StatusCode::OK);
-    let bridge_value = response_json(bridge_get).await;
-    assert_eq!(
-        bridge_value["data"]["value"]["density"],
-        "compact"
-    );
-    assert_eq!(bridge_value["data"]["revision"], 1);
-
-    let bridge_cas = request(
-        &router,
-        Method::POST,
-        &bridge_path,
-        Some(json!({
-            "surface_capability": capability,
-            "active_release_epoch": epoch,
-            "expected_release_digest": digest,
-            "request": {
-                "call_id": "cas-preference",
-                "target": {
-                    "target": "host_kv",
-                    "request": {
-                        "operation": "compare_and_swap",
-                        "key": "preference",
-                        "expected_revision": 1,
-                        "value": {"density": "comfortable"}
-                    }
-                }
-            }
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(bridge_cas.status(), StatusCode::OK);
-    let bridge_cas = response_json(bridge_cas).await;
-    assert_eq!(bridge_cas["data"]["applied"], true);
-    assert_eq!(bridge_cas["data"]["current_revision"], 2);
-
-    let second_build_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": enabled["plugin"]["product_revision"],
-        "project_id": enabled["project_id"],
-        "expected_project_revision": enabled["project_revision"],
-        "expected_build_generation": enabled["build_generation"],
-        "expected_source_snapshot_digest": enabled["source_snapshot_digest"],
-        "expected_dependency_lock_digest": enabled["dependency_lock_digest"]
-    });
-    let unchanged_build = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/build"),
-        Some(second_build_body.clone()),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(unchanged_build.status(), StatusCode::BAD_REQUEST);
-
-    let repository = SqlitePluginRuntimeRepository::new(services.database.pool().clone());
-    let before_edit = repository
-        .get(&owner_id, &plugin_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let source_store =
-        PluginRuntimeSourceStore::new(services.data_dir.join("plugin-m1").join("source"))
-            .unwrap();
-    let source = source_store
-        .replace_source(
-            &owner_id,
-            &plugin_id,
-            &before_edit.project.project_id,
-            before_edit.project.source_head_digest.as_deref().unwrap(),
-            vec![PluginRuntimeSourceFileInput::new(
-                "ui/index.html",
-                b"<!doctype html><html><body><main><h1>Surface Notes v2</h1></main></body></html>"
-                    .to_vec(),
-            )],
-        )
-        .unwrap();
-    repository
-        .update_project_source_cas(&UpdatePluginRuntimeProjectSourceParams {
-            owner_user_id: owner_id.clone(),
-            plugin_product_id: plugin_id.clone(),
-            project_id: before_edit.project.project_id.clone(),
-            expected_project_revision: before_edit.project.project_revision,
-            source_state: PluginRuntimeProjectSourceState::Editable,
-            managed_source_path: Some(source.managed_relative_path),
-            source_head_digest: Some(source.source_snapshot_digest.0),
-            dependency_lock_digest: Some(source.dependency_lock_digest.0),
-            build_profile_version: Some(source.build_profile_version.0),
-            build_generation: i64::try_from(source.build_generation).unwrap(),
-            updated_at: nomifun_common::now_ms()
-                .max(before_edit.product.updated_at)
-                .max(before_edit.project.updated_at),
-        })
-        .await
-        .unwrap();
-    let refreshed = request(
-        &router,
-        Method::GET,
-        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
-        None,
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(refreshed.status(), StatusCode::OK);
-    let edited = response_json(refreshed).await["data"].clone();
-    let second_build_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": edited["plugin"]["product_revision"],
-        "project_id": edited["project_id"],
-        "expected_project_revision": edited["project_revision"],
-        "expected_build_generation": edited["build_generation"],
-        "expected_source_snapshot_digest": edited["source_snapshot_digest"],
-        "expected_dependency_lock_digest": edited["dependency_lock_digest"]
-    });
-    let second_build = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/build"),
-        Some(second_build_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(second_build.status(), StatusCode::OK);
-    let second_ready = response_json(second_build).await["data"].clone();
-    assert!(second_ready["ready"].is_object());
-
-    let second_publish_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": second_ready["plugin"]["product_revision"],
-        "expected_pointer_revision": second_ready["plugin"]["releases"]["pointer_revision"],
-        "expected_active_release_epoch": second_ready["plugin"]["releases"]["active_release_epoch"],
-        "ready_release_id": second_ready["ready"]["release"]["release_id"],
-        "expected_ready_release_digest": second_ready["ready"]["release"]["release_digest"],
-        "expected_active_release_digest": second_ready["plugin"]["releases"]["active"]["release_digest"],
-        "acknowledge_test_warning": false
-    });
-    let second_publish = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/publish"),
-        Some(second_publish_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(second_publish.status(), StatusCode::OK);
-    let second_published = response_json(second_publish).await["data"].clone();
-    assert_eq!(
-        second_published["plugin"]["releases"]["active_release_epoch"],
-        2
-    );
-    assert!(second_published["plugin"]["releases"]["previous"].is_object());
-
-    let old_asset = request(
-        &router,
-        Method::GET,
-        &format!(
-            "/api/plugins/runtimes/{plugin_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
-        ),
-        None,
-    )
-    .send()
-    .await;
-    assert_eq!(old_asset.status(), StatusCode::NOT_FOUND);
-    let old_bridge = request(
-        &router,
-        Method::POST,
-        &bridge_path,
-        Some(json!({
-            "surface_capability": capability,
-            "active_release_epoch": epoch,
-            "expected_release_digest": digest,
-            "request": {
-                "call_id": "stale-get",
-                "target": {
-                    "target": "host_kv",
-                    "request": {
-                        "operation": "get",
-                        "key": "preference"
-                    }
-                }
-            }
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(old_bridge.status(), StatusCode::NOT_FOUND);
-
-    let rollback_body = json!({
-        "plugin_id": plugin_id,
-        "expected_product_revision": second_published["plugin"]["product_revision"],
-        "expected_pointer_revision": second_published["plugin"]["releases"]["pointer_revision"],
-        "expected_active_release_epoch": second_published["plugin"]["releases"]["active_release_epoch"],
-        "expected_current_release_digest": second_published["plugin"]["releases"]["active"]["release_digest"],
-        "previous_release_id": second_published["plugin"]["releases"]["previous"]["release_id"],
-        "expected_previous_release_digest": second_published["plugin"]["releases"]["previous"]["release_digest"]
-    });
-    let rollback = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/rollback"),
-        Some(rollback_body),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(rollback.status(), StatusCode::OK);
-    let rolled_back = response_json(rollback).await["data"].clone();
-    assert_eq!(
-        rolled_back["plugin"]["releases"]["active"]["release_digest"],
-        enabled["plugin"]["releases"]["active"]["release_digest"]
-    );
-    assert_eq!(
-        rolled_back["plugin"]["releases"]["active_release_epoch"],
-        3
-    );
-    assert_eq!(rolled_back["plugin"]["lifecycle"], "enabled");
-
-    let auto_mode = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/publish-mode"),
-        Some(json!({
-            "plugin_id": plugin_id,
-            "expected_product_revision": rolled_back["plugin"]["product_revision"],
-            "expected_pointer_revision": rolled_back["plugin"]["releases"]["pointer_revision"],
-            "mode": "auto_ui_only"
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(auto_mode.status(), StatusCode::OK);
-    let auto_enabled = response_json(auto_mode).await["data"].clone();
-    assert_eq!(auto_enabled["publish_mode"], "auto_ui_only");
-
-    let pre_auto_surface = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
-        Some(json!({ "plugin_id": plugin_id })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(pre_auto_surface.status(), StatusCode::OK);
-    let pre_auto_descriptor = response_json(pre_auto_surface).await["data"].clone();
-
-    let before_auto_edit = repository
-        .get(&owner_id, &plugin_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let auto_source = source_store
-        .replace_source(
-            &owner_id,
-            &plugin_id,
-            &before_auto_edit.project.project_id,
-            before_auto_edit
-                .project
-                .source_head_digest
-                .as_deref()
-                .unwrap(),
-            vec![PluginRuntimeSourceFileInput::new(
-                "ui/index.html",
-                b"<!doctype html><html><body><main><h1>Surface Notes auto</h1></main></body></html>"
-                    .to_vec(),
-            )],
-        )
-        .unwrap();
-    repository
-        .update_project_source_cas(&UpdatePluginRuntimeProjectSourceParams {
-            owner_user_id: owner_id.clone(),
-            plugin_product_id: plugin_id.clone(),
-            project_id: before_auto_edit.project.project_id.clone(),
-            expected_project_revision: before_auto_edit.project.project_revision,
-            source_state: PluginRuntimeProjectSourceState::Editable,
-            managed_source_path: Some(auto_source.managed_relative_path),
-            source_head_digest: Some(auto_source.source_snapshot_digest.0),
-            dependency_lock_digest: Some(auto_source.dependency_lock_digest.0),
-            build_profile_version: Some(auto_source.build_profile_version.0),
-            build_generation: i64::try_from(auto_source.build_generation).unwrap(),
-            updated_at: nomifun_common::now_ms()
-                .max(before_auto_edit.product.updated_at)
-                .max(before_auto_edit.project.updated_at),
-        })
-        .await
-        .unwrap();
-    let auto_edited = request(
-        &router,
-        Method::GET,
-        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
-        None,
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(auto_edited.status(), StatusCode::OK);
-    let auto_edited = response_json(auto_edited).await["data"].clone();
-    let auto_build = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/build"),
-        Some(json!({
-            "plugin_id": plugin_id,
-            "expected_product_revision": auto_edited["plugin"]["product_revision"],
-            "project_id": auto_edited["project_id"],
-            "expected_project_revision": auto_edited["project_revision"],
-            "expected_build_generation": auto_edited["build_generation"],
-            "expected_source_snapshot_digest": auto_edited["source_snapshot_digest"],
-            "expected_dependency_lock_digest": auto_edited["dependency_lock_digest"]
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(auto_build.status(), StatusCode::OK);
-    let auto_published = response_json(auto_build).await["data"].clone();
-    assert!(auto_published["ready"].is_null());
-    assert_eq!(auto_published["publish_mode"], "auto_ui_only");
-    assert_eq!(
-        auto_published["plugin"]["releases"]["active_release_epoch"],
-        4
-    );
-    assert_eq!(
-        auto_published["plugin"]["releases"]["previous"]["release_id"],
-        rolled_back["plugin"]["releases"]["active"]["release_id"]
-    );
-    let pre_auto_asset = request(
-        &router,
-        Method::GET,
-        &format!(
-            "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
-            pre_auto_descriptor["surface_capability"].as_str().unwrap(),
-            pre_auto_descriptor["active_release_epoch"].as_u64().unwrap(),
-            pre_auto_descriptor["expected_release_digest"].as_str().unwrap(),
-            pre_auto_descriptor["ui_entrypoint"].as_str().unwrap(),
-        ),
-        None,
-    )
-    .send()
-    .await;
-    assert_eq!(pre_auto_asset.status(), StatusCode::NOT_FOUND);
-
-    let current_surface = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
-        Some(json!({ "plugin_id": plugin_id })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(current_surface.status(), StatusCode::OK);
-    let current_descriptor = response_json(current_surface).await["data"].clone();
-
-    let before_non_ui_edit = repository
-        .get(&owner_id, &plugin_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let renamed_at = nomifun_common::now_ms().max(before_non_ui_edit.product.updated_at);
-    nomifun_db::sqlx::query(
-        "UPDATE plugin_products
-         SET product_revision = product_revision + 1,
-             display_name = 'Surface Notes renamed', updated_at = ?
-         WHERE owner_user_id = ? AND plugin_product_id = ?
-           AND product_revision = ? AND updated_at <= ?",
-    )
-    .bind(renamed_at)
-    .bind(&owner_id)
-    .bind(&plugin_id)
-    .bind(before_non_ui_edit.product.product_revision)
-    .bind(renamed_at)
-    .execute(services.database.pool())
-    .await
-    .unwrap();
-    let non_ui_source = source_store
-        .replace_source(
-            &owner_id,
-            &plugin_id,
-            &before_non_ui_edit.project.project_id,
-            before_non_ui_edit
-                .project
-                .source_head_digest
-                .as_deref()
-                .unwrap(),
-            vec![PluginRuntimeSourceFileInput::new(
-                "ui/index.html",
-                b"<!doctype html><html><body><main><h1>Surface Notes ready only</h1></main></body></html>"
-                    .to_vec(),
-            )],
-        )
-        .unwrap();
-    repository
-        .update_project_source_cas(&UpdatePluginRuntimeProjectSourceParams {
-            owner_user_id: owner_id.clone(),
-            plugin_product_id: plugin_id.clone(),
-            project_id: before_non_ui_edit.project.project_id.clone(),
-            expected_project_revision: before_non_ui_edit.project.project_revision,
-            source_state: PluginRuntimeProjectSourceState::Editable,
-            managed_source_path: Some(non_ui_source.managed_relative_path),
-            source_head_digest: Some(non_ui_source.source_snapshot_digest.0),
-            dependency_lock_digest: Some(non_ui_source.dependency_lock_digest.0),
-            build_profile_version: Some(non_ui_source.build_profile_version.0),
-            build_generation: i64::try_from(non_ui_source.build_generation).unwrap(),
-            updated_at: nomifun_common::now_ms()
-                .max(renamed_at)
-                .max(before_non_ui_edit.project.updated_at),
-        })
-        .await
-        .unwrap();
-    let non_ui_edited = request(
-        &router,
-        Method::GET,
-        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
-        None,
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(non_ui_edited.status(), StatusCode::OK);
-    let non_ui_edited = response_json(non_ui_edited).await["data"].clone();
-    let ready_only_build = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/build"),
-        Some(json!({
-            "plugin_id": plugin_id,
-            "expected_product_revision": non_ui_edited["plugin"]["product_revision"],
-            "project_id": non_ui_edited["project_id"],
-            "expected_project_revision": non_ui_edited["project_revision"],
-            "expected_build_generation": non_ui_edited["build_generation"],
-            "expected_source_snapshot_digest": non_ui_edited["source_snapshot_digest"],
-            "expected_dependency_lock_digest": non_ui_edited["dependency_lock_digest"]
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(ready_only_build.status(), StatusCode::OK);
-    let ready_only = response_json(ready_only_build).await["data"].clone();
-    assert!(ready_only["ready"].is_object());
-    assert_eq!(
-        ready_only["plugin"]["releases"]["active_release_epoch"],
-        auto_published["plugin"]["releases"]["active_release_epoch"]
-    );
-    assert_eq!(
-        ready_only["plugin"]["releases"]["active"]["release_id"],
-        auto_published["plugin"]["releases"]["active"]["release_id"]
-    );
-    let surviving_asset = request(
-        &router,
-        Method::GET,
-        &format!(
-            "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
-            current_descriptor["surface_capability"].as_str().unwrap(),
-            current_descriptor["active_release_epoch"].as_u64().unwrap(),
-            current_descriptor["expected_release_digest"].as_str().unwrap(),
-            current_descriptor["ui_entrypoint"].as_str().unwrap(),
-        ),
-        None,
-    )
-    .send()
-    .await;
-    assert_eq!(
-        surviving_asset.status(),
-        StatusCode::OK,
-        "Ready-only Build must not revoke the unchanged Active Surface"
-    );
-    let latest_operation_state: String = nomifun_db::sqlx::query_scalar(
-        "SELECT state FROM product_operations
-         WHERE owner_kind = 'plugin' AND owner_id = ? AND kind = 'build'
-         ORDER BY started_at_ms DESC, operation_id DESC LIMIT 1",
-    )
-    .bind(&plugin_id)
-    .fetch_one(services.database.pool())
-    .await
-    .unwrap();
-    assert_eq!(latest_operation_state, "succeeded");
-
-    let manual_mode = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/publish-mode"),
-        Some(json!({
-            "plugin_id": plugin_id,
-            "expected_product_revision": ready_only["plugin"]["product_revision"],
-            "expected_pointer_revision": ready_only["plugin"]["releases"]["pointer_revision"],
-            "mode": "manual"
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(manual_mode.status(), StatusCode::OK);
-    assert_eq!(response_json(manual_mode).await["data"]["publish_mode"], "manual");
-
-    let close_surface = request(
-        &router,
-        Method::POST,
-        &format!("/api/plugins/runtimes/{plugin_id}/surface/close"),
-        Some(json!({
-            "plugin_id": plugin_id,
-            "surface_session_id": current_descriptor["surface_session_id"],
-            "surface_capability": current_descriptor["surface_capability"]
-        })),
-    )
-    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
-    .send()
-    .await;
-    assert_eq!(close_surface.status(), StatusCode::OK);
-    assert_eq!(response_json(close_surface).await["data"], true);
-    let closed_asset = request(
-        &router,
-        Method::GET,
-        &format!(
-            "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
-            current_descriptor["surface_capability"].as_str().unwrap(),
-            current_descriptor["active_release_epoch"].as_u64().unwrap(),
-            current_descriptor["expected_release_digest"].as_str().unwrap(),
-            current_descriptor["ui_entrypoint"].as_str().unwrap(),
-        ),
-        None,
-    )
-    .send()
-    .await;
-    assert_eq!(closed_asset.status(), StatusCode::NOT_FOUND);
-
-    services
-        .shutdown_browser_platform()
-        .await
-        .expect("background cleanup");
-    services.database.close().await;
-}
-
-struct RequestBuilder<'a> {
-    router: &'a axum::Router,
-    builder: axum::http::request::Builder,
-    body: Body,
-}
-
-impl RequestBuilder<'_> {
-    fn header(
-        mut self,
-        name: &'static str,
-        value: impl AsRef<str>,
-    ) -> Self {
-        self.builder = self.builder.header(name, value.as_ref());
-        self
-    }
-
-    async fn send(self) -> axum::response::Response {
-        self.router
-            .clone()
-            .oneshot(self.builder.body(self.body).expect("request"))
-            .await
-            .expect("route response")
-    }
-}
-
-fn request<'a>(
-    router: &'a axum::Router,
-    method: Method,
-    path: &str,
-    body: Option<Value>,
-) -> RequestBuilder<'a> {
-    let mut builder = Request::builder().method(method).uri(path);
-    let body = match body {
-        Some(body) => {
-            builder = builder.header(header::CONTENT_TYPE, "application/json");
-            Body::from(serde_json::to_vec(&body).expect("request JSON"))
-        }
-        None => Body::empty(),
-    };
-    RequestBuilder {
-        router,
-        builder,
-        body,
-    }
-}
-
-async fn response_json(response: axum::response::Response) -> Value {
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("response body")
-        .to_bytes();
-    serde_json::from_slice(&bytes).expect("response JSON")
 }

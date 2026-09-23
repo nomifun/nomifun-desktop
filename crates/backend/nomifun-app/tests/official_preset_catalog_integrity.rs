@@ -2,9 +2,8 @@
 //!
 //! Static seed validation is deliberately insufficient here. This test boots
 //! the current Nomi-core product graph, reads the authenticated HTTP catalog,
-//! then applies a real local Plugin so the production Registry publisher
-//! reconciles and refreshes Agent availability before the same contract is
-//! checked again.
+//! then installs a real Unified Plugin so the production Action registry is
+//! exercised before the same Agent contract is checked again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -14,26 +13,14 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::Request;
 use http_body_util::BodyExt;
-use nomifun_agent_contracts::{
-    ActionId, ArtifactEnvelope, ArtifactFileDigest, ArtifactId,
-    CapabilityActionDescriptor, CapabilityConsumer, CapabilityContributions,
-    CapabilityId, CapabilityKind, CapabilityManifest, CanonicalSchemaRef, DigestHex,
-    EffectClass, ExactVersionRef, JAVASCRIPT_HOST_PROTOCOL_VERSION,
-    JAVASCRIPT_SDK_CONTRACT_VERSION, JavaScriptBuildProfile,
-    JavaScriptEntrypointMetadata, LocalizedMetadata, MINIMUM_NODE_MAJOR,
-    OfficialPresetKey,
-    PLUGIN_N1_SCHEMA_VERSION, PLUGIN_PACKAGE_PROFILE_VERSION, PackageContributions,
-    PackageId, PackageManifest, PlatformConstraint, PluginPackageArtifactV1,
-    PluginPackageV1Manifest, RuntimeTarget, StrictJsonValue, ToolPresentationKind,
-    VersionString, canonical_json_bytes, capability_surface_declarations,
-    official_preset_seed_manifest_payload,
-};
+use nomifun_agent_contracts::{OfficialPresetKey, official_preset_seed_manifest_payload};
 use nomifun_api_types::{
     AgentCatalogResponse, AgentPresetEditorResponse, AgentPresetLibraryResponse, ApiResponse,
-    ApplyPluginCandidateRequest, ApplyPluginTargetDto, CapabilityCatalogItemDto,
+    CapabilityCatalogItemDto,
     AgentChatModelSelectionDto, CapabilityRefDto, CatalogMaterializationStateDto,
-    CreateAgentPresetFromTemplateRequest, ImportPluginRequest,
-    PluginImportKindDto, SkillCatalogItemDto,
+    CreateAgentPresetFromTemplateRequest, InspectPluginImportRequest,
+    InstallPluginImportRequest, InstallPluginImportResponseDto, PluginImportInspectionDto,
+    PluginImportKindDto, PluginInstallOutcomeDto, SkillCatalogItemDto,
 };
 use nomifun_app::compatibility::{
     AppServices, build_module_states, create_router_with_states,
@@ -43,14 +30,10 @@ use nomifun_browser_platform::runtime::{
     BrowserRuntime, BrowserRuntimeFactory, CreateBrowserRuntime, WorkspaceError,
 };
 use nomifun_browser_platform::workspace::BrowserResourceService;
-use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 const LOCAL_TRUST_SECRET: &str = "official-preset-catalog-integrity";
-
-#[path = "official_preset_catalog_integrity/skill_discovery.rs"]
-mod skill_discovery;
 
 struct CatalogGateBrowserFactory;
 
@@ -191,7 +174,7 @@ fn official_preset_action_safety_matrix_is_exact() {
 }
 
 #[tokio::test]
-async fn every_published_official_preset_stays_available_after_plugin_catalog_refresh() {
+async fn every_published_official_preset_stays_available_after_unified_plugin_install() {
     let root = tempfile::tempdir().expect("allocate isolated product root");
     let database = nomifun_db::init_database_memory()
         .await
@@ -220,76 +203,45 @@ async fn every_published_official_preset_stays_available_after_plugin_catalog_re
         &services.encryption_key,
     )
     .await;
-    let owner_user_id = services.authoritative_user_id.to_string();
     let (states, _channel_components) = build_module_states(&services).await;
-    let plugin_service = Arc::clone(&states.plugin.service);
     let router = create_router_with_states(&services, states);
 
     assert_official_preset_catalog_integrity(&router, "startup catalog", &exact_model).await;
 
-    let main = br#"
-        export async function activate() {
-          return {
-            capabilities: {
-              "test.release_gate.echo.contribution": {
-                async invoke({ input }) { return input; }
-              }
-            }
-          };
-        }
-    "#;
-    let artifact = plugin_artifact(main);
     let source = root.path().join("catalog-refresh-plugin");
-    write_plugin_package(&source, &artifact, main);
-
-    let before_import = plugin_service
-        .list_library(&owner_user_id)
-        .await
-        .expect("read initial Plugin library");
-    let project = plugin_service
-        .import_prebuilt(
-            &owner_user_id,
-            ImportPluginRequest {
-                expected_library_revision: before_import.library_revision,
-                import_kind: PluginImportKindDto::PrebuiltArtifact,
-                source_path: source.display().to_string(),
-                expected_bundle_or_artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
-                target_project_id: None,
-                expected_project_revision: None,
-            },
-        )
-        .await
-        .expect("import refresh-trigger Plugin");
-    let candidate = project
-        .ready
+    write_unified_plugin_package(&source);
+    let inspection: PluginImportInspectionDto = post_data(
+        &router,
+        "/api/plugins/import/inspect",
+        &InspectPluginImportRequest {
+            source_path: source.display().to_string(),
+            kind: PluginImportKindDto::Directory,
+        },
+    )
+    .await;
+    let confirmation = inspection
+        .permission_expansion
         .as_ref()
-        .expect("prebuilt import must create a ready candidate");
-    let before_apply = plugin_service
-        .list_library(&owner_user_id)
-        .await
-        .expect("read Plugin library before apply");
-    plugin_service
-        .apply_candidate(
-            &owner_user_id,
-            ApplyPluginCandidateRequest {
-                project_id: project.summary.project_id.clone(),
-                expected_project_revision: project.summary.project_revision,
-                expected_build_generation: project.summary.build_generation,
-                candidate_id: candidate.candidate.candidate_id.clone(),
-                expected_candidate_digest: candidate.candidate.candidate_digest.clone(),
-                target: ApplyPluginTargetDto::InitialInstall {
-                    expected_library_revision: before_apply.library_revision,
-                },
-                allow_breaking: false,
-                acknowledge_test_warning: true,
-            },
-        )
-        .await
-        .expect("apply Plugin through the production Registry publisher");
+        .map(|value| value.confirmation_id.clone());
+    let installed: InstallPluginImportResponseDto = post_data(
+        &router,
+        "/api/plugins/import",
+        &InstallPluginImportRequest {
+            source_path: source.display().to_string(),
+            kind: PluginImportKindDto::Directory,
+            expected_plugin_revision: None,
+            create_copy: false,
+            permission_confirmation_id: confirmation,
+            config: None,
+            credential_bindings: None,
+        },
+    )
+    .await;
+    assert!(matches!(installed.result, PluginInstallOutcomeDto::Installed { .. }));
 
     assert_official_preset_catalog_integrity(
         &router,
-        "catalog after Plugin Registry reconcile/availability refresh",
+        "catalog after Unified Plugin Action registry install",
         &exact_model,
     )
     .await;
@@ -633,150 +585,41 @@ where
     response.data.expect("successful POST response data")
 }
 
-fn plugin_artifact(main: &[u8]) -> PluginPackageArtifactV1 {
-    let package = ExactVersionRef {
-        id: PackageId::from("test.release-gate.plugin"),
-        version: VersionString::from("1.0.0"),
-    };
-    let input_schema = StrictJsonValue(serde_json::json!({
-        "additionalProperties": false,
-        "properties": {"message": {"type": "string"}},
-        "required": ["message"],
-        "type": "object"
-    }));
-    let output_schema = StrictJsonValue(serde_json::json!({
-        "additionalProperties": true,
-        "type": "object"
-    }));
-    let input_ref = schema_ref("echo-input", &input_schema);
-    let output_ref = schema_ref("echo-output", &output_schema);
-    let capability = CapabilityManifest {
-        id: CapabilityId::from("test.release-gate.plugin.echo"),
-        contribution_id: "test.release_gate.echo.contribution".into(),
-        kind: CapabilityKind::Tool,
-        package: package.clone(),
-        display: display("Release Gate Echo", "Triggers a real Plugin Catalog refresh."),
-        requires: Vec::new(),
-        conflicts: Vec::new(),
-        supported_surfaces: capability_surface_declarations(
-            ["desktop", "headless"],
-            [CapabilityConsumer::Agent],
-        ),
-        requires_runtime_features: Vec::new(),
-        supported_platforms: vec![PlatformConstraint::Any],
-        config_schema: StrictJsonValue(serde_json::json!({
-            "type": "object",
-            "additionalProperties": false
-        })),
-        contributions: CapabilityContributions {
-            actions: vec![CapabilityActionDescriptor {
-                action_id: ActionId::from("test.release-gate.plugin.echo.invoke"),
-                input_schema: input_ref.clone(),
-                output_schema: output_ref.clone(),
-                effect_class: EffectClass::Pure,
-                presentation: ToolPresentationKind::FunctionTool,
-            }],
-            ..Default::default()
-        },
-    };
-    PluginPackageArtifactV1::new(
-        ArtifactId::from(Uuid::now_v7().to_string()),
-        PluginPackageV1Manifest {
-            schema_version: PLUGIN_N1_SCHEMA_VERSION.into(),
-            build_profile: JavaScriptBuildProfile::PluginPackageV1,
-            build_profile_version: PLUGIN_PACKAGE_PROFILE_VERSION.into(),
-            package: PackageManifest {
-                schema_version: PLUGIN_N1_SCHEMA_VERSION.into(),
-                host_contract_version: JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
-                package_id: package.id,
-                package_version: package.version,
-                display: display(
-                    "Release Gate Plugin",
-                    "Product Catalog refresh fixture.",
-                ),
-                package_dependencies: Vec::new(),
-                requires_runtime_features: Vec::new(),
-                config_schema: StrictJsonValue(serde_json::json!({
-                    "type": "object",
-                    "additionalProperties": false
-                })),
-                provides_services: Vec::new(),
-                requires_services: Vec::new(),
-                entrypoint: JavaScriptEntrypointMetadata {
-                    normalized_relative_path: "main.mjs".into(),
-                    module_digest: sha256(main),
-                    host_protocol_version: JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
-                    sdk_contract_version: JAVASCRIPT_SDK_CONTRACT_VERSION.into(),
-                }
-                .into(),
-                contributions: PackageContributions {
-                    capabilities: vec![capability],
-                    ..Default::default()
-                },
-            },
-            schemas: BTreeMap::from([
-                (input_ref, input_schema),
-                (output_ref, output_schema),
-            ]),
-            supported_targets: BTreeSet::from([native_plugin_target()]),
-            minimum_node_major: MINIMUM_NODE_MAJOR,
-            dependency_lock_digest: DigestHex::from("d".repeat(64)),
-            credential_slots: Vec::new(),
-        },
-        vec![ArtifactFileDigest {
-            normalized_relative_path: "main.mjs".into(),
-            digest: sha256(main),
-            size_bytes: u64::try_from(main.len()).expect("Plugin fixture size"),
-        }],
-    )
-    .expect("build valid Plugin package")
-}
-
-fn schema_ref(name: &str, schema: &StrictJsonValue) -> CanonicalSchemaRef {
-    CanonicalSchemaRef::from(format!(
-        "schema://test.release-gate.plugin/{name}@1#{}",
-        nomifun_agent_contracts::digest_payload(&schema.0)
-            .expect("digest schema")
-            .as_ref()
-    ))
-}
-
-fn display(name: &str, description: &str) -> LocalizedMetadata {
-    LocalizedMetadata {
-        name: name.to_owned(),
-        description: description.to_owned(),
-        localized_names: BTreeMap::new(),
-        localized_descriptions: BTreeMap::new(),
-    }
-}
-
-fn write_plugin_package(root: &Path, artifact: &PluginPackageArtifactV1, main: &[u8]) {
+fn write_unified_plugin_package(root: &Path) {
     std::fs::create_dir_all(root).expect("create Plugin fixture directory");
     std::fs::write(
-        root.join("manifest.json"),
-        canonical_json_bytes(
-            &ArtifactEnvelope::new(artifact.manifest.payload.clone())
-                .expect("build Plugin manifest envelope"),
-        )
-        .expect("serialize Plugin manifest"),
+        root.join("nomifun.plugin.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema": "nomifun.plugin/v1",
+            "id": "test.release-gate.plugin",
+            "version": "1.0.0",
+            "name": "Release Gate Plugin",
+            "description": "Exercises the Unified Action registry",
+            "hostApi": "1.0.0",
+            "entrypoints": {"service": "service/main.mjs", "serviceMode": "onDemand"},
+            "actions": {
+                "echo": {
+                    "name": "Echo",
+                    "description": "Return the input",
+                    "input": {"type": "object"},
+                    "output": {"type": "object"},
+                    "effect": "read"
+                }
+            },
+            "bindings": [],
+            "dataVersion": 0,
+            "migrations": [],
+            "configSchema": {"type": "object"},
+            "secrets": [],
+            "permissions": []
+        }))
+        .expect("serialize Unified Plugin manifest"),
     )
     .expect("write Plugin manifest");
-    std::fs::write(root.join("main.mjs"), main).expect("write Plugin entrypoint");
-}
-
-fn sha256(bytes: &[u8]) -> DigestHex {
-    DigestHex::from(format!("{:x}", Sha256::digest(bytes)))
-}
-
-fn native_plugin_target() -> RuntimeTarget {
-    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        (os, arch) => panic!("unsupported Plugin test host {os}/{arch}"),
-    };
-    RuntimeTarget::from(target)
+    std::fs::create_dir_all(root.join("service")).expect("create Service directory");
+    std::fs::write(
+        root.join("service/main.mjs"),
+        "export async function activate() { return { async invoke(_action, input) { return input; } }; }",
+    )
+    .expect("write Plugin Service");
 }

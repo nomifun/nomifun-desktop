@@ -1,7 +1,6 @@
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import {
   Cpu,
-  Code,
   Info,
   Server,
   Shield,
@@ -19,7 +18,6 @@ export const BUILTIN_TAB_IDS = [
   'system',
   'permissions',
   'execution-engines',
-  'javascript-runtime',
   'ssh-hosts',
   'about',
 ] as const;
@@ -58,12 +56,6 @@ const SettingsSider: React.FC<{ collapsed?: boolean; tooltipEnabled?: boolean }>
         label: t('settings.executionEngines.title'),
         icon: <Cpu />,
         path: 'execution-engines',
-      },
-      'javascript-runtime': {
-        id: 'javascript-runtime',
-        label: t('settings.runtimeManager.railTitle'),
-        icon: <Code />,
-        path: 'javascript-runtime',
       },
       'ssh-hosts': {
         id: 'ssh-hosts',

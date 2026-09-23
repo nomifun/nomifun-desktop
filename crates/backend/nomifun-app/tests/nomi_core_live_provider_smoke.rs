@@ -3,7 +3,6 @@
 //! Run explicitly with the credential-isolating runner:
 //! `bun scripts/validation/run-nomi-core-live-provider-smoke.mjs`
 //! The default runner exercises the selected canonical Session → Runtime path.
-//! Use `--before-tool-smoke` to exercise the live before-tool decision boundary.
 //! `NOMIFUN_LIVE_STEPFUN_MODEL` selects the confirmed model (step-3.7-flash),
 //! never an endpoint or fallback. Only the runner may read the credential env.
 
@@ -25,7 +24,6 @@ use zeroize::Zeroizing;
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
 const LIVE_MODEL_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_MODEL";
-const ENGINE_SMOKE_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -1177,13 +1175,6 @@ fn object_has_only_keys(value: &Value, allowed: &[&str]) -> bool {
     })
 }
 
-fn canonical_path_eq(left: &Path, right: &Path) -> bool {
-    std::fs::canonicalize(left)
-        .ok()
-        .zip(std::fs::canonicalize(right).ok())
-        .is_some_and(|(left, right)| left == right)
-}
-
 fn assistant_text_projection(message: &Value) -> Option<&Value> {
     if message.get("presentation_intent").and_then(Value::as_str) != Some("message") {
         return None;
@@ -1890,82 +1881,10 @@ async fn assert_session_runtime(router: &Router, session: &str) -> Result<(), Sm
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-enum LiveSmokeMode { Model, BeforeTool }
-
-const RETAIN_NATIVE_FIXTURE_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_RETAIN_NATIVE_FIXTURE";
-const NATIVE_FIXTURE_PARENT_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_FIXTURE_PARENT";
-
-fn native_fixture_parent(mode: LiveSmokeMode) -> Result<Option<std::path::PathBuf>, SmokeFailure> {
-    let Some(enabled) = std::env::var_os(RETAIN_NATIVE_FIXTURE_ENVIRONMENT_NAME) else {
-        return Ok(None);
-    };
-    let failed = || SmokeFailure::new("native.fixture", "NATIVE_FIXTURE_PARENT_INVALID", 400);
-    if enabled != "1" || !matches!(mode, LiveSmokeMode::BeforeTool) {
-        return Err(failed());
-    }
-    let parent = std::env::var_os(NATIVE_FIXTURE_PARENT_ENVIRONMENT_NAME)
-        .map(std::path::PathBuf::from)
-        .ok_or_else(failed)?;
-    if !parent.is_absolute() || !parent.is_dir() {
-        return Err(failed());
-    }
-    let parent = parent.canonicalize().map_err(|_| failed())?;
-    let git = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../.git")
-        .canonicalize()
-        .map_err(|_| failed())?;
-    if !git.is_dir()
-        || parent == git
-        || !parent.starts_with(&git)
-        || parent
-            .to_str()
-            .is_none_or(|path| path.chars().any(char::is_control))
-    {
-        return Err(failed());
-    }
-    Ok(Some(parent))
-}
-
-fn retain_native_fixture(root: TempDir, parent: &Path) -> Result<(), SmokeFailure> {
-    let failed = || SmokeFailure::new("native.fixture", "NATIVE_FIXTURE_PATHS_INVALID", 422);
-    let fixture = root.path().canonicalize().map_err(|_| failed())?;
-    let data = fixture.join("data").canonicalize().map_err(|_| failed())?;
-    let work = fixture.join("work").canonicalize().map_err(|_| failed())?;
-    if fixture.parent() != Some(parent)
-        || !fixture
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("before-tool-native-"))
-        || data != fixture.join("data")
-        || work != fixture.join("work")
-        || !data.is_dir()
-        || !work.is_dir()
-    {
-        return Err(failed());
-    }
-    let paths = json!({
-        "fixture_root": fixture.to_str().ok_or_else(failed)?,
-        "data_root": data.to_str().ok_or_else(failed)?,
-        "work_root": work.to_str().ok_or_else(failed)?,
-    });
-    let marker = serde_json::to_string(&paths).map_err(|_| failed())?;
-    // All fallible verification precedes keep. This root is only for the
-    // current native acceptance and contains the ordinary encrypted test
-    // Provider record; no service or application process remains running.
-    let _kept = root.keep();
-    eprintln!("NOMIFUN_LIVE_SMOKE_NATIVE_FIXTURE {marker}");
-    Ok(())
-}
-
-async fn run_live_provider_smoke(mode: LiveSmokeMode) -> Result<(), SmokeFailure> {
-    let retained_parent = native_fixture_parent(mode)?;
+async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
     let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
-    let root = match retained_parent.as_ref() {
-        Some(parent) => tempfile::Builder::new().prefix("before-tool-native-").tempdir_in(parent),
-        None => tempfile::tempdir(),
-    }.map_err(|_| {
+    let root = tempfile::tempdir().map_err(|_| {
         SmokeFailure::new(
             "bootstrap",
             "TEMP_ROOT_CREATE_FAILED",
@@ -1974,24 +1893,7 @@ async fn run_live_provider_smoke(mode: LiveSmokeMode) -> Result<(), SmokeFailure
     })?;
     let fixture = build_fixture(&root).await?;
     let router = fixture.application.router();
-    let mut stages_passed = Vec::new();
-
-    let result = match mode {
-        LiveSmokeMode::Model => run_selected_model_chain(&router, api_key.as_str(), &model).await,
-        LiveSmokeMode::BeforeTool => hard_deadline(
-            "before_tool.smoke",
-            "BEFORE_TOOL_SMOKE_DEADLINE_EXCEEDED",
-            ENGINE_SMOKE_DEADLINE,
-            before_tool_smoke::run(
-                &router,
-                api_key.as_str(),
-                &model,
-                root.path(),
-                &mut stages_passed,
-            ),
-        )
-        .await,
-    };
+    let result = run_selected_model_chain(&router, api_key.as_str(), &model).await;
     drop(router);
     let LiveFixture {
         _environment: environment,
@@ -2025,32 +1927,13 @@ async fn run_live_provider_smoke(mode: LiveSmokeMode) -> Result<(), SmokeFailure
     .await;
 
     audit_result?;
-    for phase in stages_passed {
-        before_tool_smoke::emit_stage_pass(phase)?;
-    }
-    // Native UI acceptance is independent from model instruction fidelity.
-    // Explicit retention is safe only here, after shutdown and credential audit;
-    // a failed smoke keeps its original failure and never becomes a pass.
-    if let Some(parent) = retained_parent { retain_native_fixture(root, &parent)?; }
     result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; use the runner --model-smoke"]
 async fn nomi_core_selected_model_reaches_live_stepfun() {
-    if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::Model).await {
-        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
-        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
-    }
-}
-
-#[path = "nomi_core_live_provider_smoke/before_tool.rs"]
-mod before_tool_smoke;
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires a live credential on stdin; use the runner --before-tool-smoke"]
-async fn nomi_core_product_before_tool_reaches_live_stepfun() {
-    if let Err(failure) = run_live_provider_smoke(LiveSmokeMode::BeforeTool).await {
+    if let Err(failure) = run_live_provider_smoke().await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

@@ -31,7 +31,7 @@ async fn canonical_baseline_keeps_a_bounded_index_inventory() {
     .await
     .expect("explicit index count");
 
-    assert_eq!(explicit_indexes, 127);
+    assert_eq!(explicit_indexes, 114);
 }
 
 #[tokio::test]
@@ -92,9 +92,9 @@ async fn hot_queries_use_the_curated_composite_and_partial_indexes() {
             "idx_cron_run_reservations_cron_job_id",
         ),
         (
-            "SELECT * FROM plugin_products WHERE owner_user_id = 'user' \
-             ORDER BY updated_at DESC, id DESC",
-            "idx_plugin_products_owner",
+            "SELECT * FROM plugins WHERE owner_user_id = 'user' \
+             ORDER BY updated_at_ms DESC, plugin_id",
+            "idx_plugins_owner_updated",
         ),
         (
             "SELECT * FROM conversation_execution_links \

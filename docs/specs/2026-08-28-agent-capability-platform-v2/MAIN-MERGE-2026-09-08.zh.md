@@ -1,5 +1,8 @@
 # main 产品修复合入 Agent Capability Platform v2
 
+> 归档边界（2026-09-23）：这是旧合并现场记录；其中 N1/M1 gate、MiniApp 与旧 Plugin
+> 路径已删除，不是当前命令或产品合同。
+
 日期：2026-09-08。目标分支：`rf/agent-capability-platform-v2`。
 
 - 合并前重构分支：`7ed336ad6ef146a65af896c64f52dc26a3c76329`。

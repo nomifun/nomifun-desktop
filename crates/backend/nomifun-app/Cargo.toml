@@ -70,14 +70,6 @@ name = "plugin_e2e"
 path = "tests/plugin_e2e.rs"
 
 [[test]]
-name = "plugin_ui_sessions"
-path = "tests/plugin_ui_sessions.rs"
-
-[[test]]
-name = "plugin_product_discovery"
-path = "tests/plugin_product_discovery.rs"
-
-[[test]]
 name = "auxiliary_e2e"
 path = "tests/auxiliary_e2e.rs"
 
@@ -180,11 +172,9 @@ nomifun-agent-domain-wave3.workspace = true
 nomifun-agent-domain-wave4.workspace = true
 nomifun-agent-domain-wave5.workspace = true
 nomifun-agent-kernel.workspace = true
-nomifun-js-authoring.workspace = true
-nomifun-js-host.workspace = true
-nomifun-js-kernel-adapter.workspace = true
 nomifun-js-runtime.workspace = true
 nomifun-plugin-platform.workspace = true
+walkdir.workspace = true
 nomifun-chat-model-broker.workspace = true
 nomifun-agent-session.workspace = true
 nomifun-assets.workspace = true
@@ -243,6 +233,7 @@ jsonschema.workspace = true
 zip.workspace = true
 zeroize.workspace = true
 base64.workspace = true
+hex.workspace = true
 sha2.workspace = true
 uuid.workspace = true
 reqwest.workspace = true

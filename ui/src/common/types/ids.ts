@@ -72,13 +72,7 @@ export type EntityKind =
   | 'creation-task'
   | 'creative-studio-project'
   | 'creative-studio-node'
-  | 'creative-studio-connection'
-  | 'plugin-project'
-  | 'plugin-mount'
-  | 'plugin-artifact'
-  | 'plugin-candidate'
-  | 'plugin-operation'
-  | 'plugin-runtime';
+  | 'creative-studio-connection';
 
 export type ConversationId = EntityId<'conversation'>;
 export type TerminalId = EntityId<'terminal'>;
@@ -131,13 +125,6 @@ export type CreationTaskId = EntityId<'creation-task'>;
 export type CreativeStudioProjectId = EntityId<'creative-studio-project'>;
 export type CreativeStudioNodeId = EntityId<'creative-studio-node'>;
 export type CreativeStudioConnectionId = EntityId<'creative-studio-connection'>;
-export type PluginProjectId = EntityId<'plugin-project'>;
-export type PluginMountId = EntityId<'plugin-mount'>;
-export type PluginArtifactId = EntityId<'plugin-artifact'>;
-export type PluginCandidateId = EntityId<'plugin-candidate'>;
-export type PluginOperationId = EntityId<'plugin-operation'>;
-export type PluginRuntimeId = EntityId<'plugin-runtime'>;
-
 export class InvalidEntityIdError extends TypeError {
   readonly entityKind: string;
   readonly value: unknown;
@@ -272,19 +259,6 @@ export const parseCreativeStudioNodeId = (value: unknown): CreativeStudioNodeId 
   parseEntityId('creative-studio-node', value);
 export const parseCreativeStudioConnectionId = (value: unknown): CreativeStudioConnectionId =>
   parseEntityId('creative-studio-connection', value);
-export const parsePluginProjectId = (value: unknown): PluginProjectId =>
-  parseEntityId('plugin-project', value);
-export const parsePluginMountId = (value: unknown): PluginMountId =>
-  parseEntityId('plugin-mount', value);
-export const parsePluginArtifactId = (value: unknown): PluginArtifactId =>
-  parseEntityId('plugin-artifact', value);
-export const parsePluginCandidateId = (value: unknown): PluginCandidateId =>
-  parseEntityId('plugin-candidate', value);
-export const parsePluginOperationId = (value: unknown): PluginOperationId =>
-  parseEntityId('plugin-operation', value);
-export const parsePluginRuntimeId = (value: unknown): PluginRuntimeId =>
-  parseEntityId('plugin-runtime', value);
-
 export type SessionTarget =
   | { readonly kind: 'conversation'; readonly id: ConversationId }
   | { readonly kind: 'terminal'; readonly id: TerminalId };

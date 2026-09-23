@@ -26,7 +26,7 @@ const SiderPluginEntry: React.FC<SiderPluginEntryProps> = ({
   onClick,
 }) => {
   const { t } = useTranslation();
-  const label = t('pluginWorkbench.navigation.railTitle');
+  const label = t('pluginPlatform.library.title');
 
   if (collapsed) {
     return (

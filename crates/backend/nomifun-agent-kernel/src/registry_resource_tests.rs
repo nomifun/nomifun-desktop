@@ -73,7 +73,7 @@ fn key(id: &str, scope: &str, mount: &str) -> ResourceHandleKey {
     ResourceHandleKey {
         scope_key: ScopeKey::from(scope),
         role_id: None,
-        mount_id: PluginMountId::from(mount),
+        mount_id: AgentModuleId::from(mount),
         target_digest: DigestHex::from("a".repeat(64)),
         binding_id: ResourceBindingId::from(id),
     }
@@ -94,7 +94,7 @@ async fn cleanup_attempts_every_selected_handle_and_preserves_other_scopes() {
         }
         let result = match mode {
             "scope" => registry.release_resources(&ScopeKey::from("scope")).await,
-            "mount" => registry.release_resources_for_mount(&PluginMountId::from("mount")).await,
+            "mount" => registry.release_resources_for_mount(&AgentModuleId::from("mount")).await,
             _ => registry.release_all_resources().await,
         };
         assert!(result.unwrap_err().to_string().contains("release a failed"));

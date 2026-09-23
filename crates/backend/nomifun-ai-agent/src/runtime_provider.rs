@@ -92,17 +92,6 @@ impl OfficialRuntimeProvider {
         &self,
         snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
     ) -> Result<(), AppError> {
-        if !self.admission.supports_tool_hooks()
-            && snapshot.content.contributions().any(|capability| {
-                capability.actions.iter().any(|action| {
-                    nomifun_agent_contracts::tool_middleware::is_tool_hook(&action.action_id)
-                })
-            })
-        {
-            return Err(invalid(
-                "the official build does not support Product tool hooks",
-            ));
-        }
         self.admission.validate_snapshot(snapshot)
     }
 

@@ -29,7 +29,7 @@ export type RequiredModuleReference = {
 export function moduleCategory(reference: ModuleReference): ModuleCategory {
   const id = String(reference.id);
   if (id === 'knowledge' || id.endsWith('.memory')) return 'knowledge';
-  if (id.startsWith('workspace.') || id === 'ssh' || id === 'plugin.development') {
+  if (id.startsWith('workspace.') || id === 'ssh') {
     return 'development';
   }
   if (id === 'web.research' || id === 'browser') return 'web';

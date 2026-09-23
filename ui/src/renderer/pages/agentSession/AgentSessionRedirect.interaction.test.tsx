@@ -2,7 +2,8 @@ import '../../../../test/setup-dom.ts';
 import { cleanup, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, mock, spyOn, test } from 'bun:test';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
-import { agentPlatform, pluginRuntimes } from '@/common/adapter/ipcBridge';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
+import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import AgentSessionPage from './AgentSessionPage';
 
 afterEach(() => { cleanup(); mock.restore(); });
@@ -10,7 +11,7 @@ test('historical Agent Session links open the existing canonical conversation wi
   const id = '0190f5fe-7c00-7a00-8000-000000000101';
   const create = spyOn(agentPlatform.sessions.create, 'invoke');
   const turn = spyOn(agentPlatform.sessions.createTurn, 'invoke');
-  const open = spyOn(pluginRuntimes.openSurface, 'invoke');
+  const open = spyOn(pluginPlatform.plugins.openSurface, 'invoke');
   const StandardConversation = () => <div>Standard conversation {useParams().conversationId}</div>;
   const view = render(<MemoryRouter initialEntries={[`/agent-sessions/${id}`]}><Routes>
     <Route path='/agent-sessions/:agentSessionId' element={<AgentSessionPage />} />

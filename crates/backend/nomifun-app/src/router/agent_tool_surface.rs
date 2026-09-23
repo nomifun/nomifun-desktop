@@ -194,7 +194,7 @@ pub(super) async fn compile(
             continue;
         }
         if !active.active.contains(&selected.capability.id)
-            || selected.contribution_lock.source_kind != ContributionSourceKind::PluginMount
+            || selected.contribution_lock.source_kind != ContributionSourceKind::AgentModule
         {
             continue;
         }
@@ -216,7 +216,7 @@ pub(super) async fn compile(
             return Err(error("Plugin tool description exceeds context bounds"));
         }
         let start = exposures.len();
-        for action in admitted_plugin_actions(&capability.manifest, &policy.allowed_actions) {
+        for action in admitted_module_actions(&capability.manifest, &policy.allowed_actions) {
             let schema = plugin_schemas
                 .resolve(selected, &action.input_schema)
                 .await
@@ -290,7 +290,7 @@ fn platform_tool_name(capability_id: &str, action_id: &str) -> String {
     format!("{PREFIX}{slug}__{}", &hash[..HASH_BYTES])
 }
 
-fn admitted_plugin_actions<'a>(
+fn admitted_module_actions<'a>(
     manifest: &'a CapabilityManifest,
     allowed_actions: &'a std::collections::BTreeSet<ActionId>,
 ) -> impl Iterator<Item = &'a nomifun_agent_contracts::CapabilityActionDescriptor> + 'a {
@@ -541,7 +541,7 @@ mod tests {
         ] {
             manifest.kind = kind;
             assert_eq!(
-                admitted_plugin_actions(&manifest, &allowed)
+                admitted_module_actions(&manifest, &allowed)
                     .map(|action| action.action_id.clone())
                     .collect::<Vec<_>>(),
                 vec![action_id.clone()],

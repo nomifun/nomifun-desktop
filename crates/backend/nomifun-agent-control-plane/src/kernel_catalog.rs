@@ -6,11 +6,11 @@
 #[path = "kernel_catalog_tests.rs"]
 mod tests;
 
-use crate::{CatalogProvider, CatalogSnapshot, ControlPlaneError, PluginProductCatalogPublicationSource};
+use crate::{CatalogProvider, CatalogSnapshot, ControlPlaneError};
 use nomifun_agent_contracts::{
     CapabilityCatalogContractError, CapabilityCatalogEntry, CapabilityCatalogMaterialization,
     CapabilityCatalogMaterializer, CapabilityConsumer, CapabilityId, CapabilityOwner,
-    CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
+    CapabilityProvenance, CapabilityPublicationState, CatalogAvailability,
 };
 use nomifun_agent_kernel::KernelRegistry;
 use std::collections::BTreeMap;
@@ -23,13 +23,13 @@ pub fn materialize_capability_catalog_entries(
     let mut entries = Vec::new();
     for capability in registry.capabilities.values() {
         let manifest = &capability.manifest;
-        let release_state = match capability.source.source_kind {
+        let publication_state = match capability.source.source_kind {
             nomifun_agent_contracts::PluginSourceKind::TestFixture => {
-                CapabilityReleaseState::TestHost
+                CapabilityPublicationState::TestOnly
             }
             nomifun_agent_contracts::PluginSourceKind::Bundled
             | nomifun_agent_contracts::PluginSourceKind::ManagedLocal => {
-                CapabilityReleaseState::PublishedActive
+                CapabilityPublicationState::Active
             }
         };
         let lock = &capability.contribution_lock;
@@ -40,7 +40,6 @@ pub fn materialize_capability_catalog_entries(
             source_kind: lock.source_kind,
             source_identity: lock.source_identity.clone(),
             mount_id: lock.mount_id.clone(),
-            plugin_product_id: lock.plugin_product_id.clone(),
             mcp_binding_id: lock.mcp_binding_id.clone(),
             artifact_digest: Some(capability.target_artifact_digest.clone()),
         };
@@ -65,11 +64,11 @@ pub fn materialize_capability_catalog_entries(
         match CapabilityCatalogMaterializer::materialize(CapabilityCatalogMaterialization {
             manifest: manifest.clone(),
             provenance,
-            release_state,
+            publication_state,
             availability,
         }) {
             Ok(entry) => entries.push(entry),
-            Err(CapabilityCatalogContractError::CandidateRejected { .. }) => {}
+            Err(CapabilityCatalogContractError::InactiveCapability { .. }) => {}
             Err(error) => {
                 return Err(ControlPlaneError::Wire(error.to_string()));
             }
@@ -83,45 +82,12 @@ pub fn materialize_catalog_snapshot(
     registry: &nomifun_agent_kernel::MaterializedRegistry,
     unavailable_capabilities: &BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>,
 ) -> Result<CatalogSnapshot, ControlPlaneError> {
-    materialize_catalog_snapshot_with_plugin_products(registry, unavailable_capabilities, Vec::new())
-}
-
-/// Compatibility name: publications use the unified Plugin Product contract.
-/// Catalog availability is not a Session permission grant.
-pub fn materialize_catalog_snapshot_with_plugin_products(
-    registry: &nomifun_agent_kernel::MaterializedRegistry,
-    unavailable_capabilities: &BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>,
-    plugin_product_publications: Vec<nomifun_agent_contracts::PluginProductCapabilityCatalogPublication>,
-) -> Result<CatalogSnapshot, ControlPlaneError> {
-    let mut formal_capability_entries =
+    let registry = registry;
+    let formal_capability_entries =
         materialize_capability_catalog_entries(registry, unavailable_capabilities)?
             .into_iter()
             .map(|entry| (entry.capability.clone(), entry))
             .collect::<BTreeMap<_, _>>();
-    let mut plugin_product_publication_map = BTreeMap::new();
-    for publication in plugin_product_publications {
-        publication
-            .validate()
-            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        if plugin_product_publication_map
-            .insert(publication.plugin_product_id.clone(), publication.clone())
-            .is_some()
-        {
-            return Err(ControlPlaneError::Wire(
-                "duplicate Plugin Product Catalog publication".to_owned(),
-            ));
-        }
-        for capability in publication.capabilities {
-            if formal_capability_entries
-                .insert(capability.entry.capability.clone(), capability.entry)
-                .is_some()
-            {
-                return Err(ControlPlaneError::Wire(
-                    "Plugin Product capability conflicts with an existing Catalog entry".to_owned(),
-                ));
-            }
-        }
-    }
     let derived_unavailable_capabilities = formal_capability_entries
         .values()
         .filter_map(|entry| {
@@ -152,7 +118,6 @@ pub fn materialize_catalog_snapshot_with_plugin_products(
         role_providers: registry.role_providers.values().cloned().collect(),
         capabilities: registry.capabilities.values().cloned().collect(),
         formal_capability_entries,
-        plugin_product_publications: plugin_product_publication_map,
         skills: registry.skills.values().cloned().collect(),
         mcp_tools: registry.mcp_tools.values().cloned().collect(),
         unavailable_capabilities: derived_unavailable_capabilities,
@@ -166,7 +131,6 @@ pub struct KernelCatalogProvider {
     registry: Arc<KernelRegistry>,
     unavailable_capabilities:
         StdRwLock<BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>>,
-    plugin_product_publications: Option<Arc<dyn PluginProductCatalogPublicationSource>>,
 }
 
 impl KernelCatalogProvider {
@@ -174,17 +138,7 @@ impl KernelCatalogProvider {
         Self {
             registry,
             unavailable_capabilities: StdRwLock::new(BTreeMap::new()),
-            plugin_product_publications: None,
         }
-    }
-
-    /// Compatibility name for the unified Plugin Product publication source.
-    pub fn with_plugin_product_publication_source(
-        mut self,
-        source: Arc<dyn PluginProductCatalogPublicationSource>,
-    ) -> Self {
-        self.plugin_product_publications = Some(source);
-        self
     }
 
     /// Mark capability identities unavailable for a specific host composition
@@ -229,17 +183,6 @@ impl CatalogProvider for KernelCatalogProvider {
                 )
             })?
             .clone();
-        let plugin_product_publications = self
-            .plugin_product_publications
-            .as_ref()
-            .map(|source| source.publications())
-            .transpose()?
-            .unwrap_or_default();
-        materialize_catalog_snapshot_with_plugin_products(
-            &registry,
-            &unavailable_capabilities,
-            plugin_product_publications,
-        )
-        .map(Arc::new)
+        materialize_catalog_snapshot(&registry, &unavailable_capabilities).map(Arc::new)
     }
 }

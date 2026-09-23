@@ -156,11 +156,6 @@ CREATE INDEX idx_agent_presets_owner_active
     ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id)
     WHERE retired_at_ms IS NULL;
 
-CREATE INDEX idx_agent_presets_ui_plugin
-    ON agent_presets(
-        json_extract(display_json, '$.ui_binding.selection.plugin_id')
-    );
-
 CREATE TABLE agent_preset_revisions (
     revision_id TEXT PRIMARY KEY,
     preset_id TEXT NOT NULL,

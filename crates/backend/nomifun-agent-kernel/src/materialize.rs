@@ -8,7 +8,7 @@ use nomifun_agent_contracts::{
     ExactRoleProviderRef, ExecutionRoleId, McpBindingId, McpServerId,
     McpToolCapabilityMapping, McpToolKey, PackageId, PackageManifest, PackageRef,
     PackageEntrypointMetadata, PluginBootCriticality, PluginDesiredState,
-    PluginEffectiveState, PluginMountId, PluginRegistrarOperation,
+    PluginEffectiveState, AgentModuleId, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateMethod, RoleContractManifest, RoleMemberRequirement,
     RoleProviderContribution, RoleProviderMemberContribution, ServiceHandleDescriptor, ServiceKeyDagEdge,
@@ -52,7 +52,7 @@ impl MaterializationPolicy {
 pub struct MaterializedPackage {
     pub manifest: PackageManifest,
     pub manifest_digest: DigestHex,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub source: PluginSourceMetadata,
 }
 
@@ -63,7 +63,7 @@ pub struct MaterializedCapability {
     pub contribution_id: ContributionId,
     pub contribution_lock: ContributionLock,
     pub target_artifact_digest: DigestHex,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub source: PluginSourceMetadata,
 }
 
@@ -87,7 +87,7 @@ pub struct MaterializedSkill {
     pub contract_digest: DigestHex,
     pub contribution_lock: ContributionLock,
     pub target_artifact_digest: DigestHex,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub source: PluginSourceMetadata,
 }
 
@@ -97,7 +97,7 @@ pub struct MaterializedMcpTool {
     pub binding_id: McpBindingId,
     pub contribution_lock: ContributionLock,
     pub target_artifact_digest: DigestHex,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub source: PluginSourceMetadata,
 }
 
@@ -106,7 +106,7 @@ struct PendingMcpTool {
     mapping: McpToolCapabilityMapping,
     binding_id: McpBindingId,
     target_artifact_digest: DigestHex,
-    mount_id: PluginMountId,
+    mount_id: AgentModuleId,
     source: PluginSourceMetadata,
 }
 
@@ -114,7 +114,7 @@ struct PendingMcpTool {
 pub struct MaterializedRoleContract {
     pub manifest: RoleContractManifest,
     pub contract_digest: DigestHex,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
 }
 
 #[derive(Clone, Debug)]
@@ -129,16 +129,16 @@ pub struct MaterializedRegistry {
     pub generation: u64,
     pub registry_digest: DigestHex,
     pub packages: BTreeMap<PackageId, MaterializedPackage>,
-    pub plugins: BTreeMap<PluginMountId, PluginRegistrationMetadata>,
+    pub plugins: BTreeMap<AgentModuleId, PluginRegistrationMetadata>,
     pub capabilities: BTreeMap<CapabilityId, MaterializedCapability>,
     pub skills: BTreeMap<SkillId, MaterializedSkill>,
     pub mcp_tools: BTreeMap<(McpServerId, McpToolKey), MaterializedMcpTool>,
     pub mcp_by_capability: BTreeMap<CapabilityId, (McpServerId, McpToolKey)>,
     pub role_contracts: BTreeMap<ExecutionRoleId, MaterializedRoleContract>,
     pub role_providers:
-        BTreeMap<(ExecutionRoleId, PluginMountId), MaterializedRoleProvider>,
+        BTreeMap<(ExecutionRoleId, AgentModuleId), MaterializedRoleProvider>,
     pub capability_roles: BTreeMap<CapabilityId, ExecutionRoleId>,
-    pub package_start_order: Vec<PluginMountId>,
+    pub package_start_order: Vec<AgentModuleId>,
     pub service_dag: ServiceKeyDagPayload,
 }
 
@@ -213,7 +213,7 @@ impl MaterializedRegistry {
     pub fn role_provider(
         &self,
         role_id: &ExecutionRoleId,
-        mount_id: &PluginMountId,
+        mount_id: &AgentModuleId,
     ) -> Option<&MaterializedRoleProvider> {
         self.role_providers
             .get(&(role_id.clone(), mount_id.clone()))
@@ -248,7 +248,7 @@ struct EmptyRegistryDigest {
 struct RegistryDigestPayload {
     schema_version: VersionString,
     registrations: Vec<PluginRegistrationMetadata>,
-    package_start_order: Vec<PluginMountId>,
+    package_start_order: Vec<AgentModuleId>,
     service_dag: ServiceKeyDagPayload,
 }
 
@@ -541,7 +541,6 @@ fn capability_provenance(
                     mcp.mapping.server_id.as_ref()
                 )),
                 mount_id,
-                plugin_product_id: None,
                 mcp_binding_id: Some(mcp.binding_id.clone()),
                 contribution_id: contribution_id.clone(),
                 contract_digest: schema_digest.clone(),
@@ -570,7 +569,7 @@ fn package_contribution_lock(
             (ContributionSourceKind::PlatformBuiltin, None)
         }
         PluginSourceKind::ManagedLocal => (
-            ContributionSourceKind::PluginMount,
+            ContributionSourceKind::AgentModule,
             Some(registration.mount_id.clone()),
         ),
     };
@@ -580,7 +579,6 @@ fn package_contribution_lock(
             registration.source.source_identity.clone(),
         ),
         mount_id,
-        plugin_product_id: None,
         mcp_binding_id: None,
         contribution_id,
         contract_digest,
@@ -1005,7 +1003,7 @@ fn declared_host_ports(
 
 fn validate_package_dependencies(
     packages: &BTreeMap<PackageId, MaterializedPackage>,
-) -> Result<Vec<(PluginMountId, PluginMountId)>, KernelError> {
+) -> Result<Vec<(AgentModuleId, AgentModuleId)>, KernelError> {
     let mut edges = Vec::new();
     for package in packages.values() {
         for dependency in &package.manifest.package_dependencies {
@@ -1238,7 +1236,7 @@ fn materialize_role_providers(
     capabilities: &BTreeMap<CapabilityId, MaterializedCapability>,
     capability_roles: &BTreeMap<CapabilityId, ExecutionRoleId>,
 ) -> Result<
-    BTreeMap<(ExecutionRoleId, PluginMountId), MaterializedRoleProvider>,
+    BTreeMap<(ExecutionRoleId, AgentModuleId), MaterializedRoleProvider>,
     KernelError,
 > {
     let mut providers = BTreeMap::new();
@@ -1395,7 +1393,7 @@ fn role_implementation_matches(facade: &CapabilityManifest, implementation: &Cap
 fn build_service_dag(
     registrations: &[PluginRegistrationMetadata],
 ) -> Result<ServiceKeyDagPayload, KernelError> {
-    let mut providers = BTreeMap::<ServiceKeyId, (ServiceKeyRef, PackageRef, PluginMountId)>::new();
+    let mut providers = BTreeMap::<ServiceKeyId, (ServiceKeyRef, PackageRef, AgentModuleId)>::new();
     for registration in registrations {
         let manifest = &registration.manifest.payload;
         let package_ref = PackageRef {
@@ -1525,7 +1523,7 @@ fn build_service_dag(
 
 fn handle_identity(
     handle: &ServiceHandleDescriptor,
-) -> (ServiceKeyRef, PackageRef, PluginMountId) {
+) -> (ServiceKeyRef, PackageRef, AgentModuleId) {
     (
         handle.service.clone(),
         handle.provider_package.clone(),

@@ -126,7 +126,6 @@ pub(crate) async fn build(
     let wave3 = super::agent_wave3_host::registrations(
         Arc::clone(&services.creation_service),
         Arc::clone(&services.workshop_service),
-        Arc::clone(&services.plugin_runtime),
         Arc::clone(&services.model_invoke_service),
         services.database.pool().clone(),
         Arc::clone(&services.authoritative_user_id),

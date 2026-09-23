@@ -38,8 +38,5 @@
       "status": "active"
     }
   },
-  "admission": {
-    "release_state": "published_active",
-    "admitted": true
-  }
+  "publication_state": "active"
 }

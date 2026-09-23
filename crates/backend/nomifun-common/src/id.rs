@@ -198,13 +198,6 @@ define_entity_id!(
     SshHostId
 );
 define_entity_id!(
-    /// Globally unique plugin product identifier.
-    ///
-    /// Identifies an owner-scoped Plugin Product. It must stay unguessable at
-    /// API boundaries, which a bare UUIDv7 provides.
-    PluginProductId
-);
-define_entity_id!(
     /// Globally unique user identifier.
     UserId
 );

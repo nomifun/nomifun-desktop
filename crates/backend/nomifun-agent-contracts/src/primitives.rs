@@ -45,7 +45,6 @@ string_newtype!(ActionId);
 string_newtype!(AgentPresetId);
 string_newtype!(AgentSessionId);
 string_newtype!(ArtifactId);
-string_newtype!(CandidateTestReceiptId);
 string_newtype!(CapabilityId);
 string_newtype!(CanonicalErrorCode);
 string_newtype!(CanonicalSchemaRef);
@@ -62,25 +61,13 @@ string_newtype!(IdempotencyKey);
 string_newtype!(McpBindingId);
 string_newtype!(McpServerId);
 string_newtype!(McpToolKey);
-string_newtype!(PluginProductId);
-string_newtype!(PluginReleaseId);
+string_newtype!(PluginId);
+string_newtype!(PluginDraftId);
+string_newtype!(PluginMutationId);
 string_newtype!(ModelRouteId);
 string_newtype!(OperationId);
 string_newtype!(PackageId);
-string_newtype!(PluginCandidateId);
-string_newtype!(PluginBackupId);
-string_newtype!(PluginBridgeCallId);
-string_newtype!(PluginBridgeSessionId);
-string_newtype!(PluginDatabaseHandleId);
-string_newtype!(PluginFilesHandleId);
-string_newtype!(PluginKvHandleId);
-string_newtype!(PluginMigrationId);
-string_newtype!(PluginMountId);
-string_newtype!(PluginProjectId);
-string_newtype!(PluginServiceTestReceiptId);
-string_newtype!(PluginShareBundleId);
-string_newtype!(PluginSurfaceSessionId);
-string_newtype!(PluginUserAuthorizationId);
+string_newtype!(AgentModuleId);
 string_newtype!(ProjectionReducerId);
 string_newtype!(RemoteBindingId);
 string_newtype!(ResolvedSnapshotId);
@@ -169,8 +156,23 @@ pub struct LogicalArtifactRef {
 #[serde(rename_all = "snake_case")]
 pub enum ContributionSourceKind {
     PlatformBuiltin,
-    PluginMount,
-    #[serde(rename = "plugin_product_active_release")]
-    PluginProductActiveRelease,
+    AgentModule,
     McpBinding,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContributionSourceKind;
+
+    #[test]
+    fn agent_module_source_kind_has_one_canonical_wire_value() {
+        assert_eq!(
+            serde_json::to_value(ContributionSourceKind::AgentModule).unwrap(),
+            serde_json::json!("agent_module")
+        );
+        assert!(
+            serde_json::from_value::<ContributionSourceKind>(serde_json::json!("plugin_mount"))
+                .is_err()
+        );
+    }
 }

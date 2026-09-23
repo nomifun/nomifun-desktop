@@ -1068,7 +1068,7 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
 }
 
 #[tokio::test]
-async fn installation_token_is_limited_to_headless_product_control_planes() {
+async fn installation_token_is_limited_to_the_unified_plugin_control_plane() {
     let trust_secret = "headless-product-local-trust";
     let installation_token = "headless-product-installation-token";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
@@ -1076,11 +1076,7 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
         .instance_token_validator
         .set_token(nomifun_auth::token_sha256_hex(installation_token));
 
-    for path in [
-        "/api/javascript-runtime/status",
-        "/api/plugins",
-        "/api/plugins/runtimes",
-    ] {
+    for path in ["/api/plugins"] {
         let response = router
             .clone()
             .oneshot(
@@ -1103,7 +1099,7 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugins/projects")
+                .uri("/api/plugins/import")
                 .header(
                     "authorization",
                     format!("Bearer {installation_token}"),
@@ -1316,12 +1312,6 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
             "{module_id} must retain exact Action {action_id}"
         );
     }
-    assert!(
-        general_enabled
-            .iter()
-            .all(|item| item["capability"]["id"] != "plugin.development"),
-        "general conversations must not require a selected Plugin project"
-    );
     assert!(
         general["seed"]["required_resource_kinds"]
             .as_array()

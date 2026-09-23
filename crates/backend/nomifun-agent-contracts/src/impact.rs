@@ -2,7 +2,7 @@
 //! the current formal contribution catalog.
 //!
 //! Matching is deliberately source-exact. A contribution with the same public
-//! ID from another Mount, Plugin Product, MCP binding, or built-in source is reported
+//! ID from another Module installation, MCP binding, or built-in source is reported
 //! only as an ignored alternative and is never selected as a fallback.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     CanonicalErrorCode, ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
-    McpBindingId, PluginProductId, PluginMountId, StableSourceIdentity, digest_payload,
+    AgentModuleId, McpBindingId, StableSourceIdentity, digest_payload,
 };
 
 #[derive(
@@ -42,13 +42,6 @@ pub enum CurrentContributionLifecycle {
         code: CanonicalErrorCode,
         reason: String,
     },
-    /// The current formal entry was published by a different Active Release
-    /// of the same Plugin Product. Compatibility is still decided exclusively from
-    /// the frozen and current contract digests.
-    PluginProductActiveReleaseChanged {
-        release_id: String,
-        release_digest: DigestHex,
-    },
 }
 
 #[derive(
@@ -67,9 +60,7 @@ pub struct CurrentContribution {
     pub source_kind: ContributionSourceKind,
     pub source_identity: StableSourceIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mount_id: Option<PluginMountId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_product_id: Option<PluginProductId>,
+    pub mount_id: Option<AgentModuleId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<McpBindingId>,
     pub contribution_id: ContributionId,
@@ -83,7 +74,6 @@ impl CurrentContribution {
             source_kind: self.source_kind,
             source_identity: self.source_identity.clone(),
             mount_id: self.mount_id.clone(),
-            plugin_product_id: self.plugin_product_id.clone(),
             mcp_binding_id: self.mcp_binding_id.clone(),
             contribution_id: self.contribution_id.clone(),
             contract_digest: self.contract_digest.clone(),
@@ -108,25 +98,6 @@ impl CurrentContribution {
                 validate_non_empty(code.as_ref(), &self.contribution_id, "code")?;
                 validate_non_empty(reason, &self.contribution_id, "reason")?;
             }
-            CurrentContributionLifecycle::PluginProductActiveReleaseChanged {
-                release_id,
-                release_digest,
-            } => {
-                if self.source_kind != ContributionSourceKind::PluginProductActiveRelease {
-                    return Err(RevisionImpactError::InvalidCurrentContribution {
-                        contribution_id: self.contribution_id.clone(),
-                        reason:
-                            "plugin_product_active_release_changed requires a plugin_product_active_release source"
-                                .into(),
-                    });
-                }
-                validate_non_empty(release_id, &self.contribution_id, "release_id")?;
-                validate_digest(
-                    release_digest,
-                    &self.contribution_id,
-                    "release_digest",
-                )?;
-            }
         }
         Ok(())
     }
@@ -136,7 +107,6 @@ impl CurrentContribution {
             source_kind: self.source_kind,
             source_identity: self.source_identity.clone(),
             mount_id: self.mount_id.clone(),
-            plugin_product_id: self.plugin_product_id.clone(),
             mcp_binding_id: self.mcp_binding_id.clone(),
             contribution_id: self.contribution_id.clone(),
         }
@@ -159,10 +129,6 @@ pub enum ContributionLifecycleImpact {
         reason: String,
     },
     Uninstalled,
-    PluginProductActiveReleaseChanged {
-        release_id: String,
-        release_digest: DigestHex,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -231,8 +197,6 @@ pub struct RevisionImpactSummary {
     pub disabled: u32,
     pub uninstalled: u32,
     pub unavailable: u32,
-    pub active_release_change_compatible: u32,
-    pub active_release_change_breaking: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -360,18 +324,10 @@ fn compare_one(
                 reason: reason.clone(),
             }
         }
-        CurrentContributionLifecycle::PluginProductActiveReleaseChanged {
-            release_id,
-            release_digest,
-        } => ContributionLifecycleImpact::PluginProductActiveReleaseChanged {
-            release_id: release_id.clone(),
-            release_digest: release_digest.clone(),
-        },
     };
     let contract = if digest_matches {
         match current.lifecycle {
-            CurrentContributionLifecycle::Replaced { .. }
-            | CurrentContributionLifecycle::PluginProductActiveReleaseChanged { .. } => {
+            CurrentContributionLifecycle::Replaced { .. } => {
                 ContributionContractImpact::Compatible
             }
             _ => ContributionContractImpact::Exact,
@@ -386,7 +342,6 @@ fn compare_one(
         current.lifecycle,
         CurrentContributionLifecycle::Active
             | CurrentContributionLifecycle::Replaced { .. }
-            | CurrentContributionLifecycle::PluginProductActiveReleaseChanged { .. }
     );
     let new_use = if lifecycle_ready && digest_matches {
         RevisionUseReadiness::Ready
@@ -451,16 +406,6 @@ fn summarize(contributions: &[ContributionImpact]) -> RevisionImpactSummary {
             ContributionLifecycleImpact::Disabled { .. } => summary.disabled += 1,
             ContributionLifecycleImpact::Unavailable { .. } => summary.unavailable += 1,
             ContributionLifecycleImpact::Uninstalled => summary.uninstalled += 1,
-            ContributionLifecycleImpact::PluginProductActiveReleaseChanged { .. } => {
-                if impact.contract == ContributionContractImpact::Compatible {
-                    summary.active_release_change_compatible += 1;
-                } else if matches!(
-                    impact.contract,
-                    ContributionContractImpact::Breaking { .. }
-                ) {
-                    summary.active_release_change_breaking += 1;
-                }
-            }
         }
         if matches!(
             impact.contract,
@@ -476,8 +421,7 @@ fn summarize(contributions: &[ContributionImpact]) -> RevisionImpactSummary {
 struct ContributionSourceKey {
     source_kind: ContributionSourceKind,
     source_identity: StableSourceIdentity,
-    mount_id: Option<PluginMountId>,
-    plugin_product_id: Option<PluginProductId>,
+    mount_id: Option<AgentModuleId>,
     mcp_binding_id: Option<McpBindingId>,
     contribution_id: ContributionId,
 }
@@ -487,7 +431,6 @@ fn source_key_for_lock(lock: &ContributionLock) -> ContributionSourceKey {
         source_kind: lock.source_kind,
         source_identity: lock.source_identity.clone(),
         mount_id: lock.mount_id.clone(),
-        plugin_product_id: lock.plugin_product_id.clone(),
         mcp_binding_id: lock.mcp_binding_id.clone(),
         contribution_id: lock.contribution_id.clone(),
     }
@@ -560,10 +503,9 @@ mod tests {
 
     fn plugin_lock(mount: &str, contract: char) -> ContributionLock {
         ContributionLock {
-            source_kind: ContributionSourceKind::PluginMount,
+            source_kind: ContributionSourceKind::AgentModule,
             source_identity: StableSourceIdentity::from("plugin.example"),
-            mount_id: Some(PluginMountId::from(mount)),
-            plugin_product_id: None,
+            mount_id: Some(AgentModuleId::from(mount)),
             mcp_binding_id: None,
             contribution_id: ContributionId::from("capability:example.run"),
             contract_digest: digest(contract),
@@ -579,7 +521,6 @@ mod tests {
             source_kind: lock.source_kind,
             source_identity: lock.source_identity.clone(),
             mount_id: lock.mount_id.clone(),
-            plugin_product_id: lock.plugin_product_id.clone(),
             mcp_binding_id: lock.mcp_binding_id.clone(),
             contribution_id: lock.contribution_id.clone(),
             contract_digest: digest(contract),
@@ -670,40 +611,7 @@ mod tests {
     }
 
     #[test]
-    fn plugin_product_active_release_change_is_compatible_or_breaking_without_mutating_lock() {
-        let lock = ContributionLock {
-            source_kind: ContributionSourceKind::PluginProductActiveRelease,
-            source_identity: StableSourceIdentity::from("plugin.example"),
-            mount_id: None,
-            plugin_product_id: Some(PluginProductId::from("plugin-1")),
-            mcp_binding_id: None,
-            contribution_id: ContributionId::from("capability:plugin.run"),
-            contract_digest: digest('a'),
-        };
-        let original = lock.clone();
-        let lifecycle = CurrentContributionLifecycle::PluginProductActiveReleaseChanged {
-            release_id: "release-2".into(),
-            release_digest: digest('2'),
-        };
-        let compatible = compare_revision_contribution_locks(
-            std::slice::from_ref(&lock),
-            &[current_from_lock(&lock, 'a', lifecycle.clone())],
-        )
-        .expect("compatible active release");
-        assert_eq!(compatible.summary.active_release_change_compatible, 1);
-        assert_eq!(lock, original, "impact reads must not rewrite old Revision locks");
-
-        let breaking = compare_revision_contribution_locks(
-            std::slice::from_ref(&lock),
-            &[current_from_lock(&lock, 'b', lifecycle)],
-        )
-        .expect("breaking active release");
-        assert_eq!(breaking.summary.active_release_change_breaking, 1);
-        assert_eq!(breaking.summary.breaking_replace, 1);
-    }
-
-    #[test]
-    fn candidate_and_test_states_cannot_enter_the_formal_impact_catalog() {
+    fn retired_execution_states_cannot_enter_the_formal_impact_catalog() {
         for state in ["ready_candidate", "test_host", "project_source"] {
             let value = serde_json::json!({ "state": state });
             assert!(

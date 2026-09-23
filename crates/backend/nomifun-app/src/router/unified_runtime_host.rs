@@ -162,8 +162,6 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-ai-agent/src/nomi_resources.rs"),
                     include_str!("mcp_effect_receipts.rs"),
                     include_str!("hosted_effect_receipts.rs"),
-                    include_str!("engine_plugin_product_tools.rs"),
-                    include_str!("engine_plugin_middleware.rs"),
                     include_str!("engine_tool_discovery.rs"),
                     include_str!("engine_robot_tools.rs"),
                     include_str!("engine_browser_tools.rs"),
@@ -179,9 +177,12 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("nomi_core_robot.rs"),
                     include_str!("../../../nomifun-robot/src/tool_registry.rs"),
                     include_str!("../../../nomifun-robot/src/vision.rs"),
-                    include_str!("../../../nomifun-plugin-platform/src/runtime/m1_application.rs"),
+                    include_str!("../../../nomifun-plugin-platform/src/install.rs"),
+                    include_str!("../../../nomifun-plugin-platform/src/bindings.rs"),
+                    include_str!("../../../nomifun-plugin-platform/src/service_runtime.rs"),
+                    include_str!("../../../nomifun-plugin-platform/src/service_process.rs"),
                     include_str!("nomi_core_mcp_catalog.rs"),
-                    include_str!("plugin_platform.rs"),
+                    include_str!("plugin.rs"),
                     include_str!("state.rs"),
                     include_str!("../../../nomifun-mcp/src/service.rs"),
                     include_str!("../../../nomifun-mcp/src/identity.rs"),
@@ -220,6 +221,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_model_facts.rs"),
                     include_str!("engine_tool_host.rs"),
                     include_str!("engine_kernel_session.rs"),
+                    include_str!("engine_plugin_bindings.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_effect_scope.rs"),
                     include_str!("../../../nomifun-agent-session/src/store.rs"),
                     include_str!("engine_mcp_resources.rs"),
@@ -290,7 +292,7 @@ pub(crate) fn factory(
                     definition, capability_id: binding.capability_id.clone(), action_id: binding.action_id.clone(),
                 }
             }))?;
-            let full_plan = full_plan.merged(&resources.plugin_product_tool_plan().await?).map_err(error)?;
+            let full_plan = full_plan.merged(&resources.plugin_action_tool_plan().await?).map_err(error)?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
             if full_plan.len() > 128 { return Err(error("Nomi tool surface exceeds 128 actions")); }
             let skills = session_host.read_selected_skills(&admitted).await?;
@@ -543,6 +545,34 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.route_image_input,
         )
         .await?;
+        let plugin_turn_context = nomifun_ai_agent::context_contributor::TurnContext {
+            turn_id: operation.clone(),
+            source_message_id: root.to_owned(),
+            text: current_content
+                .iter()
+                .filter_map(|part| match part {
+                    ChatContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            image_media_types: current_content
+                .iter()
+                .filter_map(|part| match part {
+                    ChatContentPart::Image { media_type, .. } => Some(media_type.clone()),
+                    _ => None,
+                })
+                .collect(),
+            cs_dialogue_id: response
+                .extra
+                .get(nomifun_ai_agent::context_contributor::CS_DIALOGUE_HOST_CONTEXT_KEY)
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        };
+        let plugin_context = self
+            .resources
+            .plugin_context_for_turn(&plugin_turn_context, cancellation.clone())
+            .await?;
         // Supply a bounded canonical candidate window, not a model-context
         // strategy. The runtime owns selection and per-call budgets. Host limits
         // bound DB/resource consumption independently of the engine algorithm.
@@ -595,12 +625,15 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if let Some(context) = self.resources.hosted_effect_context().await? {
             instructions.push(context);
         }
+        if let Some(context) = plugin_context {
+            instructions.push(context);
+        }
         if !message.inject_skills.is_empty() {
             instructions.push(format!("For this accepted request, the user explicitly requested these already-selected Skills: {}", serde_json::to_string(&message.inject_skills).map_err(error)?));
         }
         let mut turn_plan = self
-            .full_plan
-            .for_active_capabilities(&capabilities.active);
+            .resources
+            .retain_active_tools(&self.full_plan, &capabilities.active)?;
         let automatic_creation_route =
             super::automatic_creation_route::classify(&message.content).filter(|route| {
                 turn_plan
@@ -937,7 +970,9 @@ mod build_identity_tests {
             "../../../nomifun-agent-domain-wave2/src/lib.rs",
             "../../../nomifun-ai-agent/src/plugin_tools.rs",
             "../../../nomifun-ai-agent/src/tool_discovery.rs",
-            "engine_plugin_middleware.rs",
+            "../../../nomifun-plugin-platform/src/bindings.rs",
+            "../../../nomifun-plugin-platform/src/service_runtime.rs",
+            "engine_plugin_bindings.rs",
             "engine_tool_discovery.rs",
             "../../../nomifun-agent-runtime/src/tool_discovery.rs",
             "../../../nomifun-mcp/src/identity.rs",

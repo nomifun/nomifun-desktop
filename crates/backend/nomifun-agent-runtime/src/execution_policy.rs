@@ -21,7 +21,6 @@ pub(crate) fn requires_task_ledger(binding: &AgentToolBinding) -> bool {
             | "workspace.artifacts"
             | "ssh"
             | "requirements"
-            | "plugin.development"
     )
 }
 

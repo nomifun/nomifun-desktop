@@ -40,7 +40,6 @@ const SESSION_BOUND_RESET_ORDER: &[&str] = &[
     "nomi_remote_sessions",
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
-    "plugin_surface_sessions",
     "creative_studio_agent_proposal_receipts",
     "creative_studio_agent_sessions",
     "creation_tasks",

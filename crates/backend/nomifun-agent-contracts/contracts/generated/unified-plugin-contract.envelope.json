@@ -1,0 +1,19 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "manifest_schema": "nomifun.plugin/v1",
+    "manifest_path": "nomifun.plugin.json",
+    "host_api_major": 1,
+    "action_identity": "plugin:<plugin_id>/<action_id>",
+    "binding_points": [
+      "agent.tool",
+      "agent.context",
+      "agent.before_model",
+      "agent.before_tool",
+      "desktop.command",
+      "desktop.event",
+      "automation.action"
+    ]
+  },
+  "payload_digest": "aed271dcd6570f0352d3657c657ecfbc21c4d53569c16d4a8e13443b050b3c25"
+}

@@ -890,7 +890,7 @@ impl RoleHostInvoker for ComputerRoleInvoker {
 mod tests {
     use super::*;
     use nomifun_agent_contracts::{
-        DigestHex, PackageId, PackageRef, PluginMountId, RoleContractKey, VersionString,
+        AgentModuleId, DigestHex, PackageId, PackageRef, RoleContractKey, VersionString,
     };
 
     #[cfg(feature = "computer-use")]
@@ -938,7 +938,7 @@ mod tests {
                 id: PackageId::from("test.package"),
                 version: VersionString::from("1.0.0"),
             },
-            mount_id: PluginMountId::from("test-mount"),
+            mount_id: AgentModuleId::from("test-mount"),
             contribution_digest: DigestHex::from("b".repeat(64)),
         }
     }

@@ -1,6 +1,6 @@
 use nomifun_agent_contracts::{
     ActionId, CapabilityId, CanonicalErrorCode, ContributionId, DigestHex, ExecutionRoleId,
-    McpServerId, McpToolKey, PackageId, PluginMountId, ResourceBindingId, ServiceKeyId, SkillId,
+    McpServerId, McpToolKey, PackageId, AgentModuleId, ResourceBindingId, ServiceKeyId, SkillId,
     VersionString,
 };
 use thiserror::Error;
@@ -48,23 +48,23 @@ pub enum KernelError {
         actual: VersionString,
     },
     #[error("plugin source kind is not enabled for mount {mount_id:?}")]
-    SourceNotAllowed { mount_id: PluginMountId },
+    SourceNotAllowed { mount_id: AgentModuleId },
     #[error("plugin registration for mount {mount_id:?} is invalid: {reason}")]
     InvalidRegistration {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         reason: String,
     },
     #[error("JSON schema for {subject} is invalid: {reason}")]
     InvalidJsonSchema { subject: String, reason: String },
     #[error("configuration for mount {mount_id:?} is invalid: {reason}")]
     InvalidPluginConfig {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         reason: String,
     },
     #[error("duplicate package id {package_id:?}")]
     DuplicatePackage { package_id: PackageId },
-    #[error("duplicate plugin mount id {mount_id:?}")]
-    DuplicateMount { mount_id: PluginMountId },
+    #[error("duplicate agent module id {mount_id:?}")]
+    DuplicateMount { mount_id: AgentModuleId },
     #[error("duplicate capability id {capability_id:?}")]
     DuplicateCapability { capability_id: CapabilityId },
     #[error("duplicate contribution id {contribution_id:?}")]
@@ -90,7 +90,7 @@ pub enum KernelError {
     #[error("execution-role provider {role_id:?} is unavailable on mount {mount_id:?}")]
     RoleProviderUnavailable {
         role_id: ExecutionRoleId,
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
     },
     #[error("execution-role member {capability_id:?} is not provided by {role_id:?}")]
     RoleProviderMemberUnavailable {
@@ -100,12 +100,12 @@ pub enum KernelError {
     #[error("duplicate role provider for {role_id:?} on mount {mount_id:?}")]
     DuplicateRoleProvider {
         role_id: ExecutionRoleId,
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
     },
     #[error("role provider for {role_id:?} on mount {mount_id:?} is invalid: {reason}")]
     InvalidRoleProvider {
         role_id: ExecutionRoleId,
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         reason: String,
     },
     #[error(
@@ -150,7 +150,7 @@ pub enum KernelError {
     DuplicateServiceProvider { service_id: ServiceKeyId },
     #[error("mount {mount_id:?} requires missing service {service_id:?}@{version:?}")]
     MissingService {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         service_id: ServiceKeyId,
         version: VersionString,
     },
@@ -158,7 +158,7 @@ pub enum KernelError {
         "mount {mount_id:?} requires service {service_id:?}@{required:?}, but provider has {actual:?}"
     )]
     ServiceVersionMismatch {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         service_id: ServiceKeyId,
         required: VersionString,
         actual: VersionString,
@@ -171,56 +171,56 @@ pub enum KernelError {
         "registration for mount {mount_id:?} did not export declared service {service_id:?}"
     )]
     MissingRuntimeServiceExport {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         service_id: ServiceKeyId,
     },
     #[error(
         "registration for mount {mount_id:?} exported undeclared service {service_id:?}"
     )]
     UndeclaredRuntimeServiceExport {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         service_id: ServiceKeyId,
     },
     #[error(
         "registration for mount {mount_id:?} has no handler for capability {capability_id:?}"
     )]
     MissingCapabilityHandler {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         capability_id: CapabilityId,
     },
     #[error(
         "registration for mount {mount_id:?} has an undeclared handler for {capability_id:?}"
     )]
     UndeclaredCapabilityHandler {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         capability_id: CapabilityId,
     },
     #[error(
         "registration for mount {mount_id:?} has no Context factory for capability {capability_id:?}"
     )]
     MissingCapabilityContextFactory {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         capability_id: CapabilityId,
     },
     #[error(
         "registration for mount {mount_id:?} exported an undeclared Context factory for {capability_id:?}"
     )]
     UndeclaredCapabilityContextFactory {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         capability_id: CapabilityId,
     },
     #[error(
         "registration for mount {mount_id:?} has no Resource factory for capability {capability_id:?}"
     )]
     MissingCapabilityResourceFactory {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         capability_id: CapabilityId,
     },
     #[error(
         "registration for mount {mount_id:?} exported an undeclared Resource factory for {capability_id:?}"
     )]
     UndeclaredCapabilityResourceFactory {
-        mount_id: PluginMountId,
+        mount_id: AgentModuleId,
         capability_id: CapabilityId,
     },
     #[error("preset revision is invalid: {reason}")]

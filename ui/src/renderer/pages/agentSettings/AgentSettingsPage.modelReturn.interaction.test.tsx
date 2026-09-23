@@ -11,7 +11,8 @@ import { NavigationHistoryProvider, useNavigationHistory } from '@/renderer/hook
 import { AGENT_SIDER_TOGGLE_EVENT } from '@/renderer/utils/workspace/agentSiderEvents';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
-import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
+import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
+import type { PluginDraftDetail } from '@/common/types/pluginPlatform';
 import { asAgentPresetId, asCapabilityId, asPackageId, asDigestHex, asResolvedSnapshotId, createEmptyAgentPresetDocument, type AgentPresetEditorResponse,
   type AgentPresetLibraryResponse, type CapabilityCatalogItem, type CapabilityModuleCatalogItem, type OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import * as roleDefaults from './AgentRoleDefaults';
@@ -40,7 +41,11 @@ const capabilityModule: CapabilityModuleCatalogItem = {
 };
 const presetId = asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000101');
 const revision = { preset_id: presetId, revision: 1, revision_digest: asDigestHex('b'.repeat(64)) };
-afterEach(() => { cleanup(); mock.restore(); });
+afterEach(() => {
+  delete (window as typeof window & { __backendPort?: number }).__backendPort;
+  cleanup();
+  mock.restore();
+});
 
 async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, initialEditor?: AgentPresetEditorResponse) {
   spyOn(roleDefaults, 'default').mockImplementation(() => <div>Default roles</div>);
@@ -71,8 +76,8 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
     <button onClick={history.back}>Back to editing</button><button onClick={() => navigate('/agent?template=coding.codex')}>Other template</button>
   </div>; };
   const Author = () => { const navigate = useNavigate(), history = useNavigationHistory()!; return <div><h1>Check authoring</h1>
-    <button onClick={history.back}>Back to Agent</button><button onClick={() => navigate('/plugins/run/check?saved=1')}>Publish destination</button></div>; };
-  const Published = () => { const history = useNavigationHistory()!; return <div><h1>Published check</h1><button onClick={history.back}>Back to author</button></div>; };
+    <button onClick={history.back}>Back to Agent</button><button onClick={() => navigate('/plugins/run/check?saved=1')}>Saved destination</button></div>; };
+  const Saved = () => { const history = useNavigationHistory()!; return <div><h1>Saved check</h1><button onClick={history.back}>Back to author</button></div>; };
   const HistoryControls = () => { const history = useNavigationHistory()!; return <button disabled={!history.canForward} onClick={history.forward}>App forward</button>; };
   const PresetCacheProbe = () => {
     const { presets } = useAgentPresets();
@@ -81,7 +86,7 @@ async function mount(error: unknown = { code: 'MODEL_ROUTE_NOT_CONFIGURED' }, in
   const view = render(<I18nextProvider i18n={i18n}><SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false,
     fallback: { providers: [] } }}><PresetCacheProbe /><MemoryRouter initialEntries={[initialEditor ? `/agent?preset=${presetId}` : '/agent?template=chat.minimal']}>
     <NavigationHistoryProvider><Probe /><HistoryControls /><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='/models' element={<Models />} />
-      <Route path='/plugins/create/:id' element={<Author />} /><Route path='/plugins/run/:id' element={<Published />} /></Routes></NavigationHistoryProvider>
+      <Route path='/plugins/create/:id' element={<Author />} /><Route path='/plugins/run/:id' element={<Saved />} /></Routes></NavigationHistoryProvider>
   </MemoryRouter></SWRConfig></I18nextProvider>);
   if (initialEditor) await view.findByRole('heading', { name: initialEditor.preset.display_name });
   else await view.findByRole('heading', { name: en.template.chat.minimal.name });
@@ -211,12 +216,13 @@ test('return snapshots exclude model configuration and cannot cross a changed te
 });
 
 test('creating a before-tool draft returns to the same unsaved Agent edits without saving or sending', async () => {
+  (window as typeof window & { __backendPort?: number }).__backendPort = 11451;
   const document = createEmptyAgentPresetDocument();
   const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
     current_stable_revision: revision }, draft: { preset_id: presetId, display_name: 'Saved Agent', document, current_revision: revision },
     revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
-  let finish!: (draft: PluginRuntimeDraft) => void;
-  const createCheck = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  let finish!: (draft: PluginDraftDetail) => void;
+  const createCheck = spyOn(pluginPlatform.drafts.create, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   const v = await mount(undefined, original);
   fireEvent.click(v.getByRole('switch', { name: 'Enable Business check' }));
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
@@ -224,10 +230,10 @@ test('creating a before-tool draft returns to the same unsaved Agent edits witho
   await v.findByRole('heading', { name: 'Unsaved Agent' });
   fireEvent.click(v.getByRole('tab', { name: en.workbench.skillsTab }));
   fireEvent.click(v.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
-  await act(async () => { finish({ id: 'check-draft' } as PluginRuntimeDraft); });
+  await act(async () => { finish({ summary: { draft_id: 'check-draft' } } as PluginDraftDetail); });
   await v.findByRole('heading', { name: 'Check authoring' });
-  fireEvent.click(v.getByRole('button', { name: 'Publish destination' }));
-  await v.findByRole('heading', { name: 'Published check' });
+  fireEvent.click(v.getByRole('button', { name: 'Saved destination' }));
+  await v.findByRole('heading', { name: 'Saved check' });
   fireEvent.click(v.getByRole('button', { name: 'Back to author' }));
   await v.findByRole('heading', { name: 'Check authoring' });
   fireEvent.click(v.getByRole('button', { name: 'Back to Agent' }));
@@ -247,11 +253,12 @@ test('creating a before-tool draft returns to the same unsaved Agent edits witho
 });
 
 test('a changed saved revision cannot receive an older navigation snapshot', async () => {
+  (window as typeof window & { __backendPort?: number }).__backendPort = 11451;
   const document = createEmptyAgentPresetDocument();
   const original: AgentPresetEditorResponse = { preset: { preset_id: presetId, source: 'user', display_name: 'Saved Agent', bound_target_count: 0,
     current_stable_revision: revision }, draft: { preset_id: presetId, display_name: 'Saved Agent', document, current_revision: revision },
     revision: { reference: revision, document, created_by: 'owner', created_at_ms: 1 } };
-  spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockResolvedValue({ id: 'check-draft' } as PluginRuntimeDraft);
+  spyOn(pluginPlatform.drafts.create, 'invoke').mockResolvedValue({ summary: { draft_id: 'check-draft' } } as PluginDraftDetail);
   const v = await mount(undefined, original);
   fireEvent.click(v.getByRole('tab', { name: en.workbench.settingsTab }));
   fireEvent.change(v.getByRole('textbox', { name: en.fields.name }), { target: { value: 'Old unsaved name' } });

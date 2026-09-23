@@ -26,9 +26,7 @@ grouped_tests!(
 #[test]
 fn every_top_level_integration_test_is_registered() {
     use std::collections::BTreeSet;
-    use std::path::Path;
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest: toml::Value = toml::from_str(include_str!("../../Cargo.toml"))
         .expect("nomifun-app Cargo.toml must be valid TOML");
     let mut registered = manifest
@@ -42,20 +40,6 @@ fn every_top_level_integration_test_is_registered() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     registered.extend(GROUPED_TEST_FILES.iter().map(|file| (*file).to_owned()));
-    // Source-integrated plugin cases run inside these explicitly registered
-    // product targets; they are not independent Cargo test executables.
-    for (parent, child) in [
-        ("plugin_product_discovery.rs", "plugin_product_before_model.rs"),
-        ("plugin_product_discovery.rs", "plugin_product_before_tool.rs"),
-        ("plugin_product_discovery.rs", "plugin_product_service.rs"),
-        ("plugin_ui_sessions.rs", "plugin_ui_admission.rs"),
-    ] {
-        assert!(registered.contains(parent), "missing parent target: {parent}");
-        let source = std::fs::read_to_string(manifest_dir.join("tests").join(parent)).unwrap();
-        assert!(source.contains(&format!(r#"#[path = "{child}"]"#)), "missing child module: {child}");
-        registered.insert(child.to_owned());
-    }
-
     let actual = std::fs::read_dir(manifest_dir.join("tests"))
         .expect("tests directory must be readable")
         .filter_map(Result::ok)

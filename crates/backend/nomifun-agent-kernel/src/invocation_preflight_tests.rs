@@ -96,12 +96,12 @@ async fn role_preflight_does_not_acquire_resources() {
     }];
     revision.payload.skill_bindings.clear();
     let provider = materialized.role_provider(
-        &ExecutionRoleId::from(SAMPLE_ROLE), &PluginMountId::from(SAMPLE_MOUNT),
+        &ExecutionRoleId::from(SAMPLE_ROLE), &AgentModuleId::from(SAMPLE_MOUNT),
     ).unwrap();
     revision.payload.system_role_provider_overrides.insert(
         ExecutionRoleId::from(SAMPLE_ROLE), nomifun_agent_contracts::RoleProviderSelection {
             role: provider.provider.role.clone(),
-            provider_mount_id: PluginMountId::from(SAMPLE_MOUNT),
+            provider_mount_id: AgentModuleId::from(SAMPLE_MOUNT),
         },
     );
     revision.reference.revision_digest = revision.revision_digest().unwrap();

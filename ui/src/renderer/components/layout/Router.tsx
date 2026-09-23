@@ -12,11 +12,10 @@ const AgentSessionPage = React.lazy(() => import('@renderer/pages/agentSession/A
 const SkillsSettingsPage = React.lazy(() => import('@renderer/pages/settings/SkillsSettingsPage'));
 const ModelHubPage = React.lazy(() => import('@renderer/pages/modelHub'));
 const McpPage = React.lazy(() => import('@renderer/pages/mcp'));
-const PluginWorkbenchPage = React.lazy(() => import('@renderer/pages/plugins'));
+const PluginLibraryPage = React.lazy(() => import('@renderer/pages/plugins'));
 const OpenCapabilitiesPage = React.lazy(() => import('@renderer/pages/openCapabilities'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/ExecutionEngines'));
-const JavaScriptRuntimeSettings = React.lazy(() => import('@renderer/pages/settings/JavaScriptRuntimeSettings'));
 const SshHostSettings = React.lazy(() => import('@renderer/pages/settings/SshHostSettings'));
 const LoginPage = React.lazy(() => import('@renderer/pages/login'));
 const ComponentsShowcase = React.lazy(() => import('@renderer/pages/TestShowcase'));
@@ -80,8 +79,8 @@ const CreativeStudioPromptsRoute = React.lazy(loadCreativeStudioPromptsRoute);
 const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
-const PluginRuntimeRunnerPage = React.lazy(() => import('@renderer/pages/plugins/runtime/PluginRuntimeRunPage'));
-const PluginRuntimeCreatorPage = React.lazy(() => import('@renderer/pages/plugins/runtime/PluginRuntimeCreatorPage'));
+const PluginRunPage = React.lazy(() => import('@renderer/pages/plugins/PluginRunPage'));
+const PluginCreatorPage = React.lazy(() => import('@renderer/pages/plugins/PluginCreatorPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -169,7 +168,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
-            <Route path='/plugins' element={withRouteFallback(PluginWorkbenchPage)} />
+            <Route path='/plugins' element={withRouteFallback(PluginLibraryPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
             <Route path='/skills' element={withRouteFallback(SkillsSettingsPage)} />
             {/* Session section — the secondary sidebar (ContentSider) persists across these routes */}
@@ -188,7 +187,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/webui' element={<Navigate to='/open-capabilities' replace />} />
             <Route path='/settings/system' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/execution-engines' element={withRouteFallback(ExecutionEngineSettings)} />
-            <Route path='/settings/javascript-runtime' element={withRouteFallback(JavaScriptRuntimeSettings)} />
             <Route path='/settings/ssh-hosts' element={withRouteFallback(SshHostSettings)} />
             <Route path='/settings/permissions' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/computer-use' element={<Navigate to='/settings/permissions?tab=computer-use' replace />} />
@@ -219,10 +217,10 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/customer-service/:cs_agent_id' element={withRouteFallback(CustomerServiceDetailPage)} />
             <Route path='/knowledge' element={withRouteFallback(KnowledgeListPage)} />
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
-            {/* 插件 (Plugins) — the solidified library and its full-page runner. */}
-            <Route path='/plugins/new' element={withRouteFallback(PluginRuntimeCreatorPage)} />
-            <Route path='/plugins/create/:draftId' element={withRouteFallback(PluginRuntimeCreatorPage)} />
-            <Route path='/plugins/run/:id' element={withRouteFallback(PluginRuntimeRunnerPage)} />
+            {/* One Plugin library, creator, and App/detail surface. */}
+            <Route path='/plugins/new' element={withRouteFallback(PluginCreatorPage)} />
+            <Route path='/plugins/create/:draftId' element={withRouteFallback(PluginCreatorPage)} />
+            <Route path='/plugins/run/:id' element={withRouteFallback(PluginRunPage)} />
           </Route>
         </Route>
         <Route path='*' element={<Navigate to={status === 'authenticated' ? '/guid' : '/login'} replace />} />

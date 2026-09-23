@@ -66,7 +66,6 @@ fn current_contributions_from_catalog(
             source_kind: entry.provenance.source_kind,
             source_identity: entry.provenance.source_identity.clone(),
             mount_id: entry.provenance.mount_id.clone(),
-            plugin_product_id: entry.provenance.plugin_product_id.clone(),
             mcp_binding_id: entry.provenance.mcp_binding_id.clone(),
             contribution_id: entry.contribution_id.clone(),
             contract_digest: entry.contract_digest.clone(),
@@ -87,7 +86,6 @@ fn current_contributions_from_catalog(
             source_kind: skill.contribution_lock.source_kind,
             source_identity: skill.contribution_lock.source_identity.clone(),
             mount_id: skill.contribution_lock.mount_id.clone(),
-            plugin_product_id: skill.contribution_lock.plugin_product_id.clone(),
             mcp_binding_id: skill.contribution_lock.mcp_binding_id.clone(),
             contribution_id: skill.contribution_id.clone(),
             contract_digest: skill.contract_digest.clone(),
@@ -151,11 +149,11 @@ mod tests {
         CapabilityCatalogMaterializer, CapabilityConsumer,
         CapabilityContributions, CapabilityId, CapabilityKind,
         CapabilityManifest, CapabilityOwner, CapabilityProvenance,
-        CapabilityReleaseState, ContributionId, ContributionLock,
+        CapabilityPublicationState, ContributionId, ContributionLock,
         ContributionSourceKind, DigestHex, LocalizedMetadata,
         LogicalArtifactRef, McpBindingId, McpServerId,
         McpToolCapabilityMapping, McpToolKey, PackageId, PackageRef,
-        PluginMountId, PluginSourceKind, PluginSourceMetadata,
+        AgentModuleId, PluginSourceKind, PluginSourceMetadata,
         SkillDefinition, SkillId, StableSourceIdentity, StrictJsonValue,
         VersionString, capability_surface_declarations, digest_payload,
     };
@@ -182,7 +180,7 @@ mod tests {
     #[test]
     fn default_adapter_preserves_managed_skill_and_mcp_backed_provenance() {
         let package = package();
-        let mount_id = PluginMountId::from("mount-exact");
+        let mount_id = AgentModuleId::from("mount-exact");
         let artifact_digest = digest('c');
         let source = PluginSourceMetadata {
             source_kind: PluginSourceKind::ManagedLocal,
@@ -219,7 +217,6 @@ mod tests {
                 "mcp:server.example",
             ),
             mount_id: Some(mount_id.clone()),
-            plugin_product_id: None,
             mcp_binding_id: Some(binding_id.clone()),
             contribution_id: capability.contribution_id.clone(),
             contract_digest: capability_digest.clone(),
@@ -243,11 +240,10 @@ mod tests {
                     source_kind: capability_lock.source_kind,
                     source_identity: capability_lock.source_identity.clone(),
                     mount_id: capability_lock.mount_id.clone(),
-                    plugin_product_id: None,
                     mcp_binding_id: Some(binding_id.clone()),
                     artifact_digest: Some(artifact_digest.clone()),
                 },
-                release_state: CapabilityReleaseState::PublishedActive,
+                publication_state: CapabilityPublicationState::Active,
                 availability: BTreeMap::from([(
                     CapabilityConsumer::Agent,
                     CatalogAvailability::Unavailable {
@@ -283,12 +279,11 @@ mod tests {
             contribution_id: skill_contribution_id.clone(),
             contract_digest: skill_digest.clone(),
             contribution_lock: ContributionLock {
-                source_kind: ContributionSourceKind::PluginMount,
+                source_kind: ContributionSourceKind::AgentModule,
                 source_identity: StableSourceIdentity::from(
                     source.source_identity.clone(),
                 ),
                 mount_id: Some(mount_id.clone()),
-                plugin_product_id: None,
                 mcp_binding_id: None,
                 contribution_id: skill_contribution_id,
                 contract_digest: skill_digest,
@@ -321,7 +316,6 @@ mod tests {
                 formal_capability.capability.clone(),
                 formal_capability,
             )]),
-            plugin_product_publications: BTreeMap::new(),
             skills: vec![materialized_skill],
             mcp_tools: vec![materialized_mcp],
             unavailable_capabilities: BTreeMap::from([(
@@ -354,17 +348,16 @@ mod tests {
             .iter()
             .find(|item| item.contribution_id.as_ref() == "skill:example.skill")
             .unwrap();
-        assert_eq!(skill.source_kind, ContributionSourceKind::PluginMount);
+        assert_eq!(skill.source_kind, ContributionSourceKind::AgentModule);
         assert_eq!(skill.mount_id.as_ref(), Some(&mount_id));
     }
 
     #[test]
     fn contract_impact_projects_to_the_public_typed_dto() {
         let lock = ContributionLock {
-            source_kind: ContributionSourceKind::PluginMount,
+            source_kind: ContributionSourceKind::AgentModule,
             source_identity: StableSourceIdentity::from("plugin.example"),
-            mount_id: Some(PluginMountId::from("mount-1")),
-            plugin_product_id: None,
+            mount_id: Some(AgentModuleId::from("mount-1")),
             mcp_binding_id: None,
             contribution_id: ContributionId::from("capability:example.run"),
             contract_digest: digest('a'),
@@ -373,7 +366,6 @@ mod tests {
             source_kind: lock.source_kind,
             source_identity: lock.source_identity.clone(),
             mount_id: lock.mount_id.clone(),
-            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id: lock.contribution_id.clone(),
             contract_digest: digest('a'),

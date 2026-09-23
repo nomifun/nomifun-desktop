@@ -96,7 +96,6 @@
   cursor: pointer;
 }
 .statusFilters button[aria-pressed='true'] { background: var(--capability-card-surface); color: var(--color-text-1); box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-.sourceChip { min-height: 28px; padding: 0 9px; border: 1px solid rgba(var(--primary-6), .28); border-radius: 7px; background: rgba(var(--primary-6), .09); color: rgb(var(--primary-7)); font-size: 12px; cursor: pointer; }
 
 .catalogLayout {
   display: grid;

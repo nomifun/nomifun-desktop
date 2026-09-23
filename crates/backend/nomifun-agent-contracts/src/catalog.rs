@@ -17,9 +17,8 @@ use crate::package::{
 };
 use crate::{
     ArtifactEnvelope, CapabilityRef, ContributionId, ContributionLock,
-    ContributionSourceKind, DigestHex, McpBindingId, PluginProductId, PluginReleaseRef,
-    PluginMountId, ResourceKind, RuntimeFeatureId, StableSourceIdentity,
-    UserId,
+    AgentModuleId, ContributionSourceKind, DigestHex, McpBindingId,
+    ResourceKind, RuntimeFeatureId, StableSourceIdentity,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -36,9 +35,7 @@ pub struct CapabilityProvenance {
     pub source_kind: ContributionSourceKind,
     pub source_identity: StableSourceIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mount_id: Option<PluginMountId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_product_id: Option<PluginProductId>,
+    pub mount_id: Option<AgentModuleId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<McpBindingId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,19 +64,14 @@ impl CapabilityProvenance {
         let valid_source_identity = match self.source_kind {
             ContributionSourceKind::PlatformBuiltin => {
                 self.mount_id.is_none()
-                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
             }
-            ContributionSourceKind::PluginMount => {
+            ContributionSourceKind::AgentModule => {
                 self.mount_id.is_some()
-                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
-            }
-            ContributionSourceKind::PluginProductActiveRelease => {
-                self.plugin_product_id.is_some() && self.mcp_binding_id.is_none()
             }
             ContributionSourceKind::McpBinding => {
-                self.mcp_binding_id.is_some() && self.plugin_product_id.is_none()
+                self.mcp_binding_id.is_some()
             }
         };
         if !valid_source_identity {
@@ -131,93 +123,9 @@ impl CatalogAvailability {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case")]
-pub enum CapabilityReleaseState {
-    #[serde(rename = "published_active")]
-    PublishedActive,
-    ReadyCandidate,
-    UnpublishedRelease,
-    UnstartedService,
-    ProjectSource,
-    TestHost,
-}
-
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    JsonSchema,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum CapabilityAdmissionRejection {
-    ReadyCandidate,
-    UnpublishedRelease,
-    UnstartedService,
-    ProjectSource,
-    TestHost,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CapabilityCatalogAdmission {
-    pub release_state: CapabilityReleaseState,
-    pub admitted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rejection: Option<CapabilityAdmissionRejection>,
-}
-
-impl CapabilityCatalogAdmission {
-    pub fn for_release(release_state: CapabilityReleaseState) -> Self {
-        let rejection = match release_state {
-            CapabilityReleaseState::PublishedActive => None,
-            CapabilityReleaseState::ReadyCandidate => {
-                Some(CapabilityAdmissionRejection::ReadyCandidate)
-            }
-            CapabilityReleaseState::UnpublishedRelease => {
-                Some(CapabilityAdmissionRejection::UnpublishedRelease)
-            }
-            CapabilityReleaseState::UnstartedService => {
-                Some(CapabilityAdmissionRejection::UnstartedService)
-            }
-            CapabilityReleaseState::ProjectSource => {
-                Some(CapabilityAdmissionRejection::ProjectSource)
-            }
-            CapabilityReleaseState::TestHost => Some(CapabilityAdmissionRejection::TestHost),
-        };
-        Self {
-            release_state,
-            admitted: rejection.is_none(),
-            rejection,
-        }
-    }
-
-    pub fn admit(
-        release_state: CapabilityReleaseState,
-    ) -> Result<Self, CapabilityCatalogContractError> {
-        let admission = Self::for_release(release_state);
-        if admission.admitted {
-            Ok(admission)
-        } else {
-            Err(CapabilityCatalogContractError::CandidateRejected { release_state })
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
-        let expected = Self::for_release(self.release_state);
-        if self.admitted != expected.admitted || self.rejection != expected.rejection {
-            return Err(CapabilityCatalogContractError::InvalidField {
-                field: "admission",
-                reason: "admitted and rejection do not match release_state".into(),
-            });
-        }
-        Ok(())
-    }
+pub enum CapabilityPublicationState {
+    Active,
+    TestOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -238,7 +146,7 @@ pub struct CapabilityCatalogEntry {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub typed_resource_kinds: BTreeSet<ResourceKind>,
     pub availability: BTreeMap<CapabilityConsumer, CatalogAvailability>,
-    pub admission: CapabilityCatalogAdmission,
+    pub publication_state: CapabilityPublicationState,
 }
 
 pub type CapabilityCatalogEntryArtifact = ArtifactEnvelope<CapabilityCatalogEntry>;
@@ -248,7 +156,7 @@ pub type CapabilityCatalogEntryArtifact = ArtifactEnvelope<CapabilityCatalogEntr
 ///
 /// This is a value type rather than a second registry. The manifest remains
 /// the executable contract while the entry carries provenance, consumer
-/// availability, and release admission facts.
+/// availability, and publication-state facts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityCatalogPublication {
@@ -301,168 +209,15 @@ impl CapabilityCatalogPublication {
     }
 }
 
-/// The complete shared-Catalog publication for one enabled Plugin Product
-/// Active Release. It is swapped as one value so consumers cannot observe a
-/// mixture of two Release identities.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PluginProductCapabilityCatalogPublication {
-    pub plugin_product_id: PluginProductId,
-    pub active_release: PluginReleaseRef,
-    pub active_release_epoch: u64,
-    pub catalog_digest: DigestHex,
-    pub capabilities: Vec<CapabilityCatalogPublication>,
-}
-
-#[derive(Serialize)]
-struct PluginProductCapabilityCatalogDigestInput<'a> {
-    plugin_product_id: &'a PluginProductId,
-    active_release: &'a PluginReleaseRef,
-    capabilities: &'a [CapabilityCatalogPublication],
-}
-
-impl PluginProductCapabilityCatalogPublication {
-    pub fn computed_catalog_digest(
-        &self,
-    ) -> Result<DigestHex, CapabilityCatalogContractError> {
-        let mut capabilities = self.capabilities.clone();
-        capabilities.sort_by(|left, right| {
-            left.entry
-                .capability
-                .cmp(&right.entry.capability)
-                .then_with(|| left.entry.contribution_id.cmp(&right.entry.contribution_id))
-        });
-        digest_payload(&PluginProductCapabilityCatalogDigestInput {
-            plugin_product_id: &self.plugin_product_id,
-            active_release: &self.active_release,
-            capabilities: &capabilities,
-        })
-        .map_err(|error| CapabilityCatalogContractError::InvalidField {
-            field: "catalog_digest",
-            reason: error.to_string(),
-        })
-    }
-
-    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
-        validate_non_empty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
-        self.active_release
-            .validate()
-            .map_err(|error| CapabilityCatalogContractError::InvalidField {
-                field: "active_release",
-                reason: error.to_string(),
-            })?;
-        if self.active_release_epoch == 0 {
-            return Err(CapabilityCatalogContractError::InvalidField {
-                field: "active_release_epoch",
-                reason: "must be greater than zero".into(),
-            });
-        }
-        validate_digest(&self.catalog_digest, "catalog_digest")?;
-
-        let mut references = BTreeSet::new();
-        let mut contribution_ids = BTreeSet::new();
-        for publication in &self.capabilities {
-            publication.validate()?;
-            let entry = &publication.entry;
-            if entry.provenance.source_kind
-                != ContributionSourceKind::PluginProductActiveRelease
-                || entry.provenance.plugin_product_id.as_ref() != Some(&self.plugin_product_id)
-                || entry.provenance.mount_id.is_some()
-                || entry.provenance.mcp_binding_id.is_some()
-                || entry.provenance.artifact_digest.as_ref()
-                    != Some(&self.active_release.release_digest)
-                || entry.admission.release_state != CapabilityReleaseState::PublishedActive
-            {
-                return Err(CapabilityCatalogContractError::InvalidField {
-                    field: "capabilities.provenance",
-                        reason: "Plugin Product publication must bind the exact Active Release"
-                            .into(),
-                });
-            }
-            if !references.insert(entry.capability.clone()) {
-                return Err(CapabilityCatalogContractError::DuplicateCapability {
-                    capability: entry.capability.clone(),
-                });
-            }
-            if !contribution_ids.insert(entry.contribution_id.clone()) {
-                return Err(CapabilityCatalogContractError::DuplicateContribution {
-                    contribution_id: entry.contribution_id.clone(),
-                });
-            }
-        }
-        let expected_catalog_digest = self.computed_catalog_digest()?;
-        if self.catalog_digest != expected_catalog_digest {
-            return Err(CapabilityCatalogContractError::InvalidField {
-                field: "catalog_digest",
-                reason: "does not match the canonical Plugin Product publication".into(),
-            });
-        }
-        Ok(())
-    }
-}
-
-/// A versioned read-side update for one owner-scoped Plugin Product publication.
-///
-/// `publication = None` is a tombstone. Tombstones are retained by the
-/// in-process store so a late post-commit callback cannot resurrect an older
-/// Active Release after Disable, Trash, or Delete.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PluginProductCapabilityCatalogPublicationUpdate {
-    pub owner_user_id: UserId,
-    pub plugin_product_id: PluginProductId,
-    pub product_revision: u64,
-    pub pointer_revision: u64,
-    pub active_release_epoch: u64,
-    pub publication: Option<PluginProductCapabilityCatalogPublication>,
-}
-
-impl PluginProductCapabilityCatalogPublicationUpdate {
-    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
-        validate_non_empty(self.owner_user_id.as_ref(), "owner_user_id")?;
-        validate_non_empty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
-        if self.product_revision == 0 || self.pointer_revision == 0 {
-            return Err(CapabilityCatalogContractError::InvalidField {
-                field: "publication_version",
-                reason: "product_revision and pointer_revision must be greater than zero"
-                    .into(),
-            });
-        }
-        if let Some(publication) = &self.publication {
-            if publication.plugin_product_id != self.plugin_product_id
-                || publication.active_release_epoch != self.active_release_epoch
-            {
-                return Err(CapabilityCatalogContractError::InvalidField {
-                    field: "publication",
-                    reason: "publication identity does not match its versioned update"
-                        .into(),
-                });
-            }
-            publication.validate()?;
-        }
-        Ok(())
-    }
-}
-
-/// Synchronous update port used by the Plugin Product application service to
-/// publish its durable Active Release into the platform's shared Catalog.
-pub trait PluginProductCapabilityCatalogSink: Send + Sync {
-    fn replace_plugin_product_publication(
-        &self,
-        update: PluginProductCapabilityCatalogPublicationUpdate,
-    ) -> Result<(), String>;
-}
-
 impl CapabilityCatalogEntry {
     pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
         validate_non_empty(self.capability.id.as_ref(), "capability.id")?;
         validate_digest(&self.contract_digest, "contract_digest")?;
         validate_non_empty(self.contribution_id.as_ref(), "contribution_id")?;
         self.provenance.validate()?;
-        self.admission.validate()?;
-        if !self.admission.admitted {
-            return Err(CapabilityCatalogContractError::CandidateRejected {
-                release_state: self.admission.release_state,
+        if self.publication_state != CapabilityPublicationState::Active {
+            return Err(CapabilityCatalogContractError::InactiveCapability {
+                publication_state: self.publication_state,
             });
         }
         if self.supported_consumers.is_empty() {
@@ -568,7 +323,6 @@ impl CapabilityCatalogEntry {
                 source_kind: self.provenance.source_kind,
                 source_identity: self.provenance.source_identity.clone(),
                 mount_id: self.provenance.mount_id.clone(),
-                plugin_product_id: self.provenance.plugin_product_id.clone(),
                 mcp_binding_id: self.provenance.mcp_binding_id.clone(),
                 contribution_id: self.contribution_id.clone(),
                 contract_digest: self.contract_digest.clone(),
@@ -581,14 +335,14 @@ impl CapabilityCatalogEntry {
 /// One admitted publication input for the shared Catalog materializer.
 ///
 /// The Capability execution manifest owns host surfaces. Supported consumers,
-/// release admission, provenance, and per-consumer availability are publication
+/// publication state, provenance, and per-consumer availability are publication
 /// facts and therefore stay in this separate typed envelope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityCatalogMaterialization {
     pub manifest: CapabilityManifest,
     pub provenance: CapabilityProvenance,
-    pub release_state: CapabilityReleaseState,
+    pub publication_state: CapabilityPublicationState,
     pub availability: BTreeMap<CapabilityConsumer, CatalogAvailability>,
 }
 
@@ -598,7 +352,11 @@ impl CapabilityCatalogMaterializer {
     pub fn materialize(
         input: CapabilityCatalogMaterialization,
     ) -> Result<CapabilityCatalogEntry, CapabilityCatalogContractError> {
-        let admission = CapabilityCatalogAdmission::admit(input.release_state)?;
+        if input.publication_state != CapabilityPublicationState::Active {
+            return Err(CapabilityCatalogContractError::InactiveCapability {
+                publication_state: input.publication_state,
+            });
+        }
         let supported_consumers = input
             .manifest
             .supported_consumers()
@@ -655,7 +413,7 @@ impl CapabilityCatalogMaterializer {
                 .collect(),
             typed_resource_kinds: input.manifest.contributions.resource_kinds.clone(),
             availability: input.availability,
-            admission,
+            publication_state: input.publication_state,
         };
         entry.validate()?;
         Ok(entry)
@@ -874,8 +632,10 @@ pub enum CapabilityCatalogContractError {
     },
     #[error("catalog availability keys must exactly match supported_consumers")]
     AvailabilityCoverage,
-    #[error("release state {release_state:?} cannot enter the formal Capability Catalog")]
-    CandidateRejected { release_state: CapabilityReleaseState },
+    #[error("capability state {publication_state:?} cannot enter the formal Capability Catalog")]
+    InactiveCapability {
+        publication_state: CapabilityPublicationState,
+    },
     #[error("capability {capability:?} is duplicated in the formal Capability Catalog")]
     DuplicateCapability { capability: CapabilityRef },
     #[error("contribution {contribution_id:?} is duplicated in the formal Capability Catalog")]
@@ -892,7 +652,7 @@ mod tests {
     }
 
     #[test]
-    fn catalog_fixture_is_a_published_typed_entry() {
+    fn catalog_fixture_is_an_active_typed_entry() {
         let entry = fixture();
         entry.validate().expect("catalog fixture");
         assert!(entry.supports_consumer(CapabilityConsumer::Agent));
@@ -962,25 +722,42 @@ mod tests {
     }
 
     #[test]
-    fn catalog_rejects_candidate_and_unpublished_release_admission() {
-        for release_state in [
-            CapabilityReleaseState::ReadyCandidate,
-            CapabilityReleaseState::UnpublishedRelease,
-            CapabilityReleaseState::UnstartedService,
-            CapabilityReleaseState::ProjectSource,
-            CapabilityReleaseState::TestHost,
-        ] {
-            let admission = CapabilityCatalogAdmission::for_release(release_state);
-            assert!(!admission.admitted);
-            assert!(CapabilityCatalogAdmission::admit(release_state).is_err());
+    fn catalog_rejects_test_only_publication() {
+        let mut entry = fixture();
+        entry.publication_state = CapabilityPublicationState::TestOnly;
+        assert_eq!(
+            entry.validate(),
+            Err(CapabilityCatalogContractError::InactiveCapability {
+                publication_state: CapabilityPublicationState::TestOnly,
+            })
+        );
 
-            let mut entry = fixture();
-            entry.admission = admission;
-            assert!(matches!(
-                entry.validate(),
-                Err(CapabilityCatalogContractError::CandidateRejected { .. })
-            ));
+        assert_eq!(
+            serde_json::to_value(CapabilityPublicationState::TestOnly).unwrap(),
+            json!("test_only")
+        );
+        for retired in [
+            "published_active",
+            "ready_candidate",
+            "unpublished_release",
+            "unstarted_service",
+            "project_source",
+            "test_host",
+        ] {
+            assert!(
+                serde_json::from_value::<CapabilityPublicationState>(json!(retired)).is_err(),
+                "retired publication state {retired} must stay rejected"
+            );
         }
+
+        let mut retired_entry = serde_json::to_value(fixture()).unwrap();
+        let object = retired_entry.as_object_mut().unwrap();
+        object.remove("publication_state");
+        object.insert(
+            "admission".into(),
+            json!({"release_state": "published_active", "admitted": true}),
+        );
+        assert!(serde_json::from_value::<CapabilityCatalogEntry>(retired_entry).is_err());
     }
 
     #[test]

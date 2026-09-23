@@ -21,7 +21,6 @@ use super::official_runtime::{OfficialRuntimeHost, binding_from_extra};
 /// this typed port owner from the composition root; there is no runtime
 /// registration or direct Domain-handler access path.
 pub struct EngineSessionHost {
-    skill_artifacts: Arc<nomifun_plugin_platform::application::FsPluginArtifactStore>,
     owner: Weak<NomiCoreSessionOwner>,
     control_plane: Arc<AgentControlPlane>,
     engines: Weak<OfficialRuntimeHost>,
@@ -133,7 +132,7 @@ impl EngineSessionHost {
     ) -> Result<super::engine_skills::SelectedSkills, AppError> {
         let context = self.open_kernel_session(session)?;
         let registry = context.registry_snapshot()?;
-        let skills = super::engine_skills::compile(context.compiled(), &registry, self.skill_artifacts.clone()).await?;
+        let skills = super::engine_skills::compile(context.compiled(), &registry).await?;
         skills.validate_extra(&session.session().extra)?;
         Ok(skills)
     }
@@ -402,10 +401,8 @@ impl EngineSessionHost {
         pool: SqlitePool,
         encryption_key: [u8; 32],
         resources: super::engine_kernel_session::EngineKernelAssembly,
-        skill_artifacts: Arc<nomifun_plugin_platform::application::FsPluginArtifactStore>,
     ) -> Self {
         Self {
-            skill_artifacts,
             owner: Arc::downgrade(owner),
             control_plane,
             engines: Arc::downgrade(engines),

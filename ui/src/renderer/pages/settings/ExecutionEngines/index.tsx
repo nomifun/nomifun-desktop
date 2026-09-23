@@ -39,12 +39,7 @@ export default function ExecutionEngineSettings() {
       <div className='flex flex-col gap-14px' aria-busy={isLoading || isValidating}>
         <Alert
           type='info'
-          content={(
-            <div className='flex flex-col gap-4px'>
-              <span>{t('settings.executionEngines.scope')}</span>
-              <Link to='/settings/javascript-runtime'>{t('settings.executionEngines.javascriptLink')}</Link>
-            </div>
-          )}
+          content={t('settings.executionEngines.scope')}
         />
 
         {error && <Alert type='error' content={t('settings.executionEngines.loadError')} />}

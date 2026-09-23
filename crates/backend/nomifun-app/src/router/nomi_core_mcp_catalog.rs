@@ -56,7 +56,7 @@ impl FrozenMcpTool {
             version: VERSION.into(),
         })
     }
-    fn mount(&self) -> Result<PluginMountId, AppError> {
+    fn mount(&self) -> Result<AgentModuleId, AppError> {
         Ok(format!("mcp-tool-{}", self.suffix()?).into())
     }
     pub(crate) fn action(&self) -> ActionId {

@@ -1,607 +1,526 @@
+#[allow(dead_code)]
+#[path = "../src/data_root.rs"]
+mod data_root;
+pub use data_root::*;
+
+#[allow(dead_code)]
+#[path = "../src/service_process.rs"]
+mod service_process;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use nomi_process_runtime::probe_process_identity;
-use nomifun_agent_contracts::{
-    ArtifactId, DigestHex, PluginBridgeCallId, PluginProductId, PluginKvHandleDescriptor,
-    PluginKvHandleId, PluginReleaseId, PluginReleaseRef, PluginServiceLifecycle,
-    PluginServiceRuntimeFingerprint, PluginServiceStorageDescriptor,
-    ResolvedPluginServiceSpec, ResolvedPluginServiceSpecInputs, RuntimeInstallationId,
-    RuntimeTarget, StrictJsonValue, VersionString, digest_bytes,
+use nomifun_agent_contracts::{DigestHex, PluginId};
+use serde_json::{Value as JsonValue, json};
+use service_process::{
+    NodePluginServiceProcess, NodePluginServiceProcessFactory, PluginSecret,
+    PluginServiceActionsPort, PluginServiceCancellation, PluginServiceError, PluginServiceFence,
+    PluginServiceGrants, PluginServiceHostPort, PluginServiceInvocation, PluginServiceLaunch,
+    PluginServicePortError, PluginServicePorts, PluginServiceProcess, PluginServiceProcessLimits,
+    PluginServiceSecretsPort,
 };
-use nomifun_plugin_platform::runtime::{
-    FixedPluginRuntimeServiceModuleResolver, PluginRuntimeCallCancellation,
-    PluginRuntimeServiceGenerationFence, PluginRuntimeServiceInvocation, PluginRuntimeServiceLaunch,
-    PluginRuntimeServiceProcessError, PluginRuntimeServiceProcessFactory, PluginRuntimeServiceProcessLimits,
-    NodePluginRuntimeServiceProcessFactory,
-};
-use serde_json::json;
-use tempfile::TempDir;
-use uuid::Uuid;
 
-const SERVICE_MODULE: &str = r#"
+const SERVICE_SOURCE: &str = r#"
 import { spawn } from "node:child_process";
 
-export async function start(context) {
+export async function activate(ctx) {
+  await ctx.storage.kv.set("activation", {
+    pluginId: ctx.pluginId,
+    artifactDigest: ctx.artifactDigest,
+    dataGeneration: ctx.dataGeneration,
+    preview: ctx.preview,
+  });
   return {
-    async invoke({ method, payload, signal, ...rest }) {
-      if (method === "invocation_contract") {
-        return { extraKeys: Object.keys(rest), abortSignal: signal instanceof AbortSignal };
-      }
-      if (method === "null") return null;
-      if (method === "unsupported_event") {
-        process.stdout.write(JSON.stringify({kind: "event"}) + "\n");
-        return await new Promise(() => {});
-      }
-      if (method === "echo") {
+    async invoke(action, input) {
+      if (action === "echo") return { input, pluginId: ctx.pluginId };
+      if (action === "context") {
         return {
-          method,
-          payload,
-          hostGeneration: context.hostGeneration,
-          pluginId: context.pluginId,
+          pluginId: ctx.pluginId,
+          artifactDigest: ctx.artifactDigest,
+          dataGeneration: ctx.dataGeneration,
+          preview: ctx.preview,
+          config: ctx.config.get(),
+          secret: await ctx.secrets.get("api_key"),
+          host: await ctx.host.invoke("desktop.files.open", { path: input.path }),
+          action: await ctx.actions.invoke("plugin:other/action", { value: input.value }),
         };
       }
-      if (method === "hang") {
-        return await new Promise((resolve, reject) => {
-          signal.addEventListener(
-            "abort",
-            () => {
-              const error = new Error("canceled");
-              error.name = "AbortError";
-              reject(error);
-            },
-            { once: true },
-          );
+      if (action === "storage") {
+        await ctx.storage.kv.set("service-key", { value: input.value });
+        const kv = await ctx.storage.kv.read("service-key");
+        await ctx.storage.db.execute("CREATE TABLE IF NOT EXISTS entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+        await ctx.storage.db.execute("INSERT INTO entries (value) VALUES (?1)", [input.value]);
+        const db = await ctx.storage.db.query("SELECT value FROM entries ORDER BY id");
+        await ctx.storage.files.write("nested/value.txt", input.value);
+        const file = (await ctx.storage.files.read("nested/value.txt")).toString("utf8");
+        await ctx.cache.set("cached", input.value, 10000);
+        const cached = await ctx.cache.get("cached");
+        return { kv, db, file, cached };
+      }
+      if (action === "environment") return Object.keys(process.env).sort();
+      if (action === "wait") {
+        await new Promise((resolve, reject) => {
+          if (ctx.signal.aborted) {
+            const error = new Error("canceled"); error.name = "AbortError"; reject(error); return;
+          }
+          ctx.signal.addEventListener("abort", () => {
+            const error = new Error("canceled"); error.name = "AbortError"; reject(error);
+          }, { once: true });
         });
+        return null;
       }
-      if (method === "hang_forever") {
-        return await new Promise(() => {});
+      if (action === "timeout") await new Promise(() => {});
+      if (action === "crash") {
+        process.exit(81);
+        await new Promise(() => {});
       }
-      if (method === "crash") {
-        process.exit(86);
-        return await new Promise(() => {});
-      }
-      if (method === "spawn_child") {
-        const marker = payload.marker;
-        const childSource =
-          "const fs=require('node:fs');const p=process.argv[1];" +
-          "setInterval(()=>fs.appendFileSync(p,'x'),20);";
-        const child = spawn(process.execPath, ["-e", childSource, marker], {
+      if (action === "spawn-child") {
+        const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
           stdio: "ignore",
         });
-        child.unref();
         return { pid: child.pid };
       }
-      throw new Error(`unknown method: ${method}`);
+      throw new Error("unsupported action");
     },
-    async dispose() {},
+    async deactivate() {
+      await ctx.storage.kv.set("deactivated", true);
+    },
   };
 }
 "#;
 
-const INVALID_SERVICE_MODULE: &str = "export const value = 1;\n";
+#[derive(Default)]
+struct FixturePorts;
 
-#[path = "service_process/cancellation.rs"]
-mod cancellation;
+#[async_trait]
+impl PluginServiceSecretsPort for FixturePorts {
+    async fn get(
+        &self,
+        _plugin_id: &PluginId,
+        slot: &str,
+        credential_id: &str,
+        _preview: bool,
+    ) -> Result<Option<PluginSecret>, PluginServicePortError> {
+        assert_eq!(slot, "api_key");
+        assert_eq!(credential_id, "provider:0199aa00-0000-7000-8000-000000000001");
+        Ok(Some(PluginSecret::new("fixture-secret")))
+    }
+}
+
+#[async_trait]
+impl PluginServiceHostPort for FixturePorts {
+    async fn invoke(
+        &self,
+        _plugin_id: &PluginId,
+        capability: &str,
+        input: JsonValue,
+        _preview: bool,
+        cancellation: PluginServiceCancellation,
+    ) -> Result<JsonValue, PluginServicePortError> {
+        assert!(!cancellation.is_canceled());
+        Ok(json!({"capability": capability, "input": input}))
+    }
+}
+
+#[async_trait]
+impl PluginServiceActionsPort for FixturePorts {
+    async fn invoke(
+        &self,
+        _caller_plugin_id: &PluginId,
+        action: &str,
+        input: JsonValue,
+        call_chain: Vec<String>,
+        _preview: bool,
+        cancellation: PluginServiceCancellation,
+    ) -> Result<JsonValue, PluginServicePortError> {
+        assert!(!cancellation.is_canceled());
+        Ok(json!({"action": action, "input": input, "callChain": call_chain}))
+    }
+}
+
+struct Fixture {
+    _temp: tempfile::TempDir,
+    manager: PluginDataRootManager,
+    module_path: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = PluginDataRootManager::new(temp.path().join("plugin-data")).unwrap();
+        let service = temp.path().join("artifact").join("service");
+        fs::create_dir_all(&service).unwrap();
+        let module_path = service.join("main.mjs");
+        fs::write(&module_path, SERVICE_SOURCE).unwrap();
+        Self {
+            _temp: temp,
+            manager,
+            module_path,
+        }
+    }
+
+    fn generation(&self, suffix: &str) -> PluginDataRootHandle {
+        self.manager
+            .create_empty_generation(plugin(suffix), DataGeneration::new("generation-1").unwrap())
+            .unwrap()
+    }
+}
+
+fn plugin(suffix: &str) -> PluginId {
+    PluginId::from(format!("0199bb00-0000-7000-8000-{suffix:0>12}"))
+}
 
 fn node_executable() -> Option<PathBuf> {
-    let discovered = which::which("node").ok()?;
-    std::fs::canonicalize(discovered).ok()
+    which::which("node")
+        .ok()
+        .and_then(|path| fs::canonicalize(path).ok())
 }
 
-fn runtime_fingerprint(node: &Path) -> PluginServiceRuntimeFingerprint {
-    let bytes = std::fs::read(node).expect("read Node executable");
-    let output = Command::new(node)
-        .arg("--version")
-        .output()
-        .expect("query Node version");
-    assert!(output.status.success(), "Node --version failed");
-    let version = String::from_utf8(output.stdout)
-        .expect("Node version is UTF-8")
-        .trim()
-        .trim_start_matches('v')
-        .to_owned();
-    PluginServiceRuntimeFingerprint {
-        runtime_installation_id: RuntimeInstallationId::from(format!(
-            "test-node-{}",
-            &digest_bytes(&bytes).as_ref()[..16]
-        )),
-        runtime_target: RuntimeTarget::from(format!(
-            "{}-{}-test",
-            std::env::consts::ARCH,
-            std::env::consts::OS
-        )),
-        runtime_executable_digest: digest_bytes(&bytes),
-        node_version: VersionString::from(version),
+fn ports() -> PluginServicePorts {
+    let ports = Arc::new(FixturePorts);
+    PluginServicePorts {
+        secrets: ports.clone(),
+        host: ports.clone(),
+        actions: ports,
     }
 }
 
-fn digest(seed: &str) -> DigestHex {
-    digest_bytes(seed.as_bytes())
-}
-
-fn service_spec(
-    node: &Path,
-    module_bytes: &[u8],
-    plugin_product_id: &str,
-    epoch: u64,
-    lifecycle: PluginServiceLifecycle,
-) -> ResolvedPluginServiceSpec {
-    let plugin_product_id = PluginProductId::from(plugin_product_id);
-    ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
-        plugin_product_id: plugin_product_id.clone(),
-        release: PluginReleaseRef {
-            release_id: PluginReleaseId::from(Uuid::now_v7().to_string()),
-            artifact_id: ArtifactId::from(Uuid::now_v7().to_string()),
-            release_digest: digest("release"),
-            manifest_digest: digest("manifest"),
-        },
-        active_release_epoch: epoch,
-        service_module_digest: digest_bytes(module_bytes),
-        lifecycle,
-        host_protocol_version:
-            nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
-        sdk_contract_version:
-            nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
-        runtime: runtime_fingerprint(node),
-        config_schema_digest: digest("config-schema"),
-        config_snapshot_digest: digest("config-snapshot"),
-        credential_slots_digest: digest("credential-slots"),
-        resource_contract_digest: digest("resource-contract"),
-        resource_bindings_digest: digest("resource-bindings"),
-        runtime_requirements_digest: digest("runtime-requirements"),
-        bridge_contract_digest: digest("bridge-contract"),
-        contribution_set_digest: digest("contribution-set"),
-        storage: PluginServiceStorageDescriptor {
-            kv: PluginKvHandleDescriptor {
-                handle_id: PluginKvHandleId::from(format!(
-                    "test-kv-{}",
-                    plugin_product_id.as_ref()
-                )),
-                plugin_product_id,
-                namespace_revision: 1,
-            },
-            files_dir: None,
-            private_database: None,
-        },
-    })
-    .expect("valid resolved Service spec")
-}
-
-fn fence(spec: &ResolvedPluginServiceSpec, generation: u64) -> PluginRuntimeServiceGenerationFence {
-    PluginRuntimeServiceGenerationFence {
-        plugin_product_id: spec.plugin_product_id.clone(),
-        release: spec.release.clone(),
-        active_release_epoch: spec.active_release_epoch,
-        service_run_key: spec.service_run_key.clone(),
-        host_generation: generation,
+fn grants() -> PluginServiceGrants {
+    PluginServiceGrants {
+        secret_slots: BTreeSet::from(["api_key".into()]),
+        host_capabilities: BTreeSet::from(["desktop.files.open".into()]),
+        allow_action_invoke: true,
     }
 }
 
-fn factory(
-    node: &Path,
-    module: &Path,
-    request_timeout: Duration,
-) -> NodePluginRuntimeServiceProcessFactory {
-    NodePluginRuntimeServiceProcessFactory::new(
-        node.to_path_buf(),
-        Arc::new(FixedPluginRuntimeServiceModuleResolver::new(module)),
-    )
-    .expect("construct Node Service factory")
-    .with_limits(PluginRuntimeServiceProcessLimits {
-        hello_timeout: Duration::from_secs(5),
-        request_timeout,
-        shutdown_timeout: Duration::from_secs(3),
-        max_frame_bytes: 1024 * 1024,
-        command_queue_capacity: 32,
-        cancellation_poll_interval: Duration::from_millis(5),
-    })
-    .expect("valid test limits")
+fn fence(root: &PluginDataRootHandle, generation: u64, digest: char) -> PluginServiceFence {
+    PluginServiceFence {
+        plugin_id: root.plugin_id().clone(),
+        artifact_digest: DigestHex::from(digest.to_string().repeat(64)),
+        data_generation: root.generation().clone(),
+        process_generation: generation,
+    }
 }
 
-fn write_module(directory: &TempDir, name: &str, source: &str) -> PathBuf {
-    let path = directory.path().join(name);
-    std::fs::write(&path, source).expect("write Service module");
-    path
+fn launch(
+    fixture: &Fixture,
+    root: PluginDataRootHandle,
+    generation: u64,
+    digest: char,
+    preview: bool,
+) -> PluginServiceLaunch {
+    PluginServiceLaunch {
+        fence: fence(&root, generation, digest),
+        module_path: fixture.module_path.clone(),
+        data_root: root,
+        config: json!({"theme": "dark"}),
+        credential_bindings: BTreeMap::from([(
+            "api_key".into(),
+            "provider:0199aa00-0000-7000-8000-000000000001".into(),
+        )]),
+        grants: grants(),
+        preview,
+    }
 }
 
 async fn invoke(
-    process: &Arc<dyn nomifun_plugin_platform::runtime::PluginRuntimeServiceProcess>,
-    spec: &ResolvedPluginServiceSpec,
-    generation: u64,
-    call_id: &str,
-    method: &str,
-    payload: serde_json::Value,
-    cancellation: PluginRuntimeCallCancellation,
-) -> Result<StrictJsonValue, PluginRuntimeServiceProcessError> {
+    process: &Arc<NodePluginServiceProcess>,
+    action: &str,
+    input: JsonValue,
+) -> Result<JsonValue, PluginServiceError> {
     process
         .invoke(
-            PluginRuntimeServiceInvocation {
-                fence: fence(spec, generation),
-                call_id: PluginBridgeCallId::from(call_id),
-                method: method.to_owned(),
-                payload: StrictJsonValue(payload),
+            PluginServiceInvocation {
+                fence: process.fence().clone(),
+                action: action.into(),
+                input,
+                call_chain: vec!["plugin:caller/root".into()],
             },
-            cancellation,
+            PluginServiceCancellation::default(),
         )
         .await
 }
 
-async fn wait_for_file_growth(path: &Path) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-    let mut previous = 0;
-    loop {
-        if let Ok(metadata) = tokio::fs::metadata(path).await
-            && metadata.len() > previous
-        {
-            if previous > 0 {
-                return;
-            }
-            previous = metadata.len();
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "child heartbeat did not start"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
-async fn wait_for_process_gone(pid: u32) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        if probe_process_identity(pid)
-            .expect("probe child process identity")
-            .is_none()
-        {
-            return;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "child process {pid} survived Service Host cleanup"
-        );
-        tokio::time::sleep(Duration::from_millis(25)).await;
+fn factory(
+    node: &Path,
+    limits: Option<PluginServiceProcessLimits>,
+) -> NodePluginServiceProcessFactory {
+    let factory = NodePluginServiceProcessFactory::new(node)
+        .unwrap()
+        .with_ports(ports());
+    match limits {
+        Some(limits) => factory.with_limits(limits).unwrap(),
+        None => factory,
     }
 }
 
 #[tokio::test]
-async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
+async fn real_node_receives_unified_context_and_round_trips_all_host_managed_storage() {
     let Some(node) = node_executable() else {
-        eprintln!("Node is unavailable; skipping Plugin Service process test");
+        eprintln!("Node is unavailable; skipping real service process coverage");
         return;
     };
-    let directory = TempDir::new().expect("temporary Service directory");
-    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
-    let spec = service_spec(
-        &node,
-        SERVICE_MODULE.as_bytes(),
-        "plugin-service-a",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
-    let process = factory(&node, &module, Duration::from_secs(2))
-        .start(PluginRuntimeServiceLaunch {
-            spec: spec.clone(),
-            host_generation: 1,
-        })
+    let fixture = Fixture::new();
+    let root = fixture.generation("1");
+    let process = factory(&node, None)
+        .spawn(launch(&fixture, root.clone(), 1, 'a', false))
         .await
-        .expect("start Service process");
+        .unwrap();
 
-    let echoed = invoke(
-        &process,
-        &spec,
-        1,
-        "call-echo",
-        "echo",
-        json!({"value": 42}),
-        PluginRuntimeCallCancellation::default(),
-    )
-    .await
-    .expect("invoke echo");
-    assert_eq!(echoed.0["payload"], json!({"value": 42}));
-    assert_eq!(echoed.0["hostGeneration"], 1);
-    assert_eq!(echoed.0["pluginId"], "plugin-service-a");
+    let activated = root.storage().kv_get("activation").unwrap().value.unwrap();
+    assert_eq!(activated["pluginId"], root.plugin_id().as_ref());
+    assert_eq!(activated["preview"], false);
 
-    let contract = invoke(
-        &process, &spec, 1, "call-contract", "invocation_contract", json!({}),
-        PluginRuntimeCallCancellation::default(),
-    ).await.unwrap();
-    assert_eq!(contract.0, json!({"extraKeys":["callId"], "abortSignal":true}));
-    let null = invoke(
-        &process, &spec, 1, "call-null", "null", json!({}),
-        PluginRuntimeCallCancellation::default(),
-    ).await.unwrap();
-    assert!(null.0.is_null(), "explicit null must remain a valid unary result");
+    let context = invoke(&process, "context", json!({"path":"note.txt","value":7}))
+        .await
+        .unwrap();
+    assert_eq!(context["pluginId"], root.plugin_id().as_ref());
+    assert_eq!(context["artifactDigest"], "a".repeat(64));
+    assert_eq!(context["dataGeneration"], "generation-1");
+    assert_eq!(context["preview"], false);
+    assert_eq!(context["config"], json!({"theme":"dark"}));
+    assert_eq!(context["secret"], "fixture-secret");
+    assert_eq!(context["host"]["capability"], "desktop.files.open");
+    assert_eq!(context["action"]["action"], "plugin:other/action");
+    assert_eq!(context["action"]["callChain"][0], "plugin:caller/root");
 
-    let stale = invoke(
-        &process,
-        &spec,
-        2,
-        "call-stale",
-        "echo",
-        json!({}),
-        PluginRuntimeCallCancellation::default(),
-    )
-    .await
-    .expect_err("stale generation must be rejected");
-    assert!(matches!(stale, PluginRuntimeServiceProcessError::Rejected(_)));
+    let storage = invoke(&process, "storage", json!({"value":"persisted"}))
+        .await
+        .unwrap();
+    assert_eq!(storage["kv"]["value"], json!({"value":"persisted"}));
+    assert_eq!(storage["db"]["rows"][0][0], "persisted");
+    assert_eq!(storage["file"], "persisted");
+    assert_eq!(storage["cached"], "persisted");
 
-    let cancellation = PluginRuntimeCallCancellation::default();
-    let pending = invoke(
-        &process,
-        &spec,
-        1,
-        "call-cancel",
-        "hang",
-        json!({}),
-        cancellation.clone(),
+    let environment = invoke(&process, "environment", json!({}))
+        .await
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_ascii_uppercase())
+        .collect::<BTreeSet<_>>();
+    let allowed = [
+        "COMSPEC",
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "NO_COLOR",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "TZ",
+        "USERPROFILE",
+        "WINDIR",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    assert!(environment.is_subset(&allowed), "unexpected ambient environment: {environment:?}");
+    assert!(
+        environment
+            .iter()
+            .all(|key| !key.contains("TOKEN") && !key.contains("SECRET") && !key.contains("PASSWORD"))
     );
-    tokio::pin!(pending);
+
+    process.stop().await.unwrap();
+    assert_eq!(root.storage().kv_get("deactivated").unwrap().value, Some(json!(true)));
+}
+
+#[tokio::test]
+async fn cross_plugin_action_dispatch_requires_the_generic_actions_invoke_grant() {
+    let Some(node) = node_executable() else {
+        eprintln!("Node is unavailable; skipping real service process coverage");
+        return;
+    };
+    let fixture = Fixture::new();
+    let root = fixture.generation("8");
+    let mut denied_launch = launch(&fixture, root, 1, '8', false);
+    denied_launch.grants.allow_action_invoke = false;
+    let process = factory(&node, None).spawn(denied_launch).await.unwrap();
+
+    assert_eq!(
+        invoke(&process, "context", json!({"path":"note.txt","value":7})).await,
+        Err(PluginServiceError::Rejected {
+            code: "service_invocation_failed".into(),
+        })
+    );
+    process.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_uses_the_same_service_and_storage_contract_without_touching_the_live_generation() {
+    let Some(node) = node_executable() else {
+        eprintln!("Node is unavailable; skipping real service process coverage");
+        return;
+    };
+    let fixture = Fixture::new();
+    let live = fixture.generation("2");
+    live.storage().kv_set("service-key", &json!({"value":"live"})).unwrap();
+    let preview = fixture.manager.clone_preview(&live, "preview-session").unwrap();
+    let preview_handle = preview.handle().clone();
+    let process = factory(&node, None)
+        .spawn(launch(&fixture, preview_handle.clone(), 1, 'b', true))
+        .await
+        .unwrap();
+
+    let context = invoke(&process, "context", json!({"path":"x","value":1}))
+        .await
+        .unwrap();
+    assert_eq!(context["preview"], true);
+    invoke(&process, "storage", json!({"value":"preview"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        preview_handle.storage().kv_get("service-key").unwrap().value,
+        Some(json!({"value":"preview"}))
+    );
+    assert_eq!(
+        live.storage().kv_get("service-key").unwrap().value,
+        Some(json!({"value":"live"}))
+    );
+    process.stop().await.unwrap();
+    let preview_path = preview_handle.path().to_path_buf();
+    preview.destroy().unwrap();
+    assert!(!preview_path.exists());
+}
+
+#[tokio::test]
+async fn cancellation_is_request_scoped_and_timeout_terminates_only_that_plugin_process() {
+    let Some(node) = node_executable() else {
+        eprintln!("Node is unavailable; skipping real service process coverage");
+        return;
+    };
+    let fixture = Fixture::new();
+    let root = fixture.generation("3");
+    let process = factory(&node, None)
+        .spawn(launch(&fixture, root, 1, 'c', false))
+        .await
+        .unwrap();
+    let cancellation = PluginServiceCancellation::default();
+    let waiter = {
+        let process = process.clone();
+        let cancellation_for_call = cancellation.clone();
+        tokio::spawn(async move {
+            process
+                .invoke(
+                    PluginServiceInvocation {
+                        fence: process.fence().clone(),
+                        action: "wait".into(),
+                        input: JsonValue::Null,
+                        call_chain: vec!["plugin:caller/wait".into()],
+                    },
+                    cancellation_for_call,
+                )
+                .await
+        })
+    };
     tokio::time::sleep(Duration::from_millis(50)).await;
     cancellation.cancel();
-    let canceled = pending
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), waiter)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(PluginServiceError::Canceled)
+    );
+    assert_eq!(invoke(&process, "echo", json!("still-running")).await.unwrap()["input"], "still-running");
+    process.stop().await.unwrap();
+
+    let short = PluginServiceProcessLimits {
+        request_timeout: Duration::from_millis(150),
+        cancellation_poll_interval: Duration::from_millis(10),
+        ..PluginServiceProcessLimits::default()
+    };
+    let timeout_root = fixture.generation("4");
+    let timeout_process = factory(&node, Some(short))
+        .spawn(launch(&fixture, timeout_root, 1, 'd', false))
         .await
-        .expect_err("canceled invocation must not produce a value");
-    assert!(matches!(canceled, PluginRuntimeServiceProcessError::Rejected(_)));
-
-    process.stop().await;
-}
-
-#[tokio::test]
-async fn service_event_frames_are_unsupported_protocol() {
-    let node = node_executable().expect("Node is required for the Service protocol regression");
-    let directory = TempDir::new().unwrap();
-    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
-    let spec = service_spec(
-        &node, SERVICE_MODULE.as_bytes(), "unsupported-service-event", 1,
-        PluginServiceLifecycle::OnDemand,
+        .unwrap();
+    assert_eq!(
+        invoke(&timeout_process, "timeout", JsonValue::Null).await,
+        Err(PluginServiceError::TimedOut)
     );
-    let process = factory(&node, &module, Duration::from_secs(5))
-        .start(PluginRuntimeServiceLaunch { spec: spec.clone(), host_generation: 1 })
-        .await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(3), invoke(
-        &process, &spec, 1, "call-event", "unsupported_event", json!({}),
-        PluginRuntimeCallCancellation::default(),
-    )).await.expect("unsupported frame must fail without waiting for the watchdog");
-    assert!(matches!(result, Err(PluginRuntimeServiceProcessError::Crashed(message))
-        if message.contains("unsupported frame kind event")));
-    process.stop().await;
+    wait_terminal(&timeout_process).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn node_path_alias_is_resolved_once_and_still_requires_the_selected_digest() {
+async fn a_crashing_plugin_does_not_restart_or_break_another_plugin_process() {
     let Some(node) = node_executable() else {
-        eprintln!("Node is unavailable; skipping Unix Service path-alias regression");
+        eprintln!("Node is unavailable; skipping real service process coverage");
         return;
     };
-    let directory = TempDir::new().unwrap();
-    let alias = directory.path().join("node");
-    std::os::unix::fs::symlink(&node, &alias).unwrap();
-    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
-    let factory = factory(&alias, &module, Duration::from_secs(2));
-    let spec = service_spec(
-        &node,
-        SERVICE_MODULE.as_bytes(),
-        "plugin-node-alias",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
-
-    // A package manager can retarget the PATH alias after admission. The
-    // factory must continue using the originally resolved executable.
-    std::fs::remove_file(&alias).unwrap();
-    std::os::unix::fs::symlink(directory.path().join("missing-node"), &alias).unwrap();
-    let process = factory.start(PluginRuntimeServiceLaunch {
-        spec: spec.clone(),
-        host_generation: 1,
-    }).await.expect("launch pinned executable, not retargeted PATH alias");
-    let result = invoke(
-        &process, &spec, 1, "alias-echo", "echo", json!({"unix": true}),
-        PluginRuntimeCallCancellation::default(),
-    ).await.unwrap();
-    assert_eq!(result.0["payload"], json!({"unix": true}));
-    process.stop().await;
-
-    let mut wrong = spec;
-    wrong.runtime.runtime_executable_digest = digest_bytes(b"different executable");
-    let error = factory.start(PluginRuntimeServiceLaunch {
-        spec: wrong,
-        host_generation: 2,
-    }).await.err().expect("wrong selected digest must be rejected");
-    assert!(error.to_string().contains("digest mismatch"), "{error}");
-}
-
-#[cfg(windows)]
-#[tokio::test]
-async fn real_node_service_starts_from_an_extended_length_module_path() {
-    let Some(node) = node_executable() else {
-        eprintln!("Node is unavailable; skipping long-path Plugin Service process test");
-        return;
-    };
-    let directory = TempDir::new().expect("temporary Service directory");
-    let mut module_root = directory.path().to_path_buf();
-    for index in 0..10 {
-        module_root.push(format!("managed-release-segment-{index:02}"));
-    }
-    std::fs::create_dir_all(&module_root).expect("create extended-length module root");
-    let module = module_root.join("main.mjs");
-    std::fs::write(&module, SERVICE_MODULE).expect("write extended-length Service module");
-    assert!(module.as_os_str().len() > 300);
-    let spec = service_spec(
-        &node,
-        SERVICE_MODULE.as_bytes(),
-        "plugin-service-long-path",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
-    let process = factory(&node, &module, Duration::from_secs(2))
-        .start(PluginRuntimeServiceLaunch {
-            spec,
-            host_generation: 1,
-        })
-        .await
-        .expect("start Service process from an extended-length module path");
-    process.stop().await;
-}
-
-#[tokio::test]
-async fn crash_is_isolated_and_stop_reaps_spawned_process_tree() {
-    let Some(node) = node_executable() else {
-        eprintln!("Node is unavailable; skipping Plugin Service process test");
-        return;
-    };
-    let directory = TempDir::new().expect("temporary Service directory");
-    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
-    let factory = factory(&node, &module, Duration::from_secs(2));
-    let first_spec = service_spec(
-        &node,
-        SERVICE_MODULE.as_bytes(),
-        "plugin-service-first",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
-    let second_spec = service_spec(
-        &node,
-        SERVICE_MODULE.as_bytes(),
-        "plugin-service-second",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
+    let fixture = Fixture::new();
+    let first_root = fixture.generation("5");
+    let second_root = fixture.generation("6");
+    let factory = factory(&node, None);
     let first = factory
-        .start(PluginRuntimeServiceLaunch {
-            spec: first_spec.clone(),
-            host_generation: 1,
-        })
+        .spawn(launch(&fixture, first_root, 1, 'e', false))
         .await
-        .expect("start first Service process");
+        .unwrap();
     let second = factory
-        .start(PluginRuntimeServiceLaunch {
-            spec: second_spec.clone(),
-            host_generation: 1,
-        })
+        .spawn(launch(&fixture, second_root, 1, 'f', false))
         .await
-        .expect("start second Service process");
+        .unwrap();
+    let second_pid = second.process_id();
 
-    let crash = invoke(
-        &first,
-        &first_spec,
-        1,
-        "call-crash",
-        "crash",
-        json!({}),
-        PluginRuntimeCallCancellation::default(),
-    )
-    .await
-    .expect_err("first Service must crash");
-    assert!(matches!(crash, PluginRuntimeServiceProcessError::Crashed(_)));
+    assert!(matches!(
+        invoke(&first, "crash", JsonValue::Null).await,
+        Err(PluginServiceError::Crashed(_))
+    ));
+    wait_terminal(&first).await;
+    assert_eq!(second.process_id(), second_pid);
+    assert_eq!(invoke(&second, "echo", json!(42)).await.unwrap()["input"], 42);
+    second.stop().await.unwrap();
+}
 
-    let healthy = invoke(
-        &second,
-        &second_spec,
-        1,
-        "call-after-crash",
-        "echo",
-        json!({"healthy": true}),
-        PluginRuntimeCallCancellation::default(),
-    )
-    .await
-    .expect("second Service remains healthy");
-    assert_eq!(healthy.0["payload"]["healthy"], true);
-
-    let marker = directory.path().join("child-heartbeat.txt");
-    let spawned = invoke(
-        &second,
-        &second_spec,
-        1,
-        "call-spawn",
-        "spawn_child",
-        json!({"marker": marker}),
-        PluginRuntimeCallCancellation::default(),
-    )
-    .await
-    .expect("spawn child process");
-    let child_pid = spawned.0["pid"]
+#[tokio::test]
+async fn managed_stop_reaps_a_service_spawned_process_tree() {
+    let Some(node) = node_executable() else {
+        eprintln!("Node is unavailable; skipping real service process coverage");
+        return;
+    };
+    let fixture = Fixture::new();
+    let root = fixture.generation("7");
+    let process = factory(&node, None)
+        .spawn(launch(&fixture, root, 1, '7', false))
+        .await
+        .unwrap();
+    let child_pid = invoke(&process, "spawn-child", JsonValue::Null)
+        .await
+        .unwrap()["pid"]
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok())
-        .expect("Service returned a child PID");
-    wait_for_file_growth(&marker).await;
-    assert!(
-        probe_process_identity(child_pid)
-            .expect("probe live child")
-            .is_some()
-    );
-
-    second.stop().await;
-    wait_for_process_gone(child_pid).await;
-    let size_after_stop = tokio::fs::metadata(&marker)
-        .await
-        .expect("heartbeat marker remains readable")
-        .len();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(
-        tokio::fs::metadata(&marker)
-            .await
-            .expect("heartbeat marker remains readable")
-            .len(),
-        size_after_stop,
-        "child heartbeat continued after Service Host cleanup"
-    );
+        .unwrap();
+    assert!(probe_process_identity(child_pid).unwrap().is_some());
+    process.stop().await.unwrap();
+    wait_process_gone(child_pid).await;
 }
 
-#[tokio::test]
-async fn invalid_module_and_request_timeout_fail_closed() {
-    let Some(node) = node_executable() else {
-        eprintln!("Node is unavailable; skipping Plugin Service process test");
-        return;
-    };
-    let directory = TempDir::new().expect("temporary Service directory");
-    let invalid_module = write_module(&directory, "invalid-main.mjs", INVALID_SERVICE_MODULE);
-    let invalid_spec = service_spec(
-        &node,
-        INVALID_SERVICE_MODULE.as_bytes(),
-        "plugin-service-invalid",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
-    let error = factory(&node, &invalid_module, Duration::from_millis(150))
-        .start(PluginRuntimeServiceLaunch {
-            spec: invalid_spec,
-            host_generation: 1,
-        })
-        .await
-        .err()
-        .expect("module without start(context) must fail");
-    assert!(error.to_string().contains("Hello"));
+async fn wait_terminal(process: &Arc<NodePluginServiceProcess>) {
+    for _ in 0..100 {
+        if process.terminal_result().is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("service process did not become terminal");
+}
 
-    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
-    let spec = service_spec(
-        &node,
-        SERVICE_MODULE.as_bytes(),
-        "plugin-service-timeout",
-        1,
-        PluginServiceLifecycle::OnDemand,
-    );
-    let process = factory(&node, &module, Duration::from_millis(150))
-        .start(PluginRuntimeServiceLaunch {
-            spec: spec.clone(),
-            host_generation: 1,
-        })
-        .await
-        .expect("start timeout Service process");
-    let timeout = invoke(
-        &process,
-        &spec,
-        1,
-        "call-timeout",
-        "hang_forever",
-        json!({}),
-        PluginRuntimeCallCancellation::default(),
-    )
-    .await
-    .expect_err("watchdog must fail a hung Service");
-    assert!(matches!(timeout, PluginRuntimeServiceProcessError::Crashed(_)));
-    process.stop().await;
+async fn wait_process_gone(pid: u32) {
+    for _ in 0..150 {
+        if probe_process_identity(pid).unwrap().is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("service child process {pid} survived managed shutdown");
 }

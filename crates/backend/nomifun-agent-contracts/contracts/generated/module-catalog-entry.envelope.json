@@ -39,10 +39,7 @@
         "status": "active"
       }
     },
-    "admission": {
-      "release_state": "published_active",
-      "admitted": true
-    }
+    "publication_state": "active"
   },
-  "payload_digest": "76daf6de1703bcda4b852d932e32d4abffbebd54c177d57452a1c96e48d6967a"
+  "payload_digest": "32b70c1749ef9dcbc73bcc6200b46cd28d90e37e64ae736010c63b6480ce2168"
 }

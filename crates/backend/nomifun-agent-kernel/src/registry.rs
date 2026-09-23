@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use nomifun_agent_contracts::{
     ActionId, CanonicalSchemaRef, CapabilityConsumer, CapabilityId, CapabilityKind, DigestHex,
-    ExecutionRoleId, PackageRef, PluginMountId, ResolvedRoleProviderLock, ResourceBindingId,
+    ExecutionRoleId, PackageRef, AgentModuleId, ResolvedRoleProviderLock, ResourceBindingId,
     ScopeKey, TypedResourceBinding,
 };
 
@@ -26,25 +26,25 @@ use crate::{
 
 #[derive(Clone)]
 struct HandlerBinding {
-    mount_id: PluginMountId,
+    mount_id: AgentModuleId,
     handler: Arc<dyn CapabilityHandler>,
 }
 
 #[derive(Clone)]
 struct OperationHandlerBinding {
-    mount_id: PluginMountId,
+    mount_id: AgentModuleId,
     handler: Arc<dyn CapabilityOperationHandler>,
 }
 
 #[derive(Clone)]
 struct ContextFactoryBinding {
-    mount_id: PluginMountId,
+    mount_id: AgentModuleId,
     factory: Arc<dyn CapabilityContextContributionFactory>,
 }
 
 #[derive(Clone)]
 struct ResourceFactoryBinding {
-    mount_id: PluginMountId,
+    mount_id: AgentModuleId,
     factory: Arc<dyn CapabilityResourceProviderFactory>,
 }
 
@@ -56,22 +56,22 @@ struct PublishedRegistry {
     context_factories: BTreeMap<CapabilityId, ContextFactoryBinding>,
     resource_factories: BTreeMap<CapabilityId, ResourceFactoryBinding>,
     role_handlers:
-        BTreeMap<(ExecutionRoleId, PluginMountId, CapabilityId), HandlerBinding>,
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), HandlerBinding>,
     role_tool_handlers:
-        BTreeMap<(ExecutionRoleId, PluginMountId, CapabilityId), Arc<dyn RoleToolHandler>>,
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), Arc<dyn RoleToolHandler>>,
     role_context_factories:
-        BTreeMap<(ExecutionRoleId, PluginMountId, CapabilityId), Arc<dyn ContextContributionFactory>>,
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), Arc<dyn ContextContributionFactory>>,
     role_resource_factories:
-        BTreeMap<(ExecutionRoleId, PluginMountId, CapabilityId), Arc<dyn ResourceProviderFactory>>,
-    service_views: BTreeMap<PluginMountId, DeclaredServiceView>,
-    state_handles: BTreeMap<PluginMountId, PluginStateHandle>,
+        BTreeMap<(ExecutionRoleId, AgentModuleId, CapabilityId), Arc<dyn ResourceProviderFactory>>,
+    service_views: BTreeMap<AgentModuleId, DeclaredServiceView>,
+    state_handles: BTreeMap<AgentModuleId, PluginStateHandle>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ResourceHandleKey {
     scope_key: ScopeKey,
     role_id: Option<ExecutionRoleId>,
-    mount_id: PluginMountId,
+    mount_id: AgentModuleId,
     target_digest: DigestHex,
     binding_id: ResourceBindingId,
 }
@@ -137,7 +137,7 @@ impl KernelRegistry {
 
     pub fn declared_service_view(
         &self,
-        mount_id: &PluginMountId,
+        mount_id: &AgentModuleId,
     ) -> Result<Option<DeclaredServiceView>, KernelError> {
         self.published
             .read()
@@ -679,7 +679,7 @@ impl KernelRegistry {
                     .contribution
                     .mount_id
                     .clone()
-                    .unwrap_or_else(|| PluginMountId::from("missing")),
+                    .unwrap_or_else(|| AgentModuleId::from("missing")),
                 reason: error.to_string(),
             })?;
         if request.operation_lock.consumer == CapabilityConsumer::Agent {
@@ -1408,7 +1408,7 @@ impl KernelRegistry {
 
     pub async fn release_resources_for_mount(
         &self,
-        mount_id: &PluginMountId,
+        mount_id: &AgentModuleId,
     ) -> Result<(), KernelError> {
         self.release_matching_resources(|key| &key.mount_id == mount_id)
             .await
@@ -1545,7 +1545,7 @@ fn resolve_direct_capability_context(
     published: &PublishedRegistry,
     snapshot: &CompiledSnapshot,
     request: &CapabilityAccessRequest,
-    mount_id: &PluginMountId,
+    mount_id: &AgentModuleId,
 ) -> Result<ResolvedCapabilityContext, KernelError> {
     let frozen = snapshot
         .resolved_capability(&request.capability_id)
@@ -1870,19 +1870,19 @@ fn validate_role_exports(
     materialized: &MaterializedRegistry,
     generic_handlers: &BTreeMap<CapabilityId, HandlerBinding>,
     action_handlers: &BTreeMap<
-        (ExecutionRoleId, PluginMountId, CapabilityId),
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
         HandlerBinding,
     >,
     operation_tool_handlers: &BTreeMap<
-        (ExecutionRoleId, PluginMountId, CapabilityId),
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
         Arc<dyn RoleToolHandler>,
     >,
     context_factories: &BTreeMap<
-        (ExecutionRoleId, PluginMountId, CapabilityId),
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
         Arc<dyn ContextContributionFactory>,
     >,
     resource_factories: &BTreeMap<
-        (ExecutionRoleId, PluginMountId, CapabilityId),
+        (ExecutionRoleId, AgentModuleId, CapabilityId),
         Arc<dyn ResourceProviderFactory>,
     >,
 ) -> Result<(), KernelError> {
