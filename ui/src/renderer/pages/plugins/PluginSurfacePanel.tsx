@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Button, Spin } from '@arco-design/web-react';
 import { CloseOne, Refresh } from '@icon-park/react';
+import { useTranslation } from 'react-i18next';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type {
@@ -84,6 +85,7 @@ export default function PluginSurfacePanel({
   onReload,
   onClose,
 }: PluginSurfacePanelProps) {
+  const { t } = useTranslation();
   const frame = useRef<HTMLIFrameElement | null>(null);
   const port = useRef<MessagePort | null>(null);
   const cleanupHandshake = useRef<(() => void) | null>(null);
@@ -231,23 +233,23 @@ export default function PluginSurfacePanel({
         <div>
           <strong>{title}</strong>
           <div className={styles.muted}>
-            {descriptor.is_preview ? 'Temporary preview data' : 'Active Plugin data'}
+            {descriptor.is_preview ? t('pluginPlatform.preview.temporaryData') : t('pluginPlatform.detail.activeData')}
           </div>
         </div>
         <div className={styles.actions}>
-          <Button icon={<Refresh />} disabled={closing} onClick={reload}>Reload</Button>
-          <Button icon={<CloseOne />} disabled={closing} onClick={() => void onClose()}>Close</Button>
+          <Button icon={<Refresh />} disabled={closing} onClick={reload}>{t('pluginPlatform.actions.refresh')}</Button>
+          <Button icon={<CloseOne />} disabled={closing} onClick={() => void onClose()}>{t('pluginPlatform.actions.close')}</Button>
         </div>
       </header>
       <div className={styles.surfaceViewport}>
         {!source || failed ? (
           <div className={styles.surfaceState} role='alert'>
-            <strong>Plugin surface could not be opened</strong>
-            <Button onClick={reload}>Retry</Button>
+            <strong>{t('pluginPlatform.preview.surfaceFailed')}</strong>
+            <Button onClick={reload}>{t('pluginPlatform.preview.retry')}</Button>
           </div>
         ) : (
           <>
-            {loading && <div className={styles.surfaceState}><Spin /><span>Loading Plugin…</span></div>}
+            {loading && <div className={styles.surfaceState}><Spin /><span>{t('pluginPlatform.preview.loading')}</span></div>}
             <iframe
               ref={frame}
               key={`${descriptorKey}:${generation}`}

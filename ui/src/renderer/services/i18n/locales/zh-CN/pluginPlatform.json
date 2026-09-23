@@ -2,6 +2,7 @@
   "actions": {
     "back": "返回插件",
     "cancel": "取消",
+    "close": "关闭",
     "configure": "配置与授权",
     "create": "创建插件",
     "delete": "永久删除",
@@ -18,6 +19,27 @@
     "restoreTrash": "从回收站恢复",
     "save": "保存",
     "trash": "移入回收站"
+  },
+  "workspace": {
+    "title": "插件与小程序",
+    "subtitle": "本机能力中心",
+    "navigation": "插件工作区导航",
+    "collapse": "收起插件导航",
+    "expand": "展开插件导航",
+    "smartViews": "智能视图",
+    "capabilityTypes": "能力类型",
+    "localOnly": "插件默认仅在这台设备上运行",
+    "views": {
+      "all": "全部",
+      "enabled": "已启用",
+      "disabled": "已停用",
+      "drafts": "创作中",
+      "attention": "需处理",
+      "trash": "回收站",
+      "ui_only": "界面应用",
+      "headless": "后台能力",
+      "mixed": "App + 服务"
+    }
   },
   "shape": {
     "ui_only": "UI App",
@@ -38,7 +60,7 @@
     "draft": "请在桌面 App 中打开此草稿并继续编辑。"
   },
   "library": {
-    "title": "插件",
+    "title": "插件与小程序",
     "subtitle": "App 与系统能力共用同一种 Package、一个本地身份、一个 DataRoot 和一套生命周期。",
     "search": "搜索插件与草稿",
     "loading": "正在加载插件…",
@@ -52,7 +74,37 @@
     "openApp": "可以打开",
     "toggle": "启用或停用 {{name}}",
     "emptyTitle": "创建第一个插件",
-    "emptyBody": "通过 Chat 创建 App，或导入 Plugin Package / Backup。"
+    "emptyBody": "描述你的想法即可创建，也可以导入已有的插件包。",
+    "noResultsTitle": "没有找到匹配的插件",
+    "noResultsBody": "换个关键词试试，或清除搜索查看全部内容。",
+    "clearSearch": "清除搜索",
+    "draftDescription": "继续描述需求，完善这个插件。",
+    "sortLabel": "插件排序方式",
+    "sortRecent": "最近更新",
+    "sortName": "名称排序",
+    "pin": "固定到侧边栏",
+    "unpin": "取消固定",
+    "moreActions": "{{name}} 的更多操作",
+    "issueTitle": "此插件需要你的处理",
+    "reviewIssue": "查看并处理",
+    "columns": {
+      "plugin": "插件信息",
+      "type": "能力类型",
+      "updated": "最近更新",
+      "status": "状态",
+      "actions": "操作"
+    },
+    "views": {
+      "all": { "title": "全部插件", "subtitle": "集中查看 {{count}} 个插件与创作草稿。" },
+      "enabled": { "title": "已启用", "subtitle": "{{count}} 个插件正在为你工作。" },
+      "disabled": { "title": "已停用", "subtitle": "{{count}} 个插件已保留数据，但不会运行。" },
+      "drafts": { "title": "创作中", "subtitle": "{{count}} 个草稿等待继续完善。" },
+      "attention": { "title": "需要处理", "subtitle": "{{count}} 个项目需要确认或修复。" },
+      "trash": { "title": "回收站", "subtitle": "{{count}} 个插件已停用并等待恢复或删除。" },
+      "ui_only": { "title": "界面应用", "subtitle": "{{count}} 个可直接打开使用的界面插件。" },
+      "headless": { "title": "后台能力", "subtitle": "{{count}} 个在后台提供能力的插件。" },
+      "mixed": { "title": "App + 服务", "subtitle": "{{count}} 个同时提供界面与后台服务的插件。" }
+    }
   },
   "creator": {
     "title": "创建插件",
@@ -71,7 +123,34 @@
     "loadFailed": "无法加载草稿。",
     "generateFailed": "未能生成 Package；草稿已保留。",
     "saveFailed": "校验或激活失败；已安装插件及其数据没有变化。",
-    "operationFailed": "草稿操作失败，请刷新后重试。"
+    "operationFailed": "草稿操作失败，请刷新后重试。",
+    "assistantTitle": "创作助手",
+    "assistantHelp": "用自然语言描述需求，助手会生成并持续调整插件。",
+    "modelConnected": "模型已连接",
+    "modelDisconnected": "模型未连接",
+    "welcomeTitle": "从一句需求开始",
+    "welcomeBody": "例如：帮我做一个会议纪要助手，能整理录音并提取待办。",
+    "you": "你",
+    "assistant": "通用 Agent",
+    "composerHint": "Enter 发送 · Shift + Enter 换行",
+    "buildStatus": "构建进度",
+    "buildStatusHelp": "保存前会完成生成与预览检查。",
+    "capabilityCount": "{{count}} 项能力",
+    "permissionCount": "{{count}} 项权限",
+    "headlessPreview": "这是后台能力插件，无需界面预览即可保存。",
+    "previewWaiting": "生成插件后，这里会显示预览与能力摘要。",
+    "livePreview": "实时预览",
+    "steps": {
+      "requirement": "理解需求",
+      "implementation": "生成实现",
+      "preview": "预览验证"
+    },
+    "status": {
+      "new": "新草稿",
+      "ready": "待验证",
+      "generating": "生成中",
+      "failed": "生成失败"
+    }
   },
   "preview": {
     "title": "预览",
@@ -81,7 +160,12 @@
     "open": "打开预览",
     "reload": "重新加载预览",
     "empty": "打开预览，用临时存储测试 UI。",
-    "failed": "预览校验或启动失败；正式数据没有变化。"
+    "failed": "预览校验或启动失败；正式数据没有变化。",
+    "temporaryShort": "使用隔离的临时数据，不影响正式插件。",
+    "temporaryData": "临时预览数据",
+    "surfaceFailed": "无法打开插件界面",
+    "retry": "重试",
+    "loading": "正在加载插件…"
   },
   "permissions": {
     "title": "确认新增访问",
@@ -131,8 +215,8 @@
     "disabledBody": "启用后才能打开 UI；持久数据仍然保留。",
     "headlessTitle": "后台能力插件",
     "headlessBody": "此插件没有 UI；启用后的 Action 与 Binding 会增强已注册的 Agent、Desktop 或自动化扩展点。",
-    "actions": "Actions",
-    "bindings": "Bindings",
+    "actions": "能力",
+    "bindings": "使用方式",
     "noActions": "此插件未声明 Action。",
     "noBindings": "此插件未声明 Binding。",
     "available": "可用",
@@ -147,7 +231,34 @@
     "permissions": "权限",
     "granted": "已授权",
     "denied": "未授权",
-    "noPermissions": "未请求 Host 权限。"
+    "noPermissions": "未请求 Host 权限。",
+    "actionsHelp": "这个插件可以完成的具体操作。",
+    "bindingsHelp": "这些能力会在哪些产品场景中出现。",
+    "runtimeStatus": "运行状态",
+    "recentCheck": "最近检查",
+    "needsReview": "需要处理",
+    "passed": "通过",
+    "currentVersion": "当前版本",
+    "runtime": "运行进程",
+    "summary": "能力概览",
+    "updatedAt": "最后更新于 {{date}}",
+    "configurationHelp": "查看非敏感配置，并管理凭据引用。",
+    "showConfiguration": "查看当前配置",
+    "permissionsHelp": "明确查看插件可以访问的主机能力。",
+    "storageHelp": "版本与本地数据使用同一插件身份管理。",
+    "versionAndData": "版本与数据",
+    "versionAndDataHelp": "检查当前版本，必要时恢复或导出。",
+    "packageId": "Package ID",
+    "revision": "修订版本",
+    "maintenanceActions": "维护操作",
+    "maintenanceHelp": "导出、恢复或移除插件；危险操作会再次确认。",
+    "activeData": "正式插件数据",
+    "tabs": {
+      "label": "插件详情",
+      "overview": "概览",
+      "access": "权限与数据",
+      "maintenance": "版本与维护"
+    }
   },
   "command": {
     "run": "在 Desktop 运行",
