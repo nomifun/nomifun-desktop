@@ -204,13 +204,22 @@ pub(crate) async fn run_compaction_recorded(
                     ));
                 }
                 let next_bytes = summary.len().saturating_add(text.len());
-                if next_bytes > request.max_summary_bytes {
+                summary.push_str(&text);
+                if next_bytes > request.max_summary_bytes
+                    && summary.trim_end().len() > request.max_summary_bytes
+                {
                     return Err(AgentEngineError::ContextTooLarge {
                         limit: request.max_summary_bytes,
                         actual: next_bytes,
                     });
                 }
-                summary.push_str(&text);
+                if summary.len() > request.max_summary_bytes {
+                    let mut boundary = request.max_summary_bytes;
+                    while boundary > 0 && !summary.is_char_boundary(boundary) {
+                        boundary -= 1;
+                    }
+                    summary.truncate(boundary);
+                }
             }
             ChatModelEvent::Completed { finish_reason } => terminal = Some(finish_reason),
             ChatModelEvent::Usage { usage } => {
@@ -237,6 +246,8 @@ pub(crate) async fn run_compaction_recorded(
             }
         }
     }
+    let trimmed_len = summary.trim_end().len();
+    summary.truncate(trimmed_len);
     match terminal.expect("loop exits only after terminal") {
         ChatFinishReason::Completed if !summary.trim().is_empty() => {}
         ChatFinishReason::Cancelled => return Err(AgentEngineError::Cancelled),
@@ -354,6 +365,29 @@ mod tests {
         }
     }
 
+    struct TrailingWhitespaceCompactionModel;
+
+    #[async_trait]
+    impl AgentModelPort for TrailingWhitespaceCompactionModel {
+        async fn open_stream(
+            &self,
+            _request: ChatModelRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<crate::model::AgentModelStream, ChatModelError> {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(ChatModelEvent::OutputTextDelta {
+                    text: "12345".to_owned(),
+                }),
+                Ok(ChatModelEvent::OutputTextDelta {
+                    text: "\n".to_owned(),
+                }),
+                Ok(ChatModelEvent::Completed {
+                    finish_reason: ChatFinishReason::Completed,
+                }),
+            ])))
+        }
+    }
+
     #[test]
     fn summary_retains_exact_runtime_identity() {
         let binding = binding();
@@ -381,6 +415,24 @@ mod tests {
         assert!(matches!(run_compaction(&binding, Arc::new(CompactionModel), request,
             CancellationToken::new()).await,
             Err(AgentEngineError::ContextTooLarge { limit: 5, .. })));
+    }
+
+    #[tokio::test]
+    async fn compaction_ignores_provider_trailing_whitespace_above_the_byte_limit() {
+        let binding = binding();
+        let request = AgentCompactionRequest::new(
+            model_request(&binding), 1, "workspace", vec![], "retain work", vec![],
+        )
+        .with_max_summary_bytes(5);
+        let summary = run_compaction(
+            &binding,
+            Arc::new(TrailingWhitespaceCompactionModel),
+            request,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.task_summary, "12345");
     }
 
     #[tokio::test]
