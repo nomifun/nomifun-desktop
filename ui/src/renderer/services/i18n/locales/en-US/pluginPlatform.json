@@ -2,6 +2,7 @@
   "actions": {
     "back": "Back to plugins",
     "cancel": "Cancel",
+    "close": "Close",
     "configure": "Configuration and access",
     "create": "Create plugin",
     "delete": "Delete permanently",
@@ -18,6 +19,27 @@
     "restoreTrash": "Restore from trash",
     "save": "Save",
     "trash": "Move to trash"
+  },
+  "workspace": {
+    "title": "Plugins & Apps",
+    "subtitle": "Local capability center",
+    "navigation": "Plugin workspace navigation",
+    "collapse": "Collapse plugin navigation",
+    "expand": "Expand plugin navigation",
+    "smartViews": "Smart views",
+    "capabilityTypes": "Capability types",
+    "localOnly": "Plugins run on this device by default",
+    "views": {
+      "all": "All",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "drafts": "In progress",
+      "attention": "Needs attention",
+      "trash": "Trash",
+      "ui_only": "Interface apps",
+      "headless": "Background capabilities",
+      "mixed": "App + service"
+    }
   },
   "shape": {
     "ui_only": "UI app",
@@ -38,7 +60,7 @@
     "draft": "Open this draft in the desktop app to continue editing."
   },
   "library": {
-    "title": "Plugins",
+    "title": "Plugins & Apps",
     "subtitle": "Apps and system capabilities share one package, identity, data root, and lifecycle.",
     "search": "Search plugins and drafts",
     "loading": "Loading plugins…",
@@ -52,7 +74,37 @@
     "openApp": "Ready to open",
     "toggle": "Enable or disable {{name}}",
     "emptyTitle": "Create your first plugin",
-    "emptyBody": "Build an app with Chat or import a Plugin Package or Backup."
+    "emptyBody": "Describe what you need to create one, or import an existing plugin package.",
+    "noResultsTitle": "No matching plugins",
+    "noResultsBody": "Try another keyword, or clear the search to see everything.",
+    "clearSearch": "Clear search",
+    "draftDescription": "Keep describing what you need to finish this plugin.",
+    "sortLabel": "Plugin sort order",
+    "sortRecent": "Recently updated",
+    "sortName": "Name",
+    "pin": "Pin to sidebar",
+    "unpin": "Unpin",
+    "moreActions": "More actions for {{name}}",
+    "issueTitle": "This plugin needs your attention",
+    "reviewIssue": "Review and fix",
+    "columns": {
+      "plugin": "Plugin",
+      "type": "Capability type",
+      "updated": "Last updated",
+      "status": "Status",
+      "actions": "Actions"
+    },
+    "views": {
+      "all": { "title": "All plugins", "subtitle": "See {{count}} plugins and drafts in one place." },
+      "enabled": { "title": "Enabled", "subtitle": "{{count}} plugins are working for you." },
+      "disabled": { "title": "Disabled", "subtitle": "{{count}} plugins keep their data but do not run." },
+      "drafts": { "title": "In progress", "subtitle": "{{count}} drafts are waiting to be finished." },
+      "attention": { "title": "Needs attention", "subtitle": "{{count}} items need confirmation or a fix." },
+      "trash": { "title": "Trash", "subtitle": "{{count}} plugins are disabled and waiting to be restored or removed." },
+      "ui_only": { "title": "Interface apps", "subtitle": "{{count}} plugins can be opened and used directly." },
+      "headless": { "title": "Background capabilities", "subtitle": "{{count}} plugins provide capabilities in the background." },
+      "mixed": { "title": "App + service", "subtitle": "{{count}} plugins provide both an interface and a background service." }
+    }
   },
   "creator": {
     "title": "Create plugin",
@@ -71,7 +123,34 @@
     "loadFailed": "The draft could not be loaded.",
     "generateFailed": "The package could not be generated. Your draft was kept.",
     "saveFailed": "Validation or activation failed. The installed plugin and its data are unchanged.",
-    "operationFailed": "The draft operation failed. Refresh and try again."
+    "operationFailed": "The draft operation failed. Refresh and try again.",
+    "assistantTitle": "Creation assistant",
+    "assistantHelp": "Describe what you need in plain language, then refine the generated plugin together.",
+    "modelConnected": "Model connected",
+    "modelDisconnected": "Model not connected",
+    "welcomeTitle": "Start with one sentence",
+    "welcomeBody": "For example: build a meeting-notes assistant that organizes recordings and extracts action items.",
+    "you": "You",
+    "assistant": "General Agent",
+    "composerHint": "Enter to send · Shift + Enter for a new line",
+    "buildStatus": "Build progress",
+    "buildStatusHelp": "Generation and preview checks complete before saving.",
+    "capabilityCount": "{{count}} capabilities",
+    "permissionCount": "{{count}} permissions",
+    "headlessPreview": "This is a background capability and can be saved without an interface preview.",
+    "previewWaiting": "A preview and capability summary will appear here after generation.",
+    "livePreview": "Live preview",
+    "steps": {
+      "requirement": "Understand request",
+      "implementation": "Generate implementation",
+      "preview": "Verify preview"
+    },
+    "status": {
+      "new": "New draft",
+      "ready": "Ready to verify",
+      "generating": "Generating",
+      "failed": "Generation failed"
+    }
   },
   "preview": {
     "title": "Preview",
@@ -81,7 +160,12 @@
     "open": "Open preview",
     "reload": "Reload preview",
     "empty": "Open a preview to test the UI with temporary storage.",
-    "failed": "Preview validation or startup failed. Installed data was not changed."
+    "failed": "Preview validation or startup failed. Installed data was not changed.",
+    "temporaryShort": "Uses isolated temporary data and does not affect the installed plugin.",
+    "temporaryData": "Temporary preview data",
+    "surfaceFailed": "The plugin interface could not be opened",
+    "retry": "Retry",
+    "loading": "Loading plugin…"
   },
   "permissions": {
     "title": "Review new access",
@@ -147,7 +231,34 @@
     "permissions": "Permissions",
     "granted": "Granted",
     "denied": "Denied",
-    "noPermissions": "No Host permissions requested."
+    "noPermissions": "No Host permissions requested.",
+    "actionsHelp": "The concrete operations this plugin can perform.",
+    "bindingsHelp": "Where these capabilities appear across the product.",
+    "runtimeStatus": "Runtime status",
+    "recentCheck": "Recent check",
+    "needsReview": "Needs attention",
+    "passed": "Passed",
+    "currentVersion": "Current version",
+    "runtime": "Runtime process",
+    "summary": "Capability summary",
+    "updatedAt": "Last updated {{date}}",
+    "configurationHelp": "Review non-secret settings and manage credential references.",
+    "showConfiguration": "Show current configuration",
+    "permissionsHelp": "See exactly which host capabilities this plugin can access.",
+    "storageHelp": "Versions and local data stay under the same plugin identity.",
+    "versionAndData": "Version and data",
+    "versionAndDataHelp": "Review the current version, then restore or export when needed.",
+    "packageId": "Package ID",
+    "revision": "Revision",
+    "maintenanceActions": "Maintenance actions",
+    "maintenanceHelp": "Export, restore, or remove this plugin. Risky actions ask again.",
+    "activeData": "Active plugin data",
+    "tabs": {
+      "label": "Plugin details",
+      "overview": "Overview",
+      "access": "Access & data",
+      "maintenance": "Versions & maintenance"
+    }
   },
   "command": {
     "run": "Run on Desktop",

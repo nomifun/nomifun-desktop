@@ -7,9 +7,36 @@ import type {
 } from '@/common/types/pluginPlatform';
 
 export type PluginShape = 'ui_only' | 'headless' | 'mixed';
+export type PluginLibraryView =
+  | 'all'
+  | 'enabled'
+  | 'disabled'
+  | 'drafts'
+  | 'attention'
+  | 'trash'
+  | PluginShape;
+
+export type PluginLibraryCounts = Record<PluginLibraryView, number>;
+
 export type PluginLibraryEntry =
   | { kind: 'plugin'; key: string; plugin: PluginSummary }
   | { kind: 'draft'; key: string; draft: PluginDraftSummary };
+
+export const PLUGIN_LIBRARY_VIEWS: readonly PluginLibraryView[] = [
+  'all',
+  'enabled',
+  'disabled',
+  'drafts',
+  'attention',
+  'trash',
+  'ui_only',
+  'headless',
+  'mixed',
+];
+
+export function isPluginLibraryView(value: string | null): value is PluginLibraryView {
+  return Boolean(value && PLUGIN_LIBRARY_VIEWS.includes(value as PluginLibraryView));
+}
 
 export function pluginShape(value: Pick<PluginSummary, 'has_ui' | 'has_service'>): PluginShape {
   if (value.has_ui && value.has_service) return 'mixed';
@@ -109,6 +136,52 @@ export function pluginLibraryEntries(
     const rightTime = right.kind === 'plugin' ? right.plugin.updated_at_ms : right.draft.updated_at_ms;
     return rightTime - leftTime;
   });
+}
+
+export function pluginNeedsAttention(plugin: PluginSummary): boolean {
+  return Boolean(plugin.last_error || plugin.runtime.state === 'failed');
+}
+
+export function draftNeedsAttention(draft: PluginDraftSummary): boolean {
+  return draft.status === 'failed';
+}
+
+export function pluginLibraryCounts(
+  plugins: readonly PluginSummary[],
+  drafts: readonly PluginDraftSummary[],
+): PluginLibraryCounts {
+  const active = plugins.filter((plugin) => plugin.trashed_at_ms === undefined);
+  return {
+    all: active.length + drafts.length,
+    enabled: active.filter((plugin) => plugin.enabled).length,
+    disabled: active.filter((plugin) => !plugin.enabled).length,
+    drafts: drafts.length,
+    attention: active.filter(pluginNeedsAttention).length + drafts.filter(draftNeedsAttention).length,
+    trash: plugins.length - active.length,
+    ui_only: active.filter((plugin) => pluginShape(plugin) === 'ui_only').length,
+    headless: active.filter((plugin) => pluginShape(plugin) === 'headless').length,
+    mixed: active.filter((plugin) => pluginShape(plugin) === 'mixed').length,
+  };
+}
+
+export function pluginEntryMatchesView(
+  entry: PluginLibraryEntry,
+  view: PluginLibraryView,
+): boolean {
+  if (entry.kind === 'draft') {
+    if (view === 'all' || view === 'drafts') return true;
+    return view === 'attention' && draftNeedsAttention(entry.draft);
+  }
+  const { plugin } = entry;
+  const trashed = plugin.trashed_at_ms !== undefined;
+  if (view === 'trash') return trashed;
+  if (trashed) return false;
+  if (view === 'all') return true;
+  if (view === 'enabled') return plugin.enabled;
+  if (view === 'disabled') return !plugin.enabled;
+  if (view === 'attention') return pluginNeedsAttention(plugin);
+  if (view === 'drafts') return false;
+  return pluginShape(plugin) === view;
 }
 
 export function requiresDataLossWarning(plugin: PluginSummary): boolean {

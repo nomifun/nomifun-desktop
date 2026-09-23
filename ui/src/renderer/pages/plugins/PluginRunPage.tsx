@@ -1,6 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Button, Checkbox, Input, Modal, Spin, Switch, Tag } from '@arco-design/web-react';
-import { ArrowLeft, Code, Delete, Download, Redo, SettingTwo } from '@icon-park/react';
+import { Alert, Button, Checkbox, Input, Modal, Spin, Switch } from '@arco-design/web-react';
+import {
+  ArrowLeft,
+  ApiApp,
+  CheckOne,
+  Code,
+  Data,
+  Delete,
+  Download,
+  History,
+  Info,
+  PlayOne,
+  Puzzle,
+  Redo,
+  SettingTwo,
+  Shield,
+} from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
@@ -12,14 +27,16 @@ import type {
 import { isDesktopShell } from '@/renderer/utils/platform';
 import PluginConfigurationDialog from './PluginConfigurationDialog';
 import { notifyPluginLibraryChanged } from './pluginLibraryState';
-import { pluginShape, requiresDataLossWarning } from './pluginPlatformModel';
+import { pluginNeedsAttention, pluginShape, requiresDataLossWarning } from './pluginPlatformModel';
+import PluginWorkspace, { PluginVisual } from './PluginWorkspace';
 import PluginSurfacePanel from './PluginSurfacePanel';
 import styles from './PluginPlatform.module.css';
 
 type Dialog = 'restore' | 'export_package' | 'export_backup' | 'trash' | 'delete' | 'command' | null;
+type DetailTab = 'overview' | 'access' | 'maintenance';
 
 export default function PluginRunPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const { id = '' } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
@@ -37,6 +54,7 @@ export default function PluginRunPage() {
   const [commandActionId, setCommandActionId] = useState('');
   const [commandInput, setCommandInput] = useState('{}');
   const [commandOutput, setCommandOutput] = useState('');
+  const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const desktopShell = isDesktopShell();
 
   const closeSurface = useCallback(async () => {
@@ -238,168 +256,306 @@ export default function PluginRunPage() {
     }
   };
 
-  if (loading) return <main className={styles.page}><div className={styles.empty}><Spin /></div></main>;
-  if (!detail) return <main className={styles.page}><Alert type='error' content={error || t('pluginPlatform.detail.notFound')} /></main>;
+  if (loading) return (
+    <PluginWorkspace>
+      <main className={styles.page}><div className={styles.emptyState}><Spin /></div></main>
+    </PluginWorkspace>
+  );
+  if (!detail) return (
+    <PluginWorkspace>
+      <main className={styles.page}><Alert type='error' content={error || t('pluginPlatform.detail.notFound')} showIcon /></main>
+    </PluginWorkspace>
+  );
 
   const { summary, manifest } = detail;
   const trashed = summary.trashed_at_ms !== undefined;
   const fullDataRestore = restoreMode === 'previous_code_and_data';
   const needsLossAck = fullDataRestore && requiresDataLossWarning(summary);
+  const shape = pluginShape(summary);
+  const attention = pluginNeedsAttention(summary) || !detail.config.valid;
+  const navView = trashed ? 'trash' : attention ? 'attention' : summary.enabled ? 'enabled' : 'disabled';
 
   return (
-    <main className={styles.page}>
-      <header className={styles.header}>
-        <div className={styles.actions}>
-          <Button type='text' icon={<ArrowLeft />} onClick={() => navigate('/plugins')}>
-            {t('pluginPlatform.actions.back')}
-          </Button>
-          <div className={styles.headerCopy}>
-            <div className={styles.actions}>
-              <h1>{summary.display_name}</h1>
-              <Tag>{t(`pluginPlatform.shape.${pluginShape(summary)}`)}</Tag>
-            </div>
-            <p>{summary.description}</p>
-          </div>
+    <PluginWorkspace activeView={navView}>
+      <main className={styles.page}>
+        <div className={styles.breadcrumb}>
+          <button type='button' onClick={() => navigate('/plugins')}>
+            <ArrowLeft />{t('pluginPlatform.workspace.title')}
+          </button>
+          <span>/</span>
+          <span>{summary.display_name}</span>
         </div>
-        <div className={styles.actions}>
-          {!desktopShell && <Tag color={summary.enabled ? 'green' : 'gray'}>
-            {summary.enabled ? t('pluginPlatform.actions.enabled') : t('pluginPlatform.actions.disabled')}
-          </Tag>}
-          {desktopShell && !trashed && <Switch
-            checked={summary.enabled}
-            loading={busy}
-            checkedText={t('pluginPlatform.actions.enabled')}
-            uncheckedText={t('pluginPlatform.actions.disabled')}
-            onChange={(enabled) => void setEnabled(enabled)}
-          />}
-          {desktopShell && !trashed && <Button icon={<Code />} disabled={busy} onClick={() => void beginEditing()}>
-            {t('pluginPlatform.actions.edit')}
-          </Button>}
-          {desktopShell && !trashed && <Button icon={<SettingTwo />} disabled={busy} onClick={() => setConfigureVisible(true)}>
-            {t('pluginPlatform.actions.configure')}
-          </Button>}
-        </div>
-      </header>
-      {searchParams.has('saved') && <Alert type='success' content={t('pluginPlatform.detail.saved')} />}
-      {error && <Alert type='error' content={error} />}
-      {!desktopShell && <Alert type='info' content={t('pluginPlatform.readOnly.body')} />}
-      {summary.last_error && <Alert type='warning' content={summary.last_error} />}
-      {surface && (
-        <PluginSurfacePanel
-          descriptor={surface}
-          title={summary.display_name}
-          closing={busy}
-          onReload={() => void load()}
-          onClose={() => void closeSurface()}
-        />
-      )}
-      {!surface && summary.has_ui && !summary.enabled && (
-        <div className={styles.empty}>
-          <h2>{t('pluginPlatform.detail.disabledTitle')}</h2>
-          <p>{t('pluginPlatform.detail.disabledBody')}</p>
-          {desktopShell && !trashed && <Button type='primary' onClick={() => void setEnabled(true)}>{t('pluginPlatform.actions.enable')}</Button>}
-        </div>
-      )}
-      {!summary.has_ui && (
-        <section className={styles.section}>
-          <div className={styles.sectionHeader}>
-            <div><h2>{t('pluginPlatform.detail.headlessTitle')}</h2><p>{t('pluginPlatform.detail.headlessBody')}</p></div>
-            <Tag color={summary.runtime.state === 'failed' ? 'red' : 'green'}>
-              {t(`pluginPlatform.service.${summary.runtime.state}`)}
-            </Tag>
-          </div>
-        </section>
-      )}
-      <div className={styles.detailGrid}>
-        <section className={styles.section}>
-          <h2>{t('pluginPlatform.detail.actions')}</h2>
-          <div className={styles.bindingList}>
-            {manifest.actions.map((action) => (
-              <div key={action.action_id} className={styles.binding}>
-                <span><strong>{action.name}</strong><br /><small>{action.description}</small></span>
-                <span>
-                  <code>{action.stable_id ?? action.action_id}</code>
-                  {desktopShell && action.stable_id && summary.enabled && !trashed && manifest.bindings.some(
-                    (binding) => binding.point === 'desktop.command' && binding.action_id === action.action_id,
-                  ) && <Button type='text' size='mini' onClick={() => {
-                    setCommandActionId(action.stable_id!);
-                    setCommandInput('{}');
-                    setCommandOutput('');
-                    setDialog('command');
-                  }}>
-                    {t('pluginPlatform.command.run')}
-                  </Button>}
+
+        <header className={styles.pluginDetailHeader}>
+          <div className={styles.pluginHeroIdentity}>
+            <PluginVisual shape={shape} large />
+            <div className={styles.headerCopy}>
+              <div className={styles.pluginTitleLine}>
+                <h1>{summary.display_name}</h1>
+                <span className={styles.statusPill} data-tone={trashed ? 'trash' : summary.enabled ? 'enabled' : 'disabled'}>
+                  {trashed
+                    ? t('pluginPlatform.library.trashed')
+                    : summary.enabled
+                      ? t('pluginPlatform.actions.enabled')
+                      : t('pluginPlatform.actions.disabled')}
                 </span>
               </div>
-            ))}
-            {!manifest.actions.length && <p className={styles.muted}>{t('pluginPlatform.detail.noActions')}</p>}
+              <p>{summary.description}</p>
+              <span className={styles.pluginPackageLine}>{summary.package_id} · v{summary.active.package_version}</span>
+            </div>
           </div>
-        </section>
-        <section className={styles.section}>
-          <h2>{t('pluginPlatform.detail.bindings')}</h2>
-          <div className={styles.bindingList}>
-            {manifest.bindings.map((binding) => (
-              <div key={`${binding.point}:${binding.action_id}`} className={styles.binding}>
-                <code>{binding.point}</code>
-                <span>{binding.supported ? t('pluginPlatform.detail.available') : binding.unavailable_reason}</span>
-              </div>
-            ))}
-            {!manifest.bindings.length && <p className={styles.muted}>{t('pluginPlatform.detail.noBindings')}</p>}
+          <div className={styles.headerActions}>
+            {desktopShell && summary.has_ui && !trashed && (
+              <Button
+                type='primary'
+                icon={<PlayOne />}
+                loading={busy}
+                onClick={() => summary.enabled ? void load() : void setEnabled(true)}
+              >
+                {summary.enabled ? t('pluginPlatform.actions.open') : t('pluginPlatform.actions.enable')}
+              </Button>
+            )}
+            {desktopShell && !trashed && <Switch
+              checked={summary.enabled}
+              loading={busy}
+              checkedText={t('pluginPlatform.actions.enabled')}
+              uncheckedText={t('pluginPlatform.actions.disabled')}
+              onChange={(enabled) => void setEnabled(enabled)}
+            />}
+            {desktopShell && !trashed && <Button icon={<Code />} disabled={busy} onClick={() => void beginEditing()}>
+              {t('pluginPlatform.actions.edit')}
+            </Button>}
+            {desktopShell && !trashed && <Button icon={<SettingTwo />} disabled={busy} onClick={() => setConfigureVisible(true)}>
+              {t('pluginPlatform.actions.configure')}
+            </Button>}
           </div>
-        </section>
-        <section className={styles.section}>
-          <h2>{t('pluginPlatform.detail.storage')}</h2>
-          <div className={styles.facts}>
-            <div className={styles.fact}><span>{t('pluginPlatform.detail.artifact')}</span><code>{summary.active.artifact_digest.slice(0, 16)}…</code></div>
-            <div className={styles.fact}><span>{t('pluginPlatform.detail.dataGeneration')}</span><code>{summary.active.data_generation}</code></div>
-            <div className={styles.fact}><span>{t('pluginPlatform.detail.dataVersion')}</span><code>{summary.active.data_version}</code></div>
-            <div className={styles.fact}><span>{t('pluginPlatform.detail.credentials')}</span><code>{detail.credential_bindings.length}</code></div>
-          </div>
-        </section>
-        <section className={styles.section}>
-          <h2>{t('pluginPlatform.detail.configuration')}</h2>
-          <Tag color={detail.config.valid ? 'green' : 'red'}>
-            {t(detail.config.valid
-              ? 'pluginPlatform.detail.configurationValid'
-              : 'pluginPlatform.detail.configurationInvalid')}
-          </Tag>
-          <pre>{JSON.stringify(detail.config.values, null, 2)}</pre>
-          {!detail.config.valid && detail.config.validation_errors.length > 0 && (
-            <Alert type='warning' content={detail.config.validation_errors.join('\n')} />
-          )}
-        </section>
-        <section className={styles.section}>
-          <h2>{t('pluginPlatform.detail.permissions')}</h2>
-          <div className={styles.bindingList}>
-            {detail.grants.map((grant) => <div key={grant.permission} className={styles.binding}>
-              <code>{grant.permission}</code><Tag color={grant.granted ? 'green' : 'gray'}>{grant.granted ? t('pluginPlatform.detail.granted') : t('pluginPlatform.detail.denied')}</Tag>
-            </div>)}
-            {!detail.grants.length && <p className={styles.muted}>{t('pluginPlatform.detail.noPermissions')}</p>}
-          </div>
-        </section>
-      </div>
-      {desktopShell && <section className={styles.section}>
-        <div className={styles.actions}>
-          {!trashed && summary.previous && <Button icon={<Redo />} disabled={busy} onClick={() => {
-            setRestoreMode('previous_code'); setAcknowledgeLoss(false); setDialog('restore');
-          }}>{t('pluginPlatform.actions.restore')}</Button>}
-          {trashed && <Button icon={<Redo />} disabled={busy} onClick={() => void mutate((current) => pluginPlatform.plugins.restore.invoke({
-            plugin_id: current.summary.plugin_id,
-            request: { expected_revision: current.summary.revision, mode: 'from_trash' },
-          }))}>{t('pluginPlatform.actions.restoreTrash')}</Button>}
-          {!trashed && <Button icon={<Download />} disabled={busy} onClick={() => { setDestination(''); setDialog('export_package'); }}>
-            {t('pluginPlatform.actions.exportPackage')}
-          </Button>}
-          {!trashed && <Button icon={<Download />} disabled={busy} onClick={() => { setDestination(''); setDialog('export_backup'); }}>
-            {t('pluginPlatform.actions.exportBackup')}
-          </Button>}
-          {!trashed ? <Button status='danger' icon={<Delete />} disabled={busy} onClick={() => setDialog('trash')}>
-            {t('pluginPlatform.actions.trash')}
-          </Button> : <Button status='danger' icon={<Delete />} disabled={busy} onClick={() => setDialog('delete')}>
-            {t('pluginPlatform.actions.delete')}
-          </Button>}
+        </header>
+
+        {searchParams.has('saved') && <Alert type='success' content={t('pluginPlatform.detail.saved')} showIcon />}
+        {error && <Alert type='error' content={error} showIcon />}
+        {!desktopShell && <Alert type='info' content={t('pluginPlatform.readOnly.body')} showIcon />}
+        {summary.last_error && <Alert type='warning' content={summary.last_error} showIcon />}
+
+        <div className={styles.detailTabs} role='tablist' aria-label={t('pluginPlatform.detail.tabs.label')}>
+          {(['overview', 'access', 'maintenance'] as const).map((tab) => (
+            <button
+              type='button'
+              role='tab'
+              key={tab}
+              aria-selected={activeTab === tab}
+              className={activeTab === tab ? styles.detailTabActive : ''}
+              onClick={() => setActiveTab(tab)}
+            >
+              {t(`pluginPlatform.detail.tabs.${tab}`)}
+            </button>
+          ))}
         </div>
-      </section>}
+
+        {activeTab === 'overview' && (
+          <div className={styles.detailOverviewGrid}>
+            <div className={styles.detailPrimaryColumn}>
+              {surface && (
+                <section className={styles.surfaceSection}>
+                  <PluginSurfacePanel
+                    descriptor={surface}
+                    title={summary.display_name}
+                    closing={busy}
+                    onReload={() => void load()}
+                    onClose={() => void closeSurface()}
+                  />
+                </section>
+              )}
+              {!surface && summary.has_ui && (!summary.enabled || trashed) && (
+                <div className={styles.friendlyEmpty}>
+                  <PluginVisual shape={shape} />
+                  <h2>{trashed ? t('pluginPlatform.library.trashed') : t('pluginPlatform.detail.disabledTitle')}</h2>
+                  <p>{t('pluginPlatform.detail.disabledBody')}</p>
+                  {desktopShell && !trashed && <Button type='primary' onClick={() => void setEnabled(true)}>
+                    {t('pluginPlatform.actions.enable')}
+                  </Button>}
+                </div>
+              )}
+              {!summary.has_ui && (
+                <section className={`${styles.section} ${styles.capabilityCallout}`}>
+                  <div className={styles.sectionHeadingIcon}><ApiApp /></div>
+                  <div>
+                    <h2>{t('pluginPlatform.detail.headlessTitle')}</h2>
+                    <p>{t('pluginPlatform.detail.headlessBody')}</p>
+                  </div>
+                  <span className={styles.statusPill} data-tone={summary.runtime.state === 'failed' ? 'attention' : 'enabled'}>
+                    {t(`pluginPlatform.service.${summary.runtime.state}`)}
+                  </span>
+                </section>
+              )}
+
+              <div className={styles.capabilityGrid}>
+                <section className={styles.section}>
+                  <div className={styles.sectionTitleRow}>
+                    <div><h2>{t('pluginPlatform.detail.actions')}</h2><p>{t('pluginPlatform.detail.actionsHelp')}</p></div>
+                    <span className={styles.sectionCount}>{manifest.actions.length}</span>
+                  </div>
+                  <div className={styles.bindingList}>
+                    {manifest.actions.map((action) => (
+                      <div key={action.action_id} className={styles.capabilityRow}>
+                        <span className={styles.capabilityRowIcon}><Code /></span>
+                        <span className={styles.capabilityRowCopy}>
+                          <strong>{action.name}</strong><small>{action.description}</small>
+                        </span>
+                        <span className={styles.capabilityRowMeta}>
+                          <code>{action.stable_id ?? action.action_id}</code>
+                          {desktopShell && action.stable_id && summary.enabled && !trashed && manifest.bindings.some(
+                            (binding) => binding.point === 'desktop.command' && binding.action_id === action.action_id,
+                          ) && <Button type='text' size='mini' onClick={() => {
+                            setCommandActionId(action.stable_id!);
+                            setCommandInput('{}');
+                            setCommandOutput('');
+                            setDialog('command');
+                          }}>
+                            {t('pluginPlatform.command.run')}
+                          </Button>}
+                        </span>
+                      </div>
+                    ))}
+                    {!manifest.actions.length && <p className={styles.muted}>{t('pluginPlatform.detail.noActions')}</p>}
+                  </div>
+                </section>
+                <section className={styles.section}>
+                  <div className={styles.sectionTitleRow}>
+                    <div><h2>{t('pluginPlatform.detail.bindings')}</h2><p>{t('pluginPlatform.detail.bindingsHelp')}</p></div>
+                    <span className={styles.sectionCount}>{manifest.bindings.length}</span>
+                  </div>
+                  <div className={styles.bindingList}>
+                    {manifest.bindings.map((binding) => (
+                      <div key={`${binding.point}:${binding.action_id}`} className={styles.capabilityRow}>
+                        <span className={styles.capabilityRowIcon}><Puzzle /></span>
+                        <span className={styles.capabilityRowCopy}>
+                          <strong>{binding.point}</strong><small>{binding.action_id}</small>
+                        </span>
+                        <span className={styles.statusPill} data-tone={binding.supported ? 'enabled' : 'attention'}>
+                          {binding.supported ? t('pluginPlatform.detail.available') : binding.unavailable_reason}
+                        </span>
+                      </div>
+                    ))}
+                    {!manifest.bindings.length && <p className={styles.muted}>{t('pluginPlatform.detail.noBindings')}</p>}
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <aside className={styles.detailRail}>
+              <section className={styles.section}>
+                <div className={styles.sectionTitleRow}><h2>{t('pluginPlatform.detail.runtimeStatus')}</h2></div>
+                <div className={styles.statusList}>
+                  <div><CheckOne /><span>{t('pluginPlatform.detail.recentCheck')}</span><strong>{attention ? t('pluginPlatform.detail.needsReview') : t('pluginPlatform.detail.passed')}</strong></div>
+                  <div><History /><span>{t('pluginPlatform.detail.currentVersion')}</span><strong>v{summary.active.package_version}</strong></div>
+                  <div><Info /><span>{t('pluginPlatform.detail.runtime')}</span><strong>{t(`pluginPlatform.service.${summary.runtime.state}`)}</strong></div>
+                  <div><SettingTwo /><span>{t('pluginPlatform.detail.configuration')}</span><strong>{t(detail.config.valid ? 'pluginPlatform.detail.configurationValid' : 'pluginPlatform.detail.configurationInvalid')}</strong></div>
+                </div>
+              </section>
+              <section className={styles.section}>
+                <div className={styles.sectionTitleRow}><h2>{t('pluginPlatform.detail.summary')}</h2></div>
+                <div className={styles.summaryMetrics}>
+                  <div><strong>{manifest.actions.length}</strong><span>{t('pluginPlatform.detail.actions')}</span></div>
+                  <div><strong>{manifest.bindings.length}</strong><span>{t('pluginPlatform.detail.bindings')}</span></div>
+                  <div><strong>{detail.grants.filter((grant) => grant.granted).length}</strong><span>{t('pluginPlatform.detail.permissions')}</span></div>
+                </div>
+                <p className={styles.updatedSummary}>{t('pluginPlatform.detail.updatedAt', { date: new Date(summary.updated_at_ms).toLocaleString(i18n.language) })}</p>
+              </section>
+            </aside>
+          </div>
+        )}
+
+        {activeTab === 'access' && (
+          <div className={styles.detailGrid}>
+            <section className={styles.section}>
+              <div className={styles.sectionTitleRow}>
+                <div><h2>{t('pluginPlatform.detail.configuration')}</h2><p>{t('pluginPlatform.detail.configurationHelp')}</p></div>
+                <span className={styles.statusPill} data-tone={detail.config.valid ? 'enabled' : 'attention'}>
+                  {t(detail.config.valid ? 'pluginPlatform.detail.configurationValid' : 'pluginPlatform.detail.configurationInvalid')}
+                </span>
+              </div>
+              <details className={styles.codeDisclosure}>
+                <summary>{t('pluginPlatform.detail.showConfiguration')}</summary>
+                <pre>{JSON.stringify(detail.config.values, null, 2)}</pre>
+              </details>
+              {!detail.config.valid && detail.config.validation_errors.length > 0 && (
+                <Alert type='warning' content={detail.config.validation_errors.join('\n')} showIcon />
+              )}
+              {desktopShell && !trashed && <Button icon={<SettingTwo />} onClick={() => setConfigureVisible(true)}>
+                {t('pluginPlatform.actions.configure')}
+              </Button>}
+            </section>
+            <section className={styles.section}>
+              <div className={styles.sectionTitleRow}>
+                <div><h2>{t('pluginPlatform.detail.permissions')}</h2><p>{t('pluginPlatform.detail.permissionsHelp')}</p></div>
+                <Shield />
+              </div>
+              <div className={styles.bindingList}>
+                {detail.grants.map((grant) => <div key={grant.permission} className={styles.permissionRow}>
+                  <span><Shield /><code>{grant.permission}</code></span>
+                  <span className={styles.statusPill} data-tone={grant.granted ? 'enabled' : 'disabled'}>
+                    {grant.granted ? t('pluginPlatform.detail.granted') : t('pluginPlatform.detail.denied')}
+                  </span>
+                </div>)}
+                {!detail.grants.length && <p className={styles.muted}>{t('pluginPlatform.detail.noPermissions')}</p>}
+              </div>
+            </section>
+            <section className={styles.section}>
+              <div className={styles.sectionTitleRow}><div><h2>{t('pluginPlatform.detail.storage')}</h2><p>{t('pluginPlatform.detail.storageHelp')}</p></div><Data /></div>
+              <div className={styles.facts}>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.artifact')}</span><code>{summary.active.artifact_digest.slice(0, 16)}…</code></div>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.dataGeneration')}</span><code>{summary.active.data_generation}</code></div>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.dataVersion')}</span><code>{summary.active.data_version}</code></div>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.credentials')}</span><code>{detail.credential_bindings.length}</code></div>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {activeTab === 'maintenance' && (
+          <div className={styles.maintenanceGrid}>
+            <section className={styles.section}>
+              <div className={styles.sectionTitleRow}>
+                <div><h2>{t('pluginPlatform.detail.versionAndData')}</h2><p>{t('pluginPlatform.detail.versionAndDataHelp')}</p></div>
+                <History />
+              </div>
+              <div className={styles.facts}>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.currentVersion')}</span><code>v{summary.active.package_version}</code></div>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.packageId')}</span><code>{summary.package_id}</code></div>
+                <div className={styles.fact}><span>{t('pluginPlatform.detail.revision')}</span><code>{summary.revision}</code></div>
+              </div>
+            </section>
+            {desktopShell && <section className={styles.section}>
+              <div className={styles.sectionTitleRow}><div><h2>{t('pluginPlatform.detail.maintenanceActions')}</h2><p>{t('pluginPlatform.detail.maintenanceHelp')}</p></div></div>
+              <div className={styles.maintenanceActions}>
+                {!trashed && summary.previous && <Button icon={<Redo />} disabled={busy} onClick={() => {
+                  setRestoreMode('previous_code'); setAcknowledgeLoss(false); setDialog('restore');
+                }}>{t('pluginPlatform.actions.restore')}</Button>}
+                {trashed && <Button type='primary' icon={<Redo />} disabled={busy} onClick={() => void mutate((current) => pluginPlatform.plugins.restore.invoke({
+                  plugin_id: current.summary.plugin_id,
+                  request: { expected_revision: current.summary.revision, mode: 'from_trash' },
+                }))}>{t('pluginPlatform.actions.restoreTrash')}</Button>}
+                {!trashed && <Button icon={<Download />} disabled={busy} onClick={() => { setDestination(''); setDialog('export_package'); }}>
+                  {t('pluginPlatform.actions.exportPackage')}
+                </Button>}
+                {!trashed && <Button icon={<Download />} disabled={busy} onClick={() => { setDestination(''); setDialog('export_backup'); }}>
+                  {t('pluginPlatform.actions.exportBackup')}
+                </Button>}
+                {!trashed ? <Button status='danger' icon={<Delete />} disabled={busy} onClick={() => setDialog('trash')}>
+                  {t('pluginPlatform.actions.trash')}
+                </Button> : <Button status='danger' icon={<Delete />} disabled={busy} onClick={() => setDialog('delete')}>
+                  {t('pluginPlatform.actions.delete')}
+                </Button>}
+              </div>
+            </section>}
+            {commandOutput && <section className={styles.section}>
+              <h2>{t('pluginPlatform.command.result')}</h2>
+              <pre>{commandOutput}</pre>
+            </section>}
+          </div>
+        )}
+      </main>
+
       {desktopShell && <PluginConfigurationDialog
         detail={detail}
         visible={configureVisible}
@@ -424,7 +580,7 @@ export default function PluginRunPage() {
           {(dialog === 'export_package' || dialog === 'export_backup') && <>
             <Alert type='info' content={t(dialog === 'export_package'
               ? 'pluginPlatform.dialog.export_package.disclosure'
-              : 'pluginPlatform.dialog.export_backup.disclosure')} />
+              : 'pluginPlatform.dialog.export_backup.disclosure')} showIcon />
             <Input value={destination} onChange={setDestination} placeholder={t('pluginPlatform.dialog.destination')} />
           </>}
           {dialog === 'restore' && <>
@@ -432,13 +588,13 @@ export default function PluginRunPage() {
               setRestoreMode(checked ? 'previous_code_and_data' : 'previous_code');
               setAcknowledgeLoss(false);
             }}>{t('pluginPlatform.dialog.restore.withData')}</Checkbox>
-            {needsLossAck && <Alert type='warning' content={t('pluginPlatform.dialog.restore.dataLoss')} />}
+            {needsLossAck && <Alert type='warning' content={t('pluginPlatform.dialog.restore.dataLoss')} showIcon />}
             {needsLossAck && <Checkbox checked={acknowledgeLoss} onChange={setAcknowledgeLoss}>
               {t('pluginPlatform.dialog.restore.acknowledge')}
             </Checkbox>}
           </>}
-          {dialog === 'trash' && <Alert type='warning' content={t('pluginPlatform.dialog.trash.body')} />}
-          {dialog === 'delete' && <Alert type='error' content={t('pluginPlatform.dialog.delete.body')} />}
+          {dialog === 'trash' && <Alert type='warning' content={t('pluginPlatform.dialog.trash.body')} showIcon />}
+          {dialog === 'delete' && <Alert type='error' content={t('pluginPlatform.dialog.delete.body')} showIcon />}
           {dialog === 'command' && <>
             <p><code>{commandActionId}</code></p>
             <Input.TextArea
@@ -451,10 +607,6 @@ export default function PluginRunPage() {
           </>}
         </div>
       </Modal>
-      {commandOutput && <section className={styles.section}>
-        <h2>{t('pluginPlatform.command.result')}</h2>
-        <pre>{commandOutput}</pre>
-      </section>}
-    </main>
+    </PluginWorkspace>
   );
 }

@@ -1,6 +1,21 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Checkbox, Input, Modal, Select, Spin, Tag } from '@arco-design/web-react';
-import { ArrowLeft, PreviewOpen, Save, Send } from '@icon-park/react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Alert, Button, Checkbox, Input, Modal, Select, Spin } from '@arco-design/web-react';
+import {
+  ArrowLeft,
+  CheckOne,
+  Code,
+  EditTwo,
+  Info,
+  Loading,
+  Magic,
+  PreviewOpen,
+  Robot,
+  Save,
+  Send,
+  SettingTwo,
+  Shield,
+  User,
+} from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
@@ -16,6 +31,7 @@ import { isDesktopShell } from '@/renderer/utils/platform';
 import { notifyPluginLibraryChanged } from './pluginLibraryState';
 import { draftManifest } from './pluginPlatformModel';
 import PluginSurfacePanel from './PluginSurfacePanel';
+import PluginWorkspace, { PluginVisual } from './PluginWorkspace';
 import styles from './PluginPlatform.module.css';
 
 function textBase64(value: string): string {
@@ -416,194 +432,194 @@ export default function PluginCreatorPage() {
   const canSave = Boolean(
     desktopShell && draft && manifest && !generating && (!manifest.entrypoints.ui || preview),
   );
+  const requirementUnderstood = Boolean(draft?.messages.length || draft);
+  const implementationReady = Boolean(manifest && !generating);
+  const previewReady = Boolean(preview || (manifest && !manifest.entrypoints.ui));
+  const buildProgress = previewReady ? 100 : generating ? 68 : implementationReady ? 84 : requirementUnderstood ? 34 : 8;
 
-  if (loading) return <main className={styles.page}><div className={styles.empty}><Spin /></div></main>;
+  if (loading) return (
+    <PluginWorkspace activeView='drafts'>
+      <main className={styles.page}><div className={styles.emptyState}><Spin /></div></main>
+    </PluginWorkspace>
+  );
 
   return (
-    <main className={styles.page}>
-      <header className={styles.header}>
-        <div className={styles.actions}>
-          <Button type='text' icon={<ArrowLeft />} onClick={() => navigate('/plugins')}>
-            {t('pluginPlatform.actions.back')}
-          </Button>
-          <div className={styles.headerCopy}>
-            <h1>{draft?.summary.display_name || t('pluginPlatform.creator.title')}</h1>
-            <p>{t('pluginPlatform.creator.subtitle')}</p>
-          </div>
+    <PluginWorkspace activeView='drafts'>
+      <main className={styles.page}>
+        <div className={styles.breadcrumb}>
+          <button type='button' onClick={() => navigate('/plugins')}>
+            <ArrowLeft />{t('pluginPlatform.workspace.title')}
+          </button>
+          <span>/</span>
+          <span>{t('pluginPlatform.workspace.views.drafts')}</span>
         </div>
-        <div className={styles.actions}>
-          {desktopShell && draft && <Button status='danger' disabled={busy || generating} onClick={() => void removeDraft()}>
-            {t('pluginPlatform.creator.discard')}
-          </Button>}
-          {desktopShell && <Button
-            type='primary'
-            icon={<Save />}
-            loading={busy}
-            disabled={!canSave}
-            onClick={() => void save()}
-          >
-            {t('pluginPlatform.creator.save')}
-          </Button>}
-        </div>
-      </header>
-      {error && <Alert type='error' content={error} />}
-      {!desktopShell && <Alert type='info' content={t('pluginPlatform.readOnly.body')} />}
-      {desktopShell && !current_model && <Alert type='warning' content={t('pluginPlatform.creator.modelRequired')} />}
-      {manifest?.entrypoints.service && (
-        <Alert type='warning' content={t('pluginPlatform.permissions.localCode')} />
-      )}
-      <div className={styles.editorLayout}>
-        <section className={styles.section}>
-          <div className={styles.messageList}>
-            {draft?.messages.map((message, index) => (
-              <div
-                key={`${message.role}:${index}`}
-                className={`${styles.message} ${message.role === 'user' ? styles.messageUser : ''}`}
-              >
-                {message.content}
+
+        <header className={styles.creatorHeader}>
+          <div className={styles.creatorIdentity}>
+            <PluginVisual draft large />
+            <div className={styles.headerCopy}>
+              <div className={styles.pluginTitleLine}>
+                <h1>{draft?.summary.display_name || t('pluginPlatform.creator.title')}</h1>
+                <span className={styles.statusPill} data-tone={generating ? 'attention' : 'draft'}>
+                  {draft ? t(`pluginPlatform.creator.status.${draft.summary.status}`) : t('pluginPlatform.creator.status.new')}
+                </span>
               </div>
-            ))}
-            {generating && <div className={styles.muted}><Spin size={12} /> {t('pluginPlatform.creator.generating')}</div>}
-          </div>
-          {desktopShell && <div className={styles.composer}>
-            <Input.TextArea
-              value={input}
-              onChange={setInput}
-              disabled={generating || busy}
-              autoSize={{ minRows: 3, maxRows: 8 }}
-              placeholder={t('pluginPlatform.creator.placeholder')}
-              onPressEnter={(event) => {
-                if (!event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault();
-                  void send();
-                }
-              }}
-            />
-            <div className={styles.composerActions}>
-              {generating ? (
-                <Button onClick={() => void cancelGeneration()}>{t('pluginPlatform.creator.stop')}</Button>
-              ) : (
-                <Button type='primary' icon={<Send />} disabled={!input.trim() || busy} onClick={() => void send()}>
-                  {t('pluginPlatform.creator.send')}
-                </Button>
-              )}
-            </div>
-          </div>}
-        </section>
-        <section className={styles.section}>
-          <div className={styles.sectionHeader}>
-            <h2>{t('pluginPlatform.creator.files')}</h2>
-            {manifest && <Tag>{manifest.package_id} · {manifest.version}</Tag>}
-          </div>
-          <div className={styles.layout}>
-            <div className={styles.fileList}>
-              {draft?.files.map((file) => (
-                <button
-                  type='button'
-                  key={file.path}
-                  className={`${styles.fileButton} ${selectedPath === file.path ? styles.fileButtonActive : ''}`}
-                  onClick={() => setSelectedPath(file.path)}
-                >
-                  <span>{file.path}</span><small>{file.size_bytes} B</small>
-                </button>
-              ))}
-            </div>
-            <div>
-              {selectedFile?.text === undefined ? (
-                <p className={styles.muted}>{t('pluginPlatform.creator.binaryFile')}</p>
-              ) : (
-                <>
-                  <textarea
-                    className={styles.code}
-                    value={editor}
-                    onChange={(event) => setEditor(event.currentTarget.value)}
-                    readOnly={!desktopShell}
-                    spellCheck={false}
-                    aria-label={selectedPath}
-                  />
-                  {desktopShell && <Button disabled={editor === selectedFile.text || busy || generating} onClick={() => void saveFile()}>
-                    {t('pluginPlatform.creator.saveFile')}
-                  </Button>}
-                </>
-              )}
+              <p>{t('pluginPlatform.creator.subtitle')}</p>
             </div>
           </div>
-        </section>
-      </div>
-      {manifest && (
-        <section className={styles.section}>
-          <div className={styles.sectionHeader}>
-            <div>
-              <h2>{t('pluginPlatform.config.title')}</h2>
-              <p>{t('pluginPlatform.config.secretBoundary')}</p>
-            </div>
-          </div>
-          <label>
-            <strong>{t('pluginPlatform.config.values')}</strong>
-            <Input.TextArea
-              className={styles.jsonEditor}
-              value={draftConfig}
-              onChange={setDraftConfig}
-              disabled={!desktopShell}
-              spellCheck={false}
-              aria-label={t('pluginPlatform.config.values')}
-            />
-          </label>
-          <details>
-            <summary>{t('pluginPlatform.config.schema')}</summary>
-            <pre>{JSON.stringify(manifest.config_schema, null, 2)}</pre>
-          </details>
-          {manifest.secret_slots.map((slot) => <label key={slot}>
-            <strong>{slot}</strong>
-            <Select
-              allowClear
-              showSearch
-              disabled={!desktopShell}
-              value={previewCredentials[slot] ?? ''}
-              onChange={(value) => setPreviewCredentials((current) => ({
-                ...current,
-                [slot]: typeof value === 'string' ? value : '',
-              }))}
-              placeholder={t('pluginPlatform.config.credentialReference')}
-              aria-label={t('pluginPlatform.config.credentialSlot', { slot })}
-              options={credentialOptions.map((reference) => ({
-                value: reference.credential_id,
-                label: reference.enabled
-                  ? `${reference.label} · ${reference.kind}`
-                  : `${reference.label} · ${reference.kind} (${t('pluginPlatform.config.credentialUnavailable')})`,
-                disabled: !reference.enabled,
-              }))}
-            />
-          </label>)}
-        </section>
-      )}
-      {manifest?.entrypoints.ui && (
-        <section className={styles.section}>
-          <div className={styles.sectionHeader}>
-            <div>
-              <h2>{t('pluginPlatform.preview.title')}</h2>
-              <p>{t('pluginPlatform.preview.temporary')}</p>
-            </div>
-            {desktopShell && <Button icon={<PreviewOpen />} loading={busy} disabled={generating} onClick={() => void openPreview()}>
-              {preview ? t('pluginPlatform.preview.reload') : t('pluginPlatform.preview.open')}
+          <div className={styles.headerActions}>
+            {desktopShell && draft && <Button disabled={busy || generating} onClick={() => void removeDraft()}>
+              {t('pluginPlatform.creator.discard')}
+            </Button>}
+            {desktopShell && <Button
+              type='primary'
+              icon={<Save />}
+              loading={busy}
+              disabled={!canSave}
+              onClick={() => void save()}
+            >
+              {t('pluginPlatform.creator.save')}
             </Button>}
           </div>
-          {manifest.permissions.length > 0 && (
-            <div className={styles.disclosure}>
-              <strong>{t('pluginPlatform.preview.permissions')}</strong>
-              {manifest.permissions.map((permission) => (
-                <Checkbox
-                  key={permission}
-                  disabled={!desktopShell}
-                  checked={previewPermissions.includes(permission)}
-                  onChange={(checked) => setPreviewPermissions((current) => checked
-                    ? [...new Set([...current, permission])]
-                    : current.filter((value) => value !== permission))}
-                >{permission}</Checkbox>
-              ))}
+        </header>
+
+        {error && <Alert type='error' content={error} showIcon />}
+        {!desktopShell && <Alert type='info' content={t('pluginPlatform.readOnly.body')} showIcon />}
+        {desktopShell && !current_model && <Alert type='warning' content={t('pluginPlatform.creator.modelRequired')} showIcon />}
+        {manifest?.entrypoints.service && <Alert type='warning' content={t('pluginPlatform.permissions.localCode')} showIcon />}
+
+        <div className={styles.creatorStage}>
+          <section className={`${styles.section} ${styles.creatorConversation}`}>
+            <div className={styles.sectionTitleRow}>
+              <div className={styles.creatorPanelTitle}>
+                <span className={styles.sectionHeadingIcon}><Robot /></span>
+                <div><h2>{t('pluginPlatform.creator.assistantTitle')}</h2><p>{t('pluginPlatform.creator.assistantHelp')}</p></div>
+              </div>
+              <span className={styles.statusPill} data-tone={current_model ? 'enabled' : 'disabled'}>
+                {current_model ? t('pluginPlatform.creator.modelConnected') : t('pluginPlatform.creator.modelDisconnected')}
+              </span>
             </div>
-          )}
-          {desktopShell && preview ? (
+            <div className={styles.messageList}>
+              {!draft?.messages.length && !generating && (
+                <div className={styles.creatorWelcome}>
+                  <span><Magic /></span>
+                  <h3>{t('pluginPlatform.creator.welcomeTitle')}</h3>
+                  <p>{t('pluginPlatform.creator.welcomeBody')}</p>
+                </div>
+              )}
+              {draft?.messages.map((message, index) => (
+                <div
+                  key={`${message.role}:${index}`}
+                  className={`${styles.messageTurn} ${message.role === 'user' ? styles.messageTurnUser : ''}`}
+                >
+                  <span className={styles.messageAvatar}>{message.role === 'user' ? <User /> : <Robot />}</span>
+                  <div>
+                    <strong>{message.role === 'user' ? t('pluginPlatform.creator.you') : t('pluginPlatform.creator.assistant')}</strong>
+                    <p>{message.content}</p>
+                  </div>
+                </div>
+              ))}
+              {generating && (
+                <div className={styles.messageTurn}>
+                  <span className={`${styles.messageAvatar} ${styles.messageAvatarBusy}`}><Loading /></span>
+                  <div><strong>{t('pluginPlatform.creator.assistant')}</strong><p>{t('pluginPlatform.creator.generating')}</p></div>
+                </div>
+              )}
+            </div>
+            {desktopShell && <div className={styles.composer}>
+              <Input.TextArea
+                value={input}
+                onChange={setInput}
+                disabled={generating || busy}
+                autoSize={{ minRows: 2, maxRows: 7 }}
+                placeholder={t('pluginPlatform.creator.placeholder')}
+                onPressEnter={(event) => {
+                  if (!event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+              />
+              <div className={styles.composerActions}>
+                <span>{t('pluginPlatform.creator.composerHint')}</span>
+                {generating ? (
+                  <Button onClick={() => void cancelGeneration()}>{t('pluginPlatform.creator.stop')}</Button>
+                ) : (
+                  <Button type='primary' icon={<Send />} disabled={!input.trim() || busy} onClick={() => void send()}>
+                    {t('pluginPlatform.creator.send')}
+                  </Button>
+                )}
+              </div>
+            </div>}
+          </section>
+
+          <aside className={styles.creatorRail}>
+            <section className={styles.section}>
+              <div className={styles.sectionTitleRow}>
+                <div><h2>{t('pluginPlatform.creator.buildStatus')}</h2><p>{t('pluginPlatform.creator.buildStatusHelp')}</p></div>
+                <strong className={styles.progressValue}>{buildProgress}%</strong>
+              </div>
+              <div className={styles.progressTrack}><span style={{ width: `${buildProgress}%` }} /></div>
+              <div className={styles.buildSteps}>
+                <BuildStep done={requirementUnderstood} active={!requirementUnderstood} icon={<Magic />} label={t('pluginPlatform.creator.steps.requirement')} />
+                <BuildStep done={implementationReady} active={generating || (requirementUnderstood && !implementationReady)} icon={<Code />} label={t('pluginPlatform.creator.steps.implementation')} />
+                <BuildStep done={previewReady} active={implementationReady && !previewReady} icon={<PreviewOpen />} label={t('pluginPlatform.creator.steps.preview')} />
+              </div>
+            </section>
+
+            <section className={styles.section}>
+              <div className={styles.sectionTitleRow}>
+                <div><h2>{t('pluginPlatform.preview.title')}</h2><p>{t('pluginPlatform.preview.temporaryShort')}</p></div>
+                <PreviewOpen />
+              </div>
+              {manifest ? (
+                <div className={styles.previewSummary}>
+                  <div className={styles.previewPluginIdentity}>
+                    <PluginVisual shape={manifest.entrypoints.ui && manifest.entrypoints.service ? 'mixed' : manifest.entrypoints.ui ? 'ui_only' : 'headless'} />
+                    <span><strong>{manifest.name}</strong><small>{manifest.package_id} · {manifest.version}</small></span>
+                  </div>
+                  <div className={styles.previewFacts}>
+                    <span><Code />{t('pluginPlatform.creator.capabilityCount', { count: manifest.actions.length })}</span>
+                    <span><Shield />{t('pluginPlatform.creator.permissionCount', { count: manifest.permissions.length })}</span>
+                  </div>
+                  {manifest.entrypoints.ui ? (
+                    desktopShell && <Button type='primary' long icon={<PreviewOpen />} loading={busy} disabled={generating} onClick={() => void openPreview()}>
+                      {preview ? t('pluginPlatform.preview.reload') : t('pluginPlatform.preview.open')}
+                    </Button>
+                  ) : (
+                    <div className={styles.previewNote}><Info />{t('pluginPlatform.creator.headlessPreview')}</div>
+                  )}
+                </div>
+              ) : (
+                <div className={styles.previewPlaceholder}>
+                  <PluginVisual draft />
+                  <p>{t('pluginPlatform.creator.previewWaiting')}</p>
+                </div>
+              )}
+              {manifest?.permissions.length ? (
+                <details className={styles.permissionDisclosure}>
+                  <summary>{t('pluginPlatform.preview.permissions')}</summary>
+                  {manifest.permissions.map((permission) => (
+                    <Checkbox
+                      key={permission}
+                      disabled={!desktopShell}
+                      checked={previewPermissions.includes(permission)}
+                      onChange={(checked) => setPreviewPermissions((current) => checked
+                        ? [...new Set([...current, permission])]
+                        : current.filter((value) => value !== permission))}
+                    >{permission}</Checkbox>
+                  ))}
+                </details>
+              ) : null}
+            </section>
+          </aside>
+        </div>
+
+        {manifest?.entrypoints.ui && preview && desktopShell && (
+          <section className={styles.surfaceSection}>
+            <div className={styles.sectionTitleRow}>
+              <div><h2>{t('pluginPlatform.creator.livePreview')}</h2><p>{t('pluginPlatform.preview.temporary')}</p></div>
+            </div>
             <PluginSurfacePanel
               descriptor={preview}
               title={draft?.summary.display_name || t('pluginPlatform.preview.title')}
@@ -611,24 +627,113 @@ export default function PluginCreatorPage() {
               onReload={() => void openPreview()}
               onClose={() => void closePreview()}
             />
-          ) : (
-            <div className={styles.empty}><p>{t('pluginPlatform.preview.empty')}</p></div>
-          )}
-        </section>
-      )}
-      {manifest && !manifest.entrypoints.ui && (
-        <section className={styles.section}>
-          <h2>{t('pluginPlatform.detail.actions')}</h2>
-          <div className={styles.bindingList}>
-            {manifest.actions.map((action) => (
-              <div key={action.action_id} className={styles.binding}>
-                <span><strong>{action.name}</strong><br /><small>{action.description}</small></span>
-                <code>{action.action_id}</code>
+          </section>
+        )}
+
+        <details className={styles.developerSection}>
+          <summary>
+            <span><EditTwo />{t('pluginPlatform.creator.files')}</span>
+            {manifest && <span className={styles.kindBadge} data-tone='draft'>{manifest.package_id} · {manifest.version}</span>}
+          </summary>
+          <div className={styles.developerBody}>
+            <div className={styles.packageEditorLayout}>
+              <div className={styles.fileList}>
+                {draft?.files.map((file) => (
+                  <button
+                    type='button'
+                    key={file.path}
+                    className={`${styles.fileButton} ${selectedPath === file.path ? styles.fileButtonActive : ''}`}
+                    onClick={() => setSelectedPath(file.path)}
+                  >
+                    <span>{file.path}</span><small>{file.size_bytes} B</small>
+                  </button>
+                ))}
               </div>
-            ))}
+              <div className={styles.codeEditorPane}>
+                {selectedFile?.text === undefined ? (
+                  <p className={styles.muted}>{t('pluginPlatform.creator.binaryFile')}</p>
+                ) : (
+                  <>
+                    <textarea
+                      className={styles.code}
+                      value={editor}
+                      onChange={(event) => setEditor(event.currentTarget.value)}
+                      readOnly={!desktopShell}
+                      spellCheck={false}
+                      aria-label={selectedPath}
+                    />
+                    {desktopShell && <Button disabled={editor === selectedFile.text || busy || generating} onClick={() => void saveFile()}>
+                      {t('pluginPlatform.creator.saveFile')}
+                    </Button>}
+                  </>
+                )}
+              </div>
+            </div>
           </div>
-        </section>
-      )}
+        </details>
+
+        {manifest && (
+          <details className={styles.developerSection}>
+            <summary><span><SettingTwo />{t('pluginPlatform.config.title')}</span></summary>
+            <div className={`${styles.developerBody} ${styles.configEditor}`}>
+              <p>{t('pluginPlatform.config.secretBoundary')}</p>
+              <label>
+                <strong>{t('pluginPlatform.config.values')}</strong>
+                <Input.TextArea
+                  className={styles.jsonEditor}
+                  value={draftConfig}
+                  onChange={setDraftConfig}
+                  disabled={!desktopShell}
+                  spellCheck={false}
+                  aria-label={t('pluginPlatform.config.values')}
+                />
+              </label>
+              <details className={styles.codeDisclosure}>
+                <summary>{t('pluginPlatform.config.schema')}</summary>
+                <pre>{JSON.stringify(manifest.config_schema, null, 2)}</pre>
+              </details>
+              {manifest.secret_slots.map((slot) => <label key={slot}>
+                <strong>{slot}</strong>
+                <Select
+                  allowClear
+                  showSearch
+                  disabled={!desktopShell}
+                  value={previewCredentials[slot] ?? ''}
+                  onChange={(value) => setPreviewCredentials((current) => ({
+                    ...current,
+                    [slot]: typeof value === 'string' ? value : '',
+                  }))}
+                  placeholder={t('pluginPlatform.config.credentialReference')}
+                  aria-label={t('pluginPlatform.config.credentialSlot', { slot })}
+                  options={credentialOptions.map((reference) => ({
+                    value: reference.credential_id,
+                    label: reference.enabled
+                      ? `${reference.label} · ${reference.kind}`
+                      : `${reference.label} · ${reference.kind} (${t('pluginPlatform.config.credentialUnavailable')})`,
+                    disabled: !reference.enabled,
+                  }))}
+                />
+              </label>)}
+            </div>
+          </details>
+        )}
+
+        {manifest && !manifest.entrypoints.ui && (
+          <section className={styles.section}>
+            <div className={styles.sectionTitleRow}><h2>{t('pluginPlatform.detail.actions')}</h2><span className={styles.sectionCount}>{manifest.actions.length}</span></div>
+            <div className={styles.bindingList}>
+              {manifest.actions.map((action) => (
+                <div key={action.action_id} className={styles.capabilityRow}>
+                  <span className={styles.capabilityRowIcon}><Code /></span>
+                  <span className={styles.capabilityRowCopy}><strong>{action.name}</strong><small>{action.description}</small></span>
+                  <code>{action.action_id}</code>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </main>
+
       <Modal
         visible={desktopShell && Boolean(confirmation)}
         title={t('pluginPlatform.permissions.title')}
@@ -640,11 +745,20 @@ export default function PluginCreatorPage() {
         okText={t('pluginPlatform.permissions.confirm')}
       >
         {confirmation && <div className={styles.modalBody}>
-          {confirmation.added_permissions.length > 0 && <Alert type='warning' content={t('pluginPlatform.permissions.added', { permissions: confirmation.added_permissions.join(', ') })} />}
-          {confirmation.added_secret_slots.length > 0 && <Alert type='warning' content={t('pluginPlatform.permissions.secrets', { slots: confirmation.added_secret_slots.join(', ') })} />}
-          {confirmation.trusted_local_service && <Alert type='warning' content={t('pluginPlatform.permissions.localCode')} />}
+          {confirmation.added_permissions.length > 0 && <Alert type='warning' content={t('pluginPlatform.permissions.added', { permissions: confirmation.added_permissions.join(', ') })} showIcon />}
+          {confirmation.added_secret_slots.length > 0 && <Alert type='warning' content={t('pluginPlatform.permissions.secrets', { slots: confirmation.added_secret_slots.join(', ') })} showIcon />}
+          {confirmation.trusted_local_service && <Alert type='warning' content={t('pluginPlatform.permissions.localCode')} showIcon />}
         </div>}
       </Modal>
-    </main>
+    </PluginWorkspace>
+  );
+}
+
+function BuildStep({ done, active, icon, label }: { done: boolean; active: boolean; icon: ReactNode; label: string }) {
+  return (
+    <div className={styles.buildStep} data-state={done ? 'done' : active ? 'active' : 'pending'}>
+      <span>{done ? <CheckOne /> : icon}</span>
+      <strong>{label}</strong>
+    </div>
   );
 }

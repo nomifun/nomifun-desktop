@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test';
-import type { PluginDraftFile, PluginSummary, PluginSurfaceDescriptor } from '@/common/types/pluginPlatform';
+import type { PluginDraftFile, PluginDraftSummary, PluginSummary, PluginSurfaceDescriptor } from '@/common/types/pluginPlatform';
 import {
   draftManifest,
+  pluginEntryMatchesView,
+  pluginLibraryCounts,
   pluginLibraryEntries,
   pluginShape,
   pluginSurfaceAssetPath,
@@ -30,6 +32,28 @@ describe('Unified Plugin UI model', () => {
     expect(entries.map((entry) => entry.kind)).toEqual(['draft', 'draft', 'draft', 'plugin']);
     expect(entries.filter((entry) => entry.kind === 'draft').map((entry) => entry.draft.status))
       .toEqual(['failed', 'generating', 'ready']);
+  });
+
+  test('derives user-facing views from the existing lifecycle state only', () => {
+    const plugins = [
+      plugin({ plugin_id: 'enabled' }),
+      plugin({ plugin_id: 'disabled', enabled: false, has_ui: false, has_service: true }),
+      plugin({ plugin_id: 'failed', runtime: { state: 'failed' }, last_error: 'service exited' }),
+      plugin({ plugin_id: 'trashed', trashed_at_ms: 50 }),
+    ];
+    const drafts: PluginDraftSummary[] = [
+      { draft_id: 'ready', revision: 1, display_name: 'Ready', description: '', status: 'ready', updated_at_ms: 60 },
+      { draft_id: 'failed-draft', revision: 1, display_name: 'Failed', description: '', status: 'failed', updated_at_ms: 70 },
+    ];
+    expect(pluginLibraryCounts(plugins, drafts)).toEqual({
+      all: 5, enabled: 2, disabled: 1, drafts: 2, attention: 2, trash: 1,
+      ui_only: 2, headless: 1, mixed: 0,
+    });
+    const entries = pluginLibraryEntries(plugins, drafts);
+    expect(entries.filter((entry) => pluginEntryMatchesView(entry, 'attention')).map((entry) => entry.key))
+      .toEqual(['draft:failed-draft', 'plugin:failed']);
+    expect(entries.filter((entry) => pluginEntryMatchesView(entry, 'trash')).map((entry) => entry.key))
+      .toEqual(['plugin:trashed']);
   });
 
   test('reads the canonical package manifest directly from Draft files', () => {
