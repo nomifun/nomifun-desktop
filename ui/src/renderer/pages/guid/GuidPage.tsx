@@ -72,7 +72,6 @@ import {
   capabilitySupportsTechnicalCapability,
 } from '@/common/utils/providerModels';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
-import { isManagedModelProvider } from '@/common/types/provider/managedModelService';
 import GuidModelCompatibilityNotice from './components/GuidModelCompatibilityNotice';
 import { modelCapabilityConfigurationRoute } from '@/renderer/pages/modelHub/modelConfigurationRoute';
 
@@ -191,10 +190,7 @@ const GuidPage: React.FC = () => {
     }).length,
     0
   );
-  const canConfigureCurrentModel = Boolean(
-    modelSelection.current_model &&
-      !isManagedModelProvider(modelSelection.current_model)
-  );
+  const canConfigureCurrentModel = Boolean(modelSelection.current_model);
   const collaborationEnabled = presetResourceResolutionReady
     && presetCapabilityIds.has('agent.collaboration');
   const knowledgeEnabled = presetResourceResolutionReady

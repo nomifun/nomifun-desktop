@@ -12,7 +12,6 @@ import enSettings from '@/renderer/services/i18n/locales/en-US/settings.json';
 const read = (file: string) => readFileSync(new URL(file, import.meta.url), 'utf8');
 const panel = read('./ModalityModelsPanel.tsx');
 const pageHeader = read('./ModelHubPageHeader.tsx');
-const free = read('./FreeModelsContent.tsx');
 const providers = read('../../components/settings/SettingsModal/contents/ModelModalContent.tsx');
 const chat = read('./ChatModelsContent.tsx');
 const realtime = read('./RealtimeModelsContent.tsx');
@@ -95,7 +94,7 @@ describe('modality panel', () => {
     expect(pageHeader.includes("text-15px font-600 leading-20px text-t-primary")).toBe(true);
     expect(pageHeader.includes("text-12px leading-18px text-t-tertiary")).toBe(true);
 
-    for (const surface of [panel, free, providers]) {
+    for (const surface of [panel, providers]) {
       expect(surface.includes('<ModelHubPageHeader')).toBe(true);
       expect(surface.includes("flex flex-col bg-2 rd-16px")).toBe(false);
       expect(surface.includes("flex min-h-0 flex-col rd-16px bg-2")).toBe(false);

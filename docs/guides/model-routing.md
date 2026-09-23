@@ -119,17 +119,6 @@ Creative Studio persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task
 cannot change those facts.
 
-## NomiFun Free Models
-
-When available in the current build, **NomiFun Free Models** use a built-in
-managed provider. You can enable the service, refresh its model catalog, run a
-health check, and activate an available model without first creating a custom
-provider entry or supplying your own API key.
-
-These remain online third-party inference services. Availability, quota,
-latency, and data-handling terms can change. Read the in-product notice before
-sending sensitive content.
-
 ## Model Failover Queue
 
 The failover feature is an ordered reliability queue, not a credential

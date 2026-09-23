@@ -242,7 +242,8 @@ speech_synthesis = { protocol = "gemini.generate_content_audio" }
 
 UI 含义：添加"火山引擎"供应商时向导给出两个连接卡片（方舟必填、语音可选）；未配语音连接时，打了 TTS/ASR 标签的模型在选择器里显示"需配置语音连接"禁用态，而不是选中后失败。
 
-`nomifun-free-model` 托管平台是注册表中 `managed = true` 的一项，行为不变。
+> 2026-09-23 更新：匿名免费模型产品能力已退役并从当前实现删除；旧版本写入的
+> provider 行仅作为禁用且不可见的历史完整性墓碑保留。
 
 ### 3.4 统一调用层 `nomifun-model-invoke`
 
@@ -455,7 +456,7 @@ pub enum JobStatus { Pending, Running, Succeeded, Failed, Canceled }  // 词表�
 3. **心跳健康持久化仍走 legacy `model_health` map PUT 写路径**：行级 `provider_models.health` 由服务端探针权威写入（P0 已落地，本期 `stamp_model_unhealthy` 也改为行级 `set_health`），但设置页心跳把探针结果回写时仍使用 `updateProvider({model_health})` 整 map 兼容写（fetch-latest-then-merge）。该 map 参数 wire 上继续接受并驱动行同步，行为正确但残留读改写窗口；UI 切行级写 + 关闭 PUT 兼容路径留到 P3。
 4. **dashscope 系适配器推迟 P3**：上文 P2 行内的"dashscope 系适配器"未实施——P2 计划裁定按需适配器（dashscope/minimax/volc.tts_v3）统一记 P3 入口；路由表已声明的任务在适配器缺席时得到诚实的 `NoAdapter` typed 错误（P1 偏差 7/8 的延续）。
 5. **ts-rs 契约生成未管线化，交付为手写镜像 + serde 钉测**：provider/connection/model 域的 TS 类型（`ui/src/common/types/provider/providerModel.ts`、`providerConnection.ts`）为手工转写，带"keep in sync"指针注释与 wire key 集钉测（round-trip/tri-state/deny_unknown_fields 安全性）；ts-rs 自动生成管线列 P3。另：`mode.updateProvider` 桥接层防御性剥除 `models_detail`（否则整 spread 的读改写调用点会因后端 `deny_unknown_fields` 全部 400）。
-6. **行绑定存储的三处语义变化（T2 裁定 Accept）**：① 重新加入 membership 的模型若同调用未带对应 map 参数，从列默认值起步（双写期会继承残留 legacy map 条目）；② 托管免费模型服务对"当前目录缺席模型"的 per-model 禁用开关不再跨重启持久（无行可承载；进程内仍保留）；③ 故障转移候选无行时视为"未禁用/健康未知"（与旧缺 map 条目语义一致，fail-open），供应商存在性仍是硬门。
+6. **行绑定存储的两处语义变化（T2 裁定 Accept）**：① 重新加入 membership 的模型若同调用未带对应 map 参数，从列默认值起步（双写期会继承残留 legacy map 条目）；② 故障转移候选无行时视为"未禁用/健康未知"（与旧缺 map 条目语义一致，fail-open），供应商存在性仍是硬门。
 7. **管理页 Add/Edit 弹窗仍走整 provider map PUT**：模型行内编辑（启用/上下文/描述/协议/高级抽屉/排序/删除）已切行级 `/api/provider-models`，但 AddModelModal/AddPlatformModal/EditModeModal 的 membership 新增仍发整 map 更新（wire 兼容参数，驱动行同步）——按任务范围保留，P3 可随 map 参数退役一并收敛。
 8. **chat 平台表化省略 compat 列**：T6 的 `PLATFORM_CHAT_RULES` 常量表（14 行 + 默认行，220 行行为快照字节级锁定）未按草图携带 per-platform compat 覆盖列——现状所有 compat 覆盖均由 URL 规则或 host 门控规则完全决定，该列在全部行上恒为 None（死配置）；后续需要时增列是加法变更。new-api per-model protocol 特例与 `is_full_url` 早退保持逐字。
 9. **选择器首次过滤带来的可见收紧（设计内，此处披露）**：IDMM 备用/旁路模型与故障转移候选选择器首次获得 chat 任务过滤——已保存的非 chat 模型值不被清除、继续生效，但不再被重新提供（failover 草稿中显示"(不可用)"）；guid 模型选择原先包含"禁用中的供应商"（潜在 bug），resolve 单源后被排除。

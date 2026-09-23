@@ -698,14 +698,6 @@ mod tests {
             unreachable!("scripted read-only repository")
         }
 
-        async fn save_managed_graph(
-            &self,
-            _params: nomifun_db::CreateProviderParams<'_>,
-            _models: &[nomifun_db::NewProviderModel<'_>],
-        ) -> Result<Provider, nomifun_db::DbError> {
-            unreachable!("scripted read-only repository")
-        }
-
         async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
             unreachable!("scripted read-only repository")
         }

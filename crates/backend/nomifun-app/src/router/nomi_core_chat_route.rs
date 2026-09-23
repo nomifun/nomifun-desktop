@@ -539,13 +539,13 @@ mod tests {
     #[tokio::test]
     async fn default_agent_route_honors_the_saved_nomi_model_before_provider_order() {
         let database = nomifun_db::init_database_memory().await.unwrap();
-        let free_provider = "0190f5fe-7c00-7a00-8abc-000000000021";
+        let lower_priority_provider = "0190f5fe-7c00-7a00-8abc-000000000021";
         let stepfun_provider = "0190f5fe-7c00-7a00-8abc-000000000022";
         create_chat_provider(
             database.pool(),
-            free_provider,
-            "nomifun-free-model",
-            "big-pickle",
+            lower_priority_provider,
+            "openai",
+            "lower-priority-model",
             0,
         )
         .await;

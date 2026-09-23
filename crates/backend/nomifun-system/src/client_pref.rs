@@ -7,12 +7,10 @@ use nomifun_db::IClientPreferenceRepository;
 /// Maximum allowed key length for client preferences.
 const MAX_KEY_LENGTH: usize = 255;
 /// System-owned and retired key prefixes. The generic PUT /api/settings/client
-/// endpoint rejects them so a client cannot forge managed state or restore
-/// removed product settings:
-/// - `managedModel.`: refresh bookkeeping owned by the model manager.
+/// endpoint rejects them so a client cannot restore removed product settings:
 /// - Retired Browser v1 keys have no supported write owner. They must not be
 ///   resurrected through the generic preferences API after their UI is removed.
-const SYSTEM_RESERVED_PREFIXES: &[&str] = &["managedModel.", "agent.browserUse", "browser.resourcePolicy"];
+const SYSTEM_RESERVED_PREFIXES: &[&str] = &["agent.browserUse", "browser.resourcePolicy"];
 
 /// Business logic for client preferences (generic key-value store).
 #[derive(Clone)]
@@ -120,15 +118,6 @@ mod tests {
     fn validate_key_rejects_too_long() {
         let long_key = "x".repeat(MAX_KEY_LENGTH + 1);
         assert!(validate_key(&long_key).is_err());
-    }
-
-    #[tokio::test]
-    async fn update_rejects_system_managed_namespace() {
-        let svc = setup().await;
-        let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("managedModel.free.lastRefresh".into(), json!(1));
-        let err = svc.update_preferences(req).await.unwrap_err();
-        assert_eq!(err.status_code(), axum::http::StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

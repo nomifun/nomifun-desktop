@@ -36,7 +36,6 @@ fn build_state(db: &nomifun_db::Database, version_check_service: VersionCheckSer
         TEST_KEY,
         http_client,
         version_check_service,
-        None,
         std::env::temp_dir(),
         std::env::temp_dir(),
         false,

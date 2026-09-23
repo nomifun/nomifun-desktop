@@ -93,7 +93,6 @@ const EXPECTED_ORDER = [
   hub.sectionEmbedding,
   hub.sectionRerank,
   hub.groupAdvanced,
-  hub.sectionFree,
   hub.sectionFailover,
 ];
 
@@ -135,7 +134,6 @@ describe('model hub sidebar renders', () => {
       'music',
       'embedding',
       'rerank',
-      'free',
       'failover',
     ]);
     // A `tablist` may own only `tab` children, so the captions must not be tabs.
@@ -164,5 +162,8 @@ describe('model hub sidebar renders', () => {
     // `?section=global` held the retired global-IDMM tabs; 故障转移 is what is left.
     const retired = render('/models?section=global');
     expect(retired.includes('aria-labelledby="model-hub-tab-failover"')).toBe(true);
+
+    const removedFreeModels = render('/models?section=free');
+    expect(removedFreeModels.includes('aria-labelledby="model-hub-tab-chat"')).toBe(true);
   });
 });
