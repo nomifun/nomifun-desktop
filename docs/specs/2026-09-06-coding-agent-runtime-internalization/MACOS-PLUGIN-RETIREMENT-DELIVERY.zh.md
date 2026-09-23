@@ -1,5 +1,8 @@
 # macOS：会话页替换移除及本地包复核
 
+> 归档边界（2026-09-23）：这是旧 Plugin 架构的目标机记录，不能作为 Unified Plugin
+> Core 或当前 release 的 macOS 验收证据；其中旧测试名和实现路径均已退役。
+
 接续 2026-09-15 的多 Engine / hooks 验证。历史检查仍按其源码范围解释，本记录不将旧结果
 升级为当前源码的真实模型、签名或跨平台证明。
 最终包内重验于 2026-09-16 解锁后完成；本地工程与正常退出通过，严格签名仍失败。
@@ -105,8 +108,8 @@ bun run build:mac arm
 
 - 这是未签名本地测试包；Developer ID 签名、公证、Gatekeeper 安装/升级/卸载未执行。
 - 最终合并源码没有重新进行真实模型验收。此前 before_tool 的固定 StepFun 原生放行/拒绝闭环
-  与严格末尾 LF smoke 失败分别记录于[hooks 实施记录](../../reviews/2026-09-15-agent-tool-hooks-implementation.zh.md)，
-  不把历史成功覆盖当前源码，也不把合成 LF 失败改写为通过。
+  与严格末尾 LF smoke 失败曾记录于现已退役的 hooks 实施文档；不把历史成功覆盖当前源码，
+  也不把合成 LF 失败改写为通过。
 - 旧 macOS 缺少精确 generation 信号 API 时明确拒绝新 PTY，避免 app 加载时缺符号；旧系统实机未验。
 - 异常宿主骤亡后的独立 job 回收尚未补完整证明；刻意 setsid 脱离原 session 不在本次扩展范围。
 - Windows 仍需原生复核公共改动和普通 App/Service；Linux 继续 TODO。

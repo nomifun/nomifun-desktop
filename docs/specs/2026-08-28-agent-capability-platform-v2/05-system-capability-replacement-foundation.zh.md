@@ -1,6 +1,6 @@
 # NomiFun 一期止损修订：简化重构与可替换系统能力基础
 
-> 状态：**PHASE 1 WINDOWS CLOSED / AgentPreset AP-0～AP-7 已完成并签署 / 06 已获用户授权**
+> 状态：**Agent 核心历史设计；Plugin 条款已由 Unified Plugin Core 取代**
 >
 > 发布日期：2026-09-03
 >
@@ -11,9 +11,9 @@
 > 适用范围：正在进行的 Agent Capability Platform v2 一期重构，包括当前主机的互斥写集
 > 多并发集成主线、后续 Browser/Computer、Sidecar 与外部原生平台验证。
 >
-> 阶段门禁：AgentPreset AP-0～AP-7 与 Windows C8 已通过。用户已单独授权实施
-> `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md`；二期状态由独立
-> `PHASE-N1-M1-CLOSURE-TODO.zh.md` 跟踪，不改变本文一期合同。
+> Plugin 架构、状态与完成门禁统一见
+> [`../2026-09-22-unified-plugin-core/README.zh.md`](../2026-09-22-unified-plugin-core/README.zh.md)；
+> 本文只保留仍被 Agent 核心使用的设计依据。
 
 ## 2026-09-03 当前执行修订（用户确认）
 
@@ -36,9 +36,8 @@
   的 client、supervisor、adapter、fixture、synthetic contract 和 Host Broker smoke
   可以保留为研究或边界验证，但都不能作为 Codex-native 已移植、已成为核心或已完成
   Coding 的证据。
-- **一期状态由 `GLOBAL-CLOSURE-TODO.zh.md` 维护，二期状态由
-  `PHASE-N1-M1-CLOSURE-TODO.zh.md` 维护。** 本文和 `DECISIONS.zh.md` 负责约束
-  一期设计与理由；06 负责二期设计，不用历史章节中的未来条件覆盖当前台账。
+- **Agent 历史状态由 `GLOBAL-CLOSURE-TODO.zh.md` 保存。** 旧 N1/M1 Plugin 台账已删除，
+  不得从 Git 历史恢复为当前产品合同。
 
 ## 2026-09-05 当前执行补充
 

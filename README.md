@@ -63,13 +63,13 @@ NomiFun has four runtime projects plus **NomiFun Portal**, the canonical
 documentation home. **Desktop is the local AI, data, model, Agent, task, and
 tool hub**; Mobile and the Xiaozhi robot connect to capabilities that you
 explicitly enable, while Net Infra provides an optional, self-hosted
-cross-network relay. Desktop also hosts Plugin Products, so a locally authored
+cross-network relay. Desktop also hosts Unified Plugins, so a locally authored
 Plugin can keep using the same governed runtime and capabilities instead of
 becoming an isolated demo.
 
 | Project | Role | Start here |
 |---|---|---|
-| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Plugin Products, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
+| **NomiFun Desktop** (this repository; [GitHub](https://github.com/nomifun/nomifun-desktop) · [Gitee](https://gitee.com/nomifun/nomifun-desktop)) | Local source of truth and runtime for data, models, Agents, tasks, Skills, knowledge, Unified Plugins, WebUI, REST and MCP | [Download](https://github.com/nomifun/nomifun-desktop/releases) · [Product docs](https://www.nomifun.com/docs/) · [WebUI remote access](https://www.nomifun.com/docs/guides/webui-remote/) |
 | NomiFun Mobile ([GitHub](https://github.com/nomifun/nomifun-mobile) · [Gitee](https://gitee.com/nomifun/nomifun-mobile)) | Android / iOS / H5 client that directly reuses Desktop sessions, tasks, requirements, companions and administration | [Mobile guide](https://www.nomifun.com/docs/guides/mobile-bridge/) · Enable **Remote & Open → WebUI access** in Desktop, then scan its one-time QR code |
 | NomiFun Xiaozhi Yuntai ([GitHub](https://github.com/nomifun/nomifun-xiaozhi-yuntai) · [Gitee](https://gitee.com/nomifun/nomifun-xiaozhi-yuntai)) | ESP32-S3 Xiaozhi robot and pan-tilt platform for voice, motion and device-side multimodal interaction | [Xiaozhi guide](https://www.nomifun.com/docs/guides/xiaozhi-robot/) · Firmware source: [nomifun-xiaozhi-yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) |
 | NomiFun Net Infra ([GitHub](https://github.com/nomifun/nomifun-net-infra) · [Gitee](https://gitee.com/nomifun/nomifun-net-infra)) | Self-hosted NomiRelay infrastructure for exposing Desktop or other HTTP/WebSocket/TCP/UDP services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay docs](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
@@ -98,7 +98,7 @@ document authentication, LAN exposure, and deployment boundaries.
 This is not a collection of unrelated clients that happen to share a logo. Desktop owns
 the durable state and executes models, Agents, requirements, tools, knowledge,
 companion memory, and Skills. Mobile is a direct LAN control surface; Xiaozhi is
-a voice-and-motion hardware surface; Plugin Products are interactive software
+a voice-and-motion hardware surface; Unified Plugins are interactive software
 surfaces created and hosted by the same Desktop installation; Net Infra is an optional
 transport layer rather than another application backend. The result is one governed
 capability graph with multiple ways to reach it, rather than separate clouds,
@@ -231,7 +231,7 @@ memory, tools, permissions, and execution runtime:
 | Product surface | What it adds |
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
-| **Plugin Products** | Builds, tests, publishes, runs, shares, backs up, and rolls back local UI or Service Plugins through one governed product lifecycle. |
+| **Unified Plugins** | Creates or imports one package, validates and installs one Artifact, runs optional App/Service entrypoints, exposes Action/Binding capabilities, and provides generation-safe storage, backup, restore, and deletion. |
 | **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, and optional companion-in-the-workspace collaboration. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
@@ -261,20 +261,21 @@ sessions, and tool coordination. Setup is built into each companion's **Remote
 control → Robot connection** page: copy its OTA address, enter the six-digit
 activation code shown by the robot, and bind the device to that companion.
 
-### 🧩 Plugin Products — build and run governed local software
+### 🧩 Unified Plugins — create and run governed local software
 
-Create or import a Plugin project, edit its source, run tests, and explicitly
-publish an immutable Release. The Plugin Library and Workshop keep editable
-source separate from the active Release, support UI and Service products, and
-provide governed lifecycle operations including enablement, share, backup, and
-rollback. Published Plugin capabilities and resources can be reused by Agents
-without creating a second product model.
+Create a Plugin through Chat or import a package directory/ZIP. Both sources
+enter the same validation and `install_artifact` path. A local Plugin points to
+one active immutable Artifact and one generation DataRoot; optional UI and
+Service entrypoints cover UI-only, headless, and mixed Plugins without separate
+product models. Actions bind directly to Agent, Desktop, and Automation points
+through stable `plugin:<plugin_id>/<action_id>` identities.
 
-UI surfaces and Services are optional roles of each Plugin Release, not fixed
-product categories. One product can add or remove a Service while retaining its
-identity, release history, and governed capability bindings. This pre-release
-unification uses a clean-start plugin_* database schema; existing development
-databases from before the cutover must be backed up and rebuilt separately.
+The unified SDK exposes SQLite, KV, Files, memory-only Cache, Config,
+Credential references, Host capabilities, and cross-Plugin Actions. Preview
+uses the same Bridge and storage adapters against a temporary DataRoot. Package
+export excludes user data; Backup includes current data and non-secret config
+but never Credential plaintext. See the
+[Unified Plugin Core contract](docs/specs/2026-09-22-unified-plugin-core/README.zh.md).
 
 ### 🎨 Creative Studio — focused creation on an infinite canvas
 

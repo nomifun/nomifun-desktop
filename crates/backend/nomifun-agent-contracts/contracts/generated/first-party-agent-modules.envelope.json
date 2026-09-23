@@ -494,26 +494,6 @@
       },
       {
         "package": {
-          "id": "nomifun.plugin",
-          "version": "1.0.0"
-        },
-        "source": {
-          "source_kind": "bundled",
-          "source_identity": "nomifun.plugin"
-        },
-        "capabilities": [
-          {
-            "capability": {
-              "id": "plugin.development"
-            },
-            "kind": "tool"
-          }
-        ],
-        "skills": [],
-        "mcp_tools": []
-      },
-      {
-        "package": {
           "id": "nomifun.tool-discovery",
           "version": "1.0.0"
         },
@@ -560,5 +540,5 @@
       }
     ]
   },
-  "payload_digest": "010f993fab452e0035045f347a0f919a36f668006df29fd9b52c6195685a7c31"
+  "payload_digest": "051ff7bd4cc01ce69fb24abedd9b16cd8342b2e2c4703dd26668a102d7bf4b5c"
 }

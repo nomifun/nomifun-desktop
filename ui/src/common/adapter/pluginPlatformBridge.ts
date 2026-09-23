@@ -4,305 +4,213 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  ApplyPluginCandidateRequest,
-  ApplyPluginSourceEditRequest,
-  BuildPluginProjectRequest,
-  CancelPluginOperationRequest,
-  ConfigurePluginRequest,
-  CreatePluginProjectRequest,
-  DeletePluginDataRequest,
-  DeletePluginProjectRequest,
-  DurablePluginOperationDetail,
-  DurablePluginOperationOwner,
-  DurablePluginOperationSummary,
-  GeneratePluginDraftRequest,
-  GeneratedPluginDraft,
-  ImportPluginRequest,
-  PluginCandidateRef,
-  PluginAuthoringContext,
-  PluginImportInspection,
-  PluginCapabilityContribution,
-  PluginDetail,
-  PluginLibraryResponse,
-  PluginProjectDetail,
-  PluginProjectSummary,
-  PluginReadyCandidate,
-  PluginSummary,
-  PluginTargetRef,
-  RestorePluginPreviousRequest,
-  RetryPluginRequest,
-  SetPluginEnabledRequest,
-  SetPluginAutoApplyRequest,
-  SharePluginRequest,
-  TestPluginCandidateRequest,
-  UninstallPluginRequest,
-  UpdatePluginDependenciesRequest,
-} from '../types/pluginPlatform';
-import {
-  parsePluginArtifactId,
-  parsePluginCandidateId,
-  parsePluginMountId,
-  parsePluginOperationId,
-  parsePluginProjectId,
-  parsePluginRuntimeId,
-} from '../types/ids';
-import {
-  httpGet,
-  httpPost,
-  httpPut,
-  httpRequest,
-  withResponseMap,
-} from './httpBridge';
+import type * as Contract from '../types/pluginPlatform';
+import { httpGet, httpPost, httpPut, httpRequest } from './httpBridge';
 
-const mapTarget = (target: PluginTargetRef): PluginTargetRef => ({
-  ...target,
-  artifact_id: parsePluginArtifactId(target.artifact_id),
-});
+type DraftIdentity = { draft_id: Contract.PluginDraftId };
+type PluginIdentity = { plugin_id: Contract.PluginId };
+type DraftCommand<Request> = DraftIdentity & { request: Request };
+type PluginCommand<Request> = PluginIdentity & { request: Request };
 
-const mapCandidateRef = (candidate: PluginCandidateRef): PluginCandidateRef => ({
-  ...candidate,
-  candidate_id: parsePluginCandidateId(candidate.candidate_id),
-});
+const draftPath = (draftId: Contract.PluginDraftId): string =>
+  `/api/plugin-drafts/${encodeURIComponent(draftId)}`;
 
-const mapSummary = (summary: PluginSummary): PluginSummary => ({
-  ...summary,
-  mount_id: parsePluginMountId(summary.mount_id),
-  current: summary.current ? mapTarget(summary.current) : undefined,
-  previous: summary.previous ? mapTarget(summary.previous) : undefined,
-  linked_project_id:
-    summary.linked_project_id == null
-      ? undefined
-      : parsePluginProjectId(summary.linked_project_id),
-});
+const pluginPath = (pluginId: Contract.PluginId): string =>
+  `/api/plugins/${encodeURIComponent(pluginId)}`;
 
-const mapProjectSummary = (summary: PluginProjectSummary): PluginProjectSummary => ({
-  ...summary,
-  project_id: parsePluginProjectId(summary.project_id),
-  linked_mount_id:
-    summary.linked_mount_id == null ? undefined : parsePluginMountId(summary.linked_mount_id),
-  ready_candidate: summary.ready_candidate
-    ? mapCandidateRef(summary.ready_candidate)
-    : undefined,
-});
-
-const mapCapability = (
-  capability: PluginCapabilityContribution
-): PluginCapabilityContribution => ({
-  ...capability,
-  provenance: {
-    ...capability.provenance,
-    mount_id: parsePluginMountId(capability.provenance.mount_id),
-    artifact_id: parsePluginArtifactId(capability.provenance.artifact_id),
-  },
-});
-
-const mapOperationOwner = (
-  owner: DurablePluginOperationOwner
-): DurablePluginOperationOwner => {
-  if (owner.owner === 'plugin_project') {
-    return { ...owner, project_id: parsePluginProjectId(owner.project_id) };
-  }
-  if (owner.owner === 'plugin_mount') {
-    return { ...owner, mount_id: parsePluginMountId(owner.mount_id) };
-  }
-  return owner;
-};
-
-const mapOperationSummary = (
-  operation: DurablePluginOperationSummary
-): DurablePluginOperationSummary => ({
-  ...operation,
-  operation_id: parsePluginOperationId(operation.operation_id),
-  owner: mapOperationOwner(operation.owner),
-});
-
-const mapReadyCandidate = (ready: PluginReadyCandidate): PluginReadyCandidate => ({
-  ...ready,
-  candidate: mapCandidateRef(ready.candidate),
-  target: mapTarget(ready.target),
-  test: {
-    ...ready.test,
-    candidate_id: parsePluginCandidateId(ready.test.candidate_id),
-  },
-});
-
-const mapLibrary = (library: PluginLibraryResponse): PluginLibraryResponse => ({
-  ...library,
-  plugins: library.plugins.map(mapSummary),
-  projects: library.projects.map(mapProjectSummary),
-  runtimes: library.runtimes?.map((runtime) => ({
-    ...runtime,
-    plugin_id: parsePluginRuntimeId(runtime.plugin_id),
-  })),
-});
-
-const mapDetail = (detail: PluginDetail): PluginDetail => ({
-  ...detail,
-  summary: mapSummary(detail.summary),
-  capabilities: detail.capabilities.map(mapCapability),
-});
-
-const mapProjectDetail = (detail: PluginProjectDetail): PluginProjectDetail => ({
-  ...detail,
-  summary: mapProjectSummary(detail.summary),
-  ready: detail.ready ? mapReadyCandidate(detail.ready) : undefined,
-  active_operation: detail.active_operation
-    ? mapOperationSummary(detail.active_operation)
-    : undefined,
-});
-
-const mapOperationDetail = (
-  detail: DurablePluginOperationDetail
-): DurablePluginOperationDetail => ({
-  ...detail,
-  summary: mapOperationSummary(detail.summary),
-});
+const requestBody = <Request>({ request }: { request: Request }): Request => request;
 
 const deleteWithBody = <Data, Params>(
-  path: (params: Params) => string
-): {
-  provider: () => void;
-  invoke: (params: Params) => Promise<Data>;
-} => ({
+  path: (params: Params) => string,
+  body: (params: Params) => unknown,
+): { provider: () => void; invoke: (params: Params) => Promise<Data> } => ({
   provider: () => {},
-  invoke: (params) => httpRequest<Data>('DELETE', path(params), params),
+  invoke: (params) => httpRequest<Data>('DELETE', path(params), body(params)),
 });
 
-export const plugins = {
-  generateDraft: httpPost<GeneratedPluginDraft, GeneratePluginDraftRequest>(
-    '/api/plugins/authoring/generate'
-  ),
-  list: withResponseMap(
-    httpGet<PluginLibraryResponse, void>('/api/plugins'),
-    mapLibrary
-  ),
-  getProject: withResponseMap(
-    httpGet<PluginProjectDetail, { project_id: string }>(
-      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}`
+const surfaceOwnerPath = (
+  request: Pick<
+    Contract.DispatchPluginBridgeRequest,
+    'plugin_id' | 'draft_id' | 'is_preview'
+  >,
+  action: 'bridge' | 'close',
+): string => {
+  if (request.is_preview) {
+    if (!request.draft_id) {
+      throw new Error('A preview Surface requires draft_id');
+    }
+    return `${draftPath(request.draft_id)}/surface/${action}`;
+  }
+  if (!request.plugin_id) {
+    throw new Error('An installed Plugin Surface requires plugin_id');
+  }
+  return `${pluginPath(request.plugin_id)}/surface/${action}`;
+};
+
+/** The only frontend entry point for Unified Plugin Core. */
+export const pluginPlatform = {
+  drafts: {
+    list: httpGet<Contract.PluginDraftListResponse, void>('/api/plugin-drafts'),
+    create: httpPost<Contract.PluginDraftDetail, Contract.CreatePluginDraftRequest>(
+      '/api/plugin-drafts',
     ),
-    mapProjectDetail
-  ),
-  getAuthoringContext: httpGet<PluginAuthoringContext, { project_id: string }>(
-    (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/authoring-context`
-  ),
-  createProject: withResponseMap(
-    httpPost<PluginProjectDetail, CreatePluginProjectRequest>('/api/plugins/projects'),
-    mapProjectDetail
-  ),
-  importPrebuilt: withResponseMap(
-    httpPost<PluginProjectDetail, ImportPluginRequest>('/api/plugins/imports'),
-    mapProjectDetail
-  ),
-  inspectImport: httpPost<PluginImportInspection, { source_path: string }>(
-    '/api/plugins/imports/inspect'
-  ),
-  exportShare: withResponseMap(
-    httpPost<DurablePluginOperationDetail, SharePluginRequest>(
-      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/share`
+    get: httpGet<Contract.PluginDraftDetail, DraftIdentity>(({ draft_id }) =>
+      draftPath(draft_id),
     ),
-    mapOperationDetail
-  ),
-  buildProject: withResponseMap(
-    httpPost<PluginProjectDetail, BuildPluginProjectRequest>(
-      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/build`
+    generate: httpPost<
+      Contract.PluginDraftDetail,
+      DraftCommand<Contract.GeneratePluginDraftRequest>
+    >(
+      ({ draft_id }) => `${draftPath(draft_id)}/generate`,
+      requestBody,
     ),
-    mapProjectDetail
-  ),
-  applySourceEdit: withResponseMap(
-    httpPost<PluginProjectDetail, ApplyPluginSourceEditRequest>(
-      (request) =>
-        `/api/plugins/projects/${encodeURIComponent(request.project_id)}/source/edit`
+    cancelGeneration: httpPost<
+      Contract.PluginDraftDetail,
+      DraftCommand<Contract.CancelPluginDraftGenerationRequest>
+    >(
+      ({ draft_id }) => `${draftPath(draft_id)}/cancel`,
+      requestBody,
     ),
-    mapProjectDetail
-  ),
-  updateDependencies: withResponseMap(
-    httpPut<PluginProjectDetail, UpdatePluginDependenciesRequest>(
-      (request) =>
-        `/api/plugins/projects/${encodeURIComponent(request.project_id)}/source/dependencies`
+    replaceFile: httpPut<
+      Contract.PluginDraftDetail,
+      DraftCommand<Contract.ReplacePluginDraftFileRequest>
+    >(
+      ({ draft_id }) => `${draftPath(draft_id)}/files`,
+      requestBody,
     ),
-    mapProjectDetail
-  ),
-  setAutoApply: withResponseMap(
-    httpPut<PluginProjectDetail, SetPluginAutoApplyRequest>(
-      (request) =>
-        `/api/plugins/projects/${encodeURIComponent(request.project_id)}/auto-apply`
+    deleteFile: deleteWithBody<
+      Contract.PluginDraftDetail,
+      DraftCommand<Contract.DeletePluginDraftFileRequest>
+    >(
+      ({ draft_id }) => `${draftPath(draft_id)}/files`,
+      requestBody,
     ),
-    mapProjectDetail
-  ),
-  testCandidate: withResponseMap(
-    httpPost<PluginProjectDetail, TestPluginCandidateRequest>(
-      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/test`
+    preview: httpPost<
+      Contract.PluginDraftPreviewResponse,
+      DraftCommand<Contract.PreviewPluginDraftRequest>
+    >(
+      ({ draft_id }) => `${draftPath(draft_id)}/preview`,
+      requestBody,
     ),
-    mapProjectDetail
-  ),
-  applyCandidate: withResponseMap(
-    httpPost<PluginDetail, ApplyPluginCandidateRequest>(
-      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/apply`
+    save: httpPost<
+      Contract.SavePluginDraftResponse,
+      DraftCommand<Contract.SavePluginDraftRequest>
+    >(
+      ({ draft_id }) => `${draftPath(draft_id)}/save`,
+      requestBody,
     ),
-    mapDetail
-  ),
-  deleteProject: deleteWithBody<boolean, DeletePluginProjectRequest>(
-    (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}`
-  ),
-  getMount: withResponseMap(
-    httpGet<PluginDetail, { mount_id: string }>(
-      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}`
+    delete: deleteWithBody<
+      boolean,
+      DraftCommand<Contract.DeletePluginDraftRequest>
+    >(
+      ({ draft_id }) => draftPath(draft_id),
+      requestBody,
     ),
-    mapDetail
-  ),
-  configure: withResponseMap(
-    httpPut<PluginDetail, ConfigurePluginRequest>(
-      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/config`
+  },
+
+  plugins: {
+    list: httpGet<Contract.PluginLibraryResponse, void>('/api/plugins'),
+    get: httpGet<Contract.PluginDetail, PluginIdentity>(({ plugin_id }) =>
+      pluginPath(plugin_id),
     ),
-    mapDetail
-  ),
-  setEnabled: withResponseMap(
-    httpPut<PluginDetail, SetPluginEnabledRequest>(
-      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/enabled`
+    inspectImport: httpPost<
+      Contract.PluginImportInspection,
+      Contract.InspectPluginImportRequest
+    >('/api/plugins/import/inspect'),
+    installImport: httpPost<
+      Contract.InstallPluginImportResponse,
+      Contract.InstallPluginImportRequest
+    >('/api/plugins/import'),
+    setEnabled: httpPut<
+      Contract.PluginDetail,
+      PluginCommand<Contract.SetPluginEnabledRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/enabled`,
+      requestBody,
     ),
-    mapDetail
-  ),
-  retryMount: withResponseMap(
-    httpPost<PluginDetail, RetryPluginRequest>(
-      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/retry`
+    configure: httpPut<
+      Contract.PluginDetail,
+      PluginCommand<Contract.ConfigurePluginRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/config`,
+      requestBody,
     ),
-    mapDetail
-  ),
-  restorePrevious: withResponseMap(
-    httpPost<PluginDetail, RestorePluginPreviousRequest>(
-      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/restore`
+    restore: httpPost<
+      Contract.PluginDetail,
+      PluginCommand<Contract.RestorePluginRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/restore`,
+      requestBody,
     ),
-    mapDetail
-  ),
-  uninstall: withResponseMap(
-    httpPost<PluginDetail, UninstallPluginRequest>(
-      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/uninstall`
+    trash: httpPost<
+      Contract.PluginDetail,
+      PluginCommand<Contract.TrashPluginRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/trash`,
+      requestBody,
     ),
-    mapDetail
-  ),
-  deleteData: deleteWithBody<void, DeletePluginDataRequest>(
-    (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/data`
-  ),
-  listOperations: withResponseMap(
-    httpGet<DurablePluginOperationSummary[], void>('/api/plugins/operations'),
-    (operations) => operations.map(mapOperationSummary)
-  ),
-  getOperation: withResponseMap(
-    httpGet<DurablePluginOperationDetail, { operation_id: string }>(
-      (request) =>
-        `/api/plugins/operations/${encodeURIComponent(request.operation_id)}`
+    delete: deleteWithBody<
+      Contract.PluginLibraryResponse,
+      PluginCommand<Contract.DeletePluginRequest>
+    >(
+      ({ plugin_id }) => pluginPath(plugin_id),
+      requestBody,
     ),
-    mapOperationDetail
-  ),
-  cancelOperation: withResponseMap(
-    httpPost<DurablePluginOperationSummary, CancelPluginOperationRequest>(
-      (request) =>
-        `/api/plugins/operations/${encodeURIComponent(request.operation_id)}/cancel`,
-      (request) => ({
-        expected_operation_revision: request.expected_operation_revision,
-      })
+    exportPackage: httpPost<
+      Contract.PluginExportResult,
+      PluginCommand<Contract.ExportPluginPackageRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/export`,
+      requestBody,
     ),
-    mapOperationSummary
-  ),
+    exportBackup: httpPost<
+      Contract.PluginExportResult,
+      PluginCommand<Contract.ExportPluginBackupRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/backup`,
+      requestBody,
+    ),
+    openSurface: httpPost<
+      Contract.PluginSurfaceDescriptor,
+      PluginCommand<Contract.OpenPluginSurfaceRequest>
+    >(
+      ({ plugin_id }) => `${pluginPath(plugin_id)}/surface/open`,
+      requestBody,
+    ),
+  },
+
+  libraryState: {
+    get: httpGet<Contract.PluginLibraryState, void>('/api/plugins/library-state'),
+    update: httpPut<
+      Contract.PluginLibraryState,
+      Contract.UpdatePluginLibraryStateRequest
+    >('/api/plugins/library-state'),
+  },
+
+  credentials: {
+    list: httpGet<Contract.PluginCredentialReference[], void>('/api/plugins/credentials'),
+  },
+
+  desktop: {
+    commands: httpGet<Contract.PluginDesktopCommand[], void>(
+      '/api/plugins/desktop/commands',
+    ),
+    invoke: httpPost<unknown, Contract.InvokePluginDesktopCommandRequest>(
+      '/api/plugins/desktop/commands/invoke',
+    ),
+    emit: httpPost<Contract.PluginDesktopEventReport, Contract.DispatchPluginDesktopEventRequest>(
+      '/api/plugins/desktop/events',
+    ),
+  },
+
+  surface: {
+    close: httpPost<boolean, Contract.ClosePluginSurfaceCommand>(
+      (command) => surfaceOwnerPath(command, 'close'),
+      ({ request }) => request,
+    ),
+    bridge: httpPost<
+      Contract.PluginBridgeResult,
+      Contract.DispatchPluginBridgeRequest
+    >((request) => surfaceOwnerPath(request, 'bridge')),
+  },
 };

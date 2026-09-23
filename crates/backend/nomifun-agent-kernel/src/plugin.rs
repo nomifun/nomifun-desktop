@@ -949,7 +949,7 @@ impl PluginRegistration {
 
 fn unique_capability_ids(
     manifest: &nomifun_agent_contracts::PackageManifest,
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<CapabilityId>, KernelError> {
     let mut ids = BTreeSet::new();
     for capability in &manifest.contributions.capabilities {
@@ -965,7 +965,7 @@ fn unique_capability_ids(
 
 fn unique_skill_ids(
     manifest: &nomifun_agent_contracts::PackageManifest,
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<SkillId>, KernelError> {
     let mut ids = BTreeSet::new();
     for skill in &manifest.contributions.skills {
@@ -981,7 +981,7 @@ fn unique_skill_ids(
 
 fn unique_mcp_tool_keys(
     manifest: &nomifun_agent_contracts::PackageManifest,
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<nomifun_agent_contracts::McpToolKey>, KernelError> {
     let mut keys = BTreeSet::new();
     for mapping in &manifest.contributions.mcp_tools {
@@ -1008,7 +1008,7 @@ fn unique_mcp_tool_keys(
 
 fn unique_role_ids(
     manifest: &nomifun_agent_contracts::PackageManifest,
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<ExecutionRoleId>, KernelError> {
     let mut ids = BTreeSet::new();
     for contribution in &manifest.contributions.role_providers {
@@ -1027,7 +1027,7 @@ fn unique_role_ids(
 
 fn unique_service_ids(
     provisions: &[nomifun_agent_contracts::ServiceProvision],
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<ServiceKeyId>, KernelError> {
     let mut ids = BTreeSet::new();
     for provision in provisions {
@@ -1046,7 +1046,7 @@ fn unique_service_ids(
 
 fn unique_service_ids_from_refs(
     service_refs: &BTreeSet<ServiceKeyRef>,
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<ServiceKeyId>, KernelError> {
     let mut ids = BTreeSet::new();
     for service in service_refs {
@@ -1065,7 +1065,7 @@ fn unique_service_ids_from_refs(
 
 fn declared_host_ports(
     context: &PluginContextDescriptor,
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
 ) -> Result<BTreeSet<HostPortId>, KernelError> {
     let mut ports = BTreeSet::new();
     for port_id in context
@@ -1128,7 +1128,7 @@ fn required_registrar_operations(
 }
 
 fn invalid_registration(
-    mount_id: &nomifun_agent_contracts::PluginMountId,
+    mount_id: &nomifun_agent_contracts::AgentModuleId,
     reason: impl Into<String>,
 ) -> KernelError {
     KernelError::InvalidRegistration {

@@ -133,7 +133,9 @@ impl EngineToolInvoker for EngineToolHost {
             );
             let execution = self.execution.clone();
             let before_dispatch = cancellation.clone();
-            self.tasks.spawn(async move {
+            let effect_cancellation = CancellationToken::new();
+            let cancel_effect = effect_cancellation.clone();
+            let task = self.tasks.spawn(async move {
                 // Fair shared/exclusive gate, retained through settlement.
                 // Kernel verifies classification against the exact mapping
                 // before any real effect; an engine cannot self-label a write
@@ -154,7 +156,11 @@ impl EngineToolInvoker for EngineToolHost {
                 // This insert enforces the current accepted root/epoch. It is
                 // dispatch intent only; the inner Kernel owns actual admission.
                 journal.append(intent, None, EngineJournalWrite::Progress).await.map_err(tool_error)?;
-                let result = inner.invoke(invocation.clone(), CancellationToken::new()).await
+                // Cancellation is cooperative, never rollback proof. Retain
+                // this owner task through the actual result while still
+                // forwarding the turn's cancellation to Service/process
+                // owners so they can stop bounded work and be reaped.
+                let result = inner.invoke(invocation.clone(), effect_cancellation).await
                     .and_then(|result| { result.validate_for(&invocation.call.call_id)?; Ok(result) });
                 let recorded = result.as_ref().ok().map(|result| policy.project(&invocation, result));
                 let message = result.as_ref().err().map(|error| bounded_error(&error.to_string()));
@@ -170,10 +176,15 @@ impl EngineToolInvoker for EngineToolHost {
                 unobserved.lock().map_err(|_| { failed.store(true, Ordering::Release); tool_error("observation lock poisoned") })?
                     .insert(dispatch.call_id);
                 result
-            }).map_err(tool_error)?
+            }).map_err(tool_error)?;
+            (task, cancel_effect)
         };
+        let (task, cancel_effect) = task;
         tokio::select! {
-            _ = cancellation.cancelled() => Err(EngineToolError::Cancelled),
+            _ = cancellation.cancelled() => {
+                cancel_effect.cancel();
+                Err(EngineToolError::Cancelled)
+            },
             result = task.result() => result.map_err(tool_error)?,
         }
     }
@@ -296,8 +307,8 @@ mod tests {
                 self.started.cancel();
                 self.release.cancelled().await;
                 assert!(
-                    !cancellation.is_cancelled(),
-                    "admitted effects must not lose their completion witness"
+                    cancellation.is_cancelled(),
+                    "retained effects must receive cooperative cancellation"
                 );
                 Ok(EngineToolResult::text(
                     invocation.call.call_id,

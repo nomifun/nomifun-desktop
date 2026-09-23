@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     ActionId, AgentPresetRevision, CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityId,
     CapabilityOperationLock, CapabilityRef, CapabilitySelection,
-    ContributionSourceKind, DigestHex, ExecutionRoleId, InstallationRoleBinding,
+    DigestHex, ExecutionRoleId, InstallationRoleBinding,
     ModelRouteId, OperationId, PlatformConstraint,
     PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
     ResolvedSkillLock, ResolvedSnapshotContent,
@@ -39,10 +39,6 @@ pub struct CompilerEnvironment {
 #[derive(Clone, Debug)]
 pub struct CompileRequest {
     pub revision: AgentPresetRevision,
-    /// Exact Plugin Product Active Release projections resolved by the owning
-    /// application service. Plugin Product capabilities are deliberately not
-    /// materialized in the Kernel Plugin Registry.
-    pub plugin_product_capabilities: Vec<ResolvedCapability>,
     pub principal: PrincipalRef,
     pub scene: String,
     pub surface: String,
@@ -281,9 +277,7 @@ impl AgentPresetCompiler {
         revision: &AgentPresetRevision,
         snapshot: &ResolvedSnapshotEnvelope,
     ) -> bool {
-        let external: BTreeSet<_> = snapshot.content.enabled_capabilities.iter()
-            .filter(|capability| capability.plugin_product_id.is_some())
-            .map(|capability| capability.capability.id.clone()).collect();
+        let external = BTreeSet::new();
         let roots = revision.payload.enabled_capabilities.iter()
             .map(|selection| selection.capability.id.clone())
             .filter(|id| !external.contains(id)).collect();
@@ -331,27 +325,12 @@ impl AgentPresetCompiler {
         let initial_direct = direct_selection_map(
             &request.revision.payload.enabled_capabilities,
         );
-        let plugin_product_by_id = validate_plugin_product_inputs(
-            registry,
-            &request.revision,
-            &request.plugin_product_capabilities,
-        )?;
-        let enabled_plugin_product_capabilities = request.plugin_product_capabilities.clone();
-        let initial_plugin_direct = initial_direct
-            .iter()
-            .filter(|(capability_id, _)| {
-                !plugin_product_by_id.contains_key(*capability_id)
-            })
-            .map(|(capability_id, selection)| {
-                (capability_id.clone(), *selection)
-            })
-            .collect::<BTreeMap<_, _>>();
         let direct_ids = initial_direct
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>();
 
-        validate_direct_selections(registry, &initial_plugin_direct)?;
+        validate_direct_selections(registry, &initial_direct)?;
         for id in &request.revision.payload.context_order {
             let valid = registry.capability(id).is_some_and(|value| {
                 value.manifest.contributes_context()
@@ -366,11 +345,7 @@ impl AgentPresetCompiler {
         for id in &request.revision.payload.middleware_order {
             // Ordering follows the actual frozen middleware Action contract;
             // CapabilityKind is presentation metadata, not execution support.
-            // Plugin Product actions may target a different source-integrated
-            // consumer. The generic compiler freezes their order and identity;
-            // the installed consumer validator decides phase support.
-            let valid = plugin_product_by_id.contains_key(id)
-                || registry.capability(id).is_some_and(|value| {
+            let valid = registry.capability(id).is_some_and(|value| {
                     nomifun_agent_contracts::tool_middleware::phase_for_actions(
                         &value.manifest.contributions.actions,
                     )
@@ -383,31 +358,17 @@ impl AgentPresetCompiler {
                 });
             }
         }
-        validate_revision_contribution_locks(
-            registry,
-            &request.revision,
-            &plugin_product_by_id,
-        )?;
-        for capability in plugin_product_by_id.values() {
-            for feature in &capability.required_runtime_features {
-                if !environment.available_runtime_features.contains(feature) {
-                    return Err(KernelError::RuntimeFeatureUnavailable {
-                        capability_id: capability.capability.id.clone(),
-                        feature: feature.as_ref().to_owned(),
-                    });
-                }
-            }
-        }
+        validate_revision_contribution_locks(registry, &request.revision)?;
 
         let graph = dependencies::resolve(registry, environment, &request.revision,
-            &initial_plugin_direct.keys().cloned().collect())?;
+            &initial_direct.keys().cloned().collect())?;
         let ceiling = graph.edges.keys().cloned().collect::<BTreeSet<_>>();
 
         validate_capability_ceiling(registry, environment, &request.surface, &ceiling)?;
 
         let authority_policies = compile_authority_policies(
             registry,
-            &initial_plugin_direct,
+            &initial_direct,
             &ceiling,
         )?;
         let mut enabled_capabilities = resolved_capabilities(
@@ -425,11 +386,6 @@ impl AgentPresetCompiler {
             resolved.dependency_refs = graph.edges[&resolved.capability.id].clone();
         }
         let mut authority_policies = authority_policies;
-        merge_plugin_product_authority_policies(
-            &mut authority_policies,
-            &enabled_plugin_product_capabilities,
-        )?;
-        enabled_capabilities.extend(enabled_plugin_product_capabilities);
         enabled_capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
         let skill_locks = compile_skill_locks(
             registry,
@@ -443,7 +399,7 @@ impl AgentPresetCompiler {
             registry,
             &ceiling,
             &resolved_role_providers,
-            &plugin_product_by_id.keys().cloned().collect(),
+            &BTreeSet::new(),
         )?;
         apply_role_requirements(
             registry,
@@ -580,201 +536,6 @@ fn direct_selection_map(
         .collect()
 }
 
-fn validate_plugin_product_inputs<'a>(
-    registry: &MaterializedRegistry,
-    revision: &AgentPresetRevision,
-    capabilities: &'a [ResolvedCapability],
-) -> Result<BTreeMap<CapabilityId, &'a ResolvedCapability>, KernelError> {
-    let mut by_id = BTreeMap::new();
-    let mut contribution_ids = BTreeSet::new();
-    let mut publication_facts = BTreeMap::new();
-
-    for capability in capabilities {
-        capability
-            .validate()
-            .map_err(|error| KernelError::InvalidPresetRevision {
-                reason: error.message,
-            })?;
-        if !capability.consumption.is_contribution() || !capability.dependency_refs.is_empty() {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: "Plugin Product projections cannot supply compiler-owned dependency graph fields".into(),
-            });
-        }
-        if capability.contribution_lock.source_kind
-            != ContributionSourceKind::PluginProductActiveRelease
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: "application-supplied capabilities must bind a Plugin Product Active Release"
-                    .to_owned(),
-            });
-        }
-        let product_id = capability.plugin_product_id.as_ref().ok_or_else(|| {
-            KernelError::InvalidPresetRevision {
-                reason: "Plugin Product capability is missing plugin_product_id".to_owned(),
-            }
-        })?;
-        let release = capability.active_release.as_ref().ok_or_else(|| {
-            KernelError::InvalidPresetRevision {
-                reason: "Plugin Product capability is missing active_release".to_owned(),
-            }
-        })?;
-        if capability.target_artifact_digest != release.release_digest {
-            return Err(KernelError::InvalidPresetRevision {
-                reason:
-                    "Plugin Product capability target Artifact differs from its Active Release"
-                        .to_owned(),
-            });
-        }
-        if capability.capability.id.as_ref().trim().is_empty() {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: "Plugin Product capability reference must be non-empty".to_owned(),
-            });
-        }
-        if registry.capability(&capability.capability.id).is_some() {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} must not be present in the Kernel Plugin Registry",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-
-        let mut action_ids = BTreeSet::new();
-        for action in &capability.actions {
-            if action.action_id.as_ref().trim().is_empty() {
-                return Err(KernelError::InvalidPresetRevision {
-                    reason: format!(
-                        "Plugin Product capability {} contains an empty action ID",
-                        capability.capability.id.as_ref()
-                    ),
-                });
-            }
-            if !action_ids.insert(action.action_id.clone()) {
-                return Err(KernelError::InvalidPresetRevision {
-                    reason: format!(
-                        "Plugin Product capability {} declares duplicate action {}",
-                        capability.capability.id.as_ref(),
-                        action.action_id.as_ref()
-                    ),
-                });
-            }
-        }
-        if let Some(action_id) = capability
-            .action_allowlist
-            .iter()
-            .find(|action_id| !action_ids.contains(*action_id))
-        {
-            return Err(KernelError::ActionNotDeclared {
-                capability_id: capability.capability.id.clone(),
-                action_id: action_id.clone(),
-            });
-        }
-        if capability
-            .required_resource_kinds
-            .iter()
-            .any(|kind| kind.as_ref().trim().is_empty())
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} contains an empty resource kind",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-        if by_id
-            .insert(capability.capability.id.clone(), capability)
-            .is_some()
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} is supplied more than once",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-        if !contribution_ids.insert(capability.contribution_id.clone()) {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product contribution {} is supplied more than once",
-                    capability.contribution_id.as_ref()
-                ),
-            });
-        }
-
-        let facts = (
-            capability.active_release.clone(),
-            capability.active_release_epoch,
-            capability.catalog_digest.clone(),
-            capability.source_package.clone(),
-        );
-        if let Some(existing) = publication_facts
-            .insert(product_id.clone(), facts.clone())
-        {
-            if existing != facts {
-                return Err(KernelError::InvalidPresetRevision {
-                    reason: format!(
-                        "Plugin Product {} has inconsistent Active Release or Catalog facts",
-                        product_id.as_ref()
-                    ),
-                });
-            }
-        }
-    }
-
-    for capability in capabilities {
-        let mut matched_selection = None;
-        for selection in revision
-            .payload
-            .enabled_capabilities
-            .iter()
-        {
-            if selection.capability.id != capability.capability.id {
-                continue;
-            }
-            if selection.capability != capability.capability {
-                return Err(KernelError::CapabilityNotMaterialized {
-                    capability_id: selection.capability.id.clone(),
-                });
-            }
-            matched_selection = Some(selection);
-            break;
-        }
-        let Some(selection) = matched_selection else {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} is not selected by the Revision",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        };
-        if let Some(action_id) = selection
-            .action_allowlist
-            .iter()
-            .find(|action_id| {
-                !capability
-                    .actions
-                    .iter()
-                    .any(|action| &action.action_id == *action_id)
-            })
-        {
-            return Err(KernelError::ActionNotDeclared {
-                capability_id: capability.capability.id.clone(),
-                action_id: action_id.clone(),
-            });
-        }
-        if selection.action_allowlist != capability.action_allowlist {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} action allowlist differs from its Revision selection",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-    }
-
-    Ok(by_id)
-}
-
 fn validate_direct_selections(
     registry: &MaterializedRegistry,
     selections: &BTreeMap<CapabilityId, &CapabilitySelection>,
@@ -824,41 +585,12 @@ fn validate_direct_selections(
 fn validate_revision_contribution_locks(
     registry: &MaterializedRegistry,
     revision: &AgentPresetRevision,
-    plugin_product_capabilities: &BTreeMap<CapabilityId, &ResolvedCapability>,
 ) -> Result<(), KernelError> {
     for selection in revision
         .payload
         .enabled_capabilities
         .iter()
     {
-        if let Some(plugin_product) =
-            plugin_product_capabilities.get(&selection.capability.id)
-        {
-            if plugin_product.capability != selection.capability {
-                return Err(KernelError::CapabilityNotMaterialized {
-                    capability_id: selection.capability.id.clone(),
-                });
-            }
-            let frozen = revision
-                .contribution_locks
-                .iter()
-                .find(|lock| lock.contribution_id == plugin_product.contribution_id)
-                .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
-                    capability_id: selection.capability.id.clone(),
-                    reason: format!(
-                        "Revision is missing Plugin Product contribution lock {}",
-                        plugin_product.contribution_id.as_ref()
-                    ),
-                })?;
-            if frozen != &plugin_product.contribution_lock {
-                return Err(KernelError::CapabilityProvenanceDrift {
-                    capability_id: selection.capability.id.clone(),
-                    reason: "Revision Plugin Product contribution lock does not match the exact projection"
-                        .to_owned(),
-                });
-            }
-            continue;
-        }
         let capability = registry
             .capability(&selection.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
@@ -885,20 +617,6 @@ fn validate_revision_contribution_locks(
                 capability_id: selection.capability.id.clone(),
                 reason: "Revision contribution lock does not match the materialized target"
                     .to_owned(),
-            });
-        }
-    }
-    for lock in &revision.contribution_locks {
-        if lock.source_kind == ContributionSourceKind::PluginProductActiveRelease
-            && !plugin_product_capabilities
-                .values()
-                .any(|capability| capability.contribution_lock == *lock)
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Revision contains an unselected Plugin Product contribution lock {}",
-                    lock.contribution_id.as_ref()
-                ),
             });
         }
     }
@@ -1115,10 +833,6 @@ fn resolved_capabilities(
                     .iter()
                     .map(|feature| feature.id.clone())
                     .collect(),
-                plugin_product_id: None,
-                active_release: None,
-                active_release_epoch: None,
-                catalog_digest: None,
                 display_name: None,
                 description: None,
                 actions: capability.manifest.contributions.actions.clone(),
@@ -1138,34 +852,6 @@ fn resolved_capability_operation_lock(
         contribution: capability.contribution_lock.clone(),
         target_artifact_digest: Some(capability.target_artifact_digest.clone()),
     }
-}
-
-fn merge_plugin_product_authority_policies(
-    policies: &mut BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
-    initial: &[ResolvedCapability],
-) -> Result<(), KernelError> {
-    for capability in initial.iter() {
-        let allowed_actions = capability.action_allowlist.clone();
-        if policies
-            .insert(
-                capability.capability.id.clone(),
-                CompiledCapabilityPolicy {
-                    allowed_actions,
-                    resource_binding_ids: BTreeSet::new(),
-                    required_resource_kinds: capability.required_resource_kinds.clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} collides with a Plugin capability policy",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn compile_skill_locks(
@@ -1524,340 +1210,5 @@ fn provider_platform_supported(
             host_targets.contains(target)
                 && (host_surfaces.is_empty() || host_surfaces.contains(surface))
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
-
-    use nomifun_agent_contracts::{
-        ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload,
-        CapabilityActionDescriptor, CapabilityRef, ContributionId,
-        ContributionLock, ContributionSourceKind, DigestHex, EffectClass, PluginProductId,
-        PluginReleaseId, PluginReleaseRef, PluginSourceKind, PluginSourceMetadata,
-        PackageId, PackageRef, PresetRevisionRef, PrincipalRef, ResolvedCapability,
-        ToolPresentationKind, UserId,
-    };
-
-    use super::*;
-
-    const VERSION: &str = "1.0.0";
-    const CAPABILITY_ID: &str = "plugin.fixture.echo";
-    const ACTION_ID: &str = "plugin.fixture.echo.invoke";
-    const CONTRIBUTION_ID: &str = "capability:plugin.fixture.echo";
-    const PLUGIN_PRODUCT_ID: &str = "plugin-fixture";
-
-    fn digest(fill: char) -> DigestHex {
-        DigestHex::from(fill.to_string().repeat(64))
-    }
-
-    fn plugin_product_capability(action_allowlist: BTreeSet<ActionId>) -> ResolvedCapability {
-        let contribution_lock = ContributionLock {
-            source_kind: ContributionSourceKind::PluginProductActiveRelease,
-            source_identity: format!("plugin-product:{PLUGIN_PRODUCT_ID}").into(),
-            mount_id: None,
-            plugin_product_id: Some(PluginProductId::from(PLUGIN_PRODUCT_ID)),
-            mcp_binding_id: None,
-            contribution_id: ContributionId::from(CONTRIBUTION_ID),
-            contract_digest: digest('a'),
-        };
-        ResolvedCapability {
-            consumption: Default::default(),
-            dependency_refs: Vec::new(),
-            capability: CapabilityRef {
-                id: CAPABILITY_ID.into(),
-            },
-            source_package: PackageRef {
-                id: PackageId::from("plugin.fixture"),
-                version: VERSION.into(),
-            },
-            contribution_id: ContributionId::from(CONTRIBUTION_ID),
-            contribution_lock,
-            resolved_mount_id: None,
-            resolved_source: PluginSourceMetadata {
-                source_kind: PluginSourceKind::ManagedLocal,
-                source_identity: format!("plugin-product:{PLUGIN_PRODUCT_ID}"),
-                source_digest: Some(digest('b')),
-            },
-            target_artifact_digest: digest('b'),
-            schema_digest: digest('a'),
-            dependency_path: vec![CapabilityId::from(CAPABILITY_ID)],
-            required_runtime_features: BTreeSet::new(),
-            plugin_product_id: Some(PluginProductId::from(PLUGIN_PRODUCT_ID)),
-            active_release: Some(PluginReleaseRef {
-                release_id: PluginReleaseId::from("release-fixture"),
-                artifact_id: "artifact-fixture".into(),
-                release_digest: digest('b'),
-                manifest_digest: digest('c'),
-            }),
-            active_release_epoch: Some(7),
-            catalog_digest: Some(digest('d')),
-            display_name: Some("Fixture Echo".to_owned()),
-            description: Some("Echo from a Plugin Product Active Release".to_owned()),
-            actions: vec![CapabilityActionDescriptor {
-                action_id: ActionId::from(ACTION_ID),
-                input_schema: "schema://plugin.fixture.echo/input".into(),
-                output_schema: "schema://plugin.fixture.echo/output".into(),
-                effect_class: EffectClass::Pure,
-                presentation: ToolPresentationKind::FunctionTool,
-            }],
-            required_resource_kinds: BTreeSet::from(["workspace".into()]),
-            action_allowlist,
-        }
-    }
-
-    fn revision(
-        action_allowlist: BTreeSet<ActionId>,
-        lock: ContributionLock,
-    ) -> AgentPresetRevision {
-        let selection = CapabilitySelection {
-            capability: CapabilityRef {
-                id: CAPABILITY_ID.into(),
-            },
-            action_allowlist,
-        };
-        let payload = AgentPresetRevisionPayload {
-            context_order: Vec::new(),
-            middleware_order: Vec::new(),
-            schema_version: VERSION.into(),
-            model_route_refs: BTreeMap::new(),
-            chat_route_records: BTreeMap::new(),
-            enabled_capabilities: vec![selection],
-            skill_bindings: Vec::new(),
-            system_role_provider_overrides: BTreeMap::new(),
-            persona: "fixture".to_owned(),
-            instructions: "fixture".to_owned(),
-            starter_prompts: Vec::new(),
-            runtime_policy: Default::default(),
-        };
-        let mut revision = AgentPresetRevision {
-            reference: PresetRevisionRef {
-                preset_id: AgentPresetId::from("fixture.preset"),
-                revision: 1,
-                revision_digest: digest('0'),
-            },
-            payload,
-            contribution_locks: vec![lock],
-            created_by: UserId::from("fixture-user"),
-            created_at_ms: 1,
-            reason: None,
-        };
-        revision.reference.revision_digest = revision.revision_digest().unwrap();
-        revision
-    }
-
-    fn environment() -> CompilerEnvironment {
-        CompilerEnvironment {
-            resolver_version: VERSION.into(),
-            required_runtime_protocol_version: VERSION.into(),
-            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-            runtime_feature_inventory_digest: digest('e'),
-            available_runtime_features: BTreeSet::new(),
-            installation_role_bindings: BTreeMap::new(),
-            canonical_schema_manifest_digest: digest('f'),
-            target_contribution_manifest_digest: digest('1'),
-            host_target: RuntimeTarget::from("windows-desktop-x64"),
-            host_surface: "desktop".to_owned(),
-            availability_evidence_revision: "compiler-test".to_owned(),
-        }
-    }
-
-    fn compile_request(
-        revision: AgentPresetRevision,
-        capability: ResolvedCapability,
-    ) -> CompileRequest {
-        CompileRequest {
-            revision,
-            plugin_product_capabilities: vec![capability],
-            principal: PrincipalRef {
-                principal_kind: "user".to_owned(),
-                principal_id: "fixture-user".to_owned(),
-            },
-            scene: "test".to_owned(),
-            surface: "desktop".to_owned(),
-            audience: "test".to_owned(),
-            created_at_ms: 2,
-            resolver_run_id: OperationId::from("compiler-test"),
-        }
-    }
-
-    #[test]
-    fn middleware_order_accepts_alternative_product_contract_and_freezes_it() {
-        let capability = plugin_product_capability(BTreeSet::from([ACTION_ID.into()]));
-        let mut saved_revision = revision(
-            capability.action_allowlist.clone(),
-            capability.contribution_lock.clone(),
-        );
-        let unordered = AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(),
-            &environment(),
-            compile_request(saved_revision.clone(), capability.clone()),
-        ).unwrap();
-        saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
-        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
-        let compiled = AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(),
-            &environment(),
-            compile_request(saved_revision, capability.clone()),
-        ).expect("consumer support is not a generic compiler concern");
-
-        assert_eq!(compiled.content().middleware_order, vec![CapabilityId::from(CAPABILITY_ID)]);
-        assert_eq!(compiled.content().enabled_capabilities, vec![capability.clone()]);
-        assert_eq!(compiled.policy(&CAPABILITY_ID.into()), unordered.policy(&CAPABILITY_ID.into()));
-        assert_ne!(compiled.snapshot_ref(), unordered.snapshot_ref());
-        assert_ne!(compiled.content().compiled_runtime_profile_digest,
-            unordered.content().compiled_runtime_profile_digest);
-    }
-
-    #[test]
-    fn middleware_order_still_rejects_duplicate_and_unselected_product_entries() {
-        let granted = BTreeSet::from([ActionId::from(ACTION_ID)]);
-        let capability = plugin_product_capability(granted.clone());
-        for order in [vec![CAPABILITY_ID, CAPABILITY_ID], vec!["plugin.unselected"]] {
-            let mut saved_revision = revision(granted.clone(), capability.contribution_lock.clone());
-            saved_revision.payload.middleware_order = order.into_iter().map(Into::into).collect();
-            saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
-            let error = AgentPresetCompiler::compile(
-                &MaterializedRegistry::empty(),
-                &environment(),
-                compile_request(saved_revision, capability.clone()),
-            ).expect_err("middleware order must be unique and directly selected");
-            assert!(matches!(error, KernelError::InvalidPresetRevision { reason }
-                if reason.contains("middleware_order contains duplicate or unselected")));
-        }
-    }
-
-    #[test]
-    fn middleware_order_still_rejects_product_identity_drift() {
-        let granted = BTreeSet::from([ActionId::from(ACTION_ID)]);
-        let capability = plugin_product_capability(granted.clone());
-        let mut saved_revision = revision(granted, capability.contribution_lock.clone());
-        saved_revision.payload.middleware_order = vec![CAPABILITY_ID.into()];
-        saved_revision.payload.enabled_capabilities[0].capability.id = "plugin.fixture.other".into();
-        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
-        assert!(matches!(AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(), &environment(),
-            compile_request(saved_revision.clone(), capability.clone()),
-        ), Err(KernelError::InvalidPresetRevision { .. })));
-
-        saved_revision.payload.enabled_capabilities[0].capability = capability.capability.clone();
-        saved_revision.contribution_locks[0].contract_digest = digest('e');
-        saved_revision.reference.revision_digest = saved_revision.revision_digest().unwrap();
-        assert!(matches!(AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(), &environment(),
-            compile_request(saved_revision, capability),
-        ), Err(KernelError::CapabilityProvenanceDrift { .. })));
-    }
-
-    #[test]
-    fn compiler_keeps_plugin_product_out_of_registry_closure_and_freezes_initial_policy() {
-        let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
-        let capability = plugin_product_capability(action_allowlist.clone());
-        let saved_revision = revision(
-            action_allowlist.clone(),
-            capability.contribution_lock.clone(),
-        );
-        let compiled = AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(),
-            &environment(),
-            compile_request(saved_revision, capability),
-        )
-        .expect("Plugin Product capability should compile without Kernel registry materialization");
-
-        assert_eq!(compiled.content().enabled_capabilities.len(), 1);
-        assert!(
-            compiled
-                .content()
-                .capability_allowlist
-                .contains(&CapabilityId::from(CAPABILITY_ID))
-        );
-        assert_eq!(
-            compiled
-                .policy(&CapabilityId::from(CAPABILITY_ID))
-                .expect("Plugin Product authority policy")
-                .required_resource_kinds,
-            BTreeSet::from(["workspace".into()])
-        );
-    }
-
-    #[test]
-    fn unbound_enhancement_resources_are_detected_without_invalidating_the_snapshot() {
-        let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
-        let capability = plugin_product_capability(action_allowlist.clone());
-        let saved_revision = revision(
-            action_allowlist,
-            capability.contribution_lock.clone(),
-        );
-        let principal = PrincipalRef {
-            principal_kind: "user".to_owned(),
-            principal_id: "fixture-user".to_owned(),
-        };
-        let compiled = AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(),
-            &environment(),
-            compile_request(saved_revision, capability),
-        )
-        .unwrap();
-        let capability_id = CapabilityId::from(CAPABILITY_ID);
-        assert!(!compiled.capability_resources_bound(&capability_id).unwrap());
-
-        let bound = compiled
-            .with_target_resource_bindings(
-                &principal,
-                vec![TypedResourceBinding {
-                    binding_id: ResourceBindingId::from("workspace:fixture"),
-                    resource_kind: ResourceKind::from("workspace"),
-                    resource_id: "fixture".into(),
-                    owner_id: principal.principal_id.clone(),
-                    operations: BTreeSet::from(["read".to_owned()]),
-                    connection_config_ref: None,
-                    typed_parameters: BTreeMap::new(),
-                }],
-            )
-            .unwrap();
-        assert!(bound.capability_resources_bound(&capability_id).unwrap());
-    }
-
-    #[test]
-    fn compiler_freezes_enabled_plugin_product_and_rejects_lock_drift() {
-        let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
-        let capability = plugin_product_capability(action_allowlist.clone());
-        let saved_revision = revision(
-            action_allowlist.clone(),
-            capability.contribution_lock.clone(),
-        );
-        let compiled = AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(),
-            &environment(),
-            compile_request(saved_revision.clone(), capability.clone()),
-        )
-        .expect("enabled Plugin Product capability should compile");
-        assert_eq!(
-            compiled
-                .content()
-                .enabled_capabilities
-                .first()
-                .expect("enabled Plugin Product projection")
-                .active_release_epoch,
-            Some(7)
-        );
-
-        let mut drifted_lock = capability.contribution_lock.clone();
-        drifted_lock.source_identity = "plugin-product:other".into();
-        let drifted = revision(
-            action_allowlist,
-            drifted_lock,
-        );
-        let error = AgentPresetCompiler::compile(
-            &MaterializedRegistry::empty(),
-            &environment(),
-            compile_request(drifted, capability),
-        )
-        .expect_err("drifted Plugin Product revision lock must fail closed");
-        assert!(matches!(
-            error,
-            KernelError::CapabilityProvenanceDrift { .. }
-        ));
     }
 }

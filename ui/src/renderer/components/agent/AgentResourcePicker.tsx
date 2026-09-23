@@ -145,11 +145,6 @@ export const loadAgentResourceInventory: AgentResourceInventoryLoader = async (
     const rows = await creativeStudioCanvasApi.listCanvases();
     options.canvas = rows.map((row) => ({ value: row.canvasId, label: row.title }));
   }});
-  if (wanted.has('plugin')) jobs.push({ kinds: ['plugin'], run: async () => {
-    const rows = (await ipcBridge.pluginRuntimes.library.invoke()).plugins;
-    options.plugin = rows.filter((row) => row.lifecycle === 'enabled' && row.surface_available).map((row) => ({ value: row.plugin_id, label: row.display_name, description: row.description }));
-  }});
-
   await Promise.all(jobs.map(async (job) => {
     try { await job.run(); }
     catch (error) {
@@ -167,7 +162,6 @@ const routeForKind = (kind: UserAgentResourceKind, value: AgentResourceSelection
   if (kind === 'knowledge_base') return value.customer ? `/customer-service/${value.customer}` : '/knowledge';
   if (kind === 'mcp_server') return '/mcp';
   if (kind === 'canvas') return '/creative-studio/canvases';
-  if (kind === 'plugin') return '/plugins';
   return '/guid';
 };
 
@@ -407,9 +401,7 @@ const AgentResourcePicker: React.FC<Props> = ({ requiredKinds, optionalKinds = [
   const kindName = (kind: string) => {
     const key = kind === 'mcp_server'
       ? 'mcpConnection'
-      : kind === 'plugin'
-        ? 'pluginRuntime'
-        : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
+      : kind.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
     return t(`agentSettings.resources.kinds.${key}`);
   };
   const permissionName = (permission: keyof IApiRobotPermissions) =>

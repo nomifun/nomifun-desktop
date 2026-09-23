@@ -5,8 +5,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nomifun_agent_contracts::{
-    ArtifactEnvelope, ArtifactFileDigest, ArtifactId, DigestHex, PluginPackageArtifactV1,
-    PluginPackageV1Manifest, canonical_json_bytes,
+    DigestHex, PLUGIN_MANIFEST_PATH, PluginArtifact, PluginArtifactFile, PluginManifest,
+    canonical_json_bytes, digest_bytes,
 };
 use nomifun_common::zip_safe::{self, ZipColonPolicy};
 use serde::de::{DeserializeSeed, MapAccess, SeqAccess, Visitor};
@@ -22,10 +22,12 @@ const ARTIFACTS_DIRECTORY: &str = "artifacts";
 const STAGING_DIRECTORY: &str = ".staging";
 const PACKAGE_DIRECTORY: &str = "package";
 const ARTIFACT_RECORD_FILE: &str = "artifact.json";
-const MANIFEST_FILE: &str = "manifest.json";
-const ENTRYPOINT_FILE: &str = "main.mjs";
-const SOURCE_MAP_FILE: &str = "main.mjs.map";
-const RESOURCES_DIRECTORY: &str = "resources";
+const MANIFEST_FILE: &str = PLUGIN_MANIFEST_PATH;
+const UI_DIRECTORY: &str = "ui";
+const SERVICE_DIRECTORY: &str = "service";
+const SERVICE_ENTRYPOINT_FILE: &str = "service/main.mjs";
+const MIGRATIONS_DIRECTORY: &str = "migrations";
+const SOURCE_DIRECTORY: &str = "source";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_NORMALIZED_PATH_BYTES: usize = 1024;
 const MAX_PATH_COMPONENT_BYTES: usize = 255;
@@ -99,7 +101,7 @@ impl ImportCancellation for CancellationFlag {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StoredPluginArtifact {
-    pub artifact: PluginPackageArtifactV1,
+    pub artifact: PluginArtifact,
     pub managed_relative_path: String,
     pub artifact_root: PathBuf,
     pub package_root: PathBuf,
@@ -215,6 +217,34 @@ impl PluginArtifactStore {
         Ok(result)
     }
 
+    /// Validate captured Draft bytes through the exact package scanner without
+    /// publishing an immutable Artifact. Preview and permission inspection use
+    /// this path; Save freezes the same bytes again through `import_files`.
+    pub fn inspect_files(
+        &self,
+        files: &BTreeMap<String, Vec<u8>>,
+        cancellation: &dyn ImportCancellation,
+    ) -> Result<PluginArtifact, PluginArtifactStoreError> {
+        check_canceled(cancellation)?;
+        let staging = self.create_staging()?;
+        let mut scanner = PackageScanner::new(self.limits, staging.path(), cancellation);
+        for (path, bytes) in files {
+            check_canceled(cancellation)?;
+            let normalized = normalize_relative_path(Path::new(path))?;
+            if &normalized != path {
+                return Err(PluginArtifactStoreError::UnsafePackagePath {
+                    path: path.clone(),
+                    reason: "captured path must already be normalized".into(),
+                });
+            }
+            validate_allowed_file(&normalized)?;
+            scanner.register_file(&normalized)?;
+            scanner.check_declared_size(&normalized, bytes.len() as u64)?;
+            scanner.consume_file(&normalized, bytes.as_slice())?;
+        }
+        self.finish_staging(scanner.finish()?, staging.path())
+    }
+
     pub fn import_directory(
         &self,
         source: impl AsRef<Path>,
@@ -254,7 +284,7 @@ impl PluginArtifactStore {
         &self,
         source: impl AsRef<Path>,
         cancellation: &dyn ImportCancellation,
-    ) -> Result<PluginPackageArtifactV1, PluginArtifactStoreError> {
+    ) -> Result<PluginArtifact, PluginArtifactStoreError> {
         check_canceled(cancellation)?;
         let source = source.as_ref();
         let source_metadata =
@@ -314,7 +344,7 @@ impl PluginArtifactStore {
         &self,
         source: impl AsRef<Path>,
         cancellation: &dyn ImportCancellation,
-    ) -> Result<PluginPackageArtifactV1, PluginArtifactStoreError> {
+    ) -> Result<PluginArtifact, PluginArtifactStoreError> {
         check_canceled(cancellation)?;
         let source = source.as_ref();
         let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
@@ -550,41 +580,34 @@ impl PluginArtifactStore {
 
     fn finish_staging(
         &self,
-        scanned: ScannedPackage,
+        mut scanned: ScannedPackage,
         staging: &Path,
-    ) -> Result<PluginPackageArtifactV1, PluginArtifactStoreError> {
-        let envelope: ArtifactEnvelope<PluginPackageV1Manifest> =
-            strict_json_from_slice(&scanned.manifest_bytes)?;
-        if !envelope
-            .verify()
-            .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))?
-        {
-            return Err(PluginArtifactStoreError::InvalidManifest(
-                "manifest payload digest does not match its payload".into(),
-            ));
-        }
-        envelope
-            .payload
+    ) -> Result<PluginArtifact, PluginArtifactStoreError> {
+        let manifest: PluginManifest = strict_json_from_slice(&scanned.manifest_bytes)?;
+        manifest
             .validate()
             .map_err(|error| PluginArtifactStoreError::Contract(error.to_string()))?;
-
-        let artifact = PluginPackageArtifactV1::new(
-            ArtifactId::from(Uuid::now_v7().to_string()),
-            envelope.payload.clone(),
-            scanned.files,
-        )
-        .map_err(|error| PluginArtifactStoreError::Contract(error.to_string()))?;
-        if artifact.manifest != envelope {
-            return Err(PluginArtifactStoreError::InvalidManifest(
-                "manifest envelope is not the canonical Plugin Package v1 envelope".into(),
-            ));
+        let canonical_manifest = canonical_json_bytes(&manifest)
+            .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))?;
+        if canonical_manifest.len() as u64 > self.limits.max_manifest_bytes {
+            return Err(PluginArtifactStoreError::FileTooLarge {
+                path: MANIFEST_FILE.into(),
+                observed: canonical_manifest.len() as u64,
+                limit: self.limits.max_manifest_bytes,
+            });
         }
+        scanned.files.push(PluginArtifactFile {
+            normalized_relative_path: MANIFEST_FILE.into(),
+            digest: digest_bytes(&canonical_manifest),
+            size_bytes: canonical_manifest.len() as u64,
+        });
+        let artifact = PluginArtifact::new(manifest, scanned.files)
+        .map_err(|error| PluginArtifactStoreError::Contract(error.to_string()))?;
 
         let package_root = staging.join(PACKAGE_DIRECTORY);
         write_new_synced(
             &package_root.join(MANIFEST_FILE),
-            &canonical_json_bytes(&envelope)
-                .map_err(|error| PluginArtifactStoreError::InvalidManifest(error.to_string()))?,
+            &canonical_manifest,
         )?;
         write_new_synced(
             &staging.join(ARTIFACT_RECORD_FILE),
@@ -597,7 +620,7 @@ impl PluginArtifactStore {
 
     fn publish_or_reuse(
         &self,
-        artifact: &PluginPackageArtifactV1,
+        artifact: &PluginArtifact,
         staging: &Path,
     ) -> Result<ArtifactImportResult, PluginArtifactStoreError> {
         let final_root = self.artifacts_root.join(artifact.artifact_digest.as_ref());
@@ -633,7 +656,7 @@ impl PluginArtifactStore {
     fn reuse_existing(
         &self,
         final_root: &Path,
-        incoming: &PluginPackageArtifactV1,
+        incoming: &PluginArtifact,
     ) -> Result<ArtifactImportResult, PluginArtifactStoreError> {
         let stored = self.verify_published(final_root, Some(&incoming.artifact_digest))?;
         if stored.artifact.artifact_digest != incoming.artifact_digest
@@ -672,7 +695,7 @@ impl PluginArtifactStore {
         let record_path = artifact_root.join(ARTIFACT_RECORD_FILE);
         let record_bytes = read_regular_bounded(&record_path, self.artifact_record_limit())
             .map_err(|_| mismatch())?;
-        let artifact: PluginPackageArtifactV1 =
+        let artifact: PluginArtifact =
             strict_json_from_slice(&record_bytes).map_err(|_| mismatch())?;
         artifact.validate().map_err(|_| mismatch())?;
         if expected_digest.is_some_and(|digest| digest != &artifact.artifact_digest)
@@ -690,7 +713,7 @@ impl PluginArtifactStore {
         let manifest_bytes =
             read_regular_bounded(&package_root.join(MANIFEST_FILE), self.limits.max_manifest_bytes)
                 .map_err(|_| mismatch())?;
-        let manifest: ArtifactEnvelope<PluginPackageV1Manifest> =
+        let manifest: PluginManifest =
             strict_json_from_slice(&manifest_bytes).map_err(|_| mismatch())?;
         if manifest != artifact.manifest {
             return Err(mismatch());
@@ -731,7 +754,7 @@ struct PackageScanner<'a> {
     total_bytes: u64,
     collision_keys: HashSet<String>,
     manifest_bytes: Option<Vec<u8>>,
-    files: Vec<ArtifactFileDigest>,
+    files: Vec<PluginArtifactFile>,
 }
 
 impl<'a> PackageScanner<'a> {
@@ -865,7 +888,7 @@ impl<'a> PackageScanner<'a> {
             let _ = fs::remove_file(&destination);
             return Err(error);
         }
-        self.files.push(ArtifactFileDigest {
+        self.files.push(PluginArtifactFile {
             normalized_relative_path: normalized.to_owned(),
             digest: DigestHex::from(hex::encode(hasher.finalize())),
             size_bytes: size,
@@ -904,17 +927,10 @@ impl<'a> PackageScanner<'a> {
 
     fn finish(mut self) -> Result<ScannedPackage, PluginArtifactStoreError> {
         let manifest_bytes = self.manifest_bytes.take().ok_or_else(|| {
-            PluginArtifactStoreError::InvalidManifest("manifest.json is required".into())
+            PluginArtifactStoreError::InvalidManifest(
+                "nomifun.plugin.json is required".into(),
+            )
         })?;
-        if !self
-            .files
-            .iter()
-            .any(|file| file.normalized_relative_path == ENTRYPOINT_FILE)
-        {
-            return Err(PluginArtifactStoreError::Contract(
-                "main.mjs is required".into(),
-            ));
-        }
         self.files.sort_by(|left, right| {
             left.normalized_relative_path
                 .cmp(&right.normalized_relative_path)
@@ -928,7 +944,7 @@ impl<'a> PackageScanner<'a> {
 
 struct ScannedPackage {
     manifest_bytes: Vec<u8>,
-    files: Vec<ArtifactFileDigest>,
+    files: Vec<PluginArtifactFile>,
 }
 
 struct StagingGuard {
@@ -966,7 +982,7 @@ fn inventory_published_files(
     package_root: &Path,
     limits: ArtifactStoreLimits,
     cancellation: &dyn ImportCancellation,
-) -> Result<Vec<ArtifactFileDigest>, PluginArtifactStoreError> {
+) -> Result<Vec<PluginArtifactFile>, PluginArtifactStoreError> {
     let mut observed = BTreeMap::new();
     let mut collisions = HashSet::new();
     let mut total = 0u64;
@@ -1032,14 +1048,11 @@ fn inventory_published_files(
             });
         }
         total = checked_total_size(total, metadata.len(), limits.max_total_bytes)?;
-        if normalized == MANIFEST_FILE {
-            continue;
-        }
         let file = File::open(entry.path()).map_err(|error| io_error(entry.path(), error))?;
         let (digest, size) = hash_reader(file, &normalized, limit, cancellation)?;
         observed.insert(
             normalized.clone(),
-            ArtifactFileDigest {
+            PluginArtifactFile {
                 normalized_relative_path: normalized,
                 digest,
                 size_bytes: size,
@@ -1184,10 +1197,15 @@ fn is_windows_reserved_name(component: &str) -> bool {
 
 fn validate_allowed_file(normalized: &str) -> Result<(), PluginArtifactStoreError> {
     if normalized == MANIFEST_FILE
-        || normalized == ENTRYPOINT_FILE
-        || normalized == SOURCE_MAP_FILE
+        || normalized == SERVICE_ENTRYPOINT_FILE
         || normalized
-            .strip_prefix(&format!("{RESOURCES_DIRECTORY}/"))
+            .strip_prefix(&format!("{UI_DIRECTORY}/"))
+            .is_some_and(|suffix| !suffix.is_empty())
+        || normalized
+            .strip_prefix(&format!("{MIGRATIONS_DIRECTORY}/"))
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.ends_with(".mjs"))
+        || normalized
+            .strip_prefix(&format!("{SOURCE_DIRECTORY}/"))
             .is_some_and(|suffix| !suffix.is_empty())
     {
         Ok(())
@@ -1199,8 +1217,9 @@ fn validate_allowed_file(normalized: &str) -> Result<(), PluginArtifactStoreErro
 }
 
 fn validate_allowed_directory(normalized: &str) -> Result<(), PluginArtifactStoreError> {
-    if normalized == RESOURCES_DIRECTORY
-        || normalized.starts_with(&format!("{RESOURCES_DIRECTORY}/"))
+    if [UI_DIRECTORY, SERVICE_DIRECTORY, MIGRATIONS_DIRECTORY, SOURCE_DIRECTORY]
+        .into_iter()
+        .any(|root| normalized == root || normalized.starts_with(&format!("{root}/")))
     {
         Ok(())
     } else {

@@ -1,0 +1,187 @@
+{
+  "actions": {
+    "back": "Back to plugins",
+    "cancel": "Cancel",
+    "configure": "Configuration and access",
+    "create": "Create plugin",
+    "delete": "Delete permanently",
+    "disabled": "Disabled",
+    "edit": "Continue editing",
+    "enable": "Enable",
+    "enabled": "Enabled",
+    "exportBackup": "Export backup",
+    "exportPackage": "Export package",
+    "import": "Import",
+    "open": "Open",
+    "refresh": "Refresh",
+    "restore": "Restore previous version",
+    "restoreTrash": "Restore from trash",
+    "save": "Save",
+    "trash": "Move to trash"
+  },
+  "shape": {
+    "ui_only": "UI app",
+    "headless": "Background capability",
+    "mixed": "App + service",
+    "ui": "UI",
+    "service": "Service"
+  },
+  "service": {
+    "stopped": "Stopped",
+    "starting": "Starting",
+    "running": "Running",
+    "failed": "Failed"
+  },
+  "readOnly": {
+    "title": "Plugin access is read-only in WebUI",
+    "body": "Remote WebUI can inspect Plugins, Actions, Bindings, configuration, and access status. Creating, importing, running UI surfaces or Desktop commands, and changing local code, data, configuration, or lifecycle are available only in the desktop app.",
+    "draft": "Open this draft in the desktop app to continue editing."
+  },
+  "library": {
+    "title": "Plugins",
+    "subtitle": "Apps and system capabilities share one package, identity, data root, and lifecycle.",
+    "search": "Search plugins and drafts",
+    "loading": "Loading plugins…",
+    "loadFailed": "Plugins could not be loaded.",
+    "mutationFailed": "The plugin changed elsewhere or the operation failed. Refresh and try again.",
+    "draft": "Draft",
+    "untitled": "Untitled plugin",
+    "unsaved": "Not installed",
+    "continue": "Continue creating",
+    "trashed": "In trash",
+    "openApp": "Ready to open",
+    "toggle": "Enable or disable {{name}}",
+    "emptyTitle": "Create your first plugin",
+    "emptyBody": "Build an app with Chat or import a Plugin Package or Backup."
+  },
+  "creator": {
+    "title": "Create plugin",
+    "subtitle": "Chat edits the standard package files directly. Preview and save use the same SDK and storage adapters.",
+    "modelRequired": "Connect a Chat model before generating or changing a plugin.",
+    "placeholder": "Describe the app or capability you want, or ask for a change…",
+    "send": "Send",
+    "stop": "Stop",
+    "generating": "Updating package files…",
+    "files": "Package files",
+    "binaryFile": "This binary asset is shown by name and is not edited as text.",
+    "saveFile": "Save file",
+    "fileSaveFailed": "The file could not be saved. Refresh the draft and try again.",
+    "save": "Save and open",
+    "discard": "Discard draft",
+    "loadFailed": "The draft could not be loaded.",
+    "generateFailed": "The package could not be generated. Your draft was kept.",
+    "saveFailed": "Validation or activation failed. The installed plugin and its data are unchanged.",
+    "operationFailed": "The draft operation failed. Refresh and try again."
+  },
+  "preview": {
+    "title": "Preview",
+    "temporary": "Preview uses a temporary DataRoot. Its database, KV, files, and cache never merge into installed data.",
+    "permissions": "Preview access is off by default. Enable only the permissions needed for this session.",
+    "credentialUnavailable": "Credential slot {{slot}} refers to an unavailable Host Credential.",
+    "open": "Open preview",
+    "reload": "Reload preview",
+    "empty": "Open a preview to test the UI with temporary storage.",
+    "failed": "Preview validation or startup failed. Installed data was not changed."
+  },
+  "permissions": {
+    "title": "Review new access",
+    "added": "New permissions: {{permissions}}",
+    "secrets": "New Credential slots: {{slots}}",
+    "localCode": "This package contains a local Service. Enabling it runs trusted local JavaScript in its own process with the displayed access.",
+    "confirm": "Confirm and continue"
+  },
+  "import": {
+    "title": "Import plugin",
+    "body": "Choose a standard Plugin Package directory, ZIP, or Plugin Backup. The Host stages and validates every source through the same installation path.",
+    "directory": "Package directory",
+    "zip": "Package ZIP",
+    "backup": "Plugin Backup",
+    "package": "Plugin Package",
+    "checking": "Staging and validating…",
+    "invalid": "This source is not a valid Plugin Package or Backup.",
+    "failed": "Installation failed. Existing code and data remain unchanged.",
+    "shape": "{{ui}} · {{service}}",
+    "permissions": "Requested permissions",
+    "trustedService": "This package contains trusted local Service code. Review its permissions before installing.",
+    "backupDisclosure": "This Backup contains the active database and files ({{files}} files, {{bytes}} database bytes) plus non-secret configuration. Cache and preview data are excluded.",
+    "rebindCredentials": "Credential values are not included. Rebind these slots after import: {{slots}}",
+    "createCopy": "Create a separate local copy with new identity and data",
+    "install": "Install and enable"
+  },
+  "config": {
+    "title": "Configuration and access",
+    "values": "Non-secret configuration (JSON)",
+    "schema": "Configuration schema",
+    "invalidJson": "Configuration must be valid JSON.",
+    "objectRequired": "Configuration must be a JSON object.",
+    "secretBoundary": "Secret values never enter configuration. Enter only Host Credential Store references below.",
+    "credentialReference": "Select a Host Credential",
+    "credentialSlot": "Credential reference for {{slot}}",
+    "credentialRequired": "Credential slot {{slot}} is required.",
+    "credentialUnavailable": "unavailable",
+    "credentialUnavailableSelected": "Credential slot {{slot}} must use an available Host Credential.",
+    "grantPermission": "Allow {{permission}}"
+  },
+  "detail": {
+    "loadFailed": "The plugin could not be loaded.",
+    "notFound": "Plugin not found.",
+    "operationFailed": "The operation failed or the plugin changed elsewhere. Refresh and try again.",
+    "saved": "The plugin was validated, activated, and saved.",
+    "disabledTitle": "This app is disabled",
+    "disabledBody": "Enable it to open its UI. Its persistent data remains available.",
+    "headlessTitle": "Background capability plugin",
+    "headlessBody": "This plugin has no UI. Its enabled Actions and Bindings enhance registered Agent, Desktop, or automation extension points.",
+    "actions": "Actions",
+    "bindings": "Bindings",
+    "noActions": "This plugin declares no Actions.",
+    "noBindings": "This plugin declares no Bindings.",
+    "available": "Available",
+    "storage": "Storage and version",
+    "configuration": "Configuration status",
+    "configurationValid": "Valid",
+    "configurationInvalid": "Invalid",
+    "artifact": "Active artifact",
+    "dataGeneration": "Data generation",
+    "dataVersion": "Data version",
+    "credentials": "Credential slots",
+    "permissions": "Permissions",
+    "granted": "Granted",
+    "denied": "Denied",
+    "noPermissions": "No Host permissions requested."
+  },
+  "command": {
+    "run": "Run on Desktop",
+    "input": "Desktop command JSON input",
+    "result": "Desktop command result",
+    "invalidJson": "Desktop command input must be valid JSON.",
+    "failed": "The Desktop command failed or is no longer available."
+  },
+  "dialog": {
+    "destination": "Destination path",
+    "restore": {
+      "title": "Restore previous version",
+      "withData": "Also restore the previous data generation",
+      "dataLoss": "Restoring previous data discards data written after the update.",
+      "acknowledge": "I understand that newer plugin data will be lost"
+    },
+    "export_package": {
+      "title": "Export Plugin Package",
+      "disclosure": "Package export contains code, resources, and optional source. It never contains user data, configuration, cache, or Credential values."
+    },
+    "export_backup": {
+      "title": "Export Plugin Backup",
+      "disclosure": "Backup contains the active package, active DataRoot, non-secret configuration, grants, and Credential slot names. It excludes Credential values, cache, preview data, and older generations."
+    },
+    "trash": {
+      "title": "Move plugin to trash",
+      "body": "UI access, Actions, Bindings, Service, grants, and Credential access are revoked immediately. Data is retained until permanent deletion."
+    },
+    "delete": {
+      "title": "Delete plugin permanently",
+      "body": "This permanently removes the local plugin instance, data generations, files, configuration, grants, and Credential bindings. It cannot be undone. The content-addressed shared Artifact cache contains no user data and may be retained or reclaimed by the Host."
+    },
+    "command": {
+      "title": "Run Desktop command"
+    }
+  }
+}

@@ -12,21 +12,19 @@ use nomi_tools::{
 };
 use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_agent_contracts::{
-    ActionId, AgentPresetId, AgentPresetRevision, ArtifactId,
+    ActionId, AgentPresetId, AgentPresetRevision,
     AgentPresetRevisionPayload, AgentSessionId, ArtifactEnvelope,
     CancellationDescriptor, CapabilityActionDescriptor,
     CapabilityConsumer, CapabilityContributions, CapabilityId,
     CapabilityKind, CapabilityManifest, CapabilityRef,
-    CapabilitySelection, CanonicalSchemaRef, ContributionLock,
-    ContributionSourceKind,
+    CapabilitySelection, CanonicalSchemaRef,
     DeclaredServiceViewDescriptor, DigestHex, EffectClass, HostPortId,
     HostPortBindingDescriptor, HostPortRef, InProcessEntrypointMetadata,
     LocalizedMetadata,
     ManagedTaskRegistrationDescriptor, OperationId, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint,
     PluginBootCriticality, PluginBootState, PluginContextDescriptor,
-    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor,
-    PluginProductId, PluginReleaseId, PluginReleaseRef, PluginMountId,
+    AgentModuleId, PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor,
     PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PresetRevisionRef,
@@ -45,27 +43,11 @@ use nomifun_agent_kernel::{
     PluginStatePersistence,
 };
 use nomifun_ai_agent::{
-    KernelNomiPluginToolSession, NomiHostDynamicToolDescriptor,
-    NomiHostDynamicToolError, NomiHostDynamicToolInvocation,
-    NomiHostDynamicToolInvoker, NomiPluginProductToolInvoker,
-    NomiPluginProductToolInvocation, NomiPluginProductToolSchemaResolver,
-    NomiPlatformBuiltinToolAdmission,
+    KernelNomiPluginToolSession, NomiPlatformBuiltinToolAdmission,
     NomiPlatformBuiltinToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver,
 };
 use serde_json::{Value, json};
-
-fn product_bindings(
-    actions: Vec<nomifun_ai_agent::NomiPluginProductToolAction>,
-    invoker: Arc<dyn NomiPluginProductToolInvoker>,
-) -> nomifun_ai_agent::NomiHostedSessionBindings {
-    let scope = Arc::new(nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap());
-    scope.begin_turn().unwrap();
-    nomifun_ai_agent::NomiHostedSessionBindings {
-        product: Some((actions, invoker)),
-        ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope)
-    }
-}
 
 const VERSION: &str = "1.0.0";
 const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
@@ -84,9 +66,6 @@ mod skill_consumer;
 
 #[path = "plugin_tool_consumer/dependencies.rs"]
 mod dependency_consumer;
-
-#[path = "plugin_tool_consumer/discovery.rs"]
-mod discovery_consumer;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct InvocationEvidence {
@@ -156,67 +135,6 @@ impl CapabilityContextContributionFactory for EmptyContextFactory {
 #[derive(Default)]
 struct SchemaMap {
     schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
-}
-
-#[derive(Default)]
-struct PluginProductSchemaMap {
-    schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
-}
-
-#[async_trait]
-impl NomiPluginProductToolSchemaResolver for PluginProductSchemaMap {
-    async fn resolve(
-        &self,
-        _owner: &PrincipalRef,
-        _capability: &nomifun_agent_contracts::ResolvedCapability,
-        reference: &CanonicalSchemaRef,
-    ) -> Result<StrictJsonValue, String> {
-        self.schemas
-            .get(reference)
-            .cloned()
-            .ok_or_else(|| format!("Plugin Product schema {} is missing", reference.as_ref()))
-    }
-}
-
-#[derive(Default)]
-struct CapturingPluginProductInvoker {
-    calls: AtomicUsize,
-    action_ids: Mutex<Vec<String>>,
-}
-
-#[derive(Default)]
-struct CountingHostDynamicInvoker {
-    calls: AtomicUsize,
-}
-
-#[async_trait]
-impl NomiHostDynamicToolInvoker for CountingHostDynamicInvoker {
-    async fn invoke(
-        &self,
-        _request: NomiHostDynamicToolInvocation,
-    ) -> Result<StrictJsonValue, NomiHostDynamicToolError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(StrictJsonValue(json!({"accepted": true})))
-    }
-}
-
-#[async_trait]
-impl NomiPluginProductToolInvoker for CapturingPluginProductInvoker {
-    async fn invoke(
-        &self,
-        request: NomiPluginProductToolInvocation,
-    ) -> Result<StrictJsonValue, NomiPluginToolError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.action_ids
-            .lock()
-            .unwrap()
-            .push(request.action().action_id.as_ref().to_owned());
-        Ok(StrictJsonValue(json!({
-            "plugin": request.capability().plugin_product_id.as_ref(),
-            "action": request.action().action_id.as_ref(),
-            "input": request.input().0,
-        })))
-    }
 }
 
 #[async_trait]
@@ -525,7 +443,7 @@ fn registration_with_context_factory(
         source_identity,
         source_digest,
     };
-    let mount_id = PluginMountId::from(MOUNT);
+    let mount_id = AgentModuleId::from(MOUNT);
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
         mount_id: mount_id.clone(),
@@ -759,7 +677,6 @@ fn try_compile_revision(
             availability_evidence_revision: "plugin-tool-test".to_owned(),
         },
         CompileRequest {
-            plugin_product_capabilities: Vec::new(),
             revision,
             principal: owner(),
             scene: "chat".to_owned(),
@@ -1018,7 +935,7 @@ async fn explicitly_admitted_bundled_tool_invokes_the_exact_kernel_handler() {
     .await;
     assert!(
         plugin_only.actions().is_empty(),
-        "the legacy PluginMount-only entrypoint must not implicitly expose bundled tools"
+        "the legacy module-only entrypoint must not implicitly expose bundled tools"
     );
 
     let builtin_schema_resolver: Arc<
@@ -1450,316 +1367,4 @@ async fn stale_artifact_fails_before_replacement_handler_dispatch() {
     assert!(!result.content.contains("provenance"));
     assert_eq!(original_calls.load(Ordering::SeqCst), 0);
     assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
-}
-
-
-
-fn plugin_product_fixture() -> (
-    nomifun_agent_contracts::ResolvedCapability,
-    Arc<PluginProductSchemaMap>,
-) {
-    let input_schema = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "message": {"type": "string"}
-        },
-        "required": ["message"]
-    });
-    let output_schema = json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "plugin": {"type": "string"},
-            "action": {"type": "string"},
-            "input": {"type": "object"}
-        },
-        "required": ["plugin", "action", "input"]
-    });
-    let input_ref = schema_ref("plugin.fixture/input", &input_schema);
-    let output_ref = schema_ref("plugin.fixture/output", &output_schema);
-    let action = CapabilityActionDescriptor {
-        action_id: ActionId::from("plugin.fixture.echo.invoke"),
-        input_schema: input_ref.clone(),
-        output_schema: output_ref,
-        effect_class: EffectClass::Pure,
-        presentation: ToolPresentationKind::FunctionTool,
-    };
-    let plugin_product_id = PluginProductId::from("plugin-fixture");
-    let capability_id = CapabilityId::from("plugin.fixture.echo");
-    let contribution_id =
-        nomifun_agent_contracts::ContributionId::from("capability:plugin.fixture.echo");
-    let capability = nomifun_agent_contracts::ResolvedCapability {
-        consumption: Default::default(),
-        dependency_refs: Vec::new(),
-        capability: CapabilityRef {
-            id: capability_id,
-        },
-        source_package: PackageRef {
-            id: PackageId::from("plugin.fixture"),
-            version: VersionString::from(VERSION),
-        },
-        contribution_id: contribution_id.clone(),
-        contribution_lock: ContributionLock {
-            source_kind: ContributionSourceKind::PluginProductActiveRelease,
-            source_identity: format!("plugin-product:{}", plugin_product_id.as_ref()).into(),
-            mount_id: None,
-            plugin_product_id: Some(plugin_product_id.clone()),
-            mcp_binding_id: None,
-            contribution_id,
-            contract_digest: DigestHex::from("a".repeat(64)),
-        },
-        resolved_mount_id: None,
-        resolved_source: PluginSourceMetadata {
-            source_kind: PluginSourceKind::ManagedLocal,
-            source_identity: format!("plugin-product:{}", plugin_product_id.as_ref()),
-            source_digest: Some(DigestHex::from("b".repeat(64))),
-        },
-        target_artifact_digest: DigestHex::from("b".repeat(64)),
-        schema_digest: DigestHex::from("a".repeat(64)),
-        dependency_path: vec![CapabilityId::from("plugin.fixture.echo")],
-        required_runtime_features: BTreeSet::new(),
-        plugin_product_id: Some(plugin_product_id.clone()),
-        active_release: Some(PluginReleaseRef {
-            release_id: PluginReleaseId::from("release-fixture"),
-            artifact_id: ArtifactId::from("artifact-fixture"),
-            release_digest: DigestHex::from("b".repeat(64)),
-            manifest_digest: DigestHex::from("c".repeat(64)),
-        }),
-        active_release_epoch: Some(3),
-        catalog_digest: Some(DigestHex::from("d".repeat(64))),
-        display_name: Some("Plugin Fixture".to_owned()),
-        description: Some("Plugin fixture action".to_owned()),
-        actions: vec![action],
-        required_resource_kinds: BTreeSet::new(),
-        action_allowlist: BTreeSet::from([ActionId::from("plugin.fixture.echo.invoke")]),
-    };
-    let schemas = Arc::new(PluginProductSchemaMap {
-        schemas: BTreeMap::from([(input_ref, StrictJsonValue(input_schema))]),
-    });
-    (capability, schemas)
-}
-
-fn compile_plugin_product_fixture(
-    capability: &nomifun_agent_contracts::ResolvedCapability,
-) -> nomifun_agent_kernel::CompiledSnapshot {
-    let mut capability = capability.clone();
-    let [action] = capability.actions.as_slice() else {
-        panic!("Plugin Product fixture requires one exact Action");
-    };
-    capability.action_allowlist = BTreeSet::from([action.action_id.clone()]);
-    let selection = CapabilitySelection {
-        capability: capability.capability.clone(),
-        action_allowlist: capability.action_allowlist.clone(),
-    };
-    let payload = AgentPresetRevisionPayload {
-        context_order: Vec::new(),
-        middleware_order: Vec::new(),
-        schema_version: VersionString::from(VERSION),
-        model_route_refs: BTreeMap::new(),
-        chat_route_records: BTreeMap::new(),
-        enabled_capabilities: vec![selection],
-
-        skill_bindings: Vec::new(),
-        system_role_provider_overrides: BTreeMap::new(),
-        persona: "Plugin fixture".to_owned(),
-        instructions: "Use the Plugin fixture.".to_owned(),
-        starter_prompts: Vec::new(),
-        runtime_policy: Default::default(),
-    };
-    let mut revision = AgentPresetRevision {
-        reference: PresetRevisionRef {
-            preset_id: AgentPresetId::from("plugin.fixture.preset"),
-            revision: 1,
-            revision_digest: DigestHex::from(""),
-        },
-        payload,
-        contribution_locks: vec![capability.contribution_lock.clone()],
-        created_by: UserId::from(OWNER),
-        created_at_ms: 1,
-        reason: None,
-    };
-    revision.reference.revision_digest = revision.revision_digest().unwrap();
-    AgentPresetCompiler::compile(
-        &nomifun_agent_kernel::MaterializedRegistry::empty(),
-        &CompilerEnvironment {
-            resolver_version: VersionString::from(VERSION),
-            required_runtime_protocol_version: VersionString::from(VERSION),
-            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-            runtime_feature_inventory_digest: DigestHex::from("1".repeat(64)),
-            available_runtime_features: BTreeSet::new(),
-            installation_role_bindings: BTreeMap::new(),
-            canonical_schema_manifest_digest: DigestHex::from("2".repeat(64)),
-            target_contribution_manifest_digest: DigestHex::from("3".repeat(64)),
-            host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
-            host_surface: "desktop".to_owned(),
-            availability_evidence_revision: "plugin-tool-test".to_owned(),
-        },
-        CompileRequest {
-            plugin_product_capabilities: vec![capability],
-            revision,
-            principal: owner(),
-            scene: "chat".to_owned(),
-            surface: "desktop".to_owned(),
-            audience: "owner".to_owned(),
-            created_at_ms: 2,
-            resolver_run_id: OperationId::from("plugin-tool-test"),
-        },
-    )
-    .unwrap()
-}
-
-#[tokio::test]
-async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session() {
-    let (capability, schemas) = plugin_product_fixture();
-    let compiled = compile_plugin_product_fixture(&capability);
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .unwrap(),
-    );
-    let base = KernelNomiPluginToolSession::materialize(
-        kernel,
-        Arc::new(compiled.clone()),
-        owner(),
-        AgentSessionId::from(SESSION),
-        ScopeKey::from(format!("session:{SESSION}")),
-        Arc::new(SchemaMap::default()),
-    )
-    .await
-    .unwrap();
-    let actions = KernelNomiPluginToolSession::materialize_plugin_product_actions(
-        &compiled,
-        &owner(),
-        &AgentSessionId::from(SESSION),
-        &ScopeKey::from(format!("session:{SESSION}")),
-        schemas,
-    )
-    .await
-    .unwrap();
-    assert_eq!(actions.len(), 1);
-    assert!(actions[0].provider_name().starts_with("plugin_product__"));
-
-    let invoker = Arc::new(CapturingPluginProductInvoker::default());
-    let mut conflicting = product_bindings(actions.clone(), invoker.clone());
-    conflicting.dynamic = Some((vec![NomiHostDynamicToolDescriptor {
-        capability_id: "robot/display".into(),
-        provider_name: actions[0].provider_name().to_owned(),
-        description: "Conflicting host route".into(),
-        input_schema: StrictJsonValue(json!({"type":"object"})),
-        effect_class: EffectClass::Physical,
-        deferred: false,
-    }], Arc::new(CountingHostDynamicInvoker::default())));
-    assert!(base.clone().bind_hosted_execution(conflicting).is_err(),
-        "atomic assembly must reject Product/dynamic route collisions before publishing consumers");
-    let session = base
-        .bind_hosted_execution(product_bindings(actions, invoker.clone()))
-        .unwrap();
-    assert_eq!(session.actions().len(), 0);
-    assert_eq!(session.plugin_product_actions().len(), 1);
-
-    let mut registry = ToolRegistry::new();
-    session.register_into(&mut registry).unwrap();
-    let action = &session.plugin_product_actions()[0];
-    assert_eq!(
-        action.artifact_identity(),
-        "plugin.fixture.echo plugin.fixture.echo.invoke"
-    );
-    assert!(
-        nomifun_ai_agent::runtime_output::artifact_contract(action.artifact_identity())
-            .is_none(),
-        "ordinary Plugin Product Tools must not inherit artifact obligations from release provenance"
-    );
-    let result = registry
-        .get(action.provider_name())
-        .unwrap()
-        .execute_with_context(
-            json!({"message": "hello"}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-plugin",
-                "call-plugin",
-            ),
-        )
-        .await;
-    assert!(!result.is_error, "{}", result.content);
-    let output: Value = serde_json::from_str(&result.content).unwrap();
-    assert_eq!(output["plugin"], "plugin-fixture");
-    assert_eq!(output["action"], "plugin.fixture.echo.invoke");
-    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        invoker.action_ids.lock().unwrap().as_slice(),
-        &["plugin.fixture.echo.invoke".to_owned()]
-    );
-}
-
-#[tokio::test]
-async fn plugin_product_unknown_effect_fences_atomic_hosted_binding() {
-    struct UnknownEffectInvoker;
-
-    #[async_trait]
-    impl NomiPluginProductToolInvoker for UnknownEffectInvoker {
-        async fn invoke(
-            &self,
-            _request: NomiPluginProductToolInvocation,
-        ) -> Result<StrictJsonValue, NomiPluginToolError> {
-            Err(NomiPluginToolError::OutcomeUnknown("private owner diagnostic".into()))
-        }
-    }
-
-    {
-        let (capability, schemas) = plugin_product_fixture();
-        let compiled = compile_plugin_product_fixture(&capability);
-        let kernel = Arc::new(
-            KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new()))
-                .unwrap(),
-        );
-        let base = KernelNomiPluginToolSession::materialize(
-            kernel,
-            Arc::new(compiled.clone()),
-            owner(),
-            AgentSessionId::from(SESSION),
-            ScopeKey::from(format!("session:{SESSION}")),
-            Arc::new(SchemaMap::default()),
-        )
-        .await
-        .unwrap();
-        let actions = KernelNomiPluginToolSession::materialize_plugin_product_actions(
-            &compiled,
-            &owner(),
-            &AgentSessionId::from(SESSION),
-            &ScopeKey::from(format!("session:{SESSION}")),
-            schemas,
-        )
-        .await
-        .unwrap();
-        let scope = Arc::new(
-            nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap(),
-        );
-        let session = base.bind_hosted_execution(nomifun_ai_agent::NomiHostedSessionBindings {
-            product: Some((actions, Arc::new(UnknownEffectInvoker))),
-            ..nomifun_ai_agent::NomiHostedSessionBindings::new(scope.clone())
-        }).unwrap();
-        assert!(session.clone().bind_hosted_execution(
-            nomifun_ai_agent::NomiHostedSessionBindings::new(scope.clone())
-        ).is_err(), "host execution bindings cannot be installed twice");
-        let mut registry = ToolRegistry::new();
-        session.register_into(&mut registry).unwrap();
-        scope.begin_turn().unwrap();
-        let result = registry
-            .get(session.plugin_product_actions()[0].provider_name())
-            .unwrap()
-            .execute_with_context(
-                json!({"message": "hello"}),
-                &ToolExecutionContext::from_scoped_tool_call("turn-effect", "call-effect"),
-            )
-            .await;
-        assert!(result.is_error);
-        assert!(result.content.contains("HOSTED_EFFECT_UNPROVEN"));
-        assert!(!result.content.contains("private owner diagnostic"));
-        assert!(scope.ensure_turn_open().is_err());
-        scope.settle_turn().await.unwrap();
-        assert!(scope.begin_turn().is_err(), "unknown effects must retire the Session");
-    }
 }

@@ -328,20 +328,24 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         });
     }
 
-    if let Err(error) = nomifun_db::validate_current_migration_lineage(pool).await {
-        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-            "database migration lineage is not the exact canonical baseline: {error}"
-        )));
-    }
-    if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
-        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-            "database does not satisfy the complete v3 ID schema contract: {error}"
-        )));
-    }
-    if let Err(error) = nomifun_db::validate_id_data_contract(pool).await {
-        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-            "database does not satisfy the complete v3 ID data contract: {error}"
-        )));
+    let plugin_clean_start =
+        nomifun_db::requires_unified_plugin_clean_start(pool).await?;
+    if !plugin_clean_start {
+        if let Err(error) = nomifun_db::validate_current_migration_lineage(pool).await {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                "database migration lineage is not the exact canonical baseline: {error}"
+            )));
+        }
+        if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                "database does not satisfy the complete v3 ID schema contract: {error}"
+            )));
+        }
+        if let Err(error) = nomifun_db::validate_id_data_contract(pool).await {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                "database does not satisfy the complete v3 ID data contract: {error}"
+            )));
+        }
     }
     if let Err(error) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await {
         return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(

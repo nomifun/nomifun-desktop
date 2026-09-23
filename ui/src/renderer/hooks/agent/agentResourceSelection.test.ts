@@ -85,7 +85,7 @@ describe('Agent resource selection contract', () => {
 
   test('allows enhancement resources to remain unbound without blocking the Session', () => {
     expect(resolveAgentResourceSelections(
-      ['workspace', 'knowledge_base', 'channel', 'robot', 'canvas', 'plugin', 'ssh_host'],
+      ['workspace', 'knowledge_base', 'channel', 'robot', 'canvas', 'ssh_host'],
       {},
     )).toEqual({
       selections: [{ resource_kind: 'workspace', resource_id: 'default-workspace' }],
@@ -101,7 +101,7 @@ describe('Agent resource selection contract', () => {
     const officialKinds = [
       'workspace', 'knowledge_base', 'project_memory', 'process_session', 'terminal',
       'mcp_server', 'companion', 'companion_memory', 'channel', 'robot', 'customer',
-      'canvas', 'asset_library', 'plugin', 'browser', 'computer', 'scheduler',
+      'canvas', 'asset_library', 'browser', 'computer', 'scheduler',
     ];
     const value = {
       companion: 'companion-1',
@@ -111,15 +111,14 @@ describe('Agent resource selection contract', () => {
       knowledge_bases: ['kb-1', 'kb-2'],
       mcp_server: 'mcp-1',
       canvas: 'canvas-1',
-      plugin: 'plugin-1',
     };
 
     expect(requiredAgentResourcePickerKinds(officialKinds)).toEqual([
       'companion', 'customer', 'knowledge_base', 'channel', 'robot',
-      'mcp_server', 'canvas', 'plugin',
+      'mcp_server', 'canvas',
     ]);
     const resolution = resolveAgentResourceSelections(officialKinds, value);
     expect(resolution.missingKinds).toEqual([]);
-    expect(resolution.selections).toHaveLength(18);
+    expect(resolution.selections).toHaveLength(17);
   });
 });

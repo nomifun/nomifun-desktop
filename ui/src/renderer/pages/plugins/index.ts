@@ -1,1 +1,1 @@
-export { default } from './PluginWorkbenchPage';
+export { default } from './PluginLibraryPage';

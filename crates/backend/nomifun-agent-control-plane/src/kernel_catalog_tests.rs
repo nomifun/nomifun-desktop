@@ -1,25 +1,19 @@
 #[cfg(test)]
 mod catalog_materialization_tests {
     use super::super::*;
-    use crate::SharedPluginProductCatalogPublications;
     use nomifun_agent_contracts::{
-        ArtifactId, CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
-        CapabilityCatalogPublication, CapabilityContributions, CapabilityManifest, CapabilityOwner,
-        CapabilityProvenance, CapabilityRef, ContributionId, ContributionSourceKind,
+        CapabilityContributions, CapabilityManifest, CapabilityOwner, CapabilityPublicationState,
+        CapabilityRef, ContributionId,
         LocalizedMetadata, McpBindingId, McpServerId, McpToolCapabilityMapping, McpToolKey,
-        PluginProductCapabilityCatalogPublication, PluginProductCapabilityCatalogSink, PluginProductId,
-        PluginReleaseId, PluginReleaseRef, PackageId, PackageRef, PlatformConstraint,
+        PackageId, PackageRef,
         PluginSourceKind, PluginSourceMetadata, StableSourceIdentity,
-        capability_surface_declarations, digest_bytes,
+        capability_surface_declarations,
     };
     use nomifun_agent_contracts::{
-        CapabilityKind, ContributionLock, DigestHex, PluginMountId, StrictJsonValue, VersionString,
+        CapabilityKind, ContributionLock, DigestHex, AgentModuleId, StrictJsonValue, VersionString,
         digest_payload,
     };
-    use nomifun_agent_kernel::MaterializationPolicy;
-    use nomifun_agent_kernel::{
-        InMemoryPluginStatePersistence, MaterializedCapability, MaterializedMcpTool,
-    };
+    use nomifun_agent_kernel::{MaterializedCapability, MaterializedMcpTool};
     use serde_json::json;
 
     #[test]
@@ -28,7 +22,7 @@ mod catalog_materialization_tests {
             id: PackageId::from("managed.catalog"),
             version: VersionString::from("1.0.0"),
         };
-        let mount_id = PluginMountId::from("managed-catalog-mount");
+        let mount_id = AgentModuleId::from("managed-catalog-mount");
         let artifact_digest = DigestHex::from("a".repeat(64));
         let capability_ref = CapabilityRef {
             id: CapabilityId::from("managed.catalog.run"),
@@ -63,7 +57,6 @@ mod catalog_materialization_tests {
             source_kind: nomifun_agent_contracts::ContributionSourceKind::McpBinding,
             source_identity: StableSourceIdentity::from("mcp:managed.catalog.server"),
             mount_id: Some(mount_id.clone()),
-            plugin_product_id: None,
             mcp_binding_id: Some(binding_id.clone()),
             contribution_id: manifest.contribution_id.clone(),
             contract_digest: contract_digest.clone(),
@@ -126,6 +119,10 @@ mod catalog_materialization_tests {
         );
         assert_eq!(entry.contract_digest, contract_digest);
         assert_eq!(
+            entry.publication_state,
+            CapabilityPublicationState::Active
+        );
+        assert_eq!(
             entry
                 .operation_lock(CapabilityConsumer::Agent)
                 .unwrap()
@@ -133,155 +130,23 @@ mod catalog_materialization_tests {
             contribution_lock
         );
 
+        registry
+            .capabilities
+            .get_mut(&capability_ref.id)
+            .unwrap()
+            .source
+            .source_kind = PluginSourceKind::TestFixture;
+        assert!(
+            materialize_capability_catalog_entries(&registry, &BTreeMap::new())
+                .unwrap()
+                .is_empty(),
+            "test-only capabilities must not enter the formal catalog"
+        );
+
         let mut missing_mount = snapshot;
         missing_mount.mcp_tools[0].contribution_lock.mount_id = None;
         assert!(missing_mount.validate().is_err());
     }
 
-    #[test]
-    fn plugin_product_publication_enters_the_same_shared_catalog_provider() {
-        let package = PackageRef {
-            id: PackageId::from("plugin-product.catalog"),
-            version: VersionString::from("1.0.0"),
-        };
-        let plugin_product_id = PluginProductId::from("plugin-product-catalog");
-        let artifact_digest = digest_bytes(b"plugin-product-artifact");
-        let manifest = CapabilityManifest {
-            id: CapabilityId::from("plugin-product.catalog.search"),
-            contribution_id: ContributionId::from("capability:plugin-product.catalog.search"),
-            kind: CapabilityKind::Tool,
-            package: package.clone(),
-            display: LocalizedMetadata {
-                name: "Plugin Product Search".to_owned(),
-                description: "Search from an Active Plugin Product Release".to_owned(),
-                localized_names: BTreeMap::new(),
-                localized_descriptions: BTreeMap::new(),
-            },
-            requires: Vec::new(),
-            conflicts: Vec::new(),
-            supported_surfaces: capability_surface_declarations(
-                ["desktop"],
-                [CapabilityConsumer::Agent, CapabilityConsumer::Gateway],
-            ),
-            requires_runtime_features: Vec::new(),
-            supported_platforms: vec![PlatformConstraint::Any],
-            config_schema: StrictJsonValue(json!({"type": "object"})),
-            contributions: CapabilityContributions::default(),
-        };
-        let active_release = PluginReleaseRef {
-            release_id: PluginReleaseId::from("release-plugin-product-search"),
-            artifact_id: ArtifactId::from("artifact-plugin-product-search"),
-            release_digest: artifact_digest.clone(),
-            manifest_digest: digest_bytes(b"plugin-product-manifest"),
-        };
-        let entry = CapabilityCatalogMaterializer::materialize(CapabilityCatalogMaterialization {
-            manifest: manifest.clone(),
-            provenance: CapabilityProvenance {
-                owner: CapabilityOwner::Package {
-                    package: package.clone(),
-                },
-                source_kind: ContributionSourceKind::PluginProductActiveRelease,
-                source_identity: StableSourceIdentity::from("plugin-product:plugin-product-catalog"),
-                mount_id: None,
-                plugin_product_id: Some(plugin_product_id.clone()),
-                mcp_binding_id: None,
-                artifact_digest: Some(artifact_digest),
-            },
-            release_state: CapabilityReleaseState::PublishedActive,
-            availability: BTreeMap::from([
-                (CapabilityConsumer::Agent, CatalogAvailability::Active),
-                (CapabilityConsumer::Gateway, CatalogAvailability::Active),
-            ]),
-        })
-        .unwrap();
-        let mut publication = PluginProductCapabilityCatalogPublication {
-            plugin_product_id: plugin_product_id.clone(),
-            active_release,
-            active_release_epoch: 1,
-            catalog_digest: digest_bytes(b"uncomputed"),
-            capabilities: vec![CapabilityCatalogPublication { manifest, entry }],
-        };
-        publication.catalog_digest = publication.computed_catalog_digest().unwrap();
-        publication.validate().unwrap();
-        let mut tampered = publication.clone();
-        tampered.catalog_digest = digest_bytes(b"tampered-publication");
-        assert!(tampered.validate().is_err());
 
-        let store = Arc::new(SharedPluginProductCatalogPublications::new());
-        store
-            .replace_plugin_product_publication(
-                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
-                    owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    plugin_product_id: plugin_product_id.clone(),
-                    product_revision: 1,
-                    pointer_revision: 1,
-                    active_release_epoch: 1,
-                    publication: Some(publication.clone()),
-                },
-            )
-            .unwrap();
-        let kernel = Arc::new(
-            KernelRegistry::new(
-                MaterializationPolicy::stable("1.0.0"),
-                Arc::new(InMemoryPluginStatePersistence::new()),
-            )
-            .unwrap(),
-        );
-        let provider =
-            KernelCatalogProvider::new(kernel).with_plugin_product_publication_source(store.clone());
-        let snapshot = provider.snapshot().unwrap();
-        let reference = CapabilityRef {
-            id: CapabilityId::from("plugin-product.catalog.search"),
-        };
-        assert_eq!(
-            snapshot
-                .capability_catalog_entry(&reference)
-                .unwrap()
-                .unwrap()
-                .provenance
-                .source_kind,
-            ContributionSourceKind::PluginProductActiveRelease
-        );
-        assert_eq!(
-            snapshot.find_capability(&reference).unwrap().package,
-            package
-        );
-        assert!(snapshot.as_api().unwrap().capabilities.iter().any(|item| {
-            item.capability.id == "plugin-product.catalog.search"
-                && item.source_kind == "plugin_product_active_release"
-        }));
-
-        store
-            .replace_plugin_product_publication(
-                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
-                    owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    plugin_product_id: plugin_product_id.clone(),
-                    product_revision: 2,
-                    pointer_revision: 2,
-                    active_release_epoch: 1,
-                    publication: None,
-                },
-            )
-            .unwrap();
-        store
-            .replace_plugin_product_publication(
-                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
-                    owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    plugin_product_id: plugin_product_id.clone(),
-                    product_revision: 1,
-                    pointer_revision: 1,
-                    active_release_epoch: 1,
-                    publication: Some(publication),
-                },
-            )
-            .unwrap();
-        assert!(
-            provider
-                .snapshot()
-                .unwrap()
-                .capability_catalog_entry(&reference)
-                .unwrap()
-                .is_none()
-        );
-    }
 }

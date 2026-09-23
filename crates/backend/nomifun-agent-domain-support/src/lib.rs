@@ -20,7 +20,7 @@ use nomifun_agent_contracts::{
     InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
     PackageContributions, PackageId, PackageManifest, PackageRef, PlatformConstraint,
     PluginBootCriticality, PluginBootState, PluginContextDescriptor, PluginDesiredState,
-    PluginEffectiveState, PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
+    PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod, ResourceKind, ScopeKey,
     RuntimeTarget, SkillDefinition, StrictJsonValue, ToolPresentationKind,
@@ -229,7 +229,7 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
     };
     let identity = PluginIdentityDescriptor {
         package: package_ref.clone(),
-        mount_id: PluginMountId::from(spec.mount_id),
+        mount_id: AgentModuleId::from(spec.mount_id),
     };
     let config_schema = StrictJsonValue(json!({
         "type": "object",
@@ -575,7 +575,7 @@ pub fn validate_inventory(
         if !mounts.insert(metadata.mount_id.clone()) {
             return Err(invalid_registration(
                 &manifest.package_id,
-                "duplicate plugin mount in registration inventory",
+                "duplicate agent module in registration inventory",
             ));
         }
         let mut expected_handlers = BTreeSet::new();

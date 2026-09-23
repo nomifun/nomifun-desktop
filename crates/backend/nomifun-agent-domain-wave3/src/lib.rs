@@ -22,7 +22,7 @@ use nomifun_agent_contracts::{
     InProcessEntrypointMetadata, LocalizedMetadata,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
-    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
+    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId,
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
@@ -43,12 +43,10 @@ pub const PACKAGE_VERSION: &str = VERSION;
 pub const CREATION_PACKAGE_ID: &str = "nomifun.creation";
 pub const WORKSHOP_PACKAGE_ID: &str = "nomifun.workshop";
 pub const OFFICE_PACKAGE_ID: &str = "nomifun.office";
-pub const PLUGIN_PACKAGE_ID: &str = "nomifun.plugin";
 
 pub const CREATION_MEDIA_MODULE_ID: &str = "creation.media";
 pub const CREATIVE_WORKSHOP_MODULE_ID: &str = "creative.workshop";
 pub const OFFICE_MODULE_ID: &str = "office";
-pub const PLUGIN_DEVELOPMENT_MODULE_ID: &str = "plugin.development";
 
 pub const CREATION_MEDIA_ACTION_IDS: &[&str] = &[
     "creation.media/text",
@@ -71,33 +69,23 @@ pub const OFFICE_ACTION_IDS: &[&str] = &[
     "office/sheet.edit",
     "office/slides.edit",
 ];
-pub const PLUGIN_DEVELOPMENT_ACTION_IDS: &[&str] = &[
-    "plugin.development/read",
-    "plugin.development/edit",
-    "plugin.development/publish",
-    "plugin.development/serve",
-];
-
 pub const CANVAS_RESOURCE_KIND: &str = "canvas";
 pub const ASSET_LIBRARY_RESOURCE_KIND: &str = "asset_library";
 pub const CREATIVE_ASSET_LIBRARY_RESOURCE_ID: &str = "creative-studio-assets";
-pub const PLUGIN_RESOURCE_KIND: &str = "plugin";
 
-pub const TARGET_PACKAGE_IDS: [&str; 4] = [
+pub const TARGET_PACKAGE_IDS: [&str; 3] = [
     CREATION_PACKAGE_ID,
     WORKSHOP_PACKAGE_ID,
     OFFICE_PACKAGE_ID,
-    PLUGIN_PACKAGE_ID,
 ];
 
-pub const TARGET_CAPABILITY_IDS: [&str; 4] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 3] = [
     CREATION_MEDIA_MODULE_ID,
     CREATIVE_WORKSHOP_MODULE_ID,
     OFFICE_MODULE_ID,
-    PLUGIN_DEVELOPMENT_MODULE_ID,
 ];
 
-pub const TARGET_ACTION_IDS: [&str; 19] = [
+pub const TARGET_ACTION_IDS: [&str; 15] = [
     "creation.media/text",
     "creation.media/image",
     "creation.media/image_edit",
@@ -113,20 +101,16 @@ pub const TARGET_ACTION_IDS: [&str; 19] = [
     "office/document.edit",
     "office/sheet.edit",
     "office/slides.edit",
-    "plugin.development/read",
-    "plugin.development/edit",
-    "plugin.development/publish",
-    "plugin.development/serve",
 ];
 
-pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 4] = TARGET_CAPABILITY_IDS;
+pub const PACKAGE_IDS: [&str; 3] = TARGET_PACKAGE_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 3] = TARGET_CAPABILITY_IDS;
 pub const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 
 /// The single host port for action-bearing Wave 3 capabilities.
 ///
 /// The domain crate owns the capability vocabulary and resource requirements.
-/// The application owns creation, Canvas, Office, and Plugin facts and must
+/// The application owns creation, Canvas, and Office facts and must
 /// provide the adapter used by [`registrations_with_host_port`].
 pub const WAVE3_CAPABILITY_HOST_PORT_ID: &str = "host.wave3.capability.invoke";
 pub const WAVE3_HOST_PORT_UNAVAILABLE: &str = "WAVE3_HOST_PORT_UNAVAILABLE";
@@ -278,7 +262,7 @@ pub struct TypedResourceDescriptor {
 /// No application service bag, Gateway state, legacy Conversation state,
 /// `PluginStateHandle`, or other Kernel authority is exposed through this
 /// boundary. The central adapter owns its real business persistence (for
-/// example, an injected Creation/Workshop/Office/Plugin service or
+/// example, an injected Creation/Workshop/Office service or
 /// repository) and uses this context's principal, snapshot, idempotency,
 /// correlation, and resource identities to authorize and persist the action.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,10 +302,6 @@ pub enum Wave3CapabilityOperation {
     OfficeDocumentEdit { input: StrictJsonValue },
     OfficeSheetEdit { input: StrictJsonValue },
     OfficeSlidesEdit { input: StrictJsonValue },
-    PluginRead { input: StrictJsonValue },
-    PluginEdit { input: StrictJsonValue },
-    PluginPublish { input: StrictJsonValue },
-    PluginServe { input: StrictJsonValue },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -349,10 +329,6 @@ impl Wave3CapabilityOperation {
             | Self::OfficeDocumentEdit { .. }
             | Self::OfficeSheetEdit { .. }
             | Self::OfficeSlidesEdit { .. } => OFFICE_MODULE_ID,
-            Self::PluginRead { .. }
-            | Self::PluginEdit { .. }
-            | Self::PluginPublish { .. }
-            | Self::PluginServe { .. } => PLUGIN_DEVELOPMENT_MODULE_ID,
         })
     }
 
@@ -374,10 +350,6 @@ impl Wave3CapabilityOperation {
             Self::OfficeDocumentEdit { .. } => "office/document.edit",
             Self::OfficeSheetEdit { .. } => "office/sheet.edit",
             Self::OfficeSlidesEdit { .. } => "office/slides.edit",
-            Self::PluginRead { .. } => "plugin.development/read",
-            Self::PluginEdit { .. } => "plugin.development/edit",
-            Self::PluginPublish { .. } => "plugin.development/publish",
-            Self::PluginServe { .. } => "plugin.development/serve",
         })
     }
 
@@ -399,10 +371,6 @@ impl Wave3CapabilityOperation {
             | Self::OfficeDocumentEdit { .. }
             | Self::OfficeSheetEdit { .. }
             | Self::OfficeSlidesEdit { .. } => Wave3OwnerDomain::Office,
-            Self::PluginRead { .. }
-            | Self::PluginEdit { .. }
-            | Self::PluginPublish { .. }
-            | Self::PluginServe { .. } => Wave3OwnerDomain::Plugin,
         }
     }
 
@@ -422,11 +390,7 @@ impl Wave3CapabilityOperation {
             | Self::OfficePreview { input }
             | Self::OfficeDocumentEdit { input }
             | Self::OfficeSheetEdit { input }
-            | Self::OfficeSlidesEdit { input }
-            | Self::PluginRead { input }
-            | Self::PluginEdit { input }
-            | Self::PluginPublish { input }
-            | Self::PluginServe { input } => {
+            | Self::OfficeSlidesEdit { input } => {
                 if input.0.is_object() {
                     Ok(())
                 } else {
@@ -562,7 +526,6 @@ pub enum Wave3OwnerDomain {
     Creation,
     Workshop,
     Office,
-    Plugin,
 }
 
 /// Optional first-party owner bindings for the canonical Wave 3 action port.
@@ -575,7 +538,6 @@ pub struct Wave3OwnerBindings {
     pub creation: Option<Arc<dyn Wave3HostPort>>,
     pub workshop: Option<Arc<dyn Wave3HostPort>>,
     pub office: Option<Arc<dyn Wave3HostPort>>,
-    pub plugin: Option<Arc<dyn Wave3HostPort>>,
 }
 
 impl Wave3OwnerBindings {
@@ -594,10 +556,6 @@ impl Wave3OwnerBindings {
         self
     }
 
-    pub fn with_plugin(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
-        self.plugin = Some(owner);
-        self
-    }
 }
 
 /// Compose independently injected owners behind the one manifest host port.
@@ -623,7 +581,6 @@ impl Wave3HostPort for ComposedWave3HostPort {
             Wave3OwnerDomain::Creation => self.bindings.creation.clone(),
             Wave3OwnerDomain::Workshop => self.bindings.workshop.clone(),
             Wave3OwnerDomain::Office => self.bindings.office.clone(),
-            Wave3OwnerDomain::Plugin => self.bindings.plugin.clone(),
         };
         let capability_id = request.context.capability_id.clone();
         Box::pin(async move {
@@ -722,28 +679,6 @@ const OFFICE_SHEET_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequire
 const OFFICE_SLIDES_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: ASSET_LIBRARY_RESOURCE_KIND,
     operation: "write",
-}];
-
-const PLUGIN_READ_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
-const PLUGIN_EDIT_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
-const PLUGIN_PUBLISH_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
-const PLUGIN_SERVE_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
-
-const PLUGIN_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: PLUGIN_RESOURCE_KIND,
-    operation: "read",
-}];
-const PLUGIN_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: PLUGIN_RESOURCE_KIND,
-    operation: "edit",
-}];
-const PLUGIN_PUBLISH_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: PLUGIN_RESOURCE_KIND,
-    operation: "publish",
-}];
-const PLUGIN_SERVE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: PLUGIN_RESOURCE_KIND,
-    operation: "serve",
 }];
 
 const CREATION_ACTIONS: [CapabilitySpec; 6] = [
@@ -875,42 +810,7 @@ const OFFICE_ACTIONS: [CapabilitySpec; 4] = [
     },
 ];
 
-const PLUGIN_ACTIONS: [CapabilitySpec; 4] = [
-    CapabilitySpec {
-        id: "plugin.development/read",
-        display_name: "Read Plugin",
-        description: "Read the selected Plugin source and published metadata.",
-        resource_kinds: PLUGIN_READ_RESOURCES,
-        requirements: PLUGIN_READ_REQUIREMENTS,
-        effect_class: EffectClass::ReadSensitive,
-    },
-    CapabilitySpec {
-        id: "plugin.development/edit",
-        display_name: "Edit Plugin",
-        description: "Apply an edit to the selected Plugin working copy.",
-        resource_kinds: PLUGIN_EDIT_RESOURCES,
-        requirements: PLUGIN_EDIT_REQUIREMENTS,
-        effect_class: EffectClass::WriteReversible,
-    },
-    CapabilitySpec {
-        id: "plugin.development/publish",
-        display_name: "Publish Plugin",
-        description: "Publish the selected Plugin snapshot.",
-        resource_kinds: PLUGIN_PUBLISH_RESOURCES,
-        requirements: PLUGIN_PUBLISH_REQUIREMENTS,
-        effect_class: EffectClass::ExternalTransmit,
-    },
-    CapabilitySpec {
-        id: "plugin.development/serve",
-        display_name: "Serve Plugin",
-        description: "Read the selected published Plugin for serving.",
-        resource_kinds: PLUGIN_SERVE_RESOURCES,
-        requirements: PLUGIN_SERVE_REQUIREMENTS,
-        effect_class: EffectClass::ReadSensitive,
-    },
-];
-
-const PACKAGE_SPECS: [PackageSpec; 4] = [
+const PACKAGE_SPECS: [PackageSpec; 3] = [
     PackageSpec {
         id: CREATION_PACKAGE_ID,
         mount_id: "domain-creation",
@@ -935,17 +835,9 @@ const PACKAGE_SPECS: [PackageSpec; 4] = [
         description: "Preview Office assets and create document, sheet, and slides revisions.",
         actions: &OFFICE_ACTIONS,
     },
-    PackageSpec {
-        id: PLUGIN_PACKAGE_ID,
-        mount_id: "domain-plugin",
-        module_id: PLUGIN_DEVELOPMENT_MODULE_ID,
-        display_name: "Plugin",
-        description: "Read, edit, publish, and inspect serving state for a selected Plugin.",
-        actions: &PLUGIN_ACTIONS,
-    },
 ];
 
-/// Return shared resource descriptors for canvas, assets and plugin domains.
+/// Return shared resource descriptors for Canvas and asset domains.
 pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
     vec![
         descriptor(
@@ -961,13 +853,6 @@ pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
             true,
             ["read", "write"],
             "select_only_owned_resource",
-        ),
-        descriptor(
-            "plugin",
-            PLUGIN_RESOURCE_KIND,
-            false,
-            ["edit", "publish", "read", "serve"],
-            "require_explicit_selection",
         ),
     ]
 }
@@ -1028,13 +913,6 @@ pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> Vec<TypedReso
             ASSET_LIBRARY_RESOURCE_KIND,
             "creative-asset-library",
             &["read", "write"],
-            &owner_id,
-        ),
-        resource_binding(
-            "creative-plugin",
-            PLUGIN_RESOURCE_KIND,
-            "creative-plugin",
-            &["edit", "publish", "read", "serve"],
             &owner_id,
         ),
     ]
@@ -1193,10 +1071,6 @@ pub fn office_registration() -> Result<PluginRegistration, String> {
     registration_for(&PACKAGE_SPECS[2], unconfigured_host_port())
 }
 
-pub fn plugin_registration() -> Result<PluginRegistration, String> {
-    registration_for(&PACKAGE_SPECS[3], unconfigured_host_port())
-}
-
 fn find_module(capability_id: &str) -> Option<&'static PackageSpec> {
     PACKAGE_SPECS
         .iter()
@@ -1233,7 +1107,7 @@ fn registration_for(
         source_identity: spec.id.to_owned(),
         source_digest: None,
     };
-    let mount_id = PluginMountId::from(spec.mount_id);
+    let mount_id = AgentModuleId::from(spec.mount_id);
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
         mount_id: mount_id.clone(),
@@ -1614,51 +1488,6 @@ pub fn action_input_schema_for(action_id: &str) -> Result<StrictJsonValue, Strin
             }),
             &["title", "slides"],
         ),
-        "plugin.development/read" => strict_object_schema(
-            json!({"path": bounded_string_schema(4_096)}),
-            &[],
-        ),
-        "plugin.development/edit" => strict_object_schema(
-            json!({
-                "expected_product_revision": {"type": "integer", "minimum": 0},
-                "project_id": uuidv7_schema(),
-                "expected_project_revision": {"type": "integer", "minimum": 0},
-                "expected_build_generation": {"type": "integer", "minimum": 0},
-                "expected_source_snapshot_digest": digest_schema(),
-                "path": bounded_string_schema(4_096),
-                "content": {"type": "string", "maxLength": 4_194_304}
-            }),
-            &[
-                "expected_product_revision",
-                "project_id",
-                "expected_project_revision",
-                "expected_build_generation",
-                "expected_source_snapshot_digest",
-                "path",
-                "content",
-            ],
-        ),
-        "plugin.development/publish" => strict_object_schema(
-            json!({
-                "expected_product_revision": {"type": "integer", "minimum": 0},
-                "expected_pointer_revision": {"type": "integer", "minimum": 0},
-                "expected_active_release_epoch": {"type": "integer", "minimum": 0},
-                "ready_release_id": uuidv7_schema(),
-                "expected_ready_release_digest": digest_schema(),
-                "expected_active_release_digest": digest_schema(),
-                "expected_service_test_receipt_id": uuidv7_schema(),
-                "acknowledge_test_warning": {"type": "boolean"}
-            }),
-            &[
-                "expected_product_revision",
-                "expected_pointer_revision",
-                "expected_active_release_epoch",
-                "ready_release_id",
-                "expected_ready_release_digest",
-                "acknowledge_test_warning",
-            ],
-        ),
-        "plugin.development/serve" => strict_object_schema(json!({}), &[]),
         _ => json!({
             "type": "object",
             "additionalProperties": true
@@ -1754,11 +1583,6 @@ pub fn action_output_schema_for(action_id: &str) -> Result<StrictJsonValue, Stri
                 }),
                 &["asset_id", "source_asset_id", "title", "format", "created_at"],
             ),
-        "plugin.development/read" => json!({
-            "oneOf": [plugin_workshop_schema(), plugin_source_file_schema()]
-        }),
-        "plugin.development/edit" | "plugin.development/publish" => plugin_workshop_schema(),
-        "plugin.development/serve" => plugin_workshop_schema(),
         _ => json!({
             "type": "object",
             "additionalProperties": true
@@ -1809,10 +1633,6 @@ fn uuidv7_schema() -> Value {
         "type": "string",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     })
-}
-
-fn digest_schema() -> Value {
-    json!({"type": "string", "pattern": "^[0-9a-f]{64}$"})
 }
 
 fn revision_schema() -> Value {
@@ -1881,49 +1701,6 @@ fn workshop_asset_schema() -> Value {
             "bytes", "in_library", "deleted_at", "text_content", "origin", "url",
             "thumb_url", "created_at", "updated_at",
         ],
-    )
-}
-
-fn plugin_workshop_schema() -> Value {
-    strict_object_schema(
-        json!({
-            "plugin": {"type": "object"},
-            "service_lifecycle": {"type": "object"},
-            "active_service": {"type": "object"},
-            "publish_mode": {"type": "string"},
-            "project_id": uuidv7_schema(),
-            "project_revision": {"type": "integer", "minimum": 0},
-            "source_state": {"type": "string"},
-            "build_generation": {"type": "integer", "minimum": 0},
-            "source_snapshot_digest": digest_schema(),
-            "dependency_lock_digest": digest_schema(),
-            "ready": {"type": "object"},
-            "config_schema": {"type": "object"},
-            "config": {"type": "object"},
-            "credential_bindings_revision": {"type": "integer", "minimum": 0},
-            "credential_slots": {"type": "array"},
-            "capabilities": {"type": "array"},
-            "active_operation": {"type": "object"}
-        }),
-        &[
-            "plugin", "publish_mode", "project_id", "project_revision", "source_state",
-            "build_generation", "config_schema", "config", "credential_bindings_revision",
-            "credential_slots", "capabilities",
-        ],
-    )
-}
-
-fn plugin_source_file_schema() -> Value {
-    strict_object_schema(
-        json!({
-            "plugin_product_id": uuidv7_schema(),
-            "project_id": uuidv7_schema(),
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "source_snapshot_digest": digest_schema(),
-            "build_generation": {"type": "integer", "minimum": 0}
-        }),
-        &["plugin_product_id", "project_id", "path", "content", "source_snapshot_digest", "build_generation"],
     )
 }
 
@@ -2140,10 +1917,6 @@ pub fn operation_from_input(
         (OFFICE_MODULE_ID, "office/document.edit") => Wave3CapabilityOperation::OfficeDocumentEdit { input },
         (OFFICE_MODULE_ID, "office/sheet.edit") => Wave3CapabilityOperation::OfficeSheetEdit { input },
         (OFFICE_MODULE_ID, "office/slides.edit") => Wave3CapabilityOperation::OfficeSlidesEdit { input },
-        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/read") => Wave3CapabilityOperation::PluginRead { input },
-        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/edit") => Wave3CapabilityOperation::PluginEdit { input },
-        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/publish") => Wave3CapabilityOperation::PluginPublish { input },
-        (PLUGIN_DEVELOPMENT_MODULE_ID, "plugin.development/serve") => Wave3CapabilityOperation::PluginServe { input },
         (module, action) => {
             return Err(KernelError::CapabilityExecution {
                 reason: format!("{module} does not expose Action {action}"),
@@ -2565,7 +2338,7 @@ mod tests {
     };
 
     #[test]
-    fn registrations_cover_the_four_wave3_packages_and_all_target_capabilities() {
+    fn registrations_cover_the_three_wave3_packages_and_all_target_capabilities() {
         let registrations = registrations().expect("Wave 3 registrations are canonical");
         assert_eq!(registrations.len(), PACKAGE_IDS.len());
 
@@ -2581,10 +2354,6 @@ mod tests {
             (
                 OFFICE_PACKAGE_ID,
                 BTreeSet::from([OFFICE_MODULE_ID.to_owned()]),
-            ),
-            (
-                PLUGIN_PACKAGE_ID,
-                BTreeSet::from([PLUGIN_DEVELOPMENT_MODULE_ID.to_owned()]),
             ),
         ]);
 
@@ -2704,7 +2473,7 @@ mod tests {
         let materialized = registry
             .replace_all(registrations().expect("registrations"))
             .expect("Wave 3 metadata must materialize");
-        assert_eq!(materialized.packages.len(), 4);
+        assert_eq!(materialized.packages.len(), 3);
         assert_eq!(materialized.capabilities.len(), ALL_CAPABILITY_IDS.len());
         assert_eq!(materialized.generation, 1);
     }
@@ -2750,20 +2519,16 @@ mod tests {
     #[test]
     fn creative_resource_descriptors_match_the_frozen_typed_slots() {
         let descriptors = typed_resource_descriptors();
-        assert_eq!(descriptors.len(), 3);
+        assert_eq!(descriptors.len(), 2);
         assert_eq!(
             descriptors
                 .iter()
                 .map(|descriptor| descriptor.resource_kind.as_ref())
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                CANVAS_RESOURCE_KIND,
-                ASSET_LIBRARY_RESOURCE_KIND,
-                PLUGIN_RESOURCE_KIND,
-            ])
+            BTreeSet::from([CANVAS_RESOURCE_KIND, ASSET_LIBRARY_RESOURCE_KIND])
         );
         let bindings = canonical_resource_bindings("owner-1");
-        assert_eq!(bindings.len(), 3);
+        assert_eq!(bindings.len(), 2);
         assert!(bindings.iter().all(|binding| binding.owner_id == "owner-1"));
         assert!(bindings.iter().all(|binding| {
             descriptors
@@ -2909,30 +2674,6 @@ mod tests {
                         Wave3CapabilityOperation::OfficeSlidesEdit { .. }
                     ));
                 }
-                "plugin.development/read" => {
-                    assert!(matches!(
-                        operation,
-                        Wave3CapabilityOperation::PluginRead { .. }
-                    ));
-                }
-                "plugin.development/edit" => {
-                    assert!(matches!(
-                        operation,
-                        Wave3CapabilityOperation::PluginEdit { .. }
-                    ));
-                }
-                "plugin.development/publish" => {
-                    assert!(matches!(
-                        operation,
-                        Wave3CapabilityOperation::PluginPublish { .. }
-                    ));
-                }
-                "plugin.development/serve" => {
-                    assert!(matches!(
-                        operation,
-                        Wave3CapabilityOperation::PluginServe { .. }
-                    ));
-                }
                 other => panic!("unexpected Wave 3 Action {other}"),
             }
 
@@ -3044,12 +2785,12 @@ mod tests {
         );
 
         let missing_owner = composed_host_port(Wave3OwnerBindings::default());
-        let error = poll_ready(missing_owner.invoke(request_for("plugin.development/read")))
-            .expect_err("missing Plugin owner must fail closed");
+        let error = poll_ready(missing_owner.invoke(request_for("office/preview")))
+            .expect_err("missing Office owner must fail closed");
         assert_eq!(error.code, WAVE3_HOST_PORT_UNAVAILABLE);
         assert_eq!(
             error.message,
-            "no production owner is bound for plugin.development"
+            "no production owner is bound for office"
         );
 
         let owner_error = Wave3HostPortError::new("OWNER_ACTION_FAILED", "owner rejected action");

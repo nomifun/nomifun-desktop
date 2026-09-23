@@ -19,9 +19,9 @@ import {
   Search,
   User,
 } from '@icon-park/react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import {
   computerPermissionKindsForActions,
   missingComputerPermissionKinds,
@@ -111,11 +111,9 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
 }) => {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<ModuleCategory | 'all'>('all');
   const [status, setStatus] = useState<'all' | 'enabled' | 'attention'>('all');
-  const [pluginsOnly, setPluginsOnly] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [undo, setUndo] = useState<AgentPresetDocument | null>(null);
 
@@ -249,17 +247,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
     });
   }, [catalog.modules, document.enabled_capabilities, moduleByKey, requiredByKey, requiredModules, selectionByKey, t]);
 
-  useEffect(() => {
-    if (searchParams.get('source') !== 'plugin') return;
-    setQuery(searchParams.get('capability') ?? '');
-    setCategory('all');
-    setPluginsOnly(true);
-    const next = new URLSearchParams(searchParams);
-    next.delete('source');
-    next.delete('capability');
-    setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams]);
-
   const referenceOf = (entry: ModuleEntry): ModuleReference =>
     entry.missing ? entry.module : entry.module.module;
   const copyOf = (entry: ModuleEntry): { name: string; description: string } => {
@@ -326,7 +313,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
         .toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
       : moduleMatchesSearch(entry.module, query, copy.name, copy.description);
     return (category === 'all' || moduleCategory(reference) === category) &&
-      (!pluginsOnly || (!entry.missing && !isBuiltinModule(entry.module, catalog.capabilities))) &&
       (status === 'all' || (status === 'enabled' && active(entry)) ||
         (status === 'attention' && needsAttention(entry))) && matchesQuery;
   });
@@ -446,9 +432,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
             </button>
           ))}
         </div>
-        {pluginsOnly && <button type='button' className={styles.sourceChip} onClick={() => setPluginsOnly(false)}>
-          {t('agentSettings.workbench.plugin')} · {t('agentSettings.workbench.clearFilters')}
-        </button>}
       </div>
 
       <div className={styles.catalogLayout}>
@@ -484,12 +467,11 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
         <section className={styles.moduleResults} aria-label={t('agentSettings.workbench.moduleCatalog')}>
           <div className={styles.resultHeading}>
             <span>{t('agentSettings.workbench.results', { count: visibleEntries.length })}</span>
-            {(query || category !== 'all' || status !== 'all' || pluginsOnly) && (
+            {(query || category !== 'all' || status !== 'all') && (
               <button type='button' onClick={() => {
                 setQuery('');
                 setCategory('all');
                 setStatus('all');
-                setPluginsOnly(false);
               }}>{t('agentSettings.workbench.clearFilters')}</button>
             )}
           </div>
@@ -534,7 +516,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                     <div className={styles.moduleCopy}>
                       <div className={styles.moduleTitleLine}>
                         <h3>{copy.name}</h3>
-                        {!entry.missing && !isBuiltinModule(entry.module, catalog.capabilities) && <Tag size='small'>{t('agentSettings.workbench.plugin')}</Tag>}
+                        {!entry.missing && !isBuiltinModule(entry.module, catalog.capabilities) && <Tag size='small'>{t('agentSettings.workbench.extension')}</Tag>}
                       </div>
                       <p>{copy.description}</p>
                     </div>
@@ -722,7 +704,6 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({
                 setQuery('');
                 setCategory('all');
                 setStatus('all');
-                setPluginsOnly(false);
               }}>{t('agentSettings.workbench.clearFilters')}</Button>}
             </div>
           )}

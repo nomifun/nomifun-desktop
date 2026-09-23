@@ -118,53 +118,11 @@ pub struct AgentControlPlane {
     templates: OfficialTemplateCatalog,
     compiler: PresetRevisionCompiler,
     role_bindings: Option<Arc<dyn crate::InstallationRoleBindingStore>>,
-    ui_bindings: Option<Arc<dyn crate::AgentUiBindingStore>>,
     default_chat_route_resolver: Option<Arc<dyn DefaultChatRouteResolver>>,
     template_launch_lock: tokio::sync::Mutex<()>,
 }
 
 impl AgentControlPlane {
-    pub fn with_ui_binding_store(mut self, store: Arc<dyn crate::AgentUiBindingStore>) -> Self {
-        self.ui_bindings = Some(store);
-        self
-    }
-
-    fn ui_binding_store(&self) -> Result<&dyn crate::AgentUiBindingStore, ControlPlaneError> {
-        self.ui_bindings.as_deref().ok_or_else(|| ControlPlaneError::canonical(
-            "AGENT_UI_BINDING_UNAVAILABLE", axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            "this host does not provide persistent Agent page selection",
-        ))
-    }
-
-    pub async fn ui_binding(&self, owner: &UserId, preset_id: &str)
-        -> Result<nomifun_api_types::AgentPresetUiBindingResponse, ControlPlaneError> {
-        let stored = self.owned_preset(owner, preset_id).await?;
-        let binding = self.ui_binding_store()?.load(owner, &stored.preset.preset_id).await?;
-        Ok(nomifun_api_types::AgentPresetUiBindingResponse {
-            preset_id: preset_id.to_owned(), display_name: stored.preset.display_name, binding,
-        })
-    }
-
-    pub async fn put_ui_binding(&self, owner: &UserId, preset_id: &str,
-        request: nomifun_api_types::PutAgentUiBindingRequest)
-        -> Result<nomifun_api_types::AgentPresetUiBindingResponse, ControlPlaneError> {
-        let stored = self.owned_preset(owner, preset_id).await?;
-        let selection = match request.selection {
-            None => None,
-            Some(requested) => Some(self.agent_ui_contributions()?.into_iter().find(|candidate| {
-                candidate.plugin_id == requested.plugin_id && candidate.capability == requested.capability
-                    && candidate.expected_release_digest == requested.expected_release_digest
-            }).ok_or_else(|| ControlPlaneError::canonical("AGENT_UI_CHOICE_UNAVAILABLE",
-                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                "the exact Agent page contribution is no longer available; choose an active release"))?),
-        };
-        let binding = self.ui_binding_store()?.put(owner, &stored.preset.preset_id,
-            selection, request.expected_binding_version).await?;
-        Ok(nomifun_api_types::AgentPresetUiBindingResponse {
-            preset_id: preset_id.to_owned(), display_name: stored.preset.display_name, binding,
-        })
-    }
-
     pub fn with_installation_role_binding_store(mut self, store: Arc<dyn crate::InstallationRoleBindingStore>) -> Self {
         self.role_bindings = Some(store);
         self
@@ -217,7 +175,6 @@ impl AgentControlPlane {
             templates,
             compiler,
             role_bindings: None,
-            ui_bindings: None,
             default_chat_route_resolver: None,
             template_launch_lock: tokio::sync::Mutex::new(()),
         }
@@ -304,10 +261,6 @@ impl AgentControlPlane {
 
     pub fn catalog(&self) -> Result<AgentCatalogResponse, ControlPlaneError> {
         self.catalog.snapshot()?.as_api()
-    }
-
-    pub fn agent_ui_contributions(&self) -> Result<Vec<nomifun_api_types::AgentUiContributionDto>, ControlPlaneError> {
-        self.catalog.snapshot()?.agent_ui_contributions()
     }
 
     pub fn resolve_capability(
@@ -2170,10 +2123,10 @@ mod tests {
         CapabilityCatalogMaterializer, CapabilityContributions,
         CapabilityConsumer, CapabilityId, CapabilityKind,
         CapabilityManifest, CapabilityOwner, CapabilityProvenance,
-        CapabilityRef, CapabilityReleaseState, CatalogAvailability,
+        CapabilityPublicationState, CapabilityRef, CatalogAvailability,
         ContributionId, ContributionLock, ContributionSourceKind, DigestHex, EffectClass,
         LocalizedMetadata, PackageId, PackageRef, PlatformConstraint,
-        PluginMountId, PluginSourceKind, PluginSourceMetadata,
+        AgentModuleId, PluginSourceKind, PluginSourceMetadata,
         RuntimeProfileKind, RuntimeTarget, StableSourceIdentity,
         StrictJsonValue, ToolPresentationKind, VersionString, capability_surface_declarations,
         digest_payload,
@@ -2397,7 +2350,6 @@ mod tests {
                 source.source_identity.clone(),
             ),
             mount_id: None,
-            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id: manifest.contribution_id.clone(),
             contract_digest: contract_digest.clone(),
@@ -2408,7 +2360,7 @@ mod tests {
             contribution_id: manifest.contribution_id.clone(),
             contribution_lock: contribution_lock.clone(),
             target_artifact_digest: artifact_digest.clone(),
-            mount_id: PluginMountId::from(format!("mount.{id}")),
+            mount_id: AgentModuleId::from(format!("mount.{id}")),
             source,
         };
         let availability = manifest
@@ -2425,11 +2377,10 @@ mod tests {
                     source_kind: contribution_lock.source_kind,
                     source_identity: contribution_lock.source_identity,
                     mount_id: None,
-                    plugin_product_id: None,
                     mcp_binding_id: None,
                     artifact_digest: Some(artifact_digest),
                 },
-                release_state: CapabilityReleaseState::PublishedActive,
+                publication_state: CapabilityPublicationState::Active,
                 availability,
             },
         )
@@ -2546,7 +2497,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn creation_template_and_session_binding_never_require_a_chat_model() {
+    async fn creation_template_without_a_saved_chat_route_rejects_an_invalid_session_override() {
         // Generation providers and Chat routes may be absent; the professional
         // Agent's bundled capabilities must still exist in the host registry.
         let store = Arc::new(InMemoryControlPlaneStore::new());
@@ -2559,8 +2510,11 @@ mod tests {
         assert!(created.draft.document.chat_route_records.is_empty());
         assert!(created.draft.document.model_route_refs.is_empty());
         let ignored = nomifun_api_types::AgentChatModelSelectionDto { provider_id: "unconfigured".into(), model: "unconfigured".into() };
+        let invalid_override = tokio::time::timeout(std::time::Duration::from_secs(5),
+            control_plane.resolve_agent_session_binding_with_model(&owner, &created.preset.preset_id, Some(&ignored))).await.unwrap().unwrap_err();
+        assert_eq!(invalid_override.code().as_ref(), "MODEL_ROUTE_NOT_FOUND");
         let binding = tokio::time::timeout(std::time::Duration::from_secs(5),
-            control_plane.resolve_agent_session_binding_with_model(&owner, &created.preset.preset_id, Some(&ignored))).await.unwrap().unwrap();
+            control_plane.resolve_agent_session_binding_with_model(&owner, &created.preset.preset_id, None)).await.unwrap().unwrap();
         assert_eq!(binding.preset_revision_ref.preset_id, created.preset.preset_id);
         assert_eq!(Some(binding.preset_revision_ref.clone()), created.preset.current_stable_revision);
         let repeated = control_plane.create_from_template(&owner, "creative-studio.default", CreateAgentPresetFromTemplateRequest {
@@ -2572,7 +2526,13 @@ mod tests {
         assert!(repeated.draft.document.model_route_refs.is_empty());
         let reference: PresetRevisionRef = wire_cast(&binding.preset_revision_ref).unwrap();
         let snapshot = store.get_snapshot(&reference).await.unwrap().unwrap();
-        assert_eq!(snapshot.content.enabled_capabilities.len(), 3);
+        let expected_capability_count = OfficialTemplateCatalog::load()
+            .unwrap()
+            .seed(OfficialPresetKey::CreativeStudioDefault)
+            .unwrap()
+            .enabled_capabilities
+            .len();
+        assert_eq!(snapshot.content.enabled_capabilities.len(), expected_capability_count);
         let creation = snapshot
             .content
             .enabled_capabilities

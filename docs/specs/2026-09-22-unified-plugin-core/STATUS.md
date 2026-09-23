@@ -1,0 +1,92 @@
+# Unified Plugin Core 实施台账
+
+> 权威合同：同目录 [`README.zh.md`](README.zh.md)。本文件只记录当前源码事实、验证证据与外部阻塞，不形成第二套产品设计。
+
+## 状态
+
+- Goal：`active`。源码 clean cut 与 Windows 本机验证已进入最终冻结；目标 release 要求的 macOS 目标机证据尚未取得，因此不得标记 `complete`。
+- 分支：`codex/unified-plugin-core`。
+- 起始工作树：只有本规格目录为未跟踪内容；未发现或覆盖用户无关代码改动。
+- 最终边界：没有双架构、feature flag、旧 decoder、旧 API alias 或可运行兼容层。Plugin 子系统 clean-start，不转换 N1/M1 Plugin 行，也不触碰非 Plugin 用户数据。
+
+## 最终 inventory
+
+### 保留并收敛
+
+- 内容寻址 Artifact Store 的目录/ZIP/bytes 共用扫描、NFC/Windows 路径碰撞、防 symlink/special-file/traversal、配额、取消、原子 staging 与篡改复核。
+- 单独 Service process 的 NDJSON、队列上限、取消、超时、崩溃隔离和进程树回收；现在每个含 Service 的 Plugin 最多一个进程，UI-only 从不取得 Node lease。
+- sandbox iframe、MessageChannel、调用去重、Active Artifact fence、SQLite authorizer、Credential Store 与启动时唯一 JS Runtime authority。
+- Chat 模型选择/生成、统一 Agent Module/Action 消费时机、Desktop command/event 消费者及其他领域仍在使用的全局 Agent 合同。
+
+### 重写并接线
+
+- 唯一 `nomifun.plugin/v1` Manifest、`PluginArtifact`、本地 `plugin_id`、Action + Binding、内联 JSON Schema、统一 SDK/Bridge/DTO。
+- 七表 Repository、`install_artifact`、单一 mutation journal、generation DataRoot、SQLite/KV/Files/Cache、Preview、JS migration、Previous、恢复/删除、Package/Backup。
+- Chat Draft 与目录/ZIP/Backup Import 均冻结为标准文件树并进入同一 Artifact 校验、staging、runtime validation、事务提交和 activation 链路。
+- Agent adapter 将 `agent.tool`、`agent.context`、`agent.before_model`、`agent.before_tool` 接到真实 Engine 消费阶段；Desktop adapter 接通 command/event/automation；Plugin Core 不依赖 Role/Provider/Consumer 图。
+- 单一 `/api/plugin-drafts` 与 `/api/plugins` Router；前端只导出一个 `pluginPlatform`，Library/Creator/Preview/Import/Detail/Run/Config 共用同一产品流。Desktop WebUI 可读，本地变更严格由 Desktop shell 放行。
+
+### 已物理删除
+
+- N1 application 聚合、Project/Mount/Candidate/Test/Apply/AutoApply、Shared Extension Host、`nomifun-js-host`、`nomifun-js-kernel-adapter`、N1 DB/DTO/Router/CLI/合同/gate/测试。
+- M1 Product/Project/ReadyRelease/Publish/AutoPublish/ActiveEpoch/PointerRevision/ServiceTest/CatalogPublication、旧 Runtime DB/DTO/Router/UI/合同/gate/测试。
+- 可选 JS Runtime 持久选择与热切换、Candidate Test Host、旧 preview `Map` 假存储、Share Bundle/Prebuilt Artifact Import/Whole-App Backup 平行状态机。
+- 两套 TS 类型/Bridge/locale/UI 路由、旧 MiniApp/N1/M1 当前规格、过期 review、候选脚本、fixtures 和生成物。
+
+## DB 与 clean-start
+
+主数据库只创建七张 Plugin 表：
+
+`plugins`, `plugin_artifacts`, `plugin_drafts`, `plugin_credential_bindings`, `plugin_grants`, `plugin_library_state`, `plugin_mutations`。
+
+- 新安装直接使用 canonical baseline。
+- 仅 checksum `25497335d0bd8ce542d6422ba07ecf7c0ce7186032f1fbe5e3ad408b0aeaf166d8b887c3919ae27102bb91f130a6bd3c` 的精确退休 baseline 可执行一次 Plugin-only clean-start；未知、局部或手改 lineage 一律拒绝。
+- clean-start 只 drop 已证明属于退休 Plugin/Runtime 的表和一个退休 Agent UI Plugin 索引，随后重建七表并刷新 schema metadata；测试证明 users、preferences 与 Agent 行不变。
+- journal 同一行保存旧 Active/Previous Artifact/DataRoot、Config、Credential 引用和 Grant 快照。提交后激活失败或崩溃恢复会回到完整旧状态，不产生混合指针；快照不含 Credential 明文。
+- Surface/Preview session、PID、runtime generation、Catalog index 与测试结果均不持久化；启动只清理精确 `preview-<uuidv7>` orphan。
+
+## 受保护的非 Plugin 同名合同
+
+- `channel_plugins` 属于 Channel 连接器域，继续有真实生产消费者，不在 Plugin clean-start 范围。
+- `apps/desktop/src/native_api_plugins.rs` 是 Tauri native plugin 包装，不是 Unified Plugin Core。
+- Agent 合同独立 schema 中的 `plugin_packages/plugin_mounts/plugin_configs/plugin_states` 是既有全局 Agent Module/Capability Store 合同；Rust 产品类型和 wire source 已收敛为 `AgentModuleId` / `agent_module`，Unified Plugin Core 不读写或依赖这些表。按权威规格“不得误删其他核心领域仍在使用的全局合同”保留；主数据库的退休 N1/M1 `plugin_mounts` 已由精确 clean-start 删除。
+
+## 验收证据
+
+### 产品闭环
+
+- Chat UI-only：生成 → Preview → Save → Open；DB/KV/Files 在 Surface 关闭重开后仍存在，runtime observation 始终 `stopped`，Node 数为零。
+- Chat headless：生成含 Service 的 `agent.tool + desktop.command` Action，经本机代码确认后进入 live Binding registry，continuous Service 为 `running`，真实 Desktop command 调用成功。
+- mixed：UI Action 与 Service 共用同一 generation DataRoot；headless/mixed 生命周期停用、移入回收站、永久删除会撤销 Binding、Surface 和 Service。
+- Agent：真实 Engine surface 发现、冻结、选择并调用 `agent.tool/context/before_model/before_tool`；Artifact 漂移、停用和取消均 fail closed。
+- Directory/ZIP/Chat bytes 得到同一 Artifact digest；Backup 恢复复用同一 journal/generation/install 链，Package 无用户数据，Backup 无 Credential 明文并要求显式 rebind。
+- Preview 使用正式 SDK/Bridge/Service/storage adapters 的临时 DataRoot；同一 Draft reload 保留临时数据，保存/Discard/启动清理均不会合并到生产。
+- 同 dataVersion 只切代码并复用 DataRoot；dataVersion migration 同时覆盖 SQLite/Files，失败保持旧 Artifact/DataRoot；Previous code/data 回退与数据损失确认已覆盖。
+- 权限扩张、secret slot 与本机 Service 信任由 Router 和 Core 双层确认；不变权限保留显式撤销，不重复授权；配置 schema、Credential 引用和 UI network CSP 均强制执行。
+
+### 已通过命令（2026-09-23，Windows x64）
+
+- `cargo fmt --all -- --check`
+- `cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- write`，随后 `check`
+- `cargo test -p nomifun-agent-contracts --lib`：65/65
+- `cargo test -p nomifun-api-types --lib`：516/516
+- `cargo test -p nomifun-db -- --test-threads=1`：完整 crate（lib 307/307，所有 integration targets 通过）
+- `cargo test -p nomifun-plugin-platform --tests -- --test-threads=1`：57/57
+- `cargo test -p nomifun-app --lib -- --test-threads=1`：446/446
+- `cargo test -p nomifun-app --test plugin_e2e -- --test-threads=1`：8/8
+- `cargo test -p nomifun-app --features "browser-use computer-use" --test official_preset_catalog_integrity -- --test-threads=1`：3/3
+- Agent Control Plane 46/46、Kernel 55/55、Runtime 50/50、AI Agent 321/321 + consumer 20/20、Engine Core 17/17、JS Runtime 1/1。
+- `cargo test -p nomifun-desktop -- --test-threads=1`：144 passed，3 个需要已安装 Chrome/公网的环境测试按声明 ignored。
+- `cargo check --workspace --all-targets`
+- `bun run test:plugin-sdk`：6/6
+- `bun run test:ui`：3561/3561
+- `bun run check`：包含 typecheck、`check:desktop-ui-boundary`（1908 renderer sources，最低 880x600）、i18n/theme/icon/dead-css、installer、process/browser/UARC/Unified Plugin/Agent vocabulary 边界，全部通过。
+- `bun run build:ui`：production build 通过；仅保留既有 chunk-size/dynamic-import 提示。
+- `$env:CARGO_BUILD_BUILD_DIR='C:\Users\rika0\AppData\Local\Temp\nfb-unified'; bun run build:win x64`：首次 `rust-lld` 进程以 Windows `0xc0000409` 瞬时退出；资源检查正常，原命令重试成功并完成 NSIS。最终安装器 `NomiFun_0.7.6_x64-setup.exe` 为 60,659,091 bytes，SHA-256 `885ddf2617bd29196c22f2c3381efa71f47354bd8c570cebdbea57f136b5dd8b`。
+- `git diff --check` 与 staged/unstaged 范围检查通过。
+
+## 最终平台门禁
+
+- Windows NSIS 最终包已生成；候选安装/启动/WebView2/backend/process-tree/uninstall 冒烟必须在 clean HEAD 冻结后执行。运行结果写入 `build.noindex`（不回写源码，避免改变被测 checkpoint），并在最终交付中报告。
+- 当前主机是 Windows，无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
+- 因 macOS 目标机证据缺失，Goal 保持 `active`；除该外部平台项外没有已知源码、测试、删除或文档待办。

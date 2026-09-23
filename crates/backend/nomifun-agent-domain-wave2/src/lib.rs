@@ -28,7 +28,7 @@ use nomifun_agent_contracts::{
     LocalizedMetadata, ManagedTaskRegistrationDescriptor, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint, PluginBootCriticality,
     PluginBootState, PluginContextDescriptor, PluginDesiredState, PluginEffectiveState,
-    PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
+    PluginIdentityDescriptor, AgentModuleId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateCompareAndSwapOutcome, PluginStateEntry,
     PluginStateHandleDescriptor, PluginStateMethod, OperationId, PrincipalRef,
@@ -1144,7 +1144,7 @@ fn build_registration(
     };
     let identity = PluginIdentityDescriptor {
         package: package_ref.clone(),
-        mount_id: PluginMountId::from(package.mount_id),
+        mount_id: AgentModuleId::from(package.mount_id),
     };
     let cancellation_port = host_port(PLUGIN_CANCEL_PORT);
     let tasks_port = host_port(PLUGIN_TASKS_PORT);
@@ -2774,7 +2774,7 @@ mod tests {
             id: PackageId::from("fixture.browser-provider"),
             version: VersionString::from(CONTRACT_VERSION),
         };
-        let mount_id = PluginMountId::from("fixture-browser-provider");
+        let mount_id = AgentModuleId::from("fixture-browser-provider");
         let source = PluginSourceMetadata {
             source_kind: PluginSourceKind::TestFixture,
             source_identity: "fixture.browser-provider".to_owned(),
@@ -2997,7 +2997,6 @@ mod tests {
                 availability_evidence_revision: "wave2-state-test".to_owned(),
             },
             CompileRequest {
-                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: "wave2-state-test".to_owned(),
@@ -3547,7 +3546,6 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    plugin_product_capabilities: Vec::new(),
                     revision: revision(BTreeMap::new()),
                     principal: principal.clone(),
                     scene: "test".to_owned(),
@@ -3565,7 +3563,7 @@ mod tests {
                 key: contract.manifest.key.clone(),
                 contract_digest: contract.contract_digest.clone(),
             },
-            provider_mount_id: PluginMountId::from("fixture-browser-provider"),
+            provider_mount_id: AgentModuleId::from("fixture-browser-provider"),
         };
         let browser_binding = TypedResourceBinding {
             binding_id: ResourceBindingId::from("browser-binding"),
@@ -3580,7 +3578,6 @@ mod tests {
             &materialized,
             &environment,
             CompileRequest {
-                plugin_product_capabilities: Vec::new(),
                 revision: revision(BTreeMap::from([(role_id.clone(), selected)])),
                 principal: principal.clone(),
                 scene: "test".to_owned(),
@@ -4082,7 +4079,7 @@ mod tests {
             let provider = materialized
                 .role_provider(
                     &ExecutionRoleId::from(role_id),
-                    &PluginMountId::from(if role_id == BROWSER_EXECUTION_ROLE_ID {
+                    &AgentModuleId::from(if role_id == BROWSER_EXECUTION_ROLE_ID {
                         BROWSER_MOUNT_ID
                     } else {
                         COMPUTER_A11Y_MOUNT_ID

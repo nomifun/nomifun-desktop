@@ -1,14 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     CanonicalErrorCode, CapabilityCatalogEntry,
     CapabilityConsumer, CapabilityId, CapabilityOwner, CapabilityRef,
     CatalogAvailability, ContributionSourceKind, McpBindingId, McpServerId,
     McpToolKey, OfficialPresetKey, OfficialPresetSeedManifestPayload,
-    PluginProductCapabilityCatalogPublication,
-    PluginProductCapabilityCatalogPublicationUpdate,
-    PluginProductCapabilityCatalogSink, PluginProductId,
     PluginSourceKind, SkillRef, digest_payload,
     official_preset_seed_manifest_payload,
 };
@@ -35,111 +32,12 @@ mod role_tests;
 pub struct CatalogSnapshot {
     pub capabilities: Vec<MaterializedCapability>,
     pub formal_capability_entries: BTreeMap<CapabilityRef, CapabilityCatalogEntry>,
-    pub plugin_product_publications:
-        BTreeMap<PluginProductId, PluginProductCapabilityCatalogPublication>,
     pub skills: Vec<MaterializedSkill>,
     pub mcp_tools: Vec<MaterializedMcpTool>,
     pub role_contracts: Vec<MaterializedRoleContract>,
     pub role_providers: Vec<MaterializedRoleProvider>,
     pub unavailable_capabilities: BTreeMap<CapabilityId, CanonicalErrorCode>,
     pub service_key_diagnostics: Vec<String>,
-}
-
-/// Read-side source for durable Plugin Product Active Release publications.
-///
-/// The source is deliberately narrower than `CatalogProvider`: it contributes
-/// only Plugin Product publications, while `KernelCatalogProvider` remains the
-/// single assembled Catalog provider used by all consumers.
-pub trait PluginProductCatalogPublicationSource: Send + Sync {
-    fn publications(
-        &self,
-    ) -> Result<Vec<PluginProductCapabilityCatalogPublication>, ControlPlaneError>;
-}
-
-/// Shared in-process publication index used by the Desktop composition.
-///
-/// Each Plugin Product is replaced as one immutable publication. This prevents
-/// a consumer snapshot from observing capabilities from two different Active
-/// Release identities.
-#[derive(Clone, Default)]
-pub struct SharedPluginProductCatalogPublications {
-    publications:
-        Arc<RwLock<BTreeMap<(nomifun_agent_contracts::UserId, PluginProductId), PluginProductCapabilityCatalogPublicationUpdate>>>,
-}
-
-impl SharedPluginProductCatalogPublications {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl PluginProductCapabilityCatalogSink for SharedPluginProductCatalogPublications {
-    fn replace_plugin_product_publication(
-        &self,
-        update: PluginProductCapabilityCatalogPublicationUpdate,
-    ) -> Result<(), String> {
-        update.validate().map_err(|error| error.to_string())?;
-        let mut publications = self
-            .publications
-            .write()
-            .map_err(|_| "Plugin Product Catalog publication index is poisoned".to_owned())?;
-        let key = (update.owner_user_id.clone(), update.plugin_product_id.clone());
-        if let Some(current) = publications.get(&key) {
-            let ordering = plugin_product_publication_version(current)
-                .cmp(&plugin_product_publication_version(&update));
-            match ordering {
-                std::cmp::Ordering::Greater => return Ok(()),
-                std::cmp::Ordering::Equal if current == &update => return Ok(()),
-                std::cmp::Ordering::Equal => {
-                    return Err(
-                        "Plugin Product Catalog update reuses a version with different publication facts"
-                            .to_owned(),
-                    );
-                }
-                std::cmp::Ordering::Less => {}
-            }
-        }
-        publications.insert(key, update);
-        Ok(())
-    }
-}
-
-impl PluginProductCatalogPublicationSource for SharedPluginProductCatalogPublications {
-    fn publications(
-        &self,
-    ) -> Result<Vec<PluginProductCapabilityCatalogPublication>, ControlPlaneError> {
-        self.publications
-            .read()
-            .map_err(|_| {
-                catalog_invalid("Plugin Product Catalog publication index is poisoned")
-            })
-            .and_then(|publications| {
-                let mut active = BTreeMap::new();
-                for update in publications.values() {
-                    if let Some(publication) = &update.publication {
-                        if active
-                            .insert(publication.plugin_product_id.clone(), publication.clone())
-                            .is_some()
-                        {
-                            return Err(catalog_invalid(
-                                "multiple owner-scoped Plugin Product publications share one Plugin Product identity",
-                            ));
-                        }
-                    }
-                }
-                Ok(active.into_values().collect())
-            })
-    }
-}
-
-fn plugin_product_publication_version(
-    update: &PluginProductCapabilityCatalogPublicationUpdate,
-) -> (u64, u64, u64) {
-    (
-        update.product_revision,
-        update.pointer_revision,
-        update.active_release_epoch,
-    )
 }
 
 impl CatalogSnapshot {
@@ -183,46 +81,6 @@ impl CatalogSnapshot {
                     "duplicate contribution identity {}",
                     capability.contribution_id.as_ref()
                 )));
-            }
-        }
-        for (plugin_product_id, publication) in &self.plugin_product_publications {
-            publication
-                .validate()
-                .map_err(|error| catalog_invalid(error.to_string()))?;
-            if plugin_product_id != &publication.plugin_product_id {
-                return Err(catalog_invalid(
-                    "Plugin Product Catalog publication map key differs from its payload identity",
-                ));
-            }
-            for capability in &publication.capabilities {
-                let reference = capability.entry.capability.clone();
-                if !capabilities.insert(reference.clone()) {
-                    return Err(catalog_invalid(format!(
-                        "duplicate materialized capability {}",
-                        reference.id.as_ref()
-                    )));
-                }
-                if !contribution_ids.insert(capability.entry.contribution_id.clone()) {
-                    return Err(catalog_invalid(format!(
-                        "duplicate contribution identity {}",
-                        capability.entry.contribution_id.as_ref()
-                    )));
-                }
-                let entry = self
-                    .formal_capability_entries
-                    .get(&reference)
-                    .ok_or_else(|| {
-                        catalog_invalid(format!(
-                            "Plugin Product capability {} has no formal Catalog entry",
-                            reference.id.as_ref()
-                        ))
-                    })?;
-                if entry != &capability.entry {
-                    return Err(catalog_invalid(format!(
-                        "Plugin Product capability {} differs from its formal Catalog entry",
-                        reference.id.as_ref()
-                    )));
-                }
             }
         }
         if let Some(reference) = self
@@ -345,16 +203,7 @@ impl CatalogSnapshot {
             }
             return Some(&capability.manifest);
         }
-        self.plugin_product_publications
-            .values()
-            .flat_map(|publication| publication.capabilities.iter())
-            .find(|publication| {
-                publication.entry.capability == *reference
-                    && publication
-                        .entry
-                        .supports_consumer(CapabilityConsumer::Agent)
-            })
-            .map(|publication| &publication.manifest)
+        None
     }
 
     pub fn capability_catalog_entry(
@@ -377,12 +226,7 @@ impl CatalogSnapshot {
             validate_capability_entry(capability, entry)?;
             return Ok(Some(entry.clone()));
         }
-        Ok(self
-            .plugin_product_publications
-            .values()
-            .flat_map(|publication| publication.capabilities.iter())
-            .find(|publication| publication.entry.capability == *reference)
-            .map(|publication| publication.entry.clone()))
+        Ok(None)
     }
 
     pub fn materialized_skill(
@@ -467,22 +311,6 @@ impl CatalogSnapshot {
             .map(|capability| capability_module_catalog_item(&capability.manifest))
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
         let mut modules = modules;
-        for publication in self.plugin_product_publications.values() {
-            for capability in &publication.capabilities {
-                if capability
-                    .entry
-                    .supports_consumer(CapabilityConsumer::Agent)
-                    && capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
-                {
-                    capabilities.push(capability_catalog_item(
-                        &capability.manifest,
-                        &capability.entry,
-                        wire_name(&capability.entry.provenance.source_kind)?,
-                    )?);
-                    modules.push(capability_module_catalog_item(&capability.manifest)?);
-                }
-            }
-        }
         capabilities.sort_by(|left, right| left.capability.id.cmp(&right.capability.id));
         modules.sort_by(|left, right| left.module.id.cmp(&right.module.id));
 
@@ -534,28 +362,6 @@ impl CatalogSnapshot {
             skills,
             mcp_tools,
         })
-    }
-
-    pub fn agent_ui_contributions(&self) -> Result<Vec<nomifun_api_types::AgentUiContributionDto>, ControlPlaneError> {
-        self.validate()?;
-        let mut views = Vec::new();
-        for publication in self.plugin_product_publications.values() {
-            for capability in &publication.capabilities {
-                if capability.manifest.kind != nomifun_agent_contracts::CapabilityKind::UiContribution
-                    || capability.manifest.contributions.ui_slot != Some(nomifun_agent_contracts::UiContributionSlot::AgentSession)
-                    || capability.entry.operation_lock(CapabilityConsumer::Ui).is_err()
-                { continue; }
-                views.push(nomifun_api_types::AgentUiContributionDto {
-                    capability: CapabilityRefDto { id: capability.manifest.id.as_ref().into() },
-                    plugin_id: publication.plugin_product_id.as_ref().into(),
-                    expected_release_digest: publication.active_release.release_digest.as_ref().into(),
-                    display_name: capability.manifest.display.name.clone(),
-                    description: capability.manifest.display.description.clone(),
-                });
-            }
-        }
-        views.sort_by(|a, b| a.capability.id.cmp(&b.capability.id));
-        Ok(views)
     }
 
     fn roles_api(
@@ -801,8 +607,6 @@ fn validate_capability_entry(
             != capability.contribution_lock.source_identity
         || entry.provenance.mount_id
             != capability.contribution_lock.mount_id
-        || entry.provenance.plugin_product_id
-            != capability.contribution_lock.plugin_product_id
         || entry.provenance.mcp_binding_id
             != capability.contribution_lock.mcp_binding_id
         || entry.provenance.artifact_digest.as_ref()
@@ -830,7 +634,7 @@ fn validate_skill(skill: &MaterializedSkill) -> Result<(), ControlPlaneError> {
     let exact_source = match skill.source.source_kind {
         PluginSourceKind::ManagedLocal => {
             skill.contribution_lock.source_kind
-                == ContributionSourceKind::PluginMount
+                == ContributionSourceKind::AgentModule
                 && skill.contribution_lock.mount_id.as_ref()
                     == Some(&skill.mount_id)
         }
@@ -847,7 +651,6 @@ fn validate_skill(skill: &MaterializedSkill) -> Result<(), ControlPlaneError> {
         || skill.contribution_lock.source_identity.as_ref()
             != skill.source.source_identity
         || skill.contribution_lock.mcp_binding_id.is_some()
-        || skill.contribution_lock.plugin_product_id.is_some()
         || skill
             .source
             .source_digest

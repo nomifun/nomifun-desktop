@@ -113,43 +113,6 @@ describe('Agent resource picker', () => {
     expect(screen.getByText(en.resources.emptyOptional)).toBeTruthy();
   });
 
-  test('loads enabled Plugin products with surfaces through the runtime library contract', async () => {
-    const calls: string[] = [];
-    const plugin = {
-      plugin_id: '0190f5fe-7c00-7a00-8000-000000000001', product_revision: 1,
-      display_name: 'Workspace panel', description: 'Installed Plugin', kind: 'plugin',
-      lifecycle: 'enabled', surface_available: true, updated_at_ms: 1,
-      releases: { pointer_revision: 1, active_release_epoch: 1 },
-      service_health: { state: 'not_applicable' },
-    };
-    globalThis.fetch = (async (input) => {
-      calls.push(new URL(String(input), 'http://127.0.0.1').pathname);
-      return new Response(JSON.stringify({ success: true, data: { library_revision: 1, plugins: [
-        plugin,
-        { ...plugin, plugin_id: '0190f5fe-7c00-7a00-8000-000000000002', lifecycle: 'disabled' },
-        { ...plugin, plugin_id: '0190f5fe-7c00-7a00-8000-000000000003', surface_available: false },
-      ] } }), { headers: { 'Content-Type': 'application/json' } });
-    }) as typeof fetch;
-    const inventory = await loadAgentResourceInventory(['plugin'], new Set(['plugin.surface']));
-    expect(calls).toEqual(['/api/plugins/runtimes']);
-    expect(inventory.errors).toEqual({});
-    expect(inventory.options.plugin).toEqual([
-      { value: plugin.plugin_id, label: plugin.display_name, description: plugin.description },
-    ]);
-  });
-
-  test('uses the localized Plugin label instead of exposing an i18n key', async () => {
-    const screen = render(<I18nextProvider i18n={i18n}><MemoryRouter><AgentResourcePicker
-      requiredKinds={['plugin']} capabilityIds={['plugin.development']}
-      value={{}} onChange={() => undefined}
-      loadInventory={async () => ({ options: { plugin: [
-        { value: 'plugin-1', label: 'Workspace panel' },
-      ] }, errors: {} })}
-    /></MemoryRouter></I18nextProvider>);
-    await waitFor(() => expect(screen.getByRole('combobox', { name: `Select ${en.resources.kinds.pluginRuntime}` })).toBeTruthy());
-    expect(screen.container.textContent).not.toContain('agentSettings.resources.kinds.plugin');
-  });
-
   test('joins live Robot status and exact Action permissions before offering a device', async () => {
     const list = spyOn(ipcBridge.robot.list, 'invoke').mockResolvedValue([
       {

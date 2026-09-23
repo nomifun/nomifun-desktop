@@ -1,5 +1,8 @@
 # 旧 Wrapper 宿主与依赖物理删除
 
+> 归档边界（2026-09-23）：这是旧提交的删除记录。文中的 MiniApp、N1 gate 与旧 Plugin
+> 测试入口均已由 Unified Plugin Core clean cut 物理删除，不是可执行验证清单。
+
 日期：2026-09-14。Slice76，CAR-08 的源码实施步骤，**未经构建或运行验证**。
 工作树：rf/agent-capability-platform-v2；未 commit/push，未更改旧阶段文档。
 

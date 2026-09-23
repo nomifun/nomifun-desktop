@@ -1,5 +1,9 @@
 # 全局代码审计进度台账
 
+> 归档边界（2026-09-23）：本台账停留在 2026-09-13 的历史审计现场，不再是 Plugin
+> 工作入口。正文中的 MiniApp、N1/M1、旧 Plugin Runtime/Product 与测试名不代表当前代码；
+> Plugin 唯一权威为 `../specs/2026-09-22-unified-plugin-core/README.zh.md`。
+
 最后更新：2026-09-13。此文件是续接入口，不能把测试通过或目录扫描等同于模块审计完成。
 
 ## 续接位置
@@ -850,7 +854,7 @@ R44/R46 写入冻结交主线程后，原 worker 顺接 R49（`nomifun-runtime/s
 
 - 用户已授权按模块提交。本轮只做迁移确认、现有变更复验、分组提交和记录收尾；没有继续扩大重构，也没有推送。基线为 `41bfea6723cec3d8c5e7a1ad278edd4909959051`，分支为 `rf/agent-capability-platform-v2`。
 - MiniApp 产品实现已隔离到 `C:/Users/rika0/code/nomifun/miniapps-product`，分支 `codex/miniapps-product`；该处仍在开发，本轮未修改。当前工作区无对应实现差异；`MiniAppSurfacePanel.tsx` 的规范化内容与 HEAD 相同，未纳入提交。
-- 本地 `docs/specs/2026-09-12-miniapps-product-redesign-review.zh.md` 与另一 worktree 的同名文档内容不同；保留为未跟踪文件，不删除、不混入审计提交。
+- 当时存在一份未跟踪的 MiniApp 产品重设计文档，且与另一 worktree 内容不同；该文档现已随 Unified Plugin Core clean cut 退休，本条只保留历史审计事实。
 - 使用贡献者已配置的 Git 身份。每次只暂存明确文件白名单，检查暂存差异后提交；以单次命令的 `core.hooksPath` 指向新建空临时目录，未改变持久配置，未执行既有 `.githooks/`。
 - MiniApp 迁移后，锁文件遗留 App 对 `zip 2.4.2` 的引用，首次 `--locked` 因需更新锁文件停止。改用 `--offline` 同步后，相对本轮开始仅删除该条失效引用，没有升级依赖；其他既有锁变化按对应模块提交。
 

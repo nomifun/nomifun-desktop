@@ -370,12 +370,19 @@ mod tests {
         assert_eq!(status.permissions[2].capabilities, &["computer_use"]);
     }
 
+    #[cfg(all(not(target_os = "macos"), feature = "computer-use"))]
     #[test]
     fn non_macos_computer_permissions_do_not_block_launch() {
-        if !cfg!(target_os = "macos") {
-            let (accessibility, screen) = computer_states();
-            assert_eq!(accessibility, SystemPermissionState::NotRequired);
-            assert_eq!(screen, SystemPermissionState::NotRequired);
-        }
+        let (accessibility, screen) = computer_states();
+        assert_eq!(accessibility, SystemPermissionState::NotRequired);
+        assert_eq!(screen, SystemPermissionState::NotRequired);
+    }
+
+    #[cfg(not(feature = "computer-use"))]
+    #[test]
+    fn headless_build_does_not_claim_computer_permission_readiness() {
+        let (accessibility, screen) = computer_states();
+        assert_eq!(accessibility, SystemPermissionState::Unknown);
+        assert_eq!(screen, SystemPermissionState::Unknown);
     }
 }

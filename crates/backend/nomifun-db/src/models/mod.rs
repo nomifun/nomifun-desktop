@@ -5,7 +5,6 @@ mod attachment;
 mod channel;
 mod client_preference;
 mod instance_token;
-mod javascript_runtime_selection;
 mod cron_job;
 mod customer_service;
 mod cron_job_run;
@@ -13,9 +12,7 @@ mod knowledge;
 mod knowledge_source;
 mod knowledge_tree_operation;
 mod mcp_server;
-mod plugin_runtime;
 mod oauth_token;
-mod plugin_n1;
 mod provider;
 mod provider_connection;
 mod provider_model;
@@ -49,9 +46,6 @@ pub use channel::{
 };
 pub use client_preference::ClientPreference;
 pub use instance_token::InstanceApiTokenRow;
-pub use javascript_runtime_selection::{
-    JavaScriptRuntimeSelectionRecord, JavaScriptRuntimeSelectionRow,
-};
 pub use cron_job::CronJobRow;
 pub use cron_job_run::{CronJobRunRow, CronRunReservationRow};
 pub use customer_service::{
@@ -78,23 +72,7 @@ pub use knowledge_tree_operation::{
     KnowledgeTreeEventStatus, KnowledgeTreeOperationRow, KnowledgeTreeOperationState,
 };
 pub use mcp_server::McpServerRow;
-pub use plugin_runtime::{
-    PluginRuntimeBuildOperationLineageRow, PluginRuntimeCatalogPublicationRow,
-    PluginRuntimeCredentialBindingRow, PluginRuntimeLibraryStateRow, PluginRuntimeLibrarySnapshot,
-    PluginRuntimeKind, PluginRuntimeProjectSourceState, PluginRuntimeReleaseOrigin,
-    PluginRuntimeReleaseSourceKind, PluginRuntimeSnapshot, PluginRuntimeProductRow,
-    PluginRuntimeKvRow, PluginRuntimeProjectRow, PluginRuntimePublishAuthorizationRow, PluginRuntimeReleaseArtifactRow,
-    PluginRuntimeReleaseRow, PluginRuntimeSourceMutationIntentRow, PluginRuntimeSurfaceSessionRow,
-};
 pub use oauth_token::OAuthTokenRow;
-pub use plugin_n1::{
-    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginCredentialBindingInput,
-    PluginCredentialBindingRow, PluginCredentialBindingSnapshot,
-    PluginDependencyMutationIntentRow, PluginKvRow,
-    PluginMountRevisionRow, PluginMountRow, PluginMountRuntimeState, PluginProjectRow,
-    PluginReadyCandidateRow,
-    PluginCandidateOrigin, ProductOperationKind, ProductOperationRow, ProductOperationState,
-};
 pub use provider::Provider;
 pub use provider_connection::{ProviderConnectionRow, UpsertProviderConnectionParams};
 pub use provider_model::{

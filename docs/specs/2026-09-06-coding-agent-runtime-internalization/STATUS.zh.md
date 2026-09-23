@@ -1,5 +1,9 @@
 # CAR 阶段状态
 
+> 归档边界（2026-09-23）：本文的 Plugin/MiniApp、候选发布与旧 Host 内容仅是历史证据，
+> 不再是实施入口。Plugin 唯一权威为
+> `../2026-09-22-unified-plugin-core/README.zh.md`；Engine 自身的非 Plugin 记录仍按原范围解释。
+
 > 2026-09-15 当前 HEAD 复核：同步 `70c28b5de`，测试 fixture 修复提交 `6125f1a64`；
 > 当前 `bun run check` 已通过，原生开发、DMG 内 Nomi/Coding 交互与活动终端 Command-Q 回收通过。
 > 新 arm64 DMG 已生成；严格 bundle 签名失败，当前真实 StepFun 测试缺安全提供的凭据。
@@ -669,8 +673,8 @@ robot.vision 通过独立公共 context 端口提供现有近期观察；Coding 
 
 ## 2026-09-14 历史实施切片：共享 MiniApp 工具端口与 Coding 接入（未验证）
 
-任务 CAR-05 / CAR-06 / CAR-07，详见
-[ENGINE-MINIAPP-PORT-2026-09-14.zh.md](ENGINE-MINIAPP-PORT-2026-09-14.zh.md)。
+任务 CAR-05 / CAR-06 / CAR-07 的旧 MiniApp 端口记录已随 Unified Plugin Core 退役；
+本段仅保留历史切片事实。
 公共 EngineKernelSession 已提供 exact MiniApp schema/工具计划与真实 Service 调用端口；
 Coding 合入初始及按需 MiniApp 工具，Nomi 复用同一平台调用／凭据实现。初始 MiniApp 加入
 共享 active set，公共模型 journal 在 claim 时拒绝 hosted pending；清理与激活同样检查。
@@ -691,8 +695,8 @@ Coding/社区 MiniApp/Robot 工具面、非工具生命周期、人工解隔离�
 
 ## 2026-09-14 历史实施切片：Skill 冻结发布与多 Engine 消费（未验证）
 
-任务 CAR-06 / CAR-07，详见
-[ENGINE-SKILL-PUBLICATION-2026-09-14.zh.md](ENGINE-SKILL-PUBLICATION-2026-09-14.zh.md)。
+任务 CAR-06 / CAR-07 的旧 Skill-to-Plugin 发布记录已随 Unified Plugin Core 退役；
+本段仅保留历史切片事实。
 Skill Library 详情可预览源文件与摘要，再显式生成不可变 Plugin 候选；不自动启用、修改 Agent
 或迁移 Session。沿用现有 Project/revision 检查，断连不自动重试，不宣称跨步骤原子提交。
 共享 exact Skill 读取与纯资源类型已抽出，Coding、Nomi 和编译期社区 Engine 均有消费端口；

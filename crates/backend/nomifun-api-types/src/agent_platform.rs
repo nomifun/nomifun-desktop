@@ -407,43 +407,6 @@ pub struct CapabilityCatalogItemDto {
     pub context_contributor_count: u32,
 }
 
-/// UI consumer projection of the same active Capability Catalog.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentUiContributionDto {
-    pub capability: CapabilityRefDto,
-    pub plugin_id: String,
-    pub expected_release_digest: String,
-    pub display_name: String,
-    pub description: String,
-}
-
-/// Presentation choice, not an Agent execution binding or a Surface grant.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentUiBindingDto {
-    pub binding_version: u64,
-    pub selection: Option<AgentUiContributionDto>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentPresetUiBindingResponse {
-    pub preset_id: String,
-    pub display_name: String,
-    pub binding: AgentUiBindingDto,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PutAgentUiBindingRequest {
-    pub expected_binding_version: u64,
-    /// Null explicitly restores the built-in page. Display fields are read
-    /// back from the Catalog, never accepted as authoritative input.
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub selection: Option<AgentUiContributionDto>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillCatalogItemDto {
@@ -564,8 +527,6 @@ pub struct ContributionLockDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_product_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<String>,
     pub contribution_id: String,
     pub contract_digest: String,
@@ -586,10 +547,6 @@ pub enum CurrentContributionLifecycleDto {
         code: String,
         reason: String,
     },
-    PluginProductActiveReleaseChanged {
-        release_id: String,
-        release_digest: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -599,8 +556,6 @@ pub struct CurrentContributionDto {
     pub source_identity: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_product_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<String>,
     pub contribution_id: String,
@@ -624,10 +579,6 @@ pub enum ContributionLifecycleImpactDto {
         reason: String,
     },
     Uninstalled,
-    PluginProductActiveReleaseChanged {
-        release_id: String,
-        release_digest: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -683,8 +634,6 @@ pub struct RevisionImpactSummaryDto {
     pub disabled: u32,
     pub uninstalled: u32,
     pub unavailable: u32,
-    pub active_release_change_compatible: u32,
-    pub active_release_change_breaking: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

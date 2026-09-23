@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
 
 /**
- * Build and admit one immutable Windows x64 signed RC cohort.
+ * Build and admit one immutable Windows x64 signed RC.
  *
  * This orchestrator intentionally stays serial: signed build -> Authenticode
- * admission -> atomic staging/release lock -> live StepFun smoke -> combined
- * Signed RC Gate. It never creates a certificate or overwrites an RC root.
+ * admission -> atomic staging/release lock -> live StepFun smoke -> Unified
+ * Plugin boundary check. It never creates a certificate or overwrites an RC root.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -27,7 +27,7 @@ import {
   readAndVerifyReleaseLock,
   writeReleaseLock,
 } from './release-lock.mjs';
-import { inspectAuthenticode } from '../validation/run-windows-signed-rc-product.mjs';
+import { inspectAuthenticode } from '../validation/windows-authenticode.mjs';
 import {
   REPO_ROOT,
   isPathWithin,
@@ -211,17 +211,7 @@ function run() {
     ],
     30 * 60 * 1000,
   );
-  runCommand('bun', [
-    'run',
-    'gate:plugin-n1',
-    '--',
-    '--stage',
-    'windows_signed_rc',
-    '--scope',
-    'combined',
-    '--cohort',
-    `rc-win-${sourceCommit.slice(0, 9)}`,
-  ]);
+  runCommand('bun', ['run', 'check:unified-plugin-boundary']);
 
   return {
     schema_version: '1.0.0',
@@ -230,7 +220,7 @@ function run() {
     target: 'windows_desktop_x64',
     signed_rc_root: relative(REPO_ROOT, paths.root).replaceAll('\\', '/'),
     release_lock: relative(REPO_ROOT, paths.lock).replaceAll('\\', '/'),
-    gate_cohort: `rc-win-${sourceCommit.slice(0, 9)}`,
+    unified_plugin_boundary: 'pass',
   };
 }
 

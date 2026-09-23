@@ -11,16 +11,13 @@ pub mod cron;
 pub mod customer_service;
 pub mod customer_service_search;
 pub mod instance_token;
-pub mod javascript_runtime_selection;
 pub mod knowledge;
 pub mod knowledge_entry;
 pub mod knowledge_source;
 pub mod knowledge_tree_operation;
 pub mod mcp_server;
-pub mod plugin_runtime;
 pub mod oauth_token;
 mod pagination;
-pub mod plugin_n1;
 pub mod provider;
 pub mod provider_connection;
 pub mod provider_model;
@@ -40,19 +37,16 @@ mod sqlite_creation_task;
 mod sqlite_cron;
 mod sqlite_customer_service;
 mod sqlite_instance_token;
-mod sqlite_javascript_runtime_selection;
 mod sqlite_knowledge;
 mod sqlite_knowledge_entry;
 mod sqlite_knowledge_source;
 mod sqlite_knowledge_tree_operation;
 mod sqlite_mcp_server;
 mod sqlite_oauth_token;
-mod sqlite_plugin_n1;
 mod sqlite_provider;
 mod sqlite_provider_connection;
 mod sqlite_provider_model;
 mod sqlite_provider_model_capability;
-mod sqlite_plugin_runtime;
 mod sqlite_requirement;
 mod sqlite_remote_binding;
 mod sqlite_settings;
@@ -88,35 +82,6 @@ pub use creation_task::{
 };
 pub use cron::ICronRepository;
 pub use instance_token::IInstanceTokenRepository;
-pub use javascript_runtime_selection::{
-    IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
-};
-pub use plugin_runtime::{
-    AbortPluginSourceMutationParams, BeginPluginRuntimeDeleteParams,
-    BeginPluginRuntimeImportAsNewParams, BeginPluginSourceMutationParams,
-    BeginPluginRuntimeImportAsNewResult, CancelPluginRuntimeBuildOperationParams,
-    CancelPluginRuntimeExportOperationParams, CancelPluginRuntimeImportParams,
-    ClosePluginRuntimeSurfaceSessionParams, CommitPluginRuntimeLifecycleParams,
-    CreatePluginRuntimeParams, CreatePluginRuntimeWithSourceParams,
-    ExecutePluginRuntimeSurfaceKvParams, FailPluginRuntimeDeleteParams,
-    FailPluginRuntimeExportOperationParams, FailPluginRuntimeImportParams,
-    FinalizePluginRuntimeDeleteParams, FinalizePluginSourceMutationParams,
-    FinishPluginRuntimeBuildAndRecordReadyParams,
-    FinishPluginRuntimeBuildOperationParams, FinishPluginRuntimeExportOperationParams,
-    FinishPluginRuntimeImportReadyParams, IPluginRuntimeRepository,
-    FinishPluginRuntimeBackupImportParams, PluginRuntimeBackupExportSnapshot,
-    PluginRuntimeBackupImportRelease, PluginRuntimeBackupReleaseSlot,
-    StartPluginRuntimeBackupExportParams,
-    PluginRuntimeAutoPublishGuard, PluginRuntimeImportSource, PluginRuntimeManagedSourceLineage,
-    PluginRuntimeSurfaceKvOperation, PluginRuntimeSurfaceKvResult,
-    PluginRuntimeServiceTestReceiptRow, OpenPluginRuntimeSurfaceSessionParams,
-    PublishPluginRuntimeReadyParams, RecordPluginRuntimeReadyReleaseParams,
-    RecordPluginRuntimeServiceTestReceiptParams, ResolvePluginRuntimeSurfaceSessionParams,
-    RestartPluginRuntimeDeleteParams, RestorePluginRuntimeParams,
-    RollbackPluginRuntimePreviousParams, SetPluginRuntimeAutoPublishParams,
-    StartPluginRuntimeBuildOperationParams, StartPluginRuntimeExportOperationParams,
-    TrashPluginRuntimeParams, UpdatePluginRuntimeProjectSourceParams,
-};
 pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{
     IKnowledgeEntryRepository, KnowledgeEntryMutation, KnowledgeProjectionReplacement,
@@ -136,20 +101,6 @@ pub use knowledge_tree_operation::{
 };
 pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
-pub use plugin_n1::{
-    AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
-    BeginPluginDependencyMutationParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    DeletePluginKvParams, DeletePluginProjectParams, DiscardPluginCandidateParams,
-    FinalizePluginDependencyMutationParams, FinishProductOperationParams,
-    GetPluginKvParams,
-    IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
-    RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
-    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SetPluginAutoApplyParams,
-    StartProductOperationParams, UninstallPluginMountParams, UpdatePluginMountConfigParams,
-    UpdatePluginProjectSourceParams,
-    MAX_PRODUCT_OPERATION_LOG_LINES,
-    MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
-};
 pub use provider::IProviderRepository;
 pub use provider_connection::IProviderConnectionRepository;
 pub use provider_model::{
@@ -178,13 +129,10 @@ pub use sqlite_creation_task::SqliteCreationTaskRepository;
 pub use sqlite_cron::SqliteCronRepository;
 pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_instance_token::SqliteInstanceTokenRepository;
-pub use sqlite_javascript_runtime_selection::SqliteJavaScriptRuntimeSelectionRepository;
-pub use sqlite_plugin_runtime::SqlitePluginRuntimeRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;
 pub use sqlite_oauth_token::SqliteOAuthTokenRepository;
-pub use sqlite_plugin_n1::SqlitePluginN1Repository;
 pub use sqlite_provider::SqliteProviderRepository;
 pub use sqlite_provider_connection::SqliteProviderConnectionRepository;
 pub use sqlite_provider_model::SqliteProviderModelRepository;

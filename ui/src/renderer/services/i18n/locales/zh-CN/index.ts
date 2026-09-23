@@ -34,9 +34,8 @@ import collaboration from './collaboration.json';
 import creativeStudio from './creativeStudio.json';
 import browserWorkspace from './browserWorkspace.json';
 import ssh from './ssh.json';
-import pluginRuntime from './pluginRuntime.json';
+import pluginPlatform from './pluginPlatform.json';
 import agentSettings from './agentSettings.json';
-import pluginWorkbench from './pluginWorkbench.json';
 import idmm from './idmm.json';
 
 export default {
@@ -71,8 +70,7 @@ export default {
   creativeStudio,
   browserWorkspace,
   ssh,
-  pluginRuntime,
+  pluginPlatform,
   agentSettings,
-  pluginWorkbench,
   idmm,
 };

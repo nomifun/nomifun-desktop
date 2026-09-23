@@ -1,7 +1,7 @@
 # NomiFun Product Ecosystem Architecture
 
-This document explains how NomiFun Desktop, Mobile, Xiaozhi Yuntai, Plugin
-Products, and companion channels form one product system. It describes product and
+This document explains how NomiFun Desktop, Mobile, Xiaozhi Yuntai, Unified
+Plugins, and companion channels form one product system. It describes product and
 trust boundaries; endpoint details remain in the linked operator guides.
 
 Simplified Chinese: [product-ecosystem.zh.md](product-ecosystem.zh.md)
@@ -10,7 +10,7 @@ Simplified Chinese: [product-ecosystem.zh.md](product-ecosystem.zh.md)
 
 | Product | Primary responsibility | Documentation |
 |---|---|---|
-| [NomiFun Desktop](https://github.com/nomifun/nomifun-desktop) | Local source of truth and execution hub for data, models, Agents, tasks, tools, Skills, knowledge, companions, and Plugin Products | [Architecture overview](overview.md) · [WebUI remote access](../guides/webui-remote-access.md) · [Xiaozhi integration](../guides/xiaozhi-robot.md) |
+| [NomiFun Desktop](https://github.com/nomifun/nomifun-desktop) | Local source of truth and execution hub for data, models, Agents, tasks, tools, Skills, knowledge, companions, and Unified Plugins | [Architecture overview](overview.md) · [WebUI remote access](../guides/webui-remote-access.md) · [Xiaozhi integration](../guides/xiaozhi-robot.md) |
 | [NomiFun Mobile](https://github.com/nomifun/nomifun-mobile) | Android / iOS / H5 interaction surface that directly uses an authorized Desktop instance | [Mobile README](https://github.com/nomifun/nomifun-mobile#readme) |
 | [NomiFun Xiaozhi Yuntai](https://github.com/nomifun/nomifun-xiaozhi-yuntai) | ESP32-S3 voice, display, motion, and device-tool endpoint for a Desktop companion | [Firmware README](https://github.com/nomifun/nomifun-xiaozhi-yuntai#readme) · [Desktop integration](../guides/xiaozhi-robot.md) |
 | [NomiFun Net Infra](https://github.com/nomifun/nomifun-net-infra) | Optional self-hosted NomiRelay transport for reaching Desktop and other services behind NAT across networks | [Product page](https://www.nomifun.com/products/net-infra/) · [Portal guide](https://www.nomifun.com/docs/guides/net-infra/) · [Relay integration](https://github.com/nomifun/nomifun-net-infra/tree/main/docs/integration) |
@@ -22,7 +22,7 @@ Simplified Chinese: [product-ecosystem.zh.md](product-ecosystem.zh.md)
 
   NomiFun Mobile  ───────────────┐
   Xiaozhi Yuntai ────────────────┤
-  Plugin Products ───────────────┼──▶ NomiFun Desktop
+  Unified Plugins ───────────────┼──▶ NomiFun Desktop
   Companion IM channels ─────────┘       │
                                          ├─ data and conversation authority
                                          ├─ models and Agent runtimes
@@ -80,19 +80,20 @@ TTS, sessions, and tool coordination. Binding the device to a companion keeps
 the physical embodiment in the same governed runtime as desktop and mobile
 interaction instead of creating a disconnected robot account.
 
-### Plugin Products are governed local software
+### Unified Plugins are governed local software
 
-A Plugin Product is created or imported as an editable project, tested, and
-published as an immutable Release in the Desktop-managed Plugin Library.
-Desktop separates project source from the active Release and governs UI
-Surfaces, Service lifecycle, capabilities, sharing, backup, and rollback.
+A Plugin is created from Chat or imported as one package directory/ZIP, then
+validated and installed through the same artifact pipeline. One local Plugin
+identity points to one active immutable Artifact and one generation DataRoot.
+Desktop governs its App Surface, isolated Service process, Action/Binding
+admission, storage, package export, backup, restore, and deletion.
 
 ## What is distinctive about the architecture
 
 ### One capability graph, many entry points
 
 Desktop companions, built-in Agents, supported Agent CLIs, Mobile, hardware,
-Plugin Products, MCP/REST callers, and IM channels all converge on Desktop-managed
+Unified Plugins, MCP/REST callers, and IM channels all converge on Desktop-managed
 capabilities. Models, Skills, knowledge, requirements, tasks, and tools are
 configured once and reused rather than being reimplemented per surface.
 
@@ -151,7 +152,7 @@ commit dates.
 
 ### Innovations launched in early 2026
 
-1. Desktop Plugin Products, superseding the historical Agent-made app model.
+1. Desktop Unified Plugins, superseding the historical Agent-made app model.
 2. A security-controlled customer-service cluster system.
 3. NomiFun Mobile directly connected to Desktop with no NomiFun cloud relay on
    the LAN path.

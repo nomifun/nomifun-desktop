@@ -13,12 +13,10 @@ use crate::runtime::RuntimeProfileKind;
 use crate::{
     ActionId, AgentPresetId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef,
     ContributionId, ContributionSourceKind, DigestHex, ChatRouteIdentity, ChatRouteRecord,
-    McpBindingId, McpServerId, McpToolKey, ModelRouteId, OperationId, PluginMountId,
-    PluginProductId,
+    AgentModuleId, McpBindingId, McpServerId, McpToolKey, ModelRouteId, OperationId,
     PrincipalRef, ResolvedSnapshotId, ResourceKind, RuntimeFeatureId,
     StableSourceIdentity, TypedResourceBindings, UserId, VersionString,
 };
-use crate::plugin_runtime::PluginReleaseRef;
 
 pub const CAPABILITY_NOT_MATERIALIZED: &str = "CAPABILITY_NOT_MATERIALIZED";
 pub const CAPABILITY_NOT_IN_PRESET: &str = "CAPABILITY_NOT_IN_PRESET";
@@ -77,9 +75,7 @@ pub struct ContributionLock {
     pub source_kind: ContributionSourceKind,
     pub source_identity: StableSourceIdentity,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mount_id: Option<PluginMountId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_product_id: Option<PluginProductId>,
+    pub mount_id: Option<AgentModuleId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<McpBindingId>,
     pub contribution_id: ContributionId,
@@ -99,19 +95,14 @@ impl ContributionLock {
         let valid_source_identity = match self.source_kind {
             ContributionSourceKind::PlatformBuiltin => {
                 self.mount_id.is_none()
-                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
             }
-            ContributionSourceKind::PluginMount => {
+            ContributionSourceKind::AgentModule => {
                 self.mount_id.is_some()
-                    && self.plugin_product_id.is_none()
                     && self.mcp_binding_id.is_none()
-            }
-            ContributionSourceKind::PluginProductActiveRelease => {
-                self.plugin_product_id.is_some() && self.mcp_binding_id.is_none()
             }
             ContributionSourceKind::McpBinding => {
-                self.mcp_binding_id.is_some() && self.plugin_product_id.is_none()
+                self.mcp_binding_id.is_some()
             }
         };
         if !valid_source_identity {
@@ -442,20 +433,12 @@ pub struct ResolvedCapability {
     pub contribution_id: ContributionId,
     pub contribution_lock: ContributionLock,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_mount_id: Option<PluginMountId>,
+    pub resolved_mount_id: Option<AgentModuleId>,
     pub resolved_source: PluginSourceMetadata,
     pub target_artifact_digest: DigestHex,
     pub schema_digest: DigestHex,
     pub dependency_path: Vec<crate::CapabilityId>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub plugin_product_id: Option<PluginProductId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_release: Option<PluginReleaseRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_release_epoch: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub catalog_digest: Option<DigestHex>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -573,81 +556,6 @@ impl ResolvedCapability {
                 "an action-bearing Module must freeze an explicit non-empty action grant",
             ));
         }
-        match self.contribution_lock.source_kind {
-            ContributionSourceKind::PluginProductActiveRelease => {
-                let product_id = self.plugin_product_id.as_ref().ok_or_else(|| {
-                    snapshot_capability_violation(
-                        &self.capability.id,
-                        "plugin_product_id is required for a Plugin Product release",
-                    )
-                })?;
-                validate_non_empty_canonical_value(product_id.as_ref(), "plugin_product_id")?;
-                let release = self.active_release.as_ref().ok_or_else(|| {
-                    snapshot_capability_violation(
-                        &self.capability.id,
-                        "active_release is required for a Plugin Product release",
-                    )
-                })?;
-                release
-                    .validate()
-                    .map_err(|error| snapshot_capability_violation(
-                        &self.capability.id,
-                        error.to_string(),
-                    ))?;
-                let active_release_epoch = self.active_release_epoch.ok_or_else(|| {
-                    snapshot_capability_violation(
-                        &self.capability.id,
-                        "active_release_epoch is required for a Plugin Product release",
-                    )
-                })?;
-                if active_release_epoch == 0 {
-                    return Err(snapshot_capability_violation(
-                        &self.capability.id,
-                        "active_release_epoch must be greater than zero",
-                    ));
-                }
-                if !self.resolved_mount_id.is_none()
-                    || self.contribution_lock.mount_id.is_some()
-                    || self.contribution_lock.mcp_binding_id.is_some()
-                    || self.contribution_lock.plugin_product_id.as_ref() != Some(product_id)
-                {
-                    return Err(snapshot_capability_violation(
-                        &self.capability.id,
-                        "Plugin Product release provenance is invalid",
-                    ));
-                }
-                let catalog_digest = self.catalog_digest.as_ref().ok_or_else(|| {
-                    snapshot_capability_violation(
-                        &self.capability.id,
-                        "catalog_digest is required for a Plugin Product release",
-                    )
-                })?;
-                if !is_lowercase_hex_digest(catalog_digest) {
-                    return Err(snapshot_capability_violation(
-                        &self.capability.id,
-                        "catalog_digest must be 64 lowercase hexadecimal characters",
-                    ));
-                }
-                if self.actions.is_empty() {
-                    return Err(snapshot_capability_violation(
-                        &self.capability.id,
-                        "Plugin Product capability must freeze at least one action",
-                    ));
-                }
-            }
-            _ => {
-                if self.plugin_product_id.is_some()
-                    || self.active_release.is_some()
-                    || self.active_release_epoch.is_some()
-                    || self.catalog_digest.is_some()
-                {
-                    return Err(snapshot_capability_violation(
-                        &self.capability.id,
-                        "Plugin Product release fields require Plugin Product release provenance",
-                    ));
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -659,7 +567,7 @@ pub struct ResolvedSkillLock {
     pub body_digest: DigestHex,
     pub required_capabilities: BTreeSet<crate::CapabilityId>,
     pub contribution_lock: ContributionLock,
-    pub resolved_mount_id: PluginMountId,
+    pub resolved_mount_id: AgentModuleId,
     pub resolved_source: PluginSourceMetadata,
     pub target_artifact_digest: DigestHex,
 }
@@ -779,7 +687,7 @@ impl ResolvedSnapshotEnvelope {
                 || lock.resolved_source.source_identity.trim().is_empty()
                 || !is_lowercase_hex_digest(&lock.body_digest)
                 || !is_lowercase_hex_digest(&lock.target_artifact_digest)
-                || (lock.contribution_lock.source_kind == ContributionSourceKind::PluginMount
+                || (lock.contribution_lock.source_kind == ContributionSourceKind::AgentModule
                     && lock.contribution_lock.mount_id.as_ref() != Some(&lock.resolved_mount_id))
                 || !lock.required_capabilities.is_subset(&self.content.capability_allowlist)
             {
@@ -1557,7 +1465,6 @@ mod tests {
                 source_kind: ContributionSourceKind::PlatformBuiltin,
                 source_identity: StableSourceIdentity::from("fixture.package"),
                 mount_id: None,
-                plugin_product_id: None,
                 mcp_binding_id: None,
                 contribution_id,
                 contract_digest: DigestHex::from(schema_digest),
@@ -1572,10 +1479,6 @@ mod tests {
             schema_digest: DigestHex::from(schema_digest),
             dependency_path: vec![capability_id],
             required_runtime_features: BTreeSet::new(),
-            plugin_product_id: None,
-            active_release: None,
-            active_release_epoch: None,
-            catalog_digest: None,
             display_name: None,
             description: None,
             actions: Vec::new(),

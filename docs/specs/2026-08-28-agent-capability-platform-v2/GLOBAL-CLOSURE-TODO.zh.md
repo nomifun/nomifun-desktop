@@ -1,5 +1,9 @@
 # Agent Capability Platform v2 一期精简闭合 TODO
 
+> 归档说明（2026-09-22）：本文件只保存非 Plugin Agent 核心的历史证据。正文中出现的
+> N1/M1、MiniApp、旧跨机 Prompt 与旧阶段文件名均已退役并删除，不是当前入口，也不得
+> 恢复。Plugin 唯一权威为 `../2026-09-22-unified-plugin-core/README.zh.md`。
+
 > 盘点日期：2026-09-09
 >
 > 基线分支：`rf/agent-capability-platform-v2`
@@ -30,8 +34,8 @@
 > 均已通过。Windows x64 Nomi-core 候选随后在提交
 > `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 上完成 package/install/fresh/launch、
 > 真实 StepFun、Browser/Computer、Remote、进程树清理和卸载验证，`SL-S5-01` 已关闭。
-> 用户已明确授权继续实施 06；Plugin/MiniApp 使用独立的
-> `PHASE-N1-M1-CLOSURE-TODO.zh.md` 跟踪，不回填到本期 S0-S5 数量中。
+> 用户当时已明确授权继续实施 06；Plugin/MiniApp 使用一份现已退役的独立阶段台账
+> 跟踪，不回填到本期 S0-S5 数量中。
 
 本文是 05 发布后的唯一一期执行台账。旧版 84 个 `INF/W/LEG/SCN/TST/REL`
 ID 从现在起只作为历史审计索引，不再是一期必须逐项关闭的阻断清单，也不得继续用
@@ -61,7 +65,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 1. 05 与本文冲突时以 05 为准；经修订的 01-04 与 `DECISIONS` 保留设计依据，但不记录实时
    状态。旧 `IMPLEMENTATION-STATUS`、旧 GLOBAL TODO、旧 Prompt 和旧 handoff 仅作 Git
    历史审计，不是当前执行材料。用户于 2026-09-09 明确要求阶段性交接时，当前唯一的
-   启动入口是 `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`；它不替代本文、
+   启动入口是当时的跨机启动 Prompt（现已退役）；它不替代本文、
    PHASE 台账或 05/06 设计合同。
 2. 不使用 reset、force-push 或历史重写；revert 必须使用普通提交，并先检查真实消费者。
 3. 每个任务只实现一个实际闭环；需要第二份事实、新 coordinator、新全局 digest 或新状态机
@@ -71,7 +75,7 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 5. API key、token、私钥、主机地址和签名 secret 不进入源码、文档、fixture、日志、命令行
    参数或报告。
 6. 测试遇到环境或 harness 障碍时记录首个完整失败、停止盲目重试，并提供人工替代步骤。
-7. 二期 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 不属于本台账；
+7. 已退役的二期 Plugin/MiniApp 实施计划不属于本台账；
    AP-0～AP-7 和 Windows C8 已完成，用户已单独授权其实施，实时状态由独立 N1/M1
    台账维护。
 8. Codex app-server 只作为未来 host boundary 研究；其 fixture、adapter、Broker smoke
@@ -469,7 +473,7 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   Browser、Robot、SSH，最后关闭数据库；IDMM janitor 不再在数据库关闭后继续查询。
 - 默认所有开发、合流和验证继续在本机进行，不建立长期跨机开发协议。2026-09-09 用户
   明确要求将 Windows N1/M1 阶段性交给另一台机器；启动上下文集中记录在
-  `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`，不产生压缩包、跨机 attestation
+  当时的跨机启动 Prompt（现已退役），不产生压缩包、跨机 attestation
   或第二个状态源。
 
 ### 2026-09-05 本机续接 checkpoint
@@ -548,7 +552,7 @@ handoff 或跨机 attestation。
    边界进入维护状态，除确定性合同缺口外不扩大兼容层。
 2. 保留 `0bac72da4ebb62f6a0f183a1285065c88aa684a4` 的 Windows C8 结果作为一期
    工程闭合证据，不在其上混入 06 代码。
-3. 按 `06-phase-n1-plugin-miniapp-simplified-implementation-plan.zh.md` 和独立
+3. 按当时的二期 Plugin/MiniApp 计划和独立
    N1/M1 台账，先完成 Plugin Windows，再完成 MiniApp Windows。
 4. 06 的全部 Windows 开发和候选验证完成后，冻结新的最终 source cohort，再统一交给
    macOS arm64 与 Linux Desktop x64 做原生验证；发现问题返回当前主机修复。
@@ -582,7 +586,7 @@ Codex-native、external Codex integration、C9 shutdown 和 Nomi-free RC 不是�
 ## 2026-09-08 06 Windows 主线状态同步（M1-1 收口后）
 
 AP-0～AP-7、一期 C8 与 S0-S5 的口径保持不变；06 的实时状态继续由
-PHASE-N1-M1-CLOSURE-TODO.zh.md 维护。M1-0-02-A/B、M1-1-01 和 M1-1-02 已完成
+已退役的 N1/M1 阶段台账维护。M1-0-02-A/B、M1-1-01 和 M1-1-02 已完成
 Windows 主机实现与定向回归：真实 dedicated Service Host、Service Storage IPC、
 owner-scoped Files、Host-managed Private SQLite、authorizer、Migration ledger、
 Publish migration fence 和 Runtime candidate Service 验证均已接入并推送。
@@ -640,7 +644,7 @@ macOS arm64 与 Linux Desktop x64，手机模式不属于 `nomifun-desktop` 范�
 用户要求先进行阶段性收尾，再由另一台更快的 coding agent 接手后续 Windows 主线。
 当前交接材料为：
 
-`CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
+当时的跨机启动 Prompt（现已退役）
 
 该文档固定了 `rf/agent-capability-platform-v2` 的交接基线
 `51b0243f7587df22a4007ad63655b64d0f861b7a`、已交付的 M1-2 Whole-App Backup

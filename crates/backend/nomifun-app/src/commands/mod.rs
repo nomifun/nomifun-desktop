@@ -9,7 +9,6 @@ mod gateway_stdio;
 mod knowledge_stdio;
 mod mcp_stdio;
 mod open_stdio;
-mod plugin;
 mod remote_cli;
 mod requirement_stdio;
 mod server;
@@ -25,7 +24,6 @@ pub use mcp_stdio::{
     run_mcp_stdio_subcommand_if_present,
 };
 pub use open_stdio::run_open_stdio;
-pub use plugin::run_plugin;
 pub use remote_cli::run_remote;
 pub use requirement_stdio::run_requirement_stdio;
 pub use server::{run_nomi_core_server, shutdown_signal};

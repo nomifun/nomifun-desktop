@@ -175,7 +175,6 @@ mod tests {
                 },
                 CompileRequest {
                     revision,
-                    plugin_product_capabilities: Vec::new(),
                     principal: principal.clone(),
                     scene: "coding-kernel-test".to_owned(),
                     surface: "desktop".to_owned(),

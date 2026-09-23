@@ -97,9 +97,8 @@ NomiFun 启动时进入三种鉴权策略之一：
 | 知识库 | `/api/knowledge/*` | 已鉴权 | [`nomifun-knowledge/src/routes.rs`](../../crates/backend/nomifun-knowledge/src/routes.rs) |
 | 创意工坊管理与生成 | `/api/creative-studio/*` 管理分组：项目、素材、提示词、模板/运行/草稿、任务、Agent session 与集合 | 仅实例 owner | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs)、[`nomifun-creation/src/routes.rs`](../../crates/backend/nomifun-creation/src/routes.rs)、[`nomifun-conversation/src/routes.rs`](../../crates/backend/nomifun-conversation/src/routes.rs) |
 | 创意工坊媒体交付 | `GET /api/creative-studio/files/{asset_id}` | 公开的只读 capability URL；不提供列表或写操作 | [`nomifun-workshop/src/routes.rs`](../../crates/backend/nomifun-workshop/src/routes.rs) |
-| Plugin 平台与 Product 管理 | `/api/plugins/*`：workspace、draft、authoring、project、mount、operation 和 installation-scoped Plugin 状态 | 仅实例 owner；写操作还要求本地产品信任 | [`router/plugin_product`](../../crates/backend/nomifun-app/src/router/plugin_product/) |
-| Plugin Product 运行域 | `/api/plugins/runtimes/*`：project、Workshop、源码、构建/测试/发布/回滚、启停、发布模式、Service 生命周期、分享/备份/导入、回收站/恢复/永久删除和 Surface 开关 | 仅实例 owner；写操作还要求本地产品信任 | [`router/plugin_runtime.rs`](../../crates/backend/nomifun-app/src/router/plugin_runtime.rs) |
-| Plugin Surface 资源与 bridge | 由 Surface open 返回、受 Capability 约束的资源和 bridge 路由；调用方不得自行拼接公开资源 URL | 持有有效且作用域匹配的 Surface capability | 同上 |
+| Unified Plugin Core | `/api/plugins`、`/api/plugins/{plugin_id}/*` 与 `/api/plugin-drafts/*`：Library、Chat/Draft、目录/ZIP/Backup 共用导入、配置、生命周期、Package/Backup 导出和 Preview | 仅实例 owner；写操作还要求本地产品信任 | [`router/plugin.rs`](../../crates/backend/nomifun-app/src/router/plugin.rs) |
+| Plugin Surface 资源与 Bridge | descriptor-fenced 资源与 Bridge 路由，包含精确 session generation 与 Artifact digest | 实例 owner 且持有匹配的 live Surface descriptor | 同上 |
 | 伙伴 | `/api/companion/*` | 已鉴权 | [`nomifun-companion/src/routes.rs`](../../crates/backend/nomifun-companion/src/routes.rs) |
 | NomiFun Desktop 访问令牌 | `/api/webui/access-token` | 本地信任 / 安装 owner 流 | [`router/instance_token_routes.rs`](../../crates/backend/nomifun-app/src/router/instance_token_routes.rs) |
 | 会话 Browser Workspace | `/api/conversations/{conversation_id}/browser*` | 安装 owner + 本地产品信任；校验 conversation 所有权，并拒绝委派执行 step | [`router/browser_workspace.rs`](../../crates/backend/nomifun-app/src/router/browser_workspace.rs) |

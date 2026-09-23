@@ -19,7 +19,6 @@ const USER_AGENT_RESOURCE_KINDS = [
   'robot',
   'mcp_server',
   'canvas',
-  'plugin',
 ] as const;
 
 /**
@@ -34,7 +33,6 @@ const OPTIONAL_UNBOUND_AGENT_RESOURCE_KINDS = [
   'channel',
   'robot',
   'canvas',
-  'plugin',
   'ssh_host',
 ] as const;
 

@@ -28,7 +28,7 @@ use nomifun_agent_contracts::{
     InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
-    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
+    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId,
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     RemoteAuthMutation, RemoteOperation, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
@@ -1370,7 +1370,7 @@ fn registration_for(
     };
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
-        mount_id: PluginMountId::from(mount_id),
+        mount_id: AgentModuleId::from(mount_id),
     };
     let cancellation_port = host_port("host.plugin.cancel");
     let task_port = host_port("host.plugin.tasks");

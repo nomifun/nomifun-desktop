@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::http::StatusCode;
 use nomifun_ai_agent::{
@@ -22,7 +22,6 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, OfficialTemplateCatalog, PresetRevisionCompiler,
-    SharedPluginProductCatalogPublications,
 };
 use nomifun_agent_kernel::{
     CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
@@ -32,7 +31,6 @@ use nomifun_agent_control_plane::{
     KernelCatalogProvider,
 };
 use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
-use nomifun_plugin_platform::runtime::PluginRuntimeServiceRuntimeBinding;
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnTerminalDelete};
@@ -105,14 +103,8 @@ pub struct ModuleStates {
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
-    /// Plugin Library and Workshop state.
-    pub plugin_runtime: super::plugin_runtime::PluginRuntimeM1RouterState,
-    /// Phase N1 Plugin Library and lifecycle product state. Capability
-    /// execution remains owned by the shared Kernel registry.
-    pub plugin: nomifun_plugin_platform::application::PluginRouterState,
-    /// Installation-global Node Runtime selection and managed provisioning.
-    pub(crate) javascript_runtime:
-        super::javascript_runtime::JavaScriptRuntimeRouterState,
+    /// Unified Plugin Library, Draft, Import, Surface and storage state.
+    pub plugin: super::plugin::PluginRouterState,
     /// 生成引擎 (creation) media task queue.
     pub creation: CreationRouterState,
     pub webhook: WebhookRouterState,
@@ -223,19 +215,67 @@ pub(crate) async fn try_build_module_states(
         )
         .await
         .map_err(|error| anyhow::anyhow!("JavaScript Runtime foundation composition failed: {error:#}"))?;
-    let runtime_authority = javascript_runtime_foundation.authority();
-    let (
-        nomi_core_agent_api,
-        plugin_state,
-        plugin_runtime_participant,
-        nomi_core_wave4_owners,
-        mcp_catalog_publisher,
-    ) =
+    let plugin_action_dispatcher = Arc::new(
+        super::plugin_ports::RegistryPluginActionDispatcher::default(),
+    );
+    let plugin_ports = super::plugin_ports::build_plugin_service_ports(
+        services.database.pool().clone(),
+        services.encryption_key,
+        plugin_action_dispatcher.clone(),
+        Arc::new(super::plugin_ports::UnavailablePluginDesktopOwner),
+    );
+    let plugin_surface_host = plugin_ports.host.clone();
+    let plugin_service_runtime = Arc::new(nomifun_plugin_platform::PluginServiceRuntime::new(
+        javascript_runtime_foundation.authority(),
+        services.plugin_artifacts.clone(),
+        plugin_ports,
+    ));
+    let plugin_binding_registry = nomifun_plugin_platform::InMemoryPluginBindingRegistry::new(
+        Arc::new(super::plugin_ports::PluginServiceActionRuntime::new(
+            plugin_service_runtime.clone(),
+        )),
+    );
+    super::plugin_ports::register_plugin_binding_owners(&plugin_binding_registry)
+        .map_err(|error| anyhow::anyhow!("Plugin Binding owner registration failed: {error}"))?;
+    plugin_action_dispatcher
+        .install(plugin_binding_registry.clone())
+        .map_err(anyhow::Error::msg)?;
+    let plugin_binding_consumers =
+        super::plugin_ports::PluginBindingConsumers::new(
+            plugin_binding_registry.clone(),
+            plugin_surface_host,
+        );
+    services
+        .plugin_service_runtime
+        .set(plugin_service_runtime.clone())
+        .map_err(|_| anyhow::anyhow!("Plugin Service runtime was installed more than once"))?;
+    let plugin_install = Arc::new(nomifun_plugin_platform::PluginInstallService::new(
+        services.plugin_repository.clone(),
+        services.plugin_artifacts.clone(),
+        services.plugin_data_roots.clone(),
+        plugin_service_runtime.clone(),
+        Arc::new(plugin_binding_registry),
+    ));
+    plugin_install
+        .recover()
+        .await
+        .map_err(|error| anyhow::anyhow!("Plugin mutation recovery failed: {error}"))?;
+    let plugin_state = super::plugin::PluginRouterState::new(
+        services,
+        plugin_install,
+        plugin_service_runtime,
+        plugin_binding_consumers,
+    );
+    plugin_state
+        .recover()
+        .await
+        .map_err(|error| anyhow::anyhow!("Plugin runtime recovery failed: {error}"))?;
+    let (nomi_core_agent_api, nomi_core_wave4_owners, mcp_catalog_publisher) =
         build_nomi_core_agent_api_state(
             services,
             conversation_owner.clone(),
-            runtime_authority.clone(),
             idmm_service.clone(),
+            plugin_state.agent.clone(),
         )
         .await
         .map_err(|error| anyhow::anyhow!("Nomi-core Agent/Plugin platform composition failed: {error:#}"))?;
@@ -246,88 +286,6 @@ pub(crate) async fn try_build_module_states(
             nomi_core_agent_api.session_owner.canonical().clone(),
         )?;
     }
-    let javascript_runtime =
-        super::javascript_runtime::build_javascript_runtime_state(
-            javascript_runtime_foundation,
-            plugin_state.clone(),
-            plugin_runtime_participant,
-            services.plugin_runtime.clone(),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!("JavaScript Runtime Manager composition failed: {error:#}"))?;
-    let service_registry = Arc::new(
-        nomifun_plugin_platform::runtime::PluginRuntimeServiceModuleRegistry::new(
-            services.data_dir.join("plugin-m1").join("release"),
-        )
-        .map_err(|error| anyhow::anyhow!("Plugin Service module registry composition failed: {error}"))?,
-    );
-    let service_storage = Arc::new(
-        nomifun_plugin_platform::runtime::SqlitePluginRuntimeManagedStorage::new(
-            services.data_dir.join("plugin-m1").join("managed"),
-            services.database.pool().clone(),
-        )
-        .map_err(|error| anyhow::anyhow!("Plugin Service managed storage composition failed: {error}"))?,
-    );
-    let service_runtime = Arc::new(
-        nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage(
-            runtime_authority,
-            service_registry,
-            Some(service_storage),
-            nomifun_plugin_platform::runtime::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
-        )
-        .map_err(|error| anyhow::anyhow!("Plugin Service runtime composition failed: {error}"))?,
-    );
-    services
-        .plugin_runtime
-        .install_service_runtime(service_runtime.clone())
-        .await;
-    services
-        .plugin_runtime
-        .reconcile_source_mutations()
-        .await
-        .map_err(|error| anyhow::anyhow!("Plugin Source mutation startup reconciliation failed: {error}"))?;
-    if let Err(error) = services
-        .plugin_runtime
-        .reconcile_pending_deletions(services.authoritative_user_id.as_ref())
-        .await
-    {
-        tracing::warn!(
-            error = %error,
-            "Plugin permanent-delete startup reconciliation left durable failures"
-        );
-    }
-    if let Err(error) = services
-        .plugin_runtime
-        .reconcile_all_service_runtime(services.authoritative_user_id.as_ref())
-        .await
-    {
-        tracing::warn!(
-            error = %error,
-            "Plugin Service startup reconciliation inventory failed"
-        );
-    }
-    let service_runtime_for_maintenance = service_runtime;
-    let service_shutdown = services.background_shutdown.child_token();
-    services.register_background_task(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                _ = service_shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    if let Err(error) = service_runtime_for_maintenance
-                        .maintain(nomifun_common::now_ms().max(1))
-                        .await
-                    {
-                        tracing::warn!(
-                            error = %error,
-                            "Plugin Service runtime maintenance failed"
-                        );
-                    }
-                }
-            }
-        }
-    }));
     let cron = build_cron_state(services, conversation_owner.clone());
     nomi_core_agent_api
         .install_cron_cleanup_owner(cron.cron_service.clone())
@@ -447,9 +405,7 @@ pub(crate) async fn try_build_module_states(
             )),
         },
         workshop: build_workshop_state(services),
-        plugin_runtime: build_plugin_runtime_state(services),
         plugin: plugin_state,
-        javascript_runtime,
         creation: build_creation_state(services),
         webhook: build_webhook_state(services),
         // REST routes, model tools and AutoWork share this one engine and its
@@ -480,12 +436,10 @@ pub(crate) async fn try_build_module_states(
 async fn build_nomi_core_agent_api_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
-    runtime: Arc<dyn nomifun_js_runtime::CommittedRuntimeProvider>,
     idmm: Arc<nomifun_idmm::IdmmService>,
+    agent_plugins: nomifun_plugin_platform::AgentPluginBindings,
 ) -> anyhow::Result<(
     NomiCoreAgentApiState,
-    nomifun_plugin_platform::application::PluginRouterState,
-    Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
     Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     Arc<dyn nomifun_mcp::service::McpCatalogPublisher>,
 )> {
@@ -572,16 +526,6 @@ async fn build_nomi_core_agent_api_state(
             Arc::clone(&builtin_plan.lifecycle_invoker),
         )?,
     );
-    let plugin_catalog = Arc::new(SharedPluginProductCatalogPublications::new());
-    services
-        .plugin_runtime
-        .install_catalog_sink(plugin_catalog.clone())
-        .await;
-    services
-        .plugin_runtime
-        .hydrate_catalog_publications(services.authoritative_user_id.as_ref())
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let unavailable_capabilities = materialized
         .capabilities
         .values()
@@ -606,33 +550,27 @@ async fn build_nomi_core_agent_api_state(
         .collect::<BTreeMap<_, _>>();
     let catalog = Arc::new(
         KernelCatalogProvider::new(Arc::clone(&kernel))
-            .with_unavailable_capabilities(unavailable_capabilities)
-            .with_plugin_product_publication_source(plugin_catalog),
+            .with_unavailable_capabilities(unavailable_capabilities),
     );
-    let plugin = super::plugin_platform::build_nomi_core_plugin_state(
-        services.database.pool().clone(),
-        services.data_dir.clone(),
-        services.authoritative_user_id.as_ref(),
+    let module_publisher = Arc::new(NomiCoreModuleCatalogPublisher::new(
         Arc::clone(&kernel),
-        Arc::clone(&catalog),
         registrations,
-        runtime,
-        approved_platform_builtin_capability_ids,
-        Some(services.model_invoke_service.clone()),
-    )
-    .await?;
-    let plugin_state = plugin.router.clone();
+        Arc::new(nomifun_db::SqliteMcpServerRepository::new(
+            services.database.pool().clone(),
+        )),
+        Arc::clone(&builtin_plan.wave2_owner),
+    ));
     #[cfg(feature="browser-use")]
     if let Some(runtime) = services.headless_render.as_ref() {
         services.knowledge_service.set_browser_render_content_port(
             super::knowledge_browser::KnowledgeHeadlessRenderPort::bind(runtime.clone()));
     }
-    let mcp_catalog_publisher = plugin.mcp_catalog_publisher(
-        Arc::new(nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone())),
-        Arc::clone(&builtin_plan.wave2_owner),
-    );
-    let plugin_runtime_participant =
-        Arc::clone(&plugin.runtime_participant);
+    let mcp_catalog_publisher: Arc<dyn nomifun_mcp::service::McpCatalogPublisher> =
+        module_publisher;
+    let schema_resolver: Arc<dyn nomifun_ai_agent::NomiPluginToolSchemaResolver> =
+        Arc::new(BuiltinToolSchemaAdapter {
+            inner: Arc::clone(&builtin_plan.schema_resolver),
+        });
 
     let schema_digest = digest_payload(&agent_store_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
@@ -725,19 +663,18 @@ async fn build_nomi_core_agent_api_state(
             context_admission: Arc::clone(&platform_builtin_context_admission),
             #[cfg(feature = "browser-use")]
             browser: browser_owner,
-            plugin_product: super::engine_plugin_product_tools::PluginProductOwner {
-                application: Arc::clone(&services.plugin_runtime),
-                receipts: super::hosted_effect_receipts::HostedEffectReceipts::new(services.database.pool().clone()),
-            },
+            hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(
+                services.database.pool().clone(),
+            ),
             robot: robot_owner.clone(),
+            agent_plugins,
         },
-        Arc::clone(&plugin.skill_artifacts),
     ));
     services
         .official_runtime
         .install(super::unified_runtime_host::factory(
             engine_sessions,
-            Arc::clone(&plugin.schema_resolver),
+            Arc::clone(&schema_resolver),
             Arc::clone(&builtin_plan.schema_resolver),
             builtin_plan.host_dynamic_tool_capability_ids.clone(),
             idmm,
@@ -755,14 +692,12 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&control_plane),
         Arc::clone(&kernel),
         environment,
-        plugin.schema_resolver,
+        schema_resolver,
         platform_builtin_tool_admission,
         platform_builtin_context_admission,
         platform_builtin_lifecycle_admission,
         robot_owner,
-        Arc::clone(&services.plugin_runtime),
         Arc::clone(&builtin_plan.wave2_owner),
-        Arc::clone(&plugin.skill_artifacts),
         services.database.pool().clone(),
     ));
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
@@ -785,17 +720,89 @@ async fn build_nomi_core_agent_api_state(
             product_agent_resolver,
             plugin_tool_sessions,
             services.ssh_pool.clone(),
-            services.plugin_runtime.clone(),
             #[cfg(feature = "browser-use")]
             services.browser_resources.clone(),
             #[cfg(feature = "browser-use")]
             services.attached_chrome.clone(),
         ),
-        plugin_state,
-        plugin_runtime_participant,
         wave4_owners,
         mcp_catalog_publisher,
     ))
+}
+
+struct BuiltinToolSchemaAdapter {
+    inner: Arc<dyn nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver>,
+}
+
+#[async_trait::async_trait]
+impl nomifun_ai_agent::NomiPluginToolSchemaResolver for BuiltinToolSchemaAdapter {
+    async fn resolve(
+        &self,
+        capability: &nomifun_agent_contracts::ResolvedCapability,
+        reference: &nomifun_agent_contracts::CanonicalSchemaRef,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, String> {
+        self.inner.resolve(capability, reference).await
+    }
+}
+
+struct NomiCoreModuleCatalogPublisher {
+    kernel: Arc<KernelRegistry>,
+    base_registrations: Vec<nomifun_agent_kernel::PluginRegistration>,
+    repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+    host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    publish_lock: tokio::sync::Mutex<()>,
+}
+
+impl NomiCoreModuleCatalogPublisher {
+    fn new(
+        kernel: Arc<KernelRegistry>,
+        registrations: Vec<nomifun_agent_kernel::PluginRegistration>,
+        repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+        host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    ) -> Self {
+        let base_registrations = registrations
+            .into_iter()
+            .filter(|registration| {
+                !registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+                    .iter()
+                    .any(|capability| {
+                        super::nomi_core_mcp_catalog::is_product_tool(capability.id.as_ref())
+                    })
+            })
+            .collect();
+        Self {
+            kernel,
+            base_registrations,
+            repository,
+            host,
+            publish_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl nomifun_mcp::service::McpCatalogPublisher for NomiCoreModuleCatalogPublisher {
+    async fn refresh(&self) -> Result<(), nomifun_mcp::McpError> {
+        let _guard = self.publish_lock.lock().await;
+        let mut registrations = self.base_registrations.clone();
+        registrations.extend(
+            super::nomi_core_mcp_catalog::load_registrations(
+                self.repository.as_ref(),
+                Arc::clone(&self.host),
+            )
+            .await
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?,
+        );
+        self.kernel
+            .replace_all(registrations)
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+        Ok(())
+    }
 }
 
 struct NomiCoreCronAgentPresetResolver {
@@ -1407,22 +1414,6 @@ pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
             workspace: services.data_dir.clone(),
         }),
     )
-}
-
-/// Build the Plugin router state from the clean-start application
-/// facade composed by `AppServices`.
-pub fn build_plugin_runtime_state(
-    services: &AppServices,
-) -> super::plugin_runtime::PluginRuntimeM1RouterState {
-    super::plugin_runtime::PluginRuntimeM1RouterState::new(
-        services.plugin_runtime.clone(),
-    )
-    .with_product(super::plugin_product::PluginProductService::new(
-        nomifun_db::PluginProductDocuments::new(services.database.pool().clone()),
-        services.plugin_runtime.clone(),
-        services.model_invoke_service.clone(),
-        services.data_dir.clone(),
-    ))
 }
 
 /// Build the 生成引擎 (creation) router state, reusing the singleton

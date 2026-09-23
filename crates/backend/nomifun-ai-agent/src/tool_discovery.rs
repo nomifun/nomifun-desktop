@@ -114,31 +114,22 @@ pub(crate) fn decode_selection(value: StrictJsonValue) -> Result<Vec<String>, St
     Ok(output.names)
 }
 
-/// Assembly may still need the existing Product adapter. This is not an
-/// executable fallback: register_into rejects an unbound Product selection.
 #[derive(Clone)]
 pub(crate) enum DiscoveryBinding {
     Ready(CapabilityId, Arc<dyn ToolDiscoveryPolicy>),
-    Product(ResolvedCapability),
 }
 
 impl DiscoveryBinding {
     pub(crate) fn id(&self) -> &CapabilityId {
-        match self {
-            Self::Ready(id, _) => id,
-            Self::Product(resolved) => &resolved.capability.id,
-        }
+        let Self::Ready(id, _) = self;
+        id
     }
 
     pub(crate) fn policy(
         &self,
     ) -> Result<Arc<dyn ToolDiscoveryPolicy>, crate::NomiPluginToolError> {
-        match self {
-            Self::Ready(_, policy) => Ok(policy.clone()),
-            Self::Product(_) => Err(crate::NomiPluginToolError::Contract(
-                "Selected Product discovery policy has no execution adapter".into(),
-            )),
-        }
+        let Self::Ready(_, policy) = self;
+        Ok(policy.clone())
     }
 }
 
@@ -157,28 +148,19 @@ fn selected_capability<'a>(
 ) -> Result<Option<&'a ResolvedCapability>, crate::NomiPluginToolError> {
     let mut selected = None;
     for resolved in content.contributions() {
-        let actions = if resolved.contribution_lock.source_kind
-            == ContributionSourceKind::PluginProductActiveRelease
+        let current = registry
+            .capability(&resolved.capability.id)
+            .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                capability_id: resolved.capability.id.clone(),
+            })?;
+        crate::plugin_tools::validate_exact_target(resolved, current)?;
+        if current.manifest.contributions.actions == [action()] && !supports(&current.manifest)
         {
-            resolved
-                .validate()
-                .map_err(|e| crate::NomiPluginToolError::Contract(e.message))?;
-            &resolved.actions
-        } else {
-            let current = registry
-                .capability(&resolved.capability.id)
-                .ok_or_else(|| KernelError::CapabilityNotMaterialized {
-                    capability_id: resolved.capability.id.clone(),
-                })?;
-            crate::plugin_tools::validate_exact_target(resolved, current)?;
-            if current.manifest.contributions.actions == [action()] && !supports(&current.manifest)
-            {
-                return Err(crate::NomiPluginToolError::Contract(
-                    "Discovery capability must publish the exact Agent discovery Action".into(),
-                ));
-            }
-            &current.manifest.contributions.actions
-        };
+            return Err(crate::NomiPluginToolError::Contract(
+                "Discovery capability must publish the exact Agent discovery Action".into(),
+            ));
+        }
+        let actions = &current.manifest.contributions.actions;
         if !actions.iter().any(|a| {
             a.action_id.as_ref() == ACTION_ID && a.presentation == ToolPresentationKind::Hidden
         }) {
@@ -193,14 +175,6 @@ fn selected_capability<'a>(
             return Err(crate::NomiPluginToolError::Contract(
                 "Discovery capability requires the exact hidden rank contract and action authority"
                     .into(),
-            ));
-        }
-        if resolved.contribution_lock.source_kind
-            == ContributionSourceKind::PluginProductActiveRelease
-            && !resolved.required_resource_kinds.is_empty()
-        {
-            return Err(crate::NomiPluginToolError::Contract(
-                "Product discovery resources require an unavailable binding adapter".into(),
             ));
         }
         if selected.replace(resolved).is_some() {
@@ -234,11 +208,6 @@ impl KernelDiscoveryPolicy {
         let Some(resolved) = selected_capability(&registry, compiled.content())? else {
             return Ok(None);
         };
-        if resolved.contribution_lock.source_kind
-            == ContributionSourceKind::PluginProductActiveRelease
-        {
-            return Ok(Some(DiscoveryBinding::Product(resolved.clone())));
-        }
         let policy = compiled.policy(&resolved.capability.id).ok_or_else(|| {
             crate::NomiPluginToolError::Contract(
                 "Discovery policy has no compiled authority".into(),

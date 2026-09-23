@@ -1,5 +1,9 @@
 # 开放 Runtime 接入边界
 
+> 归档边界（2026-09-23）：本文涉及 MiniApp、旧 Plugin 发布/Host 的段落仅保留历史背景，
+> 不得作为当前 Plugin 合同或实现依据。Plugin 唯一权威为
+> `../2026-09-22-unified-plugin-core/README.zh.md`。
+
 依据用户 2026-09-13 的补充要求：NomiFun 是开放平台，执行引擎必须可替换；
 不能把接入方式固定为 Nomi/Coding 两个具体实现。所有开发统一在
 `rf/agent-capability-platform-v2`，不 push。
@@ -324,7 +328,7 @@ Plugin Package v1 生成只含冻结 Skill 资源和固定 no-op 入口的候选
 共享 EngineContextResource/EngineContextContent 为纯数据，Coding 的旧类型保留别名；
 社区通过 EngineSessionHost.read_selected_skills 获取 SelectedEngineSkills，决定自身上下文策略。
 官方 Nomi 已接冻结正文／索引、分页与 vision/model-gated 图片；无可变目录或最新版本回退。
-详见 `ENGINE-SKILL-PUBLICATION-2026-09-14.zh.md`；该切片 Coding loop27 / Nomi host12，未验证。
+该旧 Skill-to-Plugin 发布切片已退役；其 Coding loop27 / Nomi host12 记录未验证。
 
 2026-09-14 宿主效果补充（未验证）：该切片 Coding loop28 / Nomi host13。
 Nomi 的 with_effect_scope 同时覆盖 Kernel、MiniApp、动态工具 invoker，预留一个 mandatory
@@ -343,7 +347,7 @@ EngineKernelSession.miniapp_tool_plan 读取 exact schema，EngineToolPlan.merge
 同一平台调用／receipt 实现。公共模型 claim 和清理均拒绝 hosted pending。
 社区可调用 hosted_effect_context 保留效果历史，不能据 transcript 缺失重复执行。
 仅支持当前无额外资源依赖的 function actions；Robot／非工具生命周期不由此自动接通。
-详见 `ENGINE-MINIAPP-PORT-2026-09-14.zh.md`，编译期注册和 immutable Session binding 不变。
+旧 MiniApp 端口切片已退役；编译期 Engine 注册和 immutable Session binding 的历史结论不变。
 
 2026-09-14 Robot 端口补充（未验证）：当前 Coding loop30 / Nomi host15。
 公共 `EngineKernelSession.robot_tool_plan()` 冻结真实设备 schema/名称，install_tools 串行

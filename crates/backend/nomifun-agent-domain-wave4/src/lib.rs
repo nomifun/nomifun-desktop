@@ -23,7 +23,7 @@ use nomifun_agent_contracts::{
     InProcessEntrypointMetadata, LocalizedMetadata, ManagedTaskRegistrationDescriptor,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
-    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, PluginMountId,
+    PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId,
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
@@ -1675,7 +1675,7 @@ fn registration_for(
         source_identity: spec.id.to_owned(),
         source_digest: None,
     };
-    let mount_id = PluginMountId::from(spec.mount_id);
+    let mount_id = AgentModuleId::from(spec.mount_id);
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
         mount_id: mount_id.clone(),
@@ -1887,7 +1887,7 @@ fn conversation_module_registration(
         source_identity: spec.id.to_owned(),
         source_digest: None,
     };
-    let mount_id = PluginMountId::from(spec.mount_id);
+    let mount_id = AgentModuleId::from(spec.mount_id);
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
         mount_id: mount_id.clone(),

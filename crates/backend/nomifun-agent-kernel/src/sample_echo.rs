@@ -18,7 +18,7 @@ use nomifun_agent_contracts::{
     PackageContributions,
     PackageEntrypointMetadata, PackageId, PackageManifest, PackageRef, PlatformConstraint,
     PluginBootCriticality, PluginBootState, PluginContextDescriptor, PluginDesiredState,
-    PluginEffectiveState, PluginIdentityDescriptor, PluginMountId, PluginRegistrarDescriptor,
+    PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateCompareAndSwapOutcome, PluginStateHandleDescriptor, PluginStateMethod,
     PresetRevisionRef, PrincipalRef, ResolvedRoleProviderLock, ResourceBindingId, ResourceId,
@@ -236,7 +236,7 @@ fn registration_for(
     let task_port = host_port("host.plugin.tasks");
     let identity = PluginIdentityDescriptor {
         package: package.clone(),
-        mount_id: PluginMountId::from(mount_id),
+        mount_id: AgentModuleId::from(mount_id),
     };
     let metadata = PluginRegistrationMetadata {
         manifest: ArtifactEnvelope::new(manifest).unwrap(),
@@ -278,7 +278,7 @@ fn registration_for(
             },
             state: PluginStateHandleDescriptor {
                 package_id: package.id,
-                mount_id: PluginMountId::from(mount_id),
+                mount_id: AgentModuleId::from(mount_id),
                 methods: PluginStateMethod::REQUIRED.into_iter().collect(),
             },
             declared_services: DeclaredServiceViewDescriptor::default(),
@@ -823,7 +823,7 @@ fn role_operation_lock(
     let provider = materialized
         .role_provider(
             &ExecutionRoleId::from(SAMPLE_ROLE),
-            &PluginMountId::from(SAMPLE_MOUNT),
+            &AgentModuleId::from(SAMPLE_MOUNT),
         )
         .expect("sample role provider");
     ResolvedRoleProviderLock {
@@ -916,7 +916,6 @@ fn compiler_environment(target_digest: DigestHex) -> CompilerEnvironment {
 
 fn compile_request(revision: AgentPresetRevision, owner: PrincipalRef) -> CompileRequest {
     CompileRequest {
-        plugin_product_capabilities: Vec::new(),
         revision,
         principal: owner,
         scene: "sample".to_owned(),
@@ -1009,7 +1008,7 @@ fn add_service_requirement(
     registration: &mut PluginRegistration,
     service: ServiceKeyRef,
     provider_package: PackageRef,
-    provider_mount_id: PluginMountId,
+    provider_mount_id: AgentModuleId,
 ) {
     registration
         .metadata
@@ -1167,7 +1166,7 @@ fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
         .replace_all(vec![managed_sample_registration("managed:")])
         .unwrap();
     let artifact_digest = DigestHex::from("a".repeat(64));
-    let mount_id = PluginMountId::from(SAMPLE_MOUNT);
+    let mount_id = AgentModuleId::from(SAMPLE_MOUNT);
     let binding_id = McpBindingId::from(format!(
         "{SAMPLE_SERVER}:{SAMPLE_SERVER}.echo"
     ));
@@ -1192,7 +1191,7 @@ fn managed_skill_and_mcp_backed_capability_keep_exact_provenance() {
     let skill = materialized.skill(&SkillId::from(SAMPLE_SKILL)).unwrap();
     assert_eq!(
         skill.contribution_lock.source_kind,
-        ContributionSourceKind::PluginMount
+        ContributionSourceKind::AgentModule
     );
     assert_eq!(skill.contribution_lock.mount_id.as_ref(), Some(&mount_id));
     assert_eq!(
@@ -1298,7 +1297,7 @@ fn managed_skill_revision_lock_fails_closed_on_mount_drift() {
         .iter_mut()
         .find(|lock| lock.contribution_id == skill.contribution_id)
         .unwrap();
-    skill_lock.mount_id = Some(PluginMountId::from("different-mount"));
+    skill_lock.mount_id = Some(AgentModuleId::from("different-mount"));
     revision.reference.revision_digest = revision.revision_digest().unwrap();
     assert!(matches!(
         AgentPresetCompiler::compile(
@@ -1587,7 +1586,7 @@ async fn non_agent_role_operation_dispatches_exact_tool_context_and_resource() {
     assert!(captured.context.resolved_snapshot_ref.is_none());
     assert_eq!(
         captured.context.mount.identity.mount_id,
-        PluginMountId::from(SAMPLE_MOUNT)
+        AgentModuleId::from(SAMPLE_MOUNT)
     );
     assert_eq!(
         captured.context.provider_lock,
@@ -2071,7 +2070,7 @@ fn dependency_skill_and_service_faults_fail_closed() {
             version: VersionString::from(VERSION),
         },
         package_ref("missing.provider"),
-        PluginMountId::from("missing-provider"),
+        AgentModuleId::from("missing-provider"),
     );
     assert!(matches!(
         registry.replace_all(vec![missing_service]),
@@ -2124,7 +2123,7 @@ fn typed_service_wiring_is_exact_and_service_cycles_fail() {
         &mut consumer,
         service_key.reference().clone(),
         package_ref("sample.provider"),
-        PluginMountId::from("sample-provider"),
+        AgentModuleId::from("sample-provider"),
     );
     let registry = KernelRegistry::new(
         MaterializationPolicy::stable_with_test_fixtures(VERSION),
@@ -2135,7 +2134,7 @@ fn typed_service_wiring_is_exact_and_service_cycles_fail() {
         .replace_all(vec![consumer, provider])
         .unwrap();
     let view = registry
-        .declared_service_view(&PluginMountId::from("sample-consumer"))
+        .declared_service_view(&AgentModuleId::from("sample-consumer"))
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -2167,13 +2166,13 @@ fn typed_service_wiring_is_exact_and_service_cycles_fail() {
         &mut a,
         key_b.reference().clone(),
         package_ref("sample.b"),
-        PluginMountId::from("sample-b"),
+        AgentModuleId::from("sample-b"),
     );
     add_service_requirement(
         &mut b,
         key_a.reference().clone(),
         package_ref("sample.a"),
-        PluginMountId::from("sample-a"),
+        AgentModuleId::from("sample-a"),
     );
     assert!(matches!(
         registry.replace_all(vec![a, b]),
@@ -2444,7 +2443,7 @@ fn published_registration_metadata_is_derived_from_manifest_and_exports() {
     let materialized = registry.replace_all(vec![registration]).unwrap();
     let metadata = materialized
         .plugins
-        .get(&PluginMountId::from(SAMPLE_MOUNT))
+        .get(&AgentModuleId::from(SAMPLE_MOUNT))
         .expect("published plugin metadata");
 
     assert!(metadata

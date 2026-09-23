@@ -83,13 +83,20 @@ fn is_office_preview_capability_path(path: &str) -> bool {
     )
 }
 
-fn is_plugin_surface_capability_path(path: &str) -> bool {
+fn is_plugin_surface_path(path: &str) -> bool {
     let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
-    matches!(
-        segments.as_slice(),
-        ["api", "plugins", "runtimes", _plugin_id, "surface", "assets", capability, _epoch, _digest, ..]
-            if is_preview_capability(capability)
-    )
+    let fenced = match segments.as_slice() {
+        ["api", "plugins" | "plugin-drafts", owner_id, "surface", "assets", session_id, generation, digest, _asset, ..] => {
+            Some((*owner_id, *session_id, *generation, *digest))
+        }
+        _ => None,
+    };
+    fenced.is_some_and(|(owner_id, session_id, generation, digest)| {
+        nomifun_common::validate_uuidv7(owner_id).is_ok()
+            && nomifun_common::validate_uuidv7(session_id).is_ok()
+            && generation.parse::<u64>().is_ok_and(|value| value > 0)
+            && is_preview_capability(digest)
+    })
 }
 
 fn replace_frame_ancestors(policy: &str) -> String {
@@ -174,7 +181,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     }
 
     if is_office_preview_capability_path(&path)
-        || is_plugin_surface_capability_path(&path)
+        || is_plugin_surface_path(&path)
     {
         apply_office_frame_policy(headers);
     } else {
@@ -296,13 +303,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plugin_surface_capability_can_be_framed_by_the_app() {
-        let capability =
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    async fn unified_plugin_surface_descriptor_can_be_framed_by_the_app() {
         let digest =
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let path = format!(
-            "/api/plugins/runtimes/plugin-1/surface/assets/{capability}/3/{digest}/ui/index.html"
+            "/api/plugins/0199cc00-0000-7000-8000-000000000001/surface/assets/0199cc00-0000-7000-8000-000000000002/3/{digest}/ui/index.html"
         );
         let app = Router::new()
             .route(&path, get(|| async { "ok" }))

@@ -45,12 +45,11 @@ const MAX_RESOURCE_FIELD_BYTES: usize = 512;
 // backed Actions until a target is selected. Identity/infrastructure resources
 // and Computer remain mandatory. Live Browser/Computer environment checks are
 // action-time facts and never grant authority by themselves.
-const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 7] = [
+const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 6] = [
     "knowledge_base",
     "channel",
     "robot",
     "canvas",
-    "plugin",
     "ssh_host",
     "browser",
 ];
@@ -188,7 +187,6 @@ impl NomiCoreResourceBindingResolverRegistry {
             ),
             customer_service: Arc::clone(&services.customer_service_service),
             workshop: Arc::clone(&services.workshop_service),
-            plugin_runtime: Arc::clone(&services.plugin_runtime),
             channels: Arc::new(nomifun_db::SqliteChannelRepository::new(
                 services.database.pool().clone(),
             )),
@@ -556,7 +554,7 @@ fn validate_selection_field(
     Ok(())
 }
 
-const SUPPORTED_RESOURCE_KINDS: [&str; 18] = [
+const SUPPORTED_RESOURCE_KINDS: [&str; 17] = [
     "workspace",
     "knowledge_base",
     "project_memory",
@@ -570,7 +568,6 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 18] = [
     "customer",
     "canvas",
     "asset_library",
-    "plugin",
     "ssh_host",
     "browser",
     "computer",
@@ -802,7 +799,6 @@ struct ProductResourceDependencies {
     customer: Arc<nomifun_customer_service::CustomerServiceAgentCapabilityOwner>,
     customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     workshop: Arc<nomifun_workshop::WorkshopService>,
-    plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     channels: Arc<dyn IChannelRepository>,
     mcp_servers: Arc<dyn IMcpServerRepository>,
     ssh_hosts: nomifun_ssh::SshHostService,
@@ -843,7 +839,6 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "robot" => self.resolve_robot(request).await,
             "customer" => self.resolve_customer(request).await,
             "canvas" | "asset_library" => self.resolve_workshop(request).await,
-            "plugin" => self.resolve_plugin(request).await,
             _ => Err(ResourceSelectionResolutionError::invalid(format!(
                 "unsupported product resource kind {}",
                 self.kind
@@ -1406,27 +1401,6 @@ impl ProductResourceAuthority {
         }
     }
 
-    async fn resolve_plugin(
-        &self,
-        request: ResourceAuthorityRequest,
-    ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
-        self.dependencies
-            .plugin_runtime
-            .workshop(&request.owner_id, &request.resource_id)
-            .await
-            .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
-        Ok(ServerResolvedResource {
-            resource_id: request.resource_id,
-            allowed_operations: BTreeSet::from([
-                "edit".to_owned(),
-                "publish".to_owned(),
-                "read".to_owned(),
-                "serve".to_owned(),
-            ]),
-            connection_config_ref: None,
-            typed_parameters: BTreeMap::new(),
-        })
-    }
 }
 
 #[cfg(test)]
@@ -1673,7 +1647,6 @@ mod tests {
                 nomifun_agent_domain_wave4::ROBOT_VISION_ACTION_ID,
             ),
             ("canvas", "creative.workshop", "creative.workshop/canvas.read"),
-            ("plugin", "plugin.development", "plugin.development/read"),
             ("ssh_host", nomifun_agent_domain_wave2::SSH_MODULE_ID, "ssh/exec"),
             (
                 "browser",
@@ -1989,7 +1962,6 @@ mod tests {
             "customer.service".into(),
             "creative.workshop".into(),
             "creation.media".into(),
-            "plugin.development".into(),
         ]);
         let action_allowlists = BTreeMap::from([
             (
@@ -2058,10 +2030,6 @@ mod tests {
             (
                 "creation.media".into(),
                 BTreeSet::from([ActionId::from("creation.media/image")]),
-            ),
-            (
-                "plugin.development".into(),
-                BTreeSet::from([ActionId::from("plugin.development/read")]),
             ),
         ]);
         let derived = required_operations(&capabilities, &action_allowlists).unwrap();

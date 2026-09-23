@@ -20,6 +20,40 @@ const BUSY_TIMEOUT_MS: u64 = 5000;
 
 static DB_MIGRATOR: Migrator = sqlx::migrate!();
 const CANONICAL_BASELINE_MIGRATION_VERSION: i64 = 1;
+const RETIRED_PLUGIN_BASELINE_SHA384: &str =
+    "25497335d0bd8ce542d6422ba07ecf7c0ce7186032f1fbe5e3ad408b0aeaf166d8b887c3919ae27102bb91f130a6bd3c";
+const CANONICAL_BASELINE_SQL: &str = include_str!("../migrations/001_canonical_baseline.sql");
+
+const RETIRED_PLUGIN_TABLES: &[&str] = &[
+    "plugin_artifacts",
+    "plugin_build_operation_lineage",
+    "plugin_candidate_test_receipts",
+    "plugin_catalog_publications",
+    "plugin_credential_binding_mutations",
+    "plugin_credential_bindings",
+    "plugin_deletion_intents",
+    "plugin_dependency_mutation_commits",
+    "plugin_dependency_mutation_intents",
+    "plugin_kv",
+    "plugin_library_state",
+    "plugin_mount_credential_bindings",
+    "plugin_mount_kv",
+    "plugin_mount_revisions",
+    "plugin_mounts",
+    "plugin_product_documents",
+    "plugin_products",
+    "plugin_projects",
+    "plugin_publish_authorizations",
+    "plugin_ready_candidates",
+    "plugin_release_artifacts",
+    "plugin_releases",
+    "plugin_service_test_receipts",
+    "plugin_source_mutation_commits",
+    "plugin_source_mutation_intents",
+    "plugin_surface_sessions",
+    "product_operations",
+    "javascript_runtime_selection",
+];
 
 /// Wraps a SQLite connection pool with lifecycle management.
 #[derive(Clone, Debug)]
@@ -221,6 +255,27 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
     Ok(())
 }
 
+/// Return true only for the exact retired N1/M1 canonical baseline that may
+/// undergo the one-time Unified Plugin clean-start. No other checksum, partial
+/// lineage, or hand-edited schema is authorized by this boundary.
+pub async fn requires_unified_plugin_clean_start(pool: &SqlitePool) -> Result<bool, DbError> {
+    let rows = sqlx::query(
+        "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(DbError::Query)?;
+    if rows.len() != 1 {
+        return Ok(false);
+    }
+    let version: i64 = rows[0].try_get("version").map_err(DbError::Query)?;
+    let success: bool = rows[0].try_get("success").map_err(DbError::Query)?;
+    let checksum: Vec<u8> = rows[0].try_get("checksum").map_err(DbError::Query)?;
+    Ok(version == CANONICAL_BASELINE_MIGRATION_VERSION
+        && success
+        && hex::encode(checksum) == RETIRED_PLUGIN_BASELINE_SHA384)
+}
+
 /// Initialize a file-backed SQLite database.
 ///
 /// Creates the database file and parent directories if they don't exist,
@@ -397,12 +452,135 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), DbError> {
             "SQLite secure_delete must be enabled before database migrations".into(),
         ));
     }
+    clean_start_unified_plugin_schema(&mut conn).await?;
     run_migrations_with_retry(&mut conn).await?;
     // Always truncate committed migration WAL frames. Besides keeping startup
     // deterministic, this retries the only safety-critical step if a previous
     // post-032 startup was interrupted after the schema commit.
     truncate_wal(&mut conn).await?;
     validate_quick_check_on_connection(&mut conn).await
+}
+
+async fn clean_start_unified_plugin_schema(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(), DbError> {
+    let migration_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(DbError::Query)?;
+    if migration_table_exists == 0 {
+        return Ok(());
+    }
+    let rows = sqlx::query(
+        "SELECT version, success, checksum FROM _sqlx_migrations ORDER BY version",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(DbError::Query)?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if rows.len() != 1 {
+        return Err(DbError::Init(
+            "database migration lineage is not eligible for Unified Plugin clean-start".into(),
+        ));
+    }
+    let version: i64 = rows[0].try_get("version").map_err(DbError::Query)?;
+    let success: bool = rows[0].try_get("success").map_err(DbError::Query)?;
+    let checksum: Vec<u8> = rows[0].try_get("checksum").map_err(DbError::Query)?;
+    let observed = hex::encode(&checksum);
+    let expected = DB_MIGRATOR
+        .iter()
+        .next()
+        .ok_or_else(|| DbError::Init("canonical database baseline is missing".into()))?;
+    if version == expected.version && success && checksum.as_slice() == expected.checksum.as_ref() {
+        return Ok(());
+    }
+    if version != CANONICAL_BASELINE_MIGRATION_VERSION
+        || !success
+        || observed != RETIRED_PLUGIN_BASELINE_SHA384
+    {
+        return Err(DbError::Init(
+            "database migration lineage is neither current nor the exact retired Plugin baseline"
+                .into(),
+        ));
+    }
+
+    let table_sql = baseline_segment(
+        "CREATE TABLE plugin_artifacts (",
+        "CREATE TABLE product_agent_selections (",
+    )?;
+    let index_sql = baseline_segment(
+        "CREATE INDEX idx_plugin_artifacts_package_id",
+        "CREATE INDEX idx_provider_model_capabilities_task",
+    )?;
+    let trigger_sql = baseline_segment(
+        "CREATE TRIGGER trg_plugin_artifacts_immutable",
+        "CREATE TRIGGER trg_requirements_absorb_done_cancelled",
+    )?;
+    let agent_schema_digest = nomifun_agent_contracts::digest_payload(
+        &nomifun_agent_contracts::agent_store_schema_manifest_payload(),
+    )
+    .map_err(|error| DbError::Init(format!("cannot digest Agent Store schema: {error}")))?;
+    let seed_manifest_digest = nomifun_agent_contracts::digest_payload(
+        &nomifun_agent_contracts::official_preset_seed_manifest_payload(),
+    )
+    .map_err(|error| DbError::Init(format!("cannot digest Agent seed manifest: {error}")))?;
+    let mut sql = String::from("BEGIN IMMEDIATE;\n");
+    // The exact retired baseline checksum proves these names have the expected
+    // Plugin-only meaning. The one Agent-store index below indexed only the
+    // retired Plugin UI graph; dropping it preserves every Agent row. Foreign
+    // keys are deferred by dropping Plugin children in reverse order.
+    sql.push_str("DROP INDEX IF EXISTS idx_agent_presets_ui_plugin;\n");
+    for table in RETIRED_PLUGIN_TABLES.iter().rev() {
+        sql.push_str("DROP TABLE IF EXISTS \"");
+        sql.push_str(table);
+        sql.push_str("\";\n");
+    }
+    sql.push_str(table_sql);
+    sql.push('\n');
+    sql.push_str(index_sql);
+    sql.push('\n');
+    sql.push_str(trigger_sql);
+    sql.push_str("\nUPDATE schema_metadata SET data_generation = ");
+    sql.push_str(&nomifun_agent_contracts::AGENT_STORE_DATA_GENERATION.to_string());
+    sql.push_str(", migration_head = ");
+    sql.push_str(&nomifun_agent_contracts::AGENT_STORE_MIGRATION_HEAD.to_string());
+    sql.push_str(", projection_schema_version = ");
+    sql.push_str(
+        &nomifun_agent_contracts::AGENT_STORE_PROJECTION_SCHEMA_VERSION.to_string(),
+    );
+    sql.push_str(", seed_manifest_digest = '");
+    sql.push_str(seed_manifest_digest.as_ref());
+    sql.push_str("', canonical_schema_manifest_digest = '");
+    sql.push_str(agent_schema_digest.as_ref());
+    sql.push_str("' WHERE singleton_key = 'canonical';");
+    sql.push_str("\nUPDATE _sqlx_migrations SET checksum = X'");
+    sql.push_str(&hex::encode(expected.checksum.as_ref()));
+    sql.push_str("' WHERE version = 1 AND success = 1;\nCOMMIT;");
+
+    sqlx::raw_sql(&sql)
+        .execute(&mut *conn)
+        .await
+        .map_err(DbError::Query)?;
+    info!(
+        retired_checksum = RETIRED_PLUGIN_BASELINE_SHA384,
+        "Unified Plugin Core clean-start replaced only the retired Plugin schema"
+    );
+    Ok(())
+}
+
+fn baseline_segment(start: &str, end: &str) -> Result<&'static str, DbError> {
+    let start_offset = CANONICAL_BASELINE_SQL.find(start).ok_or_else(|| {
+        DbError::Init(format!("canonical baseline is missing segment start {start}"))
+    })?;
+    let end_offset = CANONICAL_BASELINE_SQL[start_offset..]
+        .find(end)
+        .map(|offset| start_offset + offset)
+        .ok_or_else(|| DbError::Init(format!("canonical baseline is missing segment end {end}")))?;
+    Ok(&CANONICAL_BASELINE_SQL[start_offset..end_offset])
 }
 
 async fn truncate_wal(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
@@ -613,6 +791,113 @@ mod tests {
             .unwrap();
         assert_eq!(secure_delete, 1);
     }
+
+    #[tokio::test]
+    async fn unified_plugin_clean_start_replaces_only_the_exact_retired_plugin_schema() {
+        let database = init_database_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO client_preferences (key, value, updated_at) VALUES ('keep-me', 'safe', 1)",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+        let mut conn = database.pool().acquire().await.unwrap();
+        let mut retired = String::from("PRAGMA foreign_keys = OFF;\n");
+        for table in CANONICAL_PLUGIN_TABLES_FOR_TEST.iter().rev() {
+            retired.push_str(&format!("DROP TABLE IF EXISTS \"{table}\";\n"));
+        }
+        for table in RETIRED_PLUGIN_TABLES {
+            retired.push_str(&format!(
+                "CREATE TABLE IF NOT EXISTS \"{table}\" (id INTEGER PRIMARY KEY);\n"
+            ));
+        }
+        retired.push_str(
+            "CREATE INDEX IF NOT EXISTS idx_agent_presets_ui_plugin \
+             ON agent_presets(json_extract(display_json, '$.ui_binding.selection.plugin_id'));\n",
+        );
+        retired.push_str(&format!(
+            "UPDATE _sqlx_migrations SET checksum = X'{RETIRED_PLUGIN_BASELINE_SHA384}' WHERE version = 1;"
+        ));
+        sqlx::raw_sql(&retired).execute(&mut *conn).await.unwrap();
+        drop(conn);
+        assert!(requires_unified_plugin_clean_start(database.pool()).await.unwrap());
+
+        let mut conn = database.pool().acquire().await.unwrap();
+        clean_start_unified_plugin_schema(&mut conn).await.unwrap();
+        drop(conn);
+        validate_current_migration_lineage(database.pool()).await.unwrap();
+        crate::id_schema_contract::validate_id_schema_contract(database.pool())
+            .await
+            .unwrap();
+
+        let plugin_tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND (name = 'plugins' OR name LIKE 'plugin_%') ORDER BY name",
+        )
+        .fetch_all(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            plugin_tables,
+            [
+                "plugin_artifacts",
+                "plugin_credential_bindings",
+                "plugin_drafts",
+                "plugin_grants",
+                "plugin_library_state",
+                "plugin_mutations",
+                "plugins",
+            ]
+        );
+        let kept: String = sqlx::query_scalar(
+            "SELECT value FROM client_preferences WHERE key = 'keep-me'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(kept, "safe");
+        let retired_index: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema \
+             WHERE type = 'index' AND name = 'idx_agent_presets_ui_plugin'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(retired_index, 0);
+        let metadata: (String, String) = sqlx::query_as(
+            "SELECT seed_manifest_digest, canonical_schema_manifest_digest \
+             FROM schema_metadata WHERE singleton_key = 'canonical'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            metadata.0,
+            nomifun_agent_contracts::digest_payload(
+                &nomifun_agent_contracts::official_preset_seed_manifest_payload(),
+            )
+            .unwrap()
+            .as_ref()
+        );
+        assert_eq!(
+            metadata.1,
+            nomifun_agent_contracts::digest_payload(
+                &nomifun_agent_contracts::agent_store_schema_manifest_payload(),
+            )
+            .unwrap()
+            .as_ref()
+        );
+    }
+
+    const CANONICAL_PLUGIN_TABLES_FOR_TEST: &[&str] = &[
+        "plugin_mutations",
+        "plugin_library_state",
+        "plugin_grants",
+        "plugin_credential_bindings",
+        "plugin_drafts",
+        "plugins",
+        "plugin_artifacts",
+    ];
 
     #[tokio::test]
     async fn public_snapshot_includes_committed_wal_pages_and_refuses_overwrite() {

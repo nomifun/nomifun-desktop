@@ -774,10 +774,15 @@ pub struct AppServices {
     /// `{data_dir}/workshop/`; project documents live in SQLite. Shared by the
     /// `/api/creative-studio/*` routes and Gateway capabilities.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
-    /// Phase M1 Plugin application facade over the clean-start, owner-scoped
-    /// Product/Project/Release data root.
-    pub plugin_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
+    /// Unified Plugin Core authorities. Business data is isolated in the
+    /// generation DataRoot; SQLite stores only Plugin pointers and metadata.
+    pub plugin_repository: Arc<nomifun_plugin_platform::SqlitePluginRepository>,
+    pub plugin_artifacts: Arc<nomifun_plugin_platform::PluginArtifactStore>,
+    pub plugin_data_roots: Arc<nomifun_plugin_platform::PluginDataRootManager>,
+    pub plugin_drafts: Arc<nomifun_plugin_platform::PluginDraftStore>,
+    pub plugin_transfers: Arc<nomifun_plugin_platform::PluginBackupFilesystem>,
+    pub plugin_service_runtime:
+        Arc<std::sync::OnceLock<Arc<nomifun_plugin_platform::PluginServiceRuntime>>>,
     /// Singleton generation service — the Creative Studio media task queue.
     /// Shared by the `/api/creative-studio/tasks*` routes and Gateway tools.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -1286,10 +1291,8 @@ impl AppServices {
         // Fence runtime admission immediately, before awaiting any producer or
         // resource owner. Its owned flight runs while these owners wind down.
         let engine_shutdown = self.agent_runtime_sessions.shutdown_and_wait();
-        if let Err(error) = self
-            .plugin_runtime
-            .shutdown_service_runtime(self.authoritative_user_id.as_ref())
-            .await
+        if let Some(runtime) = self.plugin_service_runtime.get()
+            && let Err(error) = runtime.shutdown().await
         {
             errors.push(format!("Plugin Service cleanup failed: {error}"));
         }
@@ -1408,13 +1411,11 @@ impl AppServices {
     /// preserving the original failure as the primary error.
     pub async fn cleanup_after_startup_failure(&self, error: anyhow::Error) -> anyhow::Error {
         self.request_background_shutdown();
-        if let Err(error) = self
-            .plugin_runtime
-            .shutdown_service_runtime(self.authoritative_user_id.as_ref())
-            .await
+        if let Some(runtime) = self.plugin_service_runtime.get()
+            && let Err(cleanup_error) = runtime.shutdown().await
         {
             tracing::error!(
-                %error,
+                %cleanup_error,
                 "Plugin Service cleanup failed during startup failure cleanup"
             );
         }
@@ -2052,54 +2053,23 @@ impl AppServices {
         let provider_repo_for_services: Arc<dyn IProviderRepository> =
             provider_repo.clone() as Arc<dyn nomifun_db::IProviderRepository>;
 
-        // Plugin M1 starts from its own owner-scoped Product/Project/Release
-        // data root. Legacy HTML snapshots and conversation workspaces are not
-        // migrated, read, or dual-written.
-        let plugin_runtime_repository =
-            Arc::new(nomifun_db::SqlitePluginRuntimeRepository::new(
-                database.pool().clone(),
-            ));
-        nomifun_db::IPluginRuntimeRepository::revoke_all_surface_sessions_on_startup(
-            plugin_runtime_repository.as_ref(),
-        )
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to revoke stale Plugin Surface sessions: {error}"
-                )
-            })?;
-        let plugin_runtime_repository: Arc<dyn nomifun_db::IPluginRuntimeRepository> =
-            plugin_runtime_repository;
-        let plugin_runtime_store_root = data_dir.join("plugin-m1");
-        let plugin_runtime_source_store = Arc::new(
-            nomifun_plugin_platform::runtime::PluginRuntimeSourceStore::new(
-                plugin_runtime_store_root.join("source"),
-            )
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to initialize Plugin Source Store under {}: {error}",
-                    plugin_runtime_store_root.display()
-                )
-            })?,
+        let plugin_repository = Arc::new(
+            nomifun_plugin_platform::SqlitePluginRepository::new(database.pool().clone()),
         );
-        let plugin_runtime_release_store = Arc::new(
-            nomifun_plugin_platform::runtime::PluginRuntimeReleaseStore::new(
-                plugin_runtime_store_root.join("release"),
-            )
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to initialize Plugin Release Store under {}: {error}",
-                    plugin_runtime_store_root.display()
-                )
-            })?,
-        );
-        let plugin_runtime = Arc::new(
-            nomifun_plugin_platform::runtime::PluginRuntimeApplicationService::new_with_stores(
-                plugin_runtime_repository,
-                plugin_runtime_source_store,
-                plugin_runtime_release_store,
-            )?,
-        );
+        let plugin_artifacts = Arc::new(nomifun_plugin_platform::PluginArtifactStore::new(
+            data_dir.join("plugin-core"),
+            nomifun_plugin_platform::ArtifactStoreLimits::default(),
+        )?);
+        let plugin_data_roots = Arc::new(nomifun_plugin_platform::PluginDataRootManager::new(
+            data_dir.join("plugin-data"),
+        )?);
+        let plugin_drafts = Arc::new(nomifun_plugin_platform::PluginDraftStore::new(
+            data_dir.join("plugin-drafts"),
+        )?);
+        let plugin_transfers = Arc::new(nomifun_plugin_platform::PluginBackupFilesystem::new(
+            data_dir.join("plugin-transfers"),
+        )?);
+        let plugin_service_runtime = Arc::new(std::sync::OnceLock::new());
 
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
@@ -2212,7 +2182,12 @@ impl AppServices {
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,
-            plugin_runtime,
+            plugin_repository,
+            plugin_artifacts,
+            plugin_data_roots,
+            plugin_drafts,
+            plugin_transfers,
+            plugin_service_runtime,
             creation_service,
             model_invoke_service,
             knowledge_service,
@@ -2690,8 +2665,9 @@ mod tests {
         let services = AppServices::from_config(db, &config).await.unwrap();
 
         assert!(!tmp.path().join("local-ai").exists());
-        assert!(tmp.path().join("plugin-m1/source").is_dir());
-        assert!(tmp.path().join("plugin-m1/release").is_dir());
+        assert!(tmp.path().join("plugin-core/artifacts").is_dir());
+        assert!(tmp.path().join("plugin-data").is_dir());
+        assert!(tmp.path().join("plugin-drafts").is_dir());
         // JWT service should be functional
         let test_user_id = "0190f5fe-7c00-7a00-8000-000000000001";
         let token = services.jwt_service.sign(test_user_id, "testuser").unwrap();

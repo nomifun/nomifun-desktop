@@ -63,10 +63,6 @@ impl OfficialRuntimeHost {
 struct OfficialAdmission;
 
 impl RuntimeAdmission for OfficialAdmission {
-    fn supports_tool_hooks(&self) -> bool {
-        true
-    }
-
     fn validate_snapshot(
         &self,
         snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,

@@ -1,4 +1,4 @@
-//! Canonical effect receipts for hosted Plugin Product and Robot owners.
+//! Canonical effect receipts for hosted Robot owners.
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
@@ -36,21 +36,18 @@ struct HiddenActionReceipt {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Domain {
-    PluginProduct,
     Robot,
 }
 
 impl Domain {
     fn as_str(self) -> &'static str {
         match self {
-            Self::PluginProduct => "miniapp",
             Self::Robot => "robot",
         }
     }
 
     fn strategy(self) -> EffectStrategy {
         match self {
-            Self::PluginProduct => EffectStrategy::ManagedEffect,
             Self::Robot => EffectStrategy::ExternalUncertainEffect,
         }
     }
@@ -482,7 +479,7 @@ impl HostedEffectReceipts {
                 && effect.state != AgentEffectState::Rejected
         }) {
             return Err(AppError::Conflict(
-                "The source already dispatched a hosted Plugin Product/Robot call. Automatic replay is not safe; inspect state and send a new instruction."
+                "The source already dispatched a hosted Robot call. Automatic replay is not safe; inspect state and send a new instruction."
                     .into(),
             ));
         }
@@ -505,8 +502,7 @@ impl HostedEffectReceipts {
             .map_err(|_| failure())?
             .into_iter()
             .filter(|effect| {
-                effect.owner_domain == Domain::PluginProduct.as_str()
-                    || effect.owner_domain == Domain::Robot.as_str()
+                effect.owner_domain == Domain::Robot.as_str()
             })
             .collect::<Vec<_>>();
         if effects.is_empty() {

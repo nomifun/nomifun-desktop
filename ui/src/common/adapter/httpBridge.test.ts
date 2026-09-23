@@ -621,7 +621,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     }
   });
 
-  test('recursively redacts PluginRuntime surface_capability from HTTP debug logs', async () => {
+  test('recursively redacts the Unified Plugin Surface session from HTTP debug logs', async () => {
     const realConsoleDebug = console.debug;
     const localStorageDescriptor = Object.getOwnPropertyDescriptor(
       globalThis,
@@ -642,8 +642,8 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
       } satisfies Storage,
     });
     const consoleCalls: unknown[][] = [];
-    const capability = '0123456789abcdef'.repeat(4);
-    const releaseDigest =
+    const surfaceSession = '0123456789abcdef'.repeat(4);
+    const artifactDigest =
       'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
     let requestBody = '';
     globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => {
@@ -660,18 +660,18 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     };
 
     try {
-      await httpRequest('POST', '/api/plugins/runtimes/test/bridge', {
-        expected_release_digest: releaseDigest,
+      await httpRequest('POST', '/api/plugins/plugin-1/surface/bridge', {
+        artifact_digest: artifactDigest,
         request: {
-          targets: [{ transport: { surface_capability: capability } }],
+          targets: [{ transport: { surface_session_id: surfaceSession } }],
         },
       });
 
       const exposed = JSON.stringify(consoleCalls);
-      expect(requestBody.includes(capability)).toBe(true);
-      expect(exposed.includes(capability)).toBe(false);
+      expect(requestBody.includes(surfaceSession)).toBe(true);
+      expect(exposed.includes(surfaceSession)).toBe(false);
       expect(exposed.includes('[REDACTED]')).toBe(true);
-      expect(exposed.includes(releaseDigest)).toBe(true);
+      expect(exposed.includes(artifactDigest)).toBe(true);
     } finally {
       globalThis.fetch = realFetch;
       console.debug = realConsoleDebug;

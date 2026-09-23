@@ -3,7 +3,8 @@ import { Alert, Button, Tag } from '@arco-design/web-react';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { pluginRuntimeProduct } from '@/common/adapter/pluginRuntimeProductBridge';
+import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
+import { isDesktopShell } from '@/renderer/utils/platform';
 import styles from './AgentContextOrder.module.css';
 
 type Props = {
@@ -18,6 +19,7 @@ type Props = {
 export default function AgentContributionOrder({ document, catalog, disabled = false, kind = 'context', onChange, onOpenAuthor }: Props) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const desktopShell = isDesktopShell();
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState(false);
   const pending = useRef(false);
@@ -35,12 +37,12 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
   const explicit = document[field] ?? [];
   const ids = [...explicit, ...[...contexts.keys()].filter(id => !explicit.includes(id)).sort()];
   const createBeforeTool = async () => {
-    if (disabled || pending.current) return;
+    if (!desktopShell || disabled || pending.current) return;
     pending.current = true; setCreating(true); setCreateError(false);
     try {
-      const draft = await pluginRuntimeProduct.beforeToolTemplate.invoke();
+      const draft = await pluginPlatform.drafts.create.invoke({ template: 'agent.before_tool' });
       if (mounted.current) {
-        const destination = `/plugins/create/${encodeURIComponent(draft.id)}`;
+        const destination = `/plugins/create/${encodeURIComponent(draft.summary.draft_id)}`;
         if (currentOpenAuthor.current) await currentOpenAuthor.current(destination);
         else await navigate(destination);
       }
@@ -65,7 +67,7 @@ export default function AgentContributionOrder({ document, catalog, disabled = f
     {kind === 'middleware' && <>
       <p>{t('agentSettings.middlewareOrder.toolAccess')}</p>
       <div className={styles.authoring}>
-        <Button size='small' loading={creating} disabled={disabled || creating} onClick={() => void createBeforeTool()}>
+        <Button size='small' loading={creating} disabled={!desktopShell || disabled || creating} onClick={() => void createBeforeTool()}>
           {t('agentSettings.middlewareOrder.createBeforeTool')}
         </Button>
         <p>{t('agentSettings.middlewareOrder.createHint')}</p>

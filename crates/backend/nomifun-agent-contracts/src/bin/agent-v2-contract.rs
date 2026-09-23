@@ -7,30 +7,18 @@ use nomifun_agent_contracts::{
     AgentBindingValue, AgentPresetRevision, AgentPresetRevisionDigestInput,
     AgentPresetRevisionPayload, AgentSessionAggregate, ArtifactEnvelope,
     AgentStoreSchemaManifestPayload,
-    CandidateTestReceipt,
     CanonicalAgentStoreSchemaManifestPayload, CanonicalApiInventoryPayload,
     CanonicalErrorRegistryPayload,
     CapabilityCatalogEntry, PlatformFeatureInventoryPayload,
     ContractClosurePayload, ContractDigestLedgerPayload, ContributionLock,
-    CredentialSlotBinding,
     D025FixtureContractReferencePayload, D025FixtureEnvelopeReference, D026OrderingOutcomeMatrix,
     D027TerminalSequenceMatrix, D028PlatformMatrix, DeletionManifest, DigestHex,
-    AGENT_STORE_BASELINE_SQL, JavaScriptHostHello, N1CohortLock, N1PlatformValidationRecord,
-    PluginBridgeRequest, PluginBridgeSession, PluginRuntimeContractManifest,
-    PluginMigration, PluginProductLifecycleRecord, PluginPublishRequest,
-    PluginReadyRelease, PluginReleaseArtifactV1, PluginReleasePointerState,
-    PluginReleaseV1Manifest, PluginRollbackRequest, PluginServiceTestReceipt,
-    PluginShareBundleV1, PluginProductBackupMetadataV1,
-    NodeRuntimeFingerprint, NodeRuntimeProbeResult, OfficialPresetKey,
+    AGENT_STORE_BASELINE_SQL,
+    OfficialPresetKey,
     OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
-    PluginApplyRequest, PluginApplyResult, PluginAutoApplyEligibility,
-    PluginHostRequestEnvelope, PluginHostResponseEnvelope, PluginMountRuntimeContext,
-    PluginN1ContractManifest, PluginPackageArtifactV1, PluginPackageV1Manifest,
-    PluginProjectRecord, PluginReadyCandidate, PluginRegistrationMetadata,
-    PluginRestorePreviousRequest, PluginRestorePreviousResult, PluginShareBundleManifest,
-    ProductOperationRecord, RemoteBinding, ResolvedPluginServiceSpec,
-    ResolvedSnapshotEnvelope, RuntimeSelectionRecord,
-    RuntimeSwitchValidationResult, SessionEventRegistryPayload, TargetPackageInventoryPayload,
+    PluginActionPublication, PluginArtifact, PluginManifest, PluginRegistrationMetadata,
+    RemoteBinding, UnifiedPluginContractManifest,
+    ResolvedSnapshotEnvelope, SessionEventRegistryPayload, TargetPackageInventoryPayload,
     VersionString, digest_bytes, digest_payload,
 };
 use schemars::{JsonSchema, schema_for};
@@ -78,24 +66,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         contracts.join("remote/d026-request-admission-ordering.fixture.json");
     let platform_path =
         contracts.join("validation/platform-validation-manifest.payload.json");
-    let plugin_n1_contract_path =
-        contracts.join("plugin-n1/plugin-n1-contract.v1.json");
-    let plugin_runtime_contract_path =
-        contracts.join("plugin-runtime/plugin-runtime-contract.v1.json");
+    let plugin_contract_path =
+        contracts.join("plugin/unified-plugin-contract.v1.json");
 
     let closure: ContractClosurePayload = read_json(&closure_path)?;
     validate_closure(&closure)?;
     let closure_digest = digest_payload(&closure)?;
 
-    let plugin_n1_contract: PluginN1ContractManifest =
-        read_json(&plugin_n1_contract_path)?;
-    plugin_n1_contract.validate()?;
-    let plugin_n1_contract_digest = digest_payload(&plugin_n1_contract)?;
-
-    let plugin_runtime_contract: PluginRuntimeContractManifest =
-        read_json(&plugin_runtime_contract_path)?;
-    plugin_runtime_contract.validate()?;
-    let plugin_runtime_contract_digest = digest_payload(&plugin_runtime_contract)?;
+    let plugin_contract: UnifiedPluginContractManifest =
+        read_json(&plugin_contract_path)?;
+    plugin_contract.validate()?;
+    let plugin_contract_digest = digest_payload(&plugin_contract)?;
 
     let inventory: TargetPackageInventoryPayload = read_json(&inventory_path)?;
     validate_target_inventory(&inventory)?;
@@ -194,53 +175,13 @@ fn run() -> Result<(), Box<dyn Error>> {
         &schemas,
         &["platform_validation_manifest"],
     ))?;
-    let plugin_n1_schema_digest = digest_payload(&schema_subset(
+    let plugin_schema_digest = digest_payload(&schema_subset(
         &schemas,
         &[
-            "candidate_test_receipt",
-            "credential_slot_binding",
-            "javascript_host_hello",
-            "plugin_host_request_envelope",
-            "plugin_host_response_envelope",
-            "n1_cohort_lock",
-            "n1_platform_validation_record",
-            "node_runtime_fingerprint",
-            "node_runtime_probe_result",
-            "plugin_auto_apply_eligibility",
-            "plugin_apply_request",
-            "plugin_apply_result",
-            "plugin_mount_runtime_context",
-            "plugin_n1_contract_manifest",
-            "plugin_package_artifact_v1",
-            "plugin_package_v1_manifest",
-            "plugin_project_record",
-            "plugin_ready_candidate",
-            "plugin_restore_previous_request",
-            "plugin_restore_previous_result",
-            "plugin_share_bundle_manifest",
-            "product_operation_record",
-            "runtime_selection_record",
-            "runtime_switch_validation_result",
-        ],
-    ))?;
-    let plugin_runtime_schema_digest = digest_payload(&schema_subset(
-        &schemas,
-        &[
-            "plugin_bridge_request",
-            "plugin_bridge_session",
-            "plugin_runtime_contract_manifest",
-            "plugin_migration",
-            "plugin_product_lifecycle_record",
-            "plugin_publish_request",
-            "plugin_ready_release",
-            "plugin_release_artifact_v1",
-            "plugin_release_pointer_state",
-            "plugin_release_v1_manifest",
-            "plugin_rollback_request",
-            "plugin_service_spec",
-            "plugin_service_test_receipt",
-            "plugin_share_bundle_v1",
-            "plugin_product_backup_metadata_v1",
+            "plugin_action_publication",
+            "plugin_artifact",
+            "plugin_manifest",
+            "unified_plugin_contract_manifest",
         ],
     ))?;
 
@@ -317,14 +258,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     digest_map.insert("error_registry".to_owned(), error_digest);
     digest_map.insert("official_preset_seed_manifest".to_owned(), seed_digest);
     digest_map.insert("package_schema".to_owned(), package_schema_digest);
-    digest_map.insert(
-        "plugin_runtime_contract".to_owned(),
-        plugin_runtime_contract_digest,
-    );
-    digest_map.insert(
-        "plugin_runtime_schema".to_owned(),
-        plugin_runtime_schema_digest,
-    );
+    digest_map.insert("plugin_contract".to_owned(), plugin_contract_digest);
+    digest_map.insert("plugin_schema".to_owned(), plugin_schema_digest);
     digest_map.insert(
         "platform_validation_contract".to_owned(),
         platform_contract_digest,
@@ -332,14 +267,6 @@ fn run() -> Result<(), Box<dyn Error>> {
     digest_map.insert(
         "platform_validation_fixture".to_owned(),
         platform_fixture_digest.clone(),
-    );
-    digest_map.insert(
-        "plugin_n1_contract".to_owned(),
-        plugin_n1_contract_digest,
-    );
-    digest_map.insert(
-        "plugin_n1_schema".to_owned(),
-        plugin_n1_schema_digest,
     );
     digest_map.insert("runtime_feature_inventory".to_owned(), feature_digest);
     digest_map.insert("runtime_protocol".to_owned(), runtime_protocol_digest);
@@ -406,12 +333,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             pretty_json(&platform_envelope)?,
         ),
         (
-            "plugin-runtime-contract.envelope.json".to_owned(),
-            pretty_json(&ArtifactEnvelope::new(plugin_runtime_contract.clone())?)?,
-        ),
-        (
-            "plugin-n1-contract.envelope.json".to_owned(),
-            pretty_json(&ArtifactEnvelope::new(plugin_n1_contract.clone())?)?,
+            "unified-plugin-contract.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(plugin_contract.clone())?)?,
         ),
     ]);
 
@@ -421,8 +344,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         write_json(&platform_path, &platform)?;
         write_json(&d025_payload_path, &d025_payload)?;
         write_json(&d025_reference_path, &d025_reference)?;
-        write_json(&plugin_n1_contract_path, &plugin_n1_contract)?;
-        write_json(&plugin_runtime_contract_path, &plugin_runtime_contract)?;
+        write_json(&plugin_contract_path, &plugin_contract)?;
         fs::write(&d025_envelope_path, &d025_envelope_contents)?;
         for (name, contents) in &outputs {
             fs::write(generated.join(name), contents)?;
@@ -432,8 +354,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         check_json(&platform_path, &platform)?;
         check_json(&d025_payload_path, &d025_payload)?;
         check_json(&d025_reference_path, &d025_reference)?;
-        check_json(&plugin_n1_contract_path, &plugin_n1_contract)?;
-        check_json(&plugin_runtime_contract_path, &plugin_runtime_contract)?;
+        check_json(&plugin_contract_path, &plugin_contract)?;
         if fs::read_to_string(&d025_envelope_path)? != d025_envelope_contents {
             return Err(format!(
                 "generated artifact drift: {}; run agent-v2-contract write",
@@ -685,116 +606,15 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         &mut schemas,
         "platform_validation_manifest",
     )?;
-    add_schema::<PluginN1ContractManifest>(
+    add_schema::<UnifiedPluginContractManifest>(
         &mut schemas,
-        "plugin_n1_contract_manifest",
+        "unified_plugin_contract_manifest",
     )?;
-    add_schema::<NodeRuntimeFingerprint>(
+    add_schema::<PluginManifest>(&mut schemas, "plugin_manifest")?;
+    add_schema::<PluginArtifact>(&mut schemas, "plugin_artifact")?;
+    add_schema::<PluginActionPublication>(
         &mut schemas,
-        "node_runtime_fingerprint",
-    )?;
-    add_schema::<NodeRuntimeProbeResult>(
-        &mut schemas,
-        "node_runtime_probe_result",
-    )?;
-    add_schema::<RuntimeSelectionRecord>(
-        &mut schemas,
-        "runtime_selection_record",
-    )?;
-    add_schema::<RuntimeSwitchValidationResult>(
-        &mut schemas,
-        "runtime_switch_validation_result",
-    )?;
-    add_schema::<JavaScriptHostHello>(&mut schemas, "javascript_host_hello")?;
-    add_schema::<PluginHostRequestEnvelope>(
-        &mut schemas,
-        "plugin_host_request_envelope",
-    )?;
-    add_schema::<PluginHostResponseEnvelope>(
-        &mut schemas,
-        "plugin_host_response_envelope",
-    )?;
-    add_schema::<PluginMountRuntimeContext>(
-        &mut schemas,
-        "plugin_mount_runtime_context",
-    )?;
-    add_schema::<PluginPackageV1Manifest>(
-        &mut schemas,
-        "plugin_package_v1_manifest",
-    )?;
-    add_schema::<PluginPackageArtifactV1>(
-        &mut schemas,
-        "plugin_package_artifact_v1",
-    )?;
-    add_schema::<CredentialSlotBinding>(
-        &mut schemas,
-        "credential_slot_binding",
-    )?;
-    add_schema::<PluginProjectRecord>(&mut schemas, "plugin_project_record")?;
-    add_schema::<PluginReadyCandidate>(&mut schemas, "plugin_ready_candidate")?;
-    add_schema::<CandidateTestReceipt>(&mut schemas, "candidate_test_receipt")?;
-    add_schema::<PluginAutoApplyEligibility>(
-        &mut schemas,
-        "plugin_auto_apply_eligibility",
-    )?;
-    add_schema::<PluginApplyRequest>(&mut schemas, "plugin_apply_request")?;
-    add_schema::<PluginApplyResult>(&mut schemas, "plugin_apply_result")?;
-    add_schema::<PluginRestorePreviousRequest>(
-        &mut schemas,
-        "plugin_restore_previous_request",
-    )?;
-    add_schema::<PluginRestorePreviousResult>(
-        &mut schemas,
-        "plugin_restore_previous_result",
-    )?;
-    add_schema::<PluginShareBundleManifest>(
-        &mut schemas,
-        "plugin_share_bundle_manifest",
-    )?;
-    add_schema::<ProductOperationRecord>(
-        &mut schemas,
-        "product_operation_record",
-    )?;
-    add_schema::<N1PlatformValidationRecord>(
-        &mut schemas,
-        "n1_platform_validation_record",
-    )?;
-    add_schema::<N1CohortLock>(&mut schemas, "n1_cohort_lock")?;
-    add_schema::<PluginRuntimeContractManifest>(
-        &mut schemas,
-        "plugin_runtime_contract_manifest",
-    )?;
-    add_schema::<PluginReleaseV1Manifest>(
-        &mut schemas,
-        "plugin_release_v1_manifest",
-    )?;
-    add_schema::<PluginReleaseArtifactV1>(
-        &mut schemas,
-        "plugin_release_artifact_v1",
-    )?;
-    add_schema::<PluginMigration>(&mut schemas, "plugin_migration")?;
-    add_schema::<PluginReadyRelease>(&mut schemas, "plugin_ready_release")?;
-    add_schema::<PluginReleasePointerState>(
-        &mut schemas,
-        "plugin_release_pointer_state",
-    )?;
-    add_schema::<PluginPublishRequest>(&mut schemas, "plugin_publish_request")?;
-    add_schema::<PluginRollbackRequest>(&mut schemas, "plugin_rollback_request")?;
-    add_schema::<ResolvedPluginServiceSpec>(&mut schemas, "plugin_service_spec")?;
-    add_schema::<PluginBridgeSession>(&mut schemas, "plugin_bridge_session")?;
-    add_schema::<PluginBridgeRequest>(&mut schemas, "plugin_bridge_request")?;
-    add_schema::<PluginServiceTestReceipt>(
-        &mut schemas,
-        "plugin_service_test_receipt",
-    )?;
-    add_schema::<PluginShareBundleV1>(&mut schemas, "plugin_share_bundle_v1")?;
-    add_schema::<PluginProductBackupMetadataV1>(
-        &mut schemas,
-        "plugin_product_backup_metadata_v1",
-    )?;
-    add_schema::<PluginProductLifecycleRecord>(
-        &mut schemas,
-        "plugin_product_lifecycle_record",
+        "plugin_action_publication",
     )?;
     Ok(schemas)
 }
@@ -809,24 +629,10 @@ fn validate_generated_schemas(
         "agent_preset_revision",
         "capability_catalog_entry",
         "agent_snapshot",
-        "plugin_n1_contract_manifest",
-        "runtime_selection_record",
-        "plugin_host_request_envelope",
-        "plugin_host_response_envelope",
-        "plugin_package_v1_manifest",
-        "plugin_ready_candidate",
-        "candidate_test_receipt",
-        "plugin_apply_request",
-        "plugin_restore_previous_request",
-        "n1_platform_validation_record",
-        "n1_cohort_lock",
-        "plugin_runtime_contract_manifest",
-        "plugin_release_v1_manifest",
-        "plugin_release_artifact_v1",
-        "plugin_publish_request",
-        "plugin_service_spec",
-        "plugin_bridge_request",
-        "plugin_product_lifecycle_record",
+        "unified_plugin_contract_manifest",
+        "plugin_manifest",
+        "plugin_artifact",
+        "plugin_action_publication",
     ];
     for name in required {
         if !schemas.contains_key(name) {
@@ -881,7 +687,7 @@ fn validate_generated_schemas(
         "host_surfaces",
         "supported_consumers",
         "availability",
-        "admission",
+        "publication_state",
     ] {
         if !catalog.contains(&format!("\"{field}\"")) {
             return Err(format!("capability_catalog_entry schema is missing {field}").into());
@@ -929,34 +735,23 @@ fn validate_generated_schemas(
     if !package_manifest.contains("\"contribution_id\"") {
         return Err("CapabilityManifest must own explicit contribution_id".into());
     }
-    let plugin_release = serde_json::to_string(
+    let plugin_manifest = serde_json::to_string(
         schemas
-            .get("plugin_release_v1_manifest")
-            .expect("Plugin Release schema is generated"),
-    )?;
-    if plugin_release.contains("\"capability_contribution_ids\"") {
-        return Err(
-            "Plugin Release must not duplicate Capability contribution identity".into(),
-        );
-    }
-    let plugin_bridge = serde_json::to_string(
-        schemas
-            .get("plugin_bridge_request")
-            .expect("Plugin Bridge schema is generated"),
+            .get("plugin_manifest")
+            .expect("Unified Plugin manifest schema is generated"),
     )?;
     for forbidden in [
-        "plugin_product_id",
-        "active_release_id",
-        "active_release_digest",
-        "active_release_epoch",
-        "bridge_session_id",
-        "surface_session_id",
-        "localhost",
-        "port",
+        "package_contributions",
+        "roles",
+        "providers",
+        "consumers",
+        "release_id",
+        "candidate_id",
+        "mount_id",
     ] {
-        if plugin_bridge.contains(&format!("\"{forbidden}\"")) {
+        if plugin_manifest.contains(&format!("\"{forbidden}\"")) {
             return Err(format!(
-                "Plugin Bridge request must not trust caller-supplied {forbidden}"
+                "Unified Plugin manifest must not expose {forbidden}"
             )
             .into());
         }

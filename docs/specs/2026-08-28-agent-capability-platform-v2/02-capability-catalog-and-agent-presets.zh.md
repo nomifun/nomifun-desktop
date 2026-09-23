@@ -1,5 +1,10 @@
 # Capability 目录与 Agent Preset 产品/领域设计（2026-09-13 二态修订）
 
+> Plugin 退役边界（2026-09-23）：本文的 Agent Package、Capability、Preset、Session 与
+> Kernel 条款仍作为 Agent 核心背景；其中 `PluginMount`、MiniApp 或旧 Plugin 投影示例仅为
+> 历史记录，不是当前作者或运行合同。Plugin 唯一权威为
+> `../2026-09-22-unified-plugin-core/README.zh.md`。
+
 > 文档性质：这是经 2026-09-02 止损修订后的**产品与领域设计**，用于说明
 > Capability Catalog、Agent Preset、typed resource binding、Compiler、Snapshot
 > 与 AgentSession 的长期语义；它不是实施状态、TODO、Gate、Evidence 或发布台账。

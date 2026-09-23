@@ -16,11 +16,14 @@ fn access_log_path(path: &str) -> Cow<'_, str> {
     let plugin_segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     if matches!(
         plugin_segments.as_slice(),
-        ["api", "plugins", "runtimes", _plugin_id, "surface", "assets", capability, _epoch, _digest, ..]
-            if is_preview_capability(capability)
+        ["api", "plugins" | "plugin-drafts", owner_id, "surface", "assets", session_id, generation, digest, _asset, ..]
+            if nomifun_common::validate_uuidv7(owner_id).is_ok()
+                && nomifun_common::validate_uuidv7(session_id).is_ok()
+                && generation.parse::<u64>().is_ok_and(|value| value > 0)
+                && is_preview_capability(digest)
     ) {
         let mut redacted = plugin_segments;
-        redacted[6] = REDACTED_CAPABILITY;
+        redacted[5] = REDACTED_CAPABILITY;
         return Cow::Owned(format!("/{}", redacted.join("/")));
     }
 
@@ -132,20 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn redacts_only_structural_plugin_surface_capabilities() {
-        assert_eq!(
-            access_log_path(&format!(
-                "/api/plugins/runtimes/plugin-1/surface/assets/{CAPABILITY}/4/{CAPABILITY}/ui/index.html"
-            )),
-            format!(
-                "/api/plugins/runtimes/plugin-1/surface/assets/[REDACTED]/4/{CAPABILITY}/ui/index.html"
-            )
+    fn unified_plugin_surface_session_capability_is_redacted() {
+        let path = format!(
+            "/api/plugins/0199aa00-0000-7000-8000-000000000001/surface/assets/0199aa00-0000-7000-8000-000000000002/4/{CAPABILITY}/ui/index.html"
         );
         assert_eq!(
-            access_log_path(
-                "/api/plugins/runtimes/plugin-1/surface/assets/not-a-capability/4/digest/ui/index.html"
-            ),
-            "/api/plugins/runtimes/plugin-1/surface/assets/not-a-capability/4/digest/ui/index.html"
+            access_log_path(&path),
+            format!(
+                "/api/plugins/0199aa00-0000-7000-8000-000000000001/surface/assets/[REDACTED]/4/{CAPABILITY}/ui/index.html"
+            )
         );
     }
 

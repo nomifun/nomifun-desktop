@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    PackageRef, PluginMountId, ServiceHandleDescriptor, ServiceKeyId, ServiceKeyRef, VersionString,
+    PackageRef, AgentModuleId, ServiceHandleDescriptor, ServiceKeyId, ServiceKeyRef, VersionString,
 };
 
 use crate::KernelError;
@@ -116,7 +116,7 @@ impl DeclaredServiceView {
     {
         let Some(service) = self.services.get(key.reference()) else {
             return Err(KernelError::MissingService {
-                mount_id: PluginMountId::from("declared-service-view"),
+                mount_id: AgentModuleId::from("declared-service-view"),
                 service_id: key.reference.id.clone(),
                 version: key.reference.version.clone(),
             });
@@ -153,7 +153,7 @@ pub(crate) fn build_service_bindings(
     providers: impl IntoIterator<
         Item = (
             PackageRef,
-            PluginMountId,
+            AgentModuleId,
             ServiceExports,
         ),
     >,
@@ -219,7 +219,7 @@ mod tests {
             id: nomifun_agent_contracts::PackageId::from("sample.provider"),
             version: VersionString::from("1.0.0"),
         };
-        let mount = PluginMountId::from("sample-provider");
+        let mount = AgentModuleId::from("sample-provider");
         let services =
             build_service_bindings([(package.clone(), mount.clone(), exports)]).unwrap();
         let descriptor = services

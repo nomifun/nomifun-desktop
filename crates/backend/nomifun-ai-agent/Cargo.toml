@@ -79,9 +79,6 @@ browser-use = ["dep:nomifun-browser-platform", "dep:nomi-browser-engine"]
 
 [dev-dependencies]
 nomifun-agent-domain-wave1.workspace = true
-nomifun-js-host.workspace = true
-nomifun-js-kernel-adapter.workspace = true
-nomifun-js-runtime.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber.workspace = true
 nomifun-common.workspace = true

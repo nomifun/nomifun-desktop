@@ -61,14 +61,6 @@
     "editTagsTitle": "Tags",
     "editTagsDesc": "Tag this skill so it surfaces under the right audience and scenario filters.",
     "detailTitle": "Skill Details",
-    "freezeTitle": "Publish an immutable Agent Skill",
-    "freezeHelp": "Preview and freeze the complete Skill into a Plugin candidate. Review/apply and enable it in Plugins, then select it in the Agent workbench and publish a new revision. Existing Sessions are unchanged. Plugin Package v1 requires the managed Node runtime to enable; this is not an engine installation.",
-    "freezePreview": "Preview frozen files",
-    "freezeTarget": "Choose the existing Skill project to update",
-    "freezeConfirm": "This creates or replaces the selected project’s ready candidate only. No activation, Agent change, capability grant or script execution occurs. Source changes require another preview.",
-    "freezePublish": "Confirm and create candidate",
-    "freezeReady": "Frozen candidate created. Review it in Plugins before selecting it for an Agent.",
-    "freezeOpen": "Open Plugins workshop",
     "detailLocation": "Location",
     "detailInstructions": "Instructions",
     "detailPreview": "Preview",
@@ -1266,8 +1258,7 @@
   "executionEngines": {
     "title": "Nomi Runtime",
     "subtitle": "Build, health and recovery diagnostics for the single official Agent runtime.",
-    "scope": "Nomi Runtime executes every Agent. It is updated with the app and is not an Agent setting. JavaScript Runtime supplies Node.js for plugins and remains separate.",
-    "javascriptLink": "Manage JavaScript runtime →",
+    "scope": "Nomi Runtime executes every Agent. Plugin JavaScript authority is Host-managed and is not user-selectable.",
     "refresh": "Refresh diagnostics",
     "loading": "Loading Nomi Runtime diagnostics…",
     "loadError": "Unable to refresh Nomi Runtime diagnostics. Check the service connection and retry. Any displayed information may be out of date.",
@@ -1290,76 +1281,6 @@
     "configureTitle": "Configure what an Agent can do",
     "configureHint": "Use Agent Workbench to choose capability modules, exact actions, Skills and model routes. Nomi Runtime itself has no selector.",
     "configureLink": "Open Agent Workbench →"
-  },
-  "runtimeManager": {
-    "title": "JavaScript Runtime",
-    "subtitle": "Manage the Node.js runtime used by NomiFun Plugins and PluginRuntimes.",
-    "separateHint": "JavaScript Runtime is a Plugin host dependency. It does not execute Agents and does not replace Nomi Runtime.",
-    "railTitle": "JavaScript Runtime",
-    "desktopOnlyTitle": "Desktop only",
-    "desktopOnlyBody": "Node.js paths and local processes can only be managed in the NomiFun desktop app.",
-    "loading": "Loading Runtime status…",
-    "currentTitle": "Current Runtime",
-    "currentDescription": "All JavaScript Hosts share one committed Node.js Runtime.",
-    "noSelection": "No compatible Node.js Runtime selected",
-    "noSelectionBody": "Choose a local Node.js executable or confirm the official Node.js LTS download.",
-    "candidatesTitle": "Available Runtimes",
-    "candidatesDescription": "Scan PATH, choose an absolute executable path, or use a managed Runtime.",
-    "candidatesEmpty": "No Node.js Runtime has been discovered.",
-    "unknownVersion": "Unknown version",
-    "diagnostics": "Show diagnostics",
-    "statusError": "Runtime status contains an error: {{code}}",
-    "source": {
-      "manualPath": "Manual path",
-      "processPath": "Current PATH",
-      "managed": "NomiFun managed"
-    },
-    "compatibility": {
-      "recommended": "Recommended",
-      "compatible": "Compatible",
-      "incompatible": "Incompatible"
-    },
-    "candidate": {
-      "current": "In use",
-      "pending": "Pending decision",
-      "selected": "Current Runtime",
-      "use": "Use this Runtime"
-    },
-    "downloadTitle": "Official Node.js LTS",
-    "downloadDescription": "Confirm the official release and host target before downloading.",
-    "download": {
-      "downloading": "Downloading and verifying official Node.js…",
-      "ready": "Download and verification complete. The Runtime is ready to use.",
-      "failed": "Download failed.",
-      "unavailable": "The official Node.js LTS offer is currently unavailable."
-    },
-    "switch": {
-      "title": "Runtime switch decision",
-      "description": "The candidate Runtime has partial validation results. Choose whether to continue with it or restore the previous Runtime.",
-      "noParticipants": "No participant results to show.",
-      "participantPlugin": "Plugin",
-      "participantPluginRuntime": "PluginRuntime Service",
-      "participantBuild": "Build foundation",
-      "passed": "Passed",
-      "failed": "Failed",
-      "notCovered": "Not covered"
-    },
-    "confirm": {
-      "downloadTitle": "Download and use official Node.js?",
-      "downloadBody": "NomiFun will download and verify the official Node.js {{version}} release for {{target}}, then try to make it the global JavaScript Runtime.",
-      "nonRecommendedTitle": "Use a non-recommended Node.js version?",
-      "nonRecommendedBody": "Node.js {{version}} meets the minimum compatibility requirement but is outside the current test baseline. Continue?"
-    },
-    "actions": {
-      "refresh": "Refresh",
-      "choosePath": "Choose node.exe",
-      "scan": "Scan again",
-      "download": "Download and use",
-      "useDownloaded": "Use downloaded version",
-      "continue": "Continue with new version",
-      "restore": "Restore previous version",
-      "cancel": "Cancel"
-    }
   },
   "taskModel": {
     "providerPlaceholder": "Pick a provider",

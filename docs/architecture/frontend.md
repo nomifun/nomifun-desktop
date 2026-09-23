@@ -80,10 +80,10 @@ The source of truth is
 | `/workshop/canvas/:canvasId` | Canvas infinite editor. |
 | `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
 | `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Prompt and asset libraries plus the private Template Studio. |
-| `/plugins` | Plugin Library for installed and locally authored Plugin Products. |
-| `/plugins/new` | Start Plugin creation or import. |
-| `/plugins/create/:draftId` | Create a Plugin project from a validated draft. |
-| `/plugins/run/:id` | Plugin Workshop and runtime surface for source, tests, Releases, lifecycle, transfer, and UI/Service operation. |
+| `/plugins` | Unified Plugin Library for installed Plugins and editable Drafts. |
+| `/plugins/new` | Start Chat authoring or import a Package/Backup. |
+| `/plugins/create/:draftId` | Edit, preview, and save one canonical Plugin package Draft. |
+| `/plugins/run/:id` | Unified Plugin detail and App Surface with configuration, restore, export, trash, and deletion actions. |
 | `/settings/system` and related settings subroutes | System settings page and sub-sections. |
 
 Legacy settings paths such as `/settings/model`, `/settings/agent`,

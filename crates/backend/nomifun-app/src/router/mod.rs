@@ -12,7 +12,6 @@ pub(crate) mod agent_wave3_creation_host;
 mod automatic_creation_route;
 mod engine_creation_tools;
 pub(crate) mod agent_wave3_host;
-pub(crate) mod agent_wave3_plugin_host;
 pub(crate) mod agent_wave3_template_runner;
 pub(crate) mod agent_wave3_workshop_host;
 pub(crate) mod agent_wave5_host;
@@ -37,9 +36,8 @@ pub mod engine_history;
 pub mod engine_model_facts;
 pub mod engine_tool_host;
 pub mod engine_kernel_session;
+mod engine_plugin_bindings;
 mod engine_git_lifecycle;
-mod engine_plugin_product_tools;
-mod engine_plugin_middleware;
 mod engine_tool_discovery;
 mod engine_robot_tools;
 #[cfg(feature = "browser-use")]
@@ -66,20 +64,17 @@ mod mcp_effect_receipts;
 mod hosted_effect_receipts;
 mod idmm;
 mod nomi_core_mcp_catalog;
-pub(crate) mod plugin_platform;
-mod plugin_runtime_host;
+pub(crate) mod plugin;
+pub(crate) mod plugin_ports;
 #[cfg(feature = "browser-use")]
 pub(crate) mod browser_workspace;
 mod computer_permissions;
 mod health;
 mod javascript_runtime;
 mod knowledge_registration;
-mod plugin_runtime;
-mod plugin_product;
 mod model_failover;
 mod routes;
 mod state;
-mod skill_publication;
 mod trace;
 
 pub use routes::{

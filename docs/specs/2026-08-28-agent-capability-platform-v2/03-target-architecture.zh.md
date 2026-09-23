@@ -1,5 +1,9 @@
 # 目标技术架构
 
+> Plugin 退役边界（2026-09-23）：本文仅保留非 Plugin Agent 架构背景；正文中的
+> `PluginMount`、MiniApp、旧 Product/Release/Provider 图均已失效，不得用于当前实现。
+> Plugin 唯一权威为 `../2026-09-22-unified-plugin-core/README.zh.md`。
+
 > 修订说明：本文已于 **2026-09-02** 按
 > [05-system-capability-replacement-foundation.zh.md](05-system-capability-replacement-foundation.zh.md)
 > 完成止损修订。本文描述目标架构，不声明实施已经完成。

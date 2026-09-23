@@ -1,5 +1,9 @@
 # Coding 扩展输入与上下文资源接入
 
+> 归档边界（2026-09-23）：本文的 Coding Engine 结论只作历史背景；`PluginMount` 与
+> MiniApp 接入段落已退役，不得恢复其类型、生命周期或测试入口。当前 Plugin 只能通过
+> Unified Plugin Core 的 Action + Binding 进入真实 Agent 消费者。
+
 状态：implementation-in-progress，新增实现未验证。工作分支为
 `rf/agent-capability-platform-v2`；无新提交、无 push。本轮不运行构建、测试、
 模型评测或桌面 E2E，遵循用户此前排除验证工作的要求。

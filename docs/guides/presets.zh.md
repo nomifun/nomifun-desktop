@@ -2,8 +2,7 @@
 
 > 本页按 05 §15 的当前合同更新。用户可见的产品名称是 **Agent 工作台**，
 > 公共 UI 路由是 `/agent`；`AgentPreset` 只是后端 authoring aggregate 的内部名称。
-> AP-0～AP-7 尚未全部通过，因此本页描述的是 canonical 目标和当前实现边界，
-> 不是“旧设定”兼容说明。
+> Plugin Action/Binding 以 Unified Plugin Core 为准；本页不定义 Plugin 作者合同。
 
 ## 入口与最短路径
 
@@ -23,17 +22,17 @@ Runtime、网络、系统和提供商管理仍属于全局设置，尤其是
 
 | 对象 | 所属方 | Agent 工作台能做什么 |
 | --- | --- | --- |
-| Package / Plugin | 平台扩展域 | 只读取已正式物化的来源和 provenance |
-| Plugin Active Release | Plugin Product 域 | 只读取已发布、可供消费者使用的贡献 |
+| Package / Agent Module | Agent 平台内部 | 只读取已正式物化的内置来源和 provenance |
+| Unified Plugin Action | Plugin Core | 按稳定 Action ID 发现并调用已启用 Plugin 的 Agent Binding |
 | Capability Catalog | 平台能力目录域 | 查询能力、来源、合同、支持的消费者和 availability |
 | Skill Catalog | 平台技能目录域 | 选择 instruction/workflow；Skill 本身不是执行器 |
 | AgentPreset | Agent authoring 域 | 保存用户意图和当前 Revision 引用 |
 | AgentPresetRevision | Agent authoring 域 | 保存不可变 payload、ContributionLock 和 revision digest |
 | Agent Session | Agent 运行域 | 消费冻结的 Snapshot，不反向改写 Revision |
 
-Plugin Product 是平台能力供给层，不是 Agent 子系统。安装、启停、配置、Credential、
-KV、`dataDir`、发布和 Service 生命周期由所属平台域负责；Agent 只能绑定正式的
-typed resource 或已物化 Capability。
+Unified Plugin Core 不是 Agent 子系统。安装、启停、配置、Credential、generation
+DataRoot 和 Service 生命周期由 Plugin Core 负责；Agent 只在消费者边界读取
+`agent.*` Binding，并以稳定 `plugin:<plugin_id>/<action_id>` 调用 Action。
 
 ## 四种创建种子
 
@@ -62,21 +61,20 @@ typed resource 或已物化 Capability。
 ## 能力、技能与来源
 
 工作台从平台 Capability Catalog 查询能力。Catalog 条目至少包含稳定能力 ID、合同
-digest、owner、来源 Package/Release provenance、支持的消费者、typed contribution、所需资源和
+digest、owner、来源 Package 或 Unified Plugin provenance、支持的消费者、typed contribution、所需资源和
 按消费者区分的 availability。
 
-Capability 没有独立版本号。Preset、依赖和冲突只引用稳定能力 ID；具体实现由 Package/Release
+Capability 没有独立版本号。Preset、依赖和冲突只引用稳定能力 ID；内置实现由 Package
 版本、合同 digest、ContributionLock 与 Snapshot digest 冻结，因此更新实现不需要同步改写工作台引用。
 
-- 只有已发布、已启用并完成 materialization 的贡献可以进入正式 Catalog；
-- Ready Candidate、未发布 Release、Project Source、测试 Host 和 Plugin 私有
-  `dataDir` 不会进入 Agent Snapshot；
+- 只有已启用并完成 materialization 的内置贡献，以及已启用 Plugin 的 Agent Binding，才能进入正式发现面；
+- Plugin Draft、Preview DataRoot、Credential 和私有 generation DataRoot 不会进入 Agent Snapshot；
 - 标记为 non-Agent-only 的能力不会出现在 Agent picker；
 - 能力不可用、合同不匹配或资源缺失时显示可解释状态，并 fail closed；
 - Skill 只提供 instruction/workflow 和资源说明，不自动扩张 Snapshot。
 
 如果同一 canonical 能力存在多个合法实现，用户只能在能力详情中显式选择来源。
-选择结果由服务端生成 ContributionLock；前端不提交 Mount、Artifact 或内部 digest
+选择结果由服务端生成 ContributionLock；前端不提交内部 Artifact digest
 来驱动执行。
 
 ## Revision 与 Snapshot
@@ -123,7 +121,7 @@ Session Open 读取已保存 Snapshot，不在每个 Turn 中重新选择 latest
 | Agent Session | `/api/agent-sessions/*` |
 | Agent Binding | `/api/agent-bindings/*` |
 
-客户端不得提交 Snapshot digest、Mount ID、内部 Revision ID、完整 Binding 或裸
+客户端不得提交 Snapshot digest、内部 Revision ID、完整 Binding 或裸
 canonical JSON。服务端负责 owner 检查、Catalog resolve、ContributionLock、Revision/
 Snapshot digest 和 typed failure。
 
@@ -138,4 +136,5 @@ generated inventory residual，详见：
 - [`DECISIONS.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/DECISIONS.zh.md)
 - [`05-system-capability-replacement-foundation.zh.md`](../specs/2026-08-28-agent-capability-platform-v2/05-system-capability-replacement-foundation.zh.md)
 
-在 AP-7 admission 通过前，不得开始 06 的 Plugin Product 代码实施。
+Plugin 的创建、预览、安装、配置和 Backup 请见
+[`Unified Plugin Core`](../specs/2026-09-22-unified-plugin-core/README.zh.md)。

@@ -1,12 +1,13 @@
 import '../../../../test/setup-dom.ts';
 import '@arco-design/web-react/lib/_util/react-19-adapter';
 import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
-import { afterEach, expect, mock, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
-import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
+import { pluginPlatform } from '@/common/adapter/pluginPlatformBridge';
+import type { PluginDraftDetail } from '@/common/types/pluginPlatform';
 import { SWRConfig } from 'swr';
 import { asCapabilityId, asPackageId, createEmptyAgentPresetDocument, placeCapability, type AgentPresetDocument, type CapabilityCatalogItem, type CapabilityModuleCatalogItem } from '@/common/types/agentPlatform';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
@@ -42,7 +43,14 @@ function mount(document = initial(), currentCatalog = catalog, disabled = false,
     <Route path='/' element={<Harness />} /><Route path='/plugins/create/:id' element={<Creator />} />
   </Routes></MemoryRouter></I18nextProvider>), state: () => current };
 }
-afterEach(() => { cleanup(); mock.restore(); });
+beforeEach(() => {
+  (window as typeof window & { __backendPort?: number }).__backendPort = 11451;
+});
+afterEach(() => {
+  delete (window as typeof window & { __backendPort?: number }).__backendPort;
+  cleanup();
+  mock.restore();
+});
 
 test('personal editor submits order through its existing save action', () => {
   const original: AgentPresetDraft = { preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'), display_name: 'Ordered Agent', document: initial() };
@@ -159,26 +167,26 @@ test('execution stages come from the host and unknown selected extensions remain
   expect(result.state().enabled_capabilities).toEqual(original.enabled_capabilities);
 });
 
-test('ordinary user creates one check draft from an empty list without publishing or changing selection', async () => {
-  let finish!: (draft: PluginRuntimeDraft) => void;
-  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
-  const publish = spyOn(pluginRuntimeProduct.save, 'invoke');
+test('ordinary user creates one check draft from an empty list without saving or changing selection', async () => {
+  let finish!: (draft: PluginDraftDetail) => void;
+  const create = spyOn(pluginPlatform.drafts.create, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  const save = spyOn(pluginPlatform.drafts.save, 'invoke');
   const document = createEmptyAgentPresetDocument();
   const result = mount(document, [], false, 'middleware'), view = within(result.container);
   expect(view.getByText(en.middlewareOrder.empty)).toBeTruthy();
   const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
   fireEvent.click(button); fireEvent.click(button);
   expect(create).toHaveBeenCalledTimes(1);
-  expect(create.mock.calls[0]).toEqual([]);
+  expect(create.mock.calls[0]).toEqual([{ template: 'agent.before_tool' }]);
   expect((button as HTMLButtonElement).disabled).toBe(true);
-  await act(async () => { finish({ id: 'check-draft' } as PluginRuntimeDraft); });
+  await act(async () => { finish({ summary: { draft_id: 'check-draft' } } as PluginDraftDetail); });
   expect(view.getByText('Draft check-draft')).toBeTruthy();
-  expect(publish).not.toHaveBeenCalled();
+  expect(save).not.toHaveBeenCalled();
   expect(result.state()).toEqual(document);
 });
 
 test('failed check draft creation is visible and retries only on another explicit click', async () => {
-  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockRejectedValue(new Error('offline'));
+  const create = spyOn(pluginPlatform.drafts.create, 'invoke').mockRejectedValue(new Error('offline'));
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware'), view = within(result.container);
   fireEvent.click(view.getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   await waitFor(() => expect(view.getByText(en.middlewareOrder.createFailed)).toBeTruthy());
@@ -189,7 +197,7 @@ test('failed check draft creation is visible and retries only on another explici
 });
 
 test('disabled editor cannot create a check and Context does not offer the execution template', () => {
-  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke');
+  const create = spyOn(pluginPlatform.drafts.create, 'invoke');
   const result = mount(createEmptyAgentPresetDocument(), [], true, 'middleware'), view = within(result.container);
   const button = view.getByRole('button', { name: en.middlewareOrder.createBeforeTool });
   expect((button as HTMLButtonElement).disabled).toBe(true);
@@ -200,14 +208,26 @@ test('disabled editor cannot create a check and Context does not offer the execu
   expect(within(context.container).queryByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeNull();
 });
 
+test('remote WebUI cannot create a Plugin draft from Agent settings', () => {
+  delete (window as typeof window & { __backendPort?: number }).__backendPort;
+  const create = spyOn(pluginPlatform.drafts.create, 'invoke');
+  const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
+  const button = within(result.container).getByRole('button', {
+    name: en.middlewareOrder.createBeforeTool,
+  });
+  expect((button as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(button);
+  expect(create).not.toHaveBeenCalled();
+});
+
 test('a late check draft response cannot navigate after the editor unmounts', async () => {
-  let finish!: (draft: PluginRuntimeDraft) => void;
-  const create = spyOn(pluginRuntimeProduct.beforeToolTemplate, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+  let finish!: (draft: PluginDraftDetail) => void;
+  const create = spyOn(pluginPlatform.drafts.create, 'invoke').mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   const result = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
   fireEvent.click(within(result.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool }));
   result.unmount();
   const next = mount(createEmptyAgentPresetDocument(), [], false, 'middleware');
-  await act(async () => { finish({ id: 'old-draft' } as PluginRuntimeDraft); });
+  await act(async () => { finish({ summary: { draft_id: 'old-draft' } } as PluginDraftDetail); });
   expect(within(next.container).queryByText('Draft old-draft')).toBeNull();
   expect(within(next.container).getByRole('button', { name: en.middlewareOrder.createBeforeTool })).toBeTruthy();
   expect(create).toHaveBeenCalledTimes(1);

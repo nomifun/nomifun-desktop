@@ -68,7 +68,6 @@ pub use id::{
     KnowledgeBaseId, KnowledgeBindingId, KnowledgeEntryId,
     KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, McpServerId,
     MessageId,
-    PluginProductId,
     PersistedArtifactId, PresetId, PresetTagId, PreviewSnapshotId, ProviderId,
     RemoteAgentId, TerminalId, UUID_STRING_LEN,
     RequirementId, SshHostId, UserId, UuidV7Error, WebhookId,

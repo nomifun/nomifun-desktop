@@ -22,8 +22,6 @@ use futures_util::FutureExt;
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{
     AgentRuntimeSessions, AgentStreamEvent, KernelNomiPluginToolSession,
-    NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
-    NomiPluginProductToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver, NomiPluginToolSession,
     NomiPluginToolSessionProvider, NomiPluginToolSessionRequest,
     NomiPlatformBuiltinContextAdmission,
@@ -34,7 +32,7 @@ use nomifun_ai_agent::{
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, ArtifactId, ContributionSourceKind,
     DeleteAgentSessionCommand, EffectClass, OperationId, PrincipalRef, RemoteBindingProvenance,
-    ResolvedCapability, ScopeKey, StrictJsonValue, UserId,
+    ScopeKey, StrictJsonValue, UserId,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
@@ -2141,7 +2139,6 @@ impl NomiCoreSessionOwner {
 /// action, schema, or activation authority.
 pub(crate) struct NomiCorePluginToolSessionProvider {
     hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
-    skill_artifacts: Arc<nomifun_plugin_platform::application::FsPluginArtifactStore>,
     wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     session_owner: Arc<NomiCoreSessionOwner>,
     control_plane: Arc<AgentControlPlane>,
@@ -2155,8 +2152,6 @@ pub(crate) struct NomiCorePluginToolSessionProvider {
     platform_builtin_lifecycle_admission:
         Arc<NomiPlatformBuiltinLifecycleAdmission>,
     robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
-    plugin_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 }
 
 impl NomiCorePluginToolSessionProvider {
@@ -2176,16 +2171,11 @@ impl NomiCorePluginToolSessionProvider {
             NomiPlatformBuiltinLifecycleAdmission,
         >,
         robot_owner: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
-        plugin_runtime: Arc<
-            nomifun_plugin_platform::runtime::PluginRuntimeApplicationService,
-        >,
         wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
-        skill_artifacts: Arc<nomifun_plugin_platform::application::FsPluginArtifactStore>,
         pool: nomifun_db::SqlitePool,
     ) -> Self {
         Self {
             hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts::new(pool),
-            skill_artifacts,
             wave2_owner,
             session_owner,
             control_plane,
@@ -2196,7 +2186,6 @@ impl NomiCorePluginToolSessionProvider {
             platform_builtin_context_admission,
             platform_builtin_lifecycle_admission,
             robot_owner,
-            plugin_runtime,
         }
     }
 
@@ -2398,7 +2387,6 @@ impl NomiCorePluginToolSessionProvider {
         let skills = super::engine_skills::compile_commands(
             &compiled,
             &registry,
-            Arc::clone(&self.skill_artifacts),
         )
         .await?;
         if let Some(extra) = extra {
@@ -2476,7 +2464,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             self.compile_request(request).await? else { return Ok(None); };
         let registry = self.kernel.snapshot().map_err(|error| AppError::Conflict(error.to_string()))?;
         super::nomi_core_mcp_catalog::validate_resources(&compiled, &registry, &principal)?;
-        let skills = super::engine_skills::compile(&compiled, &registry, self.skill_artifacts.clone()).await?;
+        let skills = super::engine_skills::compile(&compiled, &registry).await?;
         skills.validate_extra(&response.extra)?;
         let mut mcp_schemas = BTreeMap::new();
         for selected in compiled.content().enabled_capabilities.iter() {
@@ -2623,22 +2611,6 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 }
             }
         };
-        let plugin_product_actions = if constraints.restricted() { Vec::new() } else {
-            KernelNomiPluginToolSession::materialize_plugin_product_actions(
-            &compiled,
-            &principal,
-            &session_id,
-            &ScopeKey::from(format!("session:{}", session_id.as_ref())),
-            Arc::new(NomiCorePluginProductSchemaResolver {
-                application: Arc::clone(&self.plugin_runtime),
-            }),
-        )
-            .await
-            .map_err(|error| {
-                AppError::Conflict(format!(
-                    "Nomi Plugin Tool session materialization failed: {error}"
-                ))
-            })? };
         let hosted_witness = self.hosted_effects.witness(principal.principal_id.clone(), session_id.as_ref().to_owned());
         let git_witness = if !constraints.restricted()
             && compiled.content().enabled_capabilities.iter().any(|capability| {
@@ -2691,15 +2663,6 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 owner,
                 session_id: session_id.clone(),
             })),
-            product: Some((
-                plugin_product_actions,
-                Arc::new(NomiCorePluginProductToolInvoker {
-                    application: Arc::clone(&self.plugin_runtime),
-                    owner_user_id: principal.principal_id.clone(),
-                    session_id: session_id.as_ref().to_owned(),
-                    receipts: self.hosted_effects.clone(),
-                }),
-            )),
         })
             .map(Some)
         .map_err(|error| {
@@ -2806,70 +2769,6 @@ fn install_creation_mcp_selection(
     Ok(())
 }
 
-struct NomiCorePluginProductSchemaResolver {
-    application:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
-}
-
-#[async_trait]
-impl NomiPluginProductToolSchemaResolver for NomiCorePluginProductSchemaResolver {
-    async fn resolve(
-        &self,
-        owner: &PrincipalRef,
-        capability: &ResolvedCapability,
-        reference: &nomifun_agent_contracts::CanonicalSchemaRef,
-    ) -> Result<StrictJsonValue, String> {
-        if owner.principal_kind != "user" {
-            return Err("Plugin Agent Tool owner must be a user principal".to_owned());
-        }
-        self.application
-            .resolve_agent_capability_schema(
-                &owner.principal_id,
-                capability,
-                reference,
-            )
-            .await
-            .map_err(|error| error.to_string())
-    }
-}
-
-struct NomiCorePluginProductToolInvoker {
-    receipts: super::hosted_effect_receipts::HostedEffectReceipts,
-    session_id: String,
-    application:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
-    owner_user_id: String,
-}
-
-#[async_trait]
-impl NomiPluginProductToolInvoker for NomiCorePluginProductToolInvoker {
-    async fn preflight(&self, request: NomiPluginProductToolInvocation) -> Result<(), NomiPluginToolError> {
-        let owner = super::engine_plugin_product_tools::PluginProductOwner {
-            application: self.application.clone(), receipts: self.receipts.clone(),
-        };
-        owner.preflight(&self.owner_user_id, request.capability(), &request.action().action_id,
-            request.operation_id().clone(), request.input().clone()).await.map_err(|error| match error {
-                super::engine_plugin_product_tools::PluginProductCallError::Rejected(message) => NomiPluginToolError::Contract(message),
-                super::engine_plugin_product_tools::PluginProductCallError::Unknown(message) => NomiPluginToolError::OutcomeUnknown(message),
-            })
-    }
-    async fn invoke(
-        &self,
-        request: NomiPluginProductToolInvocation,
-    ) -> Result<StrictJsonValue, NomiPluginToolError> {
-        let owner = super::engine_plugin_product_tools::PluginProductOwner {
-            application: self.application.clone(), receipts: self.receipts.clone(),
-        };
-        owner.invoke(&self.owner_user_id, &self.session_id, request.capability(),
-            &request.action().action_id, request.operation_id().clone(), request.input().clone(),
-            nomifun_plugin_platform::runtime::PluginRuntimeCallCancellation::from_shared_flag(request.cancellation().shared_flag()))
-            .await.map_err(|error| match error {
-                super::engine_plugin_product_tools::PluginProductCallError::Rejected(message) => NomiPluginToolError::Contract(message),
-                super::engine_plugin_product_tools::PluginProductCallError::Unknown(message) => NomiPluginToolError::OutcomeUnknown(message),
-            })
-    }
-}
-
 pub(super) fn compile_nomi_plugin_snapshot(
     kernel: &KernelRegistry,
     compiler_environment: &CompilerEnvironment,
@@ -2925,16 +2824,6 @@ pub(super) fn compile_nomi_plugin_snapshot(
             audience: persisted.audience.clone(),
             created_at_ms: persisted.created_at_ms,
             resolver_run_id: persisted.resolver_run_id.clone(),
-            plugin_product_capabilities: persisted
-                .content
-                .enabled_capabilities
-                .iter()
-                .filter(|capability| {
-                    capability.contribution_lock.source_kind
-                        == ContributionSourceKind::PluginProductActiveRelease
-                })
-                .cloned()
-                .collect(),
         },
     )
     .map_err(kernel_error_to_app)?;
@@ -5512,7 +5401,6 @@ mod session_boundary_tests {
             ".retire_agent_session(agent_session_id)",
             ".delete_agent_session(owner_id, agent_session_id, &bindings)",
             ".close_agent_session(owner_id, agent_session_id)",
-            ".revoke_agent_session_surfaces(owner_id, agent_session_id)",
             ".delete_jobs_by_agent_session(owner_id, agent_session_id)",
             ".clear_owner_for_session(",
             ".record_resource_cleanup_started(&session_id, \"ssh\")",
@@ -5727,8 +5615,6 @@ pub(crate) struct NomiCoreAgentApiState {
     pub(crate) wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
     pub(crate) wave5_owner: Arc<super::agent_wave5_host::NomiCoreWave5Host>,
     ssh_pool: nomifun_ssh::SshConnectionPool,
-    plugin_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     cron_cleanup_owner:
         Arc<std::sync::OnceLock<Arc<nomifun_cron::service::CronService>>>,
     requirement_cleanup_owner:
@@ -5758,7 +5644,6 @@ impl NomiCoreAgentApiState {
         product_agent_resolver: Arc<NomiCoreProductAgentResolver>,
         skill_discovery: Arc<NomiCorePluginToolSessionProvider>,
         ssh_pool: nomifun_ssh::SshConnectionPool,
-        plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
         #[cfg(feature = "browser-use")]
         browser_resources: Option<
             Arc<nomifun_browser_platform::workspace::BrowserResourceService>,
@@ -5779,7 +5664,6 @@ impl NomiCoreAgentApiState {
             wave4_owners,
             wave5_owner,
             ssh_pool,
-            plugin_runtime,
             cron_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
             requirement_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
             autowork_cleanup_owner: Arc::new(std::sync::OnceLock::new()),
@@ -5999,18 +5883,6 @@ impl NomiCoreAgentApiState {
             }
         }
 
-        self.plugin_runtime
-            .revoke_agent_session_surfaces(owner_id, agent_session_id)
-            .await
-            .map_err(|error| {
-                NomiCoreApiError::new(
-                    StatusCode::CONFLICT,
-                    "AGENT_SESSION_PLUGIN_SURFACE_CLEANUP_FAILED",
-                    format!(
-                        "Plugin Surface cleanup failed after AgentSession deletion was fenced: {error}"
-                    ),
-                )
-            })?;
         let cron = self.cron_cleanup_owner.get().ok_or_else(|| {
             NomiCoreApiError::new(
                 StatusCode::SERVICE_UNAVAILABLE,

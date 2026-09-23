@@ -2,10 +2,11 @@
 use super::*;
 use nomifun_agent_contracts::{
     CapabilityCatalogMaterialization, CapabilityCatalogMaterializer, CapabilityContributions,
-    CapabilityKind, CapabilityManifest, CapabilityOwner, CapabilityProvenance,
-    CapabilityReleaseState, CapabilitySelection, CatalogAvailability, ExactRoleContractRef,
+    CapabilityKind, CapabilityManifest, CapabilityOwner, CapabilityProvenance, CapabilityRef,
+    CapabilityPublicationState, CapabilitySelection, CatalogAvailability, ExactRoleContractRef,
     ExactRoleProviderRef, InstallationRoleBinding, LocalizedMetadata, PackageRef,
-    PlatformConstraint, RoleContractKey, RoleContractManifest, RoleMemberContract,
+    PlatformConstraint, PluginSourceKind, PluginSourceMetadata, ContributionSourceKind,
+    RoleContractKey, RoleContractManifest, RoleMemberContract,
     RoleMemberRequirement, RoleProviderContribution, RoleProviderMemberContribution,
     RoleProviderSelection, RuntimeProfileKind, StrictJsonValue, capability_surface_declarations,
 };
@@ -70,7 +71,6 @@ impl Fixture {
             source_kind: ContributionSourceKind::PlatformBuiltin,
             source_identity: source.source_identity.clone().into(),
             mount_id: None,
-            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id: manifest.contribution_id.clone(),
             contract_digest: digest.clone(),
@@ -84,11 +84,10 @@ impl Fixture {
                 source_kind: contribution_lock.source_kind,
                 source_identity: contribution_lock.source_identity.clone(),
                 mount_id: None,
-                plugin_product_id: None,
                 mcp_binding_id: None,
                 artifact_digest: Some(artifact_digest.clone()),
             },
-            release_state: CapabilityReleaseState::PublishedActive,
+            publication_state: CapabilityPublicationState::Active,
             availability: BTreeMap::from([(
                 CapabilityConsumer::Agent,
                 CatalogAvailability::Active,
@@ -310,10 +309,10 @@ impl Fixture {
                     owner: CapabilityOwner::Package { package: capability.manifest.package.clone() },
                     source_kind: capability.contribution_lock.source_kind,
                     source_identity: capability.contribution_lock.source_identity.clone(),
-                    mount_id: None, plugin_product_id: None, mcp_binding_id: None,
+                    mount_id: None, mcp_binding_id: None,
                     artifact_digest: Some(capability.target_artifact_digest.clone()),
                 },
-                release_state: CapabilityReleaseState::PublishedActive,
+                publication_state: CapabilityPublicationState::Active,
                 availability: BTreeMap::from([(CapabilityConsumer::Agent, CatalogAvailability::Active)]),
             }).unwrap();
             self.catalog.formal_capability_entries.insert(reference, entry);
@@ -570,8 +569,8 @@ fn skill_artifact_drift_recompiles_clean_save_even_when_body_and_contract_are_un
     let skill = MaterializedSkill {
         definition, contribution_id: "skill:plugin.guide".into(), contract_digest: contract_digest.clone(),
         contribution_lock: ContributionLock {
-            source_kind: ContributionSourceKind::PluginMount, source_identity: "guide-mount".into(),
-            mount_id: Some("guide-mount".into()), plugin_product_id: None, mcp_binding_id: None,
+            source_kind: ContributionSourceKind::AgentModule, source_identity: "guide-mount".into(),
+            mount_id: Some("guide-mount".into()), mcp_binding_id: None,
             contribution_id: "skill:plugin.guide".into(), contract_digest,
         },
         target_artifact_digest: target.clone(), mount_id: "guide-mount".into(),

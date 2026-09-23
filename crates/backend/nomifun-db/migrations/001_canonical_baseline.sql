@@ -1665,47 +1665,6 @@ CREATE TABLE instance_access_token (
     created_at    INTEGER NOT NULL
 );
 
-CREATE TABLE javascript_runtime_selection (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    singleton_key            TEXT NOT NULL UNIQUE CHECK (
-        singleton_key = 'javascript_runtime_selection'
-    ),
-    selected_runtime_json    TEXT CHECK (
-        selected_runtime_json IS NULL OR (
-            json_valid(selected_runtime_json)
-            AND json_type(selected_runtime_json) = 'object'
-        )
-    ),
-    pending_candidate_json   TEXT CHECK (
-        pending_candidate_json IS NULL OR (
-            json_valid(pending_candidate_json)
-            AND json_type(pending_candidate_json) = 'object'
-        )
-    ),
-    validation_result_json   TEXT CHECK (
-        validation_result_json IS NULL OR (
-            json_valid(validation_result_json)
-            AND json_type(validation_result_json) = 'object'
-        )
-    ),
-    last_error_code          TEXT CHECK (
-        last_error_code IS NULL OR (
-            length(last_error_code) BETWEEN 1 AND 256
-            AND last_error_code NOT GLOB '*[^!-~]*'
-        )
-    ),
-    non_recommended_warning_acknowledged_json TEXT NOT NULL DEFAULT '[]' CHECK (
-        json_valid(non_recommended_warning_acknowledged_json)
-        AND json_type(non_recommended_warning_acknowledged_json) = 'array'
-    ),
-    revision                 INTEGER NOT NULL CHECK (revision >= 1),
-    updated_at               INTEGER NOT NULL CHECK (updated_at >= 0), selected_executable_path TEXT, pending_candidate_executable_path TEXT,
-    CHECK (
-        validation_result_json IS NULL
-        OR pending_candidate_json IS NOT NULL
-    )
-);
-
 CREATE TABLE knowledge_bases (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     knowledge_base_id TEXT NOT NULL UNIQUE
@@ -2489,1275 +2448,264 @@ CREATE TABLE oauth_tokens (
 );
 
 CREATE TABLE plugin_artifacts (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    artifact_id              TEXT NOT NULL UNIQUE CHECK (
-        length(artifact_id) = 36
-        AND lower(artifact_id) = artifact_id
-        AND artifact_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(artifact_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    artifact_digest          TEXT NOT NULL UNIQUE CHECK (
+    artifact_digest TEXT PRIMARY KEY CHECK (
         length(artifact_digest) = 64
         AND lower(artifact_digest) = artifact_digest
         AND artifact_digest NOT GLOB '*[^0-9a-f]*'
     ),
-    package_id               TEXT NOT NULL CHECK (
-        length(package_id) BETWEEN 1 AND 255
-        AND package_id NOT GLOB '*[^A-Za-z0-9._-]*'
+    package_id      TEXT NOT NULL CHECK (
+        length(package_id) BETWEEN 1 AND 160
+        AND package_id = lower(package_id)
+        AND package_id NOT GLOB '*[^a-z0-9._-]*'
     ),
-    package_version          TEXT NOT NULL CHECK (
-        length(package_version) BETWEEN 1 AND 128
-        AND package_version NOT GLOB '*[^!-~]*'
-    ),
-    manifest_digest          TEXT NOT NULL CHECK (
-        length(manifest_digest) = 64
-        AND lower(manifest_digest) = manifest_digest
-        AND manifest_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    manifest_json            TEXT NOT NULL CHECK (
-        json_valid(manifest_json)
-        AND json_type(manifest_json) = 'object'
-    ),
-    managed_path             TEXT NOT NULL UNIQUE CHECK (
-        managed_path <> ''
-        AND substr(managed_path, 1, 1) <> '/'
-        AND substr(managed_path, -1, 1) <> '/'
-        AND instr(managed_path, '\') = 0
-        AND instr(managed_path, '//') = 0
-        AND instr('/' || managed_path || '/', '/../') = 0
-        AND instr('/' || managed_path || '/', '/./') = 0
-        AND instr(managed_path, char(0)) = 0
-    ),
-    created_at               INTEGER NOT NULL CHECK (created_at >= 0)
+    version         TEXT NOT NULL CHECK (length(version) BETWEEN 1 AND 128),
+    manifest_json   TEXT NOT NULL CHECK (json_valid(manifest_json) AND json_type(manifest_json) = 'object'),
+    files_json      TEXT NOT NULL CHECK (json_valid(files_json) AND json_type(files_json) = 'array'),
+    artifact_root   TEXT NOT NULL CHECK (length(artifact_root) BETWEEN 1 AND 4096),
+    has_ui          INTEGER NOT NULL CHECK (has_ui IN (0, 1)),
+    has_service     INTEGER NOT NULL CHECK (has_service IN (0, 1)),
+    data_version    INTEGER NOT NULL CHECK (data_version >= 0),
+    created_at_ms   INTEGER NOT NULL CHECK (created_at_ms > 0),
+    CHECK (has_ui = 1 OR has_service = 1)
 );
 
-CREATE TABLE plugin_build_operation_lineage (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation_id TEXT NOT NULL UNIQUE CHECK (
-        length(operation_id) = 36
-        AND lower(operation_id) = operation_id
-        AND operation_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    plugin_product_id TEXT NOT NULL CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_id TEXT NOT NULL CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_revision INTEGER NOT NULL CHECK (project_revision >= 1),
-    source_snapshot_digest TEXT NOT NULL CHECK (
-        length(source_snapshot_digest) = 64
-        AND lower(source_snapshot_digest) = source_snapshot_digest
-        AND source_snapshot_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    dependency_lock_digest TEXT NOT NULL CHECK (
-        length(dependency_lock_digest) = 64
-        AND lower(dependency_lock_digest) = dependency_lock_digest
-        AND dependency_lock_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    build_profile_version TEXT NOT NULL CHECK (
-        length(build_profile_version) BETWEEN 1 AND 64
-        AND build_profile_version NOT GLOB '*[^!-~]*'
-    ),
-    build_generation INTEGER NOT NULL CHECK (build_generation >= 1),
-    started_at_ms INTEGER NOT NULL CHECK (started_at_ms > 0)
-);
-
-CREATE TABLE plugin_candidate_test_receipts (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    receipt_id               TEXT NOT NULL UNIQUE CHECK (
-        length(receipt_id) = 36
-        AND lower(receipt_id) = receipt_id
-        AND receipt_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(receipt_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    candidate_id             TEXT NOT NULL UNIQUE CHECK (
-        length(candidate_id) = 36
-        AND lower(candidate_id) = candidate_id
-        AND candidate_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(candidate_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    candidate_digest         TEXT NOT NULL CHECK (
-        length(candidate_digest) = 64
-        AND lower(candidate_digest) = candidate_digest
-        AND candidate_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    artifact_id              TEXT NOT NULL CHECK (
-        length(artifact_id) = 36
-        AND lower(artifact_id) = artifact_id
-        AND artifact_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(artifact_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    artifact_digest          TEXT NOT NULL CHECK (
-        length(artifact_digest) = 64
-        AND lower(artifact_digest) = artifact_digest
-        AND artifact_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    receipt_digest           TEXT NOT NULL UNIQUE CHECK (
-        length(receipt_digest) = 64
-        AND lower(receipt_digest) = receipt_digest
-        AND receipt_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    runtime_fingerprint_digest TEXT NOT NULL CHECK (
-        length(runtime_fingerprint_digest) = 64
-        AND lower(runtime_fingerprint_digest) = runtime_fingerprint_digest
-        AND runtime_fingerprint_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    receipt_json             TEXT NOT NULL CHECK (
-        json_valid(receipt_json)
-        AND json_type(receipt_json) = 'object'
-    ),
-    tested_at                INTEGER NOT NULL CHECK (tested_at >= 0)
-);
-
-CREATE TABLE plugin_catalog_publications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_product_id TEXT NOT NULL UNIQUE CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    active_release_id TEXT NOT NULL CHECK (
-        length(active_release_id) = 36
-        AND lower(active_release_id) = active_release_id
-        AND active_release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(active_release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    active_release_digest TEXT NOT NULL CHECK (
-        length(active_release_digest) = 64
-        AND lower(active_release_digest) = active_release_digest
-        AND active_release_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    active_release_epoch INTEGER NOT NULL CHECK (active_release_epoch > 0),
-    catalog_digest TEXT NOT NULL CHECK (
-        length(catalog_digest) = 64
-        AND lower(catalog_digest) = catalog_digest
-        AND catalog_digest NOT GLOB '*[^0-9a-f]*'
-    )
-);
-
-CREATE TABLE plugin_credential_binding_mutations (
-    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
-    mount_id                    TEXT NOT NULL UNIQUE CHECK (
-        length(mount_id) = 36
-        AND lower(mount_id) = mount_id
-        AND mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    expected_mount_revision    INTEGER NOT NULL CHECK (expected_mount_revision >= 0),
-    expected_current_artifact_digest TEXT CHECK (
-        expected_current_artifact_digest IS NULL OR (
-            length(expected_current_artifact_digest) = 64
-            AND lower(expected_current_artifact_digest) = expected_current_artifact_digest
-            AND expected_current_artifact_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    expected_bindings_revision INTEGER NOT NULL CHECK (expected_bindings_revision >= 0),
-    target_bindings_revision   INTEGER NOT NULL CHECK (target_bindings_revision >= 1),
-    allow_delete_pending       INTEGER NOT NULL DEFAULT 0 CHECK (allow_delete_pending IN (0, 1)),
-    updated_at                 INTEGER NOT NULL CHECK (updated_at >= 0)
-);
-
-CREATE TABLE plugin_credential_bindings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_product_id TEXT NOT NULL CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    slot_key TEXT NOT NULL CHECK (
-        length(slot_key) BETWEEN 1 AND 128
-        AND slot_key NOT GLOB '*[^!-~]*'
-    ),
-    credential_id TEXT NOT NULL CHECK (
-        length(credential_id) BETWEEN 1 AND 512
-        AND credential_id NOT GLOB '*[^!-~]*'
-    ),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (owner_user_id, plugin_product_id, slot_key)
-);
-
-CREATE TABLE plugin_deletion_intents (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_product_id      TEXT NOT NULL UNIQUE CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id   TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    operation_id    TEXT NOT NULL UNIQUE CHECK (
-        length(operation_id) = 36
-        AND lower(operation_id) = operation_id
-        AND operation_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    started_at_ms   INTEGER NOT NULL CHECK (started_at_ms > 0),
-    last_error_code TEXT CHECK (
-        last_error_code IS NULL OR (
-            length(last_error_code) BETWEEN 1 AND 256
-            AND last_error_code NOT GLOB '*[^!-~]*'
-        )
-    )
-);
-
-CREATE TABLE plugin_dependency_mutation_commits (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    intent_id  TEXT NOT NULL UNIQUE CHECK (
-        length(intent_id) = 36
-        AND lower(intent_id) = intent_id
-        AND intent_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(intent_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    created_at INTEGER NOT NULL CHECK (created_at > 0)
-);
-
-CREATE TABLE plugin_dependency_mutation_intents (
-    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
-    intent_id                   TEXT NOT NULL UNIQUE CHECK (
-        length(intent_id) = 36
-        AND lower(intent_id) = intent_id
-        AND intent_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(intent_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_id                  TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id               TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    expected_project_updated_at INTEGER NOT NULL CHECK (expected_project_updated_at >= 0),
-    expected_build_generation   INTEGER NOT NULL CHECK (expected_build_generation >= 0),
-    expected_source_digest      TEXT NOT NULL CHECK (
-        length(expected_source_digest) = 64
-        AND lower(expected_source_digest) = expected_source_digest
-        AND expected_source_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    expected_lock_digest        TEXT NOT NULL CHECK (
-        length(expected_lock_digest) = 64
-        AND lower(expected_lock_digest) = expected_lock_digest
-        AND expected_lock_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    next_source_digest          TEXT NOT NULL CHECK (
-        length(next_source_digest) = 64
-        AND lower(next_source_digest) = next_source_digest
-        AND next_source_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    next_lock_digest            TEXT NOT NULL CHECK (
-        length(next_lock_digest) = 64
-        AND lower(next_lock_digest) = next_lock_digest
-        AND next_lock_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    created_at                  INTEGER NOT NULL CHECK (created_at > 0),
-    CHECK (
-        expected_source_digest <> next_source_digest
-        OR expected_lock_digest <> next_lock_digest
-    )
-);
-
-CREATE TABLE plugin_kv (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_product_id TEXT NOT NULL CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    namespace TEXT NOT NULL CHECK (
-        length(namespace) BETWEEN 1 AND 128
-        AND namespace NOT GLOB '*[^!-~]*'
-    ),
-    key TEXT NOT NULL CHECK (
-        length(key) BETWEEN 1 AND 256
-        AND key NOT GLOB '*[^!-~]*'
-    ),
-    value_json TEXT NOT NULL CHECK (json_valid(value_json)),
-    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at), key_generation INTEGER NOT NULL DEFAULT 1
-        CHECK (key_generation >= 1), is_tombstone INTEGER NOT NULL DEFAULT 0
-        CHECK (is_tombstone IN (0, 1)),
-    UNIQUE (owner_user_id, plugin_product_id, namespace, key)
-);
-
-CREATE TABLE plugin_library_state (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    singleton_key TEXT NOT NULL CHECK (singleton_key = 'plugin_runtime'),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
-    UNIQUE (singleton_key, owner_user_id)
-);
-
-CREATE TABLE plugin_mount_credential_bindings (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    mount_id                 TEXT NOT NULL CHECK (
-        length(mount_id) = 36
-        AND lower(mount_id) = mount_id
-        AND mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    slot                     TEXT NOT NULL CHECK (
-        length(slot) BETWEEN 1 AND 128
-        AND slot NOT GLOB '*[^!-~]*'
-    ),
-    credential_id            TEXT NOT NULL CHECK (
-        length(credential_id) BETWEEN 1 AND 512
-        AND credential_id NOT GLOB '*[^!-~]*'
-    ),
-    created_at               INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at               INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (mount_id, slot)
-);
-
-CREATE TABLE plugin_mount_kv (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    mount_id                 TEXT NOT NULL CHECK (
-        length(mount_id) = 36
-        AND lower(mount_id) = mount_id
-        AND mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    namespace                TEXT NOT NULL CHECK (
-        length(namespace) BETWEEN 1 AND 128
-        AND namespace NOT GLOB '*[^!-~]*'
-    ),
-    key                      TEXT NOT NULL CHECK (
-        length(key) BETWEEN 1 AND 256
-        AND key NOT GLOB '*[^!-~]*'
-    ),
-    value_json               TEXT NOT NULL CHECK (json_valid(value_json)),
-    revision                 INTEGER NOT NULL CHECK (revision >= 1),
-    created_at               INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at               INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (mount_id, namespace, key)
-);
-
-CREATE TABLE plugin_mount_revisions (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    mount_revision_id        TEXT NOT NULL UNIQUE CHECK (
-        length(mount_revision_id) = 36
-        AND lower(mount_revision_id) = mount_revision_id
-        AND mount_revision_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(mount_revision_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    mount_id                 TEXT NOT NULL CHECK (
-        length(mount_id) = 36
-        AND lower(mount_id) = mount_id
-        AND mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    revision                 INTEGER NOT NULL CHECK (revision >= 1),
-    artifact_id              TEXT NOT NULL CHECK (
-        length(artifact_id) = 36
-        AND lower(artifact_id) = artifact_id
-        AND artifact_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(artifact_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    artifact_digest          TEXT NOT NULL CHECK (
-        length(artifact_digest) = 64
-        AND lower(artifact_digest) = artifact_digest
-        AND artifact_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    candidate_key            TEXT NOT NULL UNIQUE CHECK (
-        length(candidate_key) = 36
-        AND lower(candidate_key) = candidate_key
-        AND candidate_key GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(candidate_key, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    candidate_digest         TEXT NOT NULL CHECK (
-        length(candidate_digest) = 64
-        AND lower(candidate_digest) = candidate_digest
-        AND candidate_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    base_target_digest       TEXT CHECK (
-        base_target_digest IS NULL OR (
-            length(base_target_digest) = 64
-            AND lower(base_target_digest) = base_target_digest
-            AND base_target_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    applied_at               INTEGER NOT NULL CHECK (applied_at >= 0), apply_authorization_kind TEXT NOT NULL
-    DEFAULT 'manual_user_confirmation'
-    CHECK (apply_authorization_kind IN ('manual_user_confirmation', 'standing_auto')), auto_apply_authorization_revision INTEGER CHECK (
-    auto_apply_authorization_revision IS NULL OR auto_apply_authorization_revision > 0
-),
-    UNIQUE (mount_id, revision)
-);
-
-CREATE TABLE plugin_mounts (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    mount_id                 TEXT NOT NULL UNIQUE CHECK (
-        length(mount_id) = 36
-        AND lower(mount_id) = mount_id
-        AND mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    package_id               TEXT NOT NULL UNIQUE CHECK (
-        length(package_id) BETWEEN 1 AND 255
-        AND package_id NOT GLOB '*[^A-Za-z0-9._-]*'
-    ),
-    current_artifact_digest  TEXT CHECK (
-        current_artifact_digest IS NULL OR (
-            length(current_artifact_digest) = 64
-            AND lower(current_artifact_digest) = current_artifact_digest
-            AND current_artifact_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    previous_artifact_digest TEXT CHECK (
-        previous_artifact_digest IS NULL OR (
-            length(previous_artifact_digest) = 64
-            AND lower(previous_artifact_digest) = previous_artifact_digest
-            AND previous_artifact_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    current_revision_id      TEXT CHECK (
-        current_revision_id IS NULL OR (
-            length(current_revision_id) = 36
-            AND lower(current_revision_id) = current_revision_id
-            AND current_revision_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(current_revision_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    previous_revision_id     TEXT CHECK (
-        previous_revision_id IS NULL OR (
-            length(previous_revision_id) = 36
-            AND lower(previous_revision_id) = previous_revision_id
-            AND previous_revision_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(previous_revision_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    enabled                  INTEGER NOT NULL DEFAULT 0 CHECK (
-        typeof(enabled) = 'integer' AND enabled IN (0, 1)
-    ),
-    retained                 INTEGER NOT NULL DEFAULT 1 CHECK (
-        typeof(retained) = 'integer' AND retained IN (0, 1)
-    ),
-    delete_pending           INTEGER NOT NULL DEFAULT 0 CHECK (
-        typeof(delete_pending) = 'integer' AND delete_pending IN (0, 1)
-    ),
-    revision                 INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-    config_json              TEXT NOT NULL DEFAULT '{}' CHECK (
-        json_valid(config_json)
-        AND json_type(config_json) = 'object'
-    ),
-    data_dir_path            TEXT NOT NULL UNIQUE CHECK (
-        data_dir_path <> ''
-        AND substr(data_dir_path, 1, 1) <> '/'
-        AND substr(data_dir_path, -1, 1) <> '/'
-        AND instr(data_dir_path, '\') = 0
-        AND instr(data_dir_path, '//') = 0
-        AND instr('/' || data_dir_path || '/', '/../') = 0
-        AND instr('/' || data_dir_path || '/', '/./') = 0
-        AND instr(data_dir_path, char(0)) = 0
-    ),
-    last_error               TEXT CHECK (
-        last_error IS NULL OR length(last_error) BETWEEN 1 AND 8192
-    ),
-    created_at               INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at               INTEGER NOT NULL CHECK (updated_at >= created_at), config_schema_digest TEXT CHECK (
-    config_schema_digest IS NULL OR (
-        length(config_schema_digest) = 64
-        AND lower(config_schema_digest) = config_schema_digest
-        AND config_schema_digest NOT GLOB '*[^0-9a-f]*'
-    )
-), config_revision INTEGER NOT NULL DEFAULT 0 CHECK (
-    config_revision >= 0
-), credential_bindings_revision INTEGER NOT NULL DEFAULT 0 CHECK (
-    credential_bindings_revision >= 0
-),
-    CHECK (
-        (current_artifact_digest IS NULL) = (current_revision_id IS NULL)
-    ),
-    CHECK (
-        (previous_artifact_digest IS NULL) = (previous_revision_id IS NULL)
-    ),
-    CHECK (
-        current_revision_id IS NULL
-        OR previous_revision_id IS NULL
-        OR current_revision_id <> previous_revision_id
-    ),
-    CHECK (
-        current_artifact_digest IS NULL
-        OR previous_artifact_digest IS NULL
-        OR current_artifact_digest <> previous_artifact_digest
-    ),
-    CHECK (
-        enabled = 0
-        OR (
-            current_artifact_digest IS NOT NULL
-            AND retained = 0
-            AND delete_pending = 0
-        )
-    ),
-    CHECK (
-        retained = 0
-        OR (
-            enabled = 0
-            AND current_artifact_digest IS NULL
-            AND previous_artifact_digest IS NULL
-            AND current_revision_id IS NULL
-            AND previous_revision_id IS NULL
-        )
-    ),
-    CHECK (
-        delete_pending = 0
-        OR retained = 1
-    ),
-    CHECK (
-        retained = 1
-        OR current_artifact_digest IS NOT NULL
-    )
-);
-
-CREATE TABLE plugin_product_documents (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner_user_id TEXT NOT NULL CHECK (
+CREATE TABLE plugins (
+    plugin_id                    TEXT PRIMARY KEY CHECK (
+        length(plugin_id) = 36
+        AND lower(plugin_id) = plugin_id
+        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    owner_user_id                TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
         length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    document_key TEXT NOT NULL CHECK (length(document_key) BETWEEN 1 AND 100),
-    revision INTEGER NOT NULL CHECK (revision > 0),
-    content_json TEXT NOT NULL CHECK (json_valid(content_json)),
-    updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
-    UNIQUE (owner_user_id, document_key)
+    package_id                   TEXT NOT NULL CHECK (
+        length(package_id) BETWEEN 1 AND 160
+        AND package_id = lower(package_id)
+        AND package_id NOT GLOB '*[^a-z0-9._-]*'
+    ),
+    name                         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
+    description                  TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 4096),
+    enabled                      INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    trashed_at_ms                INTEGER CHECK (trashed_at_ms IS NULL OR trashed_at_ms > 0),
+    active_artifact_digest       TEXT NOT NULL REFERENCES plugin_artifacts(artifact_digest) ON DELETE RESTRICT,
+    previous_artifact_digest     TEXT REFERENCES plugin_artifacts(artifact_digest) ON DELETE RESTRICT,
+    data_generation              TEXT NOT NULL CHECK (
+        length(data_generation) = 36
+        AND lower(data_generation) = data_generation
+        AND data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    previous_data_generation     TEXT CHECK (
+        previous_data_generation IS NULL OR (
+            length(previous_data_generation) = 36
+            AND lower(previous_data_generation) = previous_data_generation
+            AND previous_data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(previous_data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    revision                     INTEGER NOT NULL CHECK (revision > 0),
+    config_json                  TEXT NOT NULL CHECK (json_valid(config_json) AND json_type(config_json) = 'object'),
+    last_error                   TEXT,
+    created_at_ms                INTEGER NOT NULL CHECK (created_at_ms > 0),
+    updated_at_ms                INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    UNIQUE (owner_user_id, package_id),
+    CHECK (previous_artifact_digest IS NULL OR previous_artifact_digest <> active_artifact_digest),
+    CHECK (previous_data_generation IS NULL OR previous_data_generation <> data_generation),
+    CHECK (trashed_at_ms IS NULL OR enabled = 0)
 );
 
-CREATE TABLE plugin_products (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    plugin_product_id TEXT NOT NULL UNIQUE CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+CREATE TABLE plugin_drafts (
+    draft_id            TEXT PRIMARY KEY CHECK (
+        length(draft_id) = 36
+        AND lower(draft_id) = draft_id
+        AND draft_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(draft_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
+    owner_user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    product_revision INTEGER NOT NULL DEFAULT 1 CHECK (product_revision >= 1),
-    display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 255),
-    description TEXT,
-    icon_asset_id TEXT,
-    kind TEXT NOT NULL CHECK (kind = 'plugin'),
-    lifecycle TEXT NOT NULL DEFAULT 'disabled'
-        CHECK (lifecycle IN ('enabled', 'disabled', 'trashed', 'deleting')),
-    pointer_revision INTEGER NOT NULL DEFAULT 1 CHECK (pointer_revision >= 1),
-    active_release_epoch INTEGER NOT NULL DEFAULT 0
-        CHECK (active_release_epoch >= 0),
-    ready_release_id TEXT,
-    ready_release_digest TEXT,
-    active_release_id TEXT,
-    active_release_digest TEXT,
-    previous_release_id TEXT,
-    previous_release_digest TEXT,
-    materialized_catalog_digest TEXT NOT NULL CHECK (
-        length(materialized_catalog_digest) = 64
-        AND lower(materialized_catalog_digest) = materialized_catalog_digest
-        AND materialized_catalog_digest NOT GLOB '*[^0-9a-f]*'
+    plugin_id           TEXT REFERENCES plugins(plugin_id) ON DELETE SET NULL CHECK (
+        plugin_id IS NULL OR (
+            length(plugin_id) = 36 AND lower(plugin_id) = plugin_id
+            AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
     ),
-    config_schema_json TEXT NOT NULL DEFAULT '{"type":"object"}'
-        CHECK (json_valid(config_schema_json) AND json_type(config_schema_json) = 'object'),
-    config_json TEXT NOT NULL DEFAULT '{}'
-        CHECK (json_valid(config_json) AND json_type(config_json) = 'object'),
-    config_revision INTEGER NOT NULL DEFAULT 1 CHECK (config_revision >= 1),
-    credential_bindings_revision INTEGER NOT NULL DEFAULT 1
-        CHECK (credential_bindings_revision >= 1),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-    CHECK ((ready_release_id IS NULL) = (ready_release_digest IS NULL)),
-    CHECK ((active_release_id IS NULL) = (active_release_digest IS NULL)),
-    CHECK ((previous_release_id IS NULL) = (previous_release_digest IS NULL)),
-    CHECK (ready_release_digest IS NULL OR (
-        length(ready_release_digest) = 64
-        AND lower(ready_release_digest) = ready_release_digest
-        AND ready_release_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (active_release_digest IS NULL OR (
-        length(active_release_digest) = 64
-        AND lower(active_release_digest) = active_release_digest
-        AND active_release_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (previous_release_digest IS NULL OR (
-        length(previous_release_digest) = 64
-        AND lower(previous_release_digest) = previous_release_digest
-        AND previous_release_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (ready_release_id IS NULL OR (
-        length(ready_release_id) = 36
-        AND lower(ready_release_id) = ready_release_id
-        AND ready_release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(ready_release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (icon_asset_id IS NULL OR (
-        length(icon_asset_id) = 36
-        AND lower(icon_asset_id) = icon_asset_id
-        AND icon_asset_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(icon_asset_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (active_release_id IS NULL OR (
-        length(active_release_id) = 36
-        AND lower(active_release_id) = active_release_id
-        AND active_release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(active_release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (previous_release_id IS NULL OR (
-        length(previous_release_id) = 36
-        AND lower(previous_release_id) = previous_release_id
-        AND previous_release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(previous_release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK ((active_release_id IS NULL) = (active_release_epoch = 0)),
-    CHECK (active_release_id IS NULL OR (
-        active_release_id <> ready_release_id
-        AND active_release_id <> previous_release_id
-    )),
-    CHECK (previous_release_id IS NULL OR previous_release_id <> ready_release_id)
+    base_revision       INTEGER CHECK (base_revision IS NULL OR base_revision > 0),
+    revision            INTEGER NOT NULL CHECK (revision > 0),
+    name                TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 160),
+    workspace_path      TEXT NOT NULL CHECK (length(workspace_path) BETWEEN 1 AND 4096),
+    messages_json       TEXT NOT NULL CHECK (json_valid(messages_json) AND json_type(messages_json) = 'array'),
+    status              TEXT NOT NULL CHECK (status IN ('ready', 'generating', 'failed')),
+    last_error          TEXT,
+    created_at_ms       INTEGER NOT NULL CHECK (created_at_ms > 0),
+    updated_at_ms       INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    CHECK ((plugin_id IS NULL AND base_revision IS NULL) OR plugin_id IS NOT NULL)
 );
 
-CREATE TABLE plugin_projects (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id               TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id            TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
+CREATE TABLE plugin_credential_bindings (
+    owner_user_id   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    package_id               TEXT CHECK (
-        package_id IS NULL OR (
-            length(package_id) BETWEEN 1 AND 255
-            AND package_id NOT GLOB '*[^A-Za-z0-9._-]*'
-        )
+    plugin_id       TEXT NOT NULL REFERENCES plugins(plugin_id) ON DELETE CASCADE CHECK (
+        length(plugin_id) = 36 AND lower(plugin_id) = plugin_id
+        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    plugin_product_id        TEXT UNIQUE CHECK (
-        plugin_product_id IS NULL OR (
-            length(plugin_product_id) = 36
-            AND lower(plugin_product_id) = plugin_product_id
-            AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
+    slot            TEXT NOT NULL CHECK (
+        length(slot) BETWEEN 1 AND 96
+        AND slot = lower(slot)
+        AND slot NOT GLOB '*[^a-z0-9_-]*'
     ),
-    project_revision         INTEGER NOT NULL DEFAULT 1 CHECK (project_revision >= 1),
-    source_state             TEXT NOT NULL DEFAULT 'package'
-        CHECK (source_state IN ('package', 'empty', 'editable', 'runtime_only')),
-    build_profile_version    TEXT CHECK (
-        build_profile_version IS NULL OR (
-            length(build_profile_version) BETWEEN 1 AND 64
-            AND build_profile_version NOT GLOB '*[^!-~]*'
-        )
+    credential_id   TEXT NOT NULL CHECK (
+        length(credential_id) BETWEEN 1 AND 512
+        AND credential_id NOT GLOB '*[^!-~]*'
     ),
-    managed_source_path      TEXT CHECK (
-        managed_source_path IS NULL OR (
-            managed_source_path <> ''
-            AND substr(managed_source_path, 1, 1) <> '/'
-            AND substr(managed_source_path, -1, 1) <> '/'
-            AND instr(managed_source_path, '\') = 0
-            AND instr(managed_source_path, '//') = 0
-            AND instr('/' || managed_source_path || '/', '/../') = 0
-            AND instr('/' || managed_source_path || '/', '/./') = 0
-            AND instr(managed_source_path, char(0)) = 0
-        )
-    ),
-    source_head_digest       TEXT CHECK (
-        source_head_digest IS NULL OR (
-            length(source_head_digest) = 64
-            AND lower(source_head_digest) = source_head_digest
-            AND source_head_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    dependency_lock_digest   TEXT CHECK (
-        dependency_lock_digest IS NULL OR (
-            length(dependency_lock_digest) = 64
-            AND lower(dependency_lock_digest) = dependency_lock_digest
-            AND dependency_lock_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    build_generation         INTEGER NOT NULL DEFAULT 0 CHECK (build_generation >= 0),
-    linked_mount_id          TEXT UNIQUE CHECK (
-        linked_mount_id IS NULL OR (
-            length(linked_mount_id) = 36
-            AND lower(linked_mount_id) = linked_mount_id
-            AND linked_mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(linked_mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    ready_candidate_id       TEXT UNIQUE CHECK (
-        ready_candidate_id IS NULL OR (
-            length(ready_candidate_id) = 36
-            AND lower(ready_candidate_id) = ready_candidate_id
-            AND ready_candidate_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(ready_candidate_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    created_at               INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at               INTEGER NOT NULL CHECK (updated_at >= created_at), display_name TEXT NOT NULL
-    DEFAULT 'Plugin Runtime Project'
-    CHECK (
-        length(display_name) BETWEEN 1 AND 255
-        AND trim(display_name) <> ''
-        AND instr(display_name, char(0)) = 0
-    ), description TEXT NOT NULL
-    DEFAULT ''
-    CHECK (
-        length(description) <= 4096
-        AND instr(description, char(0)) = 0
-    ), apply_mode TEXT NOT NULL
-    DEFAULT 'ask_before_apply'
-    CHECK (apply_mode IN ('ask_before_apply', 'auto_compatible_when_idle')), auto_apply_mount_id TEXT CHECK (
-    auto_apply_mount_id IS NULL OR (
-        length(auto_apply_mount_id) = 36
-        AND lower(auto_apply_mount_id) = auto_apply_mount_id
-        AND auto_apply_mount_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(auto_apply_mount_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    )
-), auto_apply_authorization_revision INTEGER NOT NULL
-    DEFAULT 0 CHECK (auto_apply_authorization_revision >= 0), auto_apply_authorized_at INTEGER CHECK (
-    auto_apply_authorized_at IS NULL OR auto_apply_authorized_at > 0
-),
-    CHECK (
-        managed_source_path IS NOT NULL
-        OR (source_head_digest IS NULL AND dependency_lock_digest IS NULL)
-    ),
-    CHECK (
-        source_head_digest IS NOT NULL
-        OR dependency_lock_digest IS NULL
-    ),
-    CHECK (
-        (
-            plugin_product_id IS NULL
-            AND package_id IS NOT NULL
-            AND source_state = 'package'
-            AND project_revision = 1
-            AND build_profile_version IS NULL
-        )
-        OR
-        (
-            plugin_product_id IS NOT NULL
-            AND package_id IS NULL
-            AND source_state IN ('empty', 'editable', 'runtime_only')
-        )
-    ),
-    CHECK (
-        source_state = 'package'
-        OR (
-            source_state = 'empty'
-            AND managed_source_path IS NULL
-            AND source_head_digest IS NULL
-            AND dependency_lock_digest IS NULL
-            AND build_profile_version IS NULL
-            AND build_generation = 0
-        )
-        OR (
-            source_state = 'editable'
-            AND managed_source_path IS NOT NULL
-            AND source_head_digest IS NOT NULL
-            AND dependency_lock_digest IS NOT NULL
-            AND build_profile_version IS NOT NULL
-            AND build_generation > 0
-        )
-        OR (
-            source_state = 'runtime_only'
-            AND managed_source_path IS NULL
-            AND source_head_digest IS NULL
-            AND dependency_lock_digest IS NULL
-            AND build_profile_version IS NULL
-            AND build_generation = 0
-        )
-    )
+    updated_at_ms   INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    PRIMARY KEY (owner_user_id, plugin_id, slot)
 );
 
-CREATE TABLE plugin_publish_authorizations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    authorization_id TEXT NOT NULL UNIQUE CHECK (
-        length(authorization_id) = 36
-        AND lower(authorization_id) = authorization_id
-        AND authorization_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(authorization_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    plugin_product_id TEXT NOT NULL UNIQUE CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
+CREATE TABLE plugin_grants (
+    owner_user_id              TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    revision INTEGER NOT NULL CHECK (revision >= 1),
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    user_authorized_at_ms INTEGER NOT NULL CHECK (user_authorized_at_ms > 0)
+    plugin_id                  TEXT NOT NULL REFERENCES plugins(plugin_id) ON DELETE CASCADE CHECK (
+        length(plugin_id) = 36 AND lower(plugin_id) = plugin_id
+        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    ),
+    permission                 TEXT NOT NULL CHECK (
+        length(permission) BETWEEN 1 AND 160
+        AND permission = lower(permission)
+        AND permission NOT GLOB '*[^a-z0-9._-]*'
+    ),
+    granted                    INTEGER NOT NULL CHECK (granted IN (0, 1)),
+    confirmed_artifact_digest TEXT NOT NULL CHECK (
+        length(confirmed_artifact_digest) = 64
+        AND lower(confirmed_artifact_digest) = confirmed_artifact_digest
+        AND confirmed_artifact_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    updated_at_ms              INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    PRIMARY KEY (owner_user_id, plugin_id, permission)
 );
 
-CREATE TABLE plugin_ready_candidates (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    candidate_id             TEXT NOT NULL UNIQUE CHECK (
-        length(candidate_id) = 36
-        AND lower(candidate_id) = candidate_id
-        AND candidate_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(candidate_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_id               TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    candidate_digest         TEXT NOT NULL UNIQUE CHECK (
-        length(candidate_digest) = 64
-        AND lower(candidate_digest) = candidate_digest
-        AND candidate_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    origin_kind              TEXT NOT NULL CHECK (origin_kind IN ('build', 'import')),
-    artifact_id              TEXT NOT NULL CHECK (
-        length(artifact_id) = 36
-        AND lower(artifact_id) = artifact_id
-        AND artifact_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(artifact_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    artifact_digest          TEXT NOT NULL CHECK (
-        length(artifact_digest) = 64
-        AND lower(artifact_digest) = artifact_digest
-        AND artifact_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    base_target_digest       TEXT CHECK (
-        base_target_digest IS NULL OR (
-            length(base_target_digest) = 64
-            AND lower(base_target_digest) = base_target_digest
-            AND base_target_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    source_snapshot_digest   TEXT CHECK (
-        source_snapshot_digest IS NULL OR (
-            length(source_snapshot_digest) = 64
-            AND lower(source_snapshot_digest) = source_snapshot_digest
-            AND source_snapshot_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    dependency_lock_digest   TEXT CHECK (
-        dependency_lock_digest IS NULL OR (
-            length(dependency_lock_digest) = 64
-            AND lower(dependency_lock_digest) = dependency_lock_digest
-            AND dependency_lock_digest NOT GLOB '*[^0-9a-f]*'
-        )
-    ),
-    contract_diff_json       TEXT NOT NULL CHECK (
-        json_valid(contract_diff_json)
-        AND json_type(contract_diff_json) = 'object'
-    ),
-    origin_operation_id      TEXT NOT NULL CHECK (
-        length(origin_operation_id) = 36
-        AND lower(origin_operation_id) = origin_operation_id
-        AND origin_operation_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(origin_operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    build_generation         INTEGER NOT NULL CHECK (build_generation >= 0),
-    created_at               INTEGER NOT NULL CHECK (created_at >= 0), imported_test_provenance_json TEXT CHECK (
-    imported_test_provenance_json IS NULL OR (
-        json_valid(imported_test_provenance_json)
-        AND json_type(imported_test_provenance_json) = 'object'
-    )
-),
-    CHECK (
-        (source_snapshot_digest IS NULL AND dependency_lock_digest IS NULL)
-        OR (source_snapshot_digest IS NOT NULL AND dependency_lock_digest IS NOT NULL)
-    )
-);
-
-CREATE TABLE plugin_release_artifacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    artifact_id TEXT NOT NULL UNIQUE CHECK (
-        length(artifact_id) = 36
-        AND lower(artifact_id) = artifact_id
-        AND artifact_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(artifact_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
+CREATE TABLE plugin_library_state (
+    owner_user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    artifact_digest TEXT NOT NULL UNIQUE CHECK (
-        length(artifact_digest) = 64
-        AND lower(artifact_digest) = artifact_digest
-        AND artifact_digest NOT GLOB '*[^0-9a-f]*'
+    plugin_id           TEXT NOT NULL REFERENCES plugins(plugin_id) ON DELETE CASCADE CHECK (
+        length(plugin_id) = 36 AND lower(plugin_id) = plugin_id
+        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    manifest_digest TEXT NOT NULL CHECK (
-        length(manifest_digest) = 64
-        AND lower(manifest_digest) = manifest_digest
-        AND manifest_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    artifact_record_json TEXT NOT NULL
-        CHECK (json_valid(artifact_record_json)
-               AND json_type(artifact_record_json) = 'object'),
-    managed_path TEXT NOT NULL UNIQUE CHECK (
-        managed_path <> ''
-        AND substr(managed_path, 1, 1) <> '/'
-        AND substr(managed_path, -1, 1) <> '/'
-        AND instr(managed_path, '\') = 0
-        AND instr(managed_path, '//') = 0
-        AND instr('/' || managed_path || '/', '/../') = 0
-        AND instr('/' || managed_path || '/', '/./') = 0
-        AND instr(managed_path, char(0)) = 0
-    ),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0)
+    pinned              INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0, 1)),
+    collection          TEXT CHECK (collection IS NULL OR length(collection) BETWEEN 1 AND 160),
+    custom_name         TEXT CHECK (custom_name IS NULL OR length(custom_name) BETWEEN 1 AND 160),
+    last_opened_at_ms   INTEGER CHECK (last_opened_at_ms IS NULL OR last_opened_at_ms > 0),
+    revision            INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+    PRIMARY KEY (owner_user_id, plugin_id)
 );
 
-CREATE TABLE "plugin_releases" (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    release_id TEXT NOT NULL UNIQUE CHECK (
-        length(release_id) = 36
-        AND lower(release_id) = release_id
-        AND release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+CREATE TABLE plugin_mutations (
+    mutation_id             TEXT PRIMARY KEY CHECK (
+        length(mutation_id) = 36
+        AND lower(mutation_id) = mutation_id
+        AND mutation_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(mutation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    plugin_product_id TEXT NOT NULL CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
+    owner_user_id           TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE CHECK (
+        length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    artifact_id TEXT NOT NULL CHECK (
-        length(artifact_id) = 36
-        AND lower(artifact_id) = artifact_id
-        AND artifact_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(artifact_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_id               TEXT NOT NULL CHECK (
+        length(plugin_id) = 36
+        AND lower(plugin_id) = plugin_id
+        AND plugin_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    artifact_digest TEXT NOT NULL CHECK (
-        length(artifact_digest) = 64
-        AND lower(artifact_digest) = artifact_digest
-        AND artifact_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    manifest_digest TEXT NOT NULL CHECK (
-        length(manifest_digest) = 64
-        AND lower(manifest_digest) = manifest_digest
-        AND manifest_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    release_digest TEXT NOT NULL CHECK (
-        length(release_digest) = 64
-        AND lower(release_digest) = release_digest
-        AND release_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    origin_kind TEXT NOT NULL CHECK (origin_kind IN ('build', 'import')),
-    origin_operation_id TEXT NOT NULL,
-    source_kind TEXT NOT NULL CHECK (source_kind IN ('managed', 'runtime_only')),
-    project_id TEXT,
-    source_snapshot_digest TEXT,
-    dependency_lock_digest TEXT,
-    build_profile_version TEXT,
-    build_generation INTEGER CHECK (build_generation IS NULL OR build_generation > 0),
-    release_record_json TEXT NOT NULL DEFAULT '{}'
-        CHECK (json_valid(release_record_json)
-               AND json_type(release_record_json) = 'object'),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    CHECK (project_id IS NULL OR (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (
-        length(origin_operation_id) = 36
-        AND lower(origin_operation_id) = origin_operation_id
-        AND origin_operation_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(origin_operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    CHECK (
-        (source_kind = 'managed'
-         AND project_id IS NOT NULL
-         AND source_snapshot_digest IS NOT NULL
-         AND dependency_lock_digest IS NOT NULL
-         AND build_profile_version IS NOT NULL
-         AND build_generation IS NOT NULL)
-        OR
-        (source_kind = 'runtime_only'
-         AND project_id IS NULL
-         AND source_snapshot_digest IS NULL
-         AND dependency_lock_digest IS NULL
-         AND build_profile_version IS NULL
-         AND build_generation IS NULL)
-    ),
-    CHECK (origin_kind <> 'build' OR source_kind = 'managed'),
-    CHECK (source_snapshot_digest IS NULL OR (
-        length(source_snapshot_digest) = 64
-        AND lower(source_snapshot_digest) = source_snapshot_digest
-        AND source_snapshot_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (dependency_lock_digest IS NULL OR (
-        length(dependency_lock_digest) = 64
-        AND lower(dependency_lock_digest) = dependency_lock_digest
-        AND dependency_lock_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (build_profile_version IS NULL OR (
-        length(build_profile_version) BETWEEN 1 AND 64
-        AND build_profile_version NOT GLOB '*[^!-~]*'
-    ))
-);
-
-CREATE TABLE plugin_service_test_receipts (
-    id                                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    receipt_id                          TEXT NOT NULL UNIQUE CHECK (
-        length(receipt_id) = 36
-        AND lower(receipt_id) = receipt_id
-        AND receipt_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(receipt_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id                       TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    plugin_product_id                          TEXT NOT NULL CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    release_id                          TEXT NOT NULL CHECK (
-        length(release_id) = 36
-        AND lower(release_id) = release_id
-        AND release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    release_digest                      TEXT NOT NULL CHECK (
-        length(release_digest) = 64
-        AND lower(release_digest) = release_digest
-        AND release_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    service_run_key                     TEXT NOT NULL CHECK (
-        length(service_run_key) = 64
-        AND lower(service_run_key) = service_run_key
-        AND service_run_key NOT GLOB '*[^0-9a-f]*'
-    ),
-    outcome                             TEXT NOT NULL CHECK (
-        outcome IN ('passed', 'failed', 'needs_test_input')
-    ),
-    error_code                          TEXT CHECK (
-        error_code IS NULL OR (
-            length(error_code) BETWEEN 1 AND 256
-            AND error_code NOT GLOB '*[^!-~]*'
+    kind                    TEXT NOT NULL CHECK (kind IN ('install', 'update', 'restore', 'permanent_delete')),
+    phase                   TEXT NOT NULL CHECK (phase IN ('staging', 'prepared', 'committed', 'rolling_back', 'failed')),
+    old_artifact_digest     TEXT CHECK (
+        old_artifact_digest IS NULL OR (
+            length(old_artifact_digest) = 64
+            AND lower(old_artifact_digest) = old_artifact_digest
+            AND old_artifact_digest NOT GLOB '*[^0-9a-f]*'
         )
     ),
-    receipt_digest                      TEXT NOT NULL CHECK (
-        length(receipt_digest) = 64
-        AND lower(receipt_digest) = receipt_digest
-        AND receipt_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    runtime_fingerprint_digest          TEXT NOT NULL CHECK (
-        length(runtime_fingerprint_digest) = 64
-        AND lower(runtime_fingerprint_digest) = runtime_fingerprint_digest
-        AND runtime_fingerprint_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    resolved_test_input_digest          TEXT NOT NULL CHECK (
-        length(resolved_test_input_digest) = 64
-        AND lower(resolved_test_input_digest) = resolved_test_input_digest
-        AND resolved_test_input_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    tested_product_revision             INTEGER NOT NULL CHECK (
-        tested_product_revision >= 1
-    ),
-    tested_pointer_revision             INTEGER NOT NULL CHECK (
-        tested_pointer_revision >= 1
-    ),
-    tested_config_revision              INTEGER NOT NULL CHECK (
-        tested_config_revision >= 1
-    ),
-    tested_credential_bindings_revision INTEGER NOT NULL CHECK (
-        tested_credential_bindings_revision >= 1
-    ),
-    receipt_json                        TEXT NOT NULL CHECK (
-        json_valid(receipt_json)
-        AND json_type(receipt_json) = 'object'
-    ),
-    issued_at_ms                        INTEGER NOT NULL CHECK (issued_at_ms > 0)
-);
-
-CREATE TABLE plugin_source_mutation_commits (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    intent_id  TEXT NOT NULL UNIQUE CHECK (
-        length(intent_id) = 36
-        AND lower(intent_id) = intent_id
-        AND intent_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(intent_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    created_at INTEGER NOT NULL CHECK (created_at > 0)
-);
-
-CREATE TABLE plugin_source_mutation_intents (
-    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
-    intent_id                 TEXT NOT NULL UNIQUE CHECK (
-        length(intent_id) = 36
-        AND lower(intent_id) = intent_id
-        AND intent_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(intent_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id             TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    plugin_product_id                TEXT NOT NULL CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_id                TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    expected_product_revision INTEGER NOT NULL CHECK (expected_product_revision >= 1),
-    expected_project_revision INTEGER NOT NULL CHECK (expected_project_revision >= 1),
-    expected_build_generation INTEGER NOT NULL CHECK (expected_build_generation >= 1),
-    expected_source_digest    TEXT NOT NULL CHECK (
-        length(expected_source_digest) = 64
-        AND lower(expected_source_digest) = expected_source_digest
-        AND expected_source_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    next_source_digest        TEXT NOT NULL CHECK (
-        length(next_source_digest) = 64
-        AND lower(next_source_digest) = next_source_digest
-        AND next_source_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    next_build_generation     INTEGER NOT NULL CHECK (
-        next_build_generation = expected_build_generation + 1
-    ),
-    created_at                INTEGER NOT NULL CHECK (created_at > 0),
-    CHECK (expected_source_digest <> next_source_digest)
-);
-
-CREATE TABLE plugin_surface_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    surface_session_id TEXT NOT NULL UNIQUE CHECK (
-        length(surface_session_id) = 36
-        AND lower(surface_session_id) = surface_session_id
-        AND surface_session_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(surface_session_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    plugin_product_id TEXT NOT NULL UNIQUE CHECK (
-        length(plugin_product_id) = 36
-        AND lower(plugin_product_id) = plugin_product_id
-        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    generation INTEGER NOT NULL CHECK (generation >= 1),
-    capability_digest TEXT NOT NULL UNIQUE CHECK (
-        length(capability_digest) = 64
-        AND lower(capability_digest) = capability_digest
-        AND capability_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    active_release_id TEXT NOT NULL CHECK (
-        length(active_release_id) = 36
-        AND lower(active_release_id) = active_release_id
-        AND active_release_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(active_release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    active_release_digest TEXT NOT NULL CHECK (
-        length(active_release_digest) = 64
-        AND lower(active_release_digest) = active_release_digest
-        AND active_release_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-    active_release_epoch INTEGER NOT NULL CHECK (active_release_epoch > 0),
-    issued_at_ms INTEGER NOT NULL CHECK (issued_at_ms > 0), conversation_id TEXT CHECK (
-        conversation_id IS NULL OR (
-            length(conversation_id) = 36
-            AND lower(conversation_id) = conversation_id
-            AND conversation_id GLOB '????????-????-7???-[89ab]???-????????????'
-            AND replace(conversation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    new_artifact_digest     TEXT CHECK (
+        new_artifact_digest IS NULL OR (
+            length(new_artifact_digest) = 64
+            AND lower(new_artifact_digest) = new_artifact_digest
+            AND new_artifact_digest NOT GLOB '*[^0-9a-f]*'
         )
-    )
+    ),
+    old_data_generation     TEXT CHECK (
+        old_data_generation IS NULL OR (
+            length(old_data_generation) = 36
+            AND lower(old_data_generation) = old_data_generation
+            AND old_data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(old_data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    old_previous_artifact_digest TEXT CHECK (
+        old_previous_artifact_digest IS NULL OR (
+            length(old_previous_artifact_digest) = 64
+            AND lower(old_previous_artifact_digest) = old_previous_artifact_digest
+            AND old_previous_artifact_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    old_previous_data_generation TEXT CHECK (
+        old_previous_data_generation IS NULL OR (
+            length(old_previous_data_generation) = 36
+            AND lower(old_previous_data_generation) = old_previous_data_generation
+            AND old_previous_data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(old_previous_data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    old_config_json         TEXT CHECK (
+        old_config_json IS NULL OR (
+            json_valid(old_config_json)
+            AND json_type(old_config_json) = 'object'
+        )
+    ),
+    old_credential_bindings_json TEXT CHECK (
+        old_credential_bindings_json IS NULL OR (
+            json_valid(old_credential_bindings_json)
+            AND json_type(old_credential_bindings_json) = 'array'
+        )
+    ),
+    old_grants_json         TEXT CHECK (
+        old_grants_json IS NULL OR (
+            json_valid(old_grants_json)
+            AND json_type(old_grants_json) = 'array'
+        )
+    ),
+    new_data_generation     TEXT CHECK (
+        new_data_generation IS NULL OR (
+            length(new_data_generation) = 36
+            AND lower(new_data_generation) = new_data_generation
+            AND new_data_generation GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(new_data_generation, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    expected_revision       INTEGER CHECK (expected_revision IS NULL OR expected_revision > 0),
+    error                   TEXT,
+    created_at_ms           INTEGER NOT NULL CHECK (created_at_ms > 0),
+    updated_at_ms           INTEGER NOT NULL CHECK (updated_at_ms > 0),
+    UNIQUE (owner_user_id, plugin_id)
 );
-
 CREATE TABLE product_agent_selections (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_user_id TEXT NOT NULL CHECK (
@@ -3769,85 +2717,6 @@ CREATE TABLE product_agent_selections (
     target_id TEXT NOT NULL CHECK (length(trim(target_id)) > 0),
     selection_json TEXT NOT NULL CHECK (json_valid(selection_json) AND json_type(selection_json) = 'object'),
     UNIQUE (owner_user_id, target_kind, target_id)
-);
-
-CREATE TABLE product_operations (
-    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    operation_id             TEXT NOT NULL UNIQUE CHECK (
-        length(operation_id) = 36
-        AND lower(operation_id) = operation_id
-        AND operation_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    kind                     TEXT NOT NULL CHECK (
-        kind IN ('build', 'import', 'export', 'plugin_permanent_delete')
-    ),
-    owner_kind               TEXT NOT NULL CHECK (
-        owner_kind IN ('plugin_project', 'plugin_mount', 'plugin')
-    ),
-    owner_id                 TEXT NOT NULL CHECK (
-        length(owner_id) = 36
-        AND lower(owner_id) = owner_id
-        AND owner_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    state                    TEXT NOT NULL CHECK (
-        state IN ('running', 'succeeded', 'failed', 'canceled')
-    ),
-    progress_percent         INTEGER CHECK (progress_percent BETWEEN 0 AND 100),
-    last_error_code          TEXT CHECK (
-        last_error_code IS NULL OR (
-            length(last_error_code) BETWEEN 1 AND 256
-            AND last_error_code NOT GLOB '*[^!-~]*'
-        )
-    ),
-    bounded_log_tail_json    TEXT NOT NULL DEFAULT '[]' CHECK (
-        json_valid(bounded_log_tail_json)
-        AND json_type(bounded_log_tail_json) = 'array'
-        AND json_array_length(bounded_log_tail_json) <= 200
-    ),
-    started_at_ms            INTEGER NOT NULL CHECK (started_at_ms > 0),
-    finished_at_ms           INTEGER CHECK (
-        finished_at_ms IS NULL OR finished_at_ms >= started_at_ms
-    ), result_artifact_digests_json TEXT NOT NULL
-    DEFAULT '{}' CHECK (
-        json_valid(result_artifact_digests_json)
-        AND json_type(result_artifact_digests_json) = 'object'
-    ),
-    CHECK (
-        (kind = 'build' AND owner_kind IN ('plugin_project', 'plugin'))
-        OR
-        (kind IN ('import', 'export')
-            AND owner_kind IN ('plugin_project', 'plugin_mount', 'plugin'))
-        OR
-        (kind = 'plugin_permanent_delete' AND owner_kind = 'plugin')
-    ),
-    CHECK (
-        kind <> 'plugin_permanent_delete'
-        OR progress_percent IS NULL
-    ),
-    CHECK (
-        (state = 'running'
-            AND finished_at_ms IS NULL
-            AND last_error_code IS NULL)
-        OR
-        (state = 'succeeded'
-            AND finished_at_ms IS NOT NULL
-            AND last_error_code IS NULL
-            AND (
-                kind = 'plugin_permanent_delete'
-                OR progress_percent = 100
-            ))
-        OR
-        (state = 'failed'
-            AND finished_at_ms IS NOT NULL
-            AND last_error_code IS NOT NULL)
-        OR
-        (state = 'canceled'
-            AND kind <> 'plugin_permanent_delete'
-            AND finished_at_ms IS NOT NULL
-            AND last_error_code IS NULL)
-    )
 );
 
 CREATE TABLE "provider_connections" (
@@ -4455,7 +3324,6 @@ CREATE INDEX idx_agent_executions_status_lease ON agent_executions(status, lease
 CREATE INDEX idx_agent_messages_sequence ON agent_messages(session_id, first_seq, last_seq);
 CREATE INDEX idx_agent_payloads_session ON agent_payloads(session_id);
 CREATE INDEX idx_agent_presets_owner_active ON agent_presets(json_extract(owner_ref_json, '$.user_id'), preset_id) WHERE retired_at_ms IS NULL;
-CREATE INDEX idx_agent_presets_ui_plugin ON agent_presets(json_extract(display_json, '$.ui_binding.selection.plugin_id'));
 CREATE INDEX idx_agent_runtime_snapshots_revision ON agent_runtime_snapshots( json_extract(content_json, '$.preset_revision_ref.preset_id'), json_extract(content_json, '$.preset_revision_ref.revision'), json_extract(content_json, '$.preset_revision_ref.revision_digest') );
 CREATE INDEX idx_agent_session_resources_session_kind ON agent_session_resources(session_id, resource_kind, binding_id);
 CREATE INDEX idx_agent_sessions_owner_state ON agent_sessions(owner_ref_json, state);
@@ -4520,26 +3388,13 @@ CREATE INDEX idx_nomi_wave1_memory_receipts_agent_session_id ON nomi_wave1_memor
 CREATE INDEX idx_nomi_wave1_memory_receipts_orphan_sweep ON nomi_wave1_memory_action_receipts(updated_at, agent_session_id);
 CREATE INDEX idx_nomi_wave4_receipts_agent_session_id ON nomi_wave4_action_receipts(agent_session_id);
 CREATE INDEX idx_nomi_wave4_receipts_orphan_sweep ON nomi_wave4_action_receipts(updated_at, agent_session_id);
-CREATE INDEX idx_plugin_artifacts_package_id ON plugin_artifacts(package_id, package_version, artifact_id);
-CREATE INDEX idx_plugin_build_operation_lineage_owner ON plugin_build_operation_lineage(owner_user_id, plugin_product_id, started_at_ms DESC);
-CREATE INDEX idx_plugin_build_operation_lineage_project ON plugin_build_operation_lineage(project_id, owner_user_id, build_generation);
-CREATE INDEX idx_plugin_catalog_publications_active_release_id ON plugin_catalog_publications(active_release_id);
+CREATE INDEX idx_plugin_artifacts_package_id ON plugin_artifacts(package_id, version, created_at_ms DESC);
+CREATE INDEX idx_plugins_owner_updated ON plugins(owner_user_id, updated_at_ms DESC, plugin_id);
+CREATE INDEX idx_plugins_active_artifact ON plugins(active_artifact_digest);
+CREATE INDEX idx_plugin_drafts_owner_updated ON plugin_drafts(owner_user_id, updated_at_ms DESC, draft_id);
 CREATE INDEX idx_plugin_credential_bindings_credential_id ON plugin_credential_bindings(credential_id);
-CREATE INDEX idx_plugin_library_state_owner ON plugin_library_state(owner_user_id, revision);
-CREATE INDEX idx_plugin_mount_credential_bindings_credential_id ON plugin_mount_credential_bindings(credential_id);
-CREATE INDEX idx_plugin_mount_revisions_artifact_id ON plugin_mount_revisions(artifact_id);
-CREATE INDEX idx_plugin_products_owner ON plugin_products(owner_user_id, updated_at DESC, id DESC);
-CREATE INDEX idx_plugin_projects_owner ON plugin_projects(owner_user_id, plugin_product_id, updated_at DESC);
-CREATE INDEX idx_plugin_releases_artifact_id ON plugin_releases(artifact_id);
-CREATE INDEX idx_plugin_releases_origin_operation_id ON plugin_releases(origin_operation_id);
-CREATE INDEX idx_plugin_releases_product ON plugin_releases(owner_user_id, plugin_product_id, created_at DESC);
-CREATE INDEX idx_plugin_releases_release_digest ON plugin_releases(owner_user_id, plugin_product_id, release_digest);
-CREATE INDEX idx_plugin_service_test_receipts_current ON plugin_service_test_receipts( owner_user_id, plugin_product_id, release_id, release_digest, issued_at_ms DESC );
-CREATE INDEX idx_plugin_surface_sessions_conversation_id ON plugin_surface_sessions(conversation_id);
-CREATE INDEX idx_product_operations_plugin_mount_owner_id ON product_operations(owner_id, started_at_ms, operation_id) WHERE owner_kind = 'plugin_mount';
-CREATE INDEX idx_product_operations_plugin_owner_id ON product_operations(owner_id, started_at_ms, operation_id) WHERE owner_kind = 'plugin';
-CREATE INDEX idx_product_operations_plugin_project_owner_id ON product_operations(owner_id, started_at_ms, operation_id) WHERE owner_kind = 'plugin_project';
-CREATE INDEX idx_provider_model_capabilities_task ON provider_model_capabilities(task, provider_id, model);
+CREATE INDEX idx_plugin_grants_permission ON plugin_grants(owner_user_id, permission, granted);
+CREATE INDEX idx_plugin_mutations_recovery ON plugin_mutations(phase, created_at_ms, mutation_id);CREATE INDEX idx_provider_model_capabilities_task ON provider_model_capabilities(task, provider_id, model);
 CREATE INDEX idx_requirement_pre_effect_abandon_owner_conversation ON requirement_pre_effect_abandon_guards(owner_conversation_id) WHERE owner_conversation_id IS NOT NULL;
 CREATE INDEX idx_requirement_pre_effect_abandon_owner_terminal ON requirement_pre_effect_abandon_guards(owner_terminal_id) WHERE owner_terminal_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_requirement_pre_effect_abandon_requirement_id ON requirement_pre_effect_abandon_guards(requirement_id);
@@ -4774,755 +3629,85 @@ END;
 CREATE TRIGGER trg_plugin_artifacts_immutable
 BEFORE UPDATE ON plugin_artifacts
 BEGIN
-    SELECT RAISE(ABORT, 'plugin artifacts are immutable');
+    SELECT RAISE(ABORT, 'Plugin Artifacts are immutable');
 END;
 
-CREATE TRIGGER trg_plugin_auto_apply_dependency_fence
-BEFORE UPDATE OF
-    apply_mode,
-    auto_apply_mount_id,
-    auto_apply_authorization_revision,
-    auto_apply_authorized_at
-ON plugin_projects
-WHEN EXISTS (
-    SELECT 1
-      FROM plugin_dependency_mutation_intents intent
-     WHERE intent.project_id = OLD.project_id
-)
+CREATE TRIGGER trg_plugins_identity_immutable
+BEFORE UPDATE ON plugins
+WHEN NEW.plugin_id IS NOT OLD.plugin_id
+  OR NEW.owner_user_id IS NOT OLD.owner_user_id
+  OR NEW.package_id IS NOT OLD.package_id
+  OR NEW.created_at_ms IS NOT OLD.created_at_ms
 BEGIN
-    SELECT RAISE(ABORT, 'plugin auto Apply authorization is fenced by a dependency mutation');
+    SELECT RAISE(ABORT, 'Plugin identity is immutable');
 END;
 
-CREATE TRIGGER trg_plugin_candidate_imported_provenance_guard
-BEFORE INSERT ON plugin_ready_candidates
-WHEN NEW.imported_test_provenance_json IS NOT NULL
-AND NEW.origin_kind <> 'import'
+CREATE TRIGGER trg_plugins_revision_monotonic
+BEFORE UPDATE ON plugins
+WHEN NEW.revision <> OLD.revision + 1
+  OR NEW.updated_at_ms < OLD.updated_at_ms
 BEGIN
-    SELECT RAISE(ABORT, 'only imported Plugin Candidates can carry source Test provenance');
+    SELECT RAISE(ABORT, 'Plugin revision must advance exactly once');
 END;
 
-CREATE TRIGGER trg_plugin_candidate_receipts_exact_insert
-BEFORE INSERT ON plugin_candidate_test_receipts
+CREATE TRIGGER trg_plugin_drafts_identity_immutable
+BEFORE UPDATE ON plugin_drafts
+WHEN NEW.draft_id IS NOT OLD.draft_id
+  OR NEW.owner_user_id IS NOT OLD.owner_user_id
+  OR NEW.created_at_ms IS NOT OLD.created_at_ms
+  OR NEW.updated_at_ms < OLD.updated_at_ms
+BEGIN
+    SELECT RAISE(ABORT, 'Plugin Draft identity is immutable and time is monotonic');
+END;
+
+CREATE TRIGGER trg_plugin_credential_bindings_updated_at_monotonic
+BEFORE UPDATE ON plugin_credential_bindings
+WHEN NEW.updated_at_ms < OLD.updated_at_ms
+BEGIN
+    SELECT RAISE(ABORT, 'Plugin Credential binding time is monotonic');
+END;
+
+CREATE TRIGGER trg_plugin_grants_artifact_guard
+BEFORE INSERT ON plugin_grants
 WHEN NOT EXISTS (
-    SELECT 1
-    FROM plugin_ready_candidates candidate
-    WHERE candidate.candidate_id = NEW.candidate_id
-      AND candidate.candidate_digest = NEW.candidate_digest
-      AND candidate.artifact_id = NEW.artifact_id
-      AND candidate.artifact_digest = NEW.artifact_digest
+    SELECT 1 FROM plugin_artifacts artifact
+    WHERE artifact.artifact_digest = NEW.confirmed_artifact_digest
 )
 BEGIN
-    SELECT RAISE(ABORT, 'plugin candidate test receipt must bind one exact candidate');
+    SELECT RAISE(ABORT, 'Plugin Grant must reference a stored Artifact');
 END;
 
-CREATE TRIGGER trg_plugin_candidate_receipts_immutable
-BEFORE UPDATE ON plugin_candidate_test_receipts
-BEGIN
-    SELECT RAISE(ABORT, 'plugin candidate test receipts are immutable');
-END;
-
-CREATE TRIGGER trg_plugin_dependency_commit_cleanup
-AFTER UPDATE ON plugin_projects
-WHEN EXISTS (
-    SELECT 1
-      FROM plugin_dependency_mutation_commits commit_marker
-     WHERE commit_marker.project_id = NEW.project_id
-)
-BEGIN
-    DELETE FROM plugin_dependency_mutation_commits
-     WHERE project_id = NEW.project_id;
-END;
-
-CREATE TRIGGER trg_plugin_dependency_commit_insert_guard
-BEFORE INSERT ON plugin_dependency_mutation_commits
+CREATE TRIGGER trg_plugin_grants_update_artifact_guard
+BEFORE UPDATE ON plugin_grants
 WHEN NOT EXISTS (
-    SELECT 1
-      FROM plugin_dependency_mutation_intents intent
-     WHERE intent.intent_id = NEW.intent_id
-       AND intent.project_id = NEW.project_id
+    SELECT 1 FROM plugin_artifacts artifact
+    WHERE artifact.artifact_digest = NEW.confirmed_artifact_digest
 )
 BEGIN
-    SELECT RAISE(ABORT, 'plugin dependency commit marker must bind a durable intent');
+    SELECT RAISE(ABORT, 'Plugin Grant must reference a stored Artifact');
 END;
 
-CREATE TRIGGER trg_plugin_dependency_intent_insert_guard
-BEFORE INSERT ON plugin_dependency_mutation_intents
-WHEN NOT EXISTS (
-    SELECT 1
-      FROM plugin_projects project
-     WHERE project.project_id = NEW.project_id
-       AND project.owner_user_id = NEW.owner_user_id
-       AND project.managed_source_path IS NOT NULL
-       AND project.updated_at = NEW.expected_project_updated_at
-       AND project.build_generation = NEW.expected_build_generation
-       AND project.source_head_digest = NEW.expected_source_digest
-       AND project.dependency_lock_digest = NEW.expected_lock_digest
-)
+CREATE TRIGGER trg_plugin_mutations_identity_immutable
+BEFORE UPDATE ON plugin_mutations
+WHEN NEW.mutation_id IS NOT OLD.mutation_id
+  OR NEW.owner_user_id IS NOT OLD.owner_user_id
+  OR NEW.plugin_id IS NOT OLD.plugin_id
+  OR NEW.kind IS NOT OLD.kind
+  OR NEW.old_artifact_digest IS NOT OLD.old_artifact_digest
+  OR NEW.new_artifact_digest IS NOT OLD.new_artifact_digest
+  OR NEW.old_data_generation IS NOT OLD.old_data_generation
+  OR NEW.old_previous_artifact_digest IS NOT OLD.old_previous_artifact_digest
+  OR NEW.old_previous_data_generation IS NOT OLD.old_previous_data_generation
+  OR NEW.old_config_json IS NOT OLD.old_config_json
+  OR NEW.old_credential_bindings_json IS NOT OLD.old_credential_bindings_json
+  OR NEW.old_grants_json IS NOT OLD.old_grants_json
+  OR NEW.new_data_generation IS NOT OLD.new_data_generation
+  OR NEW.expected_revision IS NOT OLD.expected_revision
+  OR NEW.created_at_ms IS NOT OLD.created_at_ms
+  OR NEW.updated_at_ms < OLD.updated_at_ms
 BEGIN
-    SELECT RAISE(ABORT, 'plugin dependency intent must bind the exact managed Project head');
+    SELECT RAISE(ABORT, 'Plugin mutation identity is immutable and time is monotonic');
 END;
-
-CREATE TRIGGER trg_plugin_dependency_project_delete_guard
-BEFORE DELETE ON plugin_projects
-WHEN EXISTS (
-    SELECT 1
-      FROM plugin_dependency_mutation_intents intent
-     WHERE intent.project_id = OLD.project_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin Project delete is fenced by a dependency mutation intent');
-END;
-
-CREATE TRIGGER trg_plugin_dependency_project_update_guard
-BEFORE UPDATE ON plugin_projects
-WHEN EXISTS (
-    SELECT 1
-      FROM plugin_dependency_mutation_intents intent
-     WHERE intent.project_id = OLD.project_id
-)
-AND NOT EXISTS (
-    SELECT 1
-      FROM plugin_dependency_mutation_commits commit_marker
-      JOIN plugin_dependency_mutation_intents intent
-        ON intent.intent_id = commit_marker.intent_id
-       AND intent.project_id = commit_marker.project_id
-     WHERE commit_marker.project_id = OLD.project_id
-       AND OLD.updated_at = intent.expected_project_updated_at
-       AND OLD.build_generation = intent.expected_build_generation
-       AND OLD.source_head_digest = intent.expected_source_digest
-       AND OLD.dependency_lock_digest = intent.expected_lock_digest
-       AND NEW.source_head_digest = intent.next_source_digest
-       AND NEW.dependency_lock_digest = intent.next_lock_digest
-       AND NEW.build_generation = intent.expected_build_generation + 1
-       AND NEW.updated_at > intent.expected_project_updated_at
-       AND NEW.id = OLD.id
-       AND NEW.project_id = OLD.project_id
-       AND NEW.owner_user_id = OLD.owner_user_id
-       AND NEW.package_id = OLD.package_id
-       AND NEW.managed_source_path IS OLD.managed_source_path
-       AND NEW.linked_mount_id IS OLD.linked_mount_id
-       AND NEW.ready_candidate_id IS OLD.ready_candidate_id
-       AND NEW.created_at = OLD.created_at
-       AND NEW.display_name = OLD.display_name
-       AND NEW.description = OLD.description
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin Project is fenced by a dependency mutation intent');
-END;
-
-CREATE TRIGGER trg_plugin_mount_binding_revision_cleanup
-AFTER UPDATE OF credential_bindings_revision ON plugin_mounts
-WHEN NEW.credential_bindings_revision <> OLD.credential_bindings_revision
-BEGIN
-    DELETE FROM plugin_credential_binding_mutations
-     WHERE mount_id = NEW.mount_id;
-END;
-
-CREATE TRIGGER trg_plugin_mount_binding_revision_guard
-BEFORE UPDATE OF credential_bindings_revision ON plugin_mounts
-WHEN (
-    NEW.credential_bindings_revision <> OLD.credential_bindings_revision
-    AND NOT EXISTS (
-        SELECT 1
-        FROM plugin_credential_binding_mutations mutation
-        WHERE mutation.mount_id = OLD.mount_id
-          AND mutation.expected_mount_revision = OLD.revision
-          AND mutation.expected_bindings_revision = OLD.credential_bindings_revision
-          AND mutation.target_bindings_revision = NEW.credential_bindings_revision
-          AND mutation.updated_at = NEW.updated_at
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount credential bindings revision requires a whole-group CAS');
-END;
-
-CREATE TRIGGER trg_plugin_mount_binding_revision_shape_guard
-BEFORE UPDATE OF credential_bindings_revision ON plugin_mounts
-WHEN NEW.credential_bindings_revision <> OLD.credential_bindings_revision
- AND NEW.credential_bindings_revision <> OLD.credential_bindings_revision + 1
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount credential bindings revision must advance by one');
-END;
-
-CREATE TRIGGER trg_plugin_mount_config_revision_guard
-BEFORE UPDATE OF config_json, config_schema_digest, config_revision
-ON plugin_mounts
-WHEN (
-    (
-        (NEW.config_json IS NOT OLD.config_json
-         OR NEW.config_schema_digest IS NOT OLD.config_schema_digest)
-        AND NEW.config_revision <= OLD.config_revision
-    )
-    OR
-    (
-        NEW.config_revision <> OLD.config_revision
-        AND NEW.config_json IS OLD.config_json
-        AND NEW.config_schema_digest IS OLD.config_schema_digest
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount config changes require an advancing config revision');
-END;
-
-CREATE TRIGGER trg_plugin_mount_config_revision_shape_guard
-BEFORE UPDATE OF config_schema_digest, config_revision ON plugin_mounts
-WHEN NEW.config_revision = 0 AND NEW.config_schema_digest IS NOT NULL
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount config schema requires a positive config revision');
-END;
-
-CREATE TRIGGER trg_plugin_mount_credential_binding_delete_guard
-BEFORE DELETE ON plugin_mount_credential_bindings
-WHEN NOT EXISTS (
-    SELECT 1
-    FROM plugin_mounts mount
-    LEFT JOIN plugin_credential_binding_mutations mutation
-      ON mutation.mount_id = mount.mount_id
-     AND mutation.expected_mount_revision = mount.revision
-     AND mutation.expected_current_artifact_digest IS mount.current_artifact_digest
-     AND mutation.expected_bindings_revision = mount.credential_bindings_revision
-     AND mutation.target_bindings_revision = mount.credential_bindings_revision + 1
-    WHERE mount.mount_id = OLD.mount_id
-      AND (
-          (mount.delete_pending = 0 OR mutation.allow_delete_pending = 1)
-          AND mutation.mount_id IS NOT NULL
-      )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin credential binding delete requires a whole-group CAS');
-END;
-
-CREATE TRIGGER trg_plugin_mount_credential_binding_insert_guard
-BEFORE INSERT ON plugin_mount_credential_bindings
-WHEN NOT EXISTS (
-    SELECT 1
-    FROM plugin_mounts mount
-    LEFT JOIN plugin_credential_binding_mutations mutation
-      ON mutation.mount_id = mount.mount_id
-     AND mutation.expected_mount_revision = mount.revision
-     AND mutation.expected_current_artifact_digest IS mount.current_artifact_digest
-     AND mutation.expected_bindings_revision = mount.credential_bindings_revision
-     AND mutation.target_bindings_revision = mount.credential_bindings_revision + 1
-    WHERE mount.mount_id = NEW.mount_id
-      AND (
-          (mount.delete_pending = 0 OR mutation.allow_delete_pending = 1)
-          AND mutation.mount_id IS NOT NULL
-      )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin credential binding insert requires a whole-group CAS');
-END;
-
-CREATE TRIGGER trg_plugin_mount_credential_binding_update_guard
-BEFORE UPDATE ON plugin_mount_credential_bindings
-WHEN NOT EXISTS (
-    SELECT 1
-    FROM plugin_mounts mount
-    LEFT JOIN plugin_credential_binding_mutations mutation
-      ON mutation.mount_id = mount.mount_id
-     AND mutation.expected_mount_revision = mount.revision
-     AND mutation.expected_current_artifact_digest IS mount.current_artifact_digest
-     AND mutation.expected_bindings_revision = mount.credential_bindings_revision
-     AND mutation.target_bindings_revision = mount.credential_bindings_revision + 1
-    WHERE mount.mount_id = OLD.mount_id
-      AND (
-          (mount.delete_pending = 0 OR mutation.allow_delete_pending = 1)
-          AND mutation.mount_id IS NOT NULL
-      )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin credential binding update requires a whole-group CAS');
-END;
-
-CREATE TRIGGER trg_plugin_mount_credential_binding_updated_at_monotonic
-BEFORE UPDATE OF updated_at ON plugin_mount_credential_bindings
-WHEN NEW.updated_at < OLD.updated_at
-BEGIN
-    SELECT RAISE(ABORT, 'plugin credential binding updated_at cannot move backwards');
-END;
-
-CREATE TRIGGER trg_plugin_mount_kv_updated_at_monotonic
-BEFORE UPDATE OF updated_at ON plugin_mount_kv
-WHEN NEW.updated_at < OLD.updated_at
-BEGIN
-    SELECT RAISE(ABORT, 'plugin KV updated_at cannot move backwards');
-END;
-
-CREATE TRIGGER trg_plugin_mount_pointer_insert_guard
-BEFORE INSERT ON plugin_mounts
-WHEN (
-    NEW.current_revision_id IS NOT NULL
-    OR NEW.previous_revision_id IS NOT NULL
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount must be created without executable pointers');
-END;
-
-CREATE TRIGGER trg_plugin_mount_pointer_update_guard
-BEFORE UPDATE OF current_artifact_digest, previous_artifact_digest,
-                 current_revision_id, previous_revision_id
-ON plugin_mounts
-WHEN (
-    (
-        NEW.current_revision_id IS NOT NULL
-        AND NOT EXISTS (
-            SELECT 1
-            FROM plugin_mount_revisions revision
-            WHERE revision.mount_revision_id = NEW.current_revision_id
-              AND revision.mount_id = NEW.mount_id
-              AND revision.artifact_digest = NEW.current_artifact_digest
-        )
-    )
-    OR
-    (
-        NEW.previous_revision_id IS NOT NULL
-        AND NOT EXISTS (
-            SELECT 1
-            FROM plugin_mount_revisions revision
-            WHERE revision.mount_revision_id = NEW.previous_revision_id
-              AND revision.mount_id = NEW.mount_id
-              AND revision.artifact_digest = NEW.previous_artifact_digest
-        )
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount executable pointers require exact mount revisions');
-END;
-
-CREATE TRIGGER trg_plugin_mount_revision_authorization_guard
-BEFORE INSERT ON plugin_mount_revisions
-WHEN NOT (
-    (
-        NEW.apply_authorization_kind = 'manual_user_confirmation'
-        AND NEW.auto_apply_authorization_revision IS NULL
-    )
-    OR (
-        NEW.apply_authorization_kind = 'standing_auto'
-        AND NEW.auto_apply_authorization_revision IS NOT NULL
-        AND EXISTS (
-            SELECT 1
-              FROM plugin_ready_candidates candidate
-              JOIN plugin_projects project
-                ON project.project_id = candidate.project_id
-             WHERE candidate.candidate_id = NEW.candidate_key
-               AND project.apply_mode = 'auto_compatible_when_idle'
-               AND project.auto_apply_mount_id = NEW.mount_id
-               AND project.auto_apply_authorization_revision =
-                   NEW.auto_apply_authorization_revision
-        )
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin Mount revision requires an exact Apply authorization');
-END;
-
-CREATE TRIGGER trg_plugin_mount_revision_insert_guard
-BEFORE INSERT ON plugin_mount_revisions
-WHEN NOT EXISTS (
-        SELECT 1
-        FROM plugin_mounts mount
-        JOIN plugin_ready_candidates candidate
-          ON candidate.candidate_id = NEW.candidate_key
-        JOIN plugin_artifacts artifact
-          ON artifact.artifact_id = NEW.artifact_id
-         AND artifact.artifact_digest = NEW.artifact_digest
-        WHERE mount.mount_id = NEW.mount_id
-          AND candidate.candidate_digest = NEW.candidate_digest
-          AND candidate.artifact_id = NEW.artifact_id
-          AND candidate.artifact_digest = NEW.artifact_digest
-          AND candidate.base_target_digest IS mount.current_artifact_digest
-          AND artifact.package_id = mount.package_id
-          AND NEW.revision = mount.revision + 1
-    )
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount revision requires exact candidate, base, artifact, and next revision');
-END;
-
-CREATE TRIGGER trg_plugin_mount_revisions_immutable
-BEFORE UPDATE ON plugin_mount_revisions
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount revisions are immutable');
-END;
-
-CREATE TRIGGER trg_plugin_mount_transition_shape_guard
-BEFORE UPDATE OF current_artifact_digest, previous_artifact_digest,
-                 current_revision_id, previous_revision_id, revision
-ON plugin_mounts
-WHEN (
-    NEW.current_artifact_digest IS NOT OLD.current_artifact_digest
-    OR NEW.previous_artifact_digest IS NOT OLD.previous_artifact_digest
-    OR NEW.current_revision_id IS NOT OLD.current_revision_id
-    OR NEW.previous_revision_id IS NOT OLD.previous_revision_id
-)
-AND (
-    NEW.revision <> OLD.revision + 1
-    OR NOT (
-        (
-            NEW.current_revision_id IS NULL
-            AND NEW.previous_revision_id IS NULL
-            AND NEW.current_artifact_digest IS NULL
-            AND NEW.previous_artifact_digest IS NULL
-            AND NEW.enabled = 0
-            AND NEW.retained = 1
-        )
-        OR
-        (
-            OLD.previous_revision_id IS NOT NULL
-            AND NEW.current_revision_id IS OLD.previous_revision_id
-            AND NEW.previous_revision_id IS OLD.current_revision_id
-            AND NEW.current_artifact_digest IS OLD.previous_artifact_digest
-            AND NEW.previous_artifact_digest IS OLD.current_artifact_digest
-        )
-        OR
-        (
-            NEW.previous_revision_id IS OLD.current_revision_id
-            AND NEW.previous_artifact_digest IS OLD.current_artifact_digest
-            AND EXISTS (
-                SELECT 1
-                FROM plugin_mount_revisions revision
-                WHERE revision.mount_revision_id = NEW.current_revision_id
-                  AND revision.mount_id = NEW.mount_id
-                  AND revision.revision = NEW.revision
-                  AND revision.artifact_digest = NEW.current_artifact_digest
-            )
-        )
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount transition must be exact apply, restore, or uninstall');
-END;
-
-CREATE TRIGGER trg_plugin_mount_updated_at_monotonic
-BEFORE UPDATE OF updated_at ON plugin_mounts
-WHEN NEW.updated_at < OLD.updated_at
-BEGIN
-    SELECT RAISE(ABORT, 'plugin mount updated_at cannot move backwards');
-END;
-
-CREATE TRIGGER trg_plugin_project_auto_apply_insert_guard
-BEFORE INSERT ON plugin_projects
-WHEN NOT (
-    NEW.apply_mode = 'ask_before_apply'
-    AND NEW.auto_apply_mount_id IS NULL
-    AND NEW.auto_apply_authorization_revision = 0
-    AND NEW.auto_apply_authorized_at IS NULL
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin Project must begin without standing auto Apply authorization');
-END;
-
-CREATE TRIGGER trg_plugin_project_auto_apply_revision_guard
-BEFORE UPDATE OF
-    apply_mode,
-    auto_apply_mount_id,
-    auto_apply_authorization_revision,
-    auto_apply_authorized_at
-ON plugin_projects
-WHEN NEW.auto_apply_authorization_revision <> OLD.auto_apply_authorization_revision + 1
-BEGIN
-    SELECT RAISE(ABORT, 'plugin auto Apply authorization revision must advance exactly once');
-END;
-
-CREATE TRIGGER trg_plugin_project_auto_apply_update_guard
-BEFORE UPDATE OF
-    apply_mode,
-    auto_apply_mount_id,
-    auto_apply_authorization_revision,
-    auto_apply_authorized_at,
-    linked_mount_id,
-    managed_source_path,
-    source_head_digest,
-    dependency_lock_digest
-ON plugin_projects
-WHEN NOT (
-    (
-        NEW.apply_mode = 'ask_before_apply'
-        AND NEW.auto_apply_mount_id IS NULL
-        AND NEW.auto_apply_authorized_at IS NULL
-    )
-    OR (
-        NEW.apply_mode = 'auto_compatible_when_idle'
-        AND NEW.auto_apply_mount_id IS NOT NULL
-        AND NEW.auto_apply_mount_id = NEW.linked_mount_id
-        AND NEW.auto_apply_authorization_revision > 0
-        AND NEW.auto_apply_authorized_at IS NOT NULL
-        AND NEW.managed_source_path IS NOT NULL
-        AND NEW.source_head_digest IS NOT NULL
-        AND NEW.dependency_lock_digest IS NOT NULL
-    )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin auto Apply authorization has an invalid Project shape');
-END;
-
-CREATE TRIGGER trg_plugin_project_initial_pointer_guard
-BEFORE INSERT ON plugin_projects
-WHEN NEW.linked_mount_id IS NOT NULL OR NEW.ready_candidate_id IS NOT NULL
-BEGIN
-    SELECT RAISE(ABORT, 'plugin project must be created without linked or ready pointers');
-END;
-
-CREATE TRIGGER trg_plugin_project_metadata_insert_guard
-BEFORE INSERT ON plugin_projects
-WHEN NEW.plugin_product_id IS NULL
- AND NEW.display_name = 'Plugin Runtime Project'
-BEGIN
-    SELECT RAISE(ABORT, 'plugin project display metadata must be explicit');
-END;
-
-CREATE TRIGGER trg_plugin_project_metadata_update_guard
-BEFORE UPDATE OF display_name, description ON plugin_projects
-WHEN NEW.plugin_product_id IS NULL
- AND NEW.display_name = 'Plugin Runtime Project'
-BEGIN
-    SELECT RAISE(ABORT, 'plugin project display metadata must be explicit');
-END;
-
-CREATE TRIGGER trg_plugin_project_ready_candidate_update_guard
-BEFORE UPDATE OF ready_candidate_id ON plugin_projects
-WHEN NEW.ready_candidate_id IS NOT NULL
- AND NOT EXISTS (
-    SELECT 1
-    FROM plugin_ready_candidates candidate
-    WHERE candidate.candidate_id = NEW.ready_candidate_id
-      AND candidate.project_id = NEW.project_id
-      AND candidate.build_generation = NEW.build_generation
-)
-BEGIN
-    SELECT RAISE(ABORT, 'plugin project ready pointer requires its exact current-generation candidate');
-END;
-
-CREATE TRIGGER trg_plugin_ready_candidate_insert_guard
-BEFORE INSERT ON plugin_ready_candidates
-WHEN NOT EXISTS (
-        SELECT 1
-        FROM plugin_projects project
-        JOIN plugin_artifacts artifact
-          ON artifact.artifact_id = NEW.artifact_id
-         AND artifact.artifact_digest = NEW.artifact_digest
-        JOIN product_operations operation
-          ON operation.operation_id = NEW.origin_operation_id
-        WHERE project.project_id = NEW.project_id
-          AND project.package_id = artifact.package_id
-          AND project.build_generation = NEW.build_generation
-          AND operation.kind = NEW.origin_kind
-          AND operation.owner_kind = 'plugin_project'
-          AND operation.owner_id = project.project_id
-          AND operation.kind IN ('build', 'import')
-          AND operation.state = 'succeeded'
-          AND (
-              (
-                  NEW.origin_kind = 'import'
-                  AND project.managed_source_path IS NULL
-                  AND NEW.source_snapshot_digest IS NULL
-                  AND NEW.dependency_lock_digest IS NULL
-              )
-              OR
-              (
-                  project.managed_source_path IS NOT NULL
-                  AND NEW.build_generation > 0
-                  AND NEW.source_snapshot_digest = project.source_head_digest
-                  AND NEW.dependency_lock_digest = project.dependency_lock_digest
-              )
-          )
-    )
-BEGIN
-    SELECT RAISE(ABORT, 'plugin ready candidate requires exact project generation, artifact, and successful origin operation');
-END;
-
-CREATE TRIGGER trg_plugin_source_build_start_guard
-BEFORE INSERT ON product_operations
-WHEN NEW.owner_kind = 'plugin'
-AND NEW.kind = 'build'
-AND NEW.state = 'running'
-AND EXISTS (
-    SELECT 1 FROM plugin_source_mutation_intents intent
-     WHERE intent.plugin_product_id = NEW.owner_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Build is fenced by a Source mutation intent');
-END;
-
-CREATE TRIGGER trg_plugin_source_commit_cleanup
-AFTER UPDATE ON plugin_projects
-WHEN EXISTS (
-    SELECT 1 FROM plugin_source_mutation_commits commit_marker
-     WHERE commit_marker.project_id = NEW.project_id
-)
-BEGIN
-    DELETE FROM plugin_source_mutation_commits
-     WHERE project_id = NEW.project_id;
-END;
-
-CREATE TRIGGER trg_plugin_source_commit_insert_guard
-BEFORE INSERT ON plugin_source_mutation_commits
-WHEN NOT EXISTS (
-    SELECT 1
-      FROM plugin_source_mutation_intents intent
-     WHERE intent.intent_id = NEW.intent_id
-       AND intent.project_id = NEW.project_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Source commit marker must bind a durable intent');
-END;
-
-CREATE TRIGGER trg_plugin_source_intent_insert_guard
-BEFORE INSERT ON plugin_source_mutation_intents
-WHEN NOT EXISTS (
-    SELECT 1
-      FROM plugin_products product
-      JOIN plugin_projects project
-        ON project.plugin_product_id = product.plugin_product_id
-       AND project.owner_user_id = product.owner_user_id
-     WHERE product.owner_user_id = NEW.owner_user_id
-       AND product.plugin_product_id = NEW.plugin_product_id
-       AND product.product_revision = NEW.expected_product_revision
-       AND product.lifecycle IN ('enabled', 'disabled')
-       AND project.project_id = NEW.project_id
-       AND project.project_revision = NEW.expected_project_revision
-       AND project.source_state = 'editable'
-       AND project.build_generation = NEW.expected_build_generation
-       AND project.source_head_digest = NEW.expected_source_digest
-       AND NOT EXISTS (
-           SELECT 1
-             FROM product_operations operation
-            WHERE operation.owner_kind = 'plugin'
-              AND operation.owner_id = NEW.plugin_product_id
-              AND operation.kind = 'build'
-              AND operation.state = 'running'
-       )
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Source intent must bind the exact editable Project head');
-END;
-
-CREATE TRIGGER trg_plugin_source_product_delete_guard
-BEFORE DELETE ON plugin_products
-WHEN EXISTS (
-    SELECT 1 FROM plugin_source_mutation_intents intent
-     WHERE intent.plugin_product_id = OLD.plugin_product_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin delete is fenced by a Source mutation intent');
-END;
-
-CREATE TRIGGER trg_plugin_source_product_update_guard
-BEFORE UPDATE ON plugin_products
-WHEN EXISTS (
-    SELECT 1 FROM plugin_source_mutation_intents intent
-     WHERE intent.plugin_product_id = OLD.plugin_product_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Product is fenced by a Source mutation intent');
-END;
-
-CREATE TRIGGER trg_plugin_source_project_delete_guard
-BEFORE DELETE ON plugin_projects
-WHEN EXISTS (
-    SELECT 1 FROM plugin_source_mutation_intents intent
-     WHERE intent.project_id = OLD.project_id
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Project delete is fenced by a Source mutation intent');
-END;
-
-CREATE TRIGGER trg_plugin_source_project_update_guard
-BEFORE UPDATE ON plugin_projects
-WHEN EXISTS (
-    SELECT 1
-      FROM plugin_source_mutation_intents intent
-     WHERE intent.project_id = OLD.project_id
-)
-AND NOT EXISTS (
-    SELECT 1
-      FROM plugin_source_mutation_commits commit_marker
-      JOIN plugin_source_mutation_intents intent
-        ON intent.intent_id = commit_marker.intent_id
-       AND intent.project_id = commit_marker.project_id
-     WHERE commit_marker.project_id = OLD.project_id
-       AND OLD.owner_user_id = intent.owner_user_id
-       AND OLD.plugin_product_id = intent.plugin_product_id
-       AND OLD.project_revision = intent.expected_project_revision
-       AND OLD.build_generation = intent.expected_build_generation
-       AND OLD.source_head_digest = intent.expected_source_digest
-       AND NEW.project_revision = OLD.project_revision + 1
-       AND NEW.build_generation = intent.next_build_generation
-       AND NEW.source_head_digest = intent.next_source_digest
-       AND NEW.updated_at > OLD.updated_at
-       AND NEW.id = OLD.id
-       AND NEW.project_id = OLD.project_id
-       AND NEW.plugin_product_id = OLD.plugin_product_id
-       AND NEW.owner_user_id = OLD.owner_user_id
-       AND NEW.source_state = OLD.source_state
-       AND NEW.managed_source_path IS OLD.managed_source_path
-       AND NEW.dependency_lock_digest IS OLD.dependency_lock_digest
-       AND NEW.build_profile_version IS OLD.build_profile_version
-       AND NEW.created_at = OLD.created_at
-)
-BEGIN
-    SELECT RAISE(ABORT, 'Plugin Project is fenced by a Source mutation intent');
-END;
-
-CREATE TRIGGER trg_product_operation_log_insert_guard
-BEFORE INSERT ON product_operations
-WHEN EXISTS (
-    SELECT 1
-    FROM json_each(NEW.bounded_log_tail_json) entry
-    WHERE entry.type <> 'text'
-       OR length(entry.value) > 4096
-       OR instr(entry.value, char(0)) > 0
-)
-BEGIN
-    SELECT RAISE(ABORT, 'product operation log tail lines must be bounded strings');
-END;
-
-CREATE TRIGGER trg_product_operation_log_update_guard
-BEFORE UPDATE OF bounded_log_tail_json ON product_operations
-WHEN EXISTS (
-    SELECT 1
-    FROM json_each(NEW.bounded_log_tail_json) entry
-    WHERE entry.type <> 'text'
-       OR length(entry.value) > 4096
-       OR instr(entry.value, char(0)) > 0
-)
-BEGIN
-    SELECT RAISE(ABORT, 'product operation log tail lines must be bounded strings');
-END;
-
-CREATE TRIGGER trg_product_operation_result_guard
-BEFORE UPDATE OF result_artifact_digests_json ON product_operations
-WHEN (
-    NEW.state <> 'succeeded'
-    AND NEW.result_artifact_digests_json <> '{}'
-)
-OR EXISTS (
-    SELECT 1
-      FROM json_each(NEW.result_artifact_digests_json) entry
-     WHERE entry.type <> 'text'
-        OR length(entry.key) NOT BETWEEN 1 AND 64
-        OR entry.key GLOB '*[^a-z0-9._-]*'
-        OR length(entry.value) <> 64
-        OR lower(entry.value) <> entry.value
-        OR entry.value GLOB '*[^0-9a-f]*'
-)
-BEGIN
-    SELECT RAISE(ABORT, 'product operation result Artifacts must be bounded SHA-256 facts');
-END;
-
-CREATE TRIGGER trg_product_operation_result_insert_guard
-BEFORE INSERT ON product_operations
-WHEN NEW.result_artifact_digests_json <> '{}'
-BEGIN
-    SELECT RAISE(ABORT, 'product operation must begin without result Artifacts');
-END;
-
-CREATE TRIGGER trg_product_operations_terminal_immutable
-BEFORE UPDATE ON product_operations
-WHEN OLD.state <> 'running'
-BEGIN
-    SELECT RAISE(ABORT, 'terminal product operations are immutable');
-END;
-
 CREATE TRIGGER trg_requirements_absorb_done_cancelled
 BEFORE UPDATE OF status ON requirements
 FOR EACH ROW

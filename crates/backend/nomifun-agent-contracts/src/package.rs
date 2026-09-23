@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionId, ArtifactEnvelope, CanonicalErrorCode, CanonicalSchemaRef, CapabilityId, DigestHex,
     ExactVersionRef, HostPortId, LogicalArtifactRef, McpServerId, McpToolKey, PackageId,
-    PluginMountId, ResourceKind, RuntimeFeatureId, RuntimeTarget, ScopeKey, ServiceKeyId, SkillId,
+    AgentModuleId, ResourceKind, RuntimeFeatureId, RuntimeTarget, ScopeKey, ServiceKeyId, SkillId,
     StateKey, StrictJsonValue, VersionString,
 };
 
@@ -107,7 +107,7 @@ pub struct ExactRoleContractRef {
 pub struct ExactRoleProviderRef {
     pub role: ExactRoleContractRef,
     pub package: PackageRef,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub contribution_digest: DigestHex,
 }
 
@@ -115,7 +115,7 @@ pub struct ExactRoleProviderRef {
 #[serde(deny_unknown_fields)]
 pub struct RoleProviderSelection {
     pub role: ExactRoleContractRef,
-    pub provider_mount_id: PluginMountId,
+    pub provider_mount_id: AgentModuleId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -202,8 +202,8 @@ pub fn agent_core_package_ref() -> PackageRef {
     }
 }
 
-pub fn agent_core_mount_id() -> PluginMountId {
-    PluginMountId::from(AGENT_CORE_MOUNT_ID)
+pub fn agent_core_mount_id() -> AgentModuleId {
+    AgentModuleId::from(AGENT_CORE_MOUNT_ID)
 }
 
 pub fn agent_session_command_service_ref() -> ServiceKeyRef {
@@ -1045,7 +1045,7 @@ pub struct ServiceRequirement {
 #[serde(deny_unknown_fields)]
 pub struct ServiceKeyDagNode {
     pub package: PackageRef,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub provides: Vec<ServiceKeyRef>,
     pub requires: Vec<ServiceKeyRef>,
 }
@@ -1054,8 +1054,8 @@ pub struct ServiceKeyDagNode {
 #[serde(deny_unknown_fields)]
 pub struct ServiceKeyDagEdge {
     pub service: ServiceKeyRef,
-    pub provider_mount_id: PluginMountId,
-    pub consumer_mount_id: PluginMountId,
+    pub provider_mount_id: AgentModuleId,
+    pub consumer_mount_id: AgentModuleId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1064,15 +1064,15 @@ pub struct ServiceKeyDagPayload {
     pub schema_version: VersionString,
     pub nodes: Vec<ServiceKeyDagNode>,
     pub edges: Vec<ServiceKeyDagEdge>,
-    pub topological_start_order: Vec<PluginMountId>,
-    pub reverse_stop_order: Vec<PluginMountId>,
+    pub topological_start_order: Vec<AgentModuleId>,
+    pub reverse_stop_order: Vec<AgentModuleId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PluginIdentityDescriptor {
     pub package: PackageRef,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1088,7 +1088,7 @@ pub struct ValidatedPluginConfig {
 pub struct ServiceHandleDescriptor {
     pub service: ServiceKeyRef,
     pub provider_package: PackageRef,
-    pub provider_mount_id: PluginMountId,
+    pub provider_mount_id: AgentModuleId,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1165,7 +1165,7 @@ impl PluginStateMethod {
 #[serde(deny_unknown_fields)]
 pub struct PluginStateHandleDescriptor {
     pub package_id: PackageId,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub methods: BTreeSet<PluginStateMethod>,
 }
 
@@ -1173,7 +1173,7 @@ pub struct PluginStateHandleDescriptor {
 #[serde(deny_unknown_fields)]
 pub struct PluginStateNamespace {
     pub package_id: PackageId,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub scope_key: ScopeKey,
     pub state_key: StateKey,
 }
@@ -1291,7 +1291,7 @@ pub struct PluginRegistrarDescriptor {
     pub declared_host_ports: BTreeSet<HostPortId>,
 }
 
-/// The complete per-mount plugin context descriptor.
+/// The complete per-module agent context descriptor.
 ///
 /// Root `PluginHost`, SQLite/DB pools, Capability or Session registries,
 /// EventBus, `AppServices`, `GatewayDeps`, ambient filesystem roots, credential
@@ -1315,7 +1315,7 @@ pub struct PluginContextDescriptor {
 #[serde(deny_unknown_fields)]
 pub struct PluginRegistrationMetadata {
     pub manifest: PackageManifestArtifact,
-    pub mount_id: PluginMountId,
+    pub mount_id: AgentModuleId,
     pub source: PluginSourceMetadata,
     pub boot_state: PluginBootState,
     pub registrar: PluginRegistrarDescriptor,

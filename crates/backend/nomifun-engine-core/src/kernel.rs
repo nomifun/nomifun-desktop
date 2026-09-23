@@ -4,7 +4,7 @@
 //! The adapter owns no handlers and no capability catalog.  It receives an
 //! already compiled Snapshot and a SessionCapabilityState from the platform,
 //! then projects a model Tool Call into the Kernel's canonical invocation
-//! contract. This keeps Plugin Product/Wave2 ownership outside every engine.
+//! contract. This keeps capability ownership outside every engine.
 
 use std::sync::Arc;
 
@@ -57,58 +57,6 @@ pub fn compile_engine_tool_plan(
                 exposure.capability_id.as_ref()
             ))
         })?;
-        if resolved.contribution_lock.source_kind
-            == nomifun_agent_contracts::ContributionSourceKind::PluginProductActiveRelease
-        {
-            resolved
-                .validate()
-                .map_err(|error| EngineToolError::ToolPlan(error.message))?;
-            if !active.active.contains(&exposure.capability_id) {
-                return Err(EngineToolError::ToolPlan(
-                    "Plugin Product capability is not enabled".into(),
-                ));
-            }
-            let action = resolved
-                .actions
-                .iter()
-                .find(|action| action.action_id == exposure.action_id)
-                .ok_or_else(|| EngineToolError::ToolPlan("Plugin Product action is not frozen".into()))?;
-            let policy = snapshot.policy(&exposure.capability_id).ok_or_else(|| {
-                EngineToolError::ToolPlan("Plugin Product authority policy is absent".into())
-            })?;
-            let schema_digest = input_schema_digest(&exposure.definition.input_schema)?;
-            if action.presentation != ToolPresentationKind::FunctionTool
-                || !policy.allowed_actions.contains(&action.action_id)
-                || (!resolved.action_allowlist.is_empty()
-                    && !resolved.action_allowlist.contains(&action.action_id))
-                || !exposure.definition.input_schema.0.is_object()
-                || action
-                    .input_schema
-                    .as_ref()
-                    .rsplit_once('#')
-                    .map(|(_, digest)| digest)
-                    != Some(schema_digest.as_ref())
-            {
-                return Err(EngineToolError::ToolPlan(
-                    "Plugin Product action/schema differs from frozen authority".into(),
-                ));
-            }
-            bindings.push(EngineToolBinding {
-                model_name: exposure.definition.name.clone(),
-                definition: exposure.definition,
-                schema_digest,
-                canonical_input_schema_ref: action.input_schema.clone(),
-                capability_contract_digest: resolved.schema_digest.clone(),
-                capability_id: exposure.capability_id,
-                action_id: exposure.action_id,
-                resource_binding_ids: policy.resource_binding_ids.clone(),
-                // Service replies do not prove remote effects are reversible.
-                // The hosted receipt lane also requires serial dispatch.
-                effect_class: EngineEffectClass::ExternalUncertainEffect,
-                parallel_safe: false,
-            });
-            continue;
-        }
         if !active.active.contains(&exposure.capability_id) {
             return Err(EngineToolError::ToolPlan(format!(
                 "capability {} is not active in generation {}",
