@@ -387,9 +387,12 @@
   animation: turn-process-shimmer 1.8s linear infinite;
 }
 
-.turn-process-disclosure__item--current.turn-process-disclosure__item--thinking
-  .turn-process-trace__paragraph,
-.turn-process-disclosure__item--current .turn-process-trace__row--running .turn-process-trace__text {
+.turn-process-disclosure--live
+  .turn-process-disclosure__item--current.turn-process-disclosure__item--thinking
+  .turn-process-trace__thinking-last-line,
+.turn-process-disclosure--live
+  .turn-process-disclosure__item--current
+  .turn-process-trace__row--current-activity .turn-process-trace__text {
   animation: turn-process-current-fade 1.55s ease-in-out infinite;
 }
 
@@ -706,6 +709,13 @@ button.turn-process-trace__row:focus-visible {
   white-space: nowrap;
 }
 
+.turn-process-trace-detail .turn-process-trace-file-list__item {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .turn-process-trace-file-list__button {
   display: flex;
   width: 100%;
@@ -748,9 +758,12 @@ button.turn-process-trace__row:focus-visible {
   }
 
   .turn-process-disclosure--live .turn-process-disclosure__label,
-  .turn-process-disclosure__item--current.turn-process-disclosure__item--thinking
-    .turn-process-trace__paragraph,
-  .turn-process-disclosure__item--current .turn-process-trace__row--running .turn-process-trace__text {
+  .turn-process-disclosure--live
+    .turn-process-disclosure__item--current.turn-process-disclosure__item--thinking
+    .turn-process-trace__thinking-last-line,
+  .turn-process-disclosure--live
+    .turn-process-disclosure__item--current
+    .turn-process-trace__row--current-activity .turn-process-trace__text {
     animation: none;
   }
 

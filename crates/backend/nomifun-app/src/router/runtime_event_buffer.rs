@@ -1,15 +1,18 @@
-//! Bounded persistence projection. UI deltas remain live; replay needs text
-//! segments and completed calls, not every provider transport fragment.
+//! Bounded persistence projection. UI deltas remain live; replay keeps display
+//! text, thinking, and completed calls without every provider fragment.
 use nomifun_chat_model_broker::{ChatContentPart, ChatToolCall, ToolCallId};
 use nomifun_agent_runtime::{AgentCompactedItem, AgentEngineEvent, AgentToolResult};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 const FLUSH_BYTES: usize = 16 * 1024;
+const MAX_THINKING_BYTES_PER_TURN: usize = 512 * 1024;
 
 #[derive(Default)]
 pub(super) struct AgentEventBuffer {
     text: Option<(u16, String)>,
+    thinking: Option<(u16, String)>,
+    thinking_bytes: usize,
     instruction_reads: BTreeSet<ToolCallId>,
     proposal_ids: BTreeSet<ToolCallId>,
 }
@@ -85,10 +88,8 @@ impl AgentEventBuffer {
                 });
             }
             AgentEngineEvent::OutputTextDelta { step, text } => {
-                if self
-                    .text
-                    .as_ref()
-                    .is_some_and(|(previous, _)| previous != step)
+                if self.thinking.is_some()
+                    || self.text.as_ref().is_some_and(|(previous, _)| previous != step)
                 {
                     self.flush(&mut records);
                 }
@@ -98,8 +99,29 @@ impl AgentEventBuffer {
                     self.flush(&mut records);
                 }
             }
-            // Actual argument fragments and private reasoning stay transient.
-            AgentEngineEvent::ToolCallDelta { .. } | AgentEngineEvent::ReasoningDelta { .. } => {}
+            AgentEngineEvent::ReasoningDelta { step, text } => {
+                if self.text.is_some()
+                    || self.thinking.as_ref().is_some_and(|(previous, _)| previous != step)
+                {
+                    self.flush(&mut records);
+                }
+                let remaining = MAX_THINKING_BYTES_PER_TURN.saturating_sub(self.thinking_bytes);
+                let mut end = text.len().min(remaining);
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end > 0 {
+                    let (_, pending) = self.thinking.get_or_insert_with(|| (*step, String::new()));
+                    pending.push_str(&text[..end]);
+                    self.thinking_bytes += end;
+                    if pending.len() >= FLUSH_BYTES {
+                        self.flush(&mut records);
+                    }
+                }
+            }
+            // Partial tool argument fragments remain transient; completed calls
+            // carry the validated arguments needed by runtime replay.
+            AgentEngineEvent::ToolCallDelta { .. } => {}
             _ => {
                 self.flush(&mut records);
                 records.push(event.clone());
@@ -111,6 +133,9 @@ impl AgentEventBuffer {
     pub(super) fn flush(&mut self, records: &mut Vec<AgentEngineEvent>) {
         if let Some((step, text)) = self.text.take() {
             records.push(AgentEngineEvent::OutputTextDelta { step, text });
+        }
+        if let Some((step, text)) = self.thinking.take() {
+            records.push(AgentEngineEvent::ReasoningDelta { step, text });
         }
     }
 }

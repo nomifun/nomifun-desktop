@@ -46,7 +46,7 @@ describe('MessageList turn completion disclosure structure', () => {
 
   test('does not reuse legacy process cards inside receipt expansion', () => {
     expect(source.includes('renderProcessTraceItem(')).toBe(true);
-    expect(source.includes("renderProcessTraceItem(processItem, 'list', workspaceRoots")).toBe(true);
+    expect(source).toMatch(/renderProcessTraceItem\(\s*processItem, 'list', workspaceRoots,/);
     expect(source.includes('MessageToolGroupSummary')).toBe(false);
     expect(source.includes('defaultExpanded={true}')).toBe(false);
   });
@@ -81,7 +81,7 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('processItemStates: Record<string, TurnDisclosureProcessState>')).toBe(true);
     expect(source.includes('processItemStates: entry.processItemStates')).toBe(true);
     expect(source.includes('getDisclosureProcessItemState')).toBe(true);
-    expect(source.includes('getDisclosureProcessItemState(processItem))')).toBe(true);
+    expect(source.includes('item.running ? undefined : getDisclosureProcessItemState(processItem)')).toBe(true);
   });
 
   test('uses canonical timing metadata without rendering a redundant status row', () => {
