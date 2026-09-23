@@ -4,7 +4,7 @@
 
 ## 状态
 
-- Goal：`active`。Unified Plugin Core 源码 clean cut 已完成；macOS arm64 App/DMG 原生包与启动证据已通过，Plugin 产品 UI 因目标 Mac 锁屏仍待验收；Windows 候选安装闭环也独立未完成，因此不得标记 `complete`。
+- Goal：`active`。Unified Plugin Core 源码 clean cut 已完成；macOS arm64 App/DMG 原生包与启动证据已通过。目标机解锁后的 Plugin UI 验收发现并修复 SDK/Host 协议错接，修复版原生包仍待重建和复验；Windows 候选安装闭环也独立未完成，因此不得标记 `complete`。
 - 开发分支：`rf/agent-capability-platform-v2`。Unified Plugin Core 的两个提交已快进进入此分支，随后正常合并远端在此期间新增的 Agent、Knowledge、会话切换、Canvas 与 UI 提交。后续只在本开发分支施工。
 - 起始工作树：只有本规格目录为未跟踪内容；未发现或覆盖用户无关代码改动。
 - 最终边界：没有双架构、feature flag、旧 decoder、旧 API alias 或可运行兼容层。Plugin 子系统 clean-start，不转换 N1/M1 Plugin 行，也不触碰非 Plugin 用户数据。
@@ -112,3 +112,9 @@
 - `bun scripts/validation/check-macos-arm64-native.mjs --release-lock <上述绝对 lock> --run-startup --host-binary <同一 App 可执行文件> --report <logs/macos-native-preflight.json> --log <logs/clean-build-mac-arm.log>` 退出 0。结构化结果 26 项、无失败/阻塞：原生 arm64、lock 来源、App/CEF helper、DMG verify/mount 同一性、空/新建 DataRoot 两次 HTTP 200 与进程树清理均通过；DMG 签名/公证和生命周期检查明确为 `not_required`。该脚本是 Host/package preflight，不是 Plugin 产品验收。
 - 从上述 `.app` 在本轮 `data/` 与 `work/app/` 实际启动 PID 15062，`data/port.json` 指向 `127.0.0.1:55102`；外部 `GET /health` 为 200，未获 WebView local-trust 的 `GET /api/plugins` 为预期 403。隔离 DB 恰有七张 Unified Plugin 表且初始 Plugin 行数为零；初始进程树 Node 数为零。日志为 `logs/native-app.log`、`logs/process-tree-initial.json`、`logs/native-health-body.json`。UI 工具报告 macOS 当前锁屏；已请求目标机手动解锁，Library/Creator/Import/Run/Config 和 DataRoot 操作仍待可见 UI 验收，不能记为通过。
 - 同一 DMG 已只读挂载到 `work/mounted-dmg/`，其中 App 可执行文件 SHA-256 与 lock 完全一致，架构为 arm64。前一 App 在 PID 15062 收到终止信号并清理退出后，直接从挂载 App 启动 PID 15462；新 `port.json` 为 `127.0.0.1:55264`，`GET /health` 为 200，初始进程树仅 App 加三个 CEF Helper，Node 数为零。证据：`logs/native-dmg-app.log`、`logs/native-dmg-health-body.json`、`logs/process-tree-dmg-initial.json`。这证明 DMG 内 App 可以原生启动，但无 Plugin 安装/调用的 UI 验收仍受锁屏阻塞。
+
+## macOS 原生 Plugin UI 接续（解锁后）
+
+- 目标机解锁后，使用上述同一 App 与隔离 `data/` 启动 PID 17418，实际打开桌面窗口的 Plugin Library，目录导入 `work/fixtures/ui-only/`；Import inspect/install、Plugin detail、Surface open 和 `ui/index.html` 静态资源均为 HTTP 200。已安装本地 Plugin `01a0ccd1-8ba4-7461-a5f1-c52a82071e3a`，Run 首次短暂显示 fixture iframe，约 10 秒后显示 `Plugin surface could not be opened`；这个原生产品步骤**失败**，不能把此前 HTTP E2E 写成 UI 验收通过。导入后进程树 `logs/process-tree-ui-only-open.json` 的 Node 数为 0，但因 Surface 失败，持久化写入/读取尚未验证。
+- 根因：唯一 `plugin-sdk.js` 仍使用旧的 `window.__nomifunPluginBridge` + `method/params` 帧，而唯一 `PluginSurfacePanel` 已发送 nonce challenge、转移 MessagePort，并要求 `call_id + target` DTO；Host 等不到 handshake 后超时。修复直接收敛这同一 SDK 与 Host：SDK 响应 challenge、校验同一 nonce、接受 transferred port/Preview 标记，发送当前后端 DTO，解码当前结果；UI/Service 不增加第二套 Bridge、旧入口或兼容分支。文件写入经统一 DataRoot 以 base64 传输并按 Service 语义覆盖已有文件。
+- 修复后 `bun run test:plugin-sdk` 8/8、Plugin UI 定向 10/10、`bun run check`（含 `check:desktop-ui-boundary` 和 Unified Plugin 边界）、Plugin HTTP E2E 8/8、Plugin Platform 全套 57/57 均退出 0。日志分别为 `logs/plugin-sdk-native-fix.log`、`logs/plugin-ui-native-fix.log`、`logs/check-native-fix.log`、`logs/plugin-e2e-native-fix.log`、`logs/plugin-platform-native-fix.log`。原生 App/DMG 仍是修复前的构建，须从本修复提交重新构建并复验，不能把源码检查替代原生结果。
