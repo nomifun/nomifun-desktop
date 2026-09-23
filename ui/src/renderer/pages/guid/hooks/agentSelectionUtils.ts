@@ -12,7 +12,7 @@ import { isConversationAgentTemplateKey } from '@/renderer/components/agent/conv
 
 export const DEFAULT_GUID_AGENT_SELECTION: GuidAgentSelection = {
   kind: 'template',
-  templateKey: 'chat.minimal',
+  templateKey: 'assistant.general',
 };
 
 /** Normalize persisted/unknown selection state to a workbench catalog identity. */
