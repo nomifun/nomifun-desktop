@@ -12,7 +12,8 @@
     "failed": "Failed {{target}}",
     "canceled": "Canceled {{target}}",
     "skipped": "Skipped {{target}}",
-    "invalidArguments": "Arguments did not pass validation; {{target}} was not run"
+    "invalidArguments": "Arguments did not pass validation; {{target}} was not run",
+    "notExecuted": "Did not run {{target}}"
   },
   "processReceipt": {
     "tool": "tool",
@@ -44,6 +45,8 @@
     "searchedTarget": "Searched {{target}}",
     "agentConnecting": "Connecting {{target}}",
     "agentFailed": "{{target}} failed",
+    "expandText": "Show full note",
+    "collapseText": "Collapse note",
     "status": "{{target}}"
   },
   "turnDuration": "Took {{duration}}",

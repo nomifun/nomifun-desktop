@@ -608,6 +608,31 @@ const normalizePersistedWorkspaceRuntimeError = (
   };
 };
 
+const normalizePersistedIncompleteTurnError = (
+  parsed: Record<string, unknown>,
+  message: string
+): AgentStreamErrorInfo | undefined => {
+  const error = isRecord(parsed.error) ? parsed.error : undefined;
+  if (error?.code !== 'UNKNOWN_UPSTREAM_ERROR' || typeof error.detail !== 'string') return undefined;
+  const detail = error.detail;
+  if (![
+    'model step limit of ',
+    'execution plan remains unresolved;',
+    'failed patch targets have not been re-observed;',
+    'processes remain running;',
+    'completion account is missing or stale;',
+    'completion account contains blocked work;',
+  ].some((prefix) => detail.startsWith(prefix))) return undefined;
+  return {
+    message,
+    code: 'NOMIFUN_TASK_INCOMPLETE',
+    ownership: 'nomifun',
+    detail,
+    retryable: false,
+    feedback_recommended: false,
+  };
+};
+
 const classifyPersistedSendFailure = (
   parsed: Record<string, unknown>,
   message: string
@@ -695,6 +720,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
   const structuredError =
     tipType === 'error'
       ? (normalizePersistedWorkspaceRuntimeError(parsed, parsed.content) ??
+        normalizePersistedIncompleteTurnError(parsed, parsed.content) ??
         normalizeAgentStreamError(parsed.error) ??
         classifyPersistedSendFailure(parsed, parsed.content) ??
         normalizeAgentStreamError({ ...parsed, message: parsed.content }))

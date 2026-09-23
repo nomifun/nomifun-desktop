@@ -27,3 +27,23 @@ export const shouldShowToolRowDetail = (
 
   return Boolean(row.input || row.output || row.truncated);
 };
+
+/** A model can repeat the same progress sentence after each tool boundary. */
+export const deduplicateProcessText = <T>(
+  items: T[],
+  textOf: (item: T) => string | undefined
+): T[] => {
+  const seen = new Set<string>();
+  let removed = false;
+  const visible = items.filter((item) => {
+    const text = textOf(item)?.replace(/\s+/g, ' ').trim();
+    if (!text) return true;
+    if (seen.has(text)) {
+      removed = true;
+      return false;
+    }
+    seen.add(text);
+    return true;
+  });
+  return removed ? visible : items;
+};

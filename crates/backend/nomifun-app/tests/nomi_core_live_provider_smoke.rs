@@ -21,6 +21,10 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 use zeroize::Zeroizing;
 
+#[cfg(all(feature = "browser-use", feature = "computer-use"))]
+#[path = "support/live_general_desktop.rs"]
+mod live_general_desktop;
+
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
 const LIVE_MODEL_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_MODEL";
@@ -36,6 +40,9 @@ const TURN_RESULT_DEADLINE: Duration = Duration::from_secs(120);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SELECTED_MODEL_MARKER: &str = "NOMIFUN_SELECTED_MODEL_LIVE_OK";
+const WORKSPACE_FILE_MARKER: &str = "NOMIFUN_WORKSPACE_FILE_LIVE_OK";
+const COMPANION_MARKER: &str = "NOMIFUN_COMPANION_LIVE_OK";
+const CREATIVE_MARKER: &str = "NOMIFUN_CREATIVE_LIVE_OK";
 const COLLABORATION_MODEL_MARKER: &str = "NOMIFUN_AGENT_COLLABORATION_LIVE_OK";
 const AUTOWORK_MODEL_MARKER: &str = "NOMIFUN_AUTOWORK_LIVE_OK";
 const AUTOWORK_TAG: &str = "live-commercial-model-smoke";
@@ -46,6 +53,16 @@ const CREDENTIAL_AUDIT_REQUIRED_CLEAN_SCANS: usize = 2;
 struct LiveFixture {
     _environment: ServerEnvironment,
     application: NomiCoreApplication,
+}
+
+#[derive(Clone, Copy)]
+enum LiveCase {
+    SelectedModel,
+    WorkspaceFile,
+    CodingPreset,
+    SnakeGame,
+    Companion,
+    CreativeStudio,
 }
 
 #[derive(Clone)]
@@ -1799,6 +1816,245 @@ async fn run_selected_model_chain(
     Ok(())
 }
 
+async fn run_live_workspace_file_chain(
+    router: &Router,
+    api_key: &str,
+    model: &str,
+    work_dir: &Path,
+    official_coding: bool,
+    snake_game: bool,
+) -> Result<(), SmokeFailure> {
+    let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let preset_id = if official_coding {
+        let created = successful_json(
+            router,
+            "coding.preset",
+            Method::POST,
+            "/api/agent-presets/from-template/coding.codex".to_owned(),
+            Some(json!({
+                "reuse_existing": false,
+                "display_name": "Live Coding Agent smoke",
+                "model": {"provider_id": provider_id, "model": model}
+            })),
+            LOCAL_API_DEADLINE,
+            &[StatusCode::OK],
+        ).await?;
+        let preset = envelope_data("coding.preset", created)?;
+        required_string("coding.preset", &preset, "/preset/preset_id", "CODING_PRESET_ID_MISSING")?
+    } else {
+        create_agent_preset(
+            router,
+            &provider_id,
+            model,
+            &[("workspace.files", &["workspace.files/read", "workspace.files/write"], "workspace")],
+        ).await?.0
+    };
+    let selections = if official_coding {
+        coding_resource_selections()
+    } else {
+        json!([{"resource_kind":"workspace","resource_id":"default-workspace"}])
+    };
+    let (session_id, _) = create_session(
+        router,
+        &preset_id,
+        &provider_id,
+        model,
+        selections,
+    ).await?;
+    let file_name = if snake_game { "snake_game.html" } else { "session-smoke.txt" };
+    let prompt = if snake_game {
+        "写一个贪吃蛇的游戏。在项目根目录用 write_file 创建独立可运行的 snake_game.html，内含 HTML、CSS 和 JavaScript，并实现键盘方向控制、计分以及开始或重新开始。完成后检查文件并简要回复。".to_owned()
+    } else {
+        format!(
+            "Create a workspace file named session-smoke.txt containing exactly {WORKSPACE_FILE_MARKER}. Use write_file, then verify the file exists with read_file. Finish the plan and completion account required by your runtime. End your reply with {WORKSPACE_FILE_MARKER}."
+        )
+    };
+    let cursor = session_message_cursor(router, "file.cursor_before", &session_id).await?;
+    start_session_turn(
+        router,
+        "file.turn",
+        &session_id,
+        &uuid::Uuid::now_v7().to_string(),
+        prompt,
+    ).await?;
+
+    let deadline = tokio::time::Instant::now() + if snake_game { Duration::from_secs(360) } else { TURN_RESULT_DEADLINE };
+    loop {
+        let (messages, _) = session_messages_after(router, "file.messages", &session_id, cursor).await?;
+        if let Some(code) = first_durable_error_code(&messages) {
+            return Err(SmokeFailure::new("file.messages", code, 422));
+        }
+        let observed = successful_json(
+            router,
+            "file.session",
+            Method::GET,
+            format!("/api/agent-sessions/{session_id}"),
+            None,
+            LOCAL_API_DEADLINE,
+            &[StatusCode::OK],
+        ).await?;
+        let observed = envelope_data("file.session", observed)?;
+        if observed.pointer("/head/status").and_then(Value::as_str) == Some("ready") {
+            let file = work_dir.join(file_name);
+            let content = std::fs::read_to_string(&file).ok();
+            let valid_file = if snake_game {
+                content.as_ref().is_some_and(|content| {
+                    let lower = content.to_ascii_lowercase();
+                    content.len() >= 1_000
+                        && lower.contains("<html")
+                        && lower.contains("<script")
+                        && lower.contains("canvas")
+                        && lower.contains("keydown")
+                })
+            } else {
+                content.as_deref() == Some(WORKSPACE_FILE_MARKER)
+            };
+            if !valid_file {
+                return Err(SmokeFailure::new("file.result", "WORKSPACE_FILE_MISSING_OR_WRONG", 422));
+            }
+            let root_listing = successful_json(
+                router,
+                "file.workspace_listing",
+                Method::GET,
+                format!("/api/agent-sessions/{session_id}/workspace?path=."),
+                None,
+                LOCAL_API_DEADLINE,
+                &[StatusCode::OK],
+            ).await?;
+            let root_listing = envelope_data("file.workspace_listing", root_listing)?;
+            if !root_listing.as_array().is_some_and(|entries| entries.iter().any(|entry|
+                entry.get("name").and_then(Value::as_str) == Some(file_name)
+            )) {
+                return Err(SmokeFailure::new("file.workspace_listing", "WORKSPACE_FILE_NOT_LISTED", 422));
+            }
+            let write_recorded = messages.iter().any(|message| {
+                message.get("presentation_intent").and_then(Value::as_str) == Some("tool")
+                    && message.pointer("/projection/tool_summary/name").and_then(Value::as_str) == Some("write_file")
+                    && message.pointer("/projection/state").and_then(Value::as_str) == Some("recorded")
+            });
+            if !write_recorded {
+                return Err(SmokeFailure::new("file.messages", "WORKSPACE_WRITE_RECEIPT_MISSING", 422));
+            }
+            // Tool-using models may add a short explanation around the final
+            // answer. The selected-model smoke checks exact text separately;
+            // here we require a real terminal reply and verified file effect.
+            if !messages.iter().filter_map(assistant_text_projection).any(|text|
+                text.get("content").and_then(Value::as_str).is_some_and(|content| !content.trim().is_empty())
+            ) {
+                return Err(SmokeFailure::new("file.messages", "WORKSPACE_FINAL_REPLY_MISSING", 422));
+            }
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(SmokeFailure::new("file.result", "WORKSPACE_TURN_DEADLINE_EXCEEDED", 408));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn run_live_companion_chain(
+    router: &Router,
+    api_key: &str,
+    model: &str,
+) -> Result<(), SmokeFailure> {
+    let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let companion = successful_json(router, "companion.create", Method::POST,
+        "/api/companion/companions".to_owned(),
+        Some(json!({"name":"Live Companion smoke","character":"ink"})),
+        LOCAL_API_DEADLINE, &[StatusCode::CREATED]).await?;
+    let companion = envelope_data("companion.create", companion)?;
+    let companion_id = required_string("companion.create", &companion,
+        "/companion_id", "COMPANION_ID_MISSING")?;
+    successful_json(router, "companion.model", Method::PATCH,
+        format!("/api/companion/companions/{companion_id}"),
+        Some(json!({"model":{"provider_id":provider_id,"model":model}})),
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    successful_json(router, "companion.agent", Method::PUT,
+        format!("/api/product-agent-bindings/companion/{companion_id}"),
+        Some(json!({
+            "selection":{"kind":"template","template_key":"companion.default"},
+            "model":{"provider_id":provider_id,"model":model},
+            "resource_selections":[
+                {"resource_kind":"companion","resource_id":companion_id},
+                {"resource_kind":"companion_memory","resource_id":companion_id},
+                {"resource_kind":"scheduler","resource_id":"installation-scheduler"}
+            ]
+        })), LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let thread = successful_json(router, "companion.thread", Method::POST,
+        format!("/api/companion/companions/{companion_id}/companion/threads"),
+        Some(json!({})), LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let thread = envelope_data("companion.thread", thread)?;
+    let session_id = required_string("companion.thread", &thread,
+        "/conversation_id", "COMPANION_SESSION_ID_MISSING")?;
+    let projection = successful_json(router, "companion.projection", Method::GET,
+        format!("/api/agent-sessions/{session_id}/projection"), None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let projection = envelope_data("companion.projection", projection)?;
+    if projection.pointer("/agent_snapshot/preset_name").and_then(Value::as_str)
+        != Some("companion.default") {
+        return Err(SmokeFailure::new("companion.projection", "COMPANION_PRESET_MISMATCH", 409));
+    }
+    let cursor = session_message_cursor(router, "companion.cursor_before", &session_id).await?;
+    start_session_turn(router, "companion.turn", &session_id,
+        &uuid::Uuid::now_v7().to_string(),
+        format!("This is a Companion session acceptance check. Do not call tools. Reply with exactly {COMPANION_MARKER} and no other text.")).await?;
+    wait_for_session_marker(router, "companion.reply", &session_id, cursor,
+        COMPANION_MARKER, TURN_RESULT_DEADLINE).await
+}
+
+async fn run_live_creative_studio_chain(
+    router: &Router,
+    api_key: &str,
+    model: &str,
+) -> Result<(), SmokeFailure> {
+    let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let canvas = successful_json(router, "creative.canvas", Method::POST,
+        "/api/creative-studio/canvases".to_owned(),
+        Some(json!({
+            "title":"Live Creative Studio smoke",
+            "agentKickoff":{
+                "prompt":"test",
+                "model":{"providerId":provider_id,"model":model}
+            }
+        })), LOCAL_API_DEADLINE, &[StatusCode::CREATED]).await?;
+    let canvas = envelope_data("creative.canvas", canvas)?;
+    let canvas_id = required_string("creative.canvas", &canvas,
+        "/canvas/canvasId", "CREATIVE_CANVAS_ID_MISSING")?;
+    let detail = successful_json(router, "creative.canvas_detail", Method::GET,
+        format!("/api/creative-studio/canvases/{canvas_id}"), None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let detail = envelope_data("creative.canvas_detail", detail)?;
+    let session_id = required_string("creative.canvas_detail", &detail,
+        "/document/chatSessions/0/id", "CREATIVE_SESSION_ID_MISSING")?;
+    let pending_key = required_string("creative.canvas_detail", &detail,
+        "/document/chatSessions/0/pendingTurn/idempotencyKey", "CREATIVE_PENDING_KEY_MISSING")?;
+    let resolved = successful_json(router, "creative.resolve", Method::POST,
+        "/api/creative-studio/canvas-agent-sessions/resolve".to_owned(),
+        Some(json!({
+            "canvas_id":canvas_id,
+            "session_id":session_id,
+            "model":{"provider_id":provider_id,"model":model},
+            "pending_turn_idempotency_key":pending_key
+        })), LOCAL_API_DEADLINE, &[StatusCode::CREATED]).await?;
+    let resolved = envelope_data("creative.resolve", resolved)?;
+    let conversation_id = required_string("creative.resolve", &resolved,
+        "/binding/conversation_id", "CREATIVE_CONVERSATION_ID_MISSING")?;
+    let projection = successful_json(router, "creative.projection", Method::GET,
+        format!("/api/agent-sessions/{conversation_id}/projection"), None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let projection = envelope_data("creative.projection", projection)?;
+    if projection.pointer("/agent_snapshot/preset_name").and_then(Value::as_str)
+        != Some("creative-studio.default") {
+        return Err(SmokeFailure::new("creative.projection", "CREATIVE_PRESET_MISMATCH", 409));
+    }
+    let cursor = session_message_cursor(router, "creative.cursor_before", &conversation_id).await?;
+    start_session_turn(router, "creative.turn", &conversation_id,
+        &uuid::Uuid::now_v7().to_string(),
+        format!("This is a Creative Studio Agent session acceptance check. Do not call tools. Reply with exactly {CREATIVE_MARKER} and no other text.")).await?;
+    wait_for_session_marker(router, "creative.reply", &conversation_id, cursor,
+        CREATIVE_MARKER, TURN_RESULT_DEADLINE).await
+}
+
 fn ensure_single_model_route(document: &Value, provider_id: &str, model: &str) -> Result<(), SmokeFailure> {
     let route = &document["chat_route_records"]["agent_chat"];
     if route.pointer("/primary/provider_id").and_then(Value::as_str) != Some(provider_id)
@@ -1869,7 +2125,7 @@ async fn assert_session_runtime(router: &Router, session: &str) -> Result<(), Sm
     Ok(())
 }
 
-async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
+async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
     let root = tempfile::tempdir().map_err(|_| {
@@ -1881,7 +2137,19 @@ async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
     })?;
     let fixture = build_fixture(&root).await?;
     let router = fixture.application.router();
-    let result = run_selected_model_chain(&router, api_key.as_str(), &model).await;
+    let result = match case {
+        LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
+            &router,
+            api_key.as_str(),
+            &model,
+            &root.path().join("work"),
+            matches!(case, LiveCase::CodingPreset | LiveCase::SnakeGame),
+            matches!(case, LiveCase::SnakeGame),
+        ).await,
+        LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
+        LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
+        LiveCase::CreativeStudio => run_live_creative_studio_chain(&router, api_key.as_str(), &model).await,
+    };
     drop(router);
     let LiveFixture {
         _environment: environment,
@@ -1921,7 +2189,62 @@ async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; use the runner --model-smoke"]
 async fn nomi_core_selected_model_reaches_live_stepfun() {
-    if let Err(failure) = run_live_provider_smoke().await {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::SelectedModel).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --file-smoke"]
+async fn nomi_core_workspace_file_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::WorkspaceFile).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --coding-smoke"]
+async fn nomi_core_official_coding_agent_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::CodingPreset).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --game-smoke"]
+async fn nomi_core_snake_game_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::SnakeGame).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --companion-smoke"]
+async fn nomi_core_official_companion_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::Companion).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --creative-smoke"]
+async fn nomi_core_official_creative_studio_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::CreativeStudio).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[cfg(all(feature = "browser-use", feature = "computer-use"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --general-desktop-smoke"]
+async fn nomi_core_general_desktop_reaches_live_stepfun() {
+    if let Err(failure) = live_general_desktop::run().await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }

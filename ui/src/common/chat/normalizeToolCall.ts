@@ -4,7 +4,7 @@ import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
-export type NormalizedToolNotExecutedReason = 'invalid_arguments';
+export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight';
 
 interface NormalizedToolRetry {
   retryGroupId: string;
@@ -170,6 +170,20 @@ const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
 const invalidArgumentsNotExecutedSuffix =
   'Correct the arguments and retry; the tool was not executed.';
 
+const localRuntimeToolNames = new Set([
+  'read_file', 'search_files', 'write_file', 'apply_patch', 'delete_path',
+  'exec_command', 'start_process', 'poll_process', 'write_process_stdin',
+  'close_process_stdin', 'resize_process', 'cancel_process',
+  'git_status', 'git_diff', 'git_stage', 'git_commit', 'git_push',
+  'update_plan', 'report_completion',
+]);
+
+const isRuntimePreflightNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error' || !localRuntimeToolNames.has(toDisplayText(name).trim())) return false;
+  const text = toDisplayText(output).trimStart();
+  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |The plan needs reconsideration after )/.test(text);
+};
+
 /**
  * Match only the local runtime's standardized pre-dispatch rejection. A null
  * `args` value alone is not sufficient: remote tools can fail without echoing
@@ -211,13 +225,15 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
       : undefined;
   const skipped = isSkippedAfterPriorError(status, output);
   const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
+  const runtimePreflightNotExecuted = !skipped && isRuntimePreflightNotExecuted(name, status, output);
 
   return {
     key: toDisplayText(call_id),
     name: toDisplayText(name, 'Tool'),
-    status: skipped || invalidArgumentsNotExecuted ? 'canceled' : normalizeToolCallStatus(status),
+    status: skipped || invalidArgumentsNotExecuted || runtimePreflightNotExecuted ? 'canceled' : normalizeToolCallStatus(status),
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
+    ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),
     ...(isOrdinaryShellExit(name, status, output) || isOrdinaryDirectProbeFailure(name, status, output)
       ? { nonFatalFailure: true }
       : {}),

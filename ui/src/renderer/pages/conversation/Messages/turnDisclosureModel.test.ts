@@ -285,7 +285,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemStates).toEqual({ thinking: 'completed' });
   });
 
-  test('keeps running assistant text visible after the live disclosure', () => {
+  test('keeps provisional assistant text inside the live disclosure', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('progress-note', 'assistant', { createdAt: 1500 }),
@@ -296,13 +296,12 @@ describe('buildTurnDisclosureItems', () => {
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
       DISCLOSURE_1,
-      'partial-answer',
     ]);
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
-    expect(disclosure.processItemIds).toEqual(['progress-note', 'scan']);
+    expect(disclosure.processItemIds).toEqual(['progress-note', 'scan', 'partial-answer']);
   });
 
   test('keeps active process steps visible in the live disclosure', () => {
@@ -315,7 +314,6 @@ describe('buildTurnDisclosureItems', () => {
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
       DISCLOSURE_1,
-      'partial-answer',
     ]);
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
@@ -323,7 +321,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
     expect(disclosure.defaultCollapsed).toBe(false);
-    expect(disclosure.processItemIds).toEqual(['active-process']);
+    expect(disclosure.processItemIds).toEqual(['active-process', 'partial-answer']);
   });
 
   test('keeps an intermediate failure in details but marks a closed answered turn as processed', () => {
@@ -455,7 +453,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['tool']);
   });
 
-  test('keeps a completed tail in the live disclosure while assistant text remains readable', () => {
+  test('keeps a completed tail and provisional assistant text in the live disclosure', () => {
     const result = buildTurnDisclosureItems([
       item('user', 'user', { createdAt: 1000 }),
       item('tool', 'process', { createdAt: 2000, processState: 'completed' }),
@@ -465,13 +463,12 @@ describe('buildTurnDisclosureItems', () => {
     expect(result.map((entry) => (entry.type === 'item' ? entry.id : entry.id))).toEqual([
       'user',
       DISCLOSURE_1,
-      'assistant-text',
     ]);
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
-    expect(disclosure.processItemIds).toEqual(['tool']);
+    expect(disclosure.processItemIds).toEqual(['tool', 'assistant-text']);
   });
 
   test('collapses a completed process-only segment once the next user request closes it', () => {

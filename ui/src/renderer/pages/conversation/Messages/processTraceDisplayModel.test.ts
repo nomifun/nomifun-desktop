@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { ToolReceiptDetailRow } from './components/toolGroupSummaryModel';
 import {
+  deduplicateProcessText,
   shouldShowFileListDetail,
   shouldShowToolRowDetail,
 } from './processTraceDisplayModel';
@@ -55,6 +56,17 @@ describe('process trace display model', () => {
 
   test('keeps command rows expandable for command input and output', () => {
     expect(shouldShowToolRowDetail(row({ action: 'run_commands', target: 'bun run check' }))).toBe(true);
+  });
+
+  test('shows repeated progress once while retaining intervening tool details', () => {
+    const items = [
+      { kind: 'text', content: 'I will create the file.' },
+      { kind: 'tool', content: 'write_file' },
+      { kind: 'text', content: 'I will  create the file.' },
+      { kind: 'text', content: 'The file is ready.' },
+    ];
+    expect(deduplicateProcessText(items, (item) => item.kind === 'text' ? item.content : undefined))
+      .toEqual([items[0], items[1], items[3]]);
   });
 
 });

@@ -17,6 +17,12 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser --compile-only
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --browser-gui --data-dir C:/new-disposable-gui-data
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --file-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --general-desktop-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --companion-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --creative-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --compaction-smoke
  *   NOMIFUN_LIVE_FIXTURE_PARENT=/absolute/repo/.git/hook-product-validation \
@@ -55,6 +61,12 @@ const MODEL_ENVIRONMENT_NAME = 'NOMIFUN_LIVE_STEPFUN_MODEL';
 const DEFAULT_MODEL = 'step-3.7-flash';
 const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
 const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
+const FILE_TEST_NAME = 'nomi_core_workspace_file_reaches_live_stepfun';
+const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
+const GAME_TEST_NAME = 'nomi_core_snake_game_reaches_live_stepfun';
+const GENERAL_DESKTOP_TEST_NAME = 'nomi_core_general_desktop_reaches_live_stepfun';
+const COMPANION_TEST_NAME = 'nomi_core_official_companion_reaches_live_stepfun';
+const CREATIVE_TEST_NAME = 'nomi_core_official_creative_studio_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
 const GLOBAL_TIMEOUT_MS = 30 * 60 * 1000;
@@ -65,6 +77,12 @@ const FAILURE_SENTINEL =
 const compileOnly = process.argv.includes('--compile-only');
 const selfTest = process.argv.includes('--self-test');
 const modelSmoke = process.argv.includes('--model-smoke');
+const fileSmoke = process.argv.includes('--file-smoke');
+const codingSmoke = process.argv.includes('--coding-smoke');
+const gameSmoke = process.argv.includes('--game-smoke');
+const generalDesktopSmoke = process.argv.includes('--general-desktop-smoke');
+const companionSmoke = process.argv.includes('--companion-smoke');
+const creativeSmoke = process.argv.includes('--creative-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
@@ -387,7 +405,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--before-tool-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--data-dir') return !browserGui || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--data-dir') return false;
@@ -397,7 +415,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, codingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -457,6 +475,7 @@ async function main() {
       'nomifun-app',
       '--test',
       TEST_TARGET,
+      ...(generalDesktopSmoke ? ['--features', 'browser-use,computer-use'] : []),
       '--no-run',
       '--message-format=json-render-diagnostics',
     ],
@@ -549,11 +568,11 @@ async function main() {
 
   let test;
   try {
-    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : 'selected_model'} model=${model}`);
+    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
     test = await runCaptured(
       executable,
       browserGui ? [guiDataDir, '--live-frontend'] : browser ? ['--live-agent-only'] : [
-        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : MODEL_TEST_NAME,
+        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -622,7 +641,7 @@ async function main() {
       return;
     }
     // libtest exits successfully even when an exact filter matches zero tests.
-    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : MODEL_TEST_NAME;
+    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
     if (!selectedTestPassed(test.stdout, selected)) {
       emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
       process.exitCode = 2;
@@ -650,7 +669,7 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : 'selected_model'} model=${model}`);
+    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;

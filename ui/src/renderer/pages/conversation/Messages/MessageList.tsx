@@ -52,6 +52,7 @@ import {
 } from './components/toolGroupSummaryModel';
 import ProcessTraceItem from './components/ProcessTraceItem';
 import { isContextCompressionTip } from './processTipModel';
+import { deduplicateProcessText } from './processTraceDisplayModel';
 import { formatFileTargetPreview, splitToolReceiptTargets } from './processFileTargetLabel';
 import type { WriteFileResult } from './types';
 import { useAutoScroll } from './useAutoScroll';
@@ -73,7 +74,7 @@ import {
   type TurnGateInfo,
 } from './turnDeliverablesModel';
 import TurnDeliverablesCard from './components/TurnDeliverablesCard';
-import { isSupersededPlanToolFailure } from './planToolVisibility';
+import { isInternalInstructionToolCall, isSupersededPlanToolFailure } from './planToolVisibility';
 import type { MessageId } from '@/common/types/ids';
 import { ExplicitToolRetryReceiptIndex } from './toolRetryReceiptModel';
 import { creationTaskPlacementAfterIndices } from './creationTaskPlacement';
@@ -344,6 +345,13 @@ const formatToolReceiptPart = (
     return t('messages.toolSummary.invalidArguments', {
       target: displayTarget ?? t('messages.processReceipt.tool', { defaultValue: 'tool' }),
       defaultValue: 'Arguments did not pass validation; {{target}} was not run',
+    });
+  }
+
+  if (part.notExecutedReason === 'runtime_preflight') {
+    return t('messages.toolSummary.notExecuted', {
+      target: displayTarget ?? t('messages.processReceipt.tool', { defaultValue: 'tool' }),
+      defaultValue: 'Did not run {{target}}',
     });
   }
 
@@ -814,6 +822,7 @@ const MessageList: React.FC<{
       const message = list[i];
       // Skip hidden and available_commands messages
       if (message.hidden) continue;
+      if (isInternalInstructionToolCall(message)) continue;
       if (
         message.type === 'tool_call' &&
         message.content.name === 'update_plan' &&
@@ -1262,10 +1271,13 @@ const MessageList: React.FC<{
   const renderTurnDisclosure = (item: ITurnProcessDisclosureVO, highlighted: boolean) => {
     const getDisclosureProcessItemState = (processItem: IRenderableItem): TurnDisclosureProcessState =>
       item.processItemStates[getProcessedItemAnchorId(processItem)] ?? getProcessItemState(processItem);
+    const processItems = deduplicateProcessText(item.processItems, (processItem) =>
+      processItem.type === 'text' ? toDisplayText(processItem.content.content) : undefined
+    );
 
     return (
       <TurnProcessDisclosure
-        item={item}
+        item={{ ...item, processItems }}
         highlighted={highlighted}
         renderProcessItem={(processItem) =>
           renderProcessTraceItem(

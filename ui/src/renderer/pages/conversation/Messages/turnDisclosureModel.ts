@@ -256,7 +256,10 @@ function buildSegmentOutput(
   // A delayed event from another turn can split one logical turn into several
   // segments. Only the last assistant row across the whole turn is final
   // answer content; earlier assistant rows remain part of the process trace.
-  const finalAssistantIndex = finalAssistantForTurn
+  // A streaming assistant row is still provisional. A later tool call or
+  // model step can replace it, so keep it in the bounded process disclosure
+  // until the turn actually closes.
+  const finalAssistantIndex = isClosed && finalAssistantForTurn
     ? segment.findIndex((entry) => entry === finalAssistantForTurn)
     : -1;
   const stateOptions = { isClosed };

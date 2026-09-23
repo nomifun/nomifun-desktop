@@ -160,6 +160,10 @@
         "title": "Request failed in the app",
         "body": "The request failed while the app was processing it. Please retry once; if it repeats, send feedback."
       },
+      "NOMIFUN_TASK_INCOMPLETE": {
+        "title": "The Agent did not finish this task",
+        "body": "This turn stopped after some actions may have succeeded. Check the project files and process record before continuing."
+      },
       "NOMIFUN_TOOL_RESULT_ENCODING_ERROR": {
         "title": "Nomi could not encode a tool result",
         "body": "A tool result conflicted with the selected model's function-response format. Retrying the same message will not resolve it; please send feedback."

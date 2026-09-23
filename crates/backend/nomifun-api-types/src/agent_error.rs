@@ -22,6 +22,10 @@ pub enum AgentErrorCode {
     NomifunAgentSessionInconsistent,
     NomifunPermissionError,
     NomifunInternalError,
+    /// The runtime safely stopped after an execution or completion guard was
+    /// exhausted. Earlier tool effects may have succeeded and must be checked
+    /// before the user continues the task.
+    NomifunTaskIncomplete,
     /// Nomi serialized a tool result into a provider function-response shape
     /// whose reserved fields changed the result's meaning. Replaying the same
     /// accepted turn would deterministically reproduce the rejected payload.
