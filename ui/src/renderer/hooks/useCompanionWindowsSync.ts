@@ -12,7 +12,7 @@ import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 const SYNC_DEBOUNCE_MS = 500;
 
 /** In-process subscribers (the mounted hook registers one). Lets a deliberate
- *  user action — the 总览 enable/disable switch — force an IMMEDIATE window
+ *  user action — a desktop-visibility switch — force an IMMEDIATE window
  *  reconcile without waiting on the WS `companion.config-updated` echo. That echo
  *  is lossy on the desktop (the WS reconnect uses backoff with no replay/heartbeat),
  *  so a dropped event left the pet not showing/hiding until a manual reload
@@ -58,7 +58,7 @@ export function useCompanionWindowsSync(): void {
     };
 
     void sync();
-    // Deliberate in-process requests (the 总览 enable/disable switch) reconcile
+    // Deliberate in-process requests (desktop-visibility switches) reconcile
     // IMMEDIATELY — they are user toggles, not echo bursts, so they must not
     // depend on the lossy WS event. Also resync when the main window regains
     // focus, as a catch-all for any event missed while it was backgrounded.
