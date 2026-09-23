@@ -1383,7 +1383,7 @@
       "emptyNoProviders": "No model providers are configured. Add a provider and model under \"Providers & keys\" first.",
       "defaultTitle": "Default generation model",
       "defaultHint": "Automatic tools use this exact model for this task. Professional creation can select a different model.",
-      "defaultUnset": "No default is set. Ordinary conversations never guess; choose the exact default for this task.",
+      "defaultUnset": "No default is set. Ordinary conversations automatically choose a compatible model, preferring healthy models and your model order.",
       "defaultLoading": "Checking available models for this task…",
       "defaultNoModels": "No enabled model supports this task. Configure one before choosing a default.",
       "defaultClear": "Clear default model",

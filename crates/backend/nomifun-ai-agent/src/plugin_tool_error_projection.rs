@@ -53,7 +53,7 @@ pub(crate) fn model_safe_tool_error(error: &NomiPluginToolError) -> ToolResult {
 fn safe_message_for(code: &str) -> &'static str {
     match code {
         "GENERATION_MODEL_UNAVAILABLE" => {
-            "The generation model could not be selected or is no longer available. Check this turn's generation model catalog. If there is no configured default and multiple available candidates, retry with an exact model_selection containing a listed provider_id and model. Do not silently replace an unavailable configured default or invent a model."
+            "No enabled compatible generation model is available, or the configured default is unavailable. Ask the user to enable a compatible model or update the default in Model Management. Do not claim a temporary provider outage."
         }
         "INVALID_PAYLOAD" | "WAVE3_INVALID_REQUEST" | "WAVE4_INVALID_REQUEST" => {
             "The capability request is invalid."
@@ -104,8 +104,8 @@ mod tests {
             "GENERATION_MODEL_UNAVAILABLE", "private endpoint and api_key=secret",
         ));
         let result = model_safe_tool_error(&error);
-        assert!(result.content.contains("model_selection"));
-        assert!(result.content.contains("provider_id"));
+        assert!(result.content.contains("compatible generation model"));
+        assert!(!result.content.contains("model_selection"));
         assert!(!result.content.contains("api_key=secret"));
         assert!(!result.content.contains("private endpoint"));
     }
