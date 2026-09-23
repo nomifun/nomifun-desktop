@@ -211,17 +211,17 @@ async fn validate_restorable_database_contract(pool: &SqlitePool) -> Result<(), 
 /// Backup and restore artifacts must already be current; they are preservation
 /// boundaries and must not be mutated as part of validation.
 pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(), DbError> {
-    // Validate the exact canonical one-row lineage. Unknown versions, edited
-    // checksums and historical prefixes fail closed without mutating the
-    // dataset.
+    // Validate the complete canonical lineage. Unknown versions, edited
+    // checksums and historical prefixes fail closed without mutating the dataset.
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
     if expected
         .first()
         .is_none_or(|migration| migration.version != CANONICAL_BASELINE_MIGRATION_VERSION)
-        || expected.len() != 1
+        || expected.len() != 2
+        || expected[1].version != 2
     {
         return Err(DbError::Init(
-            "database lineage must contain exactly the canonical baseline".into(),
+            "database lineage must contain the canonical baseline and model context migration".into(),
         ));
     }
 
@@ -482,6 +482,20 @@ async fn clean_start_unified_plugin_schema(
     if rows.is_empty() {
         return Ok(());
     }
+    let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
+    if rows.len() == expected.len()
+        && rows.iter().zip(expected.iter()).all(|(row, migration)| {
+            row.try_get::<i64, _>("version").ok() == Some(migration.version)
+                && row.try_get::<bool, _>("success").ok() == Some(true)
+                && row
+                    .try_get::<Vec<u8>, _>("checksum")
+                    .ok()
+                    .as_deref()
+                    == Some(migration.checksum.as_ref())
+        })
+    {
+        return Ok(());
+    }
     if rows.len() != 1 {
         return Err(DbError::Init(
             "database migration lineage is not eligible for Unified Plugin clean-start".into(),
@@ -491,9 +505,8 @@ async fn clean_start_unified_plugin_schema(
     let success: bool = rows[0].try_get("success").map_err(DbError::Query)?;
     let checksum: Vec<u8> = rows[0].try_get("checksum").map_err(DbError::Query)?;
     let observed = hex::encode(&checksum);
-    let expected = DB_MIGRATOR
-        .iter()
-        .next()
+    let expected = expected
+        .first()
         .ok_or_else(|| DbError::Init("canonical database baseline is missing".into()))?;
     if version == expected.version && success && checksum.as_slice() == expected.checksum.as_ref() {
         return Ok(());
@@ -803,7 +816,11 @@ mod tests {
         .unwrap();
 
         let mut conn = database.pool().acquire().await.unwrap();
-        let mut retired = String::from("PRAGMA foreign_keys = OFF;\n");
+        let mut retired = String::from(
+            "PRAGMA foreign_keys = OFF;\n\
+             DELETE FROM _sqlx_migrations WHERE version = 2;\n\
+             ALTER TABLE provider_model_capabilities DROP COLUMN compaction_threshold_pct;\n",
+        );
         for table in CANONICAL_PLUGIN_TABLES_FOR_TEST.iter().rev() {
             retired.push_str(&format!("DROP TABLE IF EXISTS \"{table}\";\n"));
         }
@@ -825,6 +842,7 @@ mod tests {
 
         let mut conn = database.pool().acquire().await.unwrap();
         clean_start_unified_plugin_schema(&mut conn).await.unwrap();
+        run_migrations_with_retry(&mut conn).await.unwrap();
         drop(conn);
         validate_current_migration_lineage(database.pool()).await.unwrap();
         crate::id_schema_contract::validate_id_schema_contract(database.pool())
@@ -898,6 +916,43 @@ mod tests {
         "plugins",
         "plugin_artifacts",
     ];
+
+    #[tokio::test]
+    async fn existing_baseline_upgrades_in_place_and_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model-context.db");
+        let database = init_database(&path).await.unwrap();
+        sqlx::query(
+            "INSERT INTO client_preferences (key, value, updated_at) VALUES ('preserve-context-test', 'saved', 1)",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 2")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE provider_model_capabilities DROP COLUMN compaction_threshold_pct")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        database.close().await;
+
+        let upgraded = init_database(&path).await.unwrap();
+        validate_current_migration_lineage(upgraded.pool()).await.unwrap();
+        let retained: String = sqlx::query_scalar(
+            "SELECT value FROM client_preferences WHERE key = 'preserve-context-test'",
+        )
+        .fetch_one(upgraded.pool())
+        .await
+        .unwrap();
+        assert_eq!(retained, "saved");
+        upgraded.close().await;
+
+        let reopened = init_database(&path).await.unwrap();
+        validate_current_migration_lineage(reopened.pool()).await.unwrap();
+        reopened.close().await;
+    }
 
     #[tokio::test]
     async fn public_snapshot_includes_committed_wal_pages_and_refuses_overwrite() {

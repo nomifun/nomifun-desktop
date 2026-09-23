@@ -10,6 +10,7 @@ use super::engine_session_host::AdmittedEngineSession;
 pub struct EngineModelLimits {
     pub context_tokens: Option<u32>,
     pub output_tokens: Option<u32>,
+    pub compaction_threshold_pct: Option<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +49,16 @@ impl EngineRouteModelFacts {
                 (context > 0 && output > 0).then_some((acc.0.min(context), acc.1.min(output)))
             })
     }
+
+    /// The route can fail over at any model boundary, so use the earliest
+    /// configured trigger among its candidates. Use 75% when none is set.
+    pub fn compaction_threshold_pct(&self) -> u8 {
+        self.candidates
+            .iter()
+            .filter_map(|candidate| candidate.limits.compaction_threshold_pct)
+            .min()
+            .unwrap_or(75)
+    }
 }
 
 fn failure(message: impl std::fmt::Display) -> AppError {
@@ -77,11 +88,11 @@ pub(super) async fn load(
     let mut tx = pool.begin().await.map_err(failure)?;
     let mut candidates = Vec::with_capacity(record.failovers.len() + 1);
     for candidate in std::iter::once(&record.primary).chain(record.failovers.iter()) {
-        let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
-            "SELECT context_limit, output_limit FROM provider_model_capabilities WHERE provider_id = ? AND model = ? AND task = 'chat'")
+        let row: Option<(Option<i64>, Option<i64>, Option<i64>)> = sqlx::query_as(
+            "SELECT context_limit, output_limit, compaction_threshold_pct FROM provider_model_capabilities WHERE provider_id = ? AND model = ? AND task = 'chat'")
             .bind(&candidate.provider_id).bind(&candidate.model)
             .fetch_optional(&mut *tx).await.map_err(failure)?;
-        let (context, output) =
+        let (context, output, threshold) =
             row.ok_or_else(|| failure("selected model capability no longer exists"))?;
         let positive = |value: Option<i64>| -> Result<Option<u32>, AppError> {
             value
@@ -99,6 +110,14 @@ pub(super) async fn load(
             limits: EngineModelLimits {
                 context_tokens: positive(context)?,
                 output_tokens: positive(output)?,
+                compaction_threshold_pct: threshold
+                    .map(|value| {
+                        u8::try_from(value)
+                            .ok()
+                            .filter(|value| (50..=95).contains(value))
+                            .ok_or_else(|| failure("invalid provider compaction threshold"))
+                    })
+                    .transpose()?,
             },
         });
     }
@@ -107,4 +126,43 @@ pub(super) async fn load(
         route: route.clone(),
         candidates,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_agent_contracts::{ChatRouteIdentity, ModelRouteId};
+
+    #[test]
+    fn route_uses_earliest_compaction_threshold_across_failover_candidates() {
+        let candidates = vec![
+            EngineRouteCandidateFacts {
+                provider_id: "primary".into(),
+                model: "large".into(),
+                limits: EngineModelLimits {
+                    context_tokens: Some(128_000),
+                    output_tokens: Some(8_000),
+                    compaction_threshold_pct: Some(90),
+                },
+            },
+            EngineRouteCandidateFacts {
+                provider_id: "backup".into(),
+                model: "small".into(),
+                limits: EngineModelLimits {
+                    context_tokens: Some(64_000),
+                    output_tokens: Some(4_000),
+                    compaction_threshold_pct: Some(60),
+                },
+            },
+        ];
+        let facts = EngineRouteModelFacts {
+            route: ChatRouteIdentity::new("preset", "agent.chat", ModelRouteId::from("route"), 1),
+            candidates,
+        };
+        assert_eq!(facts.compaction_threshold_pct(), 60);
+
+        let mut only_primary = facts.clone();
+        only_primary.candidates[1].limits.compaction_threshold_pct = None;
+        assert_eq!(only_primary.compaction_threshold_pct(), 90);
+    }
 }
