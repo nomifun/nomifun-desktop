@@ -80,7 +80,12 @@ pub trait UnifiedRuntimeHost: Send + Sync {
 }
 
 fn contract_error(error: AgentEngineError) -> AppError {
-    AppError::Conflict(format!("Nomi runtime: {error}"))
+    match error {
+        error @ AgentEngineError::ContextTooLarge { .. } => {
+            AppError::Internal(format!("Nomi runtime: {error}"))
+        }
+        error => AppError::Conflict(format!("Nomi runtime: {error}")),
+    }
 }
 
 pub struct UnifiedAgentRuntime {
@@ -366,6 +371,16 @@ mod tests {
 
     const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    #[test]
+    fn nomi_context_overflow_is_not_misclassified_as_an_unknown_upstream_conflict() {
+        let error = contract_error(AgentEngineError::ContextTooLarge {
+            limit: 8192,
+            actual: 8193,
+        });
+        assert!(matches!(error, AppError::Internal(message)
+            if message == "Nomi runtime: Nomi context is 8193 bytes, above the 8192 byte limit"));
+    }
 
     fn options() -> AgentRuntimeBuildOptions {
         static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();

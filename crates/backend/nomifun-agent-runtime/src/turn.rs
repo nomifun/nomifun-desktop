@@ -2736,6 +2736,9 @@ mod tests {
         assert!(!serde_json::to_string(&requests[1].input).unwrap().contains("private summarization reasoning"));
         assert!(requests[0].input.tools.is_empty(), "history is summarized without tool authority");
         assert_eq!(requests[0].input.metadata.get("nomifun_task").map(String::as_str), Some("agent_compaction"));
+        assert!(requests[0].input.instructions[0]
+            .contains("in at most 7680 UTF-8 bytes"),
+            "the 8192-byte hard limit keeps provider-formatting headroom");
         let source = serde_json::to_string(&requests[0].input.messages).unwrap();
         for index in 0..8 {
             assert!(source.contains(&format!("history-{index}")), "history must not be silently discarded");
