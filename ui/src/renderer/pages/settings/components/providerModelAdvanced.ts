@@ -57,6 +57,7 @@ export interface ModelCapabilityDraft {
   providerParamsJson: string;
   contextLimit?: number;
   outputLimit?: number;
+  compactionThresholdPct?: number;
 }
 
 export type ModelCapabilityDraftPatch = Partial<
@@ -169,6 +170,7 @@ export const emptyCapabilityDraft = (task: ModelTask): ModelCapabilityDraft => (
   providerParamsJson: '',
   contextLimit: undefined,
   outputLimit: undefined,
+  compactionThresholdPct: undefined,
 });
 
 export const capabilityDraftFromResponse = (capability: {
@@ -185,6 +187,7 @@ export const capabilityDraftFromResponse = (capability: {
   provider_params?: unknown;
   context_limit?: number;
   output_limit?: number;
+  compaction_threshold_pct?: number;
 }): ModelCapabilityDraft => ({
   task: capability.task,
   traits: capability.traits ?? [],
@@ -203,6 +206,7 @@ export const capabilityDraftFromResponse = (capability: {
       : '',
   contextLimit: capability.context_limit,
   outputLimit: capability.output_limit,
+  compactionThresholdPct: capability.compaction_threshold_pct,
 });
 
 /** Append one task without disturbing any existing task draft. */
@@ -237,6 +241,7 @@ export const capabilityHasConfiguration = (capability: ModelCapabilityDraft): bo
   capability.traits.length > 0 ||
   capability.contextLimit !== undefined ||
   capability.outputLimit !== undefined ||
+  capability.compactionThresholdPct !== undefined ||
   capability.allowCrossOriginCredentials ||
   Boolean(capability.baseUrlOverride.trim()) ||
   Boolean(capability.endpoint.trim()) ||
@@ -847,6 +852,9 @@ const capabilityInputFromDraft = (
       : {}),
     ...(capability.outputLimit && capability.outputLimit > 0
       ? { output_limit: capability.outputLimit }
+      : {}),
+    ...(capability.task === 'chat' && capability.compactionThresholdPct !== undefined
+      ? { compaction_threshold_pct: capability.compactionThresholdPct }
       : {}),
   };
 };

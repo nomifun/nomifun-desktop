@@ -88,6 +88,7 @@ async fn seed_provider(
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
     let initial_model = NewProviderModel {
         model,

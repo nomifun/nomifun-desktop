@@ -160,6 +160,43 @@ async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
 }
 
 #[tokio::test]
+async fn chat_context_settings_round_trip_through_model_routes() {
+    let db = init_database_memory().await.unwrap();
+    let provider_id = create_provider(&db, "custom", "Context contract").await;
+    let app = system_routes(build_state(&db));
+    let save = |threshold: u8| json!({
+        "provider_id": provider_id,
+        "model": {
+            "model": "context-model",
+            "capabilities": [{
+                "task": "chat",
+                "protocol": "openai.chat_text",
+                "connection_role": "default",
+                "context_limit": 64_000,
+                "compaction_threshold_pct": threshold
+            }]
+        }
+    });
+    let invalid = app.clone().oneshot(request("PUT", "/api/provider-models", Some(save(49)))).await.unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let saved = app.clone().oneshot(request("PUT", "/api/provider-models", Some(save(60)))).await.unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let listed = app.oneshot(request(
+        "GET",
+        &format!("/api/provider-models?provider_id={provider_id}"),
+        None,
+    )).await.unwrap();
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed = body_json(listed).await;
+    let capability = &listed["data"].as_array().unwrap().iter()
+        .find(|row| row["model"] == "context-model")
+        .unwrap()["capabilities"][0];
+    assert_eq!(capability["context_limit"], 64_000);
+    assert_eq!(capability["compaction_threshold_pct"], 60);
+}
+
+#[tokio::test]
 async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence() {
     let db = init_database_memory().await.unwrap();
     let app = system_routes(build_state(&db));

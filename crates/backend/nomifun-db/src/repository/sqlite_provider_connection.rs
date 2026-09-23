@@ -258,6 +258,7 @@ mod tests {
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
     async fn seed(pool: &SqlitePool) {

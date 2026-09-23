@@ -128,6 +128,13 @@ fn validate_capabilities(capabilities: &[NewProviderModelCapability<'_>]) -> Res
                 "capability '{task}' connection_role must not be blank"
             )));
         }
+        if let Some(pct) = capability.compaction_threshold_pct {
+            if task != "chat" || !(50..=95).contains(&pct) {
+                return Err(DbError::Conflict(
+                    "compaction_threshold_pct is supported only for Chat and must be 50-95".into(),
+                ));
+            }
+        }
         let traits: serde_json::Value = serde_json::from_str(capability.traits)
             .map_err(|error| DbError::Conflict(format!("invalid capability traits: {error}")))?;
         if !traits.is_array() {
@@ -185,8 +192,8 @@ pub(crate) async fn replace_for_model_tx(
                 (provider_id, model, task, traits, protocol, connection_role, \
                  base_url_override, endpoint, poll_endpoint, content_endpoint, \
                  realtime_endpoint, allow_cross_origin_credentials, provider_params, \
-                 context_limit, output_limit, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 context_limit, output_limit, compaction_threshold_pct, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(provider_id, model, task) DO UPDATE SET \
                  health = NULL, \
                  health_checked_at = NULL, \
@@ -202,6 +209,7 @@ pub(crate) async fn replace_for_model_tx(
                  provider_params = excluded.provider_params, \
                  context_limit = excluded.context_limit, \
                  output_limit = excluded.output_limit, \
+                 compaction_threshold_pct = excluded.compaction_threshold_pct, \
                  updated_at = excluded.updated_at \
              WHERE NOT ( \
                  provider_model_capabilities.traits IS excluded.traits AND \
@@ -216,7 +224,8 @@ pub(crate) async fn replace_for_model_tx(
                      IS excluded.allow_cross_origin_credentials AND \
                  provider_model_capabilities.provider_params IS excluded.provider_params AND \
                  provider_model_capabilities.context_limit IS excluded.context_limit AND \
-                 provider_model_capabilities.output_limit IS excluded.output_limit \
+                 provider_model_capabilities.output_limit IS excluded.output_limit AND \
+                 provider_model_capabilities.compaction_threshold_pct IS excluded.compaction_threshold_pct \
              )",
         )
         .bind(provider_id)
@@ -234,6 +243,7 @@ pub(crate) async fn replace_for_model_tx(
         .bind(capability.provider_params)
         .bind(capability.context_limit)
         .bind(capability.output_limit)
+        .bind(capability.compaction_threshold_pct)
         .bind(now)
         .bind(now)
         .execute(&mut **transaction)
