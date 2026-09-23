@@ -850,6 +850,26 @@ pub fn validate_provider_params_for_protocol(
             ));
         }
     }
+    if let Some(reasoning_effort) = object.get("reasoning_effort") {
+        if task != Chat
+            || !matches!(
+                protocol_id,
+                "openai.chat_text" | "openai.responses" | "gemini.generate_text"
+            )
+        {
+            return Err(InvokeError::config(
+                "provider_params.reasoning_effort is supported only by compatible Chat protocols",
+            ));
+        }
+        if !reasoning_effort
+            .as_str()
+            .is_some_and(|value| matches!(value, "low" | "medium" | "high"))
+        {
+            return Err(InvokeError::config(
+                "provider_params.reasoning_effort must be one of low, medium, or high",
+            ));
+        }
+    }
     if task == Chat {
         let configured_ceiling_key = match object.get("max_tokens_field") {
             None => None,
@@ -2055,6 +2075,39 @@ mod tests {
                 recommendation.default_base_url.as_deref(),
                 Some("https://api.stepfun.com/step_plan/v1")
             );
+        }
+    }
+
+    #[test]
+    fn reasoning_effort_is_a_typed_control_for_compatible_chat_protocols() {
+        for protocol in [
+            "openai.chat_text",
+            "openai.responses",
+            "gemini.generate_text",
+        ] {
+            for effort in ["low", "medium", "high"] {
+                validate_provider_params_for_protocol(
+                    protocol,
+                    Chat,
+                    &serde_json::json!({"reasoning_effort": effort}),
+                )
+                .unwrap();
+            }
+        }
+
+        for (protocol, task, effort) in [
+            ("anthropic.messages", Chat, serde_json::json!("high")),
+            ("openai.chat_text", Chat, serde_json::json!("extreme")),
+            ("openai.chat_text", Chat, serde_json::json!(1)),
+            ("openai.images", ImageGeneration, serde_json::json!("low")),
+        ] {
+            let error = validate_provider_params_for_protocol(
+                protocol,
+                task,
+                &serde_json::json!({"reasoning_effort": effort}),
+            )
+            .unwrap_err();
+            assert!(error.message.contains("reasoning_effort"), "{error:?}");
         }
     }
 }

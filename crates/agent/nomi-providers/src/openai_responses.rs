@@ -161,7 +161,11 @@ impl OpenAIResponsesProvider {
                 sanitize_tool_schemas,
             ));
         }
-        if let Some(effort) = &request.reasoning_effort {
+        let reasoning_effort = request
+            .reasoning_effort
+            .as_ref()
+            .or(self.compat.reasoning_effort.as_ref());
+        if let Some(effort) = reasoning_effort {
             typed["reasoning"] = json!({ "effort": effort });
         }
         if let Some(id) = previous_response_id {
@@ -182,7 +186,7 @@ impl OpenAIResponsesProvider {
         if request.tools.is_empty() {
             object.remove("tools");
         }
-        if request.reasoning_effort.is_none() {
+        if reasoning_effort.is_none() {
             object.remove("reasoning");
         }
         if previous_response_id.is_none() {

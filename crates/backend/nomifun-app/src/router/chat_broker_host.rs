@@ -1463,6 +1463,10 @@ fn merge_chat_provider_params(
             ChatRetryDirective::Never,
         )
     })?;
+    let reasoning_effort = configured
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     for (key, value) in configured {
         // Provider defaults may tune sampling, but cannot add model-owned
@@ -1475,7 +1479,10 @@ fn merge_chat_provider_params(
         }
         if matches!(
             key.as_str(),
-            "max_tokens_field" | "chain_rounds" | "require_reasoning_content"
+            "max_tokens_field"
+                | "chain_rounds"
+                | "require_reasoning_content"
+                | "reasoning_effort"
         ) {
             continue;
         }
@@ -1546,6 +1553,54 @@ fn merge_chat_provider_params(
                         "Messages thinking budget must remain below the effective provider output ceiling",
                     ));
                 }
+            }
+        }
+    }
+    if let Some(reasoning_effort) = reasoning_effort {
+        match protocol {
+            ChatProtocol::OpenaiChat => {
+                body_object
+                    .entry("reasoning_effort")
+                    .or_insert_with(|| Value::String(reasoning_effort));
+            }
+            ChatProtocol::OpenaiResponses => {
+                let reasoning = body_object
+                    .entry("reasoning".to_owned())
+                    .or_insert_with(|| Value::Object(Default::default()));
+                let reasoning = reasoning.as_object_mut().ok_or_else(|| {
+                    ChatModelError::invalid_request(
+                        "OpenAI Responses reasoning configuration must be an object",
+                    )
+                })?;
+                reasoning
+                    .entry("effort")
+                    .or_insert_with(|| Value::String(reasoning_effort));
+            }
+            ChatProtocol::Gemini => {
+                let generation = body_object
+                    .entry("generationConfig".to_owned())
+                    .or_insert_with(|| Value::Object(Default::default()));
+                let generation = generation.as_object_mut().ok_or_else(|| {
+                    ChatModelError::invalid_request(
+                        "Gemini generationConfig must be an object",
+                    )
+                })?;
+                let thinking = generation
+                    .entry("thinkingConfig".to_owned())
+                    .or_insert_with(|| Value::Object(Default::default()));
+                let thinking = thinking.as_object_mut().ok_or_else(|| {
+                    ChatModelError::invalid_request(
+                        "Gemini thinkingConfig must be an object",
+                    )
+                })?;
+                thinking
+                    .entry("thinkingLevel")
+                    .or_insert_with(|| Value::String(reasoning_effort));
+            }
+            ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => {
+                return Err(ChatModelError::invalid_request(
+                    "configured reasoning effort is unsupported by this Chat protocol",
+                ));
             }
         }
     }
@@ -2064,6 +2119,82 @@ mod tests {
         assert_eq!(merged["temperature"], 0.25);
         assert!(merged.get("max_tokens_field").is_none());
         assert!(merged.get("require_reasoning_content").is_none());
+    }
+
+    #[test]
+    fn model_reasoning_effort_maps_to_each_supported_chat_wire_shape_as_a_default() {
+        let openai_chat = merge_chat_provider_params(
+            json!({"reasoning_effort":"low"}),
+            &json!({"reasoning_effort":"high"}),
+            ChatProtocol::OpenaiChat,
+            None,
+        )
+        .unwrap();
+        assert_eq!(openai_chat["reasoning_effort"], "low");
+
+        let responses = merge_chat_provider_params(
+            json!({"reasoning":{"summary":"concise","effort":"low"}}),
+            &json!({"reasoning_effort":"medium"}),
+            ChatProtocol::OpenaiResponses,
+            None,
+        )
+        .unwrap();
+        assert_eq!(responses["reasoning"]["effort"], "low");
+        assert_eq!(responses["reasoning"]["summary"], "concise");
+
+        let gemini = merge_chat_provider_params(
+            json!({"generationConfig":{"temperature":0.2,"thinkingConfig":{"thinkingLevel":"low"}}}),
+            &json!({"reasoning_effort":"high"}),
+            ChatProtocol::Gemini,
+            None,
+        )
+        .unwrap();
+        assert_eq!(gemini["generationConfig"]["thinkingConfig"]["thinkingLevel"], "low");
+        assert_eq!(gemini["generationConfig"]["temperature"], 0.2);
+
+        let defaults = [
+            (
+                ChatProtocol::OpenaiChat,
+                json!({}),
+                vec!["reasoning_effort"],
+            ),
+            (
+                ChatProtocol::OpenaiResponses,
+                json!({}),
+                vec!["reasoning", "effort"],
+            ),
+            (
+                ChatProtocol::Gemini,
+                json!({}),
+                vec!["generationConfig", "thinkingConfig", "thinkingLevel"],
+            ),
+        ];
+        for (protocol, body, path) in defaults {
+            let merged = merge_chat_provider_params(
+                body,
+                &json!({"reasoning_effort":"high"}),
+                protocol,
+                None,
+            )
+            .unwrap();
+            let value = path
+                .iter()
+                .fold(&merged, |value, key| &value[*key]);
+            assert_eq!(value, "high");
+        }
+    }
+
+    #[test]
+    fn model_reasoning_effort_never_leaks_as_an_unsupported_messages_field() {
+        let error = merge_chat_provider_params(
+            json!({"max_tokens":4096}),
+            &json!({"reasoning_effort":"high"}),
+            ChatProtocol::Anthropic,
+            Some(4096),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
+        assert!(error.message.contains("reasoning effort"));
     }
 
     #[test]
