@@ -2,7 +2,7 @@
 //!
 //! The adapter is intentionally thin: Wave 3 owns the strict action DTOs,
 //! `CreationService` owns validation, durable idempotency and task execution,
-//! and task-specific defaults select an exact provider/model at admission.
+//! and task-aware routing selects an exact provider/model at admission.
 //! The Tool returns the actual durable task status immediately after the row is written
 //! by `ICreationTaskRepository::get_or_create_creative_task`.
 
@@ -125,12 +125,10 @@ impl Wave3HostPort for Wave3CreationHost {
 
 impl Wave3CreationHost {
     async fn resolve_model(&self, task: nomifun_api_types::ModelTask) -> Result<nomifun_model_invoke::ResolvedTaskConfig, Wave3HostPortError> {
+        let preferences = nomifun_db::SqliteClientPreferenceRepository::new(self.pool.clone());
         let result = self
             .invoke
-            .resolve_default_task_model(
-                task,
-                &nomifun_db::SqliteClientPreferenceRepository::new(self.pool.clone()),
-            )
+            .resolve_automatic_task_model(task, &preferences)
             .await;
         result.map_err(|error| Wave3HostPortError::new("GENERATION_MODEL_UNAVAILABLE", error.to_string()))
     }
@@ -480,6 +478,8 @@ mod tests {
 
     #[tokio::test]
     async fn product_actions_resolve_their_configured_task_routes_without_provider_input() {
+        use nomifun_db::IClientPreferenceRepository;
+
         let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
         let host = host(database.pool().clone(), owner.as_str());
         let models = configured_media_models(database.pool()).await;
@@ -498,6 +498,21 @@ mod tests {
             assert_eq!(resolved.provider_id, *provider_id);
             assert_eq!(resolved.model, *model);
             assert_eq!(resolved.task, task);
+        }
+        nomifun_db::SqliteClientPreferenceRepository::new(database.pool().clone())
+            .delete_keys(&[
+                "models.default.imageGeneration",
+                "models.default.imageEdit",
+                "models.default.videoGeneration",
+                "models.default.musicGeneration",
+                "models.default.speechSynthesis",
+            ])
+            .await
+            .unwrap();
+        for (action, (provider_id, model)) in &models {
+            let resolved = host.resolve_model(creation_model_task(action).unwrap()).await.unwrap();
+            assert_eq!(resolved.provider_id, *provider_id, "{action} should route without a default");
+            assert_eq!(resolved.model, *model);
         }
     }
 
@@ -559,6 +574,76 @@ mod tests {
         let mut foreign = request; foreign.context.principal.principal_id = UserId::new().to_string();
         assert!(host.invoke(foreign).await.is_err());
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM creation_tasks").fetch_one(database.pool()).await.unwrap(); assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn disabled_explicit_default_does_not_fall_back() {
+        let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
+        let host = host(database.pool().clone(), owner.as_str());
+        let models = configured_media_models(database.pool()).await;
+        let (provider_id, _) = &models["creation.media/image"];
+        sqlx::query("UPDATE providers SET enabled = 0 WHERE provider_id = ?")
+            .bind(provider_id)
+            .execute(database.pool())
+            .await
+            .unwrap();
+        let error = match host.resolve_model(nomifun_api_types::ModelTask::ImageGeneration).await {
+            Ok(_) => panic!("disabled default must not resolve"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "GENERATION_MODEL_UNAVAILABLE");
+    }
+
+    #[tokio::test]
+    async fn no_default_routes_across_multiple_compatible_models_in_priority_order() {
+        use nomifun_db::{CreateProviderParams, IClientPreferenceRepository, IProviderModelRepository, IProviderRepository, NewProviderModel, NewProviderModelCapability};
+
+        let owner = UserId::new(); let database = init_database_memory_with_owner(owner.clone()).await.unwrap();
+        let host = host(database.pool().clone(), owner.as_str());
+        let configured = configured_media_models(database.pool()).await;
+        let preferences = nomifun_db::SqliteClientPreferenceRepository::new(database.pool().clone());
+        preferences.delete_keys(&["models.default.imageGeneration"]).await.unwrap();
+        let preferred_provider_id = generate_id();
+        let encrypted = nomifun_common::encrypt_string(r#"{"api_keys":["host-test-key"]}"#, &[0; 32]).unwrap();
+        let (preferred_provider, _) = nomifun_db::SqliteProviderRepository::new(database.pool().clone())
+            .create(
+                CreateProviderParams { provider_id: Some(&preferred_provider_id), platform: "openai",
+                    name: "preferred automatic image route", base_url: "https://example.com/v1",
+                    auth_scheme: "bearer", credentials_encrypted: &encrypted, enabled: true,
+                    bedrock_config: None, sort_order: Some(-10),
+                },
+                &NewProviderModel { model: "preferred-image", enabled: true, sort_order: 0,
+                    description: None, capabilities: &[NewProviderModelCapability { task: "image_generation",
+                        protocol: "openai.images", traits: "[]", connection_role: "default",
+                        provider_params: "{}", ..Default::default() }],
+                },
+                &[],
+            ).await.unwrap();
+        nomifun_db::SqliteProviderModelRepository::new(database.pool().clone())
+            .save(
+                &preferred_provider_id,
+                preferred_provider.config_revision,
+                &NewProviderModel { model: "aaa-image", enabled: true, sort_order: 5,
+                    description: None, capabilities: &[NewProviderModelCapability { task: "image_generation",
+                        protocol: "openai.images", traits: "[]", connection_role: "default",
+                        provider_params: "{}", ..Default::default() }],
+                },
+            ).await.unwrap();
+        let selected = host.resolve_model(nomifun_api_types::ModelTask::ImageGeneration).await.unwrap();
+        assert_eq!(selected.provider_id, preferred_provider_id);
+        assert_eq!(selected.model, "preferred-image");
+
+        let (original_provider_id, original_model) = &configured["creation.media/image"];
+        sqlx::query("UPDATE provider_model_capabilities SET health = '{\"status\":\"healthy\"}' WHERE provider_id = ? AND model = ? AND task = 'image_generation'")
+            .bind(original_provider_id).bind(original_model).execute(database.pool()).await.unwrap();
+        let selected = host.resolve_model(nomifun_api_types::ModelTask::ImageGeneration).await.unwrap();
+        assert_eq!(selected.provider_id, *original_provider_id, "healthy capability takes precedence over untested routes");
+        sqlx::query("UPDATE provider_model_capabilities SET health = NULL WHERE provider_id = ? AND model = ? AND task = 'image_generation'")
+            .bind(original_provider_id).bind(original_model).execute(database.pool()).await.unwrap();
+        let explicit = json!({"provider_id": original_provider_id, "model": original_model}).to_string();
+        preferences.upsert_batch(&[("models.default.imageGeneration", &explicit)]).await.unwrap();
+        let selected = host.resolve_model(nomifun_api_types::ModelTask::ImageGeneration).await.unwrap();
+        assert_eq!(selected.provider_id, *original_provider_id, "explicit default takes precedence");
     }
 
     #[tokio::test]

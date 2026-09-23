@@ -34,9 +34,8 @@ export type ConfigKeyMap = {
   // generators (autogen / description.generate / description.polish). Empty
   // value = let the backend fall back to its own default completer model.
   'knowledge.autogenModel': { provider_id: ProviderId; model: string } | undefined;
-  // Install-wide exact defaults for automatic media tasks. Missing means an
-  // ordinary conversation must ask the user to configure a default; only the
-  // explicit creation UI may offer/choose another candidate for that request.
+  // Install-wide exact defaults for media tasks. When a generation default is
+  // absent, ordinary conversations choose a ranked compatible task model.
   'models.default.imageGeneration': { provider_id: ProviderId; model: string } | undefined;
   'models.default.imageEdit': { provider_id: ProviderId; model: string } | undefined;
   'models.default.vision': { provider_id: ProviderId; model: string } | undefined;
