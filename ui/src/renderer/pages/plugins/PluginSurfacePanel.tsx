@@ -155,7 +155,12 @@ export default function PluginSurfacePanel({
     };
     hostPort.start();
     target.postMessage(
-      { type: BRIDGE_CONNECT_EVENT, version: BRIDGE_VERSION, nonce: challenge },
+      {
+        type: BRIDGE_CONNECT_EVENT,
+        version: BRIDGE_VERSION,
+        nonce: challenge,
+        preview: descriptor.is_preview,
+      },
       '*',
       [channel.port2],
     );

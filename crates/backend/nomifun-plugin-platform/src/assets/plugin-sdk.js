@@ -4,8 +4,9 @@
   if (Object.prototype.hasOwnProperty.call(window, 'nomi')) return;
 
   const VERSION = '1.0.0';
-  const READY_EVENT = 'nomifun-plugin-bridge-ready';
-  const REQUEST_TYPE = 'nomifun-plugin-bridge-request-v1';
+  const CHALLENGE_EVENT = 'nomifun-plugin-bridge-challenge-v1';
+  const HANDSHAKE_EVENT = 'nomifun-plugin-bridge-handshake-v1';
+  const CONNECT_EVENT = 'nomifun-plugin-bridge-connect-v1';
   const RESULT_TYPE = 'nomifun-plugin-bridge-result-v1';
   const READY_TIMEOUT_MS = 15_000;
   const CALL_TIMEOUT_MS = 30_000;
@@ -18,6 +19,7 @@
   let preview = false;
   let closed = false;
   let readyError;
+  let challengeNonce;
   let signalReady;
   const ready = new Promise(resolve => { signalReady = resolve; });
 
@@ -111,8 +113,8 @@
   }
 
   function assertSqlParameters(value) {
-    if (!Array.isArray(value) && !isPlainRecord(value)) {
-      throw new TypeError('SQL parameters must be a JSON array or object');
+    if (!Array.isArray(value)) {
+      throw new TypeError('SQL parameters must be a JSON array');
     }
     assertJsonPayload(value, 'SQL parameters');
     return value;
@@ -149,27 +151,141 @@
     operation.reject(sdkError('PLUGIN_BRIDGE_PROTOCOL_ERROR', message));
   }
 
+  function base64For(contents, encoding) {
+    if (encoding === 'base64') return contents;
+    const bytes = new TextEncoder().encode(contents);
+    let binary = '';
+    for (let index = 0; index < bytes.length; index += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    }
+    return btoa(binary);
+  }
+
+  function contentsFromBase64(contents, encoding) {
+    if (encoding === 'base64') return contents;
+    const binary = atob(contents);
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  }
+
+  function wireTarget(method, params) {
+    if (method.startsWith('storage.kv.')) {
+      const operation = method.slice('storage.kv.'.length);
+      return {
+        target: 'kv',
+        request: {
+          operation: operation === 'compareAndSwap' ? 'compare_and_swap' : operation,
+          ...params,
+        },
+      };
+    }
+    if (method.startsWith('storage.db.')) {
+      return { target: 'db', request: { operation: method.slice('storage.db.'.length), ...params } };
+    }
+    if (method.startsWith('storage.files.')) {
+      const operation = method.slice('storage.files.'.length);
+      if (operation === 'write') {
+        return {
+          target: 'files',
+          request: {
+            operation,
+            path: params.path,
+            content_base64: base64For(params.contents, params.encoding),
+            overwrite: true,
+          },
+        };
+      }
+      return { target: 'files', request: { operation, path: params.path } };
+    }
+    if (method.startsWith('cache.')) {
+      return { target: 'cache', request: { operation: method.slice('cache.'.length), ...params } };
+    }
+    if (method === 'actions.invoke') return { target: 'actions', action: params.action, input: params.input };
+    if (method === 'host.invoke') return { target: 'host', capability: params.action, input: params.input };
+    if (method === 'config.get') return { target: 'config' };
+    throw new TypeError('unsupported Plugin SDK method');
+  }
+
+  function decodedResult(method, params, result) {
+    const expected = wireTarget(method, params).target;
+    if (!isPlainRecord(result) || result.target !== expected) {
+      throw new TypeError('Plugin bridge result target is invalid');
+    }
+    if (expected === 'actions' || expected === 'host') return result.result;
+    if (expected === 'config') return result.config;
+    const value = result.result;
+    if (!isPlainRecord(value)) throw new TypeError('Plugin bridge result is invalid');
+    if (method === 'storage.kv.get' || method === 'cache.get') {
+      if (value.outcome !== 'value') throw new TypeError('Plugin bridge value result is invalid');
+      return value.value ?? null;
+    }
+    if (method === 'storage.kv.set') {
+      if (value.outcome !== 'written') throw new TypeError('Plugin bridge KV write result is invalid');
+      return { revision: value.revision };
+    }
+    if (method === 'storage.kv.compareAndSwap') {
+      if (value.outcome !== 'compare_and_swap') throw new TypeError('Plugin bridge CAS result is invalid');
+      return { applied: value.applied, revision: value.current_revision ?? null };
+    }
+    if (method === 'storage.db.query') {
+      if (value.outcome !== 'rows') throw new TypeError('Plugin bridge query result is invalid');
+      return { rows: value.rows };
+    }
+    if (method === 'storage.db.execute') {
+      if (value.outcome !== 'executed') throw new TypeError('Plugin bridge execute result is invalid');
+      return { affectedRows: value.rows_affected };
+    }
+    if (method === 'storage.db.batch') {
+      if (value.outcome !== 'batch' || !Array.isArray(value.results)) {
+        throw new TypeError('Plugin bridge batch result is invalid');
+      }
+      return value.results.map(entry => ({ affectedRows: entry.rows_affected }));
+    }
+    if (method === 'storage.files.read') {
+      if (value.outcome !== 'data' || typeof value.content_base64 !== 'string') {
+        throw new TypeError('Plugin bridge file result is invalid');
+      }
+      return contentsFromBase64(value.content_base64, params.encoding);
+    }
+    if (method === 'storage.files.list') {
+      if (value.outcome !== 'entries') throw new TypeError('Plugin bridge file listing is invalid');
+      return value.entries;
+    }
+    if (method === 'storage.kv.delete' || method === 'storage.files.delete' || method === 'cache.delete') {
+      if (value.outcome !== 'deleted') throw new TypeError('Plugin bridge deletion result is invalid');
+      return { deleted: value.existed };
+    }
+    if (method === 'storage.files.write' || method === 'cache.set') {
+      if (value.outcome !== (expected === 'files' ? 'written' : 'stored')) {
+        throw new TypeError('Plugin bridge write result is invalid');
+      }
+      return null;
+    }
+    throw new TypeError('unsupported Plugin SDK result');
+  }
+
   function receive(event) {
     const response = event && event.data;
-    if (!response || response.type !== RESULT_TYPE || response.version !== VERSION) return;
+    if (!response || response.type !== RESULT_TYPE) return;
     if (typeof response.call_id !== 'string') return;
     const operation = pending.get(response.call_id);
     if (!operation) return;
     pending.delete(response.call_id);
 
-    if (typeof response.ok !== 'boolean') {
+    if (response.outcome !== 'success' && response.outcome !== 'failure') {
       protocolFailure(operation, 'Plugin bridge result has no outcome');
       return;
     }
-    if (response.ok) {
+    if (response.outcome === 'success') {
       try {
         assertJsonPayload(response.result, 'Plugin bridge result');
+        const value = decodedResult(operation.method, operation.params, response.result);
+        assertJsonPayload(value, 'Plugin SDK result');
+        clearTimeout(operation.timeout);
+        operation.resolve(value);
       } catch (error) {
         protocolFailure(operation, error instanceof Error ? error.message : 'Invalid Plugin bridge result');
-        return;
       }
-      clearTimeout(operation.timeout);
-      operation.resolve(response.result);
       return;
     }
     const failure = response.error;
@@ -183,21 +299,28 @@
     operation.reject(sdkError(failure.code, failure.message));
   }
 
-  function connect() {
-    if (port || readyError || closed) return;
-    const bootstrap = window.__nomifunPluginBridge;
-    if (bootstrap === undefined) return;
-    if (!isPlainRecord(bootstrap) || bootstrap.version !== VERSION
-      || typeof bootstrap.preview !== 'boolean'
-      || !bootstrap.port || typeof bootstrap.port.postMessage !== 'function'
-      || typeof bootstrap.port.addEventListener !== 'function'
-      || typeof bootstrap.port.start !== 'function') {
-      readyError = sdkError('PLUGIN_BRIDGE_BOOTSTRAP_INVALID', 'Plugin bridge bootstrap is invalid');
+  function receiveWindow(event) {
+    if (closed || port || event.source !== window.parent) return;
+    const message = event.data;
+    if (!isPlainRecord(message) || message.version !== VERSION) return;
+    if (message.type === CHALLENGE_EVENT) {
+      if (typeof message.nonce !== 'string' || !/^[0-9a-f]{64}$/u.test(message.nonce)) return;
+      challengeNonce = message.nonce;
+      window.parent.postMessage({ type: HANDSHAKE_EVENT, version: VERSION, nonce: challengeNonce }, '*');
+      return;
+    }
+    if (message.type !== CONNECT_EVENT || message.nonce !== challengeNonce || !challengeNonce) return;
+    const transferred = event.ports?.[0];
+    if (typeof message.preview !== 'boolean'
+      || !transferred || typeof transferred.postMessage !== 'function'
+      || typeof transferred.addEventListener !== 'function'
+      || typeof transferred.start !== 'function') {
+      readyError = sdkError('PLUGIN_BRIDGE_BOOTSTRAP_INVALID', 'Plugin bridge connection is invalid');
       signalReady();
       return;
     }
-    preview = bootstrap.preview;
-    port = bootstrap.port;
+    preview = message.preview;
+    port = transferred;
     port.addEventListener('message', receive);
     port.addEventListener('messageerror', () => {
       clearPending(sdkError('PLUGIN_BRIDGE_MESSAGE_ERROR', 'Plugin bridge message could not be decoded'));
@@ -208,7 +331,6 @@
 
   async function waitForPort() {
     if (closed) throw sdkError('PLUGIN_BRIDGE_CLOSED', 'Plugin surface closed');
-    connect();
     if (port) return port;
     if (readyError) throw readyError;
     let timeout;
@@ -225,6 +347,7 @@
     } finally {
       clearTimeout(timeout);
     }
+    if (closed) throw sdkError('PLUGIN_BRIDGE_CLOSED', 'Plugin surface closed');
     if (readyError) throw readyError;
     if (!port) throw sdkError('PLUGIN_BRIDGE_UNAVAILABLE', 'Plugin bridge is unavailable');
     return port;
@@ -233,6 +356,8 @@
   async function call(method, params) {
     assertString(method, 'method', 128);
     assertJsonPayload(params, 'params');
+    const target = wireTarget(method, params);
+    assertJsonPayload(target, 'target');
     const bridge = await waitForPort();
     let callId;
     do callId = crypto.randomUUID(); while (pending.has(callId));
@@ -244,15 +369,9 @@
           'Plugin request timed out; its outcome may be unknown',
         ));
       }, CALL_TIMEOUT_MS);
-      pending.set(callId, { resolve, reject, timeout });
+      pending.set(callId, { resolve, reject, timeout, method, params });
       try {
-        bridge.postMessage({
-          type: REQUEST_TYPE,
-          version: VERSION,
-          call_id: callId,
-          method,
-          params,
-        });
+        bridge.postMessage({ call_id: callId, target });
       } catch (error) {
         pending.delete(callId);
         clearTimeout(timeout);
@@ -433,10 +552,11 @@
     writable: false,
   });
 
-  window.addEventListener(READY_EVENT, connect);
+  window.addEventListener('message', receiveWindow);
   window.addEventListener('pagehide', () => {
     closed = true;
     clearPending(sdkError('PLUGIN_BRIDGE_CLOSED', 'Plugin surface closed'));
+    port?.close();
+    signalReady();
   }, { once: true });
-  connect();
 })();
