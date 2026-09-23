@@ -6,7 +6,7 @@
 
 import type { MessageId } from '@/common/types/ids';
 
-export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'other';
+export type TurnDisclosureRole = 'user' | 'assistant' | 'process' | 'process_content' | 'metadata' | 'other';
 export type TurnDisclosureProcessState = 'completed' | 'running' | 'failed' | 'canceled';
 
 export interface TurnDisclosureInputItem {
@@ -17,6 +17,11 @@ export interface TurnDisclosureInputItem {
   processStartedAt?: number;
   processEndedAt?: number;
   processState?: TurnDisclosureProcessState;
+  /** Canonical wall-clock interval supplied by the owning Turn projection. */
+  turnStartedAt?: number;
+  turnEndedAt?: number;
+  /** Terminal assistant rows (notably errors) win over partial streamed text. */
+  terminal?: boolean;
   running?: boolean;
   sourceMessageIds?: MessageId[];
 }
@@ -184,6 +189,7 @@ const buildEmptyRunningSegmentOutput = (
   let insertedDisclosure = false;
 
   segment.forEach((entry) => {
+    if (entry.role === 'metadata') return;
     if (!insertedDisclosure && entry.role !== 'user' && entry.role !== 'other') {
       output.push(disclosure);
       insertedDisclosure = true;
@@ -198,11 +204,51 @@ const buildEmptyRunningSegmentOutput = (
   return output;
 };
 
+const buildEmptyClosedSegmentOutput = (
+  turnId: MessageId,
+  segment: TurnDisclosureInputItem[],
+  finalAssistantForTurn: TurnDisclosureInputItem | undefined,
+  turnStartedAt: number,
+  turnEndedAt: number
+): TurnDisclosureOutputItem[] => {
+  const state = finalAssistantForTurn?.processState === 'failed'
+    ? 'failed'
+    : finalAssistantForTurn?.processState === 'canceled'
+      ? 'canceled'
+      : 'completed';
+  const disclosure: TurnDisclosureOutputItem = {
+    type: 'turn_disclosure',
+    id: `turn-disclosure-${turnId}`,
+    turnId,
+    processItemIds: [],
+    sourceMessageIds: [],
+    startAt: turnStartedAt,
+    endAt: turnEndedAt,
+    state,
+    processItemStates: {},
+    running: false,
+    defaultCollapsed: true,
+  };
+  const output: TurnDisclosureOutputItem[] = [];
+  let inserted = false;
+  for (const entry of segment) {
+    if (entry.role === 'metadata') continue;
+    if (entry === finalAssistantForTurn && !inserted) {
+      output.push(disclosure);
+      inserted = true;
+    }
+    output.push({ type: 'item', id: entry.id });
+  }
+  if (!inserted) output.push(disclosure);
+  return output;
+};
+
 function buildSegmentOutput(
   segment: TurnDisclosureInputItem[],
   isClosed: boolean,
   finalAssistantForTurn?: TurnDisclosureInputItem,
-  turnStartedAt?: number
+  turnStartedAt?: number,
+  turnEndedAt?: number
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
@@ -216,7 +262,7 @@ function buildSegmentOutput(
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {
-    if (entry.role === 'user' || entry.role === 'other') return false;
+    if (entry.role === 'user' || entry.role === 'metadata' || entry.role === 'other') return false;
     return index !== finalAssistantIndex;
   });
 
@@ -224,18 +270,36 @@ function buildSegmentOutput(
     if (!isClosed) {
       return buildEmptyRunningSegmentOutput(segment, buildEmptyRunningDisclosure(turnId, segment, turnStartedAt));
     }
-    return segment.map((entry) => ({ type: 'item', id: entry.id }));
+    const visibleEntries = segment.filter((entry) => entry.role !== 'metadata');
+    const fallbackStart = visibleEntries.length
+      ? Math.min(...visibleEntries.map(getProcessStartAt))
+      : 0;
+    const fallbackEnd = finalAssistantForTurn
+      ? getProcessEndAt(finalAssistantForTurn)
+      : visibleEntries.length
+        ? Math.max(...visibleEntries.map(getProcessEndAt))
+        : fallbackStart;
+    if (finalAssistantForTurn || turnEndedAt !== undefined) {
+      return buildEmptyClosedSegmentOutput(
+        turnId,
+        segment,
+        finalAssistantForTurn,
+        turnStartedAt ?? fallbackStart,
+        turnEndedAt ?? fallbackEnd
+      );
+    }
+    return visibleEntries.map((entry) => ({ type: 'item', id: entry.id }));
   }
 
   const terminalProcessState = getEffectiveProcessState(processItems.at(-1)!, stateOptions);
-  // The header describes lifecycle, not whether every individual operation
-  // succeeded. Once processing settles, every non-canceled turn is "processed";
-  // intermediate failures remain available in `processItemStates` for the
-  // expanded trace. While the turn is live, a failed step must not prematurely
-  // close the header because the agent may recover and continue.
+  const terminalState = finalAssistantForTurn
+    ? getEffectiveProcessState(finalAssistantForTurn, stateOptions)
+    : terminalProcessState;
+  // Intermediate failures remain visible in the expanded trace, while the
+  // terminal answer/error owns the settled Turn outcome.
   const state: TurnDisclosureProcessState = isClosed
-    ? terminalProcessState === 'canceled'
-      ? 'canceled'
+    ? terminalState === 'failed' || terminalState === 'canceled'
+      ? terminalState
       : 'completed'
     : 'running';
 
@@ -251,9 +315,9 @@ function buildSegmentOutput(
     startAt: turnStartedAt ?? Math.min(...processItems.map(getProcessStartAt)),
     // A final answer is the authoritative task boundary. Process intervals are
     // only a fallback for background/process-only turns with no final answer.
-    endAt: finalAssistantForTurn
+    endAt: turnEndedAt ?? (finalAssistantForTurn
       ? getProcessEndAt(finalAssistantForTurn)
-      : Math.max(...processItems.map(getProcessEndAt)),
+      : Math.max(...processItems.map(getProcessEndAt))),
     state,
     processItemStates: Object.fromEntries(
       processItems.map((entry) => [entry.id, getEffectiveProcessState(entry, stateOptions)])
@@ -266,6 +330,7 @@ function buildSegmentOutput(
   let insertedDisclosure = false;
 
   segment.forEach((entry, index) => {
+    if (entry.role === 'metadata') return;
     if (entry.role !== 'user' && entry.role !== 'other' && index !== finalAssistantIndex) {
       return;
     }
@@ -422,13 +487,25 @@ export function buildTurnDisclosureItems(
   const requestByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const finalAssistantByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const turnStartedAtByTurn = new Map<MessageId, number>();
+  const turnEndedAtByTurn = new Map<MessageId, number>();
+  const authoritativeStartedTurns = new Set<MessageId>();
   const processObservedAtByItemId = new Map<string, number>();
 
   for (const item of items) {
+    if (item.turnId && item.turnStartedAt !== undefined) {
+      turnStartedAtByTurn.set(item.turnId, item.turnStartedAt);
+      authoritativeStartedTurns.add(item.turnId);
+    }
+    if (item.turnId && item.turnEndedAt !== undefined) {
+      turnEndedAtByTurn.set(item.turnId, item.turnEndedAt);
+    }
     if (item.turnId && item.role === 'user') {
       if (!requestByTurn.has(item.turnId)) requestByTurn.set(item.turnId, item);
       const currentStart = turnStartedAtByTurn.get(item.turnId);
-      if (currentStart === undefined || item.createdAt < currentStart) {
+      if (
+        !authoritativeStartedTurns.has(item.turnId) &&
+        (currentStart === undefined || item.createdAt < currentStart)
+      ) {
         turnStartedAtByTurn.set(item.turnId, item.createdAt);
       }
     }
@@ -437,11 +514,15 @@ export function buildTurnDisclosureItems(
       // Live rows are arrival-ordered and a delayed older text can be appended
       // after the real final answer. Choose by authoritative message time;
       // `>=` intentionally lets the later observation break timestamp ties.
-      if (!currentFinal || item.createdAt >= currentFinal.createdAt) {
+      if (
+        !currentFinal ||
+        (item.terminal === true && currentFinal.terminal !== true) ||
+        (item.terminal === currentFinal.terminal && item.createdAt >= currentFinal.createdAt)
+      ) {
         finalAssistantByTurn.set(item.turnId, item);
       }
     }
-    if (item.role !== 'user' && item.role !== 'other') {
+    if (item.role !== 'user' && item.role !== 'metadata' && item.role !== 'other') {
       processObservedAtByItemId.set(item.id, getProcessEndAt(item));
     }
   }
@@ -455,7 +536,8 @@ export function buildTurnDisclosureItems(
         segment,
         isClosed,
         segmentTurnId ? finalAssistantByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined
+        segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined
       )
     );
     segment = [];
@@ -464,7 +546,9 @@ export function buildTurnDisclosureItems(
   for (const item of items) {
     if (!item.turnId) {
       flush(true);
-      output.push(item.role === 'process' ? toProcessReceipt(item) : { type: 'item', id: item.id });
+      if (item.role !== 'metadata') {
+        output.push(item.role === 'process' ? toProcessReceipt(item) : { type: 'item', id: item.id });
+      }
       continue;
     }
 

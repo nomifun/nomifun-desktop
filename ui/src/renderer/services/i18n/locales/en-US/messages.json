@@ -38,29 +38,19 @@
     "loadedTarget": "Loaded {{target}}",
     "fileRead": "Read {{target}}",
     "fileChanged": "Edited {{target}} {{stats}}",
-    "thinkingRunning": "Thinking",
-    "thinkingCompleted": "Thought",
-    "thinkingCompletedDuration": "Thought {{duration}}",
     "preparingAction": "Preparing next action",
     "preparedAction": "Prepared next action",
-    "turnSummaryRunning": "Processing this turn",
-    "turnSummaryCompleted": "Turn processing completed",
-    "turnSummaryFailed": "Turn processing did not complete",
     "contextCompressed": "Context compressed",
     "searchedTarget": "Searched {{target}}",
     "agentConnecting": "Connecting {{target}}",
     "agentFailed": "{{target}} failed",
     "status": "{{target}}"
   },
-  "turnProcessed": "Processed {{duration}}",
-  "turnCanceled": "You stopped after {{duration}}",
+  "turnDuration": "Took {{duration}}",
+  "turnDurationUnknown": "Time --",
   "turnProcess": {
-    "expandAllThinkingProcess": "Expand all thinking process",
-    "collapseAllThinkingProcess": "Collapse all thinking process"
-  },
-  "turnLiveStep": {
-    "analyzing": "Analyzing the request",
-    "composing": "Composing the reply"
+    "expand": "Expand thinking process",
+    "collapse": "Collapse thinking process"
   },
   "knowledgeWriteback": {
     "started": "Preparing knowledge write-back",

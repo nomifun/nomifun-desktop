@@ -2758,7 +2758,7 @@ fn reconcile_companion_windows(
                 // Matches DEFAULT_DESK (characters/index.ts): figure + minimal chrome,
                 // no reserved bubble headroom (the page grows the window on demand).
                 // Keeping these in sync avoids a visible startup resize for built-ins.
-                .inner_size(240.0, 214.0)
+                .inner_size(200.0, 180.0)
                 .resizable(false)
                 .decorations(false)
                 .transparent(true)

@@ -217,6 +217,9 @@ export type IMessageTips = IMessage<
       handoff_mode: 'continue_task' | 'context_only';
       completion_gate_inherited: false;
     };
+    /** Canonical wall-clock interval for the owning turn. */
+    started_at_ms?: number;
+    finished_at_ms?: number;
   }
 >;
 
@@ -324,6 +327,9 @@ export type IMessageAgentStatus = IMessage<
     turn_summary?: boolean;
     started_seq?: number;
     finished_seq?: number | null;
+    /** Canonical wall-clock interval for the owning turn. */
+    started_at_ms?: number;
+    finished_at_ms?: number;
   }
 >;
 
@@ -945,6 +951,12 @@ const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['conte
       : finiteNumber(data.finished_seq) != null
         ? { finished_seq: finiteNumber(data.finished_seq) }
         : {}),
+    ...(finiteNumber(data.started_at_ms) != null
+      ? { started_at_ms: finiteNumber(data.started_at_ms) }
+      : {}),
+    ...(finiteNumber(data.finished_at_ms) != null
+      ? { finished_at_ms: finiteNumber(data.finished_at_ms) }
+      : {}),
   };
 };
 

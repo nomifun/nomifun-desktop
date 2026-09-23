@@ -10,7 +10,12 @@ import { Slider } from '@arco-design/web-react';
 import type { ICompanionProfile } from '@/common/adapter/ipcBridge';
 import { CUSTOM_CHARACTER_ID } from '@renderer/pages/companion/characters';
 import type { CustomFigureMeta } from '@renderer/pages/companion/characters';
-import { FIGURE_HEIGHTS, SIZE_MAX, SIZE_MIN } from '@renderer/pages/companion/characters/customDesk';
+import {
+  clampDesktopFigureHeight,
+  FIGURE_HEIGHTS,
+  SIZE_MAX,
+  SIZE_MIN,
+} from '@renderer/pages/companion/characters/customDesk';
 import CharacterPicker from '@renderer/pages/nomi/CharacterPicker';
 import { figureToCustomPatch } from '@renderer/pages/nomi/useFigures';
 import type { CompanionHandle } from '../../types';
@@ -33,7 +38,9 @@ interface FigurePanelProps {
 const FigurePanel: React.FC<FigurePanelProps> = ({ profile, patchCompanion, figure }) => {
   const { t } = useTranslation();
 
-  const effectiveHeight = figure ? (figure.sizePx ?? FIGURE_HEIGHTS[figure.sizeTier]) : FIGURE_HEIGHTS.m;
+  const effectiveHeight = clampDesktopFigureHeight(
+    figure ? (figure.sizePx ?? FIGURE_HEIGHTS[figure.sizeTier]) : FIGURE_HEIGHTS.m
+  );
   const [sizeDraft, setSizeDraft] = useState<number>(effectiveHeight);
   // Re-sync the slider whenever the persisted value (or the selected figure) moves.
   useEffect(() => {

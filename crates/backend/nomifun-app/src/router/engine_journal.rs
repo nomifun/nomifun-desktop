@@ -28,7 +28,7 @@ use nomifun_chat_model_broker::{
     ChatRetryDirective,
 };
 use nomifun_agent_runtime::AgentEngineEvent;
-use nomifun_common::AppError;
+use nomifun_common::{AppError, now_ms};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -610,15 +610,24 @@ impl EngineTurnJournal {
                         json!({
                             "model_steps": model_steps,
                             "finish_reason": finish_reason,
+                            "finished_at_ms": now_ms(),
                         }),
                     ),
-                    AgentEngineEvent::TurnFailed { model_steps, message } => (
-                        "turn/failed",
-                        json!({
-                            "model_steps": model_steps,
-                            "message": message,
-                        }),
-                    ),
+                    AgentEngineEvent::TurnFailed { model_steps, message } => {
+                        let error = nomifun_ai_agent::AgentSendError::from_app_error(
+                            AppError::Conflict(message.clone()),
+                        )
+                        .into_stream_error();
+                        (
+                            "turn/failed",
+                            json!({
+                                "model_steps": model_steps,
+                                "message": message,
+                                "error": error,
+                                "finished_at_ms": now_ms(),
+                            }),
+                        )
+                    }
                     _ => unreachable!(),
                 };
                 let turn_identity = format!(
