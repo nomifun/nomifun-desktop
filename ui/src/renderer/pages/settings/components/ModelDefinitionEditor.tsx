@@ -450,9 +450,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
     Partial<Record<ModelTask, ModelCapabilityDraft>>
   >({});
   const [focusedCallConfigTask, setFocusedCallConfigTask] = useState<ModelTask>();
-  const [customContextByTask, setCustomContextByTask] = useState<
-    Partial<Record<ModelTask, boolean>>
-  >({});
   const [editingOutputLimitByTask, setEditingOutputLimitByTask] = useState<
     Partial<Record<ModelTask, boolean>>
   >({});
@@ -1052,7 +1049,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
           callConfigBaseline !== undefined && !sameCapabilityDraft(callConfigBaseline, capability);
         const contextLimitSummary = compactTokenCount(
           capability.contextLimit,
-          t('settings.modelAdvanced.contextDefaultCompact', { defaultValue: '200k' })
+          t('settings.modelAdvanced.contextDefaultCompact', { defaultValue: '自动' })
         );
         const outputLimitSummary = compactTokenCount(
           capability.outputLimit,
@@ -1060,11 +1057,6 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             defaultValue: '由供应商决定',
           })
         );
-        const customContextOpen =
-          Boolean(customContextByTask[capability.task]) ||
-          (capability.contextLimit !== undefined &&
-            capability.contextLimit !== 128_000 &&
-            capability.contextLimit !== 200_000);
         const outputLimitEditorOpen =
           Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
         const protocolTransportOpen =
@@ -1136,7 +1128,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               defaultValue: '调整模型限制',
             }),
             description: t('settings.modelAdvanced.intentLimitsHint', {
-              defaultValue: '设置上下文窗口或最大输出',
+              defaultValue: '设置最大输出等限制',
             }),
             icon: <Shield theme='outline' size='17' />,
           },
@@ -1302,6 +1294,63 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   }
                   triggerProps={{ getPopupContainer: () => document.body }}
                 />
+              </div>
+            )}
+
+            {capability.task === 'chat' && (
+              <div
+                hidden={focusedCallConfigTask !== undefined}
+                className='space-y-10px border-0 border-t border-solid border-[var(--color-border-2)] px-14px py-12px'
+                data-model-context-settings={capability.task}
+              >
+                <div className='text-12px font-600 text-t-primary'>
+                  {t('settings.modelAdvanced.contextSettingsTitle', { defaultValue: '上下文' })}
+                </div>
+                <div className='grid grid-cols-2 gap-10px'>
+                  <div className='space-y-6px'>
+                    <div className='text-12px text-t-secondary'>
+                      {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
+                    </div>
+                    <ContextLimitSelect
+                      value={capability.contextLimit}
+                      onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
+                    />
+                    <div className='text-11px leading-4 text-t-tertiary'>
+                      {t('settings.modelAdvanced.contextLimitCompactHint', {
+                        defaultValue: '未设置时使用运行时默认预算；请按模型实际窗口填写。',
+                      })}
+                    </div>
+                  </div>
+                  <div className='space-y-6px'>
+                    <div className='text-12px text-t-secondary'>
+                      {t('settings.modelAdvanced.compactionThresholdLabel', {
+                        defaultValue: '自动压缩阈值',
+                      })}
+                    </div>
+                    <Select
+                      value={capability.compactionThresholdPct ?? 75}
+                      options={[50, 60, 70, 75, 80, 85, 90, 95].map((pct) => ({
+                        value: pct,
+                        label: `${pct}%${pct === 75 ? ` · ${t('settings.modelAdvanced.recommended', { defaultValue: '推荐' })}` : ''}`,
+                      }))}
+                      onChange={(compactionThresholdPct: number) =>
+                        updateCapability(capability.task, {
+                          compactionThresholdPct: compactionThresholdPct === 75 ? undefined : compactionThresholdPct,
+                        })
+                      }
+                      getPopupContainer={() => document.body}
+                      aria-label={t('settings.modelAdvanced.compactionThresholdLabel', {
+                        defaultValue: '自动压缩阈值',
+                      })}
+                      data-model-compaction-threshold
+                    />
+                    <div className='text-11px leading-4 text-t-tertiary'>
+                      {t('settings.modelAdvanced.compactionThresholdHint', {
+                        defaultValue: '达到可用输入空间的这个比例时自动压缩；调低会更早压缩。',
+                      })}
+                    </div>
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1934,14 +1983,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
             )}
             </div>
 
-            {/*
-              One heading for both ceilings, because they are NOT two spellings
-              of the same thing and the old flat layout implied they were. The
-              context window feeds the compaction budget (its "default" is the
-              app's 200k assumption); the output ceiling feeds the request's
-              max_tokens (its "default" is whatever the provider picks) and is
-              mandatory for the Anthropic-family protocols.
-            */}
+            {/* Chat context is visible on the model card. Other tasks keep their
+                context limit here; the output ceiling stays task scoped. */}
             <div
               hidden={callConfigIntent !== 'limits'}
               className='space-y-10px rounded-10px border border-solid border-[var(--color-border-2)] p-12px'
@@ -1952,83 +1995,17 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                 {t('settings.modelAdvanced.modelLimitsTitle', { defaultValue: '模型限制' })}
               </div>
 
-              <div className='space-y-8px'>
-                <div className='flex flex-wrap items-center justify-between gap-10px'>
+              {capability.task !== 'chat' && (
+                <div className='space-y-8px'>
                   <div className='text-12px text-t-secondary'>
                     {t('settings.contextLimit', { defaultValue: '上下文窗口（tokens）' })}
                   </div>
-                  <div
-                    className='inline-flex overflow-hidden rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1'
-                    role='group'
-                    aria-label={t('settings.contextLimit', {
-                      defaultValue: '上下文窗口（tokens）',
-                    })}
-                  >
-                    {[
-                      { label: '128k', value: 128_000 },
-                      { label: '200k', value: undefined },
-                    ].map((option) => {
-                      const selected =
-                        option.value === undefined
-                          ? capability.contextLimit === undefined || capability.contextLimit === 200_000
-                          : capability.contextLimit === option.value;
-                      return (
-                        <button
-                          key={option.label}
-                          type='button'
-                          aria-pressed={selected && !customContextOpen}
-                          className={`min-w-72px border-0 border-r border-solid border-[var(--color-border-2)] px-14px py-6px text-12px last:border-r-0 ${
-                            selected && !customContextOpen
-                              ? 'bg-primary-1 text-primary-6'
-                              : 'bg-transparent text-t-secondary hover:bg-fill-2'
-                          }`}
-                          onClick={() => {
-                            setCustomContextByTask((current) => ({
-                              ...current,
-                              [capability.task]: false,
-                            }));
-                            updateCapability(capability.task, {
-                              contextLimit: option.value,
-                            });
-                          }}
-                        >
-                          {option.label}
-                        </button>
-                      );
-                    })}
-                    <button
-                      type='button'
-                      aria-pressed={customContextOpen}
-                      className={`min-w-76px border-0 px-14px py-6px text-12px ${
-                        customContextOpen
-                          ? 'bg-primary-1 text-primary-6'
-                          : 'bg-transparent text-t-secondary hover:bg-fill-2'
-                      }`}
-                      onClick={() =>
-                        setCustomContextByTask((current) => ({
-                          ...current,
-                          [capability.task]: true,
-                        }))
-                      }
-                    >
-                      {t('settings.outputLimitCustomOption', { defaultValue: '自定义' })}
-                    </button>
-                  </div>
-                </div>
-                <div hidden={!customContextOpen}>
                   <ContextLimitSelect
                     value={capability.contextLimit}
-                    onChange={(contextLimit) =>
-                      updateCapability(capability.task, { contextLimit })
-                    }
+                    onChange={(contextLimit) => updateCapability(capability.task, { contextLimit })}
                   />
                 </div>
-                <div className='text-11px leading-4 text-t-tertiary'>
-                  {t('settings.modelAdvanced.contextLimitCompactHint', {
-                    defaultValue: '留空按推荐 200k 估算；模型真实窗口更小时再调整。',
-                  })}
-                </div>
-              </div>
+              )}
 
               <div className='space-y-8px'>
                 <div className='flex items-center justify-between gap-10px rounded-8px bg-fill-1 px-10px py-8px'>
@@ -2085,7 +2062,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                   type='text'
                   onClick={() =>
                     updateCapability(capability.task, {
-                      contextLimit: undefined,
+                      ...(capability.task === 'chat' ? {} : { contextLimit: undefined }),
                       outputLimit: undefined,
                     })
                   }

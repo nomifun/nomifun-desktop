@@ -169,6 +169,7 @@ impl ProviderConnectionService {
                 provider_params: response.provider_params,
                 context_limit: response.context_limit,
                 output_limit: response.output_limit,
+                compaction_threshold_pct: response.compaction_threshold_pct,
             };
             validate_capability_auth_scheme(&capability, auth_scheme)?;
             validate_capability_urls(&capability, base_url)?;

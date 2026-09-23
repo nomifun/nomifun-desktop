@@ -27,6 +27,7 @@ static CHAT_CAPABILITIES: [NewProviderModelCapability<'static>; 1] = [NewProvide
     provider_params: "{}",
     context_limit: Some(128_000),
     output_limit: None,
+    compaction_threshold_pct: None,
 }];
 
 static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -44,6 +45,7 @@ static IMAGE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         provider_params: "{\"seed\":7}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
 static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -61,6 +63,7 @@ static VIDEO_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
 static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
@@ -78,6 +81,7 @@ static VOICE_CAPABILITIES: [NewProviderModelCapability<'static>; 1] =
         provider_params: "{}",
         context_limit: None,
         output_limit: None,
+        compaction_threshold_pct: None,
     }];
 
 fn provider_params(provider_id: Option<&str>) -> CreateProviderParams<'_> {
@@ -166,6 +170,38 @@ async fn aggregate_create_persists_provider_model_capability_and_named_connectio
     .await
     .unwrap();
     assert_eq!(connection_count, 1);
+}
+
+#[tokio::test]
+async fn chat_compaction_threshold_survives_model_save() {
+    let db = init_database_memory().await.unwrap();
+    let providers = SqliteProviderRepository::new(db.pool().clone());
+    let capability = [NewProviderModelCapability {
+        compaction_threshold_pct: Some(60),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    providers
+        .create(provider_params(Some(PROVIDER_ID)), &model("chat", &capability), &[])
+        .await
+        .unwrap();
+    let repository = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    assert_eq!(
+        repository.get(PROVIDER_ID, "chat", "chat").await.unwrap().unwrap().compaction_threshold_pct,
+        Some(60)
+    );
+
+    let changed = [NewProviderModelCapability {
+        compaction_threshold_pct: Some(90),
+        ..CHAT_CAPABILITIES[0]
+    }];
+    SqliteProviderModelRepository::new(db.pool().clone())
+        .save(PROVIDER_ID, 0, &model("chat", &changed))
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.get(PROVIDER_ID, "chat", "chat").await.unwrap().unwrap().compaction_threshold_pct,
+        Some(90)
+    );
 }
 
 #[tokio::test]
@@ -318,6 +354,7 @@ async fn model_save_preserves_health_only_when_invocation_config_is_unchanged() 
             provider_params: "{}",
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
         },
         NewProviderModelCapability {
             task: "image_generation",
@@ -994,6 +1031,7 @@ async fn bedrock_provider_allows_the_manifest_defined_empty_base_url() {
         provider_params: "{}",
         context_limit: None,
         output_limit: Some(8192),
+        compaction_threshold_pct: None,
     }];
     let db = init_database_memory().await.unwrap();
     let repository = SqliteProviderRepository::new(db.pool().clone());

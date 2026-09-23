@@ -165,6 +165,11 @@ pub struct ProviderModelCapabilityInput {
     #[serde(default)]
     #[ts(optional, type = "number")]
     pub output_limit: Option<i64>,
+    /// Chat context occupancy percentage that triggers automatic compaction.
+    /// Omission retains the runtime's 75% policy.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub compaction_threshold_pct: Option<u8>,
 }
 
 /// Latest health observation for one task-scoped capability.
@@ -239,6 +244,9 @@ pub struct ProviderModelCapabilityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional, type = "number")]
     pub output_limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "number")]
+    pub compaction_threshold_pct: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub health: Option<CapabilityHealth>,

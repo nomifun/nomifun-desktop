@@ -308,6 +308,7 @@ mod tests {
             provider_params: "{}".into(),
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
             health,
             health_checked_at: None,
             created_at: 0,

@@ -767,6 +767,31 @@ describe('capability validation and serialization', () => {
     ]);
   });
 
+  test('round-trips a Chat compaction threshold through the capability save', () => {
+    const input = capabilityInputsFromDefinition({
+      model: 'chat-model',
+      capabilities: [{
+        ...emptyCapabilityDraft('chat'),
+        protocol: 'openai.chat_text',
+        contextLimit: 64_000,
+        compactionThresholdPct: 60,
+      }],
+    });
+    expect(input?.[0]).toMatchObject({
+      context_limit: 64_000,
+      compaction_threshold_pct: 60,
+    });
+    const restored = capabilityDraftFromResponse({
+      task: 'chat',
+      protocol: 'openai.chat_text',
+      connection_role: 'default',
+      context_limit: 64_000,
+      compaction_threshold_pct: 60,
+    });
+    expect(restored.contextLimit).toBe(64_000);
+    expect(restored.compactionThresholdPct).toBe(60);
+  });
+
   test('round-trips one persisted capability into the typed editor draft', () => {
     expect(
       capabilityDraftFromResponse({

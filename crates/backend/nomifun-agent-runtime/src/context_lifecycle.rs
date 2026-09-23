@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_CONTEXT_TOKENS: u32 = 32_768;
 const DEFAULT_OUTPUT_TOKENS: u32 = 4096;
 const MAX_AUTOMATIC_OUTPUT_TOKENS: u32 = 16_384;
+const DEFAULT_COMPACTION_THRESHOLD_PCT: u8 = 75;
 const SUMMARY_PROMPT_HEADROOM_DIVISOR: usize = 16;
 const MAX_SUMMARY_PROMPT_HEADROOM_BYTES: usize = 512;
 
@@ -23,6 +24,7 @@ const MAX_SUMMARY_PROMPT_HEADROOM_BYTES: usize = 512;
 pub struct AgentModelBudget {
     pub context_window_tokens: u32,
     pub max_output_tokens: u32,
+    pub compaction_threshold_pct: u8,
 }
 
 impl Default for AgentModelBudget {
@@ -30,6 +32,7 @@ impl Default for AgentModelBudget {
         Self {
             context_window_tokens: DEFAULT_CONTEXT_TOKENS,
             max_output_tokens: DEFAULT_OUTPUT_TOKENS,
+            compaction_threshold_pct: DEFAULT_COMPACTION_THRESHOLD_PCT,
         }
     }
 }
@@ -50,6 +53,7 @@ impl AgentModelBudget {
         Self {
             context_window_tokens: context,
             max_output_tokens: output,
+            compaction_threshold_pct: DEFAULT_COMPACTION_THRESHOLD_PCT,
         }
         .validate()
     }
@@ -58,12 +62,18 @@ impl AgentModelBudget {
         if self.context_window_tokens < 2048
             || self.max_output_tokens == 0
             || self.max_output_tokens >= self.context_window_tokens / 2
+            || !(50..=95).contains(&self.compaction_threshold_pct)
         {
             return Err(AgentEngineError::ContextAssembly(
-                "Nomi needs context >= 2048 tokens and positive output below half the context window".into(),
+                "Nomi needs context >= 2048 tokens, positive output below half the context window, and a 50-95% compaction threshold".into(),
             ));
         }
         Ok(self)
+    }
+
+    pub fn with_compaction_threshold_pct(mut self, pct: u8) -> Result<Self, AgentEngineError> {
+        self.compaction_threshold_pct = pct;
+        self.validate()
     }
 
     /// Freeze one effective ceiling before any model or compaction request.
@@ -88,6 +98,11 @@ impl AgentModelBudget {
         self.context_window_tokens
             .saturating_sub(self.max_output_tokens)
             .saturating_sub(512) as usize
+    }
+
+
+    fn compaction_trigger_tokens(self) -> usize {
+        self.input_tokens() * usize::from(self.compaction_threshold_pct) / 100
     }
 }
 
@@ -151,7 +166,7 @@ impl ContextLifecycle {
         let bytes = encoded_size(rejected_input)?;
         let estimate = crate::media_context::estimate_tokens(rejected_input, bytes);
         self.recovered_input_limit =
-            Some((estimate * 3 / 4).min(self.budget.input_tokens() * 3 / 4));
+            Some((estimate * 3 / 4).min(self.budget.compaction_trigger_tokens()));
         self.overflow_recovery_used = true;
         self.force_compaction = true;
         Ok(true)
@@ -180,7 +195,7 @@ impl ContextLifecycle {
         // send below the same inaccurate threshold.
         let input_limit = self
             .recovered_input_limit
-            .unwrap_or(self.budget.input_tokens() * 3 / 4);
+            .unwrap_or(self.budget.compaction_trigger_tokens());
         let estimated_tokens = estimate.max(
             self.observed_tokens
                 .saturating_add(estimate.saturating_sub(self.observed_estimate)),
@@ -393,6 +408,22 @@ fn encoded_size(input: &ChatModelInput) -> Result<usize, AgentEngineError> {
     serde_json::to_vec(input)
         .map(|value| value.len())
         .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))
+}
+
+#[cfg(test)]
+mod context_threshold_tests {
+    use super::AgentModelBudget;
+
+    #[test]
+    fn configured_threshold_changes_the_presend_trigger_without_changing_model_limits() {
+        let default = AgentModelBudget::from_limits(Some(64_000), Some(8_000)).unwrap();
+        let early = default.with_compaction_threshold_pct(50).unwrap();
+        assert_eq!(default.context_window_tokens, early.context_window_tokens);
+        assert_eq!(default.max_output_tokens, early.max_output_tokens);
+        assert!(early.compaction_trigger_tokens() < default.compaction_trigger_tokens());
+        assert_eq!(default.compaction_threshold_pct, 75);
+        assert!(default.with_compaction_threshold_pct(96).is_err());
+    }
 }
 
 pub(crate) fn summary_message(summary: &str) -> ChatMessage {
