@@ -163,7 +163,7 @@ test('exact Action grants disable unsupported controls before dispatch', async (
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).disabled).toBe(false);
   expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(false);
   for (const tab of screen.getAllByRole('tab')) expect((tab as HTMLButtonElement).disabled).toBe(false);
-  expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(false);
   fireEvent.change(screen.getByRole('textbox', { name: words.address }), { target: { value: 'https://example.test' } });
   fireEvent.submit(screen.getByRole('textbox', { name: words.address }).closest('form')!);
   await waitFor(() => expect(screen.commands.some(command => command.command === 'navigate')).toBe(true));
@@ -193,6 +193,50 @@ test('a navigation-only Agent can switch tabs and the active page follows the re
   await waitFor(() => expect(screen.getByRole('tab', { name: 'Fixture' }).getAttribute('aria-selected')).toBe('true'));
   expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost:3000/');
   expect(sent).toEqual([{ command: 'activate', target: secondTarget }, { command: 'activate', target }]);
+});
+
+test('the tab close button restores the remaining page with navigation-only access', async () => {
+  const secondTarget = { ...target, tab_id: 'browser-2' };
+  let current: BrowserSnapshot = { ...initial, allowed_actions: ['browser/navigate'], runtime: { ...initial.runtime!, active_tab_id: secondTarget.tab_id, tabs: [
+    initial.runtime!.tabs[0]!,
+    { ...initial.runtime!.tabs[0]!, target: secondTarget, title: 'Second', url: 'https://second.example/' },
+  ] } };
+  const sent: BrowserCommand[] = [];
+  const screen = fixture({
+    async ensure() { return current; },
+    async command(_id, command) {
+      sent.push(command);
+      if (command.command === 'close') {
+        const tabs = current.runtime!.tabs.filter(tab => tab.target.tab_id !== command.target.tab_id);
+        current = { ...current, runtime: { ...current.runtime!, revision: current.runtime!.revision + 1, tabs, active_tab_id: tabs[0]?.target.tab_id ?? null } };
+      }
+      return current;
+    },
+  });
+  await screen.ready();
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Second') })); });
+  await waitFor(() => expect(screen.queryByRole('tab', { name: 'Second' })).toBeNull());
+  await waitFor(() => expect((screen.getByRole('textbox', { name: words.address }) as HTMLInputElement).value).toBe('http://localhost:3000/'));
+  expect(screen.getByRole('tab', { name: 'Fixture' }).getAttribute('aria-selected')).toBe('true');
+  expect(sent).toEqual([{ command: 'close', target: secondTarget }]);
+});
+
+test('tab close stays disabled when neither navigation nor interaction is granted', async () => {
+  const screen = fixture({ async ensure() { return { ...initial, allowed_actions: ['browser/observe'] }; } });
+  await screen.ready();
+  const close = screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement;
+  expect(close.disabled).toBe(true);
+  fireEvent.click(close);
+  expect(screen.commands).toEqual([]);
+});
+
+test('an interaction-only grant retains tab close access', async () => {
+  const screen = fixture({ async ensure() { return { ...initial, allowed_actions: ['browser/act'] }; } });
+  await screen.ready();
+  const close = screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement;
+  expect(close.disabled).toBe(false);
+  fireEvent.click(close);
+  await waitFor(() => expect(screen.commands).toEqual([{ command: 'close', target }]));
 });
 
 test('limited Browser guidance opens from the address icon and closes without a permanent row', async () => {
@@ -670,6 +714,7 @@ test('native run events lock page controls while the surface can still be hidden
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 2, input_state: 'agent_running' } } }));
   expect(address.disabled).toBe(true);
   expect((screen.getByRole('button', { name: words.newTab }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole('button', { name: words.closePage.replace('{{title}}', 'Fixture') }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: words.menu }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: words.closePanel }) as HTMLButtonElement).disabled).toBe(false);
   await act(async () => screen.emit({ kind: 'snapshot', snapshot: { ...initial, run: { ...initial.run, revision: 3 } } }));

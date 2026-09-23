@@ -261,7 +261,10 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
 
   const run = useCallback(async (command: BrowserCommand, fromLink = false) => {
     if (controlsDisabled) return;
-    if (!snapshot?.allowed_actions.includes(browserCommandAction(command))) {
+    // Human tab close accepts either navigation or interaction authority.
+    const allowed = snapshot?.allowed_actions.includes(browserCommandAction(command))
+      || (command.command === 'close' && snapshot?.allowed_actions.includes('browser/navigate'));
+    if (!allowed) {
       setNotice(t('browserWorkspace.actionUnavailableHint'));
       return;
     }
@@ -453,7 +456,7 @@ export default function BrowserPanel({ agentSessionId, onClose, client = browser
     <div className={styles.tabs} role='tablist' aria-label={t('browserWorkspace.pages')}>
       {tabs.map((tab, index) => <div className={styles.tab} key={tab.target.tab_id} data-active={tab.target.tab_id === active?.target.tab_id && !draftTab}>
         <button type='button' role='tab' aria-selected={tab.target.tab_id === active?.target.tab_id && !draftTab} tabIndex={tab.target.tab_id === active?.target.tab_id && !draftTab ? 0 : -1} disabled={!canNavigate} onKeyDown={event => focusAdjacentTab(event, index)} onClick={() => { setDraftTab(false); void run({ command: 'activate', target: tab.target }); }}><Earth size={13} /><span>{tab.title || t('browserWorkspace.newTab')}</span></button>
-        <button type='button' disabled={!canAct} aria-label={t('browserWorkspace.closePage', { title: tab.title || t('browserWorkspace.newTab') })} onClick={() => void run({ command: 'close', target: tab.target })}><Close size={11} /></button>
+        <button type='button' disabled={!canNavigate && !canAct} aria-label={t('browserWorkspace.closePage', { title: tab.title || t('browserWorkspace.newTab') })} onClick={() => void run({ command: 'close', target: tab.target })}><Close size={11} /></button>
       </div>)}
       <button type='button' className={styles.icon} disabled={!canNavigate} aria-label={t('browserWorkspace.newTab')} onClick={() => { setDraftTab(true); setAddress(''); input.current?.focus(); }}><Add size={16} /></button>
       <button type='button' className={`${styles.icon} ${styles.close}`} aria-label={t('browserWorkspace.closePanel')} onClick={onClose}><Close size={15} /></button>

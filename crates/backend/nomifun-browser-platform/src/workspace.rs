@@ -368,7 +368,14 @@ impl BrowserResource {
         self: &Arc<Self>,
         command: BrowserTabCommand,
     ) -> Result<BrowserRuntimeSnapshot, WorkspaceError> {
-        self.authority.authorize(action_for_tab_command(&command))?;
+        if matches!(command, BrowserTabCommand::Close { .. }) {
+            // Closing a human tab is part of navigation management, while an
+            // existing Act grant must keep its previous close authority.
+            self.authority.authorize(BrowserCapabilityAction::Act)
+                .or_else(|_| self.authority.authorize(BrowserCapabilityAction::Navigate))?;
+        } else {
+            self.authority.authorize(action_for_tab_command(&command))?;
+        }
         if let BrowserTabCommand::SetZoom { percent, .. } = &command {
             if !(50..=200).contains(percent) {
                 return Err(WorkspaceError::InvalidZoom);
