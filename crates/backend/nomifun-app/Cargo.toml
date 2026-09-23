@@ -129,6 +129,11 @@ path = "tests/nomi_core_route_gap.rs"
 name = "nomi_core_live_provider_smoke"
 path = "tests/nomi_core_live_provider_smoke.rs"
 
+[[test]]
+name = "live_agnes_preset_creation"
+path = "tests/live_agnes_preset_creation.rs"
+required-features = ["browser-use", "computer-use"]
+
 [features]
 default = ["telegram", "lark", "dingtalk", "weixin", "wecom", "discord", "matrix", "mattermost", "slack", "twitch", "nostr", "qqbot"]
 telegram = ["nomifun-channel/telegram"]
