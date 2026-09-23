@@ -8,6 +8,12 @@ import type { TMessage } from '@/common/chat/chatLib';
 
 const SYNTHETIC_INCOMPLETE_PREFIX = 'The turn ended before this tool completed:';
 
+/** Historical builds persisted engine-owned preflight reads as chat tools. */
+export const isInternalInstructionToolCall = (message: TMessage): boolean =>
+  message.type === 'tool_call' &&
+  typeof message.content.call_id === 'string' &&
+  message.content.call_id.startsWith('agent-instructions:');
+
 export const isSupersededPlanToolFailure = (message: TMessage, laterMessages: TMessage[]): boolean => {
   if (message.type !== 'tool_call') return false;
   if (message.content.name !== 'update_plan' || message.content.status !== 'error') return false;

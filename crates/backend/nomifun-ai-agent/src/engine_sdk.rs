@@ -333,7 +333,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 EngineTurnTerminal::Failed { message } => {
                     shared.state.emit_error_data_for_turn(
                         turn,
-                        AgentSendError::from_app_error(AppError::Conflict(message))
+                        AgentSendError::from_engine_turn_failure(message)
                             .into_stream_error(),
                     );
                     return;

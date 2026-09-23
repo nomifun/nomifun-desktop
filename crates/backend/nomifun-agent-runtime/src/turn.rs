@@ -317,6 +317,7 @@ pub(crate) async fn run_turn(
     let mut tool_call_count = 0_u32;
     let mut provider_round_id = None;
     let mut completion_review_used = false;
+    let mut control_rejections = ControlRejections::default();
     let mut admitted_call_ids = std::collections::BTreeSet::new();
     let mut stream_budget = crate::stream_limits::StreamBudget::default();
     let mut output_limit_recovery = crate::output_limit::OutputLimitRecovery::default();
@@ -356,6 +357,7 @@ pub(crate) async fn run_turn(
             let inputs = port.take(&model_request.causality, false).await?;
             if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
                 completion_review_used = false;
+                control_rejections.reset();
                 adaptive
                     .activate(
                         crate::adaptive::LEDGER_MODULES,
@@ -806,6 +808,7 @@ pub(crate) async fn run_turn(
                         content: vec![ChatContentPart::ToolResult { call_id: result.call_id, output: result.output, is_error: result.is_error }], provider_round_id: None });
                 }
                 crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)?;
+                control_rejections.reset();
                 state.execution_plan.needs_replan = true;
                 state.completion.invalidate();
                 completion_review_used = false;
@@ -823,7 +826,6 @@ pub(crate) async fn run_turn(
             }
 
             let mut long_horizon_calls = 0usize;
-            let mut long_horizon_effect = false;
             let mut explicit_continuation = false;
             let mut explicit_plan = false;
             for call_id in &step.call_order {
@@ -839,8 +841,6 @@ pub(crate) async fn run_turn(
                 if let Some(tool) = request.tool_plan.binding(&call.name) {
                     if crate::execution_policy::requires_task_ledger(tool) {
                         long_horizon_calls = long_horizon_calls.saturating_add(1);
-                        long_horizon_effect |=
-                            !matches!(tool.effect_class, AgentEffectClass::ReadOnly);
                     }
                 } else if call.name == crate::task_continuation::TOOL_NAME {
                     explicit_continuation = true;
@@ -882,14 +882,6 @@ pub(crate) async fn run_turn(
                         event_sink.as_ref(),
                     )
                     .await?;
-            } else if long_horizon_effect {
-                adaptive
-                    .activate(
-                        crate::adaptive::LONG_HORIZON_MODULES,
-                        crate::AgentRuntimeActivationReason::EffectfulToolCall,
-                        event_sink.as_ref(),
-                    )
-                    .await?;
             } else if multi_step {
                 adaptive
                     .activate(
@@ -918,6 +910,7 @@ pub(crate) async fn run_turn(
                 model_steps,
                 &cancellation,
                 &mut state.execution_plan,
+                adaptive.task_ledger(),
                 &mut state.completion,
                 &mut state.work_status,
                 &retained_inputs,
@@ -955,8 +948,14 @@ pub(crate) async fn run_turn(
             tool_call_count = tool_call_count.saturating_add(results.len() as u32);
             let single_call_batch = step.call_order.len() == 1;
             let mut terminal_collaboration_accepted = false;
+            let mut repeated_control_rejection = None;
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
+                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                    if control_rejections.observe(&call.name, &result) {
+                        repeated_control_rejection = Some(call.name.clone());
+                    }
+                }
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
                     if let Some(binding) = request.tool_plan.binding(&call.name) {
                         let attempted = dispatch.attempted(&expected_call_id)?;
@@ -1046,6 +1045,10 @@ pub(crate) async fn run_turn(
                     plan: state.execution_plan.clone(),
                 }).await?;
             }
+            if let Some(control) = repeated_control_rejection {
+                return fail_turn(&event_sink, model_steps,
+                    format!("engine control repeatedly rejected; {control} failed four consecutive times")).await;
+            }
             if terminal_collaboration_accepted
                 && !adaptive.task_ledger()
                 && state.work_status.running_processes.is_empty()
@@ -1086,6 +1089,7 @@ pub(crate) async fn run_turn(
                     &mut retained_inputs,
                     &mut steering_receipts,
                 )?;
+                control_rejections.reset();
                 completion_review_used = false;
                 adaptive
                     .activate(
@@ -1178,6 +1182,7 @@ pub(crate) async fn run_turn(
             let inputs = port.take(&model_request.causality, true).await?;
             if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
                 completion_review_used = false;
+                control_rejections.reset();
                 adaptive
                     .activate(
                         crate::adaptive::LEDGER_MODULES,
@@ -1241,6 +1246,32 @@ struct LongHorizonState {
     work_status: crate::AgentWorkStatus,
     completion: crate::completion::CompletionTracker,
     command_tracker: crate::workflow::CommandTracker,
+}
+
+/// A weak tool-calling model can keep resubmitting malformed plan/completion
+/// controls. Bound that retry loop before it consumes the context window; the
+/// fourth failure still has its durable result before the turn stops.
+#[derive(Default)]
+struct ControlRejections {
+    name: String,
+    consecutive: u8,
+}
+
+impl ControlRejections {
+    fn reset(&mut self) {
+        self.name.clear();
+        self.consecutive = 0;
+    }
+
+    fn observe(&mut self, name: &str, result: &AgentToolResult) -> bool {
+        if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
+            self.consecutive = if self.name == name { self.consecutive.saturating_add(1) } else { 1 };
+            self.name = name.to_owned();
+            return self.consecutive >= 4;
+        }
+        self.reset();
+        false
+    }
 }
 
 #[derive(Default)]
@@ -1444,6 +1475,7 @@ async fn invoke_tool_calls(
     model_step: u16,
     cancellation: &CancellationToken,
     execution_plan: &mut crate::AgentPlan,
+    task_ledger_active: bool,
     completion: &mut crate::completion::CompletionTracker,
     work_status: &mut crate::AgentWorkStatus,
     accepted_inputs: &[ChatMessage],
@@ -1623,7 +1655,8 @@ async fn invoke_tool_calls(
             let cleanup = matches!(binding.action_id.as_ref(),
                 "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin");
             if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
-            else if !cleanup
+            else if task_ledger_active
+                && !cleanup
                 && crate::execution_policy::requires_task_ledger(binding)
                 && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
             {
@@ -3297,13 +3330,17 @@ mod tests {
             }}),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
         ];
-        // The first effect proposal only activates reliability state and is
-        // deferred before the owner port. The model then records scope and
-        // retries with fresh call identities.
+        // A multi-call batch activates the ledger before either effect. The
+        // model records scope and retries with fresh call identities.
         let activation = vec![
             Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
                 call_id: "activate-1".into(), name: "write_file".into(),
                 arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a", "content":"first"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "activate-2".into(), name: "write_other_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "content":"second"})),
                 provider_metadata: None,
             }}),
             Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
@@ -3348,6 +3385,78 @@ mod tests {
                 matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. } if call_id.as_ref() == id)));
         }
         assert!(model.steps.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn single_workspace_write_completes_without_an_unavailable_plan_tool() {
+        let call_id = ToolCallId::from("single-write");
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("single-write", "write_file", json!({
+                    "path":"a", "content":"<html><canvas></canvas></html>"
+                })),
+                text_step("Saved the file."),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(1),
+        });
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(
+                request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(result.output_text, "Saved the file.");
+        assert_eq!(result.model_steps, 2);
+        assert_eq!(*tools.order.lock().unwrap(), vec!["single-write"]);
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id: id, is_error: false, .. } if id == &call_id)));
+        assert!(requests.iter().all(|request| !request.input.tools.iter().any(|tool|
+            matches!(tool.name.as_str(), crate::planning::TOOL_NAME | crate::completion::TOOL_NAME))));
+    }
+
+    #[tokio::test]
+    async fn repeated_invalid_completion_reports_stop_before_compaction() {
+        let quote = "inspect";
+        let reads = vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "read-1".into(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "read-2".into(), name: "search_files".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "query":"needle"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ];
+        let mut steps = vec![reads, plan_step("completed", quote)];
+        for index in 0..4 {
+            steps.push(control_step(&format!("bad-report-{index}"), crate::completion::TOOL_NAME,
+                json!({"summary":"The reads returned.", "criteria":[{"disposition":"supported"}]})));
+        }
+        steps.push(text_step("must not be requested"));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut input = request();
+        input.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let error = open_session(model.clone(), Arc::new(EchoTool))
+            .run_turn(AgentTurnRequest::new(
+                input, two_tool_plan(AgentEffectClass::ReadOnly, true), principal(), 0,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentEngineError::TurnFailed(message)
+            if message.starts_with("engine control repeatedly rejected; report_completion")));
+        assert_eq!(model.requests.lock().unwrap().len(), 6);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

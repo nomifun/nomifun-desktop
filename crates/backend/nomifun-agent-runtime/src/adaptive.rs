@@ -67,9 +67,9 @@ impl AdaptiveExecution {
         self.active.contains(&AgentRuntimeModule::ToolHistory)
     }
 
-    /// Returns true once read-only work spans more than one call in a batch or
-    /// more than one model-proposed platform batch. Effectful work activates
-    /// the ledger independently before crossing the owner port.
+    /// Returns true when workspace work spans more than one call in a batch or
+    /// more than one model-proposed platform batch. A single call can execute
+    /// before the plan tool is exposed; later effects need an active plan.
     pub(crate) fn observe_external_batch(&mut self, call_count: usize) -> bool {
         if call_count == 0 {
             return false;

@@ -22,6 +22,24 @@ describe('replayed process trace', () => {
     expect(container.childElementCount).toBe(0);
   });
 
+  test('long intermediate assistant text stays compact until expanded', () => {
+    const note = 'Repeating progress should remain inspectable. '.repeat(12);
+    const item: IMessageText = {
+      id: 'long-progress', type: 'text', conversation_id: conversationId,
+      position: 'left', created_at: 1, content: { content: note },
+    };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+    const paragraph = container.querySelector('.turn-process-trace__paragraph');
+    expect(paragraph?.textContent?.length).toBeLessThan(note.length);
+    const toggle = getByRole('button');
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(paragraph?.textContent).toContain(note.trim());
+  });
+
   test('only the final logical thinking line gets the live animation target', () => {
     const item: IMessageThinking = {
       id: 'thinking', type: 'thinking', conversation_id: conversationId,
@@ -52,6 +70,27 @@ describe('replayed process trace', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(getByText('src/app.ts')).toBeDefined();
     expect(getByText('file contents')).toBeDefined();
+  });
+
+  test('a deferred file call remains inspectable without a red failure row', () => {
+    const item: IMessageToolCall = {
+      id: 'deferred-write', type: 'tool_call', conversation_id: conversationId,
+      position: 'left', created_at: 2,
+      content: {
+        call_id: 'call-write', name: 'write_file', status: 'error',
+        args: { path: 'snake_game.html' },
+        output: 'Operations not executed: instruction scope changed before write',
+        artifacts: [],
+      },
+    };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
+    const toggle = getByRole('button');
+    expect(toggle.textContent).toContain('Did not run');
+    fireEvent.click(toggle);
+    expect(container.textContent).toContain('instruction scope changed before write');
   });
 
   test('a mixed tool group marks only its last running call as current activity', () => {

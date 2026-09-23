@@ -12,7 +12,8 @@
     "failed": "运行失败 {{target}}",
     "canceled": "已取消 {{target}}",
     "skipped": "已跳过 {{target}}",
-    "invalidArguments": "参数未通过校验，未执行 {{target}}"
+    "invalidArguments": "参数未通过校验，未执行 {{target}}",
+    "notExecuted": "未执行 {{target}}"
   },
   "processReceipt": {
     "tool": "工具",
@@ -44,6 +45,8 @@
     "searchedTarget": "已搜索 {{target}}",
     "agentConnecting": "正在连接 {{target}}",
     "agentFailed": "{{target}} 失败",
+    "expandText": "展开完整说明",
+    "collapseText": "收起说明",
     "status": "{{target}}"
   },
   "turnDuration": "用时 {{duration}}",

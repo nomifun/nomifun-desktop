@@ -5,7 +5,13 @@
  */
 
 import { describe, expect, test } from 'bun:test';
-import { isSupersededPlanToolFailure } from './planToolVisibility';
+import { isInternalInstructionToolCall, isSupersededPlanToolFailure } from './planToolVisibility';
+
+test('hides persisted internal preflight reads without hiding model-selected reads', () => {
+  const call = { type: 'tool_call', content: { call_id: 'agent-instructions:100', name: 'read_file' } } as any;
+  expect(isInternalInstructionToolCall(call)).toBe(true);
+  expect(isInternalInstructionToolCall({ ...call, content: { ...call.content, call_id: 'model-call-1' } })).toBe(false);
+});
 
 describe('isSupersededPlanToolFailure', () => {
   test('hides only the historical synthetic update_plan failure when a plan projection exists', () => {

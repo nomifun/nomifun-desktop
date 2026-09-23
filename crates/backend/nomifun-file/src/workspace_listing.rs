@@ -30,7 +30,7 @@ pub const MAX_DIR_DEPTH: usize = 10;
 /// Enumerate a single directory level under `base`, scoped to `rel`.
 ///
 /// `base` is the (already-resolved) workspace root. `rel` is the
-/// workspace-relative path to list (`""` or `"/"` lists the root itself).
+/// workspace-relative path to list (`""`, `"."` or `"/"` lists the root itself).
 /// `search`, when set and non-empty, filters entries to names that contain it
 /// case-insensitively.
 ///
@@ -41,7 +41,7 @@ pub fn list_workspace_level(
     rel: &str,
     search: Option<&str>,
 ) -> Result<Vec<WorkspaceEntry>, AppError> {
-    let relative_path_obj = if rel.is_empty() || rel == "/" {
+    let relative_path_obj = if rel.is_empty() || rel == "." || rel == "/" {
         PathBuf::new()
     } else {
         crate::artifact_store::normalized_workspace_relative(rel, false)?
@@ -195,6 +195,10 @@ mod tests {
         assert_eq!(out[0].entry_type, "file");
         assert_eq!(out[1].name, "sub");
         assert_eq!(out[1].entry_type, "directory");
+        // The desktop adapter uses "." for a workspace-root request. Keep
+        // the route and filesystem owner in agreement so the rail can hydrate.
+        let dot_root = list_workspace_level(dir.path(), ".", None).unwrap();
+        assert_eq!(dot_root.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>(), vec!["sub", "a.txt"]);
     }
 
     #[test]

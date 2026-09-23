@@ -95,6 +95,61 @@ impl AgentSendError {
         )
     }
 
+    /// The engine, not the upstream connection, stopped an unfinished task.
+    /// Do not offer a blind retry: the durable tool prefix may have changed
+    /// files before this guard fired.
+    pub fn from_engine_turn_failure(detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        if detail.starts_with("Internal error:") {
+            return Self::new(
+                "Nomi failed while executing the Agent turn",
+                AgentErrorCode::NomifunInternalError,
+                AgentErrorOwnership::Nomifun,
+                Some(detail),
+                true,
+                true,
+                resolution(
+                    AgentErrorResolutionKind::SendFeedback,
+                    Some(AgentErrorResolutionTarget::Feedback),
+                ),
+            );
+        }
+        if detail.starts_with("Forbidden:") {
+            return Self::new(
+                "Nomi blocked an Agent action",
+                AgentErrorCode::NomifunPermissionError,
+                AgentErrorOwnership::Nomifun,
+                Some(detail),
+                false,
+                true,
+                resolution(
+                    AgentErrorResolutionKind::SendFeedback,
+                    Some(AgentErrorResolutionTarget::Feedback),
+                ),
+            );
+        }
+        let guarded = detail.starts_with("model step limit of ")
+            || detail.starts_with("execution plan remains unresolved;")
+            || detail.starts_with("failed patch targets have not been re-observed;")
+            || detail.starts_with("processes remain running;")
+            || detail.starts_with("completion account is missing or stale;")
+            || detail.starts_with("completion account contains blocked work;")
+            || detail.starts_with("engine control repeatedly rejected;");
+        if guarded {
+            Self::new(
+                "The Agent stopped before completing the task",
+                AgentErrorCode::NomifunTaskIncomplete,
+                AgentErrorOwnership::Nomifun,
+                Some(detail),
+                false,
+                false,
+                None,
+            )
+        } else {
+            Self::from_app_error(AppError::Conflict(detail))
+        }
+    }
+
     pub fn new(
         message: impl Into<String>,
         code: AgentErrorCode,
@@ -1150,6 +1205,32 @@ mod tests {
                 "The accepted request required 'plugin.html', but no durable evidence matched it."
             )
         );
+    }
+
+    #[test]
+    fn engine_completion_guard_is_not_reported_as_an_upstream_outage() {
+        for detail in [
+            "model step limit of 32 exceeded",
+            "execution plan remains unresolved; completion was not accepted",
+            "completion account is missing or stale; call report_completion",
+            "engine control repeatedly rejected; report_completion failed four consecutive times",
+        ] {
+            let error = AgentSendError::from_engine_turn_failure(detail);
+            assert_eq!(error.code(), Some(AgentErrorCode::NomifunTaskIncomplete));
+            assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
+            assert_eq!(error.stream_error().retryable, Some(false));
+        }
+        let unrelated = AgentSendError::from_engine_turn_failure("provider returned 503");
+        assert_eq!(unrelated.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
+        assert_eq!(unrelated.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
+        let local = AgentSendError::from_engine_turn_failure(
+            "Internal error: Nomi runtime: Nomi workspace context failed: instruction scope unavailable",
+        );
+        assert_eq!(local.code(), Some(AgentErrorCode::NomifunInternalError));
+        assert_eq!(local.ownership(), Some(AgentErrorOwnership::Nomifun));
+        let denied = AgentSendError::from_engine_turn_failure("Forbidden: workspace binding cannot write");
+        assert_eq!(denied.code(), Some(AgentErrorCode::NomifunPermissionError));
+        assert_eq!(denied.ownership(), Some(AgentErrorOwnership::Nomifun));
     }
 
     #[test]

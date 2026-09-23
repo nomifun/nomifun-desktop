@@ -99,6 +99,34 @@ describe('normalizeToolCall', () => {
     expect(result?.input).toBeUndefined();
   });
 
+  it('shows a local runtime preflight deferral as unexecuted without hiding its diagnostic', () => {
+    const output = 'Operations not executed: instruction scope changed before write';
+    const result = normalizeToolCall({
+      type: 'tool_call',
+      content: {
+        call_id: 'call-preflight', name: 'write_file', status: 'error',
+        args: { path: 'snake_game.html' }, output,
+      },
+    } as any);
+    expect(result?.status).toBe('canceled');
+    expect(result?.notExecutedReason).toBe('runtime_preflight');
+    expect(result?.output).toBe(output);
+  });
+
+  it('keeps remote and actual local failures red even if the text resembles a preflight', () => {
+    for (const [name, output] of [
+      ['mcp__server__write_file__abcdefghijklmnop', 'Operations not executed: remote service error'],
+      ['write_file', 'Permission denied while writing snake_game.html'],
+    ]) {
+      const result = normalizeToolCall({
+        type: 'tool_call',
+        content: { call_id: `call-${name}`, name, status: 'error', output },
+      } as any);
+      expect(result?.status).toBe('error');
+      expect(result?.notExecutedReason).toBeUndefined();
+    }
+  });
+
   it('keeps remote failures fatal even when their arguments are null', () => {
     const result = normalizeToolCall({
       type: 'tool_call',

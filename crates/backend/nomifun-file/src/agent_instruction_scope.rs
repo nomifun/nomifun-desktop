@@ -42,7 +42,11 @@ impl FileService {
     ) -> Result<AgentInstructionScope, AppError> {
         scope.require_operation(WORKSPACE_READ_OPERATION)?;
         validate_relative(&request.path)?;
-        let target = scope.resolve_relative_path(&request.path)?;
+        // The model-facing scope protocol names the workspace root ".", while
+        // ordinary file operations require a normalized relative path. Resolve
+        // that one metadata-only spelling as the binding root without making
+        // "." a valid write/delete target.
+        let target = scope.resolve_relative_path(if request.path == "." { "" } else { &request.path })?;
         let root = scope.workspace_root().to_owned();
         let authority = scope.authority();
         let permit = SCOPE_READS
@@ -202,5 +206,54 @@ fn resolve_missing(path: &Path, authority: &crate::PathAuthority) -> Result<Path
             }
             Err(_) => return Err(invalid()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    struct NullEvents;
+
+    impl nomifun_realtime::UserEventSink for NullEvents {
+        fn send_to_user(
+            &self,
+            _user_id: &str,
+            _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
+        ) {
+        }
+    }
+
+    #[tokio::test]
+    async fn root_scope_uses_the_workspace_binding_without_granting_dot_file_operations() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("AGENTS.md"), "root rules").unwrap();
+        let scope = crate::resource::workspace_binding(
+            nomifun_common::generate_id(),
+            "binding",
+            "workspace",
+            "owner",
+            [WORKSPACE_READ_OPERATION],
+            workspace.path(),
+        )
+        .unwrap();
+        let files = FileService::new(Arc::new(NullEvents), vec![]);
+
+        let observed = files
+            .instruction_scope_for_agent_session(
+                &scope,
+                AgentInstructionScopeRequest { path: ".".into(), recursive: true },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(observed.path, ".");
+        assert_eq!(observed.canonical_path, "");
+        assert_eq!(observed.kind, "directory");
+        assert!(observed.complete);
+        assert!(observed.directories.contains(""));
+        assert!(scope.resolve_relative_path(".").is_err());
     }
 }

@@ -81,10 +81,15 @@ pub trait UnifiedRuntimeHost: Send + Sync {
 
 fn contract_error(error: AgentEngineError) -> AppError {
     match error {
-        error @ AgentEngineError::ContextTooLarge { .. } => {
-            AppError::Internal(format!("Nomi runtime: {error}"))
+        error @ (AgentEngineError::Model { .. }
+        | AgentEngineError::ModelStreamEndedWithoutTerminal
+        | AgentEngineError::InvalidModelEvent(_)) => {
+            AppError::BadGateway(format!("Nomi runtime: {error}"))
         }
-        error => AppError::Conflict(format!("Nomi runtime: {error}")),
+        error @ (AgentEngineError::TurnAlreadyRunning | AgentEngineError::SessionDisposed) => {
+            AppError::Conflict(format!("Nomi runtime: {error}"))
+        }
+        error => AppError::Internal(format!("Nomi runtime: {error}")),
     }
 }
 
@@ -202,6 +207,7 @@ impl TurnProjection {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get(call_id.as_ref())
+                .filter(|call| !call.call_id.starts_with("agent-instructions:"))
                 .cloned()
                 .map(EngineProgress::ToolCall),
             AgentEngineEvent::ToolCompleted { result, .. } => {
@@ -215,6 +221,12 @@ impl TurnProjection {
                             "tool result has no admitted call".to_owned(),
                         )
                     })?;
+                // These are engine-owned instruction preflight reads, not
+                // model-selected work. Keep their durable observations but do
+                // not flood the conversation with synthetic read/error rows.
+                if call.call_id.starts_with("agent-instructions:") {
+                    return Ok(());
+                }
                 call.status = if result.is_error {
                     ToolCallStatus::Error
                 } else {
@@ -380,6 +392,18 @@ mod tests {
         });
         assert!(matches!(error, AppError::Internal(message)
             if message == "Nomi runtime: Nomi context is 8193 bytes, above the 8192 byte limit"));
+    }
+
+    #[test]
+    fn local_runtime_context_failure_keeps_nomifun_ownership() {
+        assert!(matches!(
+            contract_error(AgentEngineError::WorkspaceContext("instruction scope unavailable".into())),
+            AppError::Internal(message) if message.contains("instruction scope unavailable")
+        ));
+        assert!(matches!(
+            contract_error(AgentEngineError::InvalidModelEvent("bad provider frame".into())),
+            AppError::BadGateway(message) if message.contains("bad provider frame")
+        ));
     }
 
     fn options() -> AgentRuntimeBuildOptions {
@@ -720,6 +744,49 @@ mod tests {
         assert_eq!(completed.args, started.args);
         assert_eq!(completed.status, ToolCallStatus::Error);
         assert_eq!(completed.output.as_deref(), Some("file unavailable"));
+        assert_eq!(host.events.lock().unwrap().len(), 3);
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn internal_instruction_read_failure_is_recorded_without_a_chat_tool_row() {
+        use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+        use nomifun_chat_model_broker::{ChatToolCall, ToolCallId};
+
+        let host = Host::new();
+        let runtime = runtime(host.clone(), model(false, false));
+        let state = AgentRuntimeState::new(SESSION, "projection-workspace", 32);
+        let turn = state.reset_for_new_turn(ConversationStatus::Running);
+        let projection = TurnProjection {
+            host: host.clone(),
+            message: message(),
+            output: EngineTurnOutput::new(state.clone(), turn),
+            calls: Mutex::new(BTreeMap::new()),
+            terminal: Mutex::new(None),
+        };
+        let mut events = state.subscribe();
+        let call_id = ToolCallId::from("agent-instructions:100");
+        projection.emit(AgentEngineEvent::ToolCallCompleted {
+            step: 0,
+            call: ChatToolCall {
+                call_id: call_id.clone(),
+                name: "read_file".into(),
+                arguments: StrictJsonValue(serde_json::json!({"format":"instruction_scope","path":"."})),
+                provider_metadata: None,
+            },
+        }).await.unwrap();
+        projection.emit(AgentEngineEvent::ToolStarted {
+            step: 0,
+            call_id: call_id.clone(),
+            capability_id: CapabilityId::from("workspace.files"),
+            action_id: ActionId::from("workspace.files/read"),
+        }).await.unwrap();
+        projection.emit(AgentEngineEvent::ToolCompleted {
+            step: 0,
+            result: AgentToolResult::text(call_id, "instruction discovery failed", true),
+        }).await.unwrap();
+
+        assert!(events.try_recv().is_err());
         assert_eq!(host.events.lock().unwrap().len(), 3);
         runtime.kill_and_wait(None).await.unwrap();
     }

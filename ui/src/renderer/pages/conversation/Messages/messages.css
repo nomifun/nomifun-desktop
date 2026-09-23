@@ -623,6 +623,17 @@ button.turn-process-trace__row:focus-visible {
   word-break: break-word;
 }
 
+.turn-process-trace__text-toggle {
+  display: block;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-primary-6, #165dff);
+  font: inherit;
+  cursor: pointer;
+}
+
 .turn-process-trace-tool__arrow {
   flex: none;
   opacity: 0.72;

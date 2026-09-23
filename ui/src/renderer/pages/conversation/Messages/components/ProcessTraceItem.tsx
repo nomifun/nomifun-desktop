@@ -34,6 +34,40 @@ import {
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
+const PROCESS_TEXT_PREVIEW_CHARS = 180;
+
+const ProcessTextTrace: React.FC<{ content: string }> = ({ content }) => {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const text = content.trim();
+  const compact = text.replace(/\s+/g, ' ');
+  const hasMore = Array.from(compact).length > PROCESS_TEXT_PREVIEW_CHARS;
+  const preview = hasMore
+    ? `${Array.from(compact).slice(0, PROCESS_TEXT_PREVIEW_CHARS).join('')}…`
+    : compact;
+
+  return (
+    <div className='turn-process-trace'>
+      <div className='turn-process-trace__paragraph-row'>
+        <TraceRowIcon kind='system' />
+        <div className='turn-process-trace__paragraph'>
+          {expanded ? text : preview}
+          {hasMore && (
+            <button
+              type='button'
+              className='turn-process-trace__text-toggle'
+              aria-expanded={expanded}
+              onClick={() => setExpanded((value) => !value)}
+            >
+              {t(expanded ? 'messages.processReceipt.collapseText' : 'messages.processReceipt.expandText')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export type ProcessTraceRenderableItem =
   | TMessage
   | {
@@ -137,6 +171,13 @@ const formatToolReceiptDetailLabel = (
     return t('messages.toolSummary.invalidArguments', {
       target: displayTarget ?? row.title,
       defaultValue: 'Arguments did not pass validation; {{target}} was not run',
+    });
+  }
+
+  if (row.notExecutedReason === 'runtime_preflight') {
+    return t('messages.toolSummary.notExecuted', {
+      target: displayTarget ?? row.title,
+      defaultValue: 'Did not run {{target}}',
     });
   }
 
@@ -700,14 +741,7 @@ const ProcessTraceItem: React.FC<{
   switch (item.type) {
     case 'text':
       if (!toDisplayText(item.content.content).trim()) return null;
-      return (
-        <div className='turn-process-trace'>
-          <div className='turn-process-trace__paragraph-row'>
-            <TraceRowIcon kind='system' />
-            <div className='turn-process-trace__paragraph'>{toDisplayText(item.content.content).trim()}</div>
-          </div>
-        </div>
-      );
+      return <ProcessTextTrace content={toDisplayText(item.content.content)} />;
     case 'thinking':
       {
         const content = toDisplayText(item.content.content).trim();

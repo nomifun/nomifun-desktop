@@ -6,13 +6,14 @@
 
 import { ipcBridge } from '@/common';
 import { conversationTarget } from '@/common/types/ids';
-import type { IDirOrFile, IResponseMessage } from '@/common/adapter/ipcBridge';
+import type { IDirOrFile } from '@/common/adapter/ipcBridge';
 import { addEventListener, emitter } from '@/renderer/utils/emitter';
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import { useAbortUploadsOnConversationChange } from '@/renderer/hooks/file/useAbortUploadsOnConversationChange';
-import React, { useCallback, useMemo, useRef } from 'react';
+import React, { useCallback, useMemo } from 'react';
 import WorkspaceRailBody from './WorkspaceRailBody';
 import type { SelectedFile, WorkspaceProps, WorkspaceSource } from './types';
+import { subscribeConversationWorkspaceRefresh } from './workspaceRefresh';
 
 /**
  * Map a source-agnostic {@link SelectedFile} back to the conversation SendBox
@@ -94,53 +95,15 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
     [eventPrefix]
   );
 
-  // --- External refresh: agent-stream writes (throttled) + manual refresh ----
-  // Throttle state lives across the subscription lifetime, so it is owned here
-  // (the source), not in the body. Mirrors the former useWorkspaceEvents logic.
-  const throttleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pendingRef = useRef(false);
-
+  // --- External refresh: file publications, settled turns, tool results ------
   const subscribeRefresh = useCallback(
-    (cb: () => void) => {
-      const throttledRefresh = () => {
-        if (throttleTimerRef.current) {
-          pendingRef.current = true; // Mark pending so trailing refresh fires after window
-          return;
-        }
-        cb();
-        throttleTimerRef.current = setTimeout(() => {
-          throttleTimerRef.current = null;
-          if (pendingRef.current) {
-            pendingRef.current = false;
-            cb(); // Fire trailing refresh for any calls missed during throttle window
-          }
-        }, 2000);
-      };
-
-      const handleResponse = (data: IResponseMessage) => {
-        if (data.conversation_id && data.conversation_id !== conversation_id) return;
-
-        if (data.type === 'tool_call') {
-          const toolData = data.data as { status?: string } | undefined;
-          if (toolData?.status === 'completed') {
-            throttledRefresh();
-          }
-        }
-      };
-
-      const unsubscribeStream = ipcBridge.agentConversation.responseStream.on(handleResponse);
-      const unsubscribeManual = addEventListener(`${eventPrefix}.workspace.refresh`, () => cb());
-
-      return () => {
-        unsubscribeStream();
-        unsubscribeManual();
-        if (throttleTimerRef.current) {
-          clearTimeout(throttleTimerRef.current);
-          throttleTimerRef.current = null;
-        }
-      };
-    },
-    [conversation_id, eventPrefix]
+    (cb: () => void) => subscribeConversationWorkspaceRefresh({
+      responseStream: (listener) => ipcBridge.agentConversation.responseStream.on(listener),
+      fileUpdates: (listener) => ipcBridge.fileStream.contentUpdate.on(listener),
+      turnCompleted: (listener) => ipcBridge.conversation.turnCompleted.on(listener),
+      manual: (listener) => addEventListener(`${eventPrefix}.workspace.refresh`, listener),
+    }, conversation_id, workspace, cb),
+    [conversation_id, eventPrefix, workspace]
   );
 
   // --- Inbound selection sync: SendBox tag close (#1083) + clear -------------

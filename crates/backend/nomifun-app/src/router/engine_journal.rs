@@ -411,6 +411,9 @@ impl EngineTurnJournal {
                     .get("call_id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| failure("host tool dispatch has no call_id"))?;
+                if call_id.starts_with("agent-instructions:") {
+                    return Ok(());
+                }
                 let capability_id = dispatch
                     .get("capability_id")
                     .and_then(Value::as_str)
@@ -463,6 +466,9 @@ impl EngineTurnJournal {
                     .get("call_id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| failure("host tool settlement has no call_id"))?;
+                if call_id.starts_with("agent-instructions:") {
+                    return Ok(());
+                }
                 let identity = format!(
                     "tool-result:{}:{operation}",
                     journal.session.as_ref(),
@@ -662,8 +668,8 @@ impl EngineTurnJournal {
                         }),
                     ),
                     AgentEngineEvent::TurnFailed { model_steps, message } => {
-                        let error = nomifun_ai_agent::AgentSendError::from_app_error(
-                            AppError::Conflict(message.clone()),
+                        let error = nomifun_ai_agent::AgentSendError::from_engine_turn_failure(
+                            message.clone(),
                         )
                         .into_stream_error();
                         (
@@ -966,6 +972,60 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
 mod history_display_tests {
     use super::*;
     use super::super::runtime_event_buffer::AgentEventBuffer;
+
+    #[tokio::test]
+    async fn engine_step_limit_projects_a_local_incomplete_turn_error() {
+        let (journal, pool) = test_fixture().await;
+        journal.append(json!({"phase":"cleanup"}).to_string(), None, EngineJournalWrite::Cleanup)
+            .await.unwrap();
+        let terminal = AgentEngineEvent::TurnFailed {
+            model_steps: 32,
+            message: "model step limit of 32 exceeded".into(),
+        };
+        journal.append(serde_json::to_string(&terminal).unwrap(), None, EngineJournalWrite::Terminal)
+            .await.unwrap();
+
+        let store = AgentSessionStore::from_pool(pool).await.unwrap();
+        let (history, _, _) = store.message_history_before(&journal.0.session, None, 50)
+            .await.unwrap();
+        let summary = history.iter().find(|projection| projection.presentation_intent == "turn_summary")
+            .expect("terminal summary persisted");
+        assert_eq!(summary.projection["error"]["code"], "NOMIFUN_TASK_INCOMPLETE");
+        assert_eq!(summary.projection["error"]["ownership"], "nomifun");
+    }
+
+    #[tokio::test]
+    async fn internal_instruction_preflight_keeps_audit_events_out_of_message_history() {
+        let (journal, pool) = test_fixture().await;
+        for event in [
+            json!({
+                "event": "host_tool_dispatch",
+                "dispatch": {
+                    "operation_id": "instruction-read-1",
+                    "call_id": "agent-instructions:100",
+                    "capability_id": "workspace.files",
+                    "action_id": "workspace.files/read",
+                    "model_name": "read_file"
+                }
+            }),
+            json!({
+                "event": "host_tool_settled",
+                "operation_id": "instruction-read-1",
+                "call_id": "agent-instructions:100",
+                "error": "instruction discovery failed"
+            }),
+        ] {
+            journal.append(event.to_string(), None, EngineJournalWrite::Progress).await.unwrap();
+        }
+
+        let store = AgentSessionStore::from_pool(pool).await.unwrap();
+        let (history, _, _) = store
+            .message_history_before(&journal.0.session, None, 50)
+            .await
+            .unwrap();
+        assert!(history.iter().all(|message| message.presentation_intent != "tool"));
+        assert_eq!(journal.sequence(), 2);
+    }
 
     #[tokio::test]
     async fn buffered_thinking_survives_a_cold_history_read() {
