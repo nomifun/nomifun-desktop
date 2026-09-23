@@ -305,6 +305,8 @@ async fn real_node_receives_unified_context_and_round_trips_all_host_managed_sto
         .iter()
         .map(|value| value.as_str().unwrap().to_ascii_uppercase())
         .collect::<BTreeSet<_>>();
+    // Node on macOS adds this Core Foundation process setting even with an
+    // empty inherited environment (`env -i node` has the same behavior).
     let allowed = [
         "COMSPEC",
         "HOME",
@@ -322,6 +324,7 @@ async fn real_node_receives_unified_context_and_round_trips_all_host_managed_sto
         "WINDIR",
     ]
     .into_iter()
+    .chain(cfg!(target_os = "macos").then_some("__CF_USER_TEXT_ENCODING"))
     .map(str::to_owned)
     .collect::<BTreeSet<_>>();
     assert!(environment.is_subset(&allowed), "unexpected ambient environment: {environment:?}");

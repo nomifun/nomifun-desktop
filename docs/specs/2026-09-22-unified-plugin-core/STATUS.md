@@ -92,6 +92,15 @@
 - 合并提交 `a4a2e25ddfb66e07ef598c9e5da3bc320b52066d` 的 Windows x64 release/NSIS 在当前分支上重建成功：安装器 60,970,183 bytes，SHA-256 `a96c0845bfdd297247bdc8e843407713f4a5cd42f80bc4e6d3b370c42975135d`；本地测试包未签名。候选脚本在此 clean HEAD 通过 native host、source checkpoint、work-root 与安装器 Artifact 检查，然后因已有用户级 `HKCU\Software\Classes\nomifun` 协议注册安全停止；该键仍指向另一开发树的 debug Desktop。安装、启动、WebView2/backend、进程树与卸载检查未执行，不能记为通过。
 - 候选 harness 自测通过；Authenticode admission 单测通过。本地 `build:win` 明确关闭签名，最终安装器的 `NotSigned` 状态符合本地测试包预期，不是签名发布证据。
 - 完整候选冒烟需要用户明确允许临时处理现有协议注册，或在无既有 NomiFun 注册的干净 Windows 账户/主机运行。结构化结果输出到命令 stdout；隔离运行目录限定在 `build.noindex`，不纳入 Git。
-- 当前主机是 Windows，无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
+- 上一轮主机是 Windows，当时无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
 - macOS 目标机接续操作已写入同目录 [`PROMPT-START.zh.md`](PROMPT-START.zh.md)，供另一台 Apple Silicon 机器在同一 `rf/agent-capability-platform-v2` 分支执行。
 - 因 Windows 候选环境保护与 macOS 目标机证据两项外部条件，Goal 保持 `active`；没有已知源码、测试、删除或文档待办。
+
+## macOS arm64 目标机接续（2026-09-23，进行中）
+
+- 本机 `uname -s` 为 `Darwin`、`uname -m` 为 `arm64`；Node 24.12.0、Rust 1.96.0、Bun 1.3.14、Xcode 26.5、macOS 26.5 SDK 和 `aarch64-apple-darwin` target 可用。`bun install --frozen-lockfile` 成功且未改依赖。
+- 从 `origin/rf/agent-capability-platform-v2` 正常快进到 `e4cf0f86facb6a9d4ac366ad9a411f102b6e249b`。本机预存的 `scripts/run-dev.mjs` 与 `scripts/run-dev.test.mjs` 未提交改动未被覆盖，也不纳入本次修复。
+- 隔离根目录：`/Users/muri/.codex/validation/unified-plugin-core-macos-20260923.Mj7t4D`；其 `data/` 与 `work/` 专用于本轮，`logs/` 保存各命令输出和退出码。既有 NomiFun/Plugin/Agent 用户数据未被删除或覆盖。
+- `cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check`、`bun run check`（含桌面 UI 最低 880×600 和 Unified Plugin 边界）、`bun run test:plugin-sdk` 均退出 0；对应日志分别为 `logs/contract.log`、`logs/check.log`、`logs/plugin-sdk.log`。
+- 首轮 `cargo test -p nomifun-plugin-platform --tests -- --test-threads=1` 在 macOS 专属 Service 进程环境断言失败：Node 即使通过 `env -i` 启动，也会注入 `__CF_USER_TEXT_ENCODING`。只在 macOS 测试断言中允许这个精确键；生产 `env_clear`、Host 环境白名单与敏感变量检查保持不变。定向 `service_process` 7/7 和 Plugin Platform 全套重跑已通过；详见 `logs/service-process-retest.log`、`logs/plugin-platform-tests-retest.log`。HTTP E2E、arm64 App/DMG、release lock 和真机产品流仍在执行，未提前记为通过。
+- 原生预检脚本检查 Git 跟踪工作树必须干净。为避让上述用户改动，另建同一 HEAD 的 detached **只读验收检出** `source/`；不创建或切换开发分支，后续预检将明确给出实际构建的 artifact root。
