@@ -86,10 +86,10 @@ the independent `realtime_conversation` task and protocol, never a Chat trait.
 
 The General Agent is preset with image generation, image editing, video
 generation, speech synthesis, and music generation Actions. An explicit
-creation request in an ordinary conversation uses only the user's exact default
+creation request in an ordinary conversation prefers the user's exact default
 for that task:
 
-| Conversation need | Exact default key | Required capability |
+| Conversation need | Default key | Required capability |
 | --- | --- | --- |
 | Image understanding | `models.default.vision` | One Chat capability declaring `vision_input`, with no confirmed tool-calling limitation |
 | Image generation | `models.default.imageGeneration` | `image_generation` |
@@ -98,10 +98,13 @@ for that task:
 | Music generation | `models.default.musicGeneration` | `music_generation` |
 | Speech synthesis | `models.default.speechSynthesis` | `speech_synthesis` |
 
-Automatic media Actions never infer user intent from model order, model names,
-or a sole remaining candidate. Without an exact default, the conversation asks
-the user to choose one in Model Management. Professional creation surfaces may
-still select another compatible model for one explicit task.
+Automatic media Actions use the exact task default when one is configured. With
+no default, they select an enabled model that declares the required task,
+preferring a healthy capability observation, then the provider and model order
+in Model Management. If no compatible model is available, the conversation asks
+the user to configure one. An unavailable configured default is not silently
+replaced. Professional creation surfaces may still select another compatible
+model for one explicit task.
 
 The vision model is frozen into new conversations as a conditional Chat
 candidate. It participates only when the current request actually requires
@@ -112,8 +115,8 @@ The model capability catalog and routing authority are separate layers.
 Creation tasks and multimodal inputs require positive evidence before automatic
 routing. Tool calling, reasoning, and streaming are optimistic until conclusive
 negative evidence narrows later routes. That optimism can never promote a Chat
-model into image/video/music/TTS/ASR generation: automatic creation still uses
-only the user's explicit default for the exact task.
+model into image/video/music/TTS/ASR generation: automatic creation selects
+only models that explicitly support the exact task.
 
 Creative Studio persists the exact `{ providerId, model, task, capability }`
 identity with each admitted media operation. Retrying the same idempotent task

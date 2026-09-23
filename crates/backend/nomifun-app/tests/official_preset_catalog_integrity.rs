@@ -19,7 +19,7 @@ use nomifun_api_types::{
     CapabilityCatalogItemDto,
     AgentChatModelSelectionDto, CapabilityRefDto, CatalogMaterializationStateDto,
     CreateAgentPresetFromTemplateRequest, InspectPluginImportRequest,
-    InstallPluginImportRequest, InstallPluginImportResponseDto, PluginImportInspectionDto,
+    CreateAgentSessionResponseDto, InstallPluginImportRequest, InstallPluginImportResponseDto, PluginImportInspectionDto,
     PluginImportKindDto, PluginInstallOutcomeDto, SkillCatalogItemDto,
 };
 use nomifun_app::compatibility::{
@@ -451,6 +451,21 @@ async fn assert_official_preset_catalog_integrity(
         "{phase}: every capability referenced by a published official preset must exist and be available; missing={missing:#?}; unavailable={unavailable:#?}"
     );
 
+    let companion: serde_json::Value = post_data(
+        router,
+        "/api/companion/companions",
+        &serde_json::json!({"name": "Catalog companion", "character": "ink"}),
+    )
+    .await;
+    let companion_id = companion["companion_id"].as_str().expect("fixture companion id");
+    let customer: serde_json::Value = post_data(
+        router,
+        "/api/customer-service/agents",
+        &serde_json::json!({"name": "Catalog customer", "provider_id": model.provider_id, "model": model.model}),
+    )
+    .await;
+    let customer_id = customer["cs_agent_id"].as_str().expect("fixture customer-service Agent id");
+
     for template in &library.official_templates {
         let template_key = serde_json::to_value(template.template_key)
             .expect("serialize official template key")
@@ -475,6 +490,59 @@ async fn assert_official_preset_catalog_integrity(
             .as_ref()
             .unwrap_or_else(|| panic!("{phase}: {template_key} creation did not persist revision 1"));
         assert_eq!(revision.reference.revision, 1);
+
+        let session: CreateAgentSessionResponseDto = post_data(
+            router,
+            "/api/agent-sessions",
+            &serde_json::json!({
+                "preset_id": editor.preset.preset_id,
+                "title": format!("Catalog gate {phase} {template_key} session"),
+                "resource_selections": official_session_resources(&template_key, companion_id, customer_id),
+            }),
+        )
+        .await;
+        assert_eq!(session.state, "ready", "{phase}: {template_key} did not open a ready Session");
+        assert_eq!(
+            session.agent_binding.preset_revision_ref.preset_id,
+            editor.preset.preset_id,
+            "{phase}: {template_key} opened with a different Agent binding",
+        );
+    }
+}
+
+fn official_session_resources(
+    template_key: &str,
+    companion_id: &str,
+    customer_id: &str,
+) -> serde_json::Value {
+    let resource = |kind: &str, id: &str| serde_json::json!({"resource_kind": kind, "resource_id": id});
+    match template_key {
+        "chat.minimal" => serde_json::json!([]),
+        "assistant.general" => serde_json::json!([
+            resource("computer", "local-desktop"),
+            resource("process_session", "managed-process-session"),
+            resource("project_memory", "default-project-memory"),
+            resource("scheduler", "installation-scheduler"),
+            resource("workspace", "default-workspace"),
+        ]),
+        "coding.codex" => serde_json::json!([
+            resource("process_session", "managed-process-session"),
+            resource("project_memory", "default-project-memory"),
+            resource("workspace", "default-workspace"),
+        ]),
+        "companion.default" => serde_json::json!([
+            resource("companion", companion_id),
+            resource("companion_memory", companion_id),
+            resource("scheduler", "installation-scheduler"),
+        ]),
+        "customer-service.default" => serde_json::json!([resource("customer", customer_id)]),
+        "creative-studio.default" => serde_json::json!([
+            resource("asset_library", "creative-studio-assets"),
+            resource("process_session", "managed-process-session"),
+            resource("project_memory", "default-project-memory"),
+            resource("workspace", "default-workspace"),
+        ]),
+        other => panic!("published official template {other} needs a session resource fixture"),
     }
 }
 
