@@ -150,7 +150,7 @@ Mobile 和小智机器人接入你在 Desktop 中显式开放的能力，Net Inf
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 按任务路由与免费模型</b></sub></td>
+    <td width="50%"><img src="docs/images/readme/zh/models.png" alt="NomiFun 多模型管理"><br/><sub><b>多模型管理 · 供应商、能力与按任务路由</b></sub></td>
     <td width="50%"><img src="docs/images/readme/zh/companions.png" alt="NomiFun 桌面伙伴"><br/><sub><b>桌面伙伴 · 人格、记忆、模型与远程控制</b></sub></td>
   </tr>
   <tr>
@@ -216,7 +216,6 @@ NomiFun Desktop 已经从 Agent 聊天客户端发展为本地优先、可扩展
 | **Agent 小程序** | 把普通 Agent 会话变成可预览、可发布的本地 Web 工具，同时保留可编辑工作副本与稳定的发布快照。 |
 | **创意工坊** | 提供持久化 Canvas、独立 Image/Video Workbench、Prompt Center、My Assets、私有模板、AI Create、多图系列、Canvas Assistant、Creative Studio 技能，以及可选的桌面伙伴协同。 |
 | **按任务路由的多模型控制面** | 将 provider 凭据与模型记录分开管理，支持原生与兼容/自定义 endpoint（含本地、自托管服务），并为聊天、实时、语音、视觉、媒体生成、Embedding 与 Rerank 提供任务级路由和故障切换。 |
-| **NomiFun 免费模型** | 内置托管供应商，无需先手动新建供应商，即可启用、刷新目录、健康检查并开箱使用。 |
 | **手机、机器人与开放接入** | Mobile 直连 Desktop，小智机器人绑定伙伴，并通过 WebUI、REST、MCP、IM 渠道和 NomiRelay 安全开放能力。 |
 
 ### 🐾 桌面伙伴 —— 越用越懂你
@@ -349,7 +348,7 @@ NomiFun 的每一项能力都经由单一、强类型的能力注册表对外开
 - **多模态失败会优雅降级。** 如果当前模型/供应商不接受图片输入，NomiFun 会自动剔除图片、在同一会话里重试，并给出一条可见提示，而不是直接把整段会话打断。
 - **每模型上下文窗口可单独校准。** 当上游平台默认值不准、没报全，或你想精细控制路由与长上下文预算时，可以按模型单独覆写上下文窗口上限。
 
-### 🔌 多模型控制面 —— 供应商、能力与免费模型
+### 🔌 多模型控制面 —— 供应商、能力与路由
 
 NomiFun 把供应商凭据、模型记录与能力分开管理。你可以通过原生 provider、兼容协议、
 自定义 base URL，以及本地或自托管 endpoint 持续扩展目录，再把模型分别用于聊天、
@@ -360,10 +359,6 @@ URL、协议或鉴权方式。
 重要边界是显式能力，而不是固定厂商清单：只有所配置的 provider 与协议声明支持某项
 任务时，模型才会被用于该任务。创意工坊会把精确的 `{ provider, model, task }` 身份
 带入每次媒体操作，不会静默用另一个 provider 的同名模型替换。
-
-**NomiFun 免费模型**通过内置托管供应商提供。无需先新建供应商或填写自己的 API Key，
-即可启用服务、刷新模型目录、执行健康检查并激活可用模型，真正做到开箱即用。它们属于
-在线第三方推理服务，可用性、限额和数据处理方式可能变化；发送敏感内容前请阅读产品内提示。
 
 对于自有供应商，可以按地区、价格、额度、能力和数据政策选择，并在 **模型 & Agent**
 页面填写凭据。下列均为第三方服务，费用、可用地区、速率限制与数据处理规则由各家控制。

@@ -14,7 +14,6 @@ import {
   HeadsetOne,
   LinkCloud,
   SettingTwo,
-  Lightning,
   Pic,
   PreviewOpen,
   SafeRetrieval,
@@ -27,7 +26,6 @@ import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import ModelModalContent from '@/renderer/components/settings/SettingsModal/contents/ModelModalContent';
 import ModelFailoverContent from './ModelFailoverContent';
-import FreeModelsContent from './FreeModelsContent';
 import SpeechToTextContent from './SpeechToTextContent';
 import TextToSpeechContent from './TextToSpeechContent';
 import ChatModelsContent from './ChatModelsContent';
@@ -53,7 +51,6 @@ type Section =
   | 'music'
   | 'embedding'
   | 'rerank'
-  | 'free'
   | 'failover';
 
 /**
@@ -65,6 +62,7 @@ type Section =
 const LEGACY_SECTIONS: Record<string, Section> = {
   speech: 'asr',
   creation: 'image',
+  free: 'chat',
   // 旧全局模型设置已收敛，只保留故障转移队列。
   global: 'failover',
 };
@@ -82,7 +80,6 @@ const SECTION_KEYS: readonly Section[] = [
   'music',
   'embedding',
   'rerank',
-  'free',
   'failover',
 ];
 
@@ -108,11 +105,8 @@ interface SectionGroup {
 }
 
 /**
- * The sidebar's three groups, in the order a model actually travels: a provider
- * is the source of every model, so 供应商与密钥 leads; then one section per model
- * capability; then the things you reach for rarely. 免费模型 sits in the last
- * group on purpose — it is NomiFun-managed, not something the user configured,
- * and the same rule orders the provider groups inside every capability section.
+ * The sidebar groups follow a model from provider access, through capabilities,
+ * to advanced routing controls.
  */
 const SECTION_GROUPS: SectionGroup[] = [
   {
@@ -191,11 +185,6 @@ const SECTION_GROUPS: SectionGroup[] = [
     key: 'advanced',
     titleKey: 'settings.modelHub.groupAdvanced',
     sections: [
-      {
-        key: 'free',
-        labelKey: 'settings.modelHub.sectionFree',
-        icon: <Lightning theme='outline' size='16' strokeWidth={3} />,
-      },
       {
         key: 'failover',
         labelKey: 'settings.modelHub.sectionFailover',
@@ -280,7 +269,6 @@ const ModelHubPage: React.FC = () => {
       {section === 'music' && <MusicModelsContent />}
       {section === 'embedding' && <EmbeddingModelsContent />}
       {section === 'rerank' && <RerankModelsContent />}
-      {section === 'free' && <FreeModelsContent />}
       {section === 'failover' && <ModelFailoverContent />}
     </>
   );

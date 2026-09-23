@@ -91,15 +91,6 @@ import type {
   ModelProtocolManifestResponse,
 } from '../types/provider/modelProtocolManifest';
 import type {
-  CheckManagedModelHealthRequest,
-  ManagedModel,
-  ManagedModelHealthBatchResult,
-  ManagedModelHealthResult,
-  ManagedModelServiceStatus,
-  SetManagedModelEnabledRequest,
-  SetManagedModelServiceEnabledRequest,
-} from '../types/provider/managedModelService';
-import type {
   ProviderModelKeyRequest,
   ProviderModelResponse,
   SaveProviderModelRequest,
@@ -1558,13 +1549,6 @@ export const fileSnapshot = {
 // Mode (Provider management) — routed to /api/providers/*
 // ---------------------------------------------------------------------------
 
-const normalizeManagedModelStatus = (
-  status: ManagedModelServiceStatus
-): ManagedModelServiceStatus => ({
-  ...status,
-  providerId: status.providerId == null ? null : parseProviderId(status.providerId),
-});
-
 export const mode = {
   listProviders: withResponseMap(httpGet<ProviderResponse[], void>('/api/providers'), (providers) =>
     providers.map(fromProviderResponse)
@@ -1633,43 +1617,6 @@ export const mode = {
   probeConnection: httpPost<ProbeProviderConnectionResponse, ProbeProviderConnectionAnonymousRequest>(
     '/api/providers/probe-connection'
   ),
-};
-
-// ---------------------------------------------------------------------------
-// NomiFun-managed free-model service
-// ---------------------------------------------------------------------------
-
-export const managedModelService = {
-  free: {
-    status: withResponseMap(
-      httpGet<ManagedModelServiceStatus, void>('/api/model-services/free/status'),
-      normalizeManagedModelStatus
-    ),
-    models: httpGet<ManagedModel[], void>('/api/model-services/free/models'),
-    refresh: withResponseMap(
-      httpPost<ManagedModelServiceStatus, void>('/api/model-services/free/refresh'),
-      normalizeManagedModelStatus
-    ),
-    setEnabled: withResponseMap(
-      httpPost<ManagedModelServiceStatus, SetManagedModelServiceEnabledRequest>(
-        '/api/model-services/free/activate'
-      ),
-      normalizeManagedModelStatus
-    ),
-    setModelEnabled: withResponseMap(
-      httpPatch<ManagedModelServiceStatus, SetManagedModelEnabledRequest>(
-        (p) => `/api/model-services/free/models/${encodeURIComponent(p.model_id)}`,
-        (p) => ({ enabled: p.enabled })
-      ),
-      normalizeManagedModelStatus
-    ),
-    healthSnapshot: httpGet<ManagedModelHealthResult[], void>('/api/model-services/free/health'),
-    checkHealth: httpPost<ManagedModelHealthBatchResult, void>('/api/model-services/free/health'),
-    checkModelHealth: httpPost<ManagedModelHealthResult, CheckManagedModelHealthRequest>(
-      (p) => `/api/model-services/free/models/${encodeURIComponent(p.model_id)}/health`,
-      () => undefined
-    ),
-  },
 };
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@ mod runtime_patch_recovery;
 mod engine_process_host;
 mod engine_process_recovery;
 mod runtime_event_buffer;
+mod history_process_display;
 mod agent_tool_surface;
 mod runtime_attachments;
 mod runtime_skills;

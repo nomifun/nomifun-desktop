@@ -330,6 +330,32 @@
       "replay_rule": "rebuild_projection"
     },
     {
+      "kind": "thinking/content-part",
+      "version": 1,
+      "persistence": "persistent",
+      "payload_schema": "events/thinking-content-part/v1",
+      "producer": {
+        "allowed": [
+          "runtime_supervisor"
+        ]
+      },
+      "predecessor": {
+        "mode": "any_of",
+        "kinds": [
+          "turn/started"
+        ]
+      },
+      "correlation": "message",
+      "idempotency": "producer_scoped_required",
+      "projector": {
+        "required": true,
+        "reducers": [
+          "message-projection"
+        ]
+      },
+      "replay_rule": "rebuild_projection"
+    },
+    {
       "kind": "message/completed",
       "version": 1,
       "persistence": "persistent",

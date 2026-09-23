@@ -93,10 +93,9 @@ impl ModelFetchService {
         &self,
         req: &FetchModelsAnonymousRequest,
     ) -> Result<FetchModelsResponse, AppError> {
-        if crate::managed_model::is_managed_provider_platform(req.platform.trim()) {
+        if crate::provider::is_retired_provider_platform(req.platform.trim()) {
             return Err(AppError::Forbidden(
-                "Reserved managed model platforms cannot be used for anonymous model fetching"
-                    .into(),
+                "This retired built-in provider platform cannot be recreated".into(),
             ));
         }
         validate_anonymous_request(req)?;
@@ -146,10 +145,9 @@ impl ModelFetchService {
             .find_by_id(provider_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id} not found")))?;
-        if crate::managed_model::is_managed_provider_platform(&row.platform) {
+        if crate::provider::is_retired_provider_platform(&row.platform) {
             return Err(AppError::Forbidden(
-                "Managed model catalogs are available through the dedicated model-service API"
-                    .into(),
+                "This retired built-in provider no longer exposes a model catalog".into(),
             ));
         }
 
@@ -453,18 +451,18 @@ mod tests {
     async fn fetch_models_rejects_noncanonical_provider_id_before_lookup() {
         let (svc, _db) = setup().await;
         let err = svc
-            .fetch_models("nomifun-free-model", &FetchModelsRequest::default())
+            .fetch_models("not-a-provider-id", &FetchModelsRequest::default())
             .await
             .unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)));
     }
 
     #[tokio::test]
-    async fn fetch_models_rejects_persisted_managed_platform_alias() {
+    async fn fetch_models_rejects_retired_builtin_platform() {
         let (svc, db) = setup().await;
         let id = create_provider(
             &db,
-            crate::managed_model::FREE_MODEL_PLATFORM,
+            "nomifun-free-model",
             "http://127.0.0.1:12345/v1",
             "internal-token",
         )
@@ -477,11 +475,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anonymous_fetch_rejects_reserved_managed_platform() {
+    async fn anonymous_fetch_rejects_retired_builtin_platform() {
         let (svc, _db) = setup().await;
         let err = svc
             .fetch_models_anonymous(&FetchModelsAnonymousRequest {
-                platform: crate::managed_model::FREE_MODEL_PLATFORM.into(),
+                platform: "nomifun-free-model".into(),
                 base_url: "https://example.com".into(),
                 auth_scheme: "bearer".into(),
                 credentials: serde_json::json!({"api_keys":["secret"]}),

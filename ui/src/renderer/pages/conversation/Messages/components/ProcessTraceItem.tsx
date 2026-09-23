@@ -274,7 +274,7 @@ const ToolFileListDetail: React.FC<{
           const display = formatWorkspaceFileTarget(target, { workspaceRoots });
           return (
             <li key={target} className='turn-process-trace-file-list__item' title={display.title}>
-              {display.label}
+              {display.title}
             </li>
           );
         })}
@@ -283,9 +283,10 @@ const ToolFileListDetail: React.FC<{
   );
 };
 
-const ToolFileGroupTraceRow: React.FC<{ rows: ToolReceiptDetailRow[]; workspaceRoots: string[] }> = ({
+const ToolFileGroupTraceRow: React.FC<{ rows: ToolReceiptDetailRow[]; workspaceRoots: string[]; currentActivity?: boolean }> = ({
   rows,
   workspaceRoots,
+  currentActivity = false,
 }) => {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -302,6 +303,7 @@ const ToolFileGroupTraceRow: React.FC<{ rows: ToolReceiptDetailRow[]; workspaceR
         className={classNames(
           'turn-process-trace__row',
           'turn-process-trace-tool__toggle',
+          currentActivity && 'turn-process-trace__row--current-activity',
           `turn-process-trace__row--${state}`
         )}
         onClick={() => setExpanded((value) => !value)}
@@ -370,7 +372,15 @@ const ToolTraceDetail: React.FC<{ row: ToolReceiptDetailRow; workspaceRoots: str
   }
 
   if (isFileReceiptRow(row) && row.state !== 'failed' && row.state !== 'canceled') {
-    return <ToolFileListDetail rows={[row]} workspaceRoots={workspaceRoots} />;
+    return (
+      <div className='turn-process-trace-detail'>
+        <ToolFileListDetail rows={[row]} workspaceRoots={workspaceRoots} />
+        <ToolTraceDetailSection
+          label={t('messages.toolDetailOutput', { defaultValue: 'Output' })}
+          value={row.output}
+        />
+      </div>
+    );
   }
 
   return (
@@ -401,24 +411,27 @@ const ToolTraceRow: React.FC<{
   label: string;
   workspaceRoots: string[];
   fileRowCount?: number;
+  currentActivity?: boolean;
 }> = ({
   row,
   label,
   workspaceRoots,
   fileRowCount,
+  currentActivity = false,
 }) => {
   const [expanded, setExpanded] = useState(false);
   const hasDetail = shouldShowToolRowDetail(row, { fileRowCount });
   const rowClassName = classNames(
     'turn-process-trace__row',
     'turn-process-trace-tool__toggle',
+    currentActivity && 'turn-process-trace__row--current-activity',
     `turn-process-trace__row--${row.state}`
   );
 
   if (!hasDetail) {
     return (
       <div className='turn-process-trace-tool'>
-        <div className={classNames('turn-process-trace__row', `turn-process-trace__row--${row.state}`)}>
+        <div className={classNames('turn-process-trace__row', currentActivity && 'turn-process-trace__row--current-activity', `turn-process-trace__row--${row.state}`)}>
           <TraceRowIcon kind={getToolTraceIconKind(row.action)} />
           <span className='turn-process-trace__text' title={row.target ?? label}>
             {label}
@@ -500,10 +513,11 @@ const ToolProcessTraceRows: React.FC<{
   const rows = useMemo(
     () =>
       buildToolReceiptDetailRows(tools).map((row) => {
-        // A group can contain both a genuine failure and a local pre-dispatch
-        // rejection. Preserve the latter's neutral row state instead of
-        // inheriting the failed group override.
-        const effectiveRow = stateOverride && !row.notExecutedReason ? { ...row, state: stateOverride } : row;
+        // Closed turns settle only stale running rows. Completed results and
+        // failures inside a mixed group retain their own lifecycle state.
+        const effectiveRow = stateOverride && row.state === 'running' && !row.notExecutedReason
+          ? { ...row, state: stateOverride }
+          : row;
         const baseLabel = formatToolReceiptDetailLabel(effectiveRow, t, workspaceRoots);
         return {
           row: effectiveRow,
@@ -520,13 +534,18 @@ const ToolProcessTraceRows: React.FC<{
 
   const fileRows = rows.filter(({ row }) => isFileReceiptRow(row)).map(({ row }) => row);
   const nonFileRows = rows.filter(({ row }) => !isFileReceiptRow(row));
+  const currentActivityKey = rows.findLast(({ row }) => row.state === 'running')?.row.key;
 
   if (shouldShowFileListDetail(fileRows)) {
     return (
       <div className='turn-process-trace'>
-        <ToolFileGroupTraceRow rows={fileRows} workspaceRoots={workspaceRoots} />
+        <ToolFileGroupTraceRow
+          rows={fileRows}
+          workspaceRoots={workspaceRoots}
+          currentActivity={fileRows.some((row) => row.key === currentActivityKey)}
+        />
         {nonFileRows.map(({ row, label }) => (
-          <ToolTraceRow key={row.key} row={row} label={label} workspaceRoots={workspaceRoots} />
+          <ToolTraceRow key={row.key} row={row} label={label} workspaceRoots={workspaceRoots} currentActivity={row.key === currentActivityKey} />
         ))}
       </div>
     );
@@ -545,6 +564,7 @@ const ToolProcessTraceRows: React.FC<{
           label={label}
           workspaceRoots={workspaceRoots}
           fileRowCount={fileRows.length}
+          currentActivity={row.key === currentActivityKey}
         />
       ))}
     </div>
@@ -679,11 +699,12 @@ const ProcessTraceItem: React.FC<{
 
   switch (item.type) {
     case 'text':
+      if (!toDisplayText(item.content.content).trim()) return null;
       return (
         <div className='turn-process-trace'>
           <div className='turn-process-trace__paragraph-row'>
             <TraceRowIcon kind='system' />
-            <div className='turn-process-trace__paragraph'>{toDisplayText(item.content.content)}</div>
+            <div className='turn-process-trace__paragraph'>{toDisplayText(item.content.content).trim()}</div>
           </div>
         </div>
       );
@@ -691,10 +712,14 @@ const ProcessTraceItem: React.FC<{
       {
         const content = toDisplayText(item.content.content).trim();
         if (!content || /^\[Private reasoning omitted(?: from replay)?\]$/i.test(content)) return null;
+        const lastLineStart = content.lastIndexOf('\n') + 1;
         return (
           <div className='turn-process-trace turn-process-trace--thinking'>
             <div className='turn-process-trace__paragraph-row turn-process-trace__paragraph-row--thinking'>
-              <div className='turn-process-trace__paragraph'>{content}</div>
+              <div className='turn-process-trace__paragraph'>
+                {content.slice(0, lastLineStart)}
+                <span className='turn-process-trace__thinking-last-line'>{content.slice(lastLineStart)}</span>
+              </div>
             </div>
           </div>
         );

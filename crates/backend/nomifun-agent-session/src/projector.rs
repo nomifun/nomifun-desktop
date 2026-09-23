@@ -18,6 +18,8 @@ struct ProjectionDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     content_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     part_count: Option<u64>,
@@ -138,6 +140,7 @@ pub(crate) fn reduce_agent_messages(
             presentation_intent: presentation_intent.clone(),
             state: None,
             content: None,
+            turn_id: None,
             content_digest: None,
             part_count: None,
             tool_summary: None,
@@ -189,6 +192,7 @@ fn projection_identity(event: &SessionEventRecord) -> (String, String) {
         "session" => "session_status",
         "turn" => "turn_status",
         "message" => "message",
+        "thinking" => "thinking",
         "context" => "context",
         "capability" => "capability",
         "tool" => "tool",
@@ -256,6 +260,33 @@ fn apply_projection_semantics(
                     .unwrap_or_default()
                     .saturating_add(1),
             );
+        }
+        "thinking/content-part" => {
+            let content = payload
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "thinking/content-part requires bounded content".to_owned(),
+                    )
+                })?;
+            let turn_id = payload
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    SessionStoreError::InvalidEvent(
+                        "thinking/content-part requires the owning turn".to_owned(),
+                    )
+                })?;
+            if document.turn_id.as_deref().is_some_and(|existing| existing != turn_id) {
+                return Err(SessionStoreError::InvalidEvent(
+                    "thinking/content-part changed its owning turn".to_owned(),
+                ));
+            }
+            document.state = Some("recorded".to_owned());
+            document.turn_id = Some(turn_id.to_owned());
+            document.content.get_or_insert_with(String::new).push_str(content);
+            document.part_count = Some(document.part_count.unwrap_or_default().saturating_add(1));
         }
         "message/completed" => {
             let expected_part_count = document.part_count.unwrap_or_default();

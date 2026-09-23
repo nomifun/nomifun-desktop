@@ -49,7 +49,7 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes("row.notExecutedReason === 'invalid_arguments'")).toBe(true);
     expect(source.includes('messages.toolSummary.invalidArguments')).toBe(true);
     expect(source.includes('value={row.output}')).toBe(true);
-    expect(source.includes('stateOverride && !row.notExecutedReason')).toBe(true);
+    expect(source.includes("stateOverride && row.state === 'running' && !row.notExecutedReason")).toBe(true);
   });
 
   test('renders read and edit steps with expandable file lists', () => {

@@ -23,6 +23,57 @@ fn repo_file(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
+async fn create_chat_provider(
+    router: &axum::Router,
+    trust_secret: &str,
+    name: &str,
+    model: &str,
+    sort_order: i64,
+) -> Value {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers")
+                .header("x-nomi-local-trust", trust_secret)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "platform": "openai",
+                        "name": name,
+                        "base_url": "https://example.invalid/v1",
+                        "auth_scheme": "bearer",
+                        "credentials": { "api_keys": ["test-only"] },
+                        "enabled": true,
+                        "sort_order": sort_order,
+                        "initial_model": {
+                            "model": model,
+                            "enabled": true,
+                            "capabilities": [{
+                                "task": "chat",
+                                "traits": [],
+                                "protocol": "openai.chat_text",
+                                "connection_role": "default",
+                                "provider_params": {}
+                            }]
+                        }
+                    }))
+                    .expect("serialize provider fixture"),
+                ))
+                .expect("build provider fixture request"),
+        )
+        .await
+        .expect("dispatch provider fixture request");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+        .await
+        .expect("read provider fixture response");
+    let value: Value = serde_json::from_slice(&bytes).expect("provider fixture JSON");
+    assert_eq!(status, StatusCode::CREATED, "{value}");
+    value["data"].clone()
+}
+
 #[test]
 fn default_nomi_core_router_exposes_only_canonical_agent_sessions_and_execution() {
     let routes = repo_file("src/router/routes.rs");
@@ -2283,6 +2334,7 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
         (status, serde_json::from_slice(&bytes).unwrap())
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    create_chat_provider(&router, TRUST, "Configured Agent fixture", "configured-chat", 0).await;
     let (_, before) = call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
     let before_count = before["data"]["user_presets"].as_array().unwrap().len();
     let official_before = before["data"]["official_templates"].clone();
@@ -2968,11 +3020,6 @@ async fn creative_agent_launches_without_enabled_chat_generation_provider_or_can
         (status, serde_json::from_slice(&bytes).unwrap())
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
-    // The managed Provider is a permanent application service and its refresh
-    // task may recreate a deleted projection. Disable it through its owner so
-    // this fixture proves the professional route does not depend on any usable
-    // Chat or media model supply without racing that background task.
-    services.managed_model_service.set_free_enabled(false).await.unwrap();
     let enabled_provider_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM providers WHERE enabled = 1",
     )
@@ -3161,6 +3208,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         (status, serde_json::from_slice(&bytes).unwrap())
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    create_chat_provider(&router, TRUST, "Primary model fixture", "primary-chat", 0).await;
+    create_chat_provider(&router, TRUST, "Fallback model fixture", "fallback-chat", 1).await;
     let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
         "display_name": "Personal model test", "document": {
             "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
@@ -3289,14 +3338,17 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
 
 #[tokio::test]
 async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
-    let (router, services) = common::build_local_trust_app("agent-settings-local-trust").await;
+    const TRUST: &str = "agent-settings-local-trust";
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    create_chat_provider(&router, TRUST, "Primary settings fixture", "primary-chat", 0).await;
+    create_chat_provider(&router, TRUST, "Fallback settings fixture", "fallback-chat", 1).await;
     let response = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/api/agent-presets/from-template/chat.minimal")
-                .header("x-nomi-local-trust", "agent-settings-local-trust")
+                .header("x-nomi-local-trust", TRUST)
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
@@ -3355,8 +3407,8 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     );
     assert_eq!(
         route["primary"]["model"],
-        "big-pickle",
-        "the managed Chat catalog's stable first candidate should be selected"
+        "primary-chat",
+        "the first configured Chat model should be selected"
     );
     assert!(
         route["failovers"].as_array().is_some_and(|items| !items.is_empty()),
@@ -3379,7 +3431,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
         .oneshot(
             Request::builder()
                 .uri(format!("/api/agent-presets/{preset_id}/editor"))
-                .header("x-nomi-local-trust", "agent-settings-local-trust")
+                .header("x-nomi-local-trust", TRUST)
                 .body(Body::empty())
                 .expect("build editor request"),
         )

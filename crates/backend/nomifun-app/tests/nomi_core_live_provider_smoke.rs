@@ -396,18 +396,6 @@ async fn configure_stepfun(
     base_url: &str,
     model: &str,
 ) -> Result<String, SmokeFailure> {
-    let disabled = successful_json(
-        router,
-        "provider.disable_managed",
-        Method::POST,
-        "/api/model-services/free/activate",
-        Some(json!({ "enabled": false })),
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let _ = envelope_data("provider.disable_managed", disabled)?;
-
     let (status, created) = dispatch_json(
         router,
         "provider.create",

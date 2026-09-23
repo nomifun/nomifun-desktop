@@ -940,7 +940,6 @@ pub fn build_system_state(services: &AppServices) -> SystemRouterState {
             connection_repo,
             deletion_coordinator,
         ),
-        managed_model_service: Some(services.managed_model_service.clone()),
         version_check_service: VersionCheckService::new_dynamic(env!("CARGO_PKG_VERSION").to_owned()),
         data_dir: services.data_dir.clone(),
         work_dir: services.work_dir.clone(),

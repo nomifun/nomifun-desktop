@@ -17,7 +17,6 @@ mod file;
 mod idmm;
 mod knowledge;
 mod lifecycle;
-mod managed_model;
 mod model_failover;
 mod mcp;
 mod mcp_bridge;
@@ -135,11 +134,6 @@ pub use knowledge::{
 pub use lifecycle::{
     GitHubReleaseAsset, SystemInfoResponse, UpdateCheckRequest, UpdateCheckResult,
     UpdateReleaseInfo, UpdateWorkDirRequest,
-};
-pub use managed_model::{
-    ManagedModel, ManagedModelHealthBatchResult, ManagedModelHealthErrorKind,
-    ManagedModelHealthResult, ManagedModelHealthStatus, ManagedModelServiceAvailability,
-    ManagedModelServiceStatus, SetManagedModelEnabledRequest, SetManagedModelServiceEnabledRequest,
 };
 pub use model_failover::ModelFailoverConfig;
 pub use mcp::{
