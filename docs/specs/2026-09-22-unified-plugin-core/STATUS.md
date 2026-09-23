@@ -83,14 +83,15 @@
 - `bun run check`：包含 typecheck、`check:desktop-ui-boundary`（1908 renderer sources，最低 880x600）、i18n/theme/icon/dead-css、installer、process/browser/UARC/Unified Plugin/Agent vocabulary 边界，全部通过。
 - `bun run build:ui`：production build 通过；仅保留既有 chunk-size/dynamic-import 提示。
 - 独立生产 WebUI host 在隔离 `build.noindex/unified-plugin-webui-smoke/data` 上启动：`cargo build -p nomifun-web --features static-webui` 通过，实际 `GET /health` 与 `/` 均为 200，页面含应用根节点；未登录 `GET /api/plugins` 为预期 403。只停止了本次启动的进程，未改动现有用户协议注册。
-- `$env:CARGO_BUILD_BUILD_DIR='C:\Users\rika0\AppData\Local\Temp\nfb-unified'; bun run build:win x64`：首次 `rust-lld` 进程以 Windows `0xc0000409` 瞬时退出；资源检查正常，原命令重试成功并完成 NSIS。最终安装器 `NomiFun_0.7.6_x64-setup.exe` 为 60,659,091 bytes，SHA-256 `885ddf2617bd29196c22f2c3381efa71f47354bd8c570cebdbea57f136b5dd8b`。
+- `$env:CARGO_BUILD_BUILD_DIR='C:\Users\rika0\AppData\Local\Temp\nfb-unified'; bun run build:win x64`：合并前首次 `rust-lld` 进程以 Windows `0xc0000409` 瞬时退出；资源检查正常，原命令重试成功并完成 NSIS。该历史包为 60,659,091 bytes，SHA-256 `885ddf2617bd29196c22f2c3381efa71f47354bd8c570cebdbea57f136b5dd8b`；下方平台门禁记录合并后的新包。
 - `git diff --check` 与 staged/unstaged 范围检查通过。
 
 ## 最终平台门禁
 
-- 合入远端新增提交后，合同生成器 write/check、App all-target 编译、`bun run check`（1920 renderer sources）、UI 全量 3582/3582、Plugin HTTP E2E 8/8、Plugin Platform 全套、App lib 457/457、带 Browser/Computer feature 的官方 Preset 3/3、DB schema/index/reset 11/11 已复核。Canvas 六种节点和 Knowledge 旧绑定默认只读的两个远端过期断言已修正。合并后的 Windows 包仍需按当前 HEAD 重建；先前安装器只证明合并前源码。
-- Windows NSIS 最终包已生成。候选脚本在 clean HEAD `558c944d4cc2473009c29de1c3cde1205fd2f08f` 上通过 native host、source checkpoint、work-root 与安装器 Artifact 检查，然后因已有用户级 `HKCU\Software\Classes\nomifun` 协议注册安全停止；该键指向另一开发树的 debug Desktop。安装、启动、WebView2/backend、进程树与卸载检查未执行，不能记为通过。
+- 合入远端新增提交后，合同生成器 write/check、App all-target 编译、`bun run check`（1920 renderer sources）、UI 全量 3582/3582、Plugin HTTP E2E 8/8、Plugin Platform 全套、App lib 457/457、带 Browser/Computer feature 的官方 Preset 3/3、DB schema/index/reset 11/11 已复核。Canvas 六种节点和 Knowledge 旧绑定默认只读的两个远端过期断言已修正。
+- 合并提交 `a4a2e25ddfb66e07ef598c9e5da3bc320b52066d` 的 Windows x64 release/NSIS 在当前分支上重建成功：安装器 60,970,183 bytes，SHA-256 `a96c0845bfdd297247bdc8e843407713f4a5cd42f80bc4e6d3b370c42975135d`；本地测试包未签名。候选脚本在此 clean HEAD 通过 native host、source checkpoint、work-root 与安装器 Artifact 检查，然后因已有用户级 `HKCU\Software\Classes\nomifun` 协议注册安全停止；该键仍指向另一开发树的 debug Desktop。安装、启动、WebView2/backend、进程树与卸载检查未执行，不能记为通过。
 - 候选 harness 自测通过；Authenticode admission 单测通过。本地 `build:win` 明确关闭签名，最终安装器的 `NotSigned` 状态符合本地测试包预期，不是签名发布证据。
 - 完整候选冒烟需要用户明确允许临时处理现有协议注册，或在无既有 NomiFun 注册的干净 Windows 账户/主机运行。结构化结果输出到命令 stdout；隔离运行目录限定在 `build.noindex`，不纳入 Git。
 - 当前主机是 Windows，无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
+- macOS 目标机接续操作已写入同目录 [`PROMPT-START.zh.md`](PROMPT-START.zh.md)，供另一台 Apple Silicon 机器在同一 `rf/agent-capability-platform-v2` 分支执行。
 - 因 Windows 候选环境保护与 macOS 目标机证据两项外部条件，Goal 保持 `active`；没有已知源码、测试、删除或文档待办。
