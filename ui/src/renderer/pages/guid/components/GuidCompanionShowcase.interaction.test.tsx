@@ -12,10 +12,13 @@ import CustomFigure from '../../companion/characters/CustomFigure';
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({ lng: 'en-US', resources: { 'en-US': { translation: { guid } } }, interpolation: { escapeValue: false } });
 const id = (index: number) => parseCompanionId(`019f0000-0000-7000-8000-${String(index).padStart(12, '0')}`);
-const companion = (index: number) => ({ companion_id: id(index), name: `Companion ${index}`, character: 'mochi' }) as ICompanionWithStatus;
+const companion = (index: number, enabled = false) => ({
+  companion_id: id(index), name: `Companion ${index}`, character: 'mochi',
+  appearance: { companion_enabled: enabled },
+}) as ICompanionWithStatus;
 const noop = () => {};
 const mount = (props: Partial<GuidCompanionShowcaseProps> = {}) => render(<I18nextProvider i18n={i18n}>
-  <GuidCompanionShowcaseView companions={[]} onRetry={noop} onCreate={noop} onManage={noop} onOpenChat={noop} {...props} />
+  <GuidCompanionShowcaseView companions={[]} onRetry={noop} onCreate={noop} onManage={noop} onOpenChat={noop} onToggleFloating={noop} {...props} />
   <textarea aria-label='Draft' defaultValue='Keep my unsent work' />
 </I18nextProvider>);
 afterEach(() => { cleanup(); localStorage.clear(); });
@@ -64,6 +67,39 @@ describe('home companion showcase', () => {
     expect((view.getByRole('textbox', { name: 'Draft' }) as HTMLTextAreaElement).value).toBe('Keep my unsent work');
     view.unmount();
     expect(mount({ companions: [companion(1)] }).getByRole('button', { name: 'Expand' })).toBeTruthy();
+  });
+  test('desktop floating switches toggle the intended companion directly in both showcase and roster', async () => {
+    const toggled: Array<[string, boolean]> = [];
+    const opened: string[] = [];
+    const view = mount({
+      companions: [companion(1), companion(2, true)],
+      onToggleFloating: (item, enabled) => toggled.push([item.companion_id, enabled]),
+      onOpenChat: (item) => opened.push(item.companion_id),
+    });
+    const first = view.getByRole('switch', { name: 'Float Companion 1 on desktop' });
+    expect(first.getAttribute('aria-checked')).toBe('false');
+    fireEvent.click(first);
+    expect(toggled).toEqual([[id(1), true]]);
+    expect(opened).toEqual([]);
+    expect(within(document.body).queryByRole('dialog', { name: 'Companion 1' })).toBeNull();
+
+    fireEvent.click(view.getByRole('button', { name: 'All companions · 2' }));
+    await settle();
+    const roster = within(document.body).getByRole('dialog', { name: 'All companions · 2' });
+    const second = within(roster).getByRole('switch', { name: 'Float Companion 2 on desktop' });
+    expect(second.getAttribute('aria-checked')).toBe('true');
+    fireEvent.click(second);
+    expect(toggled).toEqual([[id(1), true], [id(2), false]]);
+    expect(within(document.body).getByRole('dialog', { name: 'All companions · 2' })).toBeTruthy();
+  });
+  test('a pending desktop visibility change shows its target state and prevents a second click', () => {
+    const toggled: boolean[] = [];
+    const view = mount({ companions: [companion(1)], pendingFloating: { [id(1)]: true }, onToggleFloating: (_item, enabled) => toggled.push(enabled) });
+    const toggle = view.getByRole('switch', { name: 'Float Companion 1 on desktop' });
+    expect(toggle.getAttribute('aria-checked')).toBe('true');
+    expect(toggle.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(toggle);
+    expect(toggled).toEqual([]);
   });
   test('more actions operate on their own companion without selecting it or closing the parent prematurely', async () => {
     const managed: string[] = [];

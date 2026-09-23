@@ -222,5 +222,16 @@ export const useCompanions = () => {
     return () => unsubs.forEach((u) => u());
   }, [refresh, refreshOne]);
 
-  return { companions, loading, error, refresh };
+  const setDesktopVisible = useCallback(async (companionId: CompanionId, companion_enabled: boolean) => {
+    const saved = await ipcBridge.companion.patchCompanion.invoke({
+      companion_id: companionId,
+      patch: { appearance: { companion_enabled } },
+    });
+    setCompanions((prev) => prev.map((item) =>
+      item.companion_id === companionId ? { ...item, ...saved } : item
+    ));
+    requestCompanionWindowSync();
+  }, []);
+
+  return { companions, loading, error, refresh, setDesktopVisible };
 };

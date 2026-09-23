@@ -425,6 +425,7 @@ impl ProviderService {
                 provider_params: response.provider_params,
                 context_limit: response.context_limit,
                 output_limit: response.output_limit,
+                compaction_threshold_pct: response.compaction_threshold_pct,
             };
             validate_capability(
                 platform,
@@ -531,6 +532,7 @@ fn validate_capability(
     validate_protocol(platform, capability)?;
     validate_positive_token_limit("context_limit", capability.context_limit)?;
     validate_positive_token_limit("output_limit", capability.output_limit)?;
+    crate::provider_model::validate_compaction_threshold(capability)?;
     validate_provider_params(
         &capability.protocol,
         capability.task,

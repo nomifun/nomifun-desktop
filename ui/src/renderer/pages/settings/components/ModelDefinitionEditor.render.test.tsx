@@ -385,7 +385,7 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(realtimeHtml.includes('data-capability-traits')).toBe(false);
   });
 
-  test('groups both token ceilings under one heading', () => {
+  test('shows Chat context and compaction controls before advanced call configuration', () => {
     const html = render({
       model: 'step-ready',
       capabilities: [
@@ -394,6 +394,12 @@ describe('unified model definition editor rendering and interactions', () => {
     });
 
     expect(html.includes('data-token-limits')).toBe(true);
+    expect(html.includes('data-model-context-settings="chat"')).toBe(true);
+    expect(html.includes('data-model-compaction-threshold')).toBe(true);
+    expect(html.includes('自动压缩阈值')).toBe(true);
+    expect(html.indexOf('data-model-context-settings="chat"')).toBeLessThan(
+      html.indexOf('data-capability-details="chat"')
+    );
     expect(html.includes('上下文窗口')).toBe(true);
     expect(html.includes('最大输出（tokens）')).toBe(true);
     expect(html.includes('data-output-limit-input')).toBe(true);

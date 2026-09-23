@@ -257,6 +257,7 @@ impl ProviderModelService {
             }
             validate_positive_token_limit("context_limit", capability.context_limit)?;
             validate_positive_token_limit("output_limit", capability.output_limit)?;
+            validate_compaction_threshold(capability)?;
             validate_provider_params(
                 &capability.protocol,
                 capability.task,
@@ -361,6 +362,19 @@ pub(crate) fn validate_positive_token_limit(
         return Err(AppError::BadRequest(format!(
             "capability {field} must be greater than zero"
         )));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_compaction_threshold(
+    capability: &ProviderModelCapabilityInput,
+) -> Result<(), AppError> {
+    if let Some(pct) = capability.compaction_threshold_pct {
+        if capability.task != ModelTask::Chat || !(50..=95).contains(&pct) {
+            return Err(AppError::BadRequest(
+                "compaction_threshold_pct is supported only for Chat and must be 50-95".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -729,6 +743,7 @@ pub(crate) struct SerializedCapability {
     provider_params: String,
     context_limit: Option<i64>,
     output_limit: Option<i64>,
+    compaction_threshold_pct: Option<u8>,
 }
 
 impl SerializedCapability {
@@ -747,6 +762,7 @@ impl SerializedCapability {
             provider_params: &self.provider_params,
             context_limit: self.context_limit,
             output_limit: self.output_limit,
+            compaction_threshold_pct: self.compaction_threshold_pct.map(i64::from),
         }
     }
 }
@@ -779,6 +795,7 @@ pub(crate) fn serialize_capabilities(
                 )?,
                 context_limit: capability.context_limit,
                 output_limit: capability.output_limit,
+                compaction_threshold_pct: capability.compaction_threshold_pct,
             })
         })
         .collect()
@@ -898,6 +915,7 @@ pub(crate) fn capability_row_to_response(
         provider_params,
         context_limit: row.context_limit,
         output_limit: row.output_limit,
+        compaction_threshold_pct: row.compaction_threshold_pct.map(|pct| u8::try_from(pct)).transpose().map_err(|_| AppError::Internal("invalid saved compaction threshold".into()))?,
         health,
         health_checked_at: row.health_checked_at,
         created_at: row.created_at,
@@ -924,6 +942,7 @@ mod tests {
             provider_params: serde_json::json!({}),
             context_limit: None,
             output_limit: None,
+            compaction_threshold_pct: None,
         }
     }
 

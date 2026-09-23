@@ -4,6 +4,7 @@ import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
 import { useCompanions } from '@/renderer/pages/nomi/useNomi';
+import { Message } from '@arco-design/web-react';
 import { Add, CloseSmall, Down, More, Right, Search, Up } from '@icon-park/react';
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -29,10 +30,12 @@ export type GuidCompanionShowcaseProps = {
   onCreate: () => void;
   onManage: (id?: CompanionId) => void;
   onOpenChat: (companion: ICompanionWithStatus) => void;
+  onToggleFloating: (companion: ICompanionWithStatus, enabled: boolean) => void;
+  pendingFloating?: Partial<Record<CompanionId, boolean>>;
 };
 
 /** No sample companions are injected: every displayed figure belongs to the user's roster. */
-export function GuidCompanionShowcaseView({ companions, loading, error, openingId, onRetry, onCreate, onManage, onOpenChat }: GuidCompanionShowcaseProps) {
+export function GuidCompanionShowcaseView({ companions, loading, error, openingId, onRetry, onCreate, onManage, onOpenChat, onToggleFloating, pendingFloating }: GuidCompanionShowcaseProps) {
   const { t } = useTranslation();
   const { ref, width } = useContainerWidth<HTMLElement>();
   const [collapsed, setCollapsed] = useState(readCollapsed);
@@ -85,6 +88,15 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
     // The selected figure is promoted into the visible set before its popover opens.
     setDetailId(companion.companion_id);
   };
+  const floatingSwitch = (companion: ICompanionWithStatus) => {
+    const pending = pendingFloating?.[companion.companion_id];
+    const enabled = pending ?? companion.appearance.companion_enabled;
+    return <button type='button' role='switch' className={styles.floatingSwitch}
+      aria-label={t('guid.showcase.floatingFor', { name: companion.name })}
+      aria-checked={enabled} aria-busy={pending !== undefined} disabled={pending !== undefined}
+      title={t('guid.showcase.floating')}
+      onClick={() => onToggleFloating(companion, !enabled)}><span /></button>;
+  };
 
   return <section ref={ref} className={styles.showcase} aria-label={t('guid.showcase.title')} data-collapsed={collapsed}>
     <header className={styles.header}>
@@ -114,6 +126,7 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
                   <span className={styles.rosterAvatar}>{avatar(companion, 28)}</span>
                   <span className={styles.rosterName} title={companion.name}>{companion.name}</span>
                 </button>
+                {floatingSwitch(companion)}
                 <GuidPopover open={rosterMenuId === companion.companion_id}
                   onOpenChange={(open) => setRosterMenuId(open ? companion.companion_id : null)}
                   label={t('guid.showcase.moreFor', { name: companion.name })}
@@ -157,24 +170,30 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
           const meta = customFigureMetaOf(companion);
           const figureHeight = fitShowcaseFigure(meta?.aspect ?? 1, Math.min(slotWidth - 18, 210), meta ? 216 : 136);
           const selected = selectedId === companion.companion_id;
-          return <GuidPopover key={`${companion.companion_id}-${collapsed}`} open={detailId === companion.companion_id}
-            onOpenChange={(open) => { setDetailId(open ? companion.companion_id : null); if (open) setSelectedId(companion.companion_id); }}
-            label={companion.name} pressed={selected} placement={collapsed ? 'top' : 'right-start'} anchorToFigure={!collapsed}
-            panelClassName={styles.detail} triggerClassName={collapsed ? styles.compactCompanion : styles.companion}
-            trigger={<>
-              <span className={collapsed ? styles.smallAvatar : styles.figureSlot}>
-                <span data-showcase-art className={styles.figureArtwork}>{avatar(companion, collapsed ? 36 : figureHeight, !collapsed)}</span>
-                {!collapsed && <img src={podium} alt='' className={styles.podium} />}
-              </span>
-              <span className={styles.companionName} title={companion.name}>{companion.name}</span>
-            </>}>
-            <strong className={styles.detailName}>{companion.name}</strong>
-            <button type='button' className={styles.primaryButton} disabled={Boolean(openingId)}
-              onClick={() => onOpenChat(companion)}>
-              {openingId === companion.companion_id ? t('guid.showcase.opening') : t('guid.showcase.openChat')}<Right size={14} />
-            </button>
-            <button type='button' className={styles.textButton} onClick={() => onManage(companion.companion_id)}>{t('guid.showcase.manage')}</button>
-          </GuidPopover>;
+          return <div key={`${companion.companion_id}-${collapsed}`} className={collapsed ? styles.compactTile : styles.tile}>
+            <GuidPopover open={detailId === companion.companion_id}
+              onOpenChange={(open) => { setDetailId(open ? companion.companion_id : null); if (open) setSelectedId(companion.companion_id); }}
+              label={companion.name} pressed={selected} placement={collapsed ? 'top' : 'right-start'} anchorToFigure={!collapsed}
+              panelClassName={styles.detail} triggerClassName={collapsed ? styles.compactCompanion : styles.companion}
+              trigger={<>
+                <span className={collapsed ? styles.smallAvatar : styles.figureSlot}>
+                  <span data-showcase-art className={styles.figureArtwork}>{avatar(companion, collapsed ? 36 : figureHeight, !collapsed)}</span>
+                  {!collapsed && <img src={podium} alt='' className={styles.podium} />}
+                </span>
+                <span className={styles.companionName} title={companion.name}>{companion.name}</span>
+              </>}>
+              <strong className={styles.detailName}>{companion.name}</strong>
+              <button type='button' className={styles.primaryButton} disabled={Boolean(openingId)}
+                onClick={() => onOpenChat(companion)}>
+                {openingId === companion.companion_id ? t('guid.showcase.opening') : t('guid.showcase.openChat')}<Right size={14} />
+              </button>
+              <button type='button' className={styles.textButton} onClick={() => onManage(companion.companion_id)}>{t('guid.showcase.manage')}</button>
+            </GuidPopover>
+            <div className={styles.floatingControl}>
+              <span>{t('guid.showcase.floating')}</span>
+              {floatingSwitch(companion)}
+            </div>
+          </div>;
         })}
       </div>}
     </div>
@@ -185,16 +204,35 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
 export default function GuidCompanionShowcase() {
   const roster = useCompanions();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [createOpen, setCreateOpen] = useState(false);
+  const [pendingFloating, setPendingFloating] = useState<Partial<Record<CompanionId, boolean>>>({});
   const manage = (id?: CompanionId) => {
     void navigate(id ? `/nomi?companion=${encodeURIComponent(id)}&mode=manage&tab=overview` : '/nomi?mode=manage');
   };
   const openChat = (companion: ICompanionWithStatus) => {
     void navigate(`/nomi?companion=${encodeURIComponent(companion.companion_id)}&mode=cohabit`);
   };
+  const toggleFloating = async (companion: ICompanionWithStatus, enabled: boolean) => {
+    const id = companion.companion_id;
+    if (pendingFloating[id] !== undefined) return;
+    setPendingFloating((prev) => ({ ...prev, [id]: enabled }));
+    try {
+      await roster.setDesktopVisible(id, enabled);
+    } catch (cause) {
+      Message.error(`${t('guid.showcase.floatingFailed')}: ${String(cause)}`);
+    } finally {
+      setPendingFloating((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+    }
+  };
   return <>
     <GuidCompanionShowcaseView {...roster} onRetry={() => void roster.refresh()}
-      onCreate={() => setCreateOpen(true)} onManage={manage} onOpenChat={(companion) => void openChat(companion)} />
+      onCreate={() => setCreateOpen(true)} onManage={manage} onOpenChat={(companion) => void openChat(companion)}
+      onToggleFloating={(companion, enabled) => void toggleFloating(companion, enabled)} pendingFloating={pendingFloating} />
     {createOpen && <Suspense fallback={null}><CreateCompanionModal visible onCancel={() => setCreateOpen(false)} onCreated={(profile) => manage(profile.companion_id)} /></Suspense>}
   </>;
 }
