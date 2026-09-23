@@ -300,7 +300,7 @@ export function canvasVideoComposeMode(
   const imageAssetIds = [
     ...new Set(
       incoming.flatMap((node) =>
-        (node.type === 'image' || node.type === 'panorama') && node.data.assetId
+        node.type === 'image' && node.data.assetId
           ? [node.data.assetId]
           : []
       )

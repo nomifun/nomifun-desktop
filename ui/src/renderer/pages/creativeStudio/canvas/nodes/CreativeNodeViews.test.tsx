@@ -35,12 +35,6 @@ const nodes: CreativeCanvasNode[] = [
   },
   {
     ...base,
-    id: 'panorama-1',
-    type: 'panorama',
-    data: { assetId: null, projection: 'equirectangular', yaw: 14, pitch: -5, fieldOfView: 82 },
-  },
-  {
-    ...base,
     id: 'text-1',
     type: 'text',
     data: { text: '第一幕：雨夜', format: 'markdown', fontSize: 18, textAlign: 'left' },
@@ -96,7 +90,7 @@ const renderCanvas = (content: React.ReactNode) =>
 
 describe('Creative Studio canonical node views', () => {
   test('renders deleted media nodes without their original image, video, or audio URLs', () => {
-    for (const node of nodes.filter((node) => ['image', 'panorama', 'video', 'audio'].includes(node.type))) {
+    for (const node of nodes.filter((node) => ['image', 'video', 'audio'].includes(node.type))) {
       const html = renderToStaticMarkup(withCanvasTestI18n(
         <CreativeNodeView node={node} asset={{ src: '', label: 'Deleted original', deleted: true }} />
       ));
@@ -106,12 +100,12 @@ describe('Creative Studio canonical node views', () => {
       expect(html.includes('<audio')).toBe(false);
     }
   });
-  test('renders the seven user-facing kinds and keeps config task records headless', () => {
+  test('renders the six user-facing kinds and keeps config task records headless', () => {
     const html = renderCanvas(
       <>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} selected={node.id === 'text-1'} />)}</>
     );
 
-    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(7);
+    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(6);
     for (const kind of CREATIVE_NODE_VIEW_KINDS) {
       expect(html.includes(`data-node-type="${kind}"`)).toBe(true);
     }

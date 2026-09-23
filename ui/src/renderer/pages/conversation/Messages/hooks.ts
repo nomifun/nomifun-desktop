@@ -19,6 +19,7 @@ import type {
   TMessage,
 } from '@/common/chat/chatLib';
 import { toDisplayText } from '@/common/chat/displayText';
+import { isConversationAgentTemplateKey } from '@/renderer/components/agent/conversationAgentCatalog';
 import {
   composeMessage,
   mergeToolCallContent,
@@ -553,6 +554,32 @@ const parseJsonArray = (value: unknown): unknown[] | undefined => {
 const normalizeTipType = (value: unknown, fallback: IMessageTips['content']['type']) =>
   value === 'success' || value === 'warning' || value === 'error' ? value : fallback;
 
+const normalizeAgentTransition = (
+  value: unknown
+): IMessageTips['content']['agent_transition'] | undefined => {
+  if (!isRecord(value)
+    || typeof value.transition_id !== 'string'
+    || typeof value.previous_agent_label !== 'string'
+    || typeof value.next_agent_label !== 'string'
+    || value.effective_from !== 'next_turn'
+    || (value.handoff_mode !== 'continue_task' && value.handoff_mode !== 'context_only')
+    || value.completion_gate_inherited !== false) return undefined;
+  return {
+    transition_id: value.transition_id,
+    previous_agent_label: value.previous_agent_label,
+    next_agent_label: value.next_agent_label,
+    ...(typeof value.previous_preset_id === 'string' ? { previous_preset_id: value.previous_preset_id } : {}),
+    ...(typeof value.next_preset_id === 'string' ? { next_preset_id: value.next_preset_id } : {}),
+    ...(typeof value.previous_template_key === 'string' && isConversationAgentTemplateKey(value.previous_template_key)
+      ? { previous_template_key: value.previous_template_key } : {}),
+    ...(typeof value.next_template_key === 'string' && isConversationAgentTemplateKey(value.next_template_key)
+      ? { next_template_key: value.next_template_key } : {}),
+    effective_from: 'next_turn',
+    handoff_mode: value.handoff_mode,
+    completion_gate_inherited: false,
+  };
+};
+
 const normalizePersistedWorkspaceRuntimeError = (
   parsed: Record<string, unknown>,
   message: string
@@ -673,6 +700,15 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
         normalizeAgentStreamError({ ...parsed, message: parsed.content }))
       : undefined;
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
+  const agentTransition = tipType === 'success' ? normalizeAgentTransition(parsed.agent_transition) : undefined;
+  const startedAtMs =
+    typeof parsed.started_at_ms === 'number' && Number.isFinite(parsed.started_at_ms) && parsed.started_at_ms > 0
+      ? parsed.started_at_ms
+      : undefined;
+  const finishedAtMs =
+    typeof parsed.finished_at_ms === 'number' && Number.isFinite(parsed.finished_at_ms) && parsed.finished_at_ms > 0
+      ? parsed.finished_at_ms
+      : undefined;
 
   return {
     ...msg,
@@ -682,6 +718,9 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       type: tipType,
       ...(structuredError ? { error: structuredError } : {}),
       ...(recovery ? { recovery } : {}),
+      ...(agentTransition ? { agent_transition: agentTransition } : {}),
+      ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
+      ...(finishedAtMs !== undefined ? { finished_at_ms: finishedAtMs } : {}),
     },
   } as IMessageTips;
 };

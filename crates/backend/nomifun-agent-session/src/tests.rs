@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    ActionId, AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
-    AgentSessionMetadata, ArtifactId, CapabilityId, CompactionCompletedPayload, CorrelationId,
+    ActionId, AgentBindingValue, AgentHandoffBindingRefV1, AgentHandoffEnvelopeV1,
+    AgentHandoffInputCitationV1, AgentHandoffMode, AgentHandoffRequirementV1, AgentPresetId,
+    AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId, CapabilityId,
+    CompactionCompletedPayload, CorrelationId,
     ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
     IdempotencyKey, LogicalArtifactRef, OperationId, PresetRevisionRef, PrincipalRef,
     RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotId, ResolvedSnapshotRef,
@@ -21,8 +23,8 @@ use uuid::Uuid;
 use crate::{
     AgentEffectState, AgentSessionStore, ChatOperationClaimRequest, CreateSessionRequest,
     EffectEventRequest, EffectReconcileOutcome, EffectStrategy, EffectTerminalState, ForkRequest,
-    RuntimeAppendContext, SessionStoreError, TurnReceiptStatus, evaluate_snapshot_compatibility,
-    validate_checkpoint,
+    ReplaceSessionAgentBinding, RuntimeAppendContext, SessionStoreError, TurnReceiptStatus,
+    evaluate_snapshot_compatibility, validate_checkpoint,
 };
 use crate::projector::reduce_agent_messages;
 
@@ -94,6 +96,40 @@ fn binding() -> AgentBindingValue {
         resolved_snapshot_ref: snapshot_ref(),
         typed_resource_bindings: Vec::new(),
         binding_version: 1,
+    }
+}
+
+fn agent_replacement(expected: &AgentBindingValue, suffix: &str) -> AgentBindingValue {
+    let mut replacement = expected.clone();
+    replacement.preset_revision_ref = PresetRevisionRef {
+        preset_id: AgentPresetId(format!("agent-{suffix}")),
+        revision: 1,
+        revision_digest: digest('c'),
+    };
+    replacement.resolved_snapshot_ref = ResolvedSnapshotRef {
+        snapshot_id: ResolvedSnapshotId(format!("snapshot-agent-{suffix}")),
+        snapshot_digest: digest('d'),
+    };
+    replacement.binding_version += 1;
+    replacement
+}
+
+fn agent_switch(
+    expected: AgentBindingValue,
+    replacement: AgentBindingValue,
+    key: &str,
+) -> ReplaceSessionAgentBinding {
+    ReplaceSessionAgentBinding {
+        expected,
+        replacement,
+        previous_agent_label: "Source Agent".to_owned(),
+        next_agent_label: "Target Agent".to_owned(),
+        transition_id: OperationId::from(Uuid::now_v7().to_string()),
+        request_digest: digest('9'),
+        idempotency_key: IdempotencyKey::from(format!("agent-switch-{key}")),
+        handoff_mode: AgentHandoffMode::ContextOnly,
+        handoff: None,
+        initial_active_capability_ids: vec!["agent.collaboration".to_owned()],
     }
 }
 
@@ -603,6 +639,446 @@ async fn session_model_binding_replacement_rejects_an_active_turn_and_remote_pro
             )
             .await,
         Err(SessionStoreError::Conflict(message)) if message.contains("Remote")
+    ));
+}
+
+#[tokio::test]
+async fn full_agent_transition_is_atomic_audited_generated_and_idempotent() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "agent-transition").await;
+    let expected = session.agent_binding.clone();
+    let runtime_binding_id = RuntimeBindingId::from("runtime-agent-transition");
+    let mut bound = append(
+        &session.agent_session_id,
+        "event-runtime-agent-transition",
+        "runtime-supervisor",
+        "runtime-agent-transition",
+        "runtime/bound",
+        runtime_binding_id.as_ref(),
+        Some(ready_event),
+        json!({
+            "protocol_version": "1",
+            "resolved_snapshot_ref": expected.resolved_snapshot_ref.clone(),
+        }),
+    );
+    bound.runtime_binding_id = Some(runtime_binding_id);
+    bound.runtime_producer_seq = Some(1);
+    store.append_event(&bound).await.unwrap();
+    let mut replacement = agent_replacement(&expected, "target");
+    replacement.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId::from("workspace:target"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("target"),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    let request = agent_switch(expected.clone(), replacement.clone(), "atomic");
+
+    let changed = store
+        .replace_session_agent_binding(&owner(), &session.agent_session_id, request.clone())
+        .await
+        .unwrap();
+    assert!(!changed.duplicate);
+    assert!(changed.runtime_discard_ack.is_some());
+    assert_eq!(changed.session.agent_binding, replacement);
+    assert_eq!(changed.transition.previous_binding_ref.binding_version, 1);
+    assert_eq!(changed.transition.next_binding_ref.binding_version, 2);
+    assert!(!changed.transition.completion_gate_inherited);
+    assert_eq!(
+        store
+            .session_resources(&session.agent_session_id)
+            .await
+            .unwrap(),
+        replacement.typed_resource_bindings,
+    );
+    let head = store.head(&session.agent_session_id).await.unwrap();
+    assert_eq!(head.active_set_generation, 1);
+    assert!(head.runtime_bound_event_id.is_none());
+    assert!(head.runtime_checkpoint_locator.is_none());
+    assert_eq!(
+        store
+            .active_capability_ids(&session.agent_session_id)
+            .await
+            .unwrap(),
+        ["agent.collaboration"]
+    );
+    let events = store.read_events(&session.agent_session_id, None, 100).await.unwrap();
+    assert!(events.events.iter().any(|event| {
+        event.kind.0 == "session/agent-binding-changed"
+            && event.correlation_id.as_ref() == request.transition_id.as_ref()
+    }));
+    let marker = store
+        .messages_after(&session.agent_session_id, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.presentation_intent == "agent_transition")
+        .expect("canonical transition marker projection");
+    assert_eq!(
+        marker.projection["reference"]["next_agent_label"],
+        "Target Agent"
+    );
+
+    let replay = store
+        .replace_session_agent_binding(&owner(), &session.agent_session_id, request)
+        .await
+        .unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.transition_ack, changed.transition_ack);
+    assert_eq!(replay.active_set_ack, changed.active_set_ack);
+}
+
+#[tokio::test]
+async fn full_agent_transition_persists_only_a_bounded_exact_closed_turn_handoff() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let operation = "handoff-source-turn";
+    let (session, turn_event) = create_turn(&store, "agent-handoff", operation).await;
+    let terminal = store
+        .append_event(&append(
+            &session.agent_session_id,
+            "event-handoff-terminal",
+            "runtime-supervisor",
+            "handoff-terminal",
+            "turn/completed",
+            operation,
+            Some(turn_event),
+            json!({ "result": "closed" }),
+        ))
+        .await
+        .unwrap()
+        .ack
+        .unwrap();
+    let expected = session.agent_binding.clone();
+    let replacement = agent_replacement(&expected, "handoff-target");
+    let envelope = AgentHandoffEnvelopeV1 {
+        schema_version: nomifun_agent_contracts::AGENT_HANDOFF_ENVELOPE_SCHEMA_V1.to_owned(),
+        source_agent_session_id: session.agent_session_id.clone(),
+        source_turn_operation_id: OperationId::from(operation),
+        source_through_seq: terminal.seq,
+        source_binding_ref: AgentHandoffBindingRefV1::from(&expected),
+        target_binding_ref: AgentHandoffBindingRefV1::from(&replacement),
+        mode: AgentHandoffMode::ContinueTask,
+        completion_gate_inherited: false,
+        requirements: vec![AgentHandoffRequirementV1 {
+            id: "req-1".to_owned(),
+            description: "Preserve exact task scope".to_owned(),
+            source: AgentHandoffInputCitationV1 {
+                input: 0,
+                quote: "task scope".to_owned(),
+            },
+            origin: None,
+        }],
+        last_plan: None,
+        historical_completion_account: None,
+        verified_artifacts: Vec::new(),
+        unresolved_items: vec!["Re-verify the workspace".to_owned()],
+        warnings: vec!["Historical data only".to_owned()],
+    };
+    let mut request = agent_switch(expected.clone(), replacement.clone(), "handoff");
+    request.handoff_mode = AgentHandoffMode::ContinueTask;
+    request.handoff = Some(envelope.clone());
+
+    let mut invalid = request.clone();
+    invalid.handoff.as_mut().unwrap().source_through_seq += 1;
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(&owner(), &session.agent_session_id, invalid)
+            .await,
+        Err(SessionStoreError::InvalidPayload(message)) if message.contains("closed Turn")
+    ));
+    assert_eq!(
+        store
+            .get_live_session(&session.agent_session_id)
+            .await
+            .unwrap()
+            .agent_binding,
+        expected
+    );
+    let payload_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_payloads WHERE session_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(payload_count, 0, "failed handoff leaves no orphan payload");
+
+    let changed = store
+        .replace_session_agent_binding(&owner(), &session.agent_session_id, request)
+        .await
+        .unwrap();
+    assert!(changed.transition.handoff_payload_id.is_some());
+    assert!(changed.transition.handoff_payload_digest.is_some());
+    assert!(!changed.transition.completion_gate_inherited);
+    let stored: (String, i64, String) = sqlx::query_as(
+        "SELECT media_type, byte_len, digest FROM agent_payloads WHERE session_id = ?",
+    )
+    .bind(session.agent_session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "application/vnd.nomifun.agent-handoff+json;version=1");
+    assert!(stored.1 > 0 && stored.1 <= 80 * 1024);
+    assert_eq!(
+        changed.transition.handoff_payload_digest.as_ref().unwrap().as_ref(),
+        stored.2
+    );
+}
+
+#[tokio::test]
+async fn full_agent_transition_rolls_back_on_resource_failure_and_rejects_stale_active_remote() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "agent-transition-rollback").await;
+    let expected = session.agent_binding.clone();
+    let mut invalid = agent_replacement(&expected, "invalid-resource");
+    invalid.typed_resource_bindings = vec![TypedResourceBinding {
+        binding_id: ResourceBindingId::from("foreign-resource"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("foreign"),
+        owner_id: "another-owner".to_owned(),
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    }];
+    assert!(store
+        .replace_session_agent_binding(
+            &owner(),
+            &session.agent_session_id,
+            agent_switch(expected.clone(), invalid, "rollback"),
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .get_live_session(&session.agent_session_id)
+            .await
+            .unwrap()
+            .agent_binding,
+        expected,
+    );
+    assert!(store
+        .session_resources(&session.agent_session_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().active_set_generation, 0);
+
+    let (active, _) = create_turn(&store, "agent-transition-active", "active-switch").await;
+    let active_expected = active.agent_binding.clone();
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(
+                &owner(),
+                &active.agent_session_id,
+                agent_switch(
+                    active_expected.clone(),
+                    agent_replacement(&active_expected, "active"),
+                    "active",
+                ),
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
+    ));
+
+    let mut remote = live_session(session_id());
+    remote.remote_binding_provenance = Some(RemoteBindingProvenance {
+        remote_binding_id: RemoteBindingId::from("remote-agent-transition"),
+        binding_version: 1,
+    });
+    let remote = store
+        .create_session(create_request(remote, "remote-agent-transition"))
+        .await
+        .unwrap();
+    let remote_expected = remote.session.agent_binding.clone();
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(
+                &owner(),
+                &remote.session.agent_session_id,
+                agent_switch(
+                    remote_expected.clone(),
+                    agent_replacement(&remote_expected, "remote"),
+                    "remote",
+                ),
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("Remote")
+    ));
+
+    let (effect_session, _, effect_event) = create_pending_effect(
+        &store,
+        "agent-transition-effect",
+        EffectStrategy::ManagedEffect,
+    )
+    .await;
+    store
+        .append_event(&append(
+            &effect_session.agent_session_id,
+            "event-agent-transition-effect-terminal",
+            "runtime-supervisor",
+            "agent-transition-effect-terminal",
+            "turn/completed",
+            "effect-turn-agent-transition-effect",
+            Some(effect_event),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    let effect_expected = effect_session.agent_binding.clone();
+    assert!(matches!(
+        store
+            .replace_session_agent_binding(
+                &owner(),
+                &effect_session.agent_session_id,
+                agent_switch(
+                    effect_expected.clone(),
+                    agent_replacement(&effect_expected, "effect"),
+                    "effect",
+                ),
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("unsettled effects")
+    ));
+}
+
+#[tokio::test]
+async fn session_resource_replacement_updates_json_and_resource_projection_atomically() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    sqlx::query("CREATE TABLE knowledge_bases (knowledge_base_id TEXT PRIMARY KEY) STRICT")
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    for id in ["a", "b"] {
+        sqlx::query("INSERT INTO knowledge_bases (knowledge_base_id) VALUES (?)")
+        .bind(format!("0190f5fe-7c00-7a00-8000-00000000000{id}"))
+        .execute(store.test_pool())
+        .await
+        .unwrap();
+    }
+    let mut session = live_session(session_id());
+    let workspace = TypedResourceBinding {
+        binding_id: ResourceBindingId::from("workspace:default"),
+        resource_kind: ResourceKind::from("workspace"),
+        resource_id: ResourceId::from("default"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from(["read".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    let knowledge_a = TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:a"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("0190f5fe-7c00-7a00-8000-00000000000a"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from(["read".to_owned(), "search".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    };
+    session.agent_binding.typed_resource_bindings =
+        vec![knowledge_a, workspace.clone()];
+    let created = store
+        .create_session(create_request(session, "resource-binding-replacement"))
+        .await
+        .unwrap();
+    store
+        .append_event(&append(
+            &created.session.agent_session_id,
+            "event-ready-resource-binding-replacement",
+            "runtime-supervisor",
+            "ready-resource-binding-replacement",
+            "session/ready",
+            "session-resource-binding-replacement",
+            Some(created.opening_ack.event_id),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+
+    let expected = created.session.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement
+        .typed_resource_bindings
+        .retain(|resource| resource.resource_kind.as_ref() != "knowledge_base");
+    replacement.typed_resource_bindings.push(TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:b"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("0190f5fe-7c00-7a00-8000-00000000000b"),
+        owner_id: owner().principal_id.clone(),
+        operations: BTreeSet::from([
+            "read".to_owned(),
+            "search".to_owned(),
+            "write".to_owned(),
+        ]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::from([("knowledge_enabled".to_owned(), "true".to_owned())]),
+    });
+    replacement
+        .typed_resource_bindings
+        .sort_by(|left, right| left.binding_id.cmp(&right.binding_id));
+
+    let updated = store
+        .replace_session_resource_bindings(
+            &owner(),
+            &created.session.agent_session_id,
+            &expected,
+            replacement.clone(),
+            "knowledge_base",
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.agent_binding, replacement);
+    let resources = store
+        .session_resources(&created.session.agent_session_id)
+        .await
+        .unwrap();
+    assert!(resources.contains(&workspace));
+    assert!(resources.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "knowledge_base"
+            && resource.resource_id.as_ref() == "0190f5fe-7c00-7a00-8000-00000000000b"
+            && resource.operations.contains("write")
+    }));
+    assert!(!resources.iter().any(|resource| {
+        resource.resource_kind.as_ref() == "knowledge_base"
+            && resource.resource_id.as_ref() == "0190f5fe-7c00-7a00-8000-00000000000a"
+    }));
+}
+
+#[tokio::test]
+async fn session_resource_replacement_rejects_an_active_turn() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (active, _) = create_turn(
+        &store,
+        "active-resource-replacement",
+        "active-resource-replacement",
+    )
+    .await;
+    let expected = active.agent_binding;
+    let mut replacement = expected.clone();
+    replacement.binding_version += 1;
+    replacement.typed_resource_bindings.push(TypedResourceBinding {
+        binding_id: ResourceBindingId::from("knowledge_base:new"),
+        resource_kind: ResourceKind::from("knowledge_base"),
+        resource_id: ResourceId::from("new"),
+        owner_id: owner().principal_id,
+        operations: BTreeSet::from(["read".to_owned(), "search".to_owned()]),
+        connection_config_ref: None,
+        typed_parameters: BTreeMap::new(),
+    });
+
+    assert!(matches!(
+        store
+            .replace_session_resource_bindings(
+                &owner(),
+                &active.agent_session_id,
+                &expected,
+                replacement,
+                "knowledge_base",
+            )
+            .await,
+        Err(SessionStoreError::Conflict(message)) if message.contains("active Turn")
     ));
 }
 
@@ -1394,6 +1870,71 @@ async fn turn_receipt_reports_each_canonical_terminal_state() {
             Some(kind)
         );
     }
+}
+
+#[tokio::test]
+async fn turn_history_projects_wall_clock_timing_and_structured_failure() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "turn-history-timing").await;
+    let operation = OperationId::from("turn-history-timing-operation");
+    let (_, started) = store
+        .start_turn(
+            &session.agent_session_id,
+            EventProducerId::from("session-api"),
+            IdempotencyKey::from("turn-history-timing-key"),
+            operation.clone(),
+            StrictJsonValue(json!({"content": "fail quickly"})),
+        )
+        .await
+        .unwrap();
+    let started_event = started.record.unwrap();
+    let finished_at_ms = 2_000_000_000_000_i64;
+    let terminal = SessionEventAppend {
+        agent_session_id: session.agent_session_id.clone(),
+        event_id: EventId::from("turn-history-timing-terminal"),
+        producer_id: EventProducerId::from("runtime_supervisor"),
+        idempotency_key: IdempotencyKey::from("turn-history-timing-terminal"),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("turn/failed".to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId::from(operation.as_ref().to_owned()),
+            causation_event_id: Some(started_event.event_id),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "message": "provider failed",
+                "finished_at_ms": finished_at_ms,
+                "error": {
+                    "message": "The provider is temporarily unavailable",
+                    "code": "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                    "ownership": "user_llm_provider",
+                    "retryable": true
+                }
+            }))),
+        },
+    };
+    store
+        .append_turn_terminal(&terminal, &operation)
+        .await
+        .unwrap();
+
+    let (history, _, _) = store
+        .message_history_before(&session.agent_session_id, None, 50)
+        .await
+        .unwrap();
+    let summary = history
+        .iter()
+        .find(|projection| projection.presentation_intent == "turn_summary")
+        .expect("turn summary projection");
+    let started_at_ms = summary.projection["started_at_ms"].as_i64().unwrap();
+    assert!(started_at_ms > 1_700_000_000_000);
+    assert!(started_at_ms < finished_at_ms);
+    assert_eq!(summary.projection["finished_at_ms"], finished_at_ms);
+    assert_eq!(
+        summary.projection["error"]["code"],
+        "USER_LLM_PROVIDER_GATEWAY_ERROR"
+    );
+    assert_eq!(summary.projection["error"]["retryable"], true);
 }
 
 #[tokio::test]

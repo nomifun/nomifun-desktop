@@ -3,7 +3,8 @@ use nomifun_common::{
     DecisionPolicy, DelegationPolicy, ExecutionStepKind, ExecutionStepStatus, StepFailurePolicy,
 };
 use nomifun_db::{
-    CreateAgentExecutionAttemptParams, CreateAgentExecutionParams, IAgentExecutionRepository,
+    AgentExecutionAttemptSessionKind, CreateAgentExecutionAttemptParams,
+    CreateAgentExecutionParams, IAgentExecutionRepository,
     NewAgentExecutionEvent, NewAgentExecutionParticipant, NewAgentExecutionStep,
     NewAgentExecutionStepDependency, ReconcileAgentExecutionPlanParams,
     SqliteAgentExecutionRepository,
@@ -34,6 +35,115 @@ async fn database() -> nomifun_db::Database {
     .await
     .unwrap();
     database
+}
+
+#[tokio::test]
+async fn autowork_attempt_reuses_lead_without_becoming_disposable_attempt_transcript() {
+    let db = database().await;
+    insert_canonical_session(&db, CANONICAL_LEAD_ID, OWNER_ID, "live").await;
+    let repository = SqliteAgentExecutionRepository::new(db.pool().clone());
+    let participant_id = nomifun_common::generate_id();
+    let mut params = execution_params();
+    params.lead_conversation_id = Some(CANONICAL_LEAD_ID.to_owned());
+    params.initial_plan_input = serde_json::json!({
+        "mode": "automation",
+        "source": {
+            "requirement_id": "0190f5fe-7c00-7a00-8000-000000000191",
+            "claim_generation": 1,
+            "operation_id": "autowork:test"
+        },
+        "plan": { "steps": [] }
+    })
+    .to_string();
+    let created = repository
+        .create_execution_with_participants(
+            OWNER_ID,
+            &params,
+            &[participant(participant_id.clone())],
+            &event(AgentExecutionEventKind::Created),
+        )
+        .await
+        .unwrap();
+    let step_id = nomifun_common::generate_id();
+    let planned = repository
+        .reconcile_plan(
+            OWNER_ID,
+            &created.execution_id,
+            created.version,
+            &ReconcileAgentExecutionPlanParams {
+                goal: None,
+                adaptation_policy: None,
+                decision_policy: None,
+                delegation_policy: None,
+                keep_step_ids: Vec::new(),
+                new_participants: Vec::new(),
+                retire_participant_ids: Vec::new(),
+                new_steps: vec![step(step_id, Some(participant_id), "autowork")],
+                new_dependencies: Vec::new(),
+                execution_status: AgentExecutionStatus::Running,
+            },
+            &event(AgentExecutionEventKind::PlanChanged),
+        )
+        .await
+        .unwrap();
+    let queued = repository
+        .create_attempt(
+            OWNER_ID,
+            &created.execution_id,
+            &planned.steps[0].step_id,
+            planned.steps[0].version,
+            None,
+            &CreateAgentExecutionAttemptParams {
+                participant_id: Some(planned.participants[0].participant_id.clone()),
+                start_immediately: false,
+                trigger_reason: "initial".to_owned(),
+                effective_config: r#"{"session_kind":"automation"}"#.to_owned(),
+                retry_after: None,
+                runtime_state: None,
+            },
+            &event(AgentExecutionEventKind::AttemptChanged),
+        )
+        .await
+        .unwrap();
+    let attempt = queued.current_attempt.as_ref().unwrap().attempt.clone();
+    let running = repository
+        .start_attempt(
+            OWNER_ID,
+            &created.execution_id,
+            &planned.steps[0].step_id,
+            queued.step.version,
+            &attempt.attempt_id,
+            attempt.version,
+            CANONICAL_LEAD_ID,
+            AgentExecutionAttemptSessionKind::AutomationLead,
+            None,
+            &event(AgentExecutionEventKind::AttemptChanged),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        running.current_attempt.unwrap().conversation_id.as_deref(),
+        Some(CANONICAL_LEAD_ID)
+    );
+    let links = repository
+        .list_conversation_links(OWNER_ID, &created.execution_id)
+        .await
+        .unwrap();
+    assert_eq!(links.len(), 2);
+    assert!(links.iter().any(|link| link.relation == "lead"));
+    assert!(links.iter().any(|link| {
+        link.relation == "automation"
+            && link.conversation_id == CANONICAL_LEAD_ID
+            && link.attempt_id.as_deref() == Some(attempt.attempt_id.as_str())
+    }));
+    assert!(
+        !repository
+            .has_attempt_conversation_link(OWNER_ID, CANONICAL_LEAD_ID)
+            .await
+            .unwrap(),
+        "the user's main AgentSession must never become a disposable Attempt transcript"
+    );
 }
 
 fn event(kind: AgentExecutionEventKind) -> NewAgentExecutionEvent {
@@ -386,6 +496,7 @@ async fn agent_execution_row_model_excludes_retired_plan_gate_mapping() {
             &queued_attempt.attempt_id,
             queued_attempt.version,
             &conversation_id,
+            AgentExecutionAttemptSessionKind::ChildAttempt,
             None,
             &event(AgentExecutionEventKind::AttemptChanged),
         )

@@ -205,9 +205,6 @@ fn truncate_chars(value: &str, max: usize) -> String {
 fn node_asset_ids(node: &CreativeNode) -> Vec<&str> {
     match &node.data {
         CreativeNodeData::Image(data) => data.asset_id.iter().map(String::as_str).collect(),
-        CreativeNodeData::Panorama(data) => {
-            data.asset_id.iter().map(String::as_str).collect()
-        }
         CreativeNodeData::Text(_) | CreativeNodeData::Group(_) => Vec::new(),
         CreativeNodeData::Config(data) => data
             .input_asset_ids
@@ -251,7 +248,7 @@ fn summarize_node(node: &CreativeNode) -> Value {
         CreativeNodeData::Timeline(data) => {
             Some(truncate_chars(&data.title, SUMMARY_TEXT_MAX))
         }
-        CreativeNodeData::Panorama(_) | CreativeNodeData::Video(_) => None,
+        CreativeNodeData::Video(_) => None,
     };
     let status = match &node.data {
         CreativeNodeData::Config(data) => Some(data.status),

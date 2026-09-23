@@ -141,6 +141,19 @@ enum InitialPlanningCommand {
     },
 }
 
+pub(crate) fn is_automation_initial_plan(input: &str) -> Result<bool, AppError> {
+    let command: serde_json::Value = serde_json::from_str(input).map_err(|error| {
+        AppError::Internal(format!("invalid persisted initial planning input: {error}"))
+    })?;
+    match command.get("mode").and_then(serde_json::Value::as_str) {
+        Some("automation") => Ok(true),
+        Some("automatic" | "explicit") => Ok(false),
+        _ => Err(AppError::Internal(
+            "persisted initial planning input has an unknown mode".to_owned(),
+        )),
+    }
+}
+
 pub(crate) struct AgentExecutionEngineDeps {
     pub(crate) repository: Arc<dyn IAgentExecutionRepository>,
     pub(crate) template_repository: Arc<dyn IAgentExecutionTemplateRepository>,
@@ -905,7 +918,9 @@ impl AgentExecutionEngine {
             // Attempt transcripts remain execution-owned audit records after
             // settlement. They must never fall through and become the lead of
             // a new aggregate; historical routing also keeps replay reachable.
-            .filter(|link| link.relation == "attempt")
+            .filter(|link| {
+                link.relation == "attempt" || (link.relation == "automation" && link.active)
+            })
             .map(|link| link.execution_id);
         let execution = links.next();
         if links.next().is_some() {
@@ -958,7 +973,7 @@ impl AgentExecutionEngine {
             .await?
             .into_iter()
             .filter(|link| {
-                link.relation == "attempt"
+                matches!(link.relation.as_str(), "attempt" | "automation")
                     && link.attempt_id.as_deref() == Some(actor_attempt_id.as_str())
             });
         let link = links.next().ok_or_else(|| {
@@ -1134,6 +1149,21 @@ impl AgentExecutionEngine {
             .iter()
             .filter(|link| link.execution_id == execution_id)
             .collect::<Vec<_>>();
+        let automation_links = target_links
+            .iter()
+            .filter(|link| link.relation == "automation")
+            .collect::<Vec<_>>();
+        if automation_links.len() > 1 {
+            return Err(AppError::Conflict(
+                "Agent caller has multiple active AutoWork Attempt relations".to_owned(),
+            ));
+        }
+        if let Some(link) = automation_links.first() {
+            let attempt_id = link.attempt_id.clone().ok_or_else(|| {
+                AppError::Internal("active AutoWork Attempt link has no attempt id".to_owned())
+            })?;
+            return Ok(AgentExecutionActor::agent(conversation_id, Some(attempt_id)));
+        }
         let link = target_links
             .first()
             .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
@@ -1189,12 +1219,28 @@ impl AgentExecutionEngine {
         conversation_id: &str,
     ) -> Result<AgentExecutionActor, AppError> {
         canonical_id::<ConversationId>("conversation_id", conversation_id)?;
-        let mut attempts = self
+        let links = self
             .repository
             .resolve_conversation_link(owner_id, conversation_id)
-            .await?
-            .into_iter()
-            .filter(|link| link.relation == "attempt");
+            .await?;
+        let active_automation = links
+            .iter()
+            .filter(|link| link.active && link.relation == "automation")
+            .collect::<Vec<_>>();
+        if active_automation.len() > 1 {
+            return Err(AppError::Conflict(
+                "Agent caller has multiple active AutoWork Attempt relations".to_owned(),
+            ));
+        }
+        if let Some(link) = active_automation.first() {
+            return Ok(AgentExecutionActor::agent(
+                conversation_id,
+                Some(link.attempt_id.clone().ok_or_else(|| {
+                    AppError::Internal("AutoWork Attempt link has no attempt id".to_owned())
+                })?),
+            ));
+        }
+        let mut attempts = links.into_iter().filter(|link| link.relation == "attempt");
         let attempt_id = match attempts.next() {
             Some(link) => Some(link.attempt_id.ok_or_else(|| {
                 AppError::Internal("attempt link has no attempt id".to_owned())
@@ -1289,6 +1335,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecution, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "pause")
+            .await?;
         let current = self.detail(owner_id, execution_id).await?;
         require_status(
             current.execution.status,
@@ -1327,6 +1375,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecution, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "resume")
+            .await?;
         let current = self.detail(owner_id, execution_id).await?;
         require_status(current.execution.status, &[AgentExecutionStatus::Paused])?;
         if current.attempts.iter().any(|attempt| {
@@ -1384,6 +1434,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         command: VersionedAgentExecutionCommand,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "cancel")
+            .await?;
         let before = self.detail(owner_id, execution_id).await?;
         if before.execution.status.is_terminal() {
             return Err(AppError::Conflict(
@@ -1481,6 +1533,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: RenameAgentExecutionRequest,
     ) -> Result<AgentExecution, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "rename")
+            .await?;
         let goal = non_empty("goal", request.goal)?;
         let current = self.require_execution(owner_id, execution_id).await?;
         let row = self
@@ -1514,6 +1568,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: ReplanAgentExecutionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "replan")
+            .await?;
         let before = self.detail(owner_id, execution_id).await?;
         if before.execution.status.is_terminal() {
             return Err(AppError::Conflict(
@@ -1598,6 +1654,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: AdjustAgentExecutionRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "adjust")
+            .await?;
         let intent = non_empty("intent", request.intent)?;
         let before = self.detail(owner_id, execution_id).await?;
         if !matches!(
@@ -1666,6 +1724,8 @@ impl AgentExecutionEngine {
         execution_id: &str,
         request: AddExecutionStepsRequest,
     ) -> Result<AgentExecutionDetail, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "add steps to")
+            .await?;
         if request.steps.is_empty() {
             return Err(AppError::BadRequest("steps must not be empty".to_owned()));
         }
@@ -1743,6 +1803,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: UpdateExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "update")
+            .await?;
         if request.title.is_none() && request.spec.is_none() {
             return Err(AppError::BadRequest("empty step update".to_owned()));
         }
@@ -1797,6 +1859,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: ReassignExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "reassign")
+            .await?;
         canonical_uuidv7("participant_id", &request.participant_id)?;
         let detail = self.detail(owner_id, execution_id).await?;
         let step = require_pending_agent_step(&detail, step_id)?;
@@ -1861,6 +1925,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: ConfigureExecutionStepRequest,
     ) -> Result<ExecutionStep, AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "configure")
+            .await?;
         if request.model.is_none() && request.preset_prompt.is_none() {
             return Err(AppError::BadRequest("empty step configuration".to_owned()));
         }
@@ -2185,6 +2251,8 @@ impl AgentExecutionEngine {
         step_id: &str,
         request: SteerExecutionStepRequest,
     ) -> Result<(), AppError> {
+        self.reject_automation_external_command(owner_id, execution_id, actor, "steer")
+            .await?;
         let text = non_empty("text", request.text)?;
         let detail = self.detail(owner_id, execution_id).await?;
         let step = current_step(&detail, step_id)?;
@@ -2309,7 +2377,9 @@ impl AgentExecutionEngine {
             .await?;
         let mut links = links
             .into_iter()
-            .filter(|link| link.active && link.relation == "attempt");
+            .filter(|link| {
+                link.active && matches!(link.relation.as_str(), "attempt" | "automation")
+            });
         let link = links
             .next()
             .ok_or_else(|| AppError::BadRequest("conversation is not an active execution attempt".to_owned()))?;
@@ -2957,7 +3027,9 @@ impl AgentExecutionEngine {
             .await?;
         let mut attempts = links
             .iter()
-            .filter(|link| link.active && link.relation == "attempt");
+            .filter(|link| {
+                link.active && matches!(link.relation.as_str(), "attempt" | "automation")
+            });
         if let Some(link) = attempts.next() {
             if attempts.next().is_some() {
                 return Err(AppError::Conflict(
@@ -3082,6 +3154,33 @@ impl AgentExecutionEngine {
             Some(execution_id) => self.detail(owner_id, &execution_id).await.map(Some),
             None => Ok(None),
         }
+    }
+
+    /// AutoWork lifecycle is owned by the exact Requirement claim generation.
+    /// User/Agent execution controls must not mutate the queue-owned aggregate;
+    /// the AutoWork port uses the System actor for its fenced cancellation.
+    async fn reject_automation_external_command(
+        &self,
+        owner_id: &str,
+        execution_id: &str,
+        actor: &AgentExecutionActor,
+        operation: &str,
+    ) -> Result<(), AppError> {
+        if matches!(actor, AgentExecutionActor::System) {
+            return Ok(());
+        }
+        let row = self
+            .repository
+            .get_execution(owner_id, execution_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Agent Execution {execution_id}")))?;
+        let command: InitialPlanningCommand = serde_json::from_str(&row.initial_plan_input)
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "invalid persisted initial planning input for {execution_id}: {error}"
+                ))
+            })?;
+        reject_automation_external_command(&command, actor, operation)
     }
 
     /// AutoWork recovery is owned by the exact Requirement claim generation.
@@ -3414,6 +3513,21 @@ fn reject_automation_manual_recovery_command(
     if matches!(command, InitialPlanningCommand::Automation { .. }) {
         return Err(AppError::Conflict(format!(
             "cannot {operation} an AutoWork AgentExecution without the exact atomic Requirement observer"
+        )));
+    }
+    Ok(())
+}
+
+fn reject_automation_external_command(
+    command: &InitialPlanningCommand,
+    actor: &AgentExecutionActor,
+    operation: &str,
+) -> Result<(), AppError> {
+    if !matches!(actor, AgentExecutionActor::System)
+        && matches!(command, InitialPlanningCommand::Automation { .. })
+    {
+        return Err(AppError::Conflict(format!(
+            "cannot {operation} an AutoWork AgentExecution; use AutoWork queue controls"
         )));
     }
     Ok(())
@@ -4258,7 +4372,7 @@ mod tests {
         AgentExecutionEngine, AutomationExecutionSource, InitialPlanningCommand,
         attempt_delegation_operation_id, automation_cancellation_replay_safe,
         collaboration_workspace, explicit_cancel_payload, is_automation_cancel_cas_conflict,
-        is_automation_outcome_unknown_error,
+        is_automation_outcome_unknown_error, reject_automation_external_command,
         reject_automation_manual_recovery_command, runtime_model_pair,
         validate_automation_source, validate_max_parallel,
     };
@@ -4270,7 +4384,7 @@ mod tests {
         TypedResourceBindingDto,
     };
     use nomifun_common::{
-        AgentDelegationTask, AgentStepMode, AgentToolPolicy,
+        AgentDelegationTask, AgentExecutionActor, AgentStepMode, AgentToolPolicy,
         MAX_AGENT_EXECUTION_PARALLELISM, ParallelDelegationRequest,
         ParallelDelegationStrategy,
     };
@@ -4440,6 +4554,31 @@ mod tests {
         assert!(reject_automation_manual_recovery_command(&command, "retry").is_err());
         assert!(
             reject_automation_manual_recovery_command(&command, "adopt output for").is_err()
+        );
+        assert!(
+            reject_automation_external_command(
+                &command,
+                &AgentExecutionActor::user("owner"),
+                "replan",
+            )
+            .is_err()
+        );
+        assert!(
+            reject_automation_external_command(
+                &command,
+                &AgentExecutionActor::agent("conversation", Some("attempt".to_owned())),
+                "adjust",
+            )
+            .is_err()
+        );
+        assert!(
+            reject_automation_external_command(
+                &command,
+                &AgentExecutionActor::system(),
+                "cancel",
+            )
+            .is_ok(),
+            "the queue owner must retain its fenced cancellation path"
         );
 
         let explicit: InitialPlanningCommand = serde_json::from_value(serde_json::json!({

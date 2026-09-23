@@ -11,10 +11,11 @@ const cssSource = readFileSync(new URL('./messages.css', import.meta.url), 'utf8
 const disclosureSource = readFileSync(new URL('./components/TurnProcessDisclosure.tsx', import.meta.url), 'utf8');
 const processTraceSource = readFileSync(new URL('./components/ProcessTraceItem.tsx', import.meta.url), 'utf8');
 const messageListSource = readFileSync(new URL('./MessageList.tsx', import.meta.url), 'utf8');
+const modelSource = readFileSync(new URL('./turnDisclosureModel.ts', import.meta.url), 'utf8');
 type MessagesLocale = Record<string, unknown> & {
-  turnProcessed: string;
-  turnCanceled: string;
-  processReceipt: Record<string, string>;
+  turnDuration: string;
+  turnDurationUnknown: string;
+  turnProcess: { expand: string; collapse: string };
 };
 const zhMessages = JSON.parse(
   readFileSync(new URL('../../../services/i18n/locales/zh-CN/messages.json', import.meta.url), 'utf8')
@@ -24,151 +25,94 @@ const enMessages = JSON.parse(
 ) as MessagesLocale;
 
 const cssRuleFor = (selector: string) => {
-  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = cssSource.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`));
-  return match?.[1] ?? '';
+  const start = cssSource.indexOf(selector);
+  if (start < 0) return '';
+  const open = cssSource.indexOf('{', start);
+  const close = cssSource.indexOf('}', open);
+  return open >= 0 && close > open ? cssSource.slice(open + 1, close) : '';
 };
 
-describe('turn process disclosure content layout', () => {
-  test('tags disclosure items by content kind for grouped spacing', () => {
-    expect(disclosureSource.includes('getProcessItemLayoutKind')).toBe(true);
-    expect(disclosureSource.includes('turn-process-disclosure__item--${layoutKind}')).toBe(true);
-    expect(messageListSource.includes('getProcessItemLayoutKind={getProcessItemLayoutKind}')).toBe(true);
+describe('turn process disclosure result-first layout', () => {
+  test('shows only duration and disclosure affordance in the turn header', () => {
+    expect(disclosureSource.includes('messages.turnDuration')).toBe(true);
+    expect(disclosureSource.includes('messages.turnProcessed')).toBe(false);
+    expect(disclosureSource.includes('messages.turnCanceled')).toBe(false);
+    expect(disclosureSource.includes('messages.turnFailed')).toBe(false);
+    expect(disclosureSource.includes('messages.turnSuccess')).toBe(false);
+    expect(zhMessages.turnDuration).toBe('用时 {{duration}}');
+    expect(zhMessages.turnDurationUnknown).toBe('用时 --');
+    expect(enMessages.turnDuration).toBe('Took {{duration}}');
+    expect(enMessages.turnDurationUnknown).toBe('Time --');
+    expect(zhMessages.turnProcess).toEqual({ expand: '展开思考过程', collapse: '收起思考过程' });
   });
 
-  test('keeps the disclosure timer live while the current turn is running', () => {
-    expect(disclosureSource.includes('running: boolean')).toBe(true);
+  test('keeps the duration live while the current turn is running', () => {
     expect(disclosureSource.includes('if (!item.running) return;')).toBe(true);
     expect(disclosureSource.includes('window.setInterval')).toBe(true);
     expect(disclosureSource.includes('const durationEndAt = item.running ? now : item.endAt;')).toBe(true);
-    expect(messageListSource.includes('running: entry.running')).toBe(true);
+    expect(disclosureSource.includes("item.running && 'turn-process-disclosure--live'")).toBe(true);
   });
 
-  test('never exposes a failed or success outcome in the turn header', () => {
-    expect(disclosureSource.includes("failed: 'messages.turnProcessed'")).toBe(true);
-    expect(disclosureSource.includes('messages.turnFailed')).toBe(false);
-    expect(disclosureSource.includes('messages.turnSuccess')).toBe(false);
-    expect(cssSource.includes('.turn-process-disclosure--failed')).toBe(false);
+  test('opens running thought by default and collapses when the turn settles', () => {
+    expect(disclosureSource.includes('hasProcessItems && !defaultCollapsed')).toBe(true);
+    expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(true);
+    expect(disclosureSource.includes('shouldResetTurnProcessDisclosureExpansion')).toBe(true);
   });
 
-  test('shows processed instead of processing while the turn is running', () => {
-    expect(disclosureSource.includes("running: 'messages.turnProcessed'")).toBe(true);
-    expect(disclosureSource.includes('messages.turnProcessing')).toBe(false);
-    expect(zhMessages.turnProcessing).toBeUndefined();
-    expect(enMessages.turnProcessing).toBeUndefined();
+  test('removes the legacy live-step and expand-all paths', () => {
+    expect(messageListSource.includes('turn-live-step')).toBe(false);
+    expect(messageListSource.includes('planTurnLiveStep')).toBe(false);
+    expect(disclosureSource.includes('getProcessItemCanExpandAll')).toBe(false);
+    expect(disclosureSource.includes('expandAllProcessItemKeys')).toBe(false);
+    expect(cssSource.includes('.turn-live-step')).toBe(false);
+    expect(cssSource.includes('.turn-process-disclosure__header-actions')).toBe(false);
   });
 
-  test('labels a stopped turn with the stop moment copy', () => {
-    expect(zhMessages.turnCanceled).toBe('你在 {{duration}} 后停止了');
-    expect(enMessages.turnCanceled).toBe('You stopped after {{duration}}');
+  test('keeps durable turn summaries as timing metadata rather than visible rows', () => {
+    expect(messageListSource.includes("item.content.turn_summary ? 'metadata' : 'process'")).toBe(true);
+    expect(processTraceSource.includes('if (item.content.turn_summary) return null;')).toBe(true);
+    expect(modelSource.includes("entry.role === 'metadata'")).toBe(true);
   });
 
-  test('routes the user stop notice from the nomi runtime into the disclosure model', () => {
-    expect(messageListSource.includes('stopNotice: conversationContext?.stopNotice ?? undefined')).toBe(true);
+  test('renders thinking directly as paragraphs and removes private replay placeholders', () => {
+    expect(processTraceSource.includes('turn-process-trace--thinking')).toBe(true);
+    expect(processTraceSource.includes('Private reasoning omitted')).toBe(true);
+    expect(processTraceSource.includes('<MessageThinking')).toBe(false);
+    expect(messageListSource.includes('isHiddenThinkingItem')).toBe(true);
   });
 
-  test('keeps execution duration in processed and canceled header copy', () => {
-    expect(zhMessages.turnProcessed.includes('{{duration}}')).toBe(true);
-    expect(zhMessages.turnCanceled.includes('{{duration}}')).toBe(true);
-    expect(enMessages.turnProcessed.includes('{{duration}}')).toBe(true);
-    expect(enMessages.turnCanceled.includes('{{duration}}')).toBe(true);
-  });
-
-  test('labels a durable turn summary as completed processing rather than a prepared next action', () => {
-    expect(zhMessages.processReceipt.turnSummaryCompleted).toBe('本轮处理已完成');
-    expect(enMessages.processReceipt.turnSummaryCompleted).toBe('Turn processing completed');
-    expect(messageListSource.includes('item.content.turn_summary')).toBe(true);
-    expect(messageListSource.includes('messages.processReceipt.turnSummaryCompleted')).toBe(true);
-    expect(processTraceSource.includes('item.content.turn_summary')).toBe(true);
-    expect(processTraceSource.includes('messages.processReceipt.turnSummaryCompleted')).toBe(true);
-  });
-
-  test('does not render an empty disclosure body before process rows arrive', () => {
-    expect(disclosureSource.includes('const hasProcessItems = item.processItems.length > 0')).toBe(true);
-    expect(disclosureSource.includes('const disclosureExpanded = hasProcessItems && expanded')).toBe(true);
-    expect(disclosureSource.includes('{hasProcessItems && (')).toBe(true);
-    expect(disclosureSource.includes('{disclosureExpanded && (')).toBe(true);
-  });
-
-  test('offers a one-click control to expand all completed thinking blocks', () => {
-    expect(disclosureSource.includes('getProcessItemCanExpandAll')).toBe(true);
-    expect(disclosureSource.includes('expandAllProcessItemKeys')).toBe(true);
-    expect(disclosureSource.includes('turn-process-disclosure__expand-thinking')).toBe(true);
-    expect(disclosureSource.includes('const hasExpandableProcessItems = expandableProcessItemKeys.length > 0')).toBe(true);
-    expect(disclosureSource.includes('const allExpandableProcessItemsExpanded =')).toBe(true);
-    expect(disclosureSource.includes('setExpandAllProcessItemKeys(new Set())')).toBe(true);
-    expect(disclosureSource.includes('turn-process-disclosure__header-actions')).toBe(true);
-    expect(disclosureSource.includes('turn-process-disclosure__toggle')).toBe(true);
-    expect(disclosureSource.includes("messages.turnProcess.expandAllThinkingProcess")).toBe(true);
-    expect(disclosureSource.includes("messages.turnProcess.collapseAllThinkingProcess")).toBe(true);
-    expect(disclosureSource.indexOf("className='turn-process-disclosure__header-actions'")).toBeGreaterThan(
-      disclosureSource.indexOf('turn-process-disclosure__header')
-    );
-    expect(disclosureSource.indexOf("className='turn-process-disclosure__header-actions'")).toBeLessThan(
-      disclosureSource.indexOf("className='turn-process-disclosure__body'")
-    );
-    expect(cssSource.includes('.turn-process-disclosure__header-actions')).toBe(true);
-    expect(cssSource.includes('.turn-process-disclosure__toggle')).toBe(true);
-    expect(messageListSource.includes('getProcessItemCanExpandAll={isCompletedThinkingProcessItem}')).toBe(true);
-    expect(disclosureSource.includes('expanded: expandAllProcessItemKeys.has(itemKey)')).toBe(true);
-    expect(messageListSource.includes('expansionControls')).toBe(true);
-  });
-
-  test('keeps the disclosure header line stable when the thinking action appears', () => {
-    const headerRule = cssRuleFor('.turn-process-disclosure__header');
-    const headerWithActionsRule = cssRuleFor('.turn-process-disclosure__header--with-actions');
-    const headerActionsRule = cssRuleFor('.turn-process-disclosure__header-actions');
-
-    expect(disclosureSource.includes('const hasHeaderActions = disclosureExpanded && hasExpandableProcessItems')).toBe(
-      true
-    );
-    expect(disclosureSource.includes("hasHeaderActions && 'turn-process-disclosure__header--with-actions'")).toBe(
-      true
-    );
-    expect(disclosureSource.includes('{hasHeaderActions && (')).toBe(true);
-    expect(headerRule.includes('position: relative')).toBe(true);
-    expect(headerWithActionsRule.includes('padding-right')).toBe(true);
-    expect(headerActionsRule.includes('position: absolute')).toBe(true);
-    expect(headerActionsRule.includes('top: 50%')).toBe(true);
-    expect(headerActionsRule.includes('transform: translateY(-50%)')).toBe(true);
-  });
-
-  test('uses tighter same-kind spacing and clearer cross-kind spacing', () => {
-    expect(cssRuleFor('.turn-process-disclosure__body').includes('gap: 0')).toBe(true);
-    expect(cssRuleFor('.turn-process-disclosure__item').includes('margin-top: 14px')).toBe(true);
-    expect(cssSource.includes('.turn-process-disclosure__item:first-child')).toBe(true);
-    expect(cssSource.includes('.turn-process-disclosure__item--text + .turn-process-disclosure__item--text')).toBe(true);
-    expect(cssSource.includes('.turn-process-disclosure__item--tool + .turn-process-disclosure__item--tool')).toBe(true);
-  });
-
-  test('separates paragraph text from lightweight process rows', () => {
-    const paragraphRule = cssRuleFor('.turn-process-disclosure__body .turn-process-trace__paragraph');
-    const rowRule = cssRuleFor('.turn-process-disclosure__body .turn-process-trace__row');
-
-    expect(paragraphRule.includes('color: var(--color-text-1')).toBe(true);
-    expect(paragraphRule.includes('font-size: var(--conversation-message-font-size)')).toBe(true);
-    expect(paragraphRule.includes('line-height: var(--conversation-message-line-height)')).toBe(true);
-    expect(rowRule.includes('color: var(--color-text-3')).toBe(true);
-    expect(rowRule.includes('font-size: var(--conversation-message-font-size)')).toBe(true);
-    expect(rowRule.includes('line-height: var(--conversation-message-line-height)')).toBe(true);
-  });
-
-  test('keeps running process chrome neutral instead of bright blue', () => {
-    expect(cssRuleFor('.turn-process-disclosure--running').includes('color: var(--color-text-3')).toBe(true);
+  test('uses compact process rhythm and muted receipt rows', () => {
+    expect(cssRuleFor('.turn-process-disclosure__body').includes('gap: 8px')).toBe(true);
+    expect(cssRuleFor('.turn-process-disclosure__body').includes('padding: 10px 0 12px')).toBe(true);
     expect(
-      cssRuleFor('.turn-process-disclosure__body .turn-process-trace__row--running').includes(
+      cssRuleFor('.turn-process-disclosure__body .turn-process-trace__row').includes(
         'color: var(--color-text-3'
       )
     ).toBe(true);
-    expect(cssRuleFor('.turn-process-trace__row--running').includes('color: var(--color-text-3')).toBe(true);
+    expect(
+      cssRuleFor('.turn-process-disclosure__body .turn-process-trace__paragraph').includes(
+        'color: var(--color-text-2'
+      )
+    ).toBe(true);
   });
 
-  test('defines the shared conversation body typography token once', () => {
-    const itemRule = cssRuleFor('.message-item');
+  test('shimmers only live duration and the current thinking paragraph', () => {
+    expect(cssSource.includes('.turn-process-disclosure--live .turn-process-disclosure__label')).toBe(true);
+    expect(cssSource.includes('@keyframes turn-process-shimmer')).toBe(true);
+    expect(cssSource.includes('@keyframes turn-process-current-fade')).toBe(true);
+    expect(cssSource.includes('prefers-reduced-motion: reduce')).toBe(true);
+  });
 
+  test('keeps content-kind hooks for current-row targeting', () => {
+    expect(disclosureSource.includes('getProcessItemLayoutKind')).toBe(true);
+    expect(disclosureSource.includes('turn-process-disclosure__item--')).toBe(true);
+    expect(disclosureSource.includes("'turn-process-disclosure__item--current'")).toBe(true);
+    expect(messageListSource.includes('getProcessItemLayoutKind={getProcessItemLayoutKind}')).toBe(true);
+  });
+
+  test('keeps the shared conversation typography contract', () => {
+    const itemRule = cssRuleFor('.message-item');
     expect(itemRule.includes('--conversation-message-font-size: 14px')).toBe(true);
     expect(itemRule.includes('--conversation-message-line-height: 22px')).toBe(true);
-    expect(cssSource.includes('.message-item .markdown-shadow p')).toBe(false);
-    expect(cssSource.includes('.message-item .whitespace-pre-wrap')).toBe(false);
   });
 });

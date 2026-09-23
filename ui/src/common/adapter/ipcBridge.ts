@@ -64,6 +64,7 @@ import {
 import type {
   IMcpServer,
   ISessionMcpServer,
+  TChatConversation,
   TProviderWithModel,
 } from '../config/storage';
 import type { PreviewHistoryTarget, PreviewSnapshotInfo, PreviewUrlResponse } from '../types/office/preview';
@@ -152,8 +153,11 @@ import type {
   AgentPresetLibraryResponse,
   AgentPresetRevision,
   AgentResolvedSnapshot,
+  AgentSessionKnowledgeBinding,
   AgentSessionContinuationView,
   AgentSessionId,
+  ApplyAgentSessionSwitchRequest,
+  ApplyAgentSessionSwitchResponse,
   CapabilityCatalogItem,
   CreateAgentPresetFromTemplateRequest,
   CreateAgentPresetRequest,
@@ -180,6 +184,8 @@ import type {
   SelectProductAgentBindingRequest,
   ProductAgentOptions,
   ProductAgentSelectionResult,
+  PreviewAgentSessionSwitchRequest,
+  PreviewAgentSessionSwitchResponse,
   RevokeInstallationTokenResponse,
   RotateInstallationTokenResponse,
   SaveAgentPresetRevisionRequest,
@@ -592,6 +598,13 @@ const fromRevokedInstallationToken = (): RevokeInstallationTokenResponse => ({
   continuation: remoteCredentialContinuation(),
 });
 
+const fromApiAgentSessionKnowledgeBinding = (
+  value: AgentSessionKnowledgeBinding
+): AgentSessionKnowledgeBinding => ({
+  ...value,
+  kb_ids: value.kb_ids.map(parseKnowledgeBaseId),
+});
+
 export const agentPlatform = {
   roleDefaults: httpGet<InstallationRoleBinding[], void>('/api/agent-role-defaults'),
   putRoleDefault: httpPut<InstallationRoleBinding, PutAgentRoleDefaultRequest>(
@@ -703,6 +716,33 @@ export const agentPlatform = {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
     ),
+    previewAgentSwitch: httpPost<
+      PreviewAgentSessionSwitchResponse,
+      { agent_session_id: string; request: PreviewAgentSessionSwitchRequest }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/agent-switch/preview`,
+      (params) => params.request
+    ),
+    applyAgentSwitch: {
+      provider: () => {},
+      invoke: async (params: {
+        agent_session_id: string;
+        request: ApplyAgentSessionSwitchRequest;
+        idempotency_key: string;
+      }): Promise<ApplyAgentSessionSwitchResponse<TChatConversation>> => {
+        const response = await httpRequest<ApplyAgentSessionSwitchResponse>(
+          'PUT',
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/agent`,
+          params.request,
+          { idempotencyKey: params.idempotency_key }
+        );
+        return {
+          ...response,
+          conversation: fromApiConversation(response.conversation),
+        };
+      },
+    },
     get: withResponseMap(
       httpGet<unknown, { agent_session_id: string }>(
         (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}`
@@ -766,6 +806,42 @@ export const agentPlatform = {
     delete: httpDelete<IAgentSessionDeleteResult, { agent_session_id: string }>(
       (params) => `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}`
     ),
+    getKnowledge: withResponseMap(
+      httpGet<AgentSessionKnowledgeBinding, { agent_session_id: string }>(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/knowledge`
+      ),
+      fromApiAgentSessionKnowledgeBinding
+    ),
+    updateKnowledge: withResponseMap(
+      httpPut<
+        AgentSessionKnowledgeBinding,
+        { agent_session_id: string; binding: AgentSessionKnowledgeBinding }
+      >(
+        (params) =>
+          `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/knowledge`,
+        (params) => params.binding
+      ),
+      fromApiAgentSessionKnowledgeBinding
+    ),
+    onKnowledgeChanged: wsMappedEmitter<{
+      agent_session_id: AgentSessionId;
+    binding: AgentSessionKnowledgeBinding;
+  }>('agentSession.knowledgeChanged', (value) => ({
+      agent_session_id: value.agent_session_id as AgentSessionId,
+      binding: fromApiAgentSessionKnowledgeBinding(value.binding),
+    })),
+    onAgentChanged: wsMappedEmitter<{
+      agent_session_id: AgentSessionId;
+      transition_id: string;
+      previous_agent_label: string;
+      current_agent_label: string;
+      binding_version: number;
+      effective_from: 'next_turn';
+    }>('agentSession.agentChanged', (value) => ({
+      ...value,
+      agent_session_id: value.agent_session_id as AgentSessionId,
+    })),
   },
   installationToken: {
     status: withResponseMap(
@@ -5650,9 +5726,8 @@ export interface IKnowledgeBinding {
 export type KnowledgeWritebackEagerness = 'manual' | 'auto';
 
 /**
- * Mutable Knowledge-binding rows. Canonical AgentSession conversations are
- * deliberately absent: their Knowledge resources are frozen in
- * `agent_binding.typed_resource_bindings` when the Session is created.
+ * Mutable legacy product defaults. Canonical conversations use the dedicated
+ * AgentSession Knowledge command so there is never a second binding authority.
  */
 export type KnowledgeBindingKind = 'terminal' | 'companion' | 'workpath';
 export type KnowledgeBindingTarget =

@@ -8,6 +8,10 @@ import { describe, expect, it } from 'bun:test';
 import { CHARACTERS, DEFAULT_DESK, getDeskSpec } from './index';
 
 describe('getDeskSpec', () => {
+  it('uses the compact built-in desktop footprint', () => {
+    expect(DEFAULT_DESK).toEqual({ windowWidth: 200, windowHeight: 180, figureHeight: 120 });
+  });
+
   it('falls back to DEFAULT_DESK for unknown / missing ids', () => {
     expect(getDeskSpec('no-such-character')).toBe(DEFAULT_DESK);
     expect(getDeskSpec(null)).toBe(DEFAULT_DESK);

@@ -25,10 +25,9 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('shouldAutoCollapseThinkingStreamPanel')).toBe(false);
     expect(source.includes('turn-process-thinking-stream')).toBe(false);
     expect(source.includes("case 'thinking':")).toBe(true);
-    expect(source.includes('<MessageThinking')).toBe(true);
-    expect(source.includes('message={item}')).toBe(true);
-    expect(source.includes("variant='process'")).toBe(true);
-    expect(source.includes('expanded={thinkingExpansion?.expanded}')).toBe(true);
+    expect(source.includes('<MessageThinking')).toBe(false);
+    expect(source.includes('turn-process-trace--thinking')).toBe(true);
+    expect(source.includes('Private reasoning omitted')).toBe(true);
     expect(source.includes('ThinkingTraceRow')).toBe(false);
     expect(source.includes('messages.processReceipt.thinkingCompletedDuration')).toBe(false);
     expect(source.includes('messages.processReceipt.thinkingRunning')).toBe(false);
@@ -62,8 +61,9 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('shouldShowFileListDetail')).toBe(true);
     expect(source.includes('shouldShowToolRowDetail')).toBe(true);
     expect(source.includes('turn-process-trace-file-list')).toBe(true);
-    expect(source.includes('messages.processReceipt.readTargets')).toBe(true);
+    expect(source.includes('messages.processReceipt.readFiles')).toBe(true);
     expect(source.includes('messages.processReceipt.fileEditTargets')).toBe(true);
+    expect(source.includes('turn-process-trace-file-list__button')).toBe(true);
   });
 
   test('gives system and tool process rows a consistent icon slot', () => {
@@ -80,6 +80,6 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('stateOverride?: TurnDisclosureProcessState')).toBe(true);
     expect(source.includes('const state = stateOverride ?? getProcessItemState(item);')).toBe(true);
     expect(source.includes('stateOverride={stateOverride}')).toBe(true);
-    expect(source.includes("completed={state === 'completed'}")).toBe(true);
+    expect(source.includes("`turn-process-trace__row--${row.state}`")).toBe(true);
   });
 });

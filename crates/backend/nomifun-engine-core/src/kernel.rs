@@ -36,7 +36,7 @@ pub struct EngineToolExposure {
 }
 
 /// Compile the model Tool surface from one immutable Snapshot and one exact
-/// frozen enabled set (the compatibility generation remains zero).
+/// canonical Store-committed active subset and generation.
 ///
 /// The caller supplies only explicit exposures. This function never scans the
 /// registry to auto-add capabilities, so a newly installed Plugin cannot
@@ -332,9 +332,12 @@ fn validate_snapshot_registry(
             "active capability set belongs to a different Snapshot".to_owned(),
         ));
     }
-    if active.generation != 0 || active.active != snapshot.content().capability_allowlist {
+    if !active
+        .active
+        .is_subset(&snapshot.content().capability_allowlist)
+    {
         return Err(EngineToolError::ToolPlan(
-            "capability set differs from the Snapshot's frozen enabled set".to_owned(),
+            "active capability set exceeds the Snapshot's frozen ceiling".to_owned(),
         ));
     }
     if snapshot.registry_generation != registry.generation

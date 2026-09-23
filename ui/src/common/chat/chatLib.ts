@@ -8,6 +8,7 @@ import type {
   PlanUpdate,
   PersistedToolArtifact,
 } from '@/common/types/platform/toolCallTypes';
+import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 import type { IResponseMessage, IUserMessageCreatedEvent } from '../adapter/ipcBridge';
 import {
   parseConversationId,
@@ -204,6 +205,21 @@ export type IMessageTips = IMessage<
     type: 'error' | 'success' | 'warning';
     error?: AgentStreamErrorInfo;
     recovery?: TruncatedTurnRecovery;
+    agent_transition?: {
+      transition_id: string;
+      previous_agent_label: string;
+      next_agent_label: string;
+      previous_preset_id?: string;
+      next_preset_id?: string;
+      previous_template_key?: OfficialPresetKey;
+      next_template_key?: OfficialPresetKey;
+      effective_from: 'next_turn';
+      handoff_mode: 'continue_task' | 'context_only';
+      completion_gate_inherited: false;
+    };
+    /** Canonical wall-clock interval for the owning turn. */
+    started_at_ms?: number;
+    finished_at_ms?: number;
   }
 >;
 
@@ -311,6 +327,9 @@ export type IMessageAgentStatus = IMessage<
     turn_summary?: boolean;
     started_seq?: number;
     finished_seq?: number | null;
+    /** Canonical wall-clock interval for the owning turn. */
+    started_at_ms?: number;
+    finished_at_ms?: number;
   }
 >;
 
@@ -932,6 +951,12 @@ const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['conte
       : finiteNumber(data.finished_seq) != null
         ? { finished_seq: finiteNumber(data.finished_seq) }
         : {}),
+    ...(finiteNumber(data.started_at_ms) != null
+      ? { started_at_ms: finiteNumber(data.started_at_ms) }
+      : {}),
+    ...(finiteNumber(data.finished_at_ms) != null
+      ? { finished_at_ms: finiteNumber(data.finished_at_ms) }
+      : {}),
   };
 };
 

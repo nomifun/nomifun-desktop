@@ -1043,7 +1043,7 @@ async fn set_binding(
 fn reject_canonical_session_binding_kind(kind: &str) -> Result<(), AppError> {
     if kind == "conversation" {
         return Err(AppError::Conflict(
-            "AgentSession Knowledge resources are frozen at creation; create a new Session to change them"
+            "AgentSession Knowledge is owned by /api/agent-sessions/{agent_session_id}/knowledge"
                 .to_owned(),
         ));
     }

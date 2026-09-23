@@ -140,10 +140,6 @@ const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedN
         );
       }
       break;
-    case 'panorama':
-      details.assetId = node.data.assetId;
-      details.projection = node.data.projection;
-      break;
     case 'video':
       details.assetId = node.data.assetId;
       details.posterAssetId = node.data.posterAssetId;

@@ -79,7 +79,8 @@ pub use repository::SqliteSshHostRepository;
 pub use models::SshHostRow;
 pub use repository::{
     AdoptAgentExecutionStepOutputParams, AgentExecutionAttemptRecoveryDisposition,
-    AgentExecutionAttemptRecoveryResult, AgentExecutionLeaseToken, AgentExecutionTurnAuthority,
+    AgentExecutionAttemptRecoveryResult, AgentExecutionAttemptSessionKind,
+    AgentExecutionLeaseToken, AgentExecutionTurnAuthority,
     AppendAgentExecutionStepsFromAttemptParams, AppendAgentExecutionStepsFromAttemptResult,
     AppendAgentExecutionStepsParams,
     AttemptConversationEffectParams, CreateAgentExecutionAttemptParams,

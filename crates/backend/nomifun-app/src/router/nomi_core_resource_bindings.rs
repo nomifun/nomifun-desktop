@@ -53,6 +53,11 @@ const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 6] = [
     "ssh_host",
     "browser",
 ];
+
+pub(crate) fn optional_unbound_resource_kind(kind: &str) -> bool {
+    OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind)
+}
+
 const MAX_SESSION_KNOWLEDGE_BASES: usize = 32;
 
 fn resource_kind_allows_multiple(kind: &str) -> bool {
@@ -238,6 +243,26 @@ impl NomiCoreResourceBindingResolverRegistry {
         action_allowlists: &FrozenActionAllowlists,
         mcp_locks: &[ResolvedMcpToolLock],
     ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
+        self.resolve_selected_with_requirement(
+            owner_id,
+            selections,
+            selected_capability_ids,
+            action_allowlists,
+            mcp_locks,
+            true,
+        )
+        .await
+    }
+
+    async fn resolve_selected_with_requirement(
+        &self,
+        owner_id: &str,
+        selections: &[AgentResourceSelectionDto],
+        selected_capability_ids: &BTreeSet<String>,
+        action_allowlists: &FrozenActionAllowlists,
+        mcp_locks: &[ResolvedMcpToolLock],
+        require_all_kinds: bool,
+    ) -> Result<Vec<TypedResourceBinding>, ResourceSelectionResolutionError> {
         if selections.len() > MAX_RESOURCE_SELECTIONS {
             return Err(ResourceSelectionResolutionError::invalid(format!(
                 "resource_selections cannot contain more than {MAX_RESOURCE_SELECTIONS} entries"
@@ -329,7 +354,7 @@ impl NomiCoreResourceBindingResolverRegistry {
                 ));
             }
         }
-        if !mcp_locks.is_empty() || selected_mcp_servers > 0 {
+        if selected_mcp_servers > 0 || (require_all_kinds && !mcp_locks.is_empty()) {
             let expected = mcp_locks.iter().map(|lock| lock.server_id.as_ref()).collect::<BTreeSet<_>>();
             let actual = selections.iter().filter(|selection| selection.resource_kind == "mcp_server")
                 .map(|selection| selection.resource_id.as_str()).collect::<BTreeSet<_>>();
@@ -369,7 +394,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             })
             .cloned()
             .collect::<Vec<_>>();
-        if !missing.is_empty() {
+        if require_all_kinds && !missing.is_empty() {
             return Err(ResourceSelectionResolutionError::new(
                 "RESOURCE_SELECTION_REQUIRED",
                 "the Agent requires additional product resources",
@@ -429,7 +454,24 @@ impl NomiCoreResourceBindingResolverRegistry {
                 }
                 Err(error) => return Err(error),
             };
-            if !operations.is_subset(&resolved.allowed_operations) {
+            if kind == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND {
+                // A Knowledge base narrows the Agent's capability ceiling. A
+                // read-only external base remains useful for search/read even
+                // when the Agent also grants knowledge/write; the per-Session
+                // write-back policy below decides whether write authority is
+                // required for this exact selection.
+                operations.retain(|operation| resolved.allowed_operations.contains(operation));
+                if operations.is_empty() {
+                    return Err(ResourceSelectionResolutionError::new(
+                        "RESOURCE_OPERATION_NOT_ALLOWED",
+                        "the selected Knowledge base grants no operation used by this Agent",
+                        json!({
+                            "resource_kind": kind,
+                            "resource_id": resource_id,
+                        }),
+                    ));
+                }
+            } else if !operations.is_subset(&resolved.allowed_operations) {
                 return Err(ResourceSelectionResolutionError::new(
                     "RESOURCE_OPERATION_NOT_ALLOWED",
                     "the selected resource cannot satisfy the Agent capability grant",
@@ -539,6 +581,90 @@ impl NomiCoreResourceBindingResolverRegistry {
             })
             .collect();
         Ok(binding)
+    }
+
+    /// Resolve only the mutable Knowledge subset of an existing Session.
+    /// Other frozen resources (workspace/process/device/etc.) are deliberately
+    /// absent from this resolution and remain byte-for-byte unchanged in the
+    /// caller's compare-and-swap replacement.
+    pub(crate) async fn resolve_knowledge_for_saved_binding(
+        &self,
+        control_plane: &AgentControlPlane,
+        owner: &nomifun_agent_contracts::UserId,
+        binding: &AgentBindingValueDto,
+        knowledge_base_ids: &[String],
+    ) -> Result<Vec<TypedResourceBindingDto>, ResourceSelectionResolutionError> {
+        let (_, _revision, snapshot) = control_plane
+            .saved_binding_artifacts(owner, binding)
+            .await
+            .map_err(|error| {
+                ResourceSelectionResolutionError::new(
+                    "RESOURCE_BINDING_ARTIFACT_INVALID",
+                    "the saved Agent binding cannot be resolved",
+                    json!({ "control_plane_code": error.code().as_ref() }),
+                )
+            })?;
+        let capability_ids = snapshot
+            .content
+            .enabled_capabilities
+            .iter()
+            .map(|capability| capability.capability.id.as_ref().to_owned())
+            .collect::<BTreeSet<_>>();
+        let action_allowlists = snapshot
+            .content
+            .enabled_capabilities
+            .iter()
+            .map(|capability| {
+                (
+                    capability.capability.id.as_ref().to_owned(),
+                    capability.action_allowlist.clone(),
+                )
+            })
+            .collect::<FrozenActionAllowlists>();
+        let derived_kinds = required_operations(&capability_ids, &action_allowlists)?
+            .into_keys()
+            .map(ResourceKind::from)
+            .collect::<BTreeSet<_>>();
+        if derived_kinds != snapshot.content.required_resource_kinds {
+            return Err(ResourceSelectionResolutionError::new(
+                "RESOURCE_REQUIREMENT_CONTRACT_MISMATCH",
+                "the capability resource requirements differ from the frozen Snapshot",
+                Value::Null,
+            ));
+        }
+        let selections = knowledge_base_ids
+            .iter()
+            .map(|resource_id| AgentResourceSelectionDto {
+                resource_kind:
+                    nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND.to_owned(),
+                resource_id: resource_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        self.resolve_selected_with_requirement(
+            owner.as_ref(),
+            &selections,
+            &capability_ids,
+            &action_allowlists,
+            &snapshot.content.mcp_tool_locks,
+            false,
+        )
+        .await
+        .map(|bindings| {
+            bindings
+                .into_iter()
+                .map(|binding| TypedResourceBindingDto {
+                    binding_id: binding.binding_id.as_ref().to_owned(),
+                    resource_kind: binding.resource_kind.as_ref().to_owned(),
+                    resource_id: binding.resource_id.as_ref().to_owned(),
+                    owner_id: binding.owner_id,
+                    operations: binding.operations,
+                    connection_config_ref: binding
+                        .connection_config_ref
+                        .map(|reference| reference.as_ref().to_owned()),
+                    typed_parameters: binding.typed_parameters,
+                })
+                .collect()
+        })
     }
 }
 
@@ -1635,6 +1761,36 @@ mod tests {
             .unwrap();
 
         assert!(bindings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_only_knowledge_base_narrows_a_write_capable_agent() {
+        let bindings = registry("knowledge_base", &["read", "search"])
+            .resolve_selected(
+                "owner-1",
+                &[AgentResourceSelectionDto {
+                    resource_kind: "knowledge_base".into(),
+                    resource_id: "read-only".into(),
+                }],
+                &BTreeSet::from(["knowledge".to_owned()]),
+                &BTreeMap::from([(
+                    "knowledge".to_owned(),
+                    BTreeSet::from([
+                        ActionId::from("knowledge/read"),
+                        ActionId::from("knowledge/search"),
+                        ActionId::from("knowledge/write"),
+                    ]),
+                )]),
+                &[],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].operations,
+            BTreeSet::from(["read".to_owned(), "search".to_owned()])
+        );
     }
 
     #[tokio::test]

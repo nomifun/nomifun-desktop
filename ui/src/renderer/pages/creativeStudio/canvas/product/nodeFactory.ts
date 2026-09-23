@@ -27,7 +27,6 @@ import { creativeStudioProductText } from './i18n';
 export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
   text: { width: 320, height: 320 },
   image: { width: 320, height: 320 },
-  panorama: { width: 320, height: 320 },
   video: { width: 320, height: 320 },
   audio: { width: 320, height: 320 },
   timeline: { width: 680, height: 148 },
@@ -39,7 +38,6 @@ export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
 export const CREATIVE_CANVAS_PRODUCT_EMPTY_NODE_SIZES = {
   text: { width: 288, height: 288 },
   image: { width: 288, height: 288 },
-  panorama: { width: 288, height: 288 },
   video: { width: 288, height: 288 },
   audio: { width: 288, height: 288 },
   timeline: CREATIVE_CANVAS_PRODUCT_NODE_SIZES.timeline,
@@ -59,13 +57,6 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     fit: 'contain',
     naturalSize: null,
     composer: null,
-  },
-  panorama: {
-    assetId: null,
-    projection: 'equirectangular',
-    yaw: 0,
-    pitch: 0,
-    fieldOfView: 75,
   },
   text: {
     text: '',

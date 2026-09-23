@@ -518,6 +518,26 @@ describe('transformMessage runtime field normalization', () => {
     expect(message.content.status).toBe('disconnected');
   });
 
+  test('keeps canonical turn wall-clock timing on status metadata', () => {
+    const message = transformMessage(
+      baseWire({
+        type: 'agent_status',
+        data: {
+          backend: 'nomi',
+          status: 'prepared',
+          turn_summary: true,
+          started_at_ms: 4_000_000,
+          finished_at_ms: 4_002_000,
+        },
+      })
+    );
+
+    expect(message?.type).toBe('agent_status');
+    if (message?.type !== 'agent_status') throw new Error('expected agent_status message');
+    expect(message.content.started_at_ms).toBe(4_000_000);
+    expect(message.content.finished_at_ms).toBe(4_002_000);
+  });
+
   test('preserves persisted knowledge writeback state when hydrating text messages', () => {
     const message = transformMessage(
       baseWire({

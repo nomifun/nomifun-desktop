@@ -1,0 +1,88 @@
+.workspaceColumn {
+  container-type: inline-size;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-1);
+}
+
+.manageLayout {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+}
+
+.manageNav {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 10px;
+  border-right: 1px solid var(--color-border-2);
+  background: var(--color-fill-1);
+}
+
+.manageSectionLabel {
+  display: block;
+  padding: 10px 10px 5px;
+  color: var(--color-text-4);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.manageNavButton {
+  width: 100%;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color .15s ease, color .15s ease;
+}
+
+.manageNavButton:hover { background: var(--color-fill-2); color: var(--color-text-1); }
+.manageNavButton[aria-selected='true'] { background: rgb(var(--primary-1)); color: rgb(var(--primary-6)); }
+.attentionDot {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: rgb(var(--primary-6));
+}
+
+.manageContent {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.manageInner {
+  width: 100%;
+  max-width: 980px;
+  margin: 0 auto;
+  padding-top: 22px;
+}
+
+@container (max-width: 720px) {
+  .manageLayout { grid-template-columns: 1fr; }
+  .manageNav {
+    display: flex;
+    gap: 3px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 8px 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border-2);
+  }
+  .manageSectionLabel { display: none; }
+  .manageNavButton { width: auto; min-width: max-content; }
+}

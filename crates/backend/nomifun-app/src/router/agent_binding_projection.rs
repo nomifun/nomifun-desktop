@@ -109,9 +109,31 @@ pub fn project(input: ProjectionInput<'_>) -> Result<AgentBindingProjection, App
         .iter()
         .map(|kind| kind.as_ref().to_owned())
         .collect::<BTreeSet<_>>();
-    let knowledge_enabled = required_resource_kinds
-        .iter()
-        .any(|kind| matches!(kind.as_str(), "knowledge_base" | "knowledge.base"));
+    let mut knowledge_binding_policy = None;
+    let mut knowledge_enabled = false;
+    for resource in input.binding.typed_resource_bindings.iter().filter(|binding| {
+        binding.resource_kind.as_ref()
+            == nomifun_agent_domain_wave1::KNOWLEDGE_BASE_RESOURCE_KIND
+    }) {
+        let enabled = nomifun_agent_domain_wave1::agent_knowledge_enabled(resource)
+            .map_err(|reason| AppError::Conflict(reason))?;
+        if knowledge_binding_policy.is_some() && knowledge_enabled != enabled {
+            return Err(AppError::Conflict(
+                "Knowledge resources carry inconsistent enabled policies".into(),
+            ));
+        }
+        knowledge_enabled = enabled;
+        let policy = nomifun_agent_domain_wave1::agent_knowledge_writeback_policy(resource)
+            .map_err(|reason| AppError::Conflict(reason))?;
+        if knowledge_binding_policy.is_some_and(|expected| expected != policy) {
+            return Err(AppError::Conflict(
+                "Knowledge resources carry inconsistent write-back policies".into(),
+            ));
+        }
+        knowledge_binding_policy = Some(policy);
+    }
+    let (knowledge_writeback, knowledge_eagerness) =
+        knowledge_binding_policy.unwrap_or((false, "manual"));
     let included_skills = input
         .snapshot
         .content
@@ -148,8 +170,9 @@ pub fn project(input: ProjectionInput<'_>) -> Result<AgentBindingProjection, App
         required_resource_kinds,
         knowledge_policy: AgentKnowledgePolicy {
             enabled: knowledge_enabled,
-            writeback: false,
-            eagerness: None,
+            writeback: knowledge_enabled && knowledge_writeback,
+            eagerness: (knowledge_enabled && knowledge_writeback)
+                .then(|| knowledge_eagerness.to_owned()),
             grounded: knowledge_enabled,
         },
         warnings: Vec::new(),

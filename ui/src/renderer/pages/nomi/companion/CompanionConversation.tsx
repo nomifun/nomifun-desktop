@@ -15,6 +15,8 @@ import { useNomiModelSelection } from '@/renderer/pages/conversation/platforms/n
 import type { useCompanion } from '../useNomi';
 import CompanionCapabilityControls from './CompanionCapabilityControls';
 import CompanionAgentIndicator from './CompanionAgentIndicator';
+import CompanionAvatar from '@/renderer/pages/companion/CompanionAvatar';
+import { customFigureMetaOf } from '@/renderer/pages/companion/characters/customMeta';
 
 type NomiConversation = Extract<TChatConversation, { type: 'nomi' }>;
 
@@ -23,10 +25,12 @@ interface Props {
   conversation: NomiConversation;
   /** 伙伴 profile + 乐观 patch 通道（模型唯一事实源入口）。 */
   companion: ReturnType<typeof useCompanion>;
+  /** Dedicated /nomi cohabit surface: configuration lives beside the chat. */
+  compact?: boolean;
 }
 
 /** Standard chat UI with companion-owned model and skills plus a fixed product Agent. */
-const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => {
+const CompanionConversation: React.FC<Props> = ({ conversation, companion, compact = false }) => {
   const { t } = useTranslation();
   const { profile, patchCompanion } = companion;
   const { groups } = useModelsForTask('chat');
@@ -74,11 +78,33 @@ const CompanionConversation: React.FC<Props> = ({ conversation, companion }) => 
       modelSelection={modelSelection}
       modelSelectionHint={t('nomi.chat.modelConfigHint')}
       modelSelectionDisabled={modelSaving}
-      emptySlot={!profile?.model ? <div className='p-20px text-center text-t-secondary'>{t('nomi.chat.modelMissing')}</div> : undefined}
-      agentSelectorNode={<CompanionAgentIndicator />}
-      capabilityControls={<CompanionCapabilityControls companion={companion} conversation={conversation} />}
+      emptySlot={!profile?.model
+        ? <div className='p-20px text-center text-t-secondary'>{t('nomi.chat.modelMissing')}</div>
+        : compact
+          ? (
+            <div className='h-full min-h-260px flex flex-col items-center justify-center gap-10px text-center text-t-tertiary'>
+              <CompanionAvatar
+                character={profile.character}
+                companionId={profile.companion_id}
+                customFigure={customFigureMetaOf(profile)}
+                mood='content'
+                activity='idle'
+                size={88}
+              />
+              <strong className='text-15px text-t-primary'>
+                {t('nomi.cohabit.emptyTitle', { name: profile.name, defaultValue: '从和 {{name}} 的第一句话开始' })}
+              </strong>
+              <span className='max-w-360px text-12px leading-19px'>
+                {t('nomi.cohabit.emptyHint', { defaultValue: '这里会延续桌面、消息渠道和机器人中的同一段相处历史。' })}
+              </span>
+            </div>
+          )
+          : undefined}
+      agentSelectorNode={compact ? undefined : <CompanionAgentIndicator />}
+      capabilityControls={compact ? undefined : <CompanionCapabilityControls companion={companion} conversation={conversation} />}
       agent_name={profile?.name}
       creationEnabled={false}
+      compactProductComposer={compact}
     />
   );
 };

@@ -54,8 +54,6 @@ const CompanionChatPanel: React.FC<Props> = ({ conversation, extraTabs }) => {
     <ExecutionConversationLayout
       title={conversation.name}
       conversation_id={conversation.id}
-      backend='nomi'
-      agent_name={profile?.name}
       headerControls={<div className='flex items-center gap-8px'>
         <IdmmControl target={{ id: conversation.id }} />
         {companionId && conversation.agent_snapshot?.required_resource_kinds.includes('knowledge_base')

@@ -247,9 +247,11 @@ pub(super) async fn compile(
     }
     let mut resource_ready = Vec::with_capacity(exposures.len());
     for exposure in exposures {
-        if snapshot
-            .capability_resources_bound(&exposure.capability_id)
-            .map_err(error)?
+        if action_resources_bound(
+            snapshot,
+            &exposure.capability_id,
+            &exposure.action_id,
+        )?
         {
             resource_ready.push(exposure);
         }
@@ -261,6 +263,40 @@ pub(super) async fn compile(
         ));
     }
     compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
+}
+
+/// Require the operation needed by a Wave 1 Action, not merely any resource
+/// of that Module. This keeps the model-visible tool table aligned with the
+/// live Knowledge switch/write-back disposition: search/read remain available
+/// for a read-only mount while write/autogen disappear when write-back is off.
+fn action_resources_bound(
+    snapshot: &CompiledSnapshot,
+    capability_id: &CapabilityId,
+    action_id: &ActionId,
+) -> Result<bool, AppError> {
+    if !nomifun_agent_domain_wave1::CAPABILITY_IDS.contains(&capability_id.as_ref()) {
+        return snapshot
+            .capability_resources_bound(capability_id)
+            .map_err(error);
+    }
+    let requirements = nomifun_agent_domain_wave1::required_action_resource_operations(
+        capability_id.as_ref(),
+        action_id.as_ref(),
+    )
+    .ok_or_else(|| error("Wave 1 Action has no resource-operation contract"))?;
+    if requirements.is_empty() {
+        return Ok(true);
+    }
+    let policy = snapshot
+        .policy(capability_id)
+        .ok_or_else(|| error("Wave 1 Module has no compiled resource policy"))?;
+    Ok(requirements.into_iter().all(|(kind, operation)| {
+        policy.resource_binding_ids.iter().any(|binding_id| {
+            snapshot.binding(binding_id).is_some_and(|binding| {
+                binding.resource_kind == kind && binding.operations.contains(&operation)
+            })
+        })
+    }))
 }
 
 fn platform_tool_name(capability_id: &str, action_id: &str) -> String {

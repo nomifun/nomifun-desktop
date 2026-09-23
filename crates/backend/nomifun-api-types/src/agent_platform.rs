@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use nomifun_common::KnowledgeBaseId;
 
 use crate::{ExecutionModelRef, IdmmConfig};
 
@@ -814,11 +815,58 @@ pub struct RemoteMutationResponseDto {
     pub session_status: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResourceSelectionDto {
     pub resource_kind: String,
     pub resource_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSessionKnowledgeWritebackEagernessDto {
+    #[default]
+    Manual,
+    Auto,
+}
+
+impl AgentSessionKnowledgeWritebackEagernessDto {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// User intent that narrows how one new AgentSession may use its already
+/// selected Knowledge resources. It grants neither Actions nor resources;
+/// those remain host-derived from the saved Agent and exact resource rows.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionKnowledgePolicyDto {
+    #[serde(default)]
+    pub writeback: bool,
+    #[serde(default)]
+    pub writeback_eagerness: AgentSessionKnowledgeWritebackEagernessDto,
+}
+
+/// Mutable Knowledge selection owned by one local AgentSession.
+///
+/// The saved Agent revision remains the immutable capability ceiling. This
+/// value may only select owner-visible Knowledge bases and narrow the
+/// Knowledge Actions that revision already grants.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionKnowledgeBindingDto {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub writeback: bool,
+    #[serde(default)]
+    pub writeback_eagerness: AgentSessionKnowledgeWritebackEagernessDto,
+    #[serde(default)]
+    pub kb_ids: Vec<KnowledgeBaseId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -835,6 +883,12 @@ pub struct CreateAgentSessionRequestDto {
     /// themselves resource permissions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_selections: Vec<AgentResourceSelectionDto>,
+    /// Initial write-back disposition for the Knowledge resources selected
+    /// above. The host freezes the exact initial authority; the dedicated
+    /// AgentSession Knowledge command may later replace only this resource
+    /// subset inside the saved Agent's immutable capability ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge_policy: Option<AgentSessionKnowledgePolicyDto>,
     /// Optional user-selected host workspace. This is only a candidate path:
     /// the authenticated host must canonicalize it, prove it is an existing
     /// directory, and derive the frozen typed resource binding itself.
@@ -859,6 +913,136 @@ pub struct AgentChatModelSelectionDto {
     pub provider_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
     pub model: String,
+}
+
+/// Product identity only. Exact Revision/Snapshot/binding facts remain
+/// server-resolved for both preview and apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentSwitchSelectionDto {
+    Preset {
+        #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
+        preset_id: String,
+    },
+    Template {
+        template_key: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewAgentSessionSwitchRequestDto {
+    pub selection: AgentSwitchSelectionDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchIdentityDto {
+    pub label: String,
+    pub preset_id: String,
+    pub preset_revision: u64,
+    pub resolved_snapshot_ref: ResolvedSnapshotRefDto,
+    pub binding_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchModelPreviewDto {
+    pub provider_id: String,
+    pub model: String,
+    pub preserved: bool,
+    pub compatible: bool,
+    #[serde(default)]
+    pub missing_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchResourceDiffDto {
+    #[serde(default)]
+    pub retained: Vec<AgentResourceSelectionDto>,
+    #[serde(default)]
+    pub dropped: Vec<AgentResourceSelectionDto>,
+    #[serde(default)]
+    pub missing_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchCapabilityDiffDto {
+    #[serde(default)]
+    pub gained: Vec<String>,
+    #[serde(default)]
+    pub lost: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSwitchBlockerDto {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentHandoffAvailabilityDto {
+    pub available: bool,
+    pub requirement_count: usize,
+    pub verified_artifact_count: usize,
+    pub unresolved_item_count: usize,
+    /// False in v1: handoff requirements are historical data until a target
+    /// Turn establishes fresh accepted-input provenance.
+    pub completion_gate_inherited: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewAgentSessionSwitchResponseDto {
+    pub current: AgentSwitchIdentityDto,
+    pub target: AgentSwitchIdentityDto,
+    pub model: AgentSwitchModelPreviewDto,
+    pub resources: AgentSwitchResourceDiffDto,
+    pub capabilities: AgentSwitchCapabilityDiffDto,
+    pub handoff: AgentHandoffAvailabilityDto,
+    #[serde(default)]
+    pub blockers: Vec<AgentSwitchBlockerDto>,
+    pub expected_binding_version: u64,
+    pub can_apply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentHandoffModeDto {
+    ContinueTask,
+    ContextOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyAgentSessionSwitchRequestDto {
+    pub selection: AgentSwitchSelectionDto,
+    pub handoff_mode: AgentHandoffModeDto,
+    pub expected_binding_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplyAgentSessionSwitchResponseDto {
+    pub conversation: crate::ConversationResponse,
+    pub transition_id: String,
+    pub previous_agent_label: String,
+    pub current_agent_label: String,
+    pub binding_version: u64,
+    pub effective_from: String,
+    pub handoff: AgentHandoffAvailabilityDto,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1147,6 +1331,39 @@ mod snapshot_tests {
     }
 
     #[test]
+    fn agent_switch_requests_accept_selection_only_and_reject_client_bindings() {
+        let preview = serde_json::from_value::<PreviewAgentSessionSwitchRequestDto>(json!({
+            "selection": { "kind": "preset", "preset_id": PRESET_ID }
+        }))
+        .expect("selection-only preview");
+        assert!(matches!(preview.selection, AgentSwitchSelectionDto::Preset { .. }));
+
+        let apply = serde_json::from_value::<ApplyAgentSessionSwitchRequestDto>(json!({
+            "selection": { "kind": "template", "template_key": "coding.codex" },
+            "handoff_mode": "context_only",
+            "expected_binding_version": 4
+        }))
+        .expect("bounded apply command");
+        assert_eq!(apply.handoff_mode, AgentHandoffModeDto::ContextOnly);
+
+        for forbidden in ["agent_binding", "resolved_snapshot_ref", "typed_resource_bindings"] {
+            let mut request = json!({
+                "selection": { "kind": "preset", "preset_id": PRESET_ID },
+                "handoff_mode": "continue_task",
+                "expected_binding_version": 4
+            });
+            request
+                .as_object_mut()
+                .unwrap()
+                .insert(forbidden.to_owned(), json!({}));
+            assert!(
+                serde_json::from_value::<ApplyAgentSessionSwitchRequestDto>(request).is_err(),
+                "clients must not submit {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn create_agent_session_request_accepts_product_resource_selections_only() {
         let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
             "preset_id": PRESET_ID,
@@ -1161,6 +1378,7 @@ mod snapshot_tests {
         assert_eq!(request.resource_selections.len(), 2);
         assert_eq!(request.resource_selections[0].resource_kind, "companion");
         assert_eq!(request.resource_selections[1].resource_id, "channel-1");
+        assert!(request.knowledge_policy.is_none());
         assert!(request.workspace.is_none());
 
         assert!(
@@ -1175,6 +1393,60 @@ mod snapshot_tests {
             .is_err(),
             "clients must not be able to submit resource operations"
         );
+    }
+
+    #[test]
+    fn create_agent_session_request_accepts_only_bounded_knowledge_policy() {
+        let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+            "preset_id": PRESET_ID,
+            "resource_selections": [{
+                "resource_kind": "knowledge_base",
+                "resource_id": "0190f5fe-7c00-7a00-8000-000000000099"
+            }],
+            "knowledge_policy": {
+                "writeback": true,
+                "writeback_eagerness": "auto"
+            }
+        }))
+        .expect("bounded Knowledge launch policy is supported");
+        let policy = request.knowledge_policy.expect("Knowledge policy");
+        assert!(policy.writeback);
+        assert_eq!(policy.writeback_eagerness.as_str(), "auto");
+
+        for invalid in [
+            json!({
+                "preset_id": PRESET_ID,
+                "knowledge_policy": { "writeback": true, "writeback_eagerness": "aggressive" }
+            }),
+            json!({
+                "preset_id": PRESET_ID,
+                "knowledge_policy": { "writeback": true, "operations": ["write"] }
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<CreateAgentSessionRequestDto>(invalid).is_err(),
+                "unknown policy values or authority fields must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_session_knowledge_binding_validates_exact_base_ids() {
+        let binding = serde_json::from_value::<AgentSessionKnowledgeBindingDto>(json!({
+            "enabled": true,
+            "writeback": true,
+            "writeback_eagerness": "auto",
+            "kb_ids": ["0190f5fe-7c00-7a00-8000-000000000099"]
+        }))
+        .expect("canonical live Knowledge binding");
+        assert_eq!(binding.kb_ids.len(), 1);
+        assert_eq!(binding.writeback_eagerness.as_str(), "auto");
+
+        assert!(serde_json::from_value::<AgentSessionKnowledgeBindingDto>(json!({
+            "enabled": true,
+            "kb_ids": ["not-a-knowledge-id"]
+        }))
+        .is_err());
     }
 
     #[test]

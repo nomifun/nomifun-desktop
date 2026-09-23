@@ -16,7 +16,21 @@ export interface GeomSize {
   height: number;
 }
 
+export interface GeomPoint {
+  x: number;
+  y: number;
+}
+
 export const clamp = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), Math.max(lo, hi));
+
+/** Move a saved small-window anchor by the same physical-pixel delta as an expanded-window drag. */
+export function translateAnchorAfterDrag(anchor: GeomRect, from: GeomPoint, to: GeomPoint): GeomRect {
+  return {
+    ...anchor,
+    x: anchor.x + (to.x - from.x),
+    y: anchor.y + (to.y - from.y),
+  };
+}
 
 /** Intersection area of two rects (0 when disjoint). */
 const overlapArea = (a: GeomRect, b: GeomRect): number =>

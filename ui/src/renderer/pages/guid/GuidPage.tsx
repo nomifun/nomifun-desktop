@@ -19,6 +19,7 @@ import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPi
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
+import KnowledgeControl, { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
@@ -196,10 +197,17 @@ const GuidPage: React.FC = () => {
   );
   const collaborationEnabled = presetResourceResolutionReady
     && presetCapabilityIds.has('agent.collaboration');
+  const knowledgeEnabled = presetResourceResolutionReady
+    && presetResourceKinds.has('knowledge_base');
+  const knowledgeRequiresWrite = [...presetActionIds].some((action) =>
+    action === 'knowledge/write' || action === 'knowledge/autogen'
+  );
   // Every concrete resource chosen for this launch crosses the same canonical
-  // AgentSession admission boundary. Knowledge is optional, but selected bases
-  // are frozen with the Session just like Workspace, Computer, or MCP resources.
-  const resourcePickerKinds = new Set(presetResourceKinds);
+  // AgentSession admission boundary. Knowledge keeps its compact header control
+  // but contributes to this same frozen resource request at Session creation.
+  const resourcePickerKinds = new Set(
+    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
+  );
   const optionalResourcePickerKinds = requiredAgentResourcePickerKinds(
     [...resourcePickerKinds].filter(agentResourceKindMayRemainUnbound)
   );
@@ -207,6 +215,22 @@ const GuidPage: React.FC = () => {
     resourcePickerKinds,
     resourceSelectionValue
   );
+  const knowledgeResourceSelections = knowledgeEnabled && advancedConfig.knowledge.enabled
+    ? advancedConfig.knowledge.kb_ids.map((resourceId) => ({
+        resource_kind: 'knowledge_base',
+        resource_id: resourceId,
+      }))
+    : [];
+  const sessionResourceSelections = [
+    ...resourceSelectionResolution.selections,
+    ...knowledgeResourceSelections,
+  ];
+  const knowledgePolicy = knowledgeResourceSelections.length > 0
+    ? {
+        writeback: advancedConfig.knowledge.writeback,
+        writeback_eagerness: advancedConfig.knowledge.writeback_eagerness,
+      }
+    : undefined;
   const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
   const idmmControlEnabled = presetResourceResolutionReady;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
@@ -238,7 +262,8 @@ const GuidPage: React.FC = () => {
   const appliedIdmmDefaultRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     setResourceSelectionValue({});
-  }, [selectedAgentResourceKey]);
+    advancedConfig.setKnowledge(defaultKnowledgeBinding());
+  }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
   useEffect(() => {
     if (!presetResourceResolutionReady) return;
     const sourceKey = `${location.key}:${selectedAgentResourceKey}`;
@@ -290,7 +315,8 @@ const GuidPage: React.FC = () => {
       && resourceSelectionsReady
       && (!collaborationEnabled || collaboration.ready),
     collaboration: collaborationEnabled ? collaboration.config : undefined,
-    resourceSelections: resourceSelectionResolution.selections,
+    resourceSelections: sessionResourceSelections,
+    knowledgePolicy,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
@@ -538,8 +564,19 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  const advancedControlsNode = advancedControlsEnabled || idmmControlEnabled ? (
+  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled || idmmControlEnabled ? (
     <>
+      {knowledgeEnabled && (
+        <KnowledgeControl
+          key={`knowledge-${location.key}-${selectedAgentResourceKey}`}
+          draft={{
+            value: advancedConfig.knowledge,
+            onChange: advancedConfig.setKnowledge,
+          }}
+          writebackAvailable={knowledgeRequiresWrite}
+          applyNote={t('knowledge.control.guidApplyNote')}
+        />
+      )}
       {advancedControlsEnabled && (
         <AutoWorkControl
           key={`autowork-${location.key}`}

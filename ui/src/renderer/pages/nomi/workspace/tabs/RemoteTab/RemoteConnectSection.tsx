@@ -52,6 +52,7 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
   const [statuses, setStatuses] = useState<Record<string, IChannelPluginStatus>>({});
   const [pendingCounts, setPendingCounts] = useState<Record<string, number>>({});
   const [busyPluginId, setBusyPluginId] = useState<ChannelPluginId | null>(null);
+  const [showAllPlatforms, setShowAllPlatforms] = useState(false);
   // Config modal target: with channelPluginId = edit; without = create mode.
   const [configTarget, setConfigTarget] = useState<ChannelConfigTarget>(null);
 
@@ -288,6 +289,11 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
   };
 
   const allRows = useMemo(() => Object.values(statuses), [statuses]);
+  const visiblePlatforms = useMemo(() => {
+    if (showAllPlatforms) return CHANNEL_PLATFORMS;
+    const configuredTypes = new Set(allRows.filter((row) => row.hasToken).map((row) => row.type));
+    return CHANNEL_PLATFORMS.filter((platform, index) => index < 3 || configuredTypes.has(platform.id));
+  }, [allRows, showAllPlatforms]);
 
   const configChannel = useMemo(
     () => CHANNEL_PLATFORMS.find((p) => p.id === configTarget?.platform),
@@ -300,9 +306,19 @@ const RemoteConnectSection: React.FC<{ companionId: CompanionId; companionName: 
         className='mt-8px'
         title={t('nomi.settings.remoteTitle')}
         description={t('nomi.settings.remoteHint', { companionName })}
+        action={
+          <Button size='mini' type='text' onClick={() => setShowAllPlatforms((visible) => !visible)}>
+            {showAllPlatforms
+              ? t('common.collapse', { defaultValue: '收起' })
+              : t('nomi.remote.showAllPlatforms', {
+                  count: CHANNEL_PLATFORMS.length,
+                  defaultValue: '查看全部 {{count}} 个渠道',
+                })}
+          </Button>
+        }
       >
         <NomiSettingList>
-        {CHANNEL_PLATFORMS.map(({ id, logo, titleKey, fallback }) => {
+        {visiblePlatforms.map(({ id, logo, titleKey, fallback }) => {
         const title = t(titleKey, fallback);
         // Only configured plugins: `GET /plugins` may pad a builtin platform
         // with an unconfigured placeholder. Configured plugins carry credentials

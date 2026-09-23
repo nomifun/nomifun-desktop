@@ -57,11 +57,13 @@ describe('Guid Agent selector', () => {
   test('supports a current-session label while an Agent switch is pending', () => {
     const { page } = renderSelector({
       disabled: true,
+      disabledReason: 'Wait for the current Turn',
       selectedLabelOverride: '当前会话 Agent',
     });
     const trigger = page.getByTestId('guid-agent-selector') as HTMLButtonElement;
     expect(trigger.textContent?.includes('当前会话 Agent')).toBe(true);
     expect(trigger.disabled).toBe(true);
+    expect(trigger.title).toBe('Wait for the current Turn');
   });
 
   test('keeps the collection hidden until the current Agent is opened', async () => {

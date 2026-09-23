@@ -28,6 +28,7 @@ export type GuidAgentSelectorProps = {
   onRetry?: () => Promise<void>;
   selectedLabelOverride?: string;
   disabled?: boolean;
+  disabledReason?: string;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
@@ -50,6 +51,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   onRetry,
   selectedLabelOverride,
   disabled = false,
+  disabledReason,
   onSelectTemplate,
   onSelectPreset,
 }) => {
@@ -164,7 +166,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
         type='button'
         className={styles.trigger}
         disabled={disabled}
-        title={selectedLabel}
+        title={disabled ? disabledReason ?? selectedLabel : selectedLabel}
         aria-label={selectedLabel}
         data-testid='guid-agent-selector'
         data-agent-identity

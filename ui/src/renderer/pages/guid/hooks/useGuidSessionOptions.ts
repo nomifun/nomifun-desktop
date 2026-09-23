@@ -5,15 +5,19 @@
  */
 
 import { ipcBridge } from '@/common';
+import type { IKnowledgeBinding } from '@/common/adapter/ipcBridge';
 import type { IIdmmConfig } from '@/common/types/idmm';
 import type { ConversationId } from '@/common/types/ids';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
+import { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { defaultIdmmConfig } from '@/renderer/pages/conversation/components/IdmmControl';
 
 export type GuidSessionOptions = {
+  knowledge: IKnowledgeBinding;
+  setKnowledge: (next: IKnowledgeBinding) => void;
   autoWork: AutoWorkDraftValue;
   setAutoWork: (next: AutoWorkDraftValue) => void;
   idmm: IIdmmConfig;
@@ -32,6 +36,7 @@ export type GuidSessionOptions = {
  */
 export const useGuidSessionOptions = (): GuidSessionOptions => {
   const { t } = useTranslation();
+  const [knowledge, setKnowledge] = useState<IKnowledgeBinding>(defaultKnowledgeBinding);
   const [autoWork, setAutoWork] = useState<AutoWorkDraftValue>({
     enabled: false,
   });
@@ -110,12 +115,15 @@ export const useGuidSessionOptions = (): GuidSessionOptions => {
   );
 
   const reset = useCallback(() => {
+    setKnowledge(defaultKnowledgeBinding());
     setAutoWork({ enabled: false });
     idmmOverriddenRef.current = false;
     setIdmmState(defaultIdmmConfig());
   }, []);
 
   return {
+    knowledge,
+    setKnowledge,
     autoWork,
     setAutoWork,
     idmm,
