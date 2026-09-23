@@ -5,6 +5,7 @@ import {
   createMacosDevLifetime,
   developmentEnvironment,
   ensureGeneratedDevelopmentDataDirectory,
+  generatedDevelopmentDataDirectory,
   formatWindowsLinkEnvironmentError,
   hasWindowsLinkEnvironmentShape,
   loadWindowsToolchainEnvironment,
@@ -16,9 +17,9 @@ import { connect } from 'node:net';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
 
-describe('Windows development data generation', () => {
-  const generatedDirectory = (localAppData) => join(
-    localAppData,
+describe('development data generation', () => {
+  const generatedDirectory = (dataHome) => join(
+    dataHome,
     `NomiFun-dev-schema-${DEVELOPMENT_SCHEMA_FINGERPRINT}`,
   );
 
@@ -46,30 +47,66 @@ describe('Windows development data generation', () => {
       .toBe(generatedDirectory('C:\\local'));
   });
 
-  test('leaves other platforms data selection unchanged', () => {
+  test('isolates macOS and Linux defaults with the same schema fingerprint', () => {
+    expect(developmentEnvironment({ HOME: '/Users/dev' }, 'darwin'))
+      .toEqual({
+        HOME: '/Users/dev',
+        NOMIFUN_DATA_DIR: generatedDirectory('/Users/dev/Library/Application Support'),
+        NOMI_CHANNEL: 'dev',
+      });
     expect(developmentEnvironment({ HOME: '/home/dev' }, 'linux'))
-      .toEqual({ HOME: '/home/dev', NOMI_CHANNEL: 'dev' });
+      .toEqual({
+        HOME: '/home/dev',
+        NOMIFUN_DATA_DIR: generatedDirectory('/home/dev/.local/share'),
+        NOMI_CHANNEL: 'dev',
+      });
+    expect(developmentEnvironment({
+      HOME: '/home/dev',
+      XDG_DATA_HOME: '/mnt/dev-data',
+    }, 'linux').NOMIFUN_DATA_DIR).toBe(generatedDirectory('/mnt/dev-data'));
+    expect(developmentEnvironment({
+      HOME: '/home/dev',
+      XDG_DATA_HOME: 'relative-data',
+    }, 'linux').NOMIFUN_DATA_DIR).toBe(generatedDirectory('/home/dev/.local/share'));
+    expect(developmentEnvironment({
+      HOME: '/home/dev',
+      nomifun_data_dir: '/ignored-on-posix',
+    }, 'linux').NOMIFUN_DATA_DIR).toBe(generatedDirectory('/home/dev/.local/share'));
+  });
+
+  test('honors explicit POSIX roots and rejects empty ones', () => {
     expect(developmentEnvironment({ NOMIFUN_DATA_DIR: '/tmp/dev' }, 'darwin'))
       .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev' });
+    expect(developmentEnvironment({ NOMIFUN_DATA_DIR: '/tmp/dev' }, 'linux'))
+      .toEqual({ NOMIFUN_DATA_DIR: '/tmp/dev', NOMI_CHANNEL: 'dev' });
+    expect(() => developmentEnvironment({ NOMIFUN_DATA_DIR: '' }, 'darwin'))
+      .toThrow('must not be empty');
   });
 
-  test('creates the generated Windows root before launching Tauri', () => {
-    const source = { LOCALAPPDATA: 'C:\\Users\\developer\\AppData\\Local' };
-    const environment = developmentEnvironment(source, 'win32');
+  test('creates generated roots before launching Tauri on every desktop platform', () => {
     const calls = [];
-    expect(ensureGeneratedDevelopmentDataDirectory(
-      environment,
-      source,
-      'win32',
-      (...args) => calls.push(args),
-    )).toBe(generatedDirectory(source.LOCALAPPDATA));
-    expect(calls).toEqual([[
-      generatedDirectory(source.LOCALAPPDATA),
+    const cases = [
+      ['win32', { LOCALAPPDATA: 'C:\\Users\\developer\\AppData\\Local' }],
+      ['darwin', { HOME: '/Users/developer' }],
+      ['linux', { HOME: '/home/developer', XDG_DATA_HOME: '/srv/developer-data' }],
+    ];
+    for (const [platform, source] of cases) {
+      const environment = developmentEnvironment(source, platform);
+      const expected = generatedDevelopmentDataDirectory(source, platform);
+      expect(ensureGeneratedDevelopmentDataDirectory(
+        environment,
+        source,
+        platform,
+        (...args) => calls.push(args),
+      )).toBe(expected);
+    }
+    expect(calls).toEqual(cases.map(([platform, source]) => [
+      generatedDevelopmentDataDirectory(source, platform),
       { recursive: true },
-    ]]);
+    ]));
   });
 
-  test('does not create caller-owned explicit roots or non-Windows roots', () => {
+  test('does not create caller-owned explicit roots or unsupported-platform roots', () => {
     const calls = [];
     const createDirectory = (...args) => calls.push(args);
     expect(ensureGeneratedDevelopmentDataDirectory(
@@ -80,8 +117,14 @@ describe('Windows development data generation', () => {
     )).toBeNull();
     expect(ensureGeneratedDevelopmentDataDirectory(
       { NOMIFUN_DATA_DIR: '/tmp/dev' },
-      {},
+      { NOMIFUN_DATA_DIR: '/tmp/dev' },
       'darwin',
+      createDirectory,
+    )).toBeNull();
+    expect(ensureGeneratedDevelopmentDataDirectory(
+      { NOMI_CHANNEL: 'dev' },
+      {},
+      'freebsd',
       createDirectory,
     )).toBeNull();
     expect(calls).toEqual([]);

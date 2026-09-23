@@ -12,7 +12,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -29,7 +30,7 @@ export const DEVELOPMENT_SCHEMA_FINGERPRINT = createHash('sha256')
   .update(readFileSync(CANONICAL_DATABASE_BASELINE))
   .digest('hex')
   .slice(0, 16);
-const GENERATED_WINDOWS_DEV_DIRECTORY =
+const GENERATED_DEV_DIRECTORY =
   `NomiFun-dev-schema-${DEVELOPMENT_SCHEMA_FINGERPRINT}`;
 const WINDOWS_TOOLCHAIN_COMPONENT =
   'Microsoft.VisualStudio.Component.VC.Tools.x86.x64';
@@ -354,33 +355,87 @@ export function loadWindowsToolchainEnvironment(
 
 // The clean-start refactor intentionally has one editable canonical migration.
 // Reusing a database created from an older byte-for-byte baseline must fail its
-// SQLx lineage check. Derive the generated Windows development root from that
+// SQLx lineage check. Derive the generated development root from that
 // baseline so `bun run dev` gets a fresh dataset after an intentional schema
 // rewrite without deleting or rewriting any older directory. Explicit data
 // roots remain the caller's responsibility.
-// TODO(platform): validate the same clean-start dev policy on macOS/Linux.
+function explicitDataRootKey(environment, platform) {
+  if (platform === 'win32') {
+    return Object.keys(environment).find(
+      (key) => key.toUpperCase() === 'NOMIFUN_DATA_DIR',
+    );
+  }
+  return Object.hasOwn(environment, 'NOMIFUN_DATA_DIR')
+    ? 'NOMIFUN_DATA_DIR'
+    : undefined;
+}
+
+function dataRootEnvironmentValue(environment, platform) {
+  return platform === 'win32'
+    ? getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR')
+    : environment.NOMIFUN_DATA_DIR ?? '';
+}
+
+function posixHomeDirectory(environment) {
+  const configured = environment.HOME;
+  if (typeof configured === 'string' && configured.trim()) return configured;
+  const fallback = homedir();
+  return fallback?.trim() ? fallback : '';
+}
+
+export function generatedDevelopmentDataDirectory(
+  environment,
+  platform = process.platform,
+) {
+  if (platform === 'win32') {
+    const localAppData = getEnvironmentValue(environment, 'LOCALAPPDATA');
+    if (!localAppData) {
+      throw new Error('LOCALAPPDATA is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
+    }
+    return join(localAppData, GENERATED_DEV_DIRECTORY);
+  }
+
+  if (platform === 'darwin') {
+    const home = posixHomeDirectory(environment);
+    if (!home) {
+      throw new Error('the macOS home directory is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
+    }
+    return join(home, 'Library', 'Application Support', GENERATED_DEV_DIRECTORY);
+  }
+
+  if (platform === 'linux') {
+    const xdgDataHome = environment.XDG_DATA_HOME;
+    if (typeof xdgDataHome === 'string' && isAbsolute(xdgDataHome)) {
+      return join(xdgDataHome, GENERATED_DEV_DIRECTORY);
+    }
+    const home = posixHomeDirectory(environment);
+    if (!home) {
+      throw new Error('the Linux data directory is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
+    }
+    return join(home, '.local', 'share', GENERATED_DEV_DIRECTORY);
+  }
+
+  return null;
+}
+
 export function developmentEnvironment(environment, platform = process.platform) {
   const result = { ...environment, NOMI_CHANNEL: 'dev' };
-  if (platform !== 'win32') return result;
-  const explicitKey = Object.keys(environment).find(
-    (key) => key.toUpperCase() === 'NOMIFUN_DATA_DIR',
-  );
+  const explicitKey = explicitDataRootKey(environment, platform);
   if (explicitKey) {
-    if (!environment[explicitKey]?.trim()) {
+    if (typeof environment[explicitKey] !== 'string' || !environment[explicitKey].trim()) {
       throw new Error('NOMIFUN_DATA_DIR must not be empty; unset it to use the isolated development data directory');
     }
     return result;
   }
-  const localAppData = getEnvironmentValue(environment, 'LOCALAPPDATA');
-  if (!localAppData) {
-    throw new Error('LOCALAPPDATA is unavailable; set NOMIFUN_DATA_DIR to an explicit development data directory');
+  const generated = generatedDevelopmentDataDirectory(environment, platform);
+  if (generated) {
+    result.NOMIFUN_DATA_DIR = generated;
   }
-  result.NOMIFUN_DATA_DIR = join(localAppData, GENERATED_WINDOWS_DEV_DIRECTORY);
   return result;
 }
 
 /**
- * Materialize only the generated Windows development root. Explicit roots are
+ * Materialize only a generated development root. Explicit roots are
  * still owned by their caller, matching the clean-start contract above.
  */
 export function ensureGeneratedDevelopmentDataDirectory(
@@ -389,19 +444,14 @@ export function ensureGeneratedDevelopmentDataDirectory(
   platform = process.platform,
   createDirectory = mkdirSync,
 ) {
-  if (platform !== 'win32') return null;
-  const explicitKey = Object.keys(sourceEnvironment).find(
-    (key) => key.toUpperCase() === 'NOMIFUN_DATA_DIR',
-  );
+  const explicitKey = explicitDataRootKey(sourceEnvironment, platform);
   if (explicitKey) return null;
 
-  const localAppData = getEnvironmentValue(sourceEnvironment, 'LOCALAPPDATA');
-  const target = getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR');
-  const expected = localAppData
-    ? join(localAppData, GENERATED_WINDOWS_DEV_DIRECTORY)
-    : '';
+  const expected = generatedDevelopmentDataDirectory(sourceEnvironment, platform);
+  if (!expected) return null;
+  const target = dataRootEnvironmentValue(environment, platform);
   if (!target || target !== expected) {
-    throw new Error('generated Windows development data directory does not match LOCALAPPDATA');
+    throw new Error('generated development data directory does not match the platform data root');
   }
   createDirectory(target, { recursive: true });
   return target;
@@ -470,9 +520,10 @@ export async function createMacosDevLifetime() {
 
 async function main() {
   let environment;
+  let generatedDataDirectory;
   try {
     environment = developmentEnvironment(loadWindowsToolchainEnvironment(process.env));
-    ensureGeneratedDevelopmentDataDirectory(environment, process.env);
+    generatedDataDirectory = ensureGeneratedDevelopmentDataDirectory(environment, process.env);
   } catch (error) {
     console.error(`[dev] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;
@@ -491,8 +542,11 @@ async function main() {
     return;
   }
 
-  if (process.platform === 'win32') {
-    console.log(`[dev] data directory: ${getEnvironmentValue(environment, 'NOMIFUN_DATA_DIR')} (schema ${DEVELOPMENT_SCHEMA_FINGERPRINT}; historical directories are preserved)`);
+  const dataDirectory = dataRootEnvironmentValue(environment, process.platform);
+  if (generatedDataDirectory) {
+    console.log(`[dev] data directory: ${dataDirectory} (schema ${DEVELOPMENT_SCHEMA_FINGERPRINT}; historical directories are preserved)`);
+  } else if (dataDirectory) {
+    console.log(`[dev] data directory: ${dataDirectory} (explicit)`);
   }
 
   const lifetime = process.platform === 'darwin'
