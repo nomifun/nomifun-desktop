@@ -4,7 +4,7 @@
 
 ## 状态
 
-- Goal：`active`。Unified Plugin Core 源码 clean cut 已完成；macOS arm64 App/DMG 原生包与启动证据已通过。目标机解锁后的 Plugin UI 验收发现并修复 SDK/Host 协议错接，修复版原生包仍待重建和复验；Windows 候选安装闭环也独立未完成，因此不得标记 `complete`。
+- Goal：`active`。Unified Plugin Core 源码 clean cut 已完成；macOS SDK/Surface Host 协议错接和 Node 环境断言已修复。用户随后明确将当前 Mac 交付范围收窄为**源码适配**，不再要求继续扩展目标机测试矩阵；合入最新远端提交后的 Apple Silicon Desktop 代码检查通过。既有 arm64 App/DMG 证据只对应其锁定的源提交，Windows 候选安装闭环仍独立未完成，因此不把总 Goal 标为 `complete`。
 - 开发分支：`rf/agent-capability-platform-v2`。Unified Plugin Core 的两个提交已快进进入此分支，随后正常合并远端在此期间新增的 Agent、Knowledge、会话切换、Canvas 与 UI 提交。后续只在本开发分支施工。
 - 起始工作树：只有本规格目录为未跟踪内容；未发现或覆盖用户无关代码改动。
 - 最终边界：没有双架构、feature flag、旧 decoder、旧 API alias 或可运行兼容层。Plugin 子系统 clean-start，不转换 N1/M1 Plugin 行，也不触碰非 Plugin 用户数据。
@@ -94,7 +94,7 @@
 - 完整候选冒烟需要用户明确允许临时处理现有协议注册，或在无既有 NomiFun 注册的干净 Windows 账户/主机运行。结构化结果输出到命令 stdout；隔离运行目录限定在 `build.noindex`，不纳入 Git。
 - 上一轮主机是 Windows，当时无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
 - macOS 目标机接续操作已写入同目录 [`PROMPT-START.zh.md`](PROMPT-START.zh.md)，供另一台 Apple Silicon 机器在同一 `rf/agent-capability-platform-v2` 分支执行。
-- Windows 候选环境保护仍是独立未完成门禁；macOS 包/启动证据见下方，Plugin 产品 UI 仍待目标机解锁。Goal 保持 `active`，没有已知 Plugin 源码或测试失败。
+- Windows 候选环境保护仍是独立未完成门禁；macOS 包、解锁后的 Plugin UI 和后续源码适配证据见下方。Goal 保持 `active`。
 
 ## macOS arm64 目标机接续（2026-09-23，进行中）
 
@@ -117,4 +117,11 @@
 
 - 目标机解锁后，使用上述同一 App 与隔离 `data/` 启动 PID 17418，实际打开桌面窗口的 Plugin Library，目录导入 `work/fixtures/ui-only/`；Import inspect/install、Plugin detail、Surface open 和 `ui/index.html` 静态资源均为 HTTP 200。已安装本地 Plugin `01a0ccd1-8ba4-7461-a5f1-c52a82071e3a`，Run 首次短暂显示 fixture iframe，约 10 秒后显示 `Plugin surface could not be opened`；这个原生产品步骤**失败**，不能把此前 HTTP E2E 写成 UI 验收通过。导入后进程树 `logs/process-tree-ui-only-open.json` 的 Node 数为 0，但因 Surface 失败，持久化写入/读取尚未验证。
 - 根因：唯一 `plugin-sdk.js` 仍使用旧的 `window.__nomifunPluginBridge` + `method/params` 帧，而唯一 `PluginSurfacePanel` 已发送 nonce challenge、转移 MessagePort，并要求 `call_id + target` DTO；Host 等不到 handshake 后超时。修复直接收敛这同一 SDK 与 Host：SDK 响应 challenge、校验同一 nonce、接受 transferred port/Preview 标记，发送当前后端 DTO，解码当前结果；UI/Service 不增加第二套 Bridge、旧入口或兼容分支。文件写入经统一 DataRoot 以 base64 传输并按 Service 语义覆盖已有文件。
-- 修复后 `bun run test:plugin-sdk` 8/8、Plugin UI 定向 10/10、`bun run check`（含 `check:desktop-ui-boundary` 和 Unified Plugin 边界）、Plugin HTTP E2E 8/8、Plugin Platform 全套 57/57 均退出 0。日志分别为 `logs/plugin-sdk-native-fix.log`、`logs/plugin-ui-native-fix.log`、`logs/check-native-fix.log`、`logs/plugin-e2e-native-fix.log`、`logs/plugin-platform-native-fix.log`。原生 App/DMG 仍是修复前的构建，须从本修复提交重新构建并复验，不能把源码检查替代原生结果。
+- 修复后 `bun run test:plugin-sdk` 8/8、Plugin UI 定向 10/10、`bun run check`（含 `check:desktop-ui-boundary` 和 Unified Plugin 边界）、Plugin HTTP E2E 8/8、Plugin Platform 全套 57/57 均退出 0。日志分别为 `logs/plugin-sdk-native-fix.log`、`logs/plugin-ui-native-fix.log`、`logs/check-native-fix.log`、`logs/plugin-e2e-native-fix.log`、`logs/plugin-platform-native-fix.log`。修复版包已从该源码提交重建和预检，见下一节；不能以源码检查代替包或产品结果。
+
+## macOS 源码适配收口（最新用户范围）
+
+- SDK/Surface Host 修复提交 `253c86ad7166727aa8e0cca7f21840a87cb8c58b`：保留唯一 `nomifun.plugin/v1` SDK、Bridge 与 `call_id + target` DTO，删除旧 bootstrap/wire 等待；Preview 标记经同一 transferred port 握手传递。该提交的干净验收检出执行 `bun run build:mac arm` 退出 0，日志 `logs/clean-build-surface-fix.log`。App 可执行文件 SHA-256 `8444dbc157b7edb9b3495bc32e66c3c5d80b6d9be7541990e642aa2b790045c7`；DMG `ab272e56d11087a6498d80dc3d1736a30bfac777aeb1124a23ae5923749fa236`；release lock `c2fb1fb9e6d04ff2bc8ae5186f9a5bbfb94088f4a86a6682a6673c8620ee954d`。`logs/macos-native-surface-fix.json` 记录 26 项原生 preflight、零失败/阻塞；仍是 ad hoc 签名的未公证工程包。
+- 解锁后的隔离 App 曾实际显示 1182×768 Plugin UI。UI-only 的 KV/SQLite/Files 通过真实 Surface Bridge 写入、重载与 App 重启后仍在，Node 子进程始终为 0；Creator Preview 修改临时副本后正式 DataRoot 不变；headless Service 被真实 Desktop command 和 StepFun Coding Plan `step-3.7-flash` Agent Tool 调用，`agent_events` 同时有 `tool/call-started` 与 `tool/result-recorded`，Service 的 KV `last-input` 对应本轮输入；mixed UI/Service 共享一个 generation。目录与 ZIP 得到相同 Artifact digest；停用、回收与同 dataVersion 更新撤销旧 Surface/Service 访问，Previous 代码回退保留数据。逐项范围和日志见隔离根 `logs/acceptance-audit.md`。这些是修复源提交的工程验收事实，不代表签名发布或 Windows 安装器通过。
+- Chat Creator 的 StepFun UI-only Draft 在一次不合规模型产物后，经保留有效 Manifest 的受约束修复提示生成、预览、保存并打开；Preview counter 写入未合并到正式数据。另一个无 UI Agent Tool Draft 已生成，但用户明确停止扩展 Mac 测试后取消了其本机 Service 安装确认，不记为已安装。StepFun 凭据只在本轮隔离 NomiFun Credential Store 中配置，不在源码、构建命令、报告或日志中回显；独立安全 runner `logs/stepfun-model-smoke.log` 对固定模型返回 pass。
+- 用户最新要求：不再在 Mac 上继续各种测试，只需完成代码适配。随后正常合并远端同分支的 `0ed42e381`（会话过程历史）和 `2dd376cc3`（移除匿名免费模型服务）。远端 Cargo.lock 变化使 canonical validation payload 摘要漂移；使用 `agent-v2-contract write` 只更新 payload 与两个生成 envelope，`check` 复核通过。合并后 `bun run check`（含桌面 UI/Unified Plugin 边界）、`bun run test:plugin-sdk` 8/8、Plugin HTTP E2E 8/8、`cargo check --locked -p nomifun-desktop --target aarch64-apple-darwin` 均退出 0；日志为 `logs/post-merge-check.log`、`logs/post-merge-sdk.log`、`logs/post-merge-plugin-e2e.log`、`logs/post-merge-desktop-arm-check.log`。当前合并源码未重打 App/DMG，不能把上述旧 lock 声称为当前 HEAD 的包。
