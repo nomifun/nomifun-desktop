@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -50,6 +50,15 @@ pub const MAX_INLINE_JSON_BYTES: usize = 64 * 1024;
 pub const MAX_SINGLE_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_SESSION_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
+
+fn wall_clock_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
+}
 
 const AGENT_STORE_TABLES: [&str; 9] = [
     "agent_sessions",
@@ -845,7 +854,8 @@ impl AgentSessionStore {
                 correlation_id: CorrelationId::from(target_operation_id.as_ref().to_owned()),
                 causation_event_id: Some(turn_event.event_id),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                    "target_operation_id": target_operation_id
+                    "target_operation_id": target_operation_id,
+                    "finished_at_ms": wall_clock_now_ms()
                 }))),
             },
         };
@@ -2575,7 +2585,8 @@ impl AgentSessionStore {
         .fetch_all(&mut *tx)
         .await?;
         let turn_rows = sqlx::query_as::<_, StoredTurnHistoryRow>(
-            "SELECT session_id, turn_id, source_message_id, state, started_event_id, accepted_at, started_at, finished_at \
+            "SELECT session_id, turn_id, source_message_id, state, result_json, error_json, \
+                    started_event_id, accepted_at, started_at, finished_at \
              FROM agent_turns \
              WHERE session_id = ? AND source_message_id IS NOT NULL \
                AND COALESCE(started_at, accepted_at) < ? \
@@ -4557,6 +4568,8 @@ struct StoredTurnHistoryRow {
     turn_id: String,
     source_message_id: String,
     state: String,
+    result_json: Option<String>,
+    error_json: Option<String>,
     started_event_id: String,
     accepted_at: i64,
     started_at: Option<i64>,
@@ -6941,6 +6954,72 @@ fn turn_history_projection_from_row(
             "canonical Agent Turn history ends before it starts".to_owned(),
         ));
     }
+    let started_at_ms = {
+        let bytes = started_event_uuid.as_bytes();
+        let value = ((bytes[0] as u64) << 40)
+            | ((bytes[1] as u64) << 32)
+            | ((bytes[2] as u64) << 24)
+            | ((bytes[3] as u64) << 16)
+            | ((bytes[4] as u64) << 8)
+            | bytes[5] as u64;
+        i64::try_from(value).map_err(|_| {
+            SessionStoreError::InvalidSession(
+                "canonical Agent Turn UUIDv7 timestamp overflowed".to_owned(),
+            )
+        })?
+    };
+    let terminal_payload = row
+        .error_json
+        .as_deref()
+        .or(row.result_json.as_deref())
+        .map(serde_json::from_str::<Value>)
+        .transpose()?;
+    let finished_at_ms = terminal_payload
+        .as_ref()
+        .and_then(|payload| payload.get("finished_at_ms"))
+        .and_then(Value::as_i64)
+        .filter(|finished| *finished >= started_at_ms);
+    let error = if row.state == "failed" {
+        terminal_payload
+            .as_ref()
+            .and_then(|payload| payload.get("error"))
+            .cloned()
+            .or_else(|| {
+                terminal_payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("message"))
+                    .and_then(Value::as_str)
+                    .map(|message| {
+                        json!({
+                            "message": message,
+                            "code": "UNKNOWN_UPSTREAM_ERROR",
+                            "ownership": "unknown_upstream",
+                            "retryable": true,
+                            "feedback_recommended": true,
+                            "resolution": {
+                                "kind": "send_feedback",
+                                "target": "feedback"
+                            }
+                        })
+                    })
+            })
+            .unwrap_or_else(|| {
+                json!({
+                    "message": "The upstream Agent failed while handling the request",
+                    "code": "UNKNOWN_UPSTREAM_ERROR",
+                    "ownership": "unknown_upstream",
+                    "retryable": true,
+                    "feedback_recommended": true,
+                    "resolution": {
+                        "kind": "send_feedback",
+                        "target": "feedback"
+                    }
+                })
+            })
+    } else {
+        Value::Null
+    };
+    let is_failed = row.state == "failed";
     let projection_id = format!("turn_summary:{}", row.started_event_id);
     let projection = json!({
         "projection_id": projection_id,
@@ -6951,6 +7030,9 @@ fn turn_history_projection_from_row(
         "turn_operation_id": row.turn_id,
         "started_seq": first_seq,
         "finished_seq": row.finished_at,
+        "started_at_ms": started_at_ms,
+        "finished_at_ms": finished_at_ms,
+        "error": error,
     });
     let semantic_digest = digest_payload(&projection)?.0;
     Ok(Some(MessageProjection {
@@ -6959,8 +7041,17 @@ fn turn_history_projection_from_row(
         first_seq,
         last_seq,
         presentation_intent: "turn_summary".to_owned(),
-        message_type: Some("agent_status".to_owned()),
-        message_status: Some(if row.state == "running" { "work" } else { "finish" }.to_owned()),
+        message_type: Some(if is_failed { "tips" } else { "agent_status" }.to_owned()),
+        message_status: Some(
+            if row.state == "running" {
+                "work"
+            } else if is_failed {
+                "error"
+            } else {
+                "finish"
+            }
+            .to_owned(),
+        ),
         projection,
         semantic_digest,
     }))

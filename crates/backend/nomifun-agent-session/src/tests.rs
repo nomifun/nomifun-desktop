@@ -1873,6 +1873,71 @@ async fn turn_receipt_reports_each_canonical_terminal_state() {
 }
 
 #[tokio::test]
+async fn turn_history_projects_wall_clock_timing_and_structured_failure() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, _) = create_ready(&store, "turn-history-timing").await;
+    let operation = OperationId::from("turn-history-timing-operation");
+    let (_, started) = store
+        .start_turn(
+            &session.agent_session_id,
+            EventProducerId::from("session-api"),
+            IdempotencyKey::from("turn-history-timing-key"),
+            operation.clone(),
+            StrictJsonValue(json!({"content": "fail quickly"})),
+        )
+        .await
+        .unwrap();
+    let started_event = started.record.unwrap();
+    let finished_at_ms = 2_000_000_000_000_i64;
+    let terminal = SessionEventAppend {
+        agent_session_id: session.agent_session_id.clone(),
+        event_id: EventId::from("turn-history-timing-terminal"),
+        producer_id: EventProducerId::from("runtime_supervisor"),
+        idempotency_key: IdempotencyKey::from("turn-history-timing-terminal"),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("turn/failed".to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId::from(operation.as_ref().to_owned()),
+            causation_event_id: Some(started_event.event_id),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "message": "provider failed",
+                "finished_at_ms": finished_at_ms,
+                "error": {
+                    "message": "The provider is temporarily unavailable",
+                    "code": "USER_LLM_PROVIDER_GATEWAY_ERROR",
+                    "ownership": "user_llm_provider",
+                    "retryable": true
+                }
+            }))),
+        },
+    };
+    store
+        .append_turn_terminal(&terminal, &operation)
+        .await
+        .unwrap();
+
+    let (history, _, _) = store
+        .message_history_before(&session.agent_session_id, None, 50)
+        .await
+        .unwrap();
+    let summary = history
+        .iter()
+        .find(|projection| projection.presentation_intent == "turn_summary")
+        .expect("turn summary projection");
+    let started_at_ms = summary.projection["started_at_ms"].as_i64().unwrap();
+    assert!(started_at_ms > 1_700_000_000_000);
+    assert!(started_at_ms < finished_at_ms);
+    assert_eq!(summary.projection["finished_at_ms"], finished_at_ms);
+    assert_eq!(
+        summary.projection["error"]["code"],
+        "USER_LLM_PROVIDER_GATEWAY_ERROR"
+    );
+    assert_eq!(summary.projection["error"]["retryable"], true);
+}
+
+#[tokio::test]
 async fn turn_receipt_terminal_fence_is_monotonic_across_replays_and_late_events() {
     for (key, operation, first_kind, first_producer, first_payload, expected) in [
         (

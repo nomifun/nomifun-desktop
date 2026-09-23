@@ -38,29 +38,19 @@
     "loadedTarget": "已加载 {{target}}",
     "fileRead": "已读取 {{target}}",
     "fileChanged": "已编辑 {{target}} {{stats}}",
-    "thinkingRunning": "正在思考",
-    "thinkingCompleted": "已思考",
-    "thinkingCompletedDuration": "已思考 {{duration}}",
     "preparingAction": "正在准备下一步操作",
     "preparedAction": "已准备下一步操作",
-    "turnSummaryRunning": "正在处理本轮请求",
-    "turnSummaryCompleted": "本轮处理已完成",
-    "turnSummaryFailed": "本轮处理未完成",
     "contextCompressed": "上下文已自动压缩",
     "searchedTarget": "已搜索 {{target}}",
     "agentConnecting": "正在连接 {{target}}",
     "agentFailed": "{{target}} 失败",
     "status": "{{target}}"
   },
-  "turnProcessed": "已处理 {{duration}}",
-  "turnCanceled": "你在 {{duration}} 后停止了",
+  "turnDuration": "用时 {{duration}}",
+  "turnDurationUnknown": "用时 --",
   "turnProcess": {
-    "expandAllThinkingProcess": "展开全部思考过程",
-    "collapseAllThinkingProcess": "收起全部思考过程"
-  },
-  "turnLiveStep": {
-    "analyzing": "正在分析需求",
-    "composing": "正在整理回复"
+    "expand": "展开思考过程",
+    "collapse": "收起思考过程"
   },
   "knowledgeWriteback": {
     "started": "正在准备回写知识库",

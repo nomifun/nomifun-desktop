@@ -402,8 +402,8 @@ const CompanionPage: React.FC = () => {
     }
   }, []);
 
-  // Match the native window to the character's desk spec (full-figure
-  // characters use a taller window; the other five keep the classic 240x320).
+  // Match the native window to the character's compact desk spec (custom
+  // full-figure characters may still use a taller window than built-ins).
   // Bottom-anchored and monitor-clamped — and only at actual size changes, so
   // a user's deliberate half-off-screen placement is never disturbed by
   // ordinary restores. Must run AFTER applyWindowState's show(): before the
@@ -444,7 +444,7 @@ const CompanionPage: React.FC = () => {
       // 'bottom' (default): live character switch — the window and the saved
       // coords are the same generation, so anchor the bottom edge and grow up.
       // 'top-left': cold-start restore — saved coords are the TALL window's
-      // top-left, but the freshly created window is still 240x320; bottom-
+      // top-left, but the freshly created window is still the built-in desk size; bottom-
       // anchoring from that small rect would climb 280px every launch and
       // compound through the onMoved persistence. Keep the top-left, clamp only.
       const anchorRect =
@@ -2253,6 +2253,7 @@ const CompanionPage: React.FC = () => {
               mood={mood}
               activity={activity}
               size={desk.figureHeight}
+              displayMode='full'
               companionId={companionId ?? undefined}
               customFigure={customFigureMetaOf(profile)}
               figureHitRef={figureHitRef}

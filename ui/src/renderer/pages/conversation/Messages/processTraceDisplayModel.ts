@@ -14,14 +14,15 @@ export const shouldShowFileListDetail = (rows: ToolReceiptDetailRow[]): boolean 
 
 export const shouldShowToolRowDetail = (
   row: ToolReceiptDetailRow,
-  options: { fileRowCount?: number } = {}
+  _options: { fileRowCount?: number } = {}
 ): boolean => {
   if (row.attempts?.length) return true;
   if (row.action === 'run_commands') return true;
 
   if (isFileReceiptRow(row)) {
-    const hasErrorDetail = (row.state === 'failed' || row.state === 'canceled') && Boolean(row.output || row.truncated);
-    return (options.fileRowCount ?? 1) > 1 || hasErrorDetail;
+    // Even one successful file receipt stays compact by default, but can be
+    // expanded to reveal its exact path (and diagnostics for failures).
+    return true;
   }
 
   return Boolean(row.input || row.output || row.truncated);

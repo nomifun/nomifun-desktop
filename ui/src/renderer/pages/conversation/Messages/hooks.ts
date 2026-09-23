@@ -701,6 +701,14 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       : undefined;
   const recovery = normalizeTruncatedTurnRecovery(parsed.recovery);
   const agentTransition = tipType === 'success' ? normalizeAgentTransition(parsed.agent_transition) : undefined;
+  const startedAtMs =
+    typeof parsed.started_at_ms === 'number' && Number.isFinite(parsed.started_at_ms) && parsed.started_at_ms > 0
+      ? parsed.started_at_ms
+      : undefined;
+  const finishedAtMs =
+    typeof parsed.finished_at_ms === 'number' && Number.isFinite(parsed.finished_at_ms) && parsed.finished_at_ms > 0
+      ? parsed.finished_at_ms
+      : undefined;
 
   return {
     ...msg,
@@ -711,6 +719,8 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
       ...(structuredError ? { error: structuredError } : {}),
       ...(recovery ? { recovery } : {}),
       ...(agentTransition ? { agent_transition: agentTransition } : {}),
+      ...(startedAtMs !== undefined ? { started_at_ms: startedAtMs } : {}),
+      ...(finishedAtMs !== undefined ? { finished_at_ms: finishedAtMs } : {}),
     },
   } as IMessageTips;
 };
