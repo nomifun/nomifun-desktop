@@ -87,6 +87,8 @@
 
 ## 最终平台门禁
 
-- Windows NSIS 最终包已生成；候选安装/启动/WebView2/backend/process-tree/uninstall 冒烟必须在 clean HEAD 冻结后执行。运行结果写入 `build.noindex`（不回写源码，避免改变被测 checkpoint），并在最终交付中报告。
+- Windows NSIS 最终包已生成。候选脚本在 clean HEAD `558c944d4cc2473009c29de1c3cde1205fd2f08f` 上通过 native host、source checkpoint、work-root 与安装器 Artifact 检查，然后因已有用户级 `HKCU\Software\Classes\nomifun` 协议注册安全停止；该键指向另一开发树的 debug Desktop。安装、启动、WebView2/backend、进程树与卸载检查未执行，不能记为通过。
+- 候选 harness 自测通过；Authenticode admission 单测通过。本地 `build:win` 明确关闭签名，最终安装器的 `NotSigned` 状态符合本地测试包预期，不是签名发布证据。
+- 完整候选冒烟需要用户明确允许临时处理现有协议注册，或在无既有 NomiFun 注册的干净 Windows 账户/主机运行。结构化结果输出到命令 stdout；隔离运行目录限定在 `build.noindex`，不纳入 Git。
 - 当前主机是 Windows，无法生成权威规格要求的 macOS 目标机证据。旧架构的历史 macOS 文档已明确标为不可用于本次验收。
-- 因 macOS 目标机证据缺失，Goal 保持 `active`；除该外部平台项外没有已知源码、测试、删除或文档待办。
+- 因 Windows 候选环境保护与 macOS 目标机证据两项外部条件，Goal 保持 `active`；没有已知源码、测试、删除或文档待办。
