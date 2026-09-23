@@ -47,3 +47,25 @@ export const deduplicateProcessText = <T>(
   });
   return removed ? visible : items;
 };
+
+/**
+ * Intermediate assistant prose and private-reasoning snapshots may arrive once
+ * per model step. The transcript needs at most the latest public status for
+ * each narration kind; tool/file receipts remain untouched and authoritative.
+ */
+export const collapseProcessNarration = <T>(
+  items: T[],
+  kindOf: (item: T) => 'text' | 'thinking' | undefined
+): T[] => {
+  const lastIndex = new Map<'text' | 'thinking', number>();
+  items.forEach((item, index) => {
+    const kind = kindOf(item);
+    if (kind) lastIndex.set(kind, index);
+  });
+  if (lastIndex.size === 0) return items;
+  const visible = items.filter((item, index) => {
+    const kind = kindOf(item);
+    return !kind || lastIndex.get(kind) === index;
+  });
+  return visible.length === items.length ? items : visible;
+};

@@ -22,34 +22,30 @@ describe('replayed process trace', () => {
     expect(container.childElementCount).toBe(0);
   });
 
-  test('long intermediate assistant text stays compact until expanded', () => {
+  test('intermediate assistant prose is replaced by one neutral result-preparation status', () => {
     const note = 'Repeating progress should remain inspectable. '.repeat(12);
     const item: IMessageText = {
       id: 'long-progress', type: 'text', conversation_id: conversationId,
       position: 'left', created_at: 1, content: { content: note },
     };
-    const { container, getByRole } = render(
+    const { container } = render(
       <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
     );
-    const paragraph = container.querySelector('.turn-process-trace__paragraph');
-    expect(paragraph?.textContent?.length).toBeLessThan(note.length);
-    const toggle = getByRole('button');
-    expect(toggle.getAttribute('aria-expanded')).toBe('false');
-    fireEvent.click(toggle);
-    expect(toggle.getAttribute('aria-expanded')).toBe('true');
-    expect(paragraph?.textContent).toContain(note.trim());
+    expect(container.textContent).toContain('Prepared the result');
+    expect(container.textContent).not.toContain('Repeating progress');
+    expect(container.querySelector('button')).toBeNull();
   });
 
-  test('only the final logical thinking line gets the live animation target', () => {
+  test('private thinking content is replaced by one neutral analysis status', () => {
     const item: IMessageThinking = {
       id: 'thinking', type: 'thinking', conversation_id: conversationId,
       position: 'left', created_at: 1,
       content: { content: 'Earlier result\nCalling the file tool', status: 'thinking' },
     };
     const { container } = render(<I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>);
-    const lastLine = container.querySelector('.turn-process-trace__thinking-last-line');
-    expect(lastLine?.textContent).toBe('Calling the file tool');
-    expect(container.querySelector('.turn-process-trace__paragraph')?.textContent).toBe('Earlier result\nCalling the file tool');
+    expect(container.textContent).toContain('Analyzing the request');
+    expect(container.textContent).not.toContain('Earlier result');
+    expect(container.textContent).not.toContain('Calling the file tool');
   });
 
   test('a rehydrated tool row opens its saved input and output', () => {
@@ -112,5 +108,49 @@ describe('replayed process trace', () => {
     );
     expect(settled.container.querySelectorAll('.turn-process-trace__row--completed')).toHaveLength(2);
     expect(settled.container.querySelector('.turn-process-trace__row--current-activity')).toBeNull();
+  });
+
+  test('multiple failed calls collapse into one summary until explicitly expanded', () => {
+    const item: IMessageToolGroup = {
+      id: 'failed-tools', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 4,
+      content: ['first_tool', 'second_tool', 'third_tool'].map((name, index) => ({
+        call_id: `failed-${index}`,
+        name,
+        description: `${name} failed detail`,
+        status: 'Error' as const,
+        render_output_as_markdown: false,
+      })),
+    };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+
+    expect(container.textContent).toContain('3 operations did not complete');
+    expect(container.textContent).not.toContain('first_tool');
+    const toggle = getByRole('button');
+    fireEvent.click(toggle);
+    expect(container.textContent).toContain('first_tool');
+    expect(container.textContent).toContain('third_tool');
+  });
+
+  test('identical completed operations render once with their repeat count', () => {
+    const item: IMessageToolGroup = {
+      id: 'repeated-tools', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 5,
+      content: [0, 1, 2].map((index) => ({
+        call_id: `search-${index}`,
+        name: 'search_code',
+        description: 'searched code',
+        status: 'Success' as const,
+        render_output_as_markdown: false,
+      })),
+    };
+    const { container } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+
+    expect(container.querySelectorAll('.turn-process-trace__row')).toHaveLength(1);
+    expect(container.textContent).toContain('3 times');
   });
 });
