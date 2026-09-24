@@ -29,7 +29,8 @@ pub use attempt_runner::AgentExecutionSessionPort;
 pub use automation::{
     AgentExecutionAutomationPort, AutomationExecutionAdmission, AutomationExecutionReceipt,
     AutomationExecutionRequest, AutomationExecutionSource, admit_frozen_automation_workspace,
-    resolve_frozen_automation_workspace,
+    admit_frozen_session_workspace, resolve_frozen_automation_workspace,
+    resolve_frozen_session_workspace,
 };
 pub use delivery::AgentExecutionDelivery;
 pub use engine::AgentExecutionEngine;

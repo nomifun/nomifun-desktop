@@ -155,10 +155,14 @@ SQLite cascade 或 trigger。数据库和受管 side-store 都执行 orphan audi
 ```
 
 - `work_dir` —— 运行时工作目录；未显式设置时回退至数据目录。来源依次为：`--work-dir` flag → UI 中选择并持久化在 `dir-config.json` 的工作区 → 环境变量 `NOMIFUN_WORK_DIR` → `<data_dir>`。继承到的 `NOMIFUN_WORK_DIR` 若指向默认数据根位置或已不存在的目录会被忽略（防止自动更新重启时残留的自导出值）。
-- `workspace_id` —— 后端签发并存入 `extra.temp_workspace_id` 的裸小写 UUIDv7，
-  固定 36 字符。目录名不包含类型前缀、标题 slug 或 `temp` 标记。
+- `workspace_id` —— canonical AgentSession 的裸小写 UUIDv7；临时工作区投影也把
+  同一值放入 `extra.temp_workspace_id`。它固定 36 字符，目录名不包含类型前缀、
+  标题 slug 或 `temp` 标记。
 
-未选择自定义工作区时，Conversation 行创建完成后立即物化该目录。会话被删除时该目录被移除（`nomifun_common::hooks` 中的 `OnConversationDelete` 钩子）。其内的文件操作处于沙箱中并被监视：
+未选择自定义工作区时，canonical AgentSession 创建完成后立即物化该目录；已有
+Session 在首次运行或浏览时也会幂等补建。会话删除 owner 在提交删除墓碑前移除
+该目录。用户选择的自定义工作区不属于这一生命周期，永远不会随会话删除。其内的
+文件操作处于沙箱中并被监视：
 
 - [`nomifun-file::path_safety`](../../crates/backend/nomifun-file/src/path_safety.rs) 拒绝逃出工作区的路径（如 `..` 或绝对根）。
 - [`nomifun-file::watch_service`](../../crates/backend/nomifun-file/src/watch_service.rs) 借助 `notify` 把文件系统变更通过 WS 反馈给 SPA。

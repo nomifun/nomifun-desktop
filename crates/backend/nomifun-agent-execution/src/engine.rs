@@ -5,7 +5,7 @@
 //! partial lifecycle writes or invent a second execution state machine.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -217,6 +217,7 @@ pub struct AgentExecutionEngine {
     scheduler: ExecutionScheduler,
     lifecycle: AgentExecutionLifecycle,
     session: Arc<dyn AgentExecutionSessionPort>,
+    managed_workspace_root: PathBuf,
     automation_transition: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -227,6 +228,7 @@ impl AgentExecutionEngine {
             deps.provider_model_repository.clone(),
             deps.provider_model_capability_repository.clone(),
         );
+        let managed_workspace_root = deps.data_dir.join("conversations");
         let mut scheduler_deps = ExecutionSchedulerDeps::new(
             deps.repository.clone(),
             deps.attempt_runner,
@@ -245,6 +247,7 @@ impl AgentExecutionEngine {
             scheduler: ExecutionScheduler::new(scheduler_deps),
             lifecycle: deps.lifecycle,
             session: deps.session,
+            managed_workspace_root,
             automation_transition: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
@@ -3066,7 +3069,12 @@ impl AgentExecutionEngine {
         // path or the mutable Conversation `extra` projection here. Without
         // this, coding delegates run under the execution scratch directory and
         // cannot observe or modify the project the user actually selected.
-        let work_dir = collaboration_workspace(owner_id, snapshot)?;
+        let work_dir = collaboration_workspace(
+            owner_id,
+            agent_session_id,
+            snapshot,
+            &self.managed_workspace_root,
+        )?;
         let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
             AppError::Conflict(
                 "Agent collaboration Snapshot has no exact resolved model".into(),
@@ -3243,8 +3251,13 @@ impl AgentExecutionEngine {
                 "AutoWork requires an immutable Agent snapshot on its bound Session".to_owned(),
             )
         })?;
-        let effective_workspace =
-            automation_workspace(owner_id, snapshot, request.workspace.as_deref())?;
+        let effective_workspace = automation_workspace(
+            owner_id,
+            &request.lead_session_id,
+            snapshot,
+            &self.managed_workspace_root,
+            request.workspace.as_deref(),
+        )?;
         let resolved_model = snapshot.resolved_model.as_ref().ok_or_else(|| {
             AppError::Conflict(
                 "AutoWork bound Agent snapshot has no resolved model".to_owned(),
@@ -3339,7 +3352,13 @@ impl AgentExecutionEngine {
                 "AutoWork requires an immutable Agent snapshot on its bound Session".to_owned(),
             )
         })?;
-        automation_workspace(owner_id, snapshot, request.workspace.as_deref())?;
+        automation_workspace(
+            owner_id,
+            &request.lead_session_id,
+            snapshot,
+            &self.managed_workspace_root,
+            request.workspace.as_deref(),
+        )?;
         if snapshot.resolved_model.is_none() {
             return Err(AppError::Conflict(
                 "AutoWork bound Agent snapshot has no resolved model".to_owned(),
@@ -3592,25 +3611,36 @@ fn validate_automation_request(request: &AutomationExecutionRequest) -> Result<(
 
 fn automation_workspace(
     owner_id: &str,
+    session_id: &str,
     snapshot: &AgentResolvedSnapshot,
+    managed_workspace_root: &Path,
     requested: Option<&str>,
 ) -> Result<Option<String>, AppError> {
-    crate::automation::admit_frozen_automation_workspace(
+    crate::automation::admit_frozen_session_workspace(
         owner_id,
         snapshot.canonical_binding.as_ref(),
+        session_id,
+        managed_workspace_root,
         requested,
     )
 }
 
 fn collaboration_workspace(
     owner_id: &str,
+    session_id: &str,
     snapshot: &AgentResolvedSnapshot,
+    managed_workspace_root: &Path,
 ) -> Result<Option<String>, AppError> {
     snapshot
         .canonical_binding
         .as_ref()
         .map(|binding| {
-            crate::automation::resolve_frozen_execution_workspace(owner_id, binding)
+            crate::automation::resolve_frozen_session_workspace(
+                owner_id,
+                binding,
+                session_id,
+                managed_workspace_root,
+            )
         })
         .transpose()
         .map(Option::flatten)
@@ -4509,13 +4539,27 @@ mod tests {
             knowledge_policy: AgentKnowledgePolicy::default(),
             warnings: Vec::new(),
         };
+        let session_id = nomifun_common::generate_id();
+        let managed_workspace_root = std::env::temp_dir().join("conversations");
 
         assert_eq!(
-            collaboration_workspace("owner", &snapshot).unwrap(),
+            collaboration_workspace(
+                "owner",
+                &session_id,
+                &snapshot,
+                &managed_workspace_root,
+            )
+            .unwrap(),
             Some(workspace),
         );
         assert!(
-            collaboration_workspace("different-owner", &snapshot).is_err(),
+            collaboration_workspace(
+                "different-owner",
+                &session_id,
+                &snapshot,
+                &managed_workspace_root,
+            )
+            .is_err(),
             "collaboration must not inherit another owner's workspace",
         );
     }

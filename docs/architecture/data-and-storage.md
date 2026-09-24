@@ -243,15 +243,18 @@ Each conversation owns a directory the agent can freely read and write:
   names a default data-root location or a directory that no longer exists
   is ignored (protection against stale self-exports across auto-update
   restarts).
-- `workspace_id` — a backend-minted bare lowercase UUIDv7 stored as
+- `workspace_id` — the canonical AgentSession's bare lowercase UUIDv7. A
+  temporary-workspace projection also exposes the same value as
   `extra.temp_workspace_id`. It is always 36 characters. Directory names do
   not contain type prefixes, title slugs, or a `temp` marker.
 
-For a conversation without a user-selected workspace, the directory is
-provisioned immediately after the conversation row is created.
-On conversation deletion the directory is removed (the
-`OnConversationDelete` hook in `nomifun_common::hooks`). File operations
-inside it are sandboxed and watched:
+For a Session without a user-selected workspace, the directory is provisioned
+immediately after the canonical AgentSession is opened; existing Sessions are
+idempotently repaired on first execution or browse. The Session delete owner
+removes this directory before committing the deletion tombstone. A
+user-selected custom workspace is outside this lifecycle and is never removed
+with the Session. File operations inside managed workspaces are sandboxed and
+watched:
 
 - [`nomifun-file::path_safety`](../../crates/backend/nomifun-file/src/path_safety.rs)
   rejects paths that escape the workspace (e.g. via `..` or absolute roots).
