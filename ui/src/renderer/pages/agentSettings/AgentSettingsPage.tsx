@@ -10,6 +10,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { agentEditorReturn, editingDocument, type AgentEditorReturn, type TemplateEditingState } from './model';
 import AgentPresetEditor from './AgentPresetEditor';
+import GuidDefaultAgentSetting from './GuidDefaultAgentSetting';
 import AgentRoleDefaults from './AgentRoleDefaults';
 import AgentPresetLibrary from './AgentPresetLibrary';
 import OfficialTemplateOverview from './OfficialTemplateOverview';
@@ -255,7 +256,10 @@ const AgentSettingsPage: React.FC = () => {
         <div className={styles.workspace}>
           {!collapsed && (narrow ? <div ref={narrowOverlay} className={styles.siderOverlay} role='dialog' aria-modal='true' aria-label={t('agentSettings.library.ariaLabel')} onKeyDown={trapNarrowOverlay}><button className={styles.siderBackdrop} aria-label={t('agentSettings.workbench.hideList')} onClick={collapse} />{libraryPanel}</div> : libraryPanel)}
           <div className={styles.mainArea}>
-          <div className={styles.defaultsToolbar}><AgentRoleDefaults catalog={controller.catalog} /></div>
+          <div className={styles.defaultsToolbar}>
+            <GuidDefaultAgentSetting library={controller.library} />
+            <AgentRoleDefaults catalog={controller.catalog} />
+          </div>
 
           {selectedTemplate ? (
             <OfficialTemplateOverview

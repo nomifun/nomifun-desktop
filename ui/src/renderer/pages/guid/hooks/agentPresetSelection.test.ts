@@ -118,7 +118,7 @@ describe('Guid Agent selection contract', () => {
     expect(page.includes('agentSelection.loadError,')).toBe(true);
   });
 
-  test('defaults to assistant.general and persists only catalog-backed selections', () => {
+  test('reads the workbench default while keeping Guid draft choices transient', () => {
     const selection = readSource(new URL('./useGuidAgentSelection.ts', import.meta.url));
     const selectionUtils = readSource(new URL('./agentSelectionUtils.ts', import.meta.url));
     const configKeys = readSource(
@@ -127,7 +127,7 @@ describe('Guid Agent selection contract', () => {
 
     expect(
       configKeys.includes(
-        "| { kind: 'template'; templateKey: OfficialPresetKey }"
+        "'guid.defaultAgentSelection': GuidAgentSelectionPreference | undefined;"
       )
     ).toBe(true);
     expect(
@@ -137,11 +137,13 @@ describe('Guid Agent selection contract', () => {
     ).toBe(true);
     expect(configKeys.includes("| { kind: 'default' }")).toBe(false);
     expect(
-      selection.includes("configService.get('guid.agentSelection')")
+      selectionUtils.includes("configService.get('guid.defaultAgentSelection')")
     ).toBe(true);
     expect(
-      selection.includes(".set('guid.agentSelection', selection)")
+      selectionUtils.includes("configService.get('guid.agentSelection')")
     ).toBe(true);
+    expect(selection.includes(".set('guid.agentSelection', selection)")).toBe(false);
+    expect(selection.includes(".set('guid.defaultAgentSelection'")).toBe(false);
     expect(
       selection.includes(
         "setSelection({ kind: 'preset', presetId: preset.preset_id });"

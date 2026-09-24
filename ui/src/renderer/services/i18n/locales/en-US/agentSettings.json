@@ -63,6 +63,19 @@
     "untitledName": "Untitled Agent",
     "forkName": "{{name}} Copy"
   },
+  "defaultAgent": {
+    "title": "Default Agent",
+    "button": "Default Agent: {{name}}",
+    "hint": "New Guid conversations use this Agent. Switching Agents in one Guid draft does not change the default, and existing conversations stay unchanged.",
+    "field": "Use for new conversations",
+    "officialGroup": "Official Agents",
+    "personalGroup": "My Agents",
+    "save": "Save default Agent",
+    "saveFailed": "Could not save the default Agent. Try again.",
+    "unavailable": "The previous default Agent is unavailable. New conversations currently fall back to “{{name}}”.",
+    "noAvailable": "No Agent is available for Guid conversations. Save an executable Agent first.",
+    "noAvailableShort": "No Agent available"
+  },
   "productBinding": {
     "chooseModelLater": "Choose an Agent first, then configure a compatible chat model.",
     "loadFailed": "Could not load Agent options. Please retry.",
