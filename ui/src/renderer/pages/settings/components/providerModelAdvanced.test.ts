@@ -23,13 +23,16 @@ import {
   normalizeModelId,
   patchCapabilityDraft,
   providerParamChainRounds,
+  providerParamReasoningEffort,
   providerParamVoice,
+  protocolSupportsReasoningEffort,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
   resolveModelInputChange,
   requiresCrossOriginConsent,
   withProviderParamVoice,
   withProviderParamChainRounds,
+  withProviderParamReasoningEffort,
   validateModelDefinition,
   type ModelCapabilityDraft,
   type ModelDefinitionDraft,
@@ -924,6 +927,60 @@ describe('model id entry', () => {
     expect(normalizeModelId('  vendor/model-latest  ')).toBe('vendor/model-latest');
     expect(isDuplicateModelId(' vendor/model-latest ', ['vendor/model-latest'])).toBe(true);
     expect(isDuplicateModelId('Vendor/model-latest', ['vendor/model-latest'])).toBe(false);
+  });
+});
+
+describe('model reasoning effort', () => {
+  test('reads, writes, clears, and preserves unrelated provider params', () => {
+    expect(providerParamReasoningEffort('{"reasoning_effort":"medium"}')).toBe('medium');
+    expect(providerParamReasoningEffort('{"reasoning_effort":"extreme"}')).toBeUndefined();
+    expect(providerParamReasoningEffort('not json')).toBeUndefined();
+
+    const configured = withProviderParamReasoningEffort('{"temperature":0.2}', 'high');
+    expect(JSON.parse(configured)).toEqual({ temperature: 0.2, reasoning_effort: 'high' });
+    expect(providerParamReasoningEffort(configured)).toBe('high');
+    expect(JSON.parse(withProviderParamReasoningEffort(configured, undefined))).toEqual({
+      temperature: 0.2,
+    });
+    expect(withProviderParamReasoningEffort('{"reasoning_effort":"low"}', undefined)).toBe('');
+    expect(withProviderParamReasoningEffort('not json', 'low')).toBe('not json');
+  });
+
+  test('recognizes only protocols with a normalized reasoning-effort mapping', () => {
+    for (const protocol of ['openai.chat_text', 'openai.responses', 'gemini.generate_text']) {
+      expect(protocolSupportsReasoningEffort(protocol)).toBe(true);
+    }
+    for (const protocol of ['anthropic.messages', 'bedrock.anthropic_messages', '']) {
+      expect(protocolSupportsReasoningEffort(protocol)).toBe(false);
+    }
+  });
+
+  test('validation rejects malformed or unsupported authored reasoning levels', () => {
+    const chatManifest = manifest('chat', 'openai.chat_text');
+    const base = {
+      ...emptyCapabilityDraft('chat'),
+      protocol: 'openai.chat_text',
+      transportSource: 'user' as const,
+    };
+    expect(validateModelDefinition(
+      { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"high"}' }] },
+      { chat: chatManifest },
+      'https://api.stepfun.com/v1'
+    ).valid).toBe(true);
+    expect(validateModelDefinition(
+      { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"extreme"}' }] },
+      { chat: chatManifest },
+      'https://api.stepfun.com/v1'
+    ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
+    expect(validateModelDefinition(
+      { model: 'reasoner', capabilities: [{
+        ...base,
+        protocol: 'anthropic.messages',
+        providerParamsJson: '{"reasoning_effort":"low"}',
+      }] },
+      { chat: manifest('chat', 'anthropic.messages') },
+      'https://api.stepfun.com/v1'
+    ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
   });
 });
 
