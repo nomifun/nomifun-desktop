@@ -1360,6 +1360,7 @@ mod tests {
             name: "main Agent".to_owned(),
             r#type: AgentType::Nomi,
             model: None,
+            reasoning_effort: None,
             status: ConversationStatus::Finished,
             runtime: None,
             source: None,

@@ -1405,6 +1405,7 @@ mod tests {
             name: "Wave 4 AgentSession".to_owned(),
             r#type: nomifun_common::AgentType::Nomi,
             model: None,
+            reasoning_effort: None,
             status: nomifun_common::ConversationStatus::Finished,
             runtime: None,
             source: None,

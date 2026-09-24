@@ -6,6 +6,7 @@
 
 import type { TChatConversation, TProviderWithModel } from '../config/storage';
 import type { AgentResolvedSnapshot } from '../types/agentPlatform';
+import { isSessionReasoningEffort, type SessionReasoningEffort } from '../types/reasoningEffort';
 import {
   parseAgentPresetId,
   parseAgentId,
@@ -63,6 +64,7 @@ type ApiConversationResponse = Record<string, unknown> &
   ApiConversationExecutionTemplateFields & {
     conversation_id: unknown;
     model?: ApiProviderWithModel | null;
+    reasoning_effort?: unknown;
     extra?: Record<string, unknown> | null;
     cron_job_id?: string | null;
     linked_execution_id?: string | null;
@@ -147,6 +149,7 @@ export function fromApiConversation(raw: unknown): TChatConversation {
   const next = { ...r } as unknown as Record<string, unknown> & {
     id: ReturnType<typeof parseConversationId>;
     model?: TProviderWithModel;
+    reasoning_effort?: SessionReasoningEffort;
     extra?: Record<string, unknown> | null;
     cron_job_id?: ReturnType<typeof parseCronJobId>;
     execution_template_id?: ReturnType<typeof parseExecutionTemplateId> | null;
@@ -170,6 +173,13 @@ export function fromApiConversation(raw: unknown): TChatConversation {
 
   if ('model' in r) {
     next.model = fromApiModelOptional(r.model);
+  }
+
+  if ('reasoning_effort' in r) {
+    if (!isSessionReasoningEffort(r.reasoning_effort)) {
+      throw new TypeError('conversation reasoning_effort must be low, medium, or high');
+    }
+    next.reasoning_effort = r.reasoning_effort;
   }
 
   if (r.cron_job_id != null) next.cron_job_id = parseCronJobId(r.cron_job_id);

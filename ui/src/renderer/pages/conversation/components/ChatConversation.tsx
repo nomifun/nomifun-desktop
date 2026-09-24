@@ -59,6 +59,14 @@ import {
 import AgentSwitchDialog from './AgentSwitchDialog';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import { officialConversationTemplateKey } from './conversationAgentIdentity';
+import {
+  capabilityOf,
+  capabilitySupportsTechnicalCapability,
+} from '@/common/utils/providerModels';
+import {
+  protocolSupportsReasoningEffort,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
 
 /** Check whether a specific skill is mounted on the conversation. */
 const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {
@@ -116,6 +124,9 @@ const NomiConversationLayout: React.FC<{
   collaborationControlNode: React.ReactNode;
   currentAgentLabel: string;
   modelSelectionDisabled?: boolean;
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortUpdating?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
 }> = ({
   conversation,
   chatLayoutProps,
@@ -124,6 +135,9 @@ const NomiConversationLayout: React.FC<{
   collaborationControlNode,
   currentAgentLabel,
   modelSelectionDisabled,
+  reasoningEffort,
+  reasoningEffortUpdating,
+  onReasoningEffortChange,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
 
@@ -150,6 +164,9 @@ const NomiConversationLayout: React.FC<{
           : undefined}
         collaboratorSelectorNode={collaborationControlNode}
         modelSelectionDisabled={modelSelectionDisabled}
+        reasoningEffort={reasoningEffort}
+        reasoningEffortUpdating={reasoningEffortUpdating}
+        onReasoningEffortChange={onReasoningEffortChange}
         isProcessing={isConversationProcessing(conversation)}
         creationTasksEnabled={conversation.agent_snapshot?.enabled_capabilities.includes('creation.media') === true}
       />
@@ -243,6 +260,14 @@ const NomiConversationPanel: React.FC<{
   const { t } = useTranslation();
   const frozenSessionConfigHint = t('conversation.chat.frozenSessionConfigHint');
   const [modelSwitching, setModelSwitching] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort | undefined>(
+    conversation.reasoning_effort
+  );
+  const [reasoningEffortUpdating, setReasoningEffortUpdating] = useState(false);
+  const reasoningEffortUpdatingRef = useRef(false);
+  useEffect(() => {
+    setReasoningEffort(conversation.reasoning_effort);
+  }, [conversation.reasoning_effort]);
   const modelSwitchingRef = useRef(false);
   const onSelectModel = useCallback(async (provider: IProvider, modelName: string) => {
     if (modelSwitchingRef.current) return false;
@@ -256,6 +281,13 @@ const NomiConversationPanel: React.FC<{
       });
       if (!switched) return false;
       await saveNomiDefaultModel(provider.id, modelName);
+      const capability = capabilityOf(provider, modelName, 'chat');
+      if (
+        !protocolSupportsReasoningEffort(capability?.protocol)
+        || !capabilitySupportsTechnicalCapability(capability, 'reasoning')
+      ) {
+        setReasoningEffort(undefined);
+      }
       void refreshConversationCache(conversation.id).catch((error) => {
         console.error('[ChatConversation] Failed to refresh switched model:', error);
       });
@@ -275,6 +307,35 @@ const NomiConversationPanel: React.FC<{
     initialModel: conversation.model,
     onSelectModel,
   });
+
+  const onReasoningEffortChange = useCallback(async (
+    next: SessionReasoningEffort | undefined
+  ) => {
+    if (reasoningEffortUpdatingRef.current) return;
+    if (isConversationProcessing(conversation)) {
+      Message.warning(t('conversation.chat.modelSwitchAfterTurn'));
+      return;
+    }
+    const previous = reasoningEffort;
+    reasoningEffortUpdatingRef.current = true;
+    setReasoningEffortUpdating(true);
+    setReasoningEffort(next);
+    try {
+      const updated = await ipcBridge.agentPlatform.sessions.updateReasoning.invoke({
+        agent_session_id: conversation.id,
+        reasoning_effort: next,
+      });
+      setReasoningEffort(updated.reasoning_effort);
+      await refreshConversationCache(conversation.id);
+    } catch (error) {
+      setReasoningEffort(previous);
+      console.error('[ChatConversation] Failed to update reasoning effort:', error);
+      Message.error(`${t('conversation.reasoningEffort.updateFailed')}: ${parseError(error)}`);
+    } finally {
+      reasoningEffortUpdatingRef.current = false;
+      setReasoningEffortUpdating(false);
+    }
+  }, [conversation, reasoningEffort, t]);
 
   // Main model reference used by the collaboration selector.
   const mainModelRef = useMemo<TExecutionModelRef | null>(
@@ -550,6 +611,9 @@ const NomiConversationPanel: React.FC<{
           collaborationControlNode={collaborationControlNode}
           currentAgentLabel={currentAgentLabel}
           modelSelectionDisabled={modelSwitching || agentSwitch?.applying === true}
+          reasoningEffort={reasoningEffort}
+          reasoningEffortUpdating={reasoningEffortUpdating}
+          onReasoningEffortChange={onReasoningEffortChange}
         />
       </>
     </CreationComposerContext.Provider>

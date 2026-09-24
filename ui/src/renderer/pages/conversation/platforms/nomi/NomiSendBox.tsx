@@ -60,6 +60,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
@@ -127,6 +128,9 @@ const NomiSendBox: React.FC<{
   capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortUpdating?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
   /** Existing collaboration control, rendered in the composer side rail. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
@@ -147,6 +151,9 @@ const NomiSendBox: React.FC<{
   capabilityControls,
   modelSelectionHint,
   modelSelectionDisabled,
+  reasoningEffort,
+  reasoningEffortUpdating = false,
+  onReasoningEffortChange,
   collaboratorSelectorNode,
   extraRightTools,
   creationEnabled = true,
@@ -907,6 +914,9 @@ const NomiSendBox: React.FC<{
                     <NomiModelSelector
                       selection={modelSelection}
                       disabled={modelPickerDisabled}
+                      reasoningEffort={reasoningEffort}
+                      reasoningEffortDisabled={modelPickerDisabled || reasoningEffortUpdating}
+                      onReasoningEffortChange={onReasoningEffortChange}
                       className='nomi-sendbox-model-btn'
                     />
                   </span>

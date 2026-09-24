@@ -183,7 +183,9 @@ import type {
   SaveAgentPresetRevisionResponse,
   SkillCatalogItem,
   UpdateRemoteBindingRequest,
+  UpdateAgentSessionReasoningResponse,
 } from '../types/agentPlatform';
+import type { SessionReasoningEffort } from '../types/reasoningEffort';
 import type {
   IIdmmConfig,
   IIdmmState,
@@ -706,6 +708,14 @@ export const agentPlatform = {
   sessions: {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(
       '/api/agent-sessions'
+    ),
+    updateReasoning: httpPut<
+      UpdateAgentSessionReasoningResponse,
+      { agent_session_id: string; reasoning_effort?: SessionReasoningEffort }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/reasoning-effort`,
+      (params) => ({ reasoning_effort: params.reasoning_effort ?? null })
     ),
     previewAgentSwitch: httpPost<
       PreviewAgentSessionSwitchResponse,

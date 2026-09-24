@@ -1,7 +1,7 @@
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata, ArtifactId,
     CorrelationId, DeleteAgentSessionCommand, EventId, EventProducerId, IdempotencyKey,
-    OperationId, PrincipalRef, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor,
+    OperationId, PrincipalRef, ReasoningEffort, SemanticSessionEventDraft, SessionEventAppend, SessionEventCursor,
     SessionEventKind, SessionEventPayloadRef, SessionPayloadBody, StrictJsonValue,
 };
 use nomifun_agent_session::{
@@ -89,6 +89,53 @@ impl CanonicalAgentSessionOwner {
         idempotency_key: &str,
         created_at: i64,
     ) -> Result<OpenAgentSession, AppError> {
+        self.open_with_options(
+            owner,
+            binding,
+            title,
+            active_capability_ids,
+            remote_binding_provenance,
+            None,
+            idempotency_key,
+            created_at,
+        )
+        .await
+    }
+
+    pub async fn open_with_reasoning_effort(
+        &self,
+        owner: PrincipalRef,
+        binding: AgentBindingValue,
+        title: Option<String>,
+        active_capability_ids: Vec<String>,
+        reasoning_effort: Option<ReasoningEffort>,
+        idempotency_key: &str,
+        created_at: i64,
+    ) -> Result<OpenAgentSession, AppError> {
+        self.open_with_options(
+            owner,
+            binding,
+            title,
+            active_capability_ids,
+            None,
+            reasoning_effort,
+            idempotency_key,
+            created_at,
+        )
+        .await
+    }
+
+    async fn open_with_options(
+        &self,
+        owner: PrincipalRef,
+        binding: AgentBindingValue,
+        title: Option<String>,
+        active_capability_ids: Vec<String>,
+        remote_binding_provenance: Option<nomifun_agent_contracts::RemoteBindingProvenance>,
+        reasoning_effort: Option<ReasoningEffort>,
+        idempotency_key: &str,
+        created_at: i64,
+    ) -> Result<OpenAgentSession, AppError> {
         let key = scoped_key(&owner, idempotency_key, "open")?;
         let producer = EventProducerId::from("session_api");
         let session_id = AgentSessionId::from(Uuid::now_v7().to_string());
@@ -99,6 +146,7 @@ impl CanonicalAgentSessionOwner {
                 title,
                 archived: false,
                 pinned: false,
+                reasoning_effort,
             },
             agent_binding: binding,
             remote_binding_provenance,
@@ -362,6 +410,7 @@ impl CanonicalAgentSessionOwner {
                 title,
                 archived: false,
                 pinned: false,
+                reasoning_effort: parent.metadata.reasoning_effort,
             },
             child_agent_binding: parent.agent_binding.clone(),
             parent_through_seq,

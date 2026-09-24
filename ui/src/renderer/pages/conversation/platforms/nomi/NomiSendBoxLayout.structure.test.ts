@@ -134,7 +134,10 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('{collaboratorSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('<SessionCapabilityPicker')).toBe(false);
     expect(sendBoxSource.includes('updateCapabilitySelection')).toBe(false);
-    expect(selectorSource.includes('if (disabled) return trigger;')).toBe(true);
+    expect(selectorSource.includes('const modelControl = disabled ? modelTrigger')).toBe(true);
+    expect(selectorSource.indexOf('{modelControl}')).toBeLessThan(
+      selectorSource.indexOf('{reasoningControl}')
+    );
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
     expect(sendBoxSource.includes('modelPickerDisabled = Boolean(modelSelectionDisabled || running)')).toBe(true);
   });

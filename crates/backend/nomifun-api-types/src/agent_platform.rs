@@ -869,6 +869,16 @@ pub struct AgentSessionKnowledgeBindingDto {
     pub kb_ids: Vec<KnowledgeBaseId>,
 }
 
+/// Optional per-session override. Absence inherits the selected model's
+/// default reasoning policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionReasoningEffortDto {
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
@@ -878,6 +888,8 @@ pub struct CreateAgentSessionRequestDto {
     pub preset_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<SessionReasoningEffortDto>,
     /// Product resource choices only. The host validates ownership and derives
     /// typed operations; clients cannot submit an AgentBinding or grant
     /// themselves resource permissions.
@@ -903,6 +915,19 @@ pub struct CreateAgentSessionResponseDto {
     pub agent_binding: AgentBindingValueDto,
     pub state: String,
     pub cursor: SessionCursorDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionReasoningRequestDto {
+    pub reasoning_effort: Option<SessionReasoningEffortDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionReasoningResponseDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<SessionReasoningEffortDto>,
 }
 
 /// Product selection only; route, protocol and credential facts are host-owned.
@@ -1393,6 +1418,39 @@ mod snapshot_tests {
             .is_err(),
             "clients must not be able to submit resource operations"
         );
+    }
+
+    #[test]
+    fn session_reasoning_effort_accepts_only_the_bounded_override() {
+        let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+            "preset_id": PRESET_ID,
+            "reasoning_effort": "high"
+        }))
+        .expect("bounded session reasoning override");
+        assert_eq!(
+            request.reasoning_effort,
+            Some(SessionReasoningEffortDto::High)
+        );
+
+        assert!(
+            serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+                "preset_id": PRESET_ID,
+                "reasoning_effort": "max"
+            }))
+            .is_err()
+        );
+        let automatic = serde_json::from_value::<UpdateAgentSessionReasoningRequestDto>(json!({
+            "reasoning_effort": null
+        }))
+        .expect("null restores the model default");
+        assert_eq!(automatic.reasoning_effort, None);
+        let automatic_response = serde_json::to_value(
+            UpdateAgentSessionReasoningResponseDto {
+                reasoning_effort: None,
+            },
+        )
+        .unwrap();
+        assert!(automatic_response.get("reasoning_effort").is_none());
     }
 
     #[test]

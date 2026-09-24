@@ -26,6 +26,7 @@ import type {
   McpServerId,
   ProviderId,
 } from '@/common/types/ids';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 
 /**
  * Conversation source type - identifies where the conversation was created
@@ -61,6 +62,8 @@ interface IChatConversation<T, Extra> {
   type: T;
   extra: Extra;
   model: TProviderWithModel;
+  /** Per-session override. Undefined inherits the selected model default. */
+  reasoning_effort?: SessionReasoningEffort;
   status?: TChatConversationStatus | undefined;
   runtime?: TConversationRuntimeSummary;
   /** 会话来源，默认为 nomifun / Conversation source, defaults to nomifun */

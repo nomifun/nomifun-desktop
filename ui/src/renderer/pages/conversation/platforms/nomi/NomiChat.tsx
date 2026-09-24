@@ -22,6 +22,7 @@ import NomiSendBox from './NomiSendBox';
 import { useNomiMessage } from './useNomiMessage';
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { ConversationCreationTasksProvider } from '@/renderer/creation/ConversationCreationTasks';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 
 const NomiChat: React.FC<{
   conversation_id: ConversationId;
@@ -41,6 +42,9 @@ const NomiChat: React.FC<{
   capabilityControls?: React.ReactNode;
   modelSelectionHint?: string;
   modelSelectionDisabled?: boolean;
+  reasoningEffort?: SessionReasoningEffort;
+  reasoningEffortUpdating?: boolean;
+  onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
   /** Conversation collaborator-model control rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /** Extra right-side tools used by projected task transcripts. */
@@ -68,6 +72,9 @@ const NomiChat: React.FC<{
   capabilityControls,
   modelSelectionHint,
   modelSelectionDisabled,
+  reasoningEffort,
+  reasoningEffortUpdating,
+  onReasoningEffortChange,
   collaboratorSelectorNode,
   extraRightTools,
   creationTasksEnabled = false,
@@ -136,6 +143,9 @@ const NomiChat: React.FC<{
               capabilityControls={capabilityControls}
               modelSelectionHint={modelSelectionHint}
               modelSelectionDisabled={modelSelectionDisabled}
+              reasoningEffort={reasoningEffort}
+              reasoningEffortUpdating={reasoningEffortUpdating}
+              onReasoningEffortChange={onReasoningEffortChange}
               collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
               creationEnabled={creationEnabled}

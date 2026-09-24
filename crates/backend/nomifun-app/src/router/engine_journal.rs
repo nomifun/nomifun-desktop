@@ -892,6 +892,7 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
                     title: Some("fixture".into()),
                     archived: false,
                     pinned: false,
+                    reasoning_effort: None,
                 },
                 agent_binding: binding.clone(),
                 remote_binding_provenance: None,

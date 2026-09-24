@@ -30,6 +30,7 @@ pub mod validation;
 
 pub use closure::*;
 pub use catalog::*;
+pub use chat_model::ReasoningEffort;
 pub use deletion::*;
 pub use digest::{
     ArtifactEnvelope, CanonicalDigestError, canonical_json_bytes, digest_bytes, digest_payload,

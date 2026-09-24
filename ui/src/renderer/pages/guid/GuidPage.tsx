@@ -74,6 +74,10 @@ import {
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import GuidModelCompatibilityNotice from './components/GuidModelCompatibilityNotice';
 import { modelCapabilityConfigurationRoute } from '@/renderer/pages/modelHub/modelConfigurationRoute';
+import {
+  protocolSupportsReasoningEffort,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
 
 type GuidNavigationState = {
   resetAgentSelection?: boolean;
@@ -93,6 +97,7 @@ const GuidPage: React.FC = () => {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const [resourcePickerReady, setResourcePickerReady] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort>();
 
   useEffect(() => {
     void import('@renderer/pages/conversation');
@@ -168,6 +173,14 @@ const GuidPage: React.FC = () => {
   const currentModelCapability = currentModelDefinition?.capabilities.find(
     (capability) => capability.task === 'chat'
   );
+  const reasoningEffortSupported = protocolSupportsReasoningEffort(
+    currentModelCapability?.protocol
+  ) && capabilitySupportsTechnicalCapability(currentModelCapability, 'reasoning');
+  useEffect(() => {
+    if (currentModelCapability && !reasoningEffortSupported) {
+      setReasoningEffort(undefined);
+    }
+  }, [currentModelCapability, reasoningEffortSupported]);
   const missingTechnicalCapabilities = requiredTechnicalCapabilities.filter(
     (technical) =>
       !capabilitySupportsTechnicalCapability(currentModelCapability, technical)
@@ -301,6 +314,7 @@ const GuidPage: React.FC = () => {
     selectedPreset: agentSelection.selectedPreset,
     selectedTemplate: agentSelection.selectedTemplate,
     current_model: modelSelection.current_model,
+    reasoningEffort,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
         allowAutomation: advancedControlsEnabled || idmmControlEnabled,
@@ -491,6 +505,7 @@ const GuidPage: React.FC = () => {
     }
     advancedConfig.reset();
     collaboration.reset();
+    setReasoningEffort(undefined);
     setResourceSelectionValue({});
     creation.update(draft => ({ ...draft, references: [], pendingPrompt: undefined, pendingFiles: undefined }));
   }, [
@@ -606,7 +621,20 @@ const GuidPage: React.FC = () => {
         requiredTechnicalCapabilities={requiredTechnicalCapabilities}
         popupVisible={modelPickerOpen}
         onPopupVisibleChange={setModelPickerOpen}
-        onSelectModel={(provider, model) => modelSelection.setCurrentModel({ ...provider, use_model: model })}
+        reasoningEffort={reasoningEffort}
+        reasoningEffortSupported={reasoningEffortSupported}
+        reasoningEffortDisabled={guidInput.loading}
+        onReasoningEffortChange={setReasoningEffort}
+        onSelectModel={async (provider, model) => {
+          const capability = capabilityOf(provider, model, 'chat');
+          if (
+            !protocolSupportsReasoningEffort(capability?.protocol)
+            || !capabilitySupportsTechnicalCapability(capability, 'reasoning')
+          ) {
+            setReasoningEffort(undefined);
+          }
+          await modelSelection.setCurrentModel({ ...provider, use_model: model });
+        }}
       />
     )
   );

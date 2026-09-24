@@ -20,6 +20,14 @@
     "skillsMarketDesc": "按需搜索并调用社区 Skills，一次配置，所有Agent通用。",
     "skillsMarketDetails": "详情 >>"
   },
+  "reasoningEffort": {
+    "label": "本会话思考深度",
+    "auto": "自动",
+    "low": "低",
+    "medium": "中",
+    "high": "高",
+    "updateFailed": "思考深度更新失败"
+  },
   "history": {
     "noHistory": "暂无对话历史",
     "deleteTitle": "删除",

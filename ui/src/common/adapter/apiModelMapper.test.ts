@@ -86,6 +86,15 @@ describe('fromApiConversation first-class fields', () => {
     expect(mapped.extra && 'pinned' in mapped.extra).toBe(false);
   });
 
+  test('accepts only bounded session reasoning effort values', () => {
+    expect(
+      fromApiConversation(apiConv({ reasoning_effort: 'high', extra: {} })).reasoning_effort,
+    ).toBe('high');
+    expect(() =>
+      fromApiConversation(apiConv({ reasoning_effort: 'max', extra: {} })),
+    ).toThrow('conversation reasoning_effort must be low, medium, or high');
+  });
+
   test('parses runtime active_turn_id as exact lifecycle authority', () => {
     const turnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000021');
     const mapped = fromApiConversation(
