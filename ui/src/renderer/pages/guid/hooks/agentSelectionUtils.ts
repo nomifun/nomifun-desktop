@@ -42,6 +42,16 @@ export const normalizeGuidAgentSelection = (
   return DEFAULT_GUID_AGENT_SELECTION;
 };
 
+/**
+ * Read the explicit Agent Workbench default. The former Guid selection key is
+ * retained only as an upgrade fallback so existing users keep their choice.
+ */
+export const readGuidDefaultAgentSelection = (): GuidAgentSelection =>
+  normalizeGuidAgentSelection(
+    configService.get('guid.defaultAgentSelection')
+      ?? configService.get('guid.agentSelection')
+  );
+
 /** Save default nomi provider/model so the Guid page restores it next session. */
 export async function saveNomiDefaultModel(
   provider_id: ProviderId,

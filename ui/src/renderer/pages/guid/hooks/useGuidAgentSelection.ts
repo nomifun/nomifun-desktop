@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { configService } from '@/common/config/configService';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import type { AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
@@ -13,6 +12,7 @@ import {
   DEFAULT_GUID_AGENT_SELECTION,
   isExecutableAgentPreset,
   normalizeGuidAgentSelection,
+  readGuidDefaultAgentSelection,
 } from './agentSelectionUtils';
 import type {
   ExecutableAgentPreset,
@@ -44,19 +44,6 @@ type UseGuidAgentSelectionOptions = {
   locationKey?: string;
 };
 
-const readSavedSelection = (): GuidAgentSelection => {
-  const saved: unknown = configService.get('guid.agentSelection');
-  return normalizeGuidAgentSelection(saved);
-};
-
-const saveSelection = (selection: GuidAgentSelection): void => {
-  void configService
-    .set('guid.agentSelection', selection)
-    .catch((error) => {
-      console.error('Failed to save Guid Agent selection:', error);
-    });
-};
-
 /** Selects an official Agent or a saved personal Agent from the workbench catalog. */
 export const useGuidAgentSelection = ({
   resetAgentSelection = false,
@@ -66,7 +53,7 @@ export const useGuidAgentSelection = ({
 }: UseGuidAgentSelectionOptions): GuidAgentSelectionResult => {
   const [selection, setSelectionState] = useGuidDraftState<GuidAgentSelection>('agent', () => {
     try {
-      return readSavedSelection();
+      return readGuidDefaultAgentSelection();
     } catch {
       return DEFAULT_GUID_AGENT_SELECTION;
     }
@@ -100,12 +87,17 @@ export const useGuidAgentSelection = ({
   const setSelection = useCallback((nextSelection: GuidAgentSelection) => {
     const normalized = normalizeGuidAgentSelection(nextSelection);
     setSelectionState(normalized);
-    saveSelection(normalized);
   }, [setSelectionState]);
 
-  const selectDefaultTemplate = useCallback(() => {
-    setSelection(DEFAULT_GUID_AGENT_SELECTION);
-  }, [setSelection]);
+  const selectDefaultAgent = useCallback(() => {
+    const configured = readGuidDefaultAgentSelection();
+    const available = configured.kind === 'preset'
+      ? presets.some((preset) => preset.preset_id === configured.presetId)
+      : officialTemplates.some(
+          (template) => template.template_key === configured.templateKey
+        );
+    setSelectionState(available ? configured : DEFAULT_GUID_AGENT_SELECTION);
+  }, [officialTemplates, presets, setSelectionState]);
 
   const selectedPresetId =
     selection.kind === 'preset' ? selection.presetId : undefined;
@@ -137,8 +129,12 @@ export const useGuidAgentSelection = ({
     if (navigationRequestHandledRef.current) return;
 
     if (resetAgentSelection) {
+      if (!isLoaded) {
+        setSelectionState(readGuidDefaultAgentSelection());
+        return;
+      }
       navigationRequestHandledRef.current = true;
-      selectDefaultTemplate();
+      selectDefaultAgent();
       return;
     }
 
@@ -156,7 +152,7 @@ export const useGuidAgentSelection = ({
         return;
       }
 
-      selectDefaultTemplate();
+      selectDefaultAgent();
       return;
     }
 
@@ -173,7 +169,7 @@ export const useGuidAgentSelection = ({
       return;
     }
 
-    selectDefaultTemplate();
+    selectDefaultAgent();
   }, [
     isLoading,
     isLoaded,
@@ -181,10 +177,11 @@ export const useGuidAgentSelection = ({
     presets,
     officialTemplates,
     resetAgentSelection,
-    selectDefaultTemplate,
+    selectDefaultAgent,
     selectedAgentPresetId,
     selectedAgentTemplateKey,
     setSelection,
+    setSelectionState,
   ]);
 
   useEffect(() => {
@@ -200,7 +197,7 @@ export const useGuidAgentSelection = ({
     ) {
       return;
     }
-    selectDefaultTemplate();
+    selectDefaultAgent();
   }, [
     isLoading,
     isLoaded,
@@ -210,7 +207,7 @@ export const useGuidAgentSelection = ({
     selectedAgentTemplateKey,
     selectedPreset,
     selectedTemplate,
-    selectDefaultTemplate,
+    selectDefaultAgent,
   ]);
 
   return {

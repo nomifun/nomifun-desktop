@@ -63,6 +63,19 @@
     "untitledName": "未命名 Agent",
     "forkName": "{{name}} 副本"
   },
+  "defaultAgent": {
+    "title": "默认 Agent",
+    "button": "默认 Agent：{{name}}",
+    "hint": "新建 Guid 会话时会使用这个 Agent。只在某个 Guid 草稿中切换 Agent 不会修改默认值，已有会话也不会变化。",
+    "field": "新会话使用",
+    "officialGroup": "官方 Agent",
+    "personalGroup": "我的 Agent",
+    "save": "保存默认 Agent",
+    "saveFailed": "无法保存默认 Agent，请重试。",
+    "unavailable": "此前设置的默认 Agent 已不可用，新会话当前将回退为“{{name}}”。",
+    "noAvailable": "没有可用于 Guid 会话的 Agent。请先保存一个可执行的 Agent。",
+    "noAvailableShort": "暂无可用 Agent"
+  },
   "productBinding": {
     "chooseModelLater": "可先选择 Agent，再配置兼容的对话模型。",
     "loadFailed": "暂时无法读取 Agent 选项，请重试。",

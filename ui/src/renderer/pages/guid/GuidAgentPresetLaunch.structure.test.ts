@@ -82,6 +82,11 @@ describe('Guid workbench Agent launch behavior', () => {
       )
     ).toBe(true);
     expect(
+      configKeys.includes(
+        "'guid.defaultAgentSelection': GuidAgentSelectionPreference | undefined;"
+      )
+    ).toBe(true);
+    expect(
       types.includes(
         'export type GuidAgentSelection = GuidAgentSelectionPreference;'
       )
@@ -248,6 +253,6 @@ describe('Guid workbench Agent launch behavior', () => {
         "setSelection({ kind: 'template', templateKey: template.template_key });"
       )
     ).toBe(true);
-    expect(selection.includes('selectDefaultTemplate();')).toBe(true);
+    expect(selection.includes('selectDefaultAgent();')).toBe(true);
   });
 });

@@ -6,17 +6,25 @@ import { SWRConfig } from 'swr';
 import { uuidv7 } from '@/common/utils';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import { configService } from '@/common/config/configService';
-import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import type { AgentPresetSummary, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { parseProviderId } from '@/common/types/ids';
 import { useGuidCreation } from '@/renderer/creation/useGuidCreation';
 import { useGuidInput } from './useGuidInput';
 import { useGuidAgentSelection } from './useGuidAgentSelection';
 
 const templates = ['chat.minimal', 'assistant.general', 'creative-studio.default'].map(template_key => ({ template_key })) as OfficialPresetTemplate[];
-beforeEach(() => setBrowserStorageGeneration(uuidv7()));
-afterEach(() => { cleanup(); sessionStorage.clear(); });
+const stablePreset = {
+  preset_id: '0190f5fe-7c00-7a00-8000-000000000101',
+  source: 'user', display_name: 'Release reviewer', bound_target_count: 0,
+  current_stable_revision: { preset_id: '0190f5fe-7c00-7a00-8000-000000000101', revision: 1, revision_digest: 'a'.repeat(64) },
+} as AgentPresetSummary;
+beforeEach(() => { configService.reset(); setBrowserStorageGeneration(uuidv7()); });
+afterEach(() => { cleanup(); sessionStorage.clear(); configService.reset(); });
 
-function mountDraft(initialEntry = '/guid') {
+function mountDraft(
+  initialEntry = '/guid',
+  agentOptions: Parameters<typeof useGuidAgentSelection>[0] = {},
+) {
   let composer!: {
     input: ReturnType<typeof useGuidInput>;
     agent: ReturnType<typeof useGuidAgentSelection>;
@@ -24,7 +32,7 @@ function mountDraft(initialEntry = '/guid') {
   };
   function Composer() {
     const input = useGuidInput({ locationState: null });
-    const agent = useGuidAgentSelection({});
+    const agent = useGuidAgentSelection(agentOptions);
     const creation = useGuidCreation(agent, input.input, input.files, input.dir);
     composer = { input, agent, creation };
     return <textarea aria-label='草稿' value={input.input} onChange={e => input.setInput(e.target.value)} />;
@@ -34,11 +42,37 @@ function mountDraft(initialEntry = '/guid') {
     return <><button onClick={() => navigate('/assets')}>资产库</button><button onClick={() => navigate('/guid')}>会话</button><button onClick={() => navigate(-1)}>返回</button></>;
   }
   const page = render(<MemoryRouter initialEntries={[initialEntry]}><SWRConfig value={{ provider: () => new Map(),
-    fallback: { providers: [], 'agent-presets.library': { official_templates: templates, user_presets: [] } },
+    fallback: { providers: [], 'agent-presets.library': { official_templates: templates, user_presets: [stablePreset], active_bindings: [] } },
     revalidateOnMount: false, shouldRetryOnError: false,
   }}><Navigation /><Routes><Route path='/guid' element={<Composer />} /><Route path='/assets' element={<div>资产列表</div>} /></Routes></SWRConfig></MemoryRouter>);
   return { page, current: () => composer };
 }
+
+test('new Guid conversations use the workbench default without persisting draft-only switches', () => {
+  configService.setLocal('guid.defaultAgentSelection', {
+    kind: 'preset',
+    presetId: stablePreset.preset_id,
+  });
+  const { current } = mountDraft('/guid', { resetAgentSelection: true });
+
+  expect(current().agent.selection).toEqual({
+    kind: 'preset',
+    presetId: stablePreset.preset_id,
+  });
+  act(() => current().agent.setSelection({
+    kind: 'template',
+    templateKey: 'chat.minimal',
+  }));
+  expect(current().agent.selection).toEqual({
+    kind: 'template',
+    templateKey: 'chat.minimal',
+  });
+  expect(configService.get('guid.defaultAgentSelection')).toEqual({
+    kind: 'preset',
+    presetId: stablePreset.preset_id,
+  });
+  expect(configService.get('guid.agentSelection')).toBeUndefined();
+});
 
 test.each(['image', 'video', 'music'] as const)('%s draft survives page unmount with text, files, workspace, Agent, references and parameters', mode => {
   const save = spyOn(configService, 'set').mockResolvedValue(undefined);
