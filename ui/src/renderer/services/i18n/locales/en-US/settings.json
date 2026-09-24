@@ -1617,12 +1617,15 @@
     "reasoningEffortDescription": "The default reasoning level for this model's Chat capability, affecting latency, quality, and token usage.",
     "reasoningEffortHint": "Auto uses system and provider defaults; a fixed level applies to new sessions, preset agents, health checks, and other calls using this model.",
     "reasoningEffortJsonInvalid": "Fix the provider parameters JSON before changing reasoning depth.",
-    "reasoningEffortProtocolUnsupported": "This protocol has no normalized Low/Medium/High mapping. Use Auto.",
+    "reasoningEffortProtocolUnsupported": "This protocol has no normalized reasoning-effort mapping. Use Auto.",
     "reasoningEffortOptions": {
       "auto": "Auto",
       "low": "Low",
       "medium": "Medium",
-      "high": "High"
+      "high": "High",
+      "xhigh": "XHigh",
+      "max": "Max",
+      "ultra": "Ultra"
     },
     "setOutputLimit": "Set limit",
     "taskOnlyHint": "Saved only to the {{task}} task on {{model}}; other tasks are unaffected.",

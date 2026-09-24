@@ -2,7 +2,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub const AGENT_STORE_DATA_GENERATION: u32 = 6;
-pub const AGENT_STORE_MIGRATION_HEAD: u32 = 2;
+pub const AGENT_STORE_MIGRATION_HEAD: u32 = 3;
 pub const AGENT_STORE_PROJECTION_SCHEMA_VERSION: u32 = 1;
 pub const AGENT_STORE_BASELINE_SQL: &str = include_str!("../schema/0001_agent_store.sql");
 pub const CHAT_ROUTE_RECORD_JSON_SCHEMA: &str =

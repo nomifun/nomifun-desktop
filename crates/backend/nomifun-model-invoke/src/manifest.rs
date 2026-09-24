@@ -856,12 +856,11 @@ pub fn validate_provider_params_for_protocol(
                 "provider_params.reasoning_effort is supported only by compatible Chat protocols",
             ));
         }
-        if !reasoning_effort
-            .as_str()
-            .is_some_and(|value| matches!(value, "low" | "medium" | "high"))
-        {
+        if !reasoning_effort.as_str().is_some_and(|value| {
+            protocol_supports_reasoning_effort_value(protocol_id, value)
+        }) {
             return Err(InvokeError::config(
-                "provider_params.reasoning_effort must be one of low, medium, or high",
+                "provider_params.reasoning_effort is not supported by the selected Chat protocol",
             ));
         }
     }
@@ -959,6 +958,19 @@ pub fn protocol_supports_reasoning_effort(protocol_id: &str) -> bool {
         protocol_id,
         "openai.chat_text" | "openai.responses" | "gemini.generate_text"
     )
+}
+
+/// Protocol-level effort envelope. Individual provider models may narrow it.
+/// `ultra` is retained as an OpenAI-compatible extension for vendors that
+/// expose a tier beyond the official OpenAI `max` level.
+pub fn protocol_supports_reasoning_effort_value(protocol_id: &str, value: &str) -> bool {
+    match protocol_id {
+        "openai.chat_text" | "openai.responses" => {
+            matches!(value, "low" | "medium" | "high" | "xhigh" | "max" | "ultra")
+        }
+        "gemini.generate_text" => matches!(value, "low" | "medium" | "high"),
+        _ => false,
+    }
 }
 
 /// Validate and expand a protocol-owned endpoint template. Every placeholder
@@ -2084,12 +2096,8 @@ mod tests {
 
     #[test]
     fn reasoning_effort_is_a_typed_control_for_compatible_chat_protocols() {
-        for protocol in [
-            "openai.chat_text",
-            "openai.responses",
-            "gemini.generate_text",
-        ] {
-            for effort in ["low", "medium", "high"] {
+        for protocol in ["openai.chat_text", "openai.responses"] {
+            for effort in ["low", "medium", "high", "xhigh", "max", "ultra"] {
                 validate_provider_params_for_protocol(
                     protocol,
                     Chat,
@@ -2098,9 +2106,18 @@ mod tests {
                 .unwrap();
             }
         }
+        for effort in ["low", "medium", "high"] {
+            validate_provider_params_for_protocol(
+                "gemini.generate_text",
+                Chat,
+                &serde_json::json!({"reasoning_effort": effort}),
+            )
+            .unwrap();
+        }
 
         for (protocol, task, effort) in [
             ("anthropic.messages", Chat, serde_json::json!("high")),
+            ("gemini.generate_text", Chat, serde_json::json!("max")),
             ("openai.chat_text", Chat, serde_json::json!("extreme")),
             ("openai.chat_text", Chat, serde_json::json!(1)),
             ("openai.images", ImageGeneration, serde_json::json!("low")),

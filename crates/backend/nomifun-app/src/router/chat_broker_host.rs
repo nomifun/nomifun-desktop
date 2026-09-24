@@ -1557,6 +1557,21 @@ fn merge_chat_provider_params(
         }
     }
     if let Some(reasoning_effort) = reasoning_effort {
+        let supported = match protocol {
+            ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses => matches!(
+                reasoning_effort.as_str(),
+                "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
+            ),
+            ChatProtocol::Gemini => {
+                matches!(reasoning_effort.as_str(), "low" | "medium" | "high")
+            }
+            ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => false,
+        };
+        if !supported {
+            return Err(ChatModelError::invalid_request(
+                "configured reasoning effort is unsupported by this Chat protocol",
+            ));
+        }
         match protocol {
             ChatProtocol::OpenaiChat => {
                 body_object
@@ -1597,11 +1612,9 @@ fn merge_chat_provider_params(
                     .entry("thinkingLevel")
                     .or_insert_with(|| Value::String(reasoning_effort));
             }
-            ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => {
-                return Err(ChatModelError::invalid_request(
-                    "configured reasoning effort is unsupported by this Chat protocol",
-                ));
-            }
+            ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => unreachable!(
+                "unsupported reasoning protocol returned before provider default merge"
+            ),
         }
     }
     Ok(body)
@@ -2157,22 +2170,25 @@ mod tests {
                 ChatProtocol::OpenaiChat,
                 json!({}),
                 vec!["reasoning_effort"],
+                "ultra",
             ),
             (
                 ChatProtocol::OpenaiResponses,
                 json!({}),
                 vec!["reasoning", "effort"],
+                "max",
             ),
             (
                 ChatProtocol::Gemini,
                 json!({}),
                 vec!["generationConfig", "thinkingConfig", "thinkingLevel"],
+                "high",
             ),
         ];
-        for (protocol, body, path) in defaults {
+        for (protocol, body, path, effort) in defaults {
             let merged = merge_chat_provider_params(
                 body,
-                &json!({"reasoning_effort":"high"}),
+                &json!({"reasoning_effort":effort}),
                 protocol,
                 None,
             )
@@ -2180,8 +2196,17 @@ mod tests {
             let value = path
                 .iter()
                 .fold(&merged, |value, key| &value[*key]);
-            assert_eq!(value, "high");
+            assert_eq!(value, effort);
         }
+
+        let error = merge_chat_provider_params(
+            json!({}),
+            &json!({"reasoning_effort":"max"}),
+            ChatProtocol::Gemini,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, ChatModelErrorCode::InvalidRequest);
     }
 
     #[test]

@@ -430,6 +430,9 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('思考深度')).toBe(true);
     expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="medium")(?=[^>]*aria-pressed="true")[^>]*>/);
     expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="high")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="xhigh")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="max")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="ultra")(?=[^>]*aria-pressed="false")[^>]*>/);
     expect(html.includes('新会话、预设 Agent、健康检查')).toBe(true);
 
     const unsupported = render({
@@ -437,8 +440,8 @@ describe('unified model definition editor rendering and interactions', () => {
       capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'anthropic.messages' }],
     });
     expect(unsupported).toMatch(/<button(?=[^>]*data-reasoning-effort="auto")(?=[^>]*aria-pressed="true")[^>]*>/);
-    expect(unsupported).toMatch(/<button(?=[^>]*data-reasoning-effort="low")(?=[^>]*disabled="")[^>]*>/);
-    expect(unsupported.includes('当前协议不提供统一的低/中/高映射')).toBe(true);
+    expect(unsupported.includes('data-reasoning-effort="low"')).toBe(false);
+    expect(unsupported.includes('当前协议不提供统一的思考深度映射')).toBe(true);
   });
 
   test('only exposes catalog models compatible with the selected primary type', () => {

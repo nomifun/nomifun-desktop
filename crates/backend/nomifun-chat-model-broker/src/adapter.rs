@@ -497,12 +497,7 @@ fn encode_openai_chat_request(
     if let Some(reasoning) = &input.reasoning
         && let Some(effort) = reasoning.effort
     {
-        body["reasoning_effort"] = Value::String(match effort {
-            crate::contracts::ReasoningEffort::Low => "low",
-            crate::contracts::ReasoningEffort::Medium => "medium",
-            crate::contracts::ReasoningEffort::High => "high",
-        }
-        .to_owned());
+        body["reasoning_effort"] = Value::String(effort.as_str().to_owned());
     }
     if !matches!(input.response_format, ChatResponseFormat::Text) {
         body["response_format"] = response_format_value(&input.response_format);
@@ -560,11 +555,7 @@ fn encode_openai_responses_request(
     if let Some(reasoning) = &input.reasoning {
         let mut options = Map::new();
         if let Some(effort) = reasoning.effort {
-            options.insert("effort".into(), Value::String(match effort {
-                crate::contracts::ReasoningEffort::Low => "low",
-                crate::contracts::ReasoningEffort::Medium => "medium",
-                crate::contracts::ReasoningEffort::High => "high",
-            }.into()));
+            options.insert("effort".into(), Value::String(effort.as_str().into()));
         }
         if reasoning.summary != crate::contracts::ReasoningSummary::None {
             options.insert("summary".into(), Value::String(format!("{:?}", reasoning.summary).to_ascii_lowercase()));
@@ -597,9 +588,23 @@ fn encode_gemini_request(
     if let Some(reasoning) = &input.reasoning
         && let Some(effort) = reasoning.effort
     {
+        let thinking_level = match effort {
+            crate::contracts::ReasoningEffort::Low => "low",
+            crate::contracts::ReasoningEffort::Medium => "medium",
+            crate::contracts::ReasoningEffort::High => "high",
+            crate::contracts::ReasoningEffort::XHigh
+            | crate::contracts::ReasoningEffort::Max
+            | crate::contracts::ReasoningEffort::Ultra => {
+                return Err(ChatModelError::new(
+                    ChatModelErrorCode::UnsupportedFeature,
+                    "Gemini thinking level does not support xhigh, max, or ultra",
+                    crate::contracts::ChatRetryDirective::Never,
+                ));
+            }
+        };
         generation.insert(
             "thinkingConfig".to_owned(),
-            json!({"thinkingLevel": format!("{effort:?}").to_ascii_lowercase()}),
+            json!({"thinkingLevel": thinking_level}),
         );
     }
     if !matches!(input.response_format, ChatResponseFormat::Text) {

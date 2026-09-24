@@ -7,7 +7,7 @@ import {
   capabilitySupportsTechnicalCapability,
 } from '@/common/utils/providerModels';
 import {
-  protocolSupportsReasoningEffort,
+  reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
 
@@ -38,14 +38,19 @@ export default function NomiModelSelector({
         'chat'
       )
     : undefined;
+  const reasoningEffortOptions = capabilitySupportsTechnicalCapability(
+    currentCapability,
+    'reasoning'
+  )
+    ? reasoningEffortsForProtocol(currentCapability?.protocol)
+    : [];
   return <ChatModelSelector providers={selection?.providers ?? []} currentModel={selection?.current_model}
     getAvailableModels={provider => selection?.getAvailableModels(provider) ?? []}
     onSelectModel={async (provider, model) => { await selection?.handleSelectModel(provider, model); }}
     disabled={disabled || !selection || selection.pickerDisabled} compact={compact ?? isOpen} className={className}
     readOnlyLabel={!selection ? t('conversation.welcome.useCliModel') : undefined}
     reasoningEffort={reasoningEffort}
-    reasoningEffortSupported={protocolSupportsReasoningEffort(currentCapability?.protocol)
-      && capabilitySupportsTechnicalCapability(currentCapability, 'reasoning')}
+    reasoningEffortOptions={reasoningEffortOptions}
     reasoningEffortDisabled={reasoningEffortDisabled}
     onReasoningEffortChange={onReasoningEffortChange}
     testId='nomi-model-selector' />;

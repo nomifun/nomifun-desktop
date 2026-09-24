@@ -177,7 +177,7 @@ export function fromApiConversation(raw: unknown): TChatConversation {
 
   if ('reasoning_effort' in r) {
     if (!isSessionReasoningEffort(r.reasoning_effort)) {
-      throw new TypeError('conversation reasoning_effort must be low, medium, or high');
+      throw new TypeError('conversation reasoning_effort is not a supported level');
     }
     next.reasoning_effort = r.reasoning_effort;
   }

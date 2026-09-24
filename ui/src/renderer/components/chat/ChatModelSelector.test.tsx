@@ -8,6 +8,7 @@ import { SWRConfig } from 'swr';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import type { IProvider } from '@/common/config/storage';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 import { parseProviderId } from '@/common/types/ids';
 import messages from '@/renderer/services/i18n/locales/zh-CN/index';
 import ChatModelSelector, { filterCompatibleChatModelGroups } from './ChatModelSelector';
@@ -113,13 +114,13 @@ test('keeps model selection on the left and reasoning control on the right', asy
   const changes: Array<string | undefined> = [];
   const modelChanges: string[] = [];
   const ReasoningPicker = () => {
-    const [effort, setEffort] = useState<'low' | 'medium' | 'high'>();
+    const [effort, setEffort] = useState<SessionReasoningEffort>();
     return <ChatModelSelector
       providers={[reasoningProvider]}
       currentModel={{ ...reasoningProvider, use_model: 'allowed-model' }}
       getAvailableModels={() => ['allowed-model']}
       onSelectModel={async (_provider, model) => { modelChanges.push(model); }}
-      reasoningEffortSupported
+      reasoningEffortOptions={['low', 'medium', 'high', 'xhigh', 'max', 'ultra']}
       reasoningEffort={effort}
       onReasoningEffortChange={(value) => {
         changes.push(value);
@@ -141,13 +142,15 @@ test('keeps model selection on the left and reasoning control on the right', asy
     '本会话思考深度: 自动',
   ]);
   fireEvent.click(page.getByRole('button', { name: '本会话思考深度: 自动' }));
-  const high = await waitFor(() => page.getByTestId('chat-model-selector-reasoning-high'));
+  const max = await waitFor(() => page.getByTestId('chat-model-selector-reasoning-max'));
+  expect(page.getByTestId('chat-model-selector-reasoning-xhigh')).toBeTruthy();
+  expect(page.getByTestId('chat-model-selector-reasoning-ultra')).toBeTruthy();
   expect(page.queryByTestId('nomi-model-option-allowed-model')).toBeNull();
-  fireEvent.click(high);
-  expect(changes).toEqual(['high']);
+  fireEvent.click(max);
+  expect(changes).toEqual(['max']);
   expect(modelChanges).toEqual([]);
   expect(page.getByRole('button', { name: '对话模型' })).toBeTruthy();
-  expect(page.getByRole('button', { name: '本会话思考深度: 高' })).toBeTruthy();
+  expect(page.getByRole('button', { name: '本会话思考深度: 最大' })).toBeTruthy();
   fireEvent.click(page.getByRole('button', { name: '对话模型' }));
   await waitFor(() => page.getByTestId('nomi-model-option-allowed-model'));
   const activeModelMenu = await waitFor(() => within(document.body).getByRole('menu'));

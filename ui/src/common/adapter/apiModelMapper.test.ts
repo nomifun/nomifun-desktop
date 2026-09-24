@@ -87,12 +87,14 @@ describe('fromApiConversation first-class fields', () => {
   });
 
   test('accepts only bounded session reasoning effort values', () => {
-    expect(
-      fromApiConversation(apiConv({ reasoning_effort: 'high', extra: {} })).reasoning_effort,
-    ).toBe('high');
+    for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'] as const) {
+      expect(
+        fromApiConversation(apiConv({ reasoning_effort: effort, extra: {} })).reasoning_effort,
+      ).toBe(effort);
+    }
     expect(() =>
-      fromApiConversation(apiConv({ reasoning_effort: 'max', extra: {} })),
-    ).toThrow('conversation reasoning_effort must be low, medium, or high');
+      fromApiConversation(apiConv({ reasoning_effort: 'extreme', extra: {} })),
+    ).toThrow('conversation reasoning_effort is not a supported level');
   });
 
   test('parses runtime active_turn_id as exact lifecycle authority', () => {

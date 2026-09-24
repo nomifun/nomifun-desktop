@@ -11,7 +11,7 @@ use nomifun_api_types::{ModelTask, ModelTrait};
 use nomifun_common::{AppError, ProviderId, ProviderWithModel};
 use nomifun_model_invoke::{
     AuthMaterial, AuthScheme, ModelInvokeService, ModelRef, ProtocolExecutorKind,
-    protocol_task_descriptor,
+    protocol_supports_reasoning_effort_value, protocol_task_descriptor,
 };
 
 use crate::types::NomiCompatOverrides;
@@ -380,10 +380,11 @@ async fn resolve_provider_fields_at_revision(
     };
     let reasoning_effort = match provider_body.remove("reasoning_effort") {
         Some(serde_json::Value::String(value))
-            if matches!(value.as_str(), "low" | "medium" | "high") => Some(value),
+            if protocol_supports_reasoning_effort_value(&task.protocol, &value) => Some(value),
         Some(_) => {
             return Err(AppError::BadRequest(
-                "Chat provider_params.reasoning_effort must be low, medium, or high".into(),
+                "Chat provider_params.reasoning_effort is unsupported by the selected protocol"
+                    .into(),
             ));
         }
         None => None,
@@ -951,7 +952,7 @@ mod provider_resolution_tests {
             endpoint: Some("/custom/chat"),
             traits: "[]",
             credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
-            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"high","temperature":0.2}"#,
+            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"ultra","temperature":0.2}"#,
             bedrock_config: None,
         })
         .await;
@@ -961,7 +962,7 @@ mod provider_resolution_tests {
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
         assert_eq!(fields.compat_overrides.max_tokens_field.as_deref(), Some("max_completion_tokens"));
         assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
-        assert_eq!(fields.compat_overrides.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(fields.compat_overrides.reasoning_effort.as_deref(), Some("ultra"));
         assert_eq!(
             fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
             serde_json::json!(0.2)

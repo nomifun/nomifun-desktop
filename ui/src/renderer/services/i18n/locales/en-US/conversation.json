@@ -26,6 +26,9 @@
     "low": "Low",
     "medium": "Medium",
     "high": "High",
+    "xhigh": "XHigh",
+    "max": "Max",
+    "ultra": "Ultra",
     "updateFailed": "Failed to update reasoning effort"
   },
   "history": {

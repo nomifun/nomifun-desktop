@@ -75,7 +75,7 @@ import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import GuidModelCompatibilityNotice from './components/GuidModelCompatibilityNotice';
 import { modelCapabilityConfigurationRoute } from '@/renderer/pages/modelHub/modelConfigurationRoute';
 import {
-  protocolSupportsReasoningEffort,
+  reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
 
@@ -173,14 +173,21 @@ const GuidPage: React.FC = () => {
   const currentModelCapability = currentModelDefinition?.capabilities.find(
     (capability) => capability.task === 'chat'
   );
-  const reasoningEffortSupported = protocolSupportsReasoningEffort(
-    currentModelCapability?.protocol
-  ) && capabilitySupportsTechnicalCapability(currentModelCapability, 'reasoning');
+  const reasoningEffortOptions = capabilitySupportsTechnicalCapability(
+    currentModelCapability,
+    'reasoning'
+  )
+    ? reasoningEffortsForProtocol(currentModelCapability?.protocol)
+    : [];
   useEffect(() => {
-    if (currentModelCapability && !reasoningEffortSupported) {
+    if (
+      currentModelCapability
+      && reasoningEffort !== undefined
+      && !reasoningEffortOptions.includes(reasoningEffort)
+    ) {
       setReasoningEffort(undefined);
     }
-  }, [currentModelCapability, reasoningEffortSupported]);
+  }, [currentModelCapability, reasoningEffort, reasoningEffortOptions]);
   const missingTechnicalCapabilities = requiredTechnicalCapabilities.filter(
     (technical) =>
       !capabilitySupportsTechnicalCapability(currentModelCapability, technical)
@@ -622,15 +629,15 @@ const GuidPage: React.FC = () => {
         popupVisible={modelPickerOpen}
         onPopupVisibleChange={setModelPickerOpen}
         reasoningEffort={reasoningEffort}
-        reasoningEffortSupported={reasoningEffortSupported}
+        reasoningEffortOptions={reasoningEffortOptions}
         reasoningEffortDisabled={guidInput.loading}
         onReasoningEffortChange={setReasoningEffort}
         onSelectModel={async (provider, model) => {
           const capability = capabilityOf(provider, model, 'chat');
-          if (
-            !protocolSupportsReasoningEffort(capability?.protocol)
-            || !capabilitySupportsTechnicalCapability(capability, 'reasoning')
-          ) {
+          const options = capabilitySupportsTechnicalCapability(capability, 'reasoning')
+            ? reasoningEffortsForProtocol(capability?.protocol)
+            : [];
+          if (reasoningEffort !== undefined && !options.includes(reasoningEffort)) {
             setReasoningEffort(undefined);
           }
           await modelSelection.setCurrentModel({ ...provider, use_model: model });

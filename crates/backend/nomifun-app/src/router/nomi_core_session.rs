@@ -10145,14 +10145,21 @@ async fn create_nomi_core_agent_session(
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
-    if request.reasoning_effort.is_some()
-        && !saved_binding_supports_reasoning_effort(&state, &owner, &binding).await?
-    {
-        return Err(NomiCoreApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "AGENT_SESSION_REASONING_UNSUPPORTED",
-            "The selected Chat model protocol does not support reasoning effort",
-        ));
+    if let Some(effort) = request.reasoning_effort {
+        if !saved_binding_supports_reasoning_effort(
+            &state,
+            &owner,
+            &binding,
+            contract_reasoning_effort(effort),
+        )
+        .await?
+        {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "AGENT_SESSION_REASONING_UNSUPPORTED",
+                "The selected Chat model protocol does not support this reasoning effort",
+            ));
+        }
     }
     let idmm_config = idmm_config_from_runtime_policy(&projection.runtime_policy)?;
     let creation_key = request_idempotency_key(
@@ -11794,13 +11801,17 @@ async fn apply_nomi_core_agent_session_agent_switch(
         ));
     }
     let transition_id = OperationId::from(idempotency_key.clone());
-    let clear_reasoning_effort = current.session.metadata.reasoning_effort.is_some()
-        && !saved_binding_supports_reasoning_effort(
+    let clear_reasoning_effort = if let Some(effort) = current.session.metadata.reasoning_effort {
+        !saved_binding_supports_reasoning_effort(
             &state,
             &owner,
             &agent_binding_dto(&prepared.replacement)?,
+            effort,
         )
-        .await?;
+        .await?
+    } else {
+        false
+    };
     state
         .session_owner
         .runtime_sessions
@@ -12053,8 +12064,19 @@ async fn switch_nomi_core_agent_session_model(
         .control_plane
         .resolve_agent_session_model_binding(&owner.0, &current_dto, &model)
         .await?;
-    let replacement_supports_reasoning =
-        saved_binding_supports_reasoning_effort(&state, &owner, &replacement_dto).await?;
+    let replacement_supports_reasoning = if let Some(effort) =
+        observation.session.metadata.reasoning_effort
+    {
+        saved_binding_supports_reasoning_effort(
+            &state,
+            &owner,
+            &replacement_dto,
+            effort,
+        )
+        .await?
+    } else {
+        true
+    };
     let replacement: AgentBindingValue = serde_json::to_value(&replacement_dto)
         .and_then(serde_json::from_value)
         .map_err(|error| AppError::Conflict(format!(
@@ -12104,6 +12126,9 @@ fn contract_reasoning_effort(value: SessionReasoningEffortDto) -> ReasoningEffor
         SessionReasoningEffortDto::Low => ReasoningEffort::Low,
         SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
         SessionReasoningEffortDto::High => ReasoningEffort::High,
+        SessionReasoningEffortDto::XHigh => ReasoningEffort::XHigh,
+        SessionReasoningEffortDto::Max => ReasoningEffort::Max,
+        SessionReasoningEffortDto::Ultra => ReasoningEffort::Ultra,
     }
 }
 
@@ -12112,6 +12137,9 @@ fn session_reasoning_effort_dto(value: ReasoningEffort) -> SessionReasoningEffor
         ReasoningEffort::Low => SessionReasoningEffortDto::Low,
         ReasoningEffort::Medium => SessionReasoningEffortDto::Medium,
         ReasoningEffort::High => SessionReasoningEffortDto::High,
+        ReasoningEffort::XHigh => SessionReasoningEffortDto::XHigh,
+        ReasoningEffort::Max => SessionReasoningEffortDto::Max,
+        ReasoningEffort::Ultra => SessionReasoningEffortDto::Ultra,
     }
 }
 
@@ -12119,6 +12147,7 @@ async fn saved_binding_supports_reasoning_effort(
     state: &NomiCoreAgentApiState,
     owner: &AuthenticatedOwner,
     binding: &AgentBindingValueDto,
+    effort: ReasoningEffort,
 ) -> Result<bool, NomiCoreApiError> {
     let (_, revision, snapshot) = state
         .control_plane
@@ -12142,12 +12171,17 @@ async fn saved_binding_supports_reasoning_effort(
             "AgentSession reasoning route differs from its frozen identity: {error}"
         ))
     })?;
-    Ok(matches!(
-        record.primary.protocol,
-        ChatRouteProtocol::OpenaiChat
-            | ChatRouteProtocol::OpenaiResponses
-            | ChatRouteProtocol::Gemini
-    ) && record.primary.features.contains(&ChatRouteFeature::Reasoning))
+    if !record.primary.features.contains(&ChatRouteFeature::Reasoning) {
+        return Ok(false);
+    }
+    Ok(match record.primary.protocol {
+        ChatRouteProtocol::OpenaiChat | ChatRouteProtocol::OpenaiResponses => true,
+        ChatRouteProtocol::Gemini => matches!(
+            effort,
+            ReasoningEffort::Low | ReasoningEffort::Medium | ReasoningEffort::High
+        ),
+        _ => false,
+    })
 }
 
 async fn update_nomi_core_agent_session_reasoning(
@@ -12196,13 +12230,20 @@ async fn update_nomi_core_agent_session_reasoning(
             "AgentExecution Attempt transcripts cannot change reasoning effort",
         ));
     }
-    if update.reasoning_effort.is_some() {
+    if let Some(effort) = update.reasoning_effort {
         let binding = agent_binding_dto(&observation.session.agent_binding)?;
-        if !saved_binding_supports_reasoning_effort(&state, &owner, &binding).await? {
+        if !saved_binding_supports_reasoning_effort(
+            &state,
+            &owner,
+            &binding,
+            contract_reasoning_effort(effort),
+        )
+        .await?
+        {
             return Err(NomiCoreApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "AGENT_SESSION_REASONING_UNSUPPORTED",
-                "The selected Chat model protocol does not support reasoning effort",
+                "The selected Chat model protocol does not support this reasoning effort",
             ));
         }
     }
