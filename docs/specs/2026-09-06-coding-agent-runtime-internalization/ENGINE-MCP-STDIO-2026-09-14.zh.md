@@ -66,3 +66,19 @@ stdio 是工具传输，不是打包后安装或挂载 Engine；Engine 仍只允
 新增代码未编译/执行验证。MCP resources/订阅、经授权的 server-initiated 生命周期、
 持久 stdio 会话、额外远端进程 placement、新版协议、其他生态生命周期、跨启动证据及
 人工隔离处置仍未完成，不能据此宣称 Engine 总体能力已完善或发布就绪。
+
+## 2026-09-25 市场连接修复补充
+
+当前实现对本文最初记录的环境和 stderr 策略作了两处收敛式修订：
+
+- `env_clear` 仍不继承 API Token、Node 注入变量或其他无关父进程环境，但会通过
+  `nomifun-net` 的统一代理策略注入显式父进程代理变量，或在其缺失时注入系统代理；
+  server 自己配置的代理仍优先，并继续使用失效 loopback 代理防护。这使桌面进程启动的
+  `npx`/`uvx` 首次依赖下载与应用内 HTTP 请求采用同一网络边界。
+- stderr 不再直接丢弃。独立 reader 持续排空 pipe 以避免子进程背压，但只在最初 64KiB
+  范围内设置固定失败分类位；原始字节不会保留、写日志或返回 API。reader 在受管进程
+  cleanup 时有界 join，超时即 abort，不形成无界后台任务。
+
+设置页手动连接检测还会识别 package runner：普通握手继续使用 30 秒预算，`npx`、
+`bunx`、`uvx` 等首次下载与握手共用 120 秒预算。该差异只属于可用性检测；canonical
+owner 仍使用调用方给定的单一 deadline，未增加自动重试、后台安装或第二套进程所有权。

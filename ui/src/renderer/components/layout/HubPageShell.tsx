@@ -16,6 +16,8 @@ interface HubPageShellProps {
   maxWidthClass?: string;
   /** Rendered between the header and the body (e.g. a segmented tab bar). */
   toolbar?: React.ReactNode;
+  /** Page-level actions aligned to the right of the visible heading. */
+  actions?: React.ReactNode;
   /** Dense workbenches provide their visible title inside the navigation pane. */
   hideHeading?: boolean;
   children: React.ReactNode;
@@ -36,6 +38,7 @@ const HubPageShell: React.FC<HubPageShellProps> = ({
   className,
   maxWidthClass = 'md:max-w-1100px',
   toolbar,
+  actions,
   hideHeading = false,
   children,
 }) => {
@@ -48,10 +51,17 @@ const HubPageShell: React.FC<HubPageShellProps> = ({
       )}
     >
       <div className={classNames('mx-auto w-full', maxWidthClass)}>
-        {hideHeading ? <h1 className='sr-only'>{title}</h1> : <div className='mb-18px'>
-          <h1 className={HUB_PAGE_TITLE_CLASS}>{title}</h1>
-          {subtitle && <div className='mt-6px text-13px leading-18px text-t-tertiary'>{subtitle}</div>}
-        </div>}
+        {hideHeading ? (
+          <h1 className='sr-only'>{title}</h1>
+        ) : (
+          <div className='mb-18px flex items-start justify-between gap-24px'>
+            <div className='min-w-0'>
+              <h1 className={HUB_PAGE_TITLE_CLASS}>{title}</h1>
+              {subtitle && <div className='mt-6px text-13px leading-18px text-t-tertiary'>{subtitle}</div>}
+            </div>
+            {actions && <div className='flex shrink-0 items-center'>{actions}</div>}
+          </div>
+        )}
         {toolbar && <div className='mb-20px'>{toolbar}</div>}
         {children}
       </div>

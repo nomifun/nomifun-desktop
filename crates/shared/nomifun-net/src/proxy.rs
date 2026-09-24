@@ -258,6 +258,35 @@ where
     proxy_env_from_config(&config, &configured_names, &process_names)
 }
 
+/// Proxy environment for a child launched with `env_clear`.
+///
+/// Unlike [`child_proxy_env`], this also copies the parent's proxy-only
+/// variables because the child will not inherit them implicitly. Explicit
+/// child configuration remains authoritative. No unrelated parent variable is
+/// returned.
+pub fn isolated_child_proxy_env<'a, I>(configured_env_names: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let configured_names: HashSet<String> = configured_env_names
+        .into_iter()
+        .map(|name| name.to_ascii_uppercase())
+        .collect();
+    if has_proxy_name(&configured_names) {
+        return Vec::new();
+    }
+
+    let process_vars = process_proxy_env_values(&configured_names);
+    if process_vars
+        .iter()
+        .any(|(name, _)| PROXY_ENV_KEYS.contains(&name.to_ascii_uppercase().as_str()))
+    {
+        return process_vars;
+    }
+
+    child_proxy_env(configured_names.iter().map(String::as_str))
+}
+
 /// TCP-connect budget for the loopback proxy liveness probe. Loopback
 /// connects resolve in microseconds either way; the cap only guards against
 /// pathological local firewalls silently dropping SYNs.
@@ -391,6 +420,24 @@ fn process_env_proxy_names() -> HashSet<String> {
     std::env::vars_os()
         .filter(|(_, value)| value.to_str().is_some_and(|value| !value.trim().is_empty()))
         .filter_map(|(name, _)| name.to_str().map(str::to_ascii_uppercase))
+        .collect()
+}
+
+fn process_proxy_env_values(
+    configured_names: &HashSet<String>,
+) -> Vec<(String, String)> {
+    std::env::vars_os()
+        .filter_map(|(name, value)| {
+            let name = name.to_str()?;
+            let normalized = name.to_ascii_uppercase();
+            if (!PROXY_ENV_KEYS.contains(&normalized.as_str()) && normalized != "NO_PROXY")
+                || configured_names.contains(&normalized)
+            {
+                return None;
+            }
+            let value = value.to_str()?.trim();
+            (!value.is_empty()).then(|| (name.to_owned(), value.to_owned()))
+        })
         .collect()
 }
 

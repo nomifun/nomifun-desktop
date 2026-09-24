@@ -124,10 +124,20 @@ const normalizeParsedTransport = (transport: IMcpServerTransport): IMcpServerTra
   }
 
   const normalized = normalizeStdioCommand(transport.command, transport.args);
+  const commandName = normalized.command
+    .trim()
+    .split(/[\\/]/)
+    .at(-1)
+    ?.toLowerCase()
+    .replace(/\.(cmd|exe)$/i, '');
+  const args =
+    commandName === 'npx' && !normalized.args.some((arg) => arg === '-y' || arg === '--yes')
+      ? ['-y', ...normalized.args]
+      : normalized.args;
   return {
     ...transport,
     command: normalized.command,
-    args: normalized.args,
+    args,
   };
 };
 

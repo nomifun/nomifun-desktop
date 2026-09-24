@@ -50,6 +50,30 @@ fn echo_command() -> (String, Vec<String>) {
     ("echo".into(), vec!["hello".into()])
 }
 
+#[cfg(windows)]
+fn package_not_found_command() -> (String, Vec<String>) {
+    (
+        "cmd.exe".into(),
+        vec![
+            "/D".into(),
+            "/Q".into(),
+            "/C".into(),
+            "set /p request=& echo npm ERR! code E404 package not found 1>&2".into(),
+        ],
+    )
+}
+
+#[cfg(not(windows))]
+fn package_not_found_command() -> (String, Vec<String>) {
+    (
+        "sh".into(),
+        vec![
+            "-c".into(),
+            "IFS= read -r line; printf '%s\\n' 'npm ERR! code E404 package not found' >&2".into(),
+        ],
+    )
+}
+
 fn test_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .no_proxy()
@@ -82,6 +106,29 @@ async fn stdio_nonexistent_command_returns_not_found_error() {
     assert!(result.needs_auth.is_none());
 }
 
+#[tokio::test]
+async fn stdio_stderr_is_projected_as_a_typed_non_secret_failure() {
+    let svc = make_service_with_timeout(Duration::from_secs(3));
+    let (command, args) = package_not_found_command();
+    let transport = McpServerTransport::Stdio {
+        command,
+        args,
+        env: HashMap::new(),
+    };
+
+    let result = svc.test_connection("typed-stderr", &transport).await;
+
+    assert!(!result.success);
+    assert_eq!(
+        result.code,
+        Some(McpConnectionTestErrorCode::CommandStartFailed)
+    );
+    let details = result.details.expect("typed stdio diagnostics");
+    assert_eq!(details["failure_kind"], "package_not_found");
+    assert_eq!(details["owner_code"], "MCP_PACKAGE_NOT_FOUND");
+    assert!(!result.error.unwrap_or_default().contains("npm ERR"));
+}
+
 // ---------------------------------------------------------------------------
 // CT-4: URL not reachable
 // ---------------------------------------------------------------------------
@@ -99,6 +146,10 @@ async fn http_unreachable_url_returns_connection_error() {
     assert!(!result.success);
     assert_eq!(result.error.as_deref(), Some("MCP request failed"));
     assert_eq!(result.code, Some(McpConnectionTestErrorCode::ConnectionFailed));
+    let details = result.details.expect("typed local endpoint diagnostics");
+    assert_eq!(details["endpoint_scope"], "local");
+    assert_eq!(details["host"], "127.0.0.1");
+    assert_eq!(details["port"], 1);
 }
 
 #[tokio::test]
@@ -117,6 +168,10 @@ async fn sse_unreachable_url_returns_connection_error() {
         Some("MCP legacy SSE connection failed")
     );
     assert_eq!(result.code, Some(McpConnectionTestErrorCode::ConnectionFailed));
+    let details = result.details.expect("typed local endpoint diagnostics");
+    assert_eq!(details["endpoint_scope"], "local");
+    assert_eq!(details["host"], "127.0.0.1");
+    assert_eq!(details["port"], 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +476,11 @@ async fn http_500_returns_error_with_status() {
     assert!(!result.success);
     let error = result.error.as_deref().unwrap();
     assert!(error.contains("500"), "expected HTTP 500 in: {error}");
+    assert_eq!(
+        result.code,
+        Some(nomifun_api_types::McpConnectionTestErrorCode::HttpError)
+    );
+    assert_eq!(result.details.as_ref().unwrap()["status"], 500);
 
     server_handle.abort();
 }

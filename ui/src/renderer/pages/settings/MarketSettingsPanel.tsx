@@ -60,6 +60,9 @@ type MarketSettingsPanelProps = {
   onAdd: (item: ISkillMarketItem) => void | Promise<void>;
   /** True when this market entry already has a live installed resource. */
   isAdded?: (item: ISkillMarketItem) => boolean;
+  /** Allow an explicit consumer-owned repair/update action for an installed entry. */
+  canRunAddedAction?: (item: ISkillMarketItem) => boolean;
+  addedActionLabel?: string;
   /** Prevent a false enabled flash while the installed catalog is loading. */
   addedStateLoading?: boolean;
   /**
@@ -81,6 +84,8 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   emptyText,
   onAdd,
   isAdded,
+  canRunAddedAction,
+  addedActionLabel,
   addedStateLoading = false,
   testIdPrefix,
   text,
@@ -207,7 +212,12 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
 
   const handleMarketAdd = useCallback(
     async (item: ISkillMarketItem) => {
-      if (addedStateLoading || isAdded?.(item) || pendingAddIdsRef.current.has(item.id)) return;
+      const added = isAdded?.(item) ?? false;
+      if (
+        addedStateLoading ||
+        (added && !canRunAddedAction?.(item)) ||
+        pendingAddIdsRef.current.has(item.id)
+      ) return;
       const started = new Set(pendingAddIdsRef.current);
       started.add(item.id);
       pendingAddIdsRef.current = started;
@@ -225,7 +235,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
         setPendingAddIds(finished);
       }
     },
-    [addedStateLoading, isAdded, onAdd]
+    [addedStateLoading, canRunAddedAction, isAdded, onAdd]
   );
 
   const isSearchVisible = searchExpanded || searchQuery.length > 0;
@@ -354,6 +364,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
         <div className={ENHANCED_TOOLS_GRID_CLASS} style={{ gridTemplateColumns: CARD_GRID_COLS }}>
           {filteredItems.map((item) => {
             const added = isAdded?.(item) ?? false;
+            const addedActionEnabled = added && (canRunAddedAction?.(item) ?? false);
             return (
               <SkillMarketCard
                 key={item.id}
@@ -361,6 +372,8 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
                 localeKey={localeKey}
                 adding={pendingAddIds.has(item.id)}
                 added={added}
+                addedActionEnabled={addedActionEnabled}
+                addedActionLabel={addedActionLabel}
                 addedStateLoading={addedStateLoading}
                 onAdd={(marketItem) => void handleMarketAdd(marketItem)}
               />

@@ -39,6 +39,38 @@ NomiFun 有两种容易混淆的扩展机制：
 
 需要 OAuth 的 HTTP/SSE server 走 `/api/mcp/oauth/*` 流程。
 
+当前 canonical owner 的协议边界是 Streamable HTTP/stdio `2025-03-26` 与显式 legacy SSE
+`2024-11-05`。它不会把新旧 transport 静默互转，也尚未宣称支持 `2026-07-28` 的
+`server/discover` / 无 initialize 生命周期；只支持该新生命周期的服务会返回明确的协议错误。
+这是一次独立的 owner/安全模型迁移，不属于市场配置导入。
+
+### MCP 市场的边界
+
+MCP 市场是**配置目录**，不是包管理器。点击添加时，NomiFun 会从市场说明中选择更可移植的
+MCP 配置候选（优先 `npx`/`uvx` 与 HTTPS，避开 Docker、全局命令和占位 endpoint），把
+`streamableHttp`、`baseUrl` 等常见写法规范化，并以停用状态导入。它不会替用户安装 Node.js、
+Docker、Python/uv、浏览器驱动，也不会完成第三方登录或生成 API Key。
+
+导入确认页会显示实际命令、参数、URL、env/header 键和仍需填写的字段。含 `${...}`、
+`<...>`、`xxxxx`、`YOUR_*` 等占位内容的 server 在补全前不能执行连接测试，因此不会误把
+模板 URL 发到网络或误启动未配置的进程。已从市场导入但检测失败的条目可在市场中选择
+“修复配置”；替换内容仍须再次确认，并会保持停用。
+
+连接测试只代表该配置在检测时完成了 MCP 握手和 `tools/list`，不是常驻在线状态。失败时
+UI 会区分缺少本地运行时、HTTP 状态、超时、RPC 与协议错误；URL 型服务只有在服务端明确
+返回 OAuth Bearer challenge 时才进入 OAuth 登录流程，API Key/Header 配置不会被误判为 OAuth。
+
+`npx`、`bunx`、`uvx` 等便携包运行器在手动检测时使用独立的 120 秒首次引导预算，普通 MCP
+握手仍保持 30 秒预算。stdio 子进程通过统一代理策略只接入父进程代理变量或系统代理（并保留
+失效本地代理探测），同时继续隔离父进程的 API Token 和无关环境变量。子进程原始 stderr
+不会进入 API 或日志；后台
+只保留无敏感信息的失败分类，例如包不存在、下载/网络失败、依赖缺失、配置缺失、权限问题或进程
+提前退出。
+
+指向 `localhost` 的 HTTP URL 只是客户端连接描述，NomiFun 不会代替第三方项目启动本地程序或
+Docker 容器。本地探测失败时会明确显示 host/port 并提示先启动前置服务，不再把运行时、前置服务
+或网络问题一律描述成“MCP JSON 配置错误”。
+
 ## 导入和同步外部 Agent 配置
 
 `GET /api/mcp/agent-configs` 会探测已支持本地 agent CLI 的 MCP 配置。UI 可把探测到

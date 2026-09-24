@@ -7,6 +7,7 @@ import { useTranslation } from 'react-i18next';
 import type { McpOAuthStatus } from '@/renderer/hooks/mcp/useMcpOAuth';
 import FeedbackButton from '@/renderer/components/base/FeedbackButton';
 import { iconColors } from '@/renderer/styles/colors';
+import { getMcpConfigurationFields, supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
 
 interface McpServerHeaderProps {
   server: IMcpServer;
@@ -84,7 +85,8 @@ const getStatusPopoverContent = (
   const checkedAt = formatStatusTimestamp(server.updated_at);
 
   const reasonText =
-    t?.('settings.mcpInlineConfigHint') || 'Configuration may be incorrect. Review the MCP JSON and test again.';
+    t?.('settings.mcpInlineFailureHint') ||
+    'The last availability check failed. The cause may be a missing runtime, a prerequisite service, networking, authentication, or protocol compatibility—not necessarily the JSON format. Test again to see the current diagnostic.';
 
   return (
     <div className='max-w-300px space-y-2 text-13px leading-20px'>
@@ -126,9 +128,6 @@ const getStatusText = (
   return t?.('settings.mcpDisconnected') || 'Not tested';
 };
 
-const supportsOAuth = (server: IMcpServer) =>
-  server.transport.type === 'http' || server.transport.type === 'sse' || server.transport.type === 'streamable_http';
-
 const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   server,
   isTestingConnection,
@@ -141,13 +140,39 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  const oauthCapable = supportsOAuth(server);
+  const configurationFields = getMcpConfigurationFields(server.transport);
+  const needsConfiguration = configurationFields.length > 0;
+  const oauthCapable = supportsMcpOAuthLogin(server.transport);
   const needsLogin = oauthCapable && oauthStatus?.needsLogin;
-  const statusText = getStatusText(server.last_test_status, oauthStatus, isTestingConnection, t);
-  const statusIcon = getStatusIcon(server.last_test_status, oauthStatus, isTestingConnection);
-  const statusPopoverContent = getStatusPopoverContent(server, t);
+  const statusText = needsConfiguration
+    ? t('settings.mcpConfigurationRequiredShort', {
+        defaultValue: 'Configuration required',
+      })
+    : getStatusText(server.last_test_status, oauthStatus, isTestingConnection, t);
+  const statusIcon = needsConfiguration ? (
+    <span className='text-orange-500 text-xl font-bold leading-none'>!</span>
+  ) : (
+    getStatusIcon(server.last_test_status, oauthStatus, isTestingConnection)
+  );
+  const statusPopoverContent = needsConfiguration ? (
+    <div className='max-w-300px space-y-2 text-13px leading-20px'>
+      <div className='font-medium text-t-primary'>
+        {t('settings.mcpConfigurationRequiredShort', {
+          defaultValue: 'Configuration required',
+        })}
+      </div>
+      <div className='text-12px leading-18px text-t-secondary'>
+        {t('settings.mcpConfigurationFieldsHint', {
+          fields: configurationFields.join(', '),
+          defaultValue: `Complete these fields before testing: ${configurationFields.join(', ')}`,
+        })}
+      </div>
+    </div>
+  ) : (
+    getStatusPopoverContent(server, t)
+  );
 
-  const isError = server.last_test_status === 'error';
+  const isError = !needsConfiguration && server.last_test_status === 'error';
 
   return (
     <div className='flex items-center justify-between group'>
@@ -163,7 +188,19 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           </Tooltip>
         )}
         {isError && <FeedbackButton />}
-        {needsLogin && onOAuthLogin && (
+        {needsConfiguration && !server.builtin && (
+          <Button
+            size='mini'
+            type='outline'
+            status='warning'
+            icon={<Write size={'14'} />}
+            title={statusText}
+            onClick={() => onEditServer(server)}
+          >
+            {t('settings.mcpConfigure', { defaultValue: 'Configure' })}
+          </Button>
+        )}
+        {!needsConfiguration && needsLogin && onOAuthLogin && (
           <Button
             size='mini'
             type='primary'
@@ -175,7 +212,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             {t('settings.mcpLogin') || 'Login'}
           </Button>
         )}
-        {!needsLogin && (
+        {!needsConfiguration && !needsLogin && (
           <Button
             size='mini'
             icon={<Refresh size={'14'} />}
@@ -186,29 +223,29 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
         )}
       </div>
       <div className='flex items-center gap-2 invisible group-hover:visible' onClick={(e) => e.stopPropagation()}>
-          {!server.builtin && (
-            <Dropdown
-              trigger='hover'
-              droplist={
-                <Menu>
-                  <Menu.Item key='edit' onClick={() => onEditServer(server)}>
-                    <div className='flex items-center gap-2'>
-                      <Write size={'14'} />
-                      {t('settings.mcpEditServer')}
-                    </div>
-                  </Menu.Item>
-                  <Menu.Item key='delete' onClick={() => onDeleteServer(server.mcp_server_id)}>
-                    <div className='flex items-center gap-2 text-red-500'>
-                      <DeleteFour size={'14'} />
-                      {t('settings.mcpDeleteServer')}
-                    </div>
-                  </Menu.Item>
-                </Menu>
-              }
-            >
-              <Button size='mini' icon={<SettingOne size={'14'} />} />
-            </Dropdown>
-          )}
+        {!server.builtin && (
+          <Dropdown
+            trigger='hover'
+            droplist={
+              <Menu>
+                <Menu.Item key='edit' onClick={() => onEditServer(server)}>
+                  <div className='flex items-center gap-2'>
+                    <Write size={'14'} />
+                    {t('settings.mcpEditServer')}
+                  </div>
+                </Menu.Item>
+                <Menu.Item key='delete' onClick={() => onDeleteServer(server.mcp_server_id)}>
+                  <div className='flex items-center gap-2 text-red-500'>
+                    <DeleteFour size={'14'} />
+                    {t('settings.mcpDeleteServer')}
+                  </div>
+                </Menu.Item>
+              </Menu>
+            }
+          >
+            <Button size='mini' icon={<SettingOne size={'14'} />} />
+          </Dropdown>
+        )}
       </div>
     </div>
   );

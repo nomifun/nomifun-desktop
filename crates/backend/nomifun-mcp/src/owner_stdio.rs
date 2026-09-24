@@ -5,13 +5,15 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess, resolve_command_in};
 use serde::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{JsonRpcResponse, MAX_RESPONSE_BYTES, McpOwnerError, McpSession, stream};
@@ -20,6 +22,7 @@ pub(super) const CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 const EOF_GRACE: Duration = Duration::from_millis(250);
 const MAX_TRANSACTION_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FRAMES: usize = 4096;
+const MAX_STDERR_DIAGNOSTIC_BYTES: usize = 64 * 1024;
 pub(super) type Writer = Arc<Mutex<Option<ChildStdin>>>;
 
 /// Settings discovery uses the same process owner and full bounded catalog.
@@ -65,6 +68,8 @@ pub(super) struct StdioTransport {
     pending: Vec<u8>,
     received: usize,
     frames: usize,
+    stderr_diagnostics: Arc<StdMutex<StdioDiagnostics>>,
+    stderr_task: Option<JoinHandle<()>>,
 }
 
 impl StdioTransport {
@@ -77,7 +82,7 @@ impl StdioTransport {
         validate_config(command, args, env)?;
         let command = command.to_owned();
         let args = args.to_vec();
-        let env = child_environment(env);
+        let configured_env = env.clone();
         // Resolution and platform spawn can block. If the waiter is cancelled
         // or times out, the task's result is dropped and ManagedChildProcess
         // still owns cleanup. A startup timeout is never a no-effect proof.
@@ -85,6 +90,7 @@ impl StdioTransport {
             if Instant::now() >= deadline {
                 return Err(startup_timeout());
             }
+            let env = child_environment(&configured_env);
             let program = resolve_program(&command, &env)?;
             let mut builder = ChildProcessBuilder::new(program);
             builder
@@ -93,7 +99,10 @@ impl StdioTransport {
                 .args(args)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                // stderr is diagnostic-only and is drained into bounded,
+                // non-secret categories below. Never merge it into stdout:
+                // stdout is the MCP JSON-RPC transport.
+                .stderr(Stdio::piped());
             if Instant::now() >= deadline {
                 return Err(startup_timeout());
             }
@@ -111,16 +120,12 @@ impl StdioTransport {
             let stdout = process.child_mut().stdout.take().ok_or_else(|| {
                 McpOwnerError::protocol_failed("MCP process stdout is unavailable")
             })?;
-            Ok(Self {
-                process,
-                stdin: Arc::new(Mutex::new(Some(stdin))),
-                stdout: BufReader::new(stdout),
-                pending: Vec::new(),
-                received: 0,
-                frames: 0,
-            })
+            let stderr = process.child_mut().stderr.take().ok_or_else(|| {
+                McpOwnerError::protocol_failed("MCP process stderr is unavailable")
+            })?;
+            Ok((process, stdin, stdout, stderr))
         });
-        timeout_at(deadline, launch)
+        let (process, stdin, stdout, stderr) = timeout_at(deadline, launch)
             .await
             .map_err(|_| startup_timeout())?
             .map_err(|_| {
@@ -128,7 +133,19 @@ impl StdioTransport {
                     "MCP_PROCESS_START_FAILED",
                     "MCP process launch owner did not return",
                 )
-            })?
+            })??;
+        let stderr_diagnostics = Arc::new(StdMutex::new(StdioDiagnostics::default()));
+        let stderr_task = tokio::spawn(drain_stderr(stderr, Arc::clone(&stderr_diagnostics)));
+        Ok(Self {
+            process,
+            stdin: Arc::new(Mutex::new(Some(stdin))),
+            stdout: BufReader::new(stdout),
+            pending: Vec::new(),
+            received: 0,
+            frames: 0,
+            stderr_diagnostics,
+            stderr_task: Some(stderr_task),
+        })
     }
 
     pub(super) fn writer(&self) -> Writer {
@@ -141,9 +158,7 @@ impl StdioTransport {
                 McpOwnerError::connection_failed("MCP process stdout could not be read")
             })?;
             if bytes.is_empty() {
-                return Err(McpOwnerError::protocol_failed(
-                    "MCP process closed stdout before a complete correlated response",
-                ));
+                return Err(self.closed_stdout_error().await);
             }
             let newline = bytes.iter().position(|byte| *byte == b'\n');
             let content = newline.unwrap_or(bytes.len());
@@ -181,12 +196,204 @@ impl StdioTransport {
         // Give cooperative servers a small EOF grace. Direct-child exit alone
         // is not proof: shutdown always seals/reaps the platform-owned tree.
         let _ = timeout(EOF_GRACE, self.process.child_mut().wait()).await;
-        self.process.shutdown().await.map_err(|_| {
+        let cleanup = self.process.shutdown().await.map_err(|_| {
             McpOwnerError::new(
                 "MCP_SESSION_CLEANUP_FAILED",
                 "MCP stdio process-tree cleanup is unproven",
             )
-        })
+        });
+        if let Some(mut task) = self.stderr_task.take()
+            && timeout(EOF_GRACE, &mut task).await.is_err()
+        {
+            task.abort();
+        }
+        cleanup
+    }
+
+    async fn closed_stdout_error(&mut self) -> McpOwnerError {
+        let mut exited = self
+            .process
+            .child_mut()
+            .try_wait()
+            .ok()
+            .flatten()
+            .is_some();
+        if !exited {
+            tokio::task::yield_now().await;
+            exited = self
+                .process
+                .child_mut()
+                .try_wait()
+                .ok()
+                .flatten()
+                .is_some();
+        }
+        if exited
+            && let Some(mut task) = self.stderr_task.take()
+            && timeout(EOF_GRACE, &mut task).await.is_err()
+        {
+            task.abort();
+        }
+        let failure = self
+            .stderr_diagnostics
+            .lock()
+            .ok()
+            .and_then(|diagnostics| diagnostics.failure_kind());
+        match failure {
+            Some(StdioFailureKind::PackageNotFound) => McpOwnerError::new(
+                "MCP_PACKAGE_NOT_FOUND",
+                "MCP package runner could not resolve the configured package",
+            ),
+            Some(StdioFailureKind::Network) => McpOwnerError::new(
+                "MCP_PACKAGE_DOWNLOAD_FAILED",
+                "MCP process could not download or reach a required dependency",
+            ),
+            Some(StdioFailureKind::Permission) => McpOwnerError::new(
+                "MCP_COMMAND_PERMISSION_DENIED",
+                "MCP process exited after a permission failure",
+            ),
+            Some(StdioFailureKind::MissingDependency) => McpOwnerError::new(
+                "MCP_PROCESS_DEPENDENCY_MISSING",
+                "MCP process exited because a required local dependency is missing",
+            ),
+            Some(StdioFailureKind::Configuration) => McpOwnerError::new(
+                "MCP_PROCESS_CONFIGURATION_REQUIRED",
+                "MCP process exited because required runtime configuration is missing",
+            ),
+            None if exited => McpOwnerError::new(
+                "MCP_PROCESS_EXITED",
+                "MCP process exited before completing the protocol handshake",
+            ),
+            None => McpOwnerError::protocol_failed(
+                "MCP process closed stdout before a complete correlated response",
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StdioFailureKind {
+    PackageNotFound,
+    Network,
+    Permission,
+    MissingDependency,
+    Configuration,
+}
+
+#[derive(Default)]
+struct StdioDiagnostics {
+    classified_bytes: usize,
+    package_not_found: bool,
+    network: bool,
+    permission: bool,
+    missing_dependency: bool,
+    configuration: bool,
+}
+
+impl StdioDiagnostics {
+    fn observe(&mut self, bytes: &[u8]) {
+        // Only retain classifications. Raw stderr may contain URLs, tokens,
+        // kube contexts or other credentials and must never enter API errors
+        // or logs. Classification work is capped even if a child floods its
+        // diagnostic stream; the reader keeps draining after the cap.
+        let remaining = MAX_STDERR_DIAGNOSTIC_BYTES.saturating_sub(self.classified_bytes);
+        if remaining == 0 {
+            return;
+        }
+        let bytes = &bytes[..bytes.len().min(remaining)];
+        self.classified_bytes = self.classified_bytes.saturating_add(bytes.len());
+        let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+        self.package_not_found |= contains_any(
+            &text,
+            &[
+                "e404",
+                "404 not found",
+                "no matching version",
+                "could not find a version",
+                "package not found",
+            ],
+        );
+        self.network |= contains_any(
+            &text,
+            &[
+                "econnrefused",
+                "econnreset",
+                "enotfound",
+                "etimedout",
+                "network error",
+                "proxy error",
+                "certificate error",
+                "unable to get local issuer",
+                "failed to download",
+                "failed to fetch",
+                "tls error",
+                "ssl error",
+            ],
+        );
+        self.permission |= contains_any(
+            &text,
+            &["eacces", "eperm", "permission denied", "access is denied"],
+        );
+        self.missing_dependency |= contains_any(
+            &text,
+            &[
+                "not recognized as an internal or external command",
+                "command not found",
+                "no such file or directory",
+                "modulenotfounderror",
+                "cannot find module",
+            ],
+        );
+        self.configuration |= contains_any(
+            &text,
+            &[
+                "missing required configuration",
+                "missing required environment",
+                "api key is required",
+                "no kubeconfig",
+                "kubeconfig not found",
+                "credentials not found",
+                "login required",
+                "authentication required",
+            ],
+        );
+    }
+
+    fn failure_kind(&self) -> Option<StdioFailureKind> {
+        if self.package_not_found {
+            Some(StdioFailureKind::PackageNotFound)
+        } else if self.network {
+            Some(StdioFailureKind::Network)
+        } else if self.permission {
+            Some(StdioFailureKind::Permission)
+        } else if self.missing_dependency {
+            Some(StdioFailureKind::MissingDependency)
+        } else if self.configuration {
+            Some(StdioFailureKind::Configuration)
+        } else {
+            None
+        }
+    }
+}
+
+fn contains_any(text: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| text.contains(marker))
+}
+
+async fn drain_stderr(
+    mut stderr: ChildStderr,
+    diagnostics: Arc<StdMutex<StdioDiagnostics>>,
+) {
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match stderr.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => {
+                if let Ok(mut diagnostics) = diagnostics.lock() {
+                    diagnostics.observe(&buffer[..read]);
+                }
+            }
+        }
     }
 }
 
@@ -288,8 +495,10 @@ fn validate_config(
 }
 
 fn child_environment(configured: &HashMap<String, String>) -> HashMap<OsString, OsString> {
-    // No inherited API tokens, proxy credentials, node injections or private
-    // platform variables. Any extra environment is explicit server config.
+    // No inherited API tokens, node injections or private platform variables.
+    // Proxy variables come from explicit server config or the shared system-
+    // proxy detector, which also suppresses stale loopback proxies. This is
+    // essential for first-run npx/uvx downloads launched by a desktop process.
     #[cfg(windows)]
     const INHERIT: &[&str] = &[
         "PATH",
@@ -325,6 +534,11 @@ fn child_environment(configured: &HashMap<String, String>) -> HashMap<OsString, 
         .iter()
         .filter_map(|key| std::env::var_os(*key).map(|value| (OsString::from(*key), value)))
         .collect();
+    for (name, value) in
+        nomifun_net::proxy::isolated_child_proxy_env(configured.keys().map(String::as_str))
+    {
+        env.insert(OsString::from(name), OsString::from(value));
+    }
     for (name, value) in configured {
         if cfg!(windows) {
             env.retain(|key, _| !key.to_string_lossy().eq_ignore_ascii_case(name));
@@ -372,4 +586,66 @@ fn resolve_program(
         "MCP_COMMAND_NOT_FOUND",
         "MCP configured command was not found in the child PATH",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stderr_is_reduced_to_non_secret_failure_categories() {
+        let mut diagnostics = StdioDiagnostics::default();
+        diagnostics.observe(b"npm ERR! code ECONNRESET https://user:secret@example.test/pkg?token=x");
+
+        assert_eq!(diagnostics.failure_kind(), Some(StdioFailureKind::Network));
+        assert!(std::mem::size_of_val(&diagnostics) <= 16);
+    }
+
+    #[test]
+    fn stderr_failure_category_priority_is_stable() {
+        let mut diagnostics = StdioDiagnostics::default();
+        diagnostics.observe(b"network error; npm ERR! E404 package not found");
+
+        assert_eq!(
+            diagnostics.failure_kind(),
+            Some(StdioFailureKind::PackageNotFound)
+        );
+    }
+
+    #[test]
+    fn stderr_classification_work_is_bounded_while_the_pipe_remains_drainable() {
+        let mut diagnostics = StdioDiagnostics::default();
+        diagnostics.observe(&vec![b'x'; MAX_STDERR_DIAGNOSTIC_BYTES * 2]);
+        diagnostics.observe(b"npm ERR! code ECONNRESET");
+
+        assert_eq!(diagnostics.classified_bytes, MAX_STDERR_DIAGNOSTIC_BYTES);
+        assert_eq!(diagnostics.failure_kind(), None);
+    }
+
+    #[test]
+    fn isolated_child_environment_uses_shared_proxy_policy() {
+        let configured = HashMap::new();
+        let expected = nomifun_net::proxy::isolated_child_proxy_env(std::iter::empty());
+        let actual = child_environment(&configured);
+
+        for (name, value) in expected {
+            assert_eq!(
+                actual.get(&OsString::from(name)),
+                Some(&OsString::from(value))
+            );
+        }
+
+        let configured = HashMap::from([(
+            "HTTP_PROXY".to_owned(),
+            "http://configured.invalid:8080".to_owned(),
+        )]);
+        let actual = child_environment(&configured);
+        let configured_proxy = actual.iter().find(|(name, _)| {
+            name.to_string_lossy().eq_ignore_ascii_case("HTTP_PROXY")
+        });
+        assert_eq!(
+            configured_proxy.map(|(_, value)| value),
+            Some(&OsString::from("http://configured.invalid:8080"))
+        );
+    }
 }

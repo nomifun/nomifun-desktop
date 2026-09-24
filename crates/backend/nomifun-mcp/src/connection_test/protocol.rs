@@ -90,7 +90,7 @@ pub(super) fn timeout_result(duration: Duration) -> McpConnectionTestResult {
 pub(super) fn spawn_error_result(command: &str, error: &std::io::Error) -> McpConnectionTestResult {
     match error.kind() {
         std::io::ErrorKind::NotFound => {
-            let runtime = missing_command_runtime(command);
+            let runtime = command_runtime(command);
             error_result(
                 McpConnectionTestErrorCode::CommandNotFound,
                 command_not_found_message(command),
@@ -131,7 +131,7 @@ fn command_basename(command: &str) -> String {
     command_name
 }
 
-fn missing_command_runtime(command: &str) -> &'static str {
+pub(super) fn command_runtime(command: &str) -> &'static str {
     let command_name = command_basename(command);
     match command_name.as_str() {
         "npx" | "npm" | "node" | "pnpx" => "node",
@@ -144,7 +144,7 @@ fn missing_command_runtime(command: &str) -> &'static str {
 }
 
 fn command_not_found_message(command: &str) -> String {
-    match missing_command_runtime(command) {
+    match command_runtime(command) {
         "node" => format!(
             "Command not found: {command}. Install Node.js (which includes npm/npx), then restart Nomi or configure this MCP server to use an absolute command path."
         ),
@@ -163,6 +163,21 @@ fn command_not_found_message(command: &str) -> String {
         _ => format!(
             "Command not found: {command}. Install the command or configure this MCP server to use an absolute command path."
         ),
+    }
+}
+
+pub(super) fn is_package_runner(command: &str, args: &[String]) -> bool {
+    let command_name = command_basename(command);
+    match command_name.as_str() {
+        "npx" | "pnpx" | "bunx" | "uvx" | "pipx" => true,
+        "npm" => matches!(args.first().map(String::as_str), Some("exec") | Some("x")),
+        "pnpm" => matches!(args.first().map(String::as_str), Some("dlx")),
+        "bun" => matches!(args.first().map(String::as_str), Some("x")),
+        "uv" => matches!(
+            args.first().map(String::as_str),
+            Some("run") | Some("tool")
+        ),
+        _ => false,
     }
 }
 
@@ -326,6 +341,21 @@ mod tests {
             Some(McpConnectionTestErrorCode::CommandNotFound)
         );
         assert_eq!(result.details.as_ref().unwrap()["runtime"], "node");
+    }
+
+    #[test]
+    fn package_runner_detection_covers_portable_market_launchers() {
+        for (command, args) in [
+            ("npx", vec!["-y".into(), "pkg".into()]),
+            ("uvx.exe", vec!["pkg".into()]),
+            ("bunx", vec!["pkg".into()]),
+            ("npm.cmd", vec!["exec".into(), "pkg".into()]),
+            ("pnpm", vec!["dlx".into(), "pkg".into()]),
+        ] {
+            assert!(is_package_runner(command, &args), "{command} {args:?}");
+        }
+        assert!(!is_package_runner("node", &["server.js".into()]));
+        assert!(!is_package_runner("npm", &["start".into()]));
     }
 
     #[test]
