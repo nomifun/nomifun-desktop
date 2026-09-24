@@ -79,7 +79,7 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
   const groups = providers.filter(item => item.enabled !== false)
     .map(item => ({ provider: item, models: getAvailableModels(item) })).filter(item => item.models.length);
   const modelTrigger = <Button data-testid={testId} data-readonly={disabled ? 'true' : undefined}
-    className={`sendbox-model-btn header-model-btn nomi-sendbox-model-btn min-w-0 ${compact ? '!max-w-[120px]' : showReasoning ? '!max-w-[232px]' : '!max-w-[280px]'} ${className}`}
+    className={`sendbox-model-btn header-model-btn nomi-sendbox-model-btn min-w-0 ${showReasoning ? 'sendbox-model-segment' : ''} ${compact ? '!max-w-[120px]' : showReasoning ? '!max-w-[232px]' : '!max-w-[280px]'} ${className}`}
     shape='round' size='small' aria-label={label} style={disabled ? { cursor: 'default' } : undefined}>
     <span className='flex items-center gap-6px min-w-0'>
       <Brain theme='outline' size={14} fill='currentColor' className='shrink-0' />
@@ -104,14 +104,18 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
       {group.models.map(name => {
         const dot = exactChatHealthDotColor(configuredProviders ?? providers, group.provider.id, name);
         const displayName = group.provider.models.find(item => item.model === name)?.display_name;
+        const selected = currentModel?.id === group.provider.id && currentModel.use_model === name;
         return <Menu.Item key={compositeKey(group.provider.id, name)} data-testid={`nomi-model-option-${name}`}
           onClick={() => {
             onPopupVisibleChange?.(false);
             void onSelectModel(group.provider, name).catch(error => console.error('Failed to select chat model:', error));
           }}>
-          <div className='flex items-center gap-8px w-full'>
-            {dot && <span className={`w-6px h-6px rounded-full shrink-0 ${dot}`} />}
-            <span>{modelDisplayLabel(name, displayName)}</span>
+          <div className='flex items-center justify-between gap-16px w-full min-w-[164px]'>
+            <span className='flex items-center gap-8px min-w-0'>
+              {dot && <span className={`w-6px h-6px rounded-full shrink-0 ${dot}`} />}
+              <span className='truncate'>{modelDisplayLabel(name, displayName)}</span>
+            </span>
+            {selected && <Check size={13} fill='currentColor' className='shrink-0 text-primary-6' />}
           </div>
         </Menu.Item>;
       })}
@@ -132,17 +136,17 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
   const reasoningTrigger = showReasoning ? <Button
     data-testid={`${testId}-reasoning-trigger`}
     data-readonly={disabled || reasoningEffortDisabled ? 'true' : undefined}
-    className='sendbox-reasoning-btn shrink-0 !px-8px'
+    className='sendbox-model-btn header-model-btn nomi-sendbox-model-btn sendbox-reasoning-segment shrink-0 !px-8px'
     shape='round'
     size='small'
     aria-label={reasoningAriaLabel}
     style={disabled || reasoningEffortDisabled ? { cursor: 'default' } : undefined}
   >
     <span className='flex items-center gap-4px'>
-      <span className='text-12px text-t-secondary' data-testid={`${testId}-reasoning-value`}>
+      <span className='text-12px' data-testid={`${testId}-reasoning-value`}>
         {reasoningLabel}
       </span>
-      {!disabled && !reasoningEffortDisabled && <Down size={11} fill='currentColor' />}
+      {!disabled && !reasoningEffortDisabled && <Down size={12} fill='currentColor' />}
     </span>
   </Button> : null;
   const reasoningMenu = showReasoning ? <Menu
@@ -188,7 +192,7 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
     : null;
 
   return <span
-    className='inline-flex items-center gap-4px min-w-0'
+    className={`inline-flex items-center min-w-0 ${showReasoning ? 'sendbox-model-reasoning-group' : ''}`}
     data-testid={`${testId}-controls`}
   >
     {modelControl}
