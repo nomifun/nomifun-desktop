@@ -217,11 +217,12 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
     if expected
         .first()
         .is_none_or(|migration| migration.version != CANONICAL_BASELINE_MIGRATION_VERSION)
-        || expected.len() != 2
+        || expected.len() != 3
         || expected[1].version != 2
+        || expected[2].version != 3
     {
         return Err(DbError::Init(
-            "database lineage must contain the canonical baseline and model context migration".into(),
+            "database lineage must contain the canonical baseline, model context, and session reasoning migrations".into(),
         ));
     }
 
@@ -818,8 +819,9 @@ mod tests {
         let mut conn = database.pool().acquire().await.unwrap();
         let mut retired = String::from(
             "PRAGMA foreign_keys = OFF;\n\
-             DELETE FROM _sqlx_migrations WHERE version = 2;\n\
-             ALTER TABLE provider_model_capabilities DROP COLUMN compaction_threshold_pct;\n",
+             DELETE FROM _sqlx_migrations WHERE version >= 2;\n\
+             ALTER TABLE provider_model_capabilities DROP COLUMN compaction_threshold_pct;\n\
+             ALTER TABLE agent_sessions DROP COLUMN reasoning_effort;\n",
         );
         for table in CANONICAL_PLUGIN_TABLES_FOR_TEST.iter().rev() {
             retired.push_str(&format!("DROP TABLE IF EXISTS \"{table}\";\n"));
@@ -928,11 +930,15 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 2")
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 2")
             .execute(database.pool())
             .await
             .unwrap();
         sqlx::query("ALTER TABLE provider_model_capabilities DROP COLUMN compaction_threshold_pct")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort")
             .execute(database.pool())
             .await
             .unwrap();

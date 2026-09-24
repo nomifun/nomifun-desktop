@@ -320,6 +320,9 @@ pub struct AgentSessionMetadata {
     pub title: Option<String>,
     pub archived: bool,
     pub pinned: bool,
+    /// Session-owned override. None inherits the selected model's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::ReasoningEffort>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

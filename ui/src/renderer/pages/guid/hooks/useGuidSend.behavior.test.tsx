@@ -482,6 +482,20 @@ describe('useGuidSend HTTP behavior', () => {
     expect(calls[0].body).not.toHaveProperty('runtime_build');
   });
 
+  test('persists the selected reasoning effort on the new session', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+      reasoningEffort: 'high',
+    }));
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(calls[0].body).toMatchObject({
+      preset_id: PRESET_ID,
+      reasoning_effort: 'high',
+    });
+  });
+
   test('official selection prepares its configuration only on send and launches a normal frozen session', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();

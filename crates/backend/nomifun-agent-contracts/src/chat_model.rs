@@ -11,6 +11,7 @@ use crate::{
     AgentSessionId, ChatRouteIdentity, ConnectionConfigRef, DigestHex, EventId, ModelRouteId,
     OperationId, ResolvedSnapshotRef, StrictJsonValue, VersionString,
 };
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -356,12 +357,22 @@ pub enum ChatToolChoice {
     Specific { name: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Low,
     Medium,
     High,
+}
+
+impl ReasoningEffort {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

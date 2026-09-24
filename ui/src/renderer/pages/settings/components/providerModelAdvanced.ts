@@ -15,6 +15,10 @@ ProtocolEndpointDescriptor
 } from '@/common/types/provider/modelProtocolManifest';
 import type { ProviderConnectionInput as CanonicalProviderConnectionInput } from '@/common/types/provider/providerConnection';
 import type { ProviderModelCapabilityInput as CanonicalProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
+import {
+  protocolSupportsReasoningEffort,
+  type SessionReasoningEffort,
+} from '@/common/types/reasoningEffort';
 
 /** The endpoint fields owned by a task capability on the wire. */
 export const CAPABILITY_ENDPOINT_FIELDS = [
@@ -81,16 +85,8 @@ export interface CatalogCapabilitySuggestion {
 
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
 export type ProviderConnectionInput = CanonicalProviderConnectionInput;
-export type ModelReasoningEffort = 'low' | 'medium' | 'high';
-
-const REASONING_EFFORT_PROTOCOLS = new Set([
-  'openai.chat_text',
-  'openai.responses',
-  'gemini.generate_text',
-]);
-
-export const protocolSupportsReasoningEffort = (protocol: string): boolean =>
-  REASONING_EFFORT_PROTOCOLS.has(protocol.trim());
+export type ModelReasoningEffort = SessionReasoningEffort;
+export { protocolSupportsReasoningEffort };
 
 /** Persisted connection metadata used while resolving a capability. */
 export interface ProviderConnectionDescriptor {

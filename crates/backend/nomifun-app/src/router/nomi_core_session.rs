@@ -34,9 +34,10 @@ use nomifun_agent_contracts::{
     AgentHandoffCompletionCriterionV1, AgentHandoffEnvelopeV1, AgentHandoffInputCitationV1,
     AgentHandoffMode, AgentHandoffPlanStepV1, AgentHandoffPlanV1,
     AgentHandoffRequirementOriginV1, AgentHandoffRequirementV1,
-    AgentHandoffVerifiedArtifactV1, AgentSessionId, ArtifactId, ContributionSourceKind,
+    AgentHandoffVerifiedArtifactV1, AgentSessionId, ArtifactId, ChatRouteFeature,
+    ChatRouteProtocol, ContributionSourceKind,
     DeleteAgentSessionCommand, EffectClass, OperationId, PrincipalRef, RemoteBindingProvenance,
-    ScopeKey, SessionPayloadBody, StrictJsonValue, UserId, digest_bytes,
+    ReasoningEffort, ScopeKey, SessionPayloadBody, StrictJsonValue, UserId, digest_bytes,
     digest_payload,
 };
 use nomifun_agent_control_plane::{
@@ -68,6 +69,8 @@ use nomifun_api_types::{
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto,
     AgentChatModelSelectionDto, AgentResolvedSnapshot, SessionCursorDto,
+    SessionReasoningEffortDto, UpdateAgentSessionReasoningRequestDto,
+    UpdateAgentSessionReasoningResponseDto,
     McpServerId,
     SendMessageRequest, SideQuestionRequest, SideQuestionResponse,
     TypedResourceBindingDto, UpdateConversationRequest, WebSocketMessage, WorkspaceBrowseQuery, WorkspaceEntry,
@@ -4607,6 +4610,10 @@ fn canonical_conversation_response(
         name,
         r#type: request.r#type,
         model: request.model,
+        reasoning_effort: session
+            .metadata
+            .reasoning_effort
+            .map(session_reasoning_effort_dto),
         status,
         runtime,
         source: request.source,
@@ -5507,6 +5514,7 @@ mod session_boundary_tests {
                 model: "step-3.7-flash".to_owned(),
                 use_model: None,
             }),
+            reasoning_effort: None,
             status: ConversationStatus::Pending,
             runtime: None,
             source: None,
@@ -5720,6 +5728,7 @@ mod session_boundary_tests {
             name: "original".to_owned(),
             r#type: AgentType::Nomi,
             model: None,
+            reasoning_effort: None,
             status: ConversationStatus::Finished,
             runtime: None,
             source: Some(ConversationSource::Nomifun),
@@ -7000,6 +7009,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
         .route(
             "/api/agent-sessions/{agent_session_id}/model",
             put(switch_nomi_core_agent_session_model),
+        )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/reasoning-effort",
+            put(update_nomi_core_agent_session_reasoning),
         )
         .route(
             "/api/agent-sessions/{agent_session_id}/agent-switch/preview",
@@ -9723,6 +9736,15 @@ async fn create_nomi_core_agent_session(
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
+    if request.reasoning_effort.is_some()
+        && !saved_binding_supports_reasoning_effort(&state, &owner, &binding).await?
+    {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "AGENT_SESSION_REASONING_UNSUPPORTED",
+            "The selected Chat model protocol does not support reasoning effort",
+        ));
+    }
     let idmm_config = idmm_config_from_runtime_policy(&projection.runtime_policy)?;
     let creation_key = request_idempotency_key(
         &headers,
@@ -9743,11 +9765,12 @@ async fn create_nomi_core_agent_session(
     let opened = state
         .session_owner
         .canonical()
-        .open(
+        .open_with_reasoning_effort(
             authenticated_principal(&owner),
             binding_contract,
             request.title.or(Some(agent_name)),
             active_capabilities,
+            request.reasoning_effort.map(contract_reasoning_effort),
             &creation_key,
             now_ms(),
         )
@@ -11354,6 +11377,13 @@ async fn apply_nomi_core_agent_session_agent_switch(
         ));
     }
     let transition_id = OperationId::from(idempotency_key.clone());
+    let clear_reasoning_effort = current.session.metadata.reasoning_effort.is_some()
+        && !saved_binding_supports_reasoning_effort(
+            &state,
+            &owner,
+            &agent_binding_dto(&prepared.replacement)?,
+        )
+        .await?;
     state
         .session_owner
         .runtime_sessions
@@ -11413,7 +11443,7 @@ async fn apply_nomi_core_agent_session_agent_switch(
         )
         .await
         .map_err(agent_switch_store_error)?;
-    let conversation = state
+    let mut conversation = state
         .session_owner
         .canonical_conversation_projection(owner.as_ref(), &session_id)
         .await?
@@ -11422,6 +11452,20 @@ async fn apply_nomi_core_agent_session_agent_switch(
                 "Agent-switched AgentSession has no canonical projection".to_owned(),
             )
         })?;
+    if clear_reasoning_effort {
+        state
+            .session_owner
+            .canonical()
+            .store()
+            .update_session_reasoning_effort(
+                &authenticated_principal(&owner),
+                &session_id,
+                None,
+            )
+            .await
+            .map_err(agent_session_store_error)?;
+        conversation.reasoning_effort = None;
+    }
     let handoff_view = AgentHandoffAvailabilityDto {
         available: mode == AgentHandoffMode::ContinueTask,
         requirement_count: prepared
@@ -11592,6 +11636,8 @@ async fn switch_nomi_core_agent_session_model(
         .control_plane
         .resolve_agent_session_model_binding(&owner.0, &current_dto, &model)
         .await?;
+    let replacement_supports_reasoning =
+        saved_binding_supports_reasoning_effort(&state, &owner, &replacement_dto).await?;
     let replacement: AgentBindingValue = serde_json::to_value(&replacement_dto)
         .and_then(serde_json::from_value)
         .map_err(|error| AppError::Conflict(format!(
@@ -11611,6 +11657,21 @@ async fn switch_nomi_core_agent_session_model(
             .await
             .map_err(agent_session_store_error)?;
     }
+    if observation.session.metadata.reasoning_effort.is_some()
+        && !replacement_supports_reasoning
+    {
+        state
+            .session_owner
+            .canonical()
+            .store()
+            .update_session_reasoning_effort(
+                &authenticated_principal(&owner),
+                &session_id,
+                None,
+            )
+            .await
+            .map_err(agent_session_store_error)?;
+    }
     let projection = state
         .session_owner
         .canonical_conversation_projection(owner.as_ref(), &session_id)
@@ -11619,6 +11680,132 @@ async fn switch_nomi_core_agent_session_model(
             AppError::Conflict("model-switched AgentSession has no canonical projection".to_owned())
         })?;
     Ok(Json(ApiResponse::ok(projection)))
+}
+
+fn contract_reasoning_effort(value: SessionReasoningEffortDto) -> ReasoningEffort {
+    match value {
+        SessionReasoningEffortDto::Low => ReasoningEffort::Low,
+        SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
+        SessionReasoningEffortDto::High => ReasoningEffort::High,
+    }
+}
+
+fn session_reasoning_effort_dto(value: ReasoningEffort) -> SessionReasoningEffortDto {
+    match value {
+        ReasoningEffort::Low => SessionReasoningEffortDto::Low,
+        ReasoningEffort::Medium => SessionReasoningEffortDto::Medium,
+        ReasoningEffort::High => SessionReasoningEffortDto::High,
+    }
+}
+
+async fn saved_binding_supports_reasoning_effort(
+    state: &NomiCoreAgentApiState,
+    owner: &AuthenticatedOwner,
+    binding: &AgentBindingValueDto,
+) -> Result<bool, NomiCoreApiError> {
+    let (_, revision, snapshot) = state
+        .control_plane
+        .saved_binding_artifacts(&owner.0, binding)
+        .await?;
+    let Some(identity) = snapshot.content.chat_route_identity.as_ref() else {
+        return Ok(false);
+    };
+    let record = revision
+        .payload
+        .chat_route_records
+        .get(&identity.model_task)
+        .ok_or_else(|| {
+            AppError::Conflict(
+                "AgentSession reasoning route is missing from its frozen Preset Revision"
+                    .to_owned(),
+            )
+        })?;
+    record.validate_for(identity).map_err(|error| {
+        AppError::Conflict(format!(
+            "AgentSession reasoning route differs from its frozen identity: {error}"
+        ))
+    })?;
+    Ok(matches!(
+        record.primary.protocol,
+        ChatRouteProtocol::OpenaiChat
+            | ChatRouteProtocol::OpenaiResponses
+            | ChatRouteProtocol::Gemini
+    ) && record.primary.features.contains(&ChatRouteFeature::Reasoning))
+}
+
+async fn update_nomi_core_agent_session_reasoning(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(update): Json<UpdateAgentSessionReasoningRequestDto>,
+) -> Result<Json<ApiResponse<UpdateAgentSessionReasoningResponseDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let _operation_fence = state
+        .session_owner
+        .session_operation_lock(session_id.as_ref())
+        .write_owned()
+        .await;
+    let observation = state
+        .session_owner
+        .canonical()
+        .get(&authenticated_principal(&owner), &session_id)
+        .await?;
+    if observation.session.remote_binding_provenance.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_REASONING_IS_REMOTE_FROZEN",
+            "Remote AgentSession reasoning is fixed by its Remote binding",
+        ));
+    }
+    if observation.head.status == "running" || observation.head.active_turn_id.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_SESSION_TURN_ACTIVE",
+            "wait for the active Turn before changing reasoning effort",
+        ));
+    }
+    let attempt_transcript: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM conversation_execution_links \
+         WHERE conversation_id = ? AND relation = 'attempt')",
+    )
+    .bind(session_id.as_ref())
+    .fetch_one(&state.session_owner.pool)
+    .await
+    .map_err(|error| AppError::Internal(error.to_string()))?;
+    if attempt_transcript != 0 {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "AGENT_EXECUTION_ATTEMPT_READ_ONLY",
+            "AgentExecution Attempt transcripts cannot change reasoning effort",
+        ));
+    }
+    if update.reasoning_effort.is_some() {
+        let binding = agent_binding_dto(&observation.session.agent_binding)?;
+        if !saved_binding_supports_reasoning_effort(&state, &owner, &binding).await? {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "AGENT_SESSION_REASONING_UNSUPPORTED",
+                "The selected Chat model protocol does not support reasoning effort",
+            ));
+        }
+    }
+    let reasoning_effort = update.reasoning_effort.map(contract_reasoning_effort);
+    state
+        .session_owner
+        .canonical()
+        .store()
+        .update_session_reasoning_effort(
+            &authenticated_principal(&owner),
+            &session_id,
+            reasoning_effort,
+        )
+        .await
+        .map_err(agent_session_store_error)?;
+    Ok(Json(ApiResponse::ok(
+        UpdateAgentSessionReasoningResponseDto {
+            reasoning_effort: reasoning_effort.map(session_reasoning_effort_dto),
+        },
+    )))
 }
 
 fn canonical_message_response(

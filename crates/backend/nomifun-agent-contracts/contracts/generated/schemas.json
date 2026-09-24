@@ -1762,6 +1762,17 @@
           "pinned": {
             "type": "boolean"
           },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ReasoningEffort"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Session-owned override. None inherits the selected model's default."
+          },
           "title": {
             "type": [
               "string",
@@ -1837,6 +1848,14 @@
           "principal_id"
         ],
         "type": "object"
+      },
+      "ReasoningEffort": {
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "type": "string"
       },
       "RemoteBindingProvenance": {
         "additionalProperties": false,

@@ -2337,6 +2337,7 @@ mod tests {
                 title: Some("Wave 2 workspace test".to_owned()),
                 archived: false,
                 pinned: false,
+                reasoning_effort: None,
             },
             agent_binding: AgentBindingValue {
                 preset_revision_ref: preset_ref,

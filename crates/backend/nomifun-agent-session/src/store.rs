@@ -14,7 +14,7 @@ use nomifun_agent_contracts::{
     DigestHex, EventId,
     EventProducerId, AGENT_STORE_DATA_GENERATION,
     AGENT_STORE_MIGRATION_HEAD, AGENT_STORE_PROJECTION_SCHEMA_VERSION, IdempotencyKey, PrincipalRef,
-    OperationId, RemoteBindingId, RuntimeBindingId, RuntimeCheckpointValidationInput,
+    OperationId, ReasoningEffort, RemoteBindingId, RuntimeBindingId, RuntimeCheckpointValidationInput,
     RuntimeCheckpointValidationResult, RuntimeEventAck, SessionEventAck, SessionEventAppend,
     SessionEventCursor, SessionEventKind, SessionEventPayloadRef, SessionEventPredecessorMode,
     SessionEventRecord, SessionForkContract, SessionForkPayload, SessionPayloadBody,
@@ -90,6 +90,7 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
             "next_seq",
             "created_at",
             "deleted_at",
+            "reasoning_effort",
         ],
     ),
     (
@@ -1188,7 +1189,7 @@ impl AgentSessionStore {
                 sqlx::query_as::<_, StoredSessionRow>(
                     "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                             agent_binding_json, remote_binding_id, remote_binding_version, \
-                            parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                            parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
                      FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
                        AND agent_session_id < ? \
                      ORDER BY agent_session_id DESC LIMIT ?",
@@ -1203,7 +1204,7 @@ impl AgentSessionStore {
                 sqlx::query_as::<_, StoredSessionRow>(
                     "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                             agent_binding_json, remote_binding_id, remote_binding_version, \
-                            parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                            parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
                      FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
                      ORDER BY agent_session_id DESC LIMIT ?",
                 )
@@ -1285,6 +1286,39 @@ impl AgentSessionStore {
         if result.rows_affected() != 1 {
             return Err(SessionStoreError::Conflict(
                 "AgentSession metadata update lost its live row".to_owned(),
+            ));
+        }
+        let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// Replace the session-owned reasoning override. `None` restores model
+    /// inheritance. Turn admission is fenced by the host before this call.
+    pub async fn update_session_reasoning_effort(
+        &self,
+        owner: &PrincipalRef,
+        session_id: &AgentSessionId,
+        effort: Option<ReasoningEffort>,
+    ) -> Result<AgentSessionLiveRecord, SessionStoreError> {
+        validate_principal(owner)?;
+        let mut tx = self.begin_write_transaction().await?;
+        let row = session_row_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        require_owner(&row, owner)?;
+        if row.state != "live" {
+            return Err(SessionStoreError::Deleted(row.agent_session_id));
+        }
+        let result = sqlx::query(
+            "UPDATE agent_sessions SET reasoning_effort = ? \
+             WHERE agent_session_id = ? AND state = 'live'",
+        )
+        .bind(effort.map(ReasoningEffort::as_str))
+        .bind(session_id.as_ref())
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SessionStoreError::Conflict(
+                "AgentSession reasoning update lost its live row".to_owned(),
             ));
         }
         let updated = live_session_by_id_tx(&mut tx, session_id.as_ref()).await?;
@@ -3680,7 +3714,7 @@ impl AgentSessionStore {
         let rows = sqlx::query_as::<_, StoredSessionRow>(
             "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                     agent_binding_json, remote_binding_id, remote_binding_version, \
-                    parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                    parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
              FROM agent_sessions WHERE owner_ref_json = ? AND state = 'live' \
              ORDER BY agent_session_id",
         )
@@ -4055,7 +4089,7 @@ impl AgentSessionStore {
                 state = 'deleted', title = NULL, archived = NULL, pinned = NULL, \
                 agent_binding_json = NULL, remote_binding_id = NULL, \
                 remote_binding_version = NULL, parent_agent_session_id = NULL, \
-                fork_base_payload_id = NULL, next_seq = NULL, created_at = NULL, \
+                fork_base_payload_id = NULL, reasoning_effort = NULL, next_seq = NULL, created_at = NULL, \
                 deleted_at = ? \
              WHERE agent_session_id = ? AND state = 'deleting'",
         )
@@ -4086,7 +4120,7 @@ impl AgentSessionStore {
         let row = sqlx::query_as::<_, StoredSessionRow>(
             "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                     agent_binding_json, remote_binding_id, remote_binding_version, \
-                    parent_agent_session_id, fork_base_payload_id, next_seq, \
+                    parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, \
                     created_at, deleted_at \
              FROM agent_sessions WHERE agent_session_id = ? AND state = 'deleting'",
         )
@@ -4105,7 +4139,7 @@ impl AgentSessionStore {
         let rows = sqlx::query_as::<_, StoredSessionRow>(
             "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                     agent_binding_json, remote_binding_id, remote_binding_version, \
-                    parent_agent_session_id, fork_base_payload_id, next_seq, \
+                    parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, \
                     created_at, deleted_at \
              FROM agent_sessions WHERE state = 'deleting' ORDER BY agent_session_id",
         )
@@ -4519,6 +4553,7 @@ struct StoredSessionRow {
     remote_binding_version: Option<i64>,
     parent_agent_session_id: Option<String>,
     fork_base_payload_id: Option<String>,
+    reasoning_effort: Option<String>,
     next_seq: Option<i64>,
     created_at: Option<i64>,
     deleted_at: Option<i64>,
@@ -5004,8 +5039,8 @@ async fn insert_live_session_tx(
         "INSERT INTO agent_sessions (\
             agent_session_id, owner_ref_json, state, title, archived, pinned, \
             agent_binding_json, remote_binding_id, remote_binding_version, \
-            parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at\
-         ) VALUES (?, ?, 'live', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)",
+            parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at\
+         ) VALUES (?, ?, 'live', ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, NULL)",
     )
     .bind(session.agent_session_id.as_ref())
     .bind(owner_ref)
@@ -5029,6 +5064,7 @@ async fn insert_live_session_tx(
     )
     .bind(session.parent_session_id.as_ref().map(|id| id.as_ref()))
     .bind(session.fork_base_payload_id.as_ref().map(|id| id.as_ref()))
+    .bind(session.metadata.reasoning_effort.map(ReasoningEffort::as_str))
     .bind(created_at)
     .execute(&mut **tx)
     .await
@@ -6176,7 +6212,7 @@ async fn optional_session_row_by_id(
     Ok(sqlx::query_as::<_, StoredSessionRow>(
         "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                 agent_binding_json, remote_binding_id, remote_binding_version, \
-                parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
          FROM agent_sessions WHERE agent_session_id = ?",
     )
     .bind(session_id)
@@ -6191,7 +6227,7 @@ async fn session_row_by_id_tx(
     sqlx::query_as::<_, StoredSessionRow>(
         "SELECT agent_session_id, owner_ref_json, state, title, archived, pinned, \
                 agent_binding_json, remote_binding_id, remote_binding_version, \
-                parent_agent_session_id, fork_base_payload_id, next_seq, created_at, deleted_at \
+                parent_agent_session_id, fork_base_payload_id, reasoning_effort, next_seq, created_at, deleted_at \
          FROM agent_sessions WHERE agent_session_id = ?",
     )
     .bind(session_id)
@@ -6267,6 +6303,7 @@ fn live_from_row(row: StoredSessionRow) -> Result<AgentSessionLiveRecord, Sessio
             title: row.title,
             archived: bool_from_i64(row.archived, "archived")?,
             pinned: bool_from_i64(row.pinned, "pinned")?,
+            reasoning_effort: parse_reasoning_effort(row.reasoning_effort.as_deref())?,
         },
         agent_binding,
         remote_binding_provenance,
@@ -7409,6 +7446,7 @@ async fn assert_tombstone_exact_tx(
         || row.remote_binding_version.is_some()
         || row.parent_agent_session_id.is_some()
         || row.fork_base_payload_id.is_some()
+        || row.reasoning_effort.is_some()
         || row.next_seq.is_some()
         || row.created_at.is_some()
         || row.deleted_at.is_none()
@@ -7575,6 +7613,18 @@ fn bool_from_i64(value: Option<i64>, field: &str) -> Result<bool, SessionStoreEr
         _ => Err(SessionStoreError::InvalidSession(format!(
             "{field} is not a canonical boolean"
         ))),
+    }
+}
+
+fn parse_reasoning_effort(value: Option<&str>) -> Result<Option<ReasoningEffort>, SessionStoreError> {
+    match value {
+        None => Ok(None),
+        Some("low") => Ok(Some(ReasoningEffort::Low)),
+        Some("medium") => Ok(Some(ReasoningEffort::Medium)),
+        Some("high") => Ok(Some(ReasoningEffort::High)),
+        Some(_) => Err(SessionStoreError::InvalidSession(
+            "reasoning_effort is not low, medium, or high".to_owned(),
+        )),
     }
 }
 

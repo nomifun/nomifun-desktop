@@ -41,6 +41,7 @@ import {
   WorkspaceDirectoryUnavailableError,
   validateExistingWorkspaceDirectory,
 } from '@/renderer/components/workspace';
+import type { SessionReasoningEffort } from '@/common/types/reasoningEffort';
 
 export type GuidSendDeps = {
   input: string;
@@ -55,6 +56,7 @@ export type GuidSendDeps = {
   selectedPreset: ExecutableAgentPreset | undefined;
   selectedTemplate?: OfficialPresetTemplate;
   current_model: TProviderWithModel | undefined;
+  reasoningEffort?: SessionReasoningEffort;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
   autoWork: AutoWorkDraftValue;
   /** Whether the selected target may receive the staged workspace resource. */
@@ -160,6 +162,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedPreset,
     selectedTemplate,
     current_model,
+    reasoningEffort,
     applyAdvancedConfig,
     autoWork,
     collaboration,
@@ -223,6 +226,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         provider_id: current_model.id,
         model: current_model.use_model,
       },
+      ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
       ...(knowledgePolicy ? { knowledge_policy: knowledgePolicy } : {}),
       ...(canonicalWorkspace ? { workspace: canonicalWorkspace } : {}),
@@ -304,6 +308,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     applyAdvancedConfig,
     autoWork,
     current_model,
+    reasoningEffort,
     collaboration,
     dir,
     files,

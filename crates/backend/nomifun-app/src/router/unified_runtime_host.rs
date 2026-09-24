@@ -9,7 +9,7 @@ use nomifun_agent_kernel::SessionCapabilityState;
 use nomifun_ai_agent::unified_runtime::{UnifiedAgentRuntime, UnifiedRuntimeHost};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{RuntimeBuildDescriptor, OfficialRuntimeFactory};
-use nomifun_api_types::RuntimeBuildBinding;
+use nomifun_api_types::{RuntimeBuildBinding, SessionReasoningEffortDto};
 use nomifun_chat_model_broker::*;
 use nomifun_agent_runtime::*;
 use nomifun_common::AppError;
@@ -715,7 +715,15 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 tools: Vec::new(),
                 tool_choice,
                 max_output_tokens: None,
-                reasoning: None,
+                reasoning: response.reasoning_effort.map(|effort| ChatReasoningRequest {
+                    effort: Some(match effort {
+                        SessionReasoningEffortDto::Low => ReasoningEffort::Low,
+                        SessionReasoningEffortDto::Medium => ReasoningEffort::Medium,
+                        SessionReasoningEffortDto::High => ReasoningEffort::High,
+                    }),
+                    summary: ReasoningSummary::None,
+                    max_reasoning_tokens: None,
+                }),
                 prompt_cache: PromptCachePolicy::Disabled,
                 response_format: ChatResponseFormat::Text,
                 requested_output_modalities: BTreeSet::new(),

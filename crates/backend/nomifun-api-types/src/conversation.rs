@@ -265,6 +265,9 @@ pub struct ConversationResponse {
         deserialize_with = "crate::serde_util::deserialize_optional_provider_with_model"
     )]
     pub model: Option<ProviderWithModel>,
+    /// Per-session override. None inherits the selected model configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::SessionReasoningEffortDto>,
     pub status: ConversationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<ConversationRuntimeSummary>,
@@ -827,6 +830,7 @@ mod tests {
                 model: "m1".into(),
                 use_model: None,
             }),
+            reasoning_effort: Some(crate::SessionReasoningEffortDto::High),
             status: ConversationStatus::Pending,
             runtime: None,
             source: Some(ConversationSource::Nomifun),
@@ -856,6 +860,7 @@ mod tests {
         assert_eq!(json["type"], "nomi");
         assert_eq!(json["status"], "pending");
         assert_eq!(json["source"], "nomifun");
+        assert_eq!(json["reasoning_effort"], "high");
         assert_eq!(json["created_at"], 1712345678000_i64);
         assert_eq!(json["modified_at"], 1712345678000_i64);
         assert_eq!(json["extra"]["workspace"], "/project");
@@ -886,6 +891,7 @@ mod tests {
             name: "Test".into(),
             r#type: AgentType::Nomi,
             model: None,
+            reasoning_effort: None,
             status: ConversationStatus::Pending,
             runtime: None,
             source: None,
@@ -937,6 +943,7 @@ mod tests {
             name: "Round".into(),
             r#type: AgentType::Nomi,
             model: None,
+            reasoning_effort: None,
             status: ConversationStatus::Running,
             runtime: None,
             source: None,
@@ -1091,6 +1098,7 @@ mod tests {
                 name: "Code Review".into(),
                 r#type: AgentType::Nomi,
                 model: None,
+                reasoning_effort: None,
                 status: ConversationStatus::Finished,
                 runtime: None,
                 source: None,
@@ -1141,6 +1149,7 @@ mod tests {
                 name: "Search Test".into(),
                 r#type: AgentType::Nomi,
                 model: None,
+                reasoning_effort: None,
                 status: ConversationStatus::Finished,
                 runtime: None,
                 source: None,
@@ -1221,6 +1230,7 @@ mod tests {
                 name: "Test".into(),
                 r#type: AgentType::Nomi,
                 model: None,
+                reasoning_effort: None,
                 status: ConversationStatus::Pending,
                 runtime: None,
                 source: None,
@@ -1275,6 +1285,7 @@ mod tests {
                     name: "Conv".into(),
                     r#type: AgentType::Nomi,
                     model: None,
+                    reasoning_effort: None,
                     status: ConversationStatus::Finished,
                     runtime: None,
                     source: None,

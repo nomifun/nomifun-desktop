@@ -56,7 +56,7 @@ pub use manifest::{
     default_protocol_registry, platform_presets, protocol_descriptor,
     protocol_manifest_for, protocol_manifest_for_connection,
     protocol_manifest_for_model_connection, protocol_task_descriptor,
-    protocol_requires_output_ceiling,
+    protocol_requires_output_ceiling, protocol_supports_reasoning_effort,
     try_default_protocol_registry, validate_endpoint_template,
     expand_protocol_endpoint_template, validate_provider_params_for_protocol,
 };

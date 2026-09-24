@@ -60,6 +60,7 @@ async fn seed_session(
             title: Some("IDMM E2E".to_owned()),
             archived: false,
             pinned: false,
+            reasoning_effort: None,
         },
         agent_binding: AgentBindingValue {
             preset_revision_ref: PresetRevisionRef {

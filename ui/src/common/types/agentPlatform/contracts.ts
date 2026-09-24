@@ -543,6 +543,7 @@ export interface CreateAgentSessionRequest {
   model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
   title?: string;
+  reasoning_effort?: import('../reasoningEffort').SessionReasoningEffort;
   resource_selections?: AgentResourceSelection[];
   /** Session-scoped disposition for selected Knowledge resources. This can
    * narrow behavior only; the backend still derives Actions and write access. */
@@ -553,6 +554,10 @@ export interface CreateAgentSessionRequest {
   /** User-selected host directory candidate. The backend validates and freezes
    * the canonical workspace resource; this field is never authority by itself. */
   workspace?: string;
+}
+
+export interface UpdateAgentSessionReasoningResponse {
+  reasoning_effort?: import('../reasoningEffort').SessionReasoningEffort;
 }
 
 /** Live Knowledge selection owned by one AgentSession. Agent capabilities are

@@ -851,12 +851,7 @@ pub fn validate_provider_params_for_protocol(
         }
     }
     if let Some(reasoning_effort) = object.get("reasoning_effort") {
-        if task != Chat
-            || !matches!(
-                protocol_id,
-                "openai.chat_text" | "openai.responses" | "gemini.generate_text"
-            )
-        {
+        if task != Chat || !protocol_supports_reasoning_effort(protocol_id) {
             return Err(InvokeError::config(
                 "provider_params.reasoning_effort is supported only by compatible Chat protocols",
             ));
@@ -955,6 +950,15 @@ pub fn validate_provider_params_for_protocol(
             Ok(())
         }
     }
+}
+
+/// Whether a persisted Chat protocol accepts the normalized reasoning effort
+/// control used by both model defaults and per-session overrides.
+pub fn protocol_supports_reasoning_effort(protocol_id: &str) -> bool {
+    matches!(
+        protocol_id,
+        "openai.chat_text" | "openai.responses" | "gemini.generate_text"
+    )
 }
 
 /// Validate and expand a protocol-owned endpoint template. Every placeholder

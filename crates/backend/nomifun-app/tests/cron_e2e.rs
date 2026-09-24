@@ -227,6 +227,7 @@ async fn seed_conversation(
                     title: Some("Seeded Cron Session".to_owned()),
                     archived: false,
                     pinned: false,
+                    reasoning_effort: None,
                 },
                 agent_binding: binding,
                 remote_binding_provenance: None,

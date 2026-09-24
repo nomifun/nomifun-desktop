@@ -195,6 +195,7 @@ async fn seed_canonical_agent_session(
             title: Some("AutoWork AgentSession".to_owned()),
             archived: false,
             pinned: false,
+            reasoning_effort: None,
         },
         agent_binding: AgentBindingValue {
             preset_revision_ref: PresetRevisionRef {

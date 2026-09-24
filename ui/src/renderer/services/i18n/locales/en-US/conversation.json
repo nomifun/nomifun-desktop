@@ -20,6 +20,14 @@
     "skillsMarketDesc": "Search and activate community Skills on demand. Configure once, available for all agents.",
     "skillsMarketDetails": "View More >>"
   },
+  "reasoningEffort": {
+    "label": "Reasoning for this conversation",
+    "auto": "Auto",
+    "low": "Low",
+    "medium": "Medium",
+    "high": "High",
+    "updateFailed": "Failed to update reasoning effort"
+  },
   "history": {
     "noHistory": "No chat history",
     "deleteTitle": "Delete",

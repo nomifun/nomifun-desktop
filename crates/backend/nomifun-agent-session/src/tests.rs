@@ -7,6 +7,7 @@ use nomifun_agent_contracts::{
     CompactionCompletedPayload, CorrelationId,
     ChatRouteIdentity, DeleteAgentSessionCommand, DigestHex, EffectClass, EventId, EventProducerId,
     IdempotencyKey, LogicalArtifactRef, OperationId, PresetRevisionRef, PrincipalRef,
+    ReasoningEffort,
     RemoteBindingId, RemoteBindingProvenance, ResolvedSnapshotId, ResolvedSnapshotRef,
     ResourceBindingId, ResourceId, ResourceKind, TypedResourceBinding,
     RuntimeBindingId, RuntimeCapabilityExecutionContract,
@@ -141,6 +142,7 @@ fn live_session(id: AgentSessionId) -> AgentSessionLiveRecord {
             title: Some("Session fixture".to_owned()),
             archived: false,
             pinned: false,
+            reasoning_effort: None,
         },
         agent_binding: binding(),
         remote_binding_provenance: None,
@@ -388,6 +390,48 @@ async fn shared_agent_store_schema_and_session_creation_are_exact_and_idempotent
         created.session.agent_session_id
     );
     assert_eq!(replay.activation_ack.cursor, created.activation_ack.cursor);
+}
+
+#[tokio::test]
+async fn session_reasoning_effort_is_persisted_and_updated_independently() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let mut session = live_session(session_id());
+    session.metadata.reasoning_effort = Some(ReasoningEffort::High);
+    let session_id = session.agent_session_id.clone();
+    let frozen_binding = session.agent_binding.clone();
+    let frozen_title = session.metadata.title.clone();
+
+    store
+        .create_session(create_request(session, "session-reasoning"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_live_session(&session_id)
+            .await
+            .unwrap()
+            .metadata
+            .reasoning_effort,
+        Some(ReasoningEffort::High)
+    );
+
+    store
+        .update_session_reasoning_effort(&owner(), &session_id, Some(ReasoningEffort::Low))
+        .await
+        .unwrap();
+    let updated = store.get_live_session(&session_id).await.unwrap();
+    assert_eq!(updated.metadata.reasoning_effort, Some(ReasoningEffort::Low));
+    assert_eq!(updated.metadata.title, frozen_title);
+    assert_eq!(updated.agent_binding, frozen_binding);
+
+    store
+        .update_session_reasoning_effort(&owner(), &session_id, None)
+        .await
+        .unwrap();
+    let inherited = store.get_live_session(&session_id).await.unwrap();
+    assert_eq!(inherited.metadata.reasoning_effort, None);
+    assert_eq!(inherited.metadata.title, frozen_title);
+    assert_eq!(inherited.agent_binding, frozen_binding);
 }
 
 #[tokio::test]
@@ -3058,6 +3102,7 @@ async fn fork_is_self_contained_and_parent_deletion_leaves_child_live() {
             title: Some("Fork child".to_owned()),
             archived: false,
             pinned: false,
+            reasoning_effort: None,
         },
         child_agent_binding: binding(),
         parent_through_seq: 1,
