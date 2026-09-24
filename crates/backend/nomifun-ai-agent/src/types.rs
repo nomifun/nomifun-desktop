@@ -106,6 +106,8 @@ pub struct NomiCompatOverrides {
     /// Explicit opt-in for OpenAI Responses provider-side round retention.
     /// Request builders still apply their own lifecycle gate.
     pub chain_rounds: Option<bool>,
+    /// Normalized model-level reasoning default (low/medium/high).
+    pub reasoning_effort: Option<String>,
     /// Provider-native request body fields after local Agent controls have
     /// been removed. Typed serializer fields overwrite conflicts at send time.
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,

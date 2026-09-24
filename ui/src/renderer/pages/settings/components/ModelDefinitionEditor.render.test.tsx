@@ -406,6 +406,41 @@ describe('unified model definition editor rendering and interactions', () => {
     expect(html.includes('未设置最大输出，将使用供应商默认值。')).toBe(true);
   });
 
+  test('places model reasoning depth beside Chat generation limits', () => {
+    const chatManifest = manifest('chat');
+    chatManifest.recommendation!.protocol_id = 'openai.chat_text';
+    chatManifest.protocols[0] = {
+      ...chatManifest.protocols[0],
+      protocol_id: 'openai.chat_text',
+      platforms: ['stepfun'],
+    };
+    const html = render(
+      {
+        model: 'step-3.7-flash',
+        capabilities: [{
+          ...emptyCapabilityDraft('chat'),
+          protocol: 'openai.chat_text',
+          providerParamsJson: '{"reasoning_effort":"medium"}',
+        }],
+      },
+      { ...manifests, chat: chatManifest }
+    );
+
+    expect(html.includes('data-reasoning-effort-control="true"')).toBe(true);
+    expect(html.includes('思考深度')).toBe(true);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="medium")(?=[^>]*aria-pressed="true")[^>]*>/);
+    expect(html).toMatch(/<button(?=[^>]*data-reasoning-effort="high")(?=[^>]*aria-pressed="false")[^>]*>/);
+    expect(html.includes('新会话、预设 Agent、健康检查')).toBe(true);
+
+    const unsupported = render({
+      model: 'claude',
+      capabilities: [{ ...emptyCapabilityDraft('chat'), protocol: 'anthropic.messages' }],
+    });
+    expect(unsupported).toMatch(/<button(?=[^>]*data-reasoning-effort="auto")(?=[^>]*aria-pressed="true")[^>]*>/);
+    expect(unsupported).toMatch(/<button(?=[^>]*data-reasoning-effort="low")(?=[^>]*disabled="")[^>]*>/);
+    expect(unsupported.includes('当前协议不提供统一的低/中/高映射')).toBe(true);
+  });
+
   test('only exposes catalog models compatible with the selected primary type', () => {
     const html = render(
       { model: '', capabilities: [emptyCapabilityDraft('image_generation')] },

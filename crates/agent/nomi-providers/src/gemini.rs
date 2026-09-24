@@ -160,6 +160,14 @@ impl GeminiProvider {
         if let Some(limit) = request.max_tokens {
             body["generationConfig"]["maxOutputTokens"] = json!(limit);
         }
+        let reasoning_effort = request
+            .reasoning_effort
+            .as_ref()
+            .or(self.compat.reasoning_effort.as_ref());
+        if let Some(effort) = reasoning_effort {
+            body["generationConfig"]["thinkingConfig"] =
+                json!({ "thinkingLevel": effort });
+        }
         let has_system_instruction = !system_parts.is_empty();
         if has_system_instruction {
             body["systemInstruction"] = json!({ "parts": system_parts });

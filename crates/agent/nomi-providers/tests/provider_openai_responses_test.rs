@@ -244,6 +244,31 @@ async fn extra_body_cannot_restore_an_omitted_ceiling_or_protocol_invariants() {
 }
 
 #[tokio::test]
+async fn model_reasoning_default_applies_when_the_request_has_no_override() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            completed_text("resp_default_effort", false, "ok"),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut provider_compat = compat(false);
+    provider_compat.reasoning_effort = Some("medium".to_owned());
+    let provider = OpenAIResponsesProvider::new("key", &server.uri(), provider_compat);
+    let mut request = request(false);
+    request.reasoning_effort = None;
+    collect(provider.stream(&request).await.unwrap()).await;
+
+    let received = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(body["reasoning"], json!({"effort": "medium"}));
+}
+
+#[tokio::test]
 async fn function_outputs_keep_schema_refs_opaque_for_compatibility_gateways() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

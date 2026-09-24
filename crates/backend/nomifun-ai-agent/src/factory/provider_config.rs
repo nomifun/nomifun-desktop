@@ -378,6 +378,16 @@ async fn resolve_provider_fields_at_revision(
         }
         None => None,
     };
+    let reasoning_effort = match provider_body.remove("reasoning_effort") {
+        Some(serde_json::Value::String(value))
+            if matches!(value.as_str(), "low" | "medium" | "high") => Some(value),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Chat provider_params.reasoning_effort must be low, medium, or high".into(),
+            ));
+        }
+        None => None,
+    };
 
     let compat_overrides = NomiCompatOverrides {
         // The resolver passes Nomi a complete task endpoint.
@@ -390,6 +400,7 @@ async fn resolve_provider_fields_at_revision(
         max_tokens_field,
         require_reasoning_content,
         chain_rounds,
+        reasoning_effort,
         extra_body: (!provider_body.is_empty()).then_some(provider_body),
     };
 
@@ -476,6 +487,9 @@ fn provider_config_from_fields(
     }
     if let Some(chain_rounds) = fields.compat_overrides.chain_rounds {
         config.compat.chain_rounds = Some(chain_rounds);
+    }
+    if let Some(reasoning_effort) = fields.compat_overrides.reasoning_effort {
+        config.compat.reasoning_effort = Some(reasoning_effort);
     }
     config.compat.extra_body = fields.compat_overrides.extra_body;
     // One-shot consumers include robot vision, so the same persisted Chat
@@ -937,7 +951,7 @@ mod provider_resolution_tests {
             endpoint: Some("/custom/chat"),
             traits: "[]",
             credentials: r#"{"api_keys":["test-secret","test-secret-2"]}"#,
-            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true}"#,
+            provider_params: r#"{"max_tokens_field":"max_completion_tokens","require_reasoning_content":true,"reasoning_effort":"high","temperature":0.2}"#,
             bedrock_config: None,
         })
         .await;
@@ -947,6 +961,20 @@ mod provider_resolution_tests {
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
         assert_eq!(fields.compat_overrides.max_tokens_field.as_deref(), Some("max_completion_tokens"));
         assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
+        assert_eq!(fields.compat_overrides.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
+            serde_json::json!(0.2)
+        );
+        assert!(
+            !fields
+                .compat_overrides
+                .extra_body
+                .as_ref()
+                .unwrap()
+                .contains_key("reasoning_effort"),
+            "the normalized model default must be carried as a typed request field"
+        );
         assert_eq!(fields.compat_overrides.supports_image, Some(false));
         assert!(!fields.supports_web_search);
     }

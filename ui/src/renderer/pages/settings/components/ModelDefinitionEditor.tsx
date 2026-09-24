@@ -44,7 +44,9 @@ import {
   parseProviderParams,
   patchCapabilityDraft,
   providerParamChainRounds,
+  providerParamReasoningEffort,
   protocolDescriptorForDraft,
+  protocolSupportsReasoningEffort,
   providerParamVoice,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
@@ -54,6 +56,7 @@ import {
   rootMatchesShape,
   withProviderParamVoice,
   withProviderParamChainRounds,
+  withProviderParamReasoningEffort,
   type CapabilityEndpointDescriptor,
   type CapabilityEndpointField,
   type CapabilityValidationError,
@@ -61,6 +64,7 @@ import {
   type ModelCapabilityDraft,
   type ModelCapabilityDraftPatch,
   type ModelDefinitionDraft,
+  type ModelReasoningEffort,
   type ModelProtocolManifestMap,
   type ProviderConnectionDescriptor,
   type ProviderConnectionInput,
@@ -969,7 +973,8 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         // this is the only way it learns the convention.
         const rootShape = sdkTransport ? undefined : descriptor?.root_shape ?? undefined;
         const crossOrigin = requiresCrossOriginConsent(capability, manifest, providerBaseUrl, connections);
-        const providerParamsValid = parseProviderParams(capability.providerParamsJson).ok;
+        const parsedProviderParams = parseProviderParams(capability.providerParamsJson);
+        const providerParamsValid = parsedProviderParams.ok;
         const endpointDescriptors =
           descriptor?.endpoints
             .filter(
@@ -1059,6 +1064,15 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         );
         const outputLimitEditorOpen =
           Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
+        const reasoningEffort = providerParamReasoningEffort(capability.providerParamsJson);
+        const hasReasoningEffort =
+          parsedProviderParams.ok &&
+          Object.prototype.hasOwnProperty.call(parsedProviderParams.value, 'reasoning_effort');
+        const reasoningEffortProtocolSupported = protocolSupportsReasoningEffort(capability.protocol);
+        const reasoningEffortAvailable =
+          capability.task === 'chat' &&
+          reasoningEffortProtocolSupported &&
+          providerParamsValid;
         const protocolTransportOpen =
           protocolTransportOpenByTask[capability.task] ??
           taskValidationErrors.some((error) =>
@@ -1128,7 +1142,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               defaultValue: '调整模型限制',
             }),
             description: t('settings.modelAdvanced.intentLimitsHint', {
-              defaultValue: '设置最大输出等限制',
+              defaultValue: '设置思考深度、最大输出等限制',
             }),
             icon: <Shield theme='outline' size='17' />,
           },
@@ -1992,8 +2006,88 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
               data-call-config-branch='limits'
             >
               <div className='text-12px font-500 text-t-secondary'>
-                {t('settings.modelAdvanced.modelLimitsTitle', { defaultValue: '模型限制' })}
+                {t('settings.modelAdvanced.modelLimitsTitle', { defaultValue: '生成与限制' })}
               </div>
+
+              {capability.task === 'chat' && (
+                <div className='space-y-8px' data-reasoning-effort-control>
+                  <div className='flex flex-wrap items-center justify-between gap-10px'>
+                    <div>
+                      <div className='text-12px text-t-secondary'>
+                        {t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })}
+                      </div>
+                      <div className='mt-2px text-11px leading-4 text-t-tertiary'>
+                        {t('settings.modelAdvanced.reasoningEffortDescription', {
+                          defaultValue: '作为该模型 Chat 能力的默认值，影响速度、质量和 token 消耗。',
+                        })}
+                      </div>
+                    </div>
+                    <div
+                      className='inline-flex overflow-hidden rounded-8px border border-solid border-[var(--color-border-2)] bg-fill-1'
+                      role='group'
+                      aria-label={t('settings.modelAdvanced.reasoningEffort', { defaultValue: '思考深度' })}
+                    >
+                      {([
+                        { value: undefined, key: 'auto' },
+                        { value: 'low' as const, key: 'low' },
+                        { value: 'medium' as const, key: 'medium' },
+                        { value: 'high' as const, key: 'high' },
+                      ] satisfies Array<{ value: ModelReasoningEffort | undefined; key: string }>).map((option) => {
+                        const selected = option.value === undefined
+                          ? !hasReasoningEffort
+                          : reasoningEffort === option.value;
+                        const disabled = !providerParamsValid || (option.value !== undefined && !reasoningEffortAvailable);
+                        return (
+                          <button
+                            key={option.key}
+                            type='button'
+                            aria-pressed={selected}
+                            disabled={disabled}
+                            data-reasoning-effort={option.key}
+                            className={`min-w-58px border-0 border-r border-solid border-[var(--color-border-2)] px-11px py-6px text-12px last:border-r-0 disabled:cursor-not-allowed disabled:opacity-45 ${
+                              selected
+                                ? 'bg-primary-1 text-primary-6'
+                                : 'bg-transparent text-t-secondary hover:bg-fill-2'
+                            }`}
+                            onClick={() =>
+                              updateCapability(capability.task, {
+                                providerParamsJson: withProviderParamReasoningEffort(
+                                  capability.providerParamsJson,
+                                  option.value
+                                ),
+                              })
+                            }
+                          >
+                            {t(`settings.modelAdvanced.reasoningEffortOptions.${option.key}`, {
+                              defaultValue: option.key,
+                            })}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div
+                    className={`text-11px leading-4 ${
+                      providerParamsValid && reasoningEffortProtocolSupported
+                        ? 'text-t-tertiary'
+                        : 'text-warning-7'
+                    }`}
+                    data-reasoning-effort-hint
+                  >
+                    {!providerParamsValid
+                      ? t('settings.modelAdvanced.reasoningEffortJsonInvalid', {
+                          defaultValue: '先修正供应商参数 JSON，才能调整思考深度。',
+                        })
+                      : !reasoningEffortProtocolSupported
+                          ? t('settings.modelAdvanced.reasoningEffortProtocolUnsupported', {
+                              defaultValue: '当前协议不提供统一的低/中/高映射；请使用自动。',
+                            })
+                          : t('settings.modelAdvanced.reasoningEffortHint', {
+                              defaultValue: '自动使用系统与供应商默认值；固定档位会应用到使用该模型的新调用。',
+                            })}
+                  </div>
+                </div>
+              )}
 
               {capability.task !== 'chat' && (
                 <div className='space-y-8px'>
@@ -2064,6 +2158,10 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     updateCapability(capability.task, {
                       ...(capability.task === 'chat' ? {} : { contextLimit: undefined }),
                       outputLimit: undefined,
+                      providerParamsJson: withProviderParamReasoningEffort(
+                        capability.providerParamsJson,
+                        undefined
+                      ),
                     })
                   }
                 >
