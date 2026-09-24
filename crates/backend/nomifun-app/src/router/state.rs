@@ -194,7 +194,7 @@ pub(crate) async fn try_build_module_states(
         services.event_bus.clone(),
         services.background_tasks.clone()
             as Arc<dyn nomifun_conversation::BackgroundTaskRegistrar>,
-        services.work_dir.join("agent-sessions"),
+        services.work_dir.join("conversations"),
         services.database.pool().clone(),
         services.creation_service.clone(),
     ));

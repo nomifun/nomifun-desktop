@@ -132,7 +132,10 @@ pub(crate) struct NomiCoreSessionOwner {
     runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     user_events: Arc<dyn UserEventSink>,
     background_tasks: Arc<dyn BackgroundTaskRegistrar>,
-    fallback_workspace_root: std::path::PathBuf,
+    /// Current installation-owned root for per-Session managed workspaces.
+    /// Every default workspace is materialized as `<root>/<AgentSessionId>`;
+    /// user-selected workspaces never use this root.
+    managed_workspace_root: std::path::PathBuf,
     pool: nomifun_db::SqlitePool,
     creation_service: Arc<nomifun_creation::CreationService>,
     session_operation_locks:
@@ -625,7 +628,7 @@ impl NomiCoreSessionOwner {
         runtime_sessions: Arc<dyn AgentRuntimeSessions>,
         user_events: Arc<dyn UserEventSink>,
         background_tasks: Arc<dyn BackgroundTaskRegistrar>,
-        fallback_workspace_root: std::path::PathBuf,
+        managed_workspace_root: std::path::PathBuf,
         pool: nomifun_db::SqlitePool,
         creation_service: Arc<nomifun_creation::CreationService>,
     ) -> Self {
@@ -638,7 +641,7 @@ impl NomiCoreSessionOwner {
             runtime_sessions,
             user_events,
             background_tasks,
-            fallback_workspace_root,
+            managed_workspace_root,
             pool,
             creation_service,
             session_operation_locks: Arc::new(DashMap::new()),
@@ -657,6 +660,90 @@ impl NomiCoreSessionOwner {
             .entry(session_id.to_owned())
             .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
             .clone()
+    }
+
+    async fn materialize_workspace_for_binding(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        binding: &AgentBindingValue,
+    ) -> Result<Option<String>, AppError> {
+        let workspace = frozen_workspace_root(
+            &self.managed_workspace_root,
+            owner_id,
+            session_id,
+            binding,
+        )?;
+        if uses_managed_session_workspace(binding) {
+            return materialize_managed_session_workspace(
+                &self.managed_workspace_root,
+                session_id,
+            )
+            .await
+            .map(Some);
+        }
+        workspace
+            .map(|workspace| {
+                canonical_existing_workspace_directory(
+                    std::path::Path::new(&workspace),
+                    WorkspaceDirectoryCheck::Runtime,
+                )
+                .map(|path| path.to_string_lossy().into_owned())
+            })
+            .transpose()
+    }
+
+    async fn materialize_session_workspace(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+    ) -> Result<Option<String>, AppError> {
+        let _operation_fence = self
+            .session_operation_lock(session_id.as_ref())
+            .try_read_owned()
+            .map_err(|_| {
+                AppError::Conflict(
+                    "AgentSession workspace is unavailable during a concurrent lifecycle mutation"
+                        .to_owned(),
+                )
+            })?;
+        let observed = self
+            .canonical
+            .get(
+                &PrincipalRef {
+                    principal_kind: "user".to_owned(),
+                    principal_id: owner_id.to_owned(),
+                },
+                session_id,
+            )
+            .await?;
+        self.materialize_workspace_for_binding(
+            owner_id,
+            session_id,
+            &observed.session.agent_binding,
+        )
+        .await
+    }
+
+    async fn remove_workspace_for_binding(
+        &self,
+        owner_id: &str,
+        session_id: &AgentSessionId,
+        binding: &AgentBindingValue,
+    ) -> Result<(), AppError> {
+        // Validate the complete frozen authority even though only a managed
+        // Session directory may be reclaimed. A selected/custom path is never
+        // removed by Session lifecycle cleanup.
+        let frozen_workspace = frozen_workspace_root(
+            &self.managed_workspace_root,
+            owner_id,
+            session_id,
+            binding,
+        )?;
+        if uses_managed_session_workspace(binding) || frozen_workspace.is_none() {
+            remove_managed_session_workspace(&self.managed_workspace_root, session_id).await?;
+        }
+        Ok(())
     }
 
     pub(crate) fn install_official_runtime(&self, host: Arc<super::official_runtime::OfficialRuntimeHost>, control_plane: std::sync::Weak<AgentControlPlane>) -> Result<(), AppError> {
@@ -1030,6 +1117,12 @@ impl NomiCoreSessionOwner {
                 now_ms(),
             )
             .await?;
+        self.materialize_workspace_for_binding(
+            owner_id,
+            &opened.session.agent_session_id,
+            &opened.session.agent_binding,
+        )
+        .await?;
         self.initialize_idmm_state(
             opened.session.agent_session_id.as_ref(),
             idmm_config,
@@ -1137,20 +1230,24 @@ impl NomiCoreSessionOwner {
         if has_workspace {
             return Ok(response);
         }
-        let fallback = self
-            .fallback_workspace_root
-            .join(&response.conversation_id);
-        tokio::fs::create_dir_all(&fallback)
-            .await
-            .map_err(|error| AppError::Internal(format!(
-                "create Cron AgentSession fallback workspace: {error}"
-            )))?;
+        let session_id = AgentSessionId::from(response.conversation_id.clone());
+        let fallback = materialize_managed_session_workspace(
+            &self.managed_workspace_root,
+            &session_id,
+        )
+        .await?;
         let extra = response.extra.as_object_mut().ok_or_else(|| {
             AppError::Conflict("canonical AgentSession extra must be an object".to_owned())
         })?;
         extra.insert(
             "workspace".to_owned(),
-            Value::String(fallback.to_string_lossy().into_owned()),
+            Value::String(fallback),
+        );
+        extra.insert("custom_workspace".to_owned(), Value::Bool(false));
+        extra.insert("is_temporary_workspace".to_owned(), Value::Bool(true));
+        extra.insert(
+            "temp_workspace_id".to_owned(),
+            Value::String(session_id.as_ref().to_owned()),
         );
         Ok(response)
     }
@@ -1197,12 +1294,8 @@ impl NomiCoreSessionOwner {
                 "AgentSession binding differs from its saved immutable artifacts".to_owned(),
             ));
         }
-        if let Some(workspace) = frozen_workspace_root(owner_id, session_id, &saved_binding)? {
-            canonical_existing_workspace_directory(
-                std::path::Path::new(&workspace),
-                WorkspaceDirectoryCheck::Runtime,
-            )?;
-        }
+        self.materialize_workspace_for_binding(owner_id, session_id, &saved_binding)
+            .await?;
         let route_identity = snapshot.content.chat_route_identity.clone().ok_or_else(|| {
             AppError::UnprocessableEntity(
                 "AgentSession Snapshot has no exact Chat route".to_owned(),
@@ -1702,14 +1795,16 @@ impl NomiCoreSessionOwner {
             .and_then(Value::as_str)
             .is_none_or(|workspace| workspace.trim().is_empty())
         {
-            let fallback = self.fallback_workspace_root.join(session_id.as_ref());
-            tokio::fs::create_dir_all(&fallback)
-                .await
-                .map_err(|error| AppError::Internal(format!(
-                    "create AgentSession fallback workspace: {error}"
-                )))?;
-            projection.extra["workspace"] =
-                Value::String(fallback.to_string_lossy().into_owned());
+            let fallback = materialize_managed_session_workspace(
+                &self.managed_workspace_root,
+                session_id,
+            )
+            .await?;
+            projection.extra["workspace"] = Value::String(fallback);
+            projection.extra["custom_workspace"] = Value::Bool(false);
+            projection.extra["is_temporary_workspace"] = Value::Bool(true);
+            projection.extra["temp_workspace_id"] =
+                Value::String(session_id.as_ref().to_owned());
         }
         let (options, _) = runtime_options_from_session(owner_id, projection, None)?;
         let cancellation = tokio_util::sync::CancellationToken::new();
@@ -1989,6 +2084,7 @@ impl NomiCoreSessionOwner {
         projected.projection.request.extra[nomifun_api_types::RUNTIME_BUILD_BINDING_KEY] =
             serde_json::to_value(engine).map_err(|error| AppError::Internal(error.to_string()))?;
         let workspace = frozen_workspace_root(
+            &self.managed_workspace_root,
             owner_id,
             session_id,
             &projected.binding,
@@ -2240,6 +2336,9 @@ impl NomiCorePluginToolSessionProvider {
         let session_id = parse_agent_session_id(&request.conversation_id)
             .map_err(|error| AppError::Conflict(error.message))?;
         self.hosted_effects.ensure_settled(common_owner.as_ref(), session_id.as_ref()).await?;
+        self.session_owner
+            .materialize_session_workspace(common_owner.as_ref(), &session_id)
+            .await?;
         let response = self
             .session_owner
             .get_session(common_owner.as_ref(), session_id.as_ref())
@@ -2297,8 +2396,36 @@ impl NomiCorePluginToolSessionProvider {
                     "workspace.files" | "workspace.vcs" | "workspace.artifacts"
                 )
             });
+        let wave2_process_selected = revision
+            .payload
+            .enabled_capabilities
+            .iter()
+            .any(|selection| {
+                selection.capability.id.as_ref()
+                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+            });
+        let server_workspace = (wave2_workspace_selected || wave2_process_selected)
+            .then(|| {
+                response
+                    .extra
+                    .get("workspace")
+                    .and_then(Value::as_str)
+                    .filter(|workspace| !workspace.trim().is_empty())
+                    .ok_or_else(|| {
+                        AppError::Conflict(
+                            "Nomi Wave 2 AgentSession has no server-resolved workspace"
+                                .to_owned(),
+                        )
+                    })
+            })
+            .transpose()?;
         let mut runtime_binding = binding;
         if wave2_workspace_selected {
+            let server_workspace = server_workspace.ok_or_else(|| {
+                AppError::Internal(
+                    "workspace capability lost its resolved Session root".to_owned(),
+                )
+            })?;
             let workspace_resources = runtime_binding
                 .typed_resource_bindings
                 .iter()
@@ -2313,16 +2440,6 @@ impl NomiCorePluginToolSessionProvider {
                         .to_owned(),
                 ));
             };
-            let server_workspace = response
-                .extra
-                .get("workspace")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AppError::Conflict(
-                        "Nomi Wave 2 AgentSession has no server-resolved workspace"
-                            .to_owned(),
-                    )
-                })?;
             let workspace = super::nomi_core_wave2::session_workspace_binding(
                 server_workspace,
                 &principal,
@@ -2334,6 +2451,33 @@ impl NomiCorePluginToolSessionProvider {
                     runtime_binding.typed_resource_bindings,
                     workspace.clone(),
                 );
+        }
+        if wave2_process_selected {
+            let server_workspace = server_workspace.ok_or_else(|| {
+                AppError::Internal(
+                    "process capability lost its resolved Session root".to_owned(),
+                )
+            })?;
+            let process_resources = runtime_binding
+                .typed_resource_bindings
+                .iter()
+                .enumerate()
+                .filter(|(_, binding)| binding.resource_kind.as_ref() == "process_session")
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            let [index] = process_resources.as_slice() else {
+                return Err(AppError::Conflict(
+                    "Nomi Wave 2 requires one server-resolved Session process resource"
+                        .to_owned(),
+                ));
+            };
+            runtime_binding.typed_resource_bindings[*index] =
+                super::nomi_core_wave2::session_process_binding(
+                    server_workspace,
+                    &principal,
+                    &session_id,
+                    &runtime_binding.typed_resource_bindings[*index],
+                )?;
         }
         let resource_image_model = revision.payload.chat_route_records
             .get(nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT)
@@ -3524,11 +3668,13 @@ impl nomifun_requirement::AutoWorkWorkspacePort for NomiCoreSessionOwner {
                     .to_owned(),
             ));
         }
-        let workspace = frozen_workspace_root(
-            owner_id,
-            &session_id,
-            &observed.session.agent_binding,
-        )?
+        let workspace = self
+            .materialize_workspace_for_binding(
+                owner_id,
+                &session_id,
+                &observed.session.agent_binding,
+            )
+            .await?
             .map(nomifun_requirement::FrozenAutoWorkWorkspace::new)
             .transpose()?;
         let lease: Arc<dyn Send + Sync> =
@@ -3667,6 +3813,18 @@ impl nomifun_companion::CompanionSessionPort for NomiCoreSessionOwner {
                     .to_owned(),
             ));
         }
+        let deleting_session = self
+            .canonical
+            .store()
+            .get_deleting_session(&session_id)
+            .await
+            .map_err(agent_session_store_error)?;
+        self.remove_workspace_for_binding(
+            owner_id,
+            &session_id,
+            &deleting_session.agent_binding,
+        )
+        .await?;
         self.canonical.complete_fenced_delete(&command, now_ms()).await?;
         self.remove_idmm_state(session_id.as_ref()).await?;
         Ok(())
@@ -3828,6 +3986,18 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             }
             PreparedAgentSessionDelete::Fenced(command) => command,
         };
+        let deleting_session = self
+            .canonical
+            .store()
+            .get_deleting_session(&session_id)
+            .await
+            .map_err(agent_session_store_error)?;
+        self.remove_workspace_for_binding(
+            owner_id,
+            &session_id,
+            &deleting_session.agent_binding,
+        )
+        .await?;
         self.canonical.complete_fenced_delete(&command, now_ms()).await?;
         self.remove_idmm_state(session_id.as_ref()).await?;
         Ok(())
@@ -3912,6 +4082,8 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 "AgentSession identity is not canonical UUIDv7: {error}"
             ))
         })?;
+        self.materialize_session_workspace(owner_id, &agent_session_id)
+            .await?;
         self.canonical_conversation_projection(owner_id, &agent_session_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!(
@@ -4284,9 +4456,48 @@ fn has_selected_workspace(binding: &AgentBindingValue) -> bool {
     })
 }
 
+/// A default Workspace/Process resource is installation-owned, but its
+/// physical directory is Session-owned. The immutable binding deliberately
+/// freezes only the installation resource identity; the Session ID selects the
+/// isolated child directory at execution/projection time.
+fn uses_managed_session_workspace(binding: &AgentBindingValue) -> bool {
+    if has_selected_workspace(binding) {
+        return false;
+    }
+
+    binding.typed_resource_bindings.iter().any(|resource| {
+        (resource.resource_kind.as_ref() == "workspace"
+            && resource.resource_id.as_ref()
+                == super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID)
+            || (resource.resource_kind.as_ref() == "process_session"
+                && resource.resource_id.as_ref()
+                    == super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID)
+    })
+}
+
+fn managed_session_workspace_path(
+    managed_workspace_root: &std::path::Path,
+    session_id: &AgentSessionId,
+) -> Result<std::path::PathBuf, AppError> {
+    nomifun_common::validate_uuidv7(session_id.as_ref()).map_err(|error| {
+        AppError::Conflict(format!(
+            "managed Workspace requires a canonical AgentSession UUIDv7: {error}"
+        ))
+    })?;
+    if !managed_workspace_root.is_absolute()
+        || nomifun_common::workspace_path_has_edge_whitespace_segment(managed_workspace_root)
+    {
+        return Err(AppError::Conflict(
+            "managed Workspace root is not a canonical absolute path".to_owned(),
+        ));
+    }
+    Ok(managed_workspace_root.join(session_id.as_ref()))
+}
+
 fn frozen_workspace_root(
+    managed_workspace_root: &std::path::Path,
     owner_id: &str,
-    _session_id: &AgentSessionId,
+    session_id: &AgentSessionId,
     binding: &AgentBindingValue,
 ) -> Result<Option<String>, AppError> {
     let binding: AgentBindingValueDto = serde_json::to_value(binding)
@@ -4296,16 +4507,160 @@ fn frozen_workspace_root(
                 "canonical AgentSession has an invalid frozen binding: {error}"
             ))
         })?;
-    nomifun_agent_execution::resolve_frozen_automation_workspace(owner_id, &binding)
+    nomifun_agent_execution::resolve_frozen_session_workspace(
+        owner_id,
+        &binding,
+        session_id.as_ref(),
+        managed_workspace_root,
+    )
+}
+
+fn workspace_metadata_is_redirect(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn ensure_plain_managed_directory(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(create_error) = std::fs::create_dir(path)
+                && create_error.kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(create_error);
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if workspace_metadata_is_redirect(&metadata) || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "managed Workspace path is not a real directory",
+        ));
+    }
+    Ok(())
+}
+
+async fn materialize_managed_session_workspace(
+    managed_workspace_root: &std::path::Path,
+    session_id: &AgentSessionId,
+) -> Result<String, AppError> {
+    let workspace = managed_session_workspace_path(managed_workspace_root, session_id)?;
+    let managed_workspace_root = managed_workspace_root.to_path_buf();
+    let display = workspace.display().to_string();
+    let materialized = tokio::task::spawn_blocking(move || -> std::io::Result<std::path::PathBuf> {
+        let work_root = managed_workspace_root.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "managed Workspace root has no installation work-root parent",
+            )
+        })?;
+        ensure_plain_managed_directory(work_root)?;
+        ensure_plain_managed_directory(&managed_workspace_root)?;
+        ensure_plain_managed_directory(&workspace)?;
+        let canonical_root = nomifun_common::paths::canonicalize_simplified(&managed_workspace_root)?;
+        let canonical_workspace = nomifun_common::paths::canonicalize_simplified(&workspace)?;
+        if canonical_workspace
+            .parent()
+            .is_none_or(|parent| !nomifun_common::paths::paths_equivalent(parent, &canonical_root))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed Workspace escaped its installation-owned root",
+            ));
+        }
+        Ok(canonical_workspace)
+    })
+    .await
+    .map_err(|error| {
+        AppError::Internal(format!(
+            "managed Workspace materialization task failed for {display}: {error}"
+        ))
+    })?
+    .map_err(|error| {
+        AppError::Internal(format!(
+            "failed to materialize managed Workspace {display}: {error}"
+        ))
+    })?;
+    Ok(materialized.to_string_lossy().into_owned())
+}
+
+async fn remove_managed_session_workspace(
+    managed_workspace_root: &std::path::Path,
+    session_id: &AgentSessionId,
+) -> Result<(), AppError> {
+    let workspace = managed_session_workspace_path(managed_workspace_root, session_id)?;
+    let managed_workspace_root = managed_workspace_root.to_path_buf();
+    let display = workspace.display().to_string();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let root_metadata = match std::fs::symlink_metadata(&managed_workspace_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if workspace_metadata_is_redirect(&root_metadata) || !root_metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed Workspace root is not a real directory",
+            ));
+        }
+        let metadata = match std::fs::symlink_metadata(&workspace) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if workspace_metadata_is_redirect(&metadata) || !metadata.is_dir() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed Workspace path is not a real directory",
+            ));
+        }
+        let canonical_root = nomifun_common::paths::canonicalize_simplified(&managed_workspace_root)?;
+        let canonical_workspace = nomifun_common::paths::canonicalize_simplified(&workspace)?;
+        if canonical_workspace
+            .parent()
+            .is_none_or(|parent| !nomifun_common::paths::paths_equivalent(parent, &canonical_root))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "managed Workspace escaped its installation-owned root",
+            ));
+        }
+        std::fs::remove_dir_all(canonical_workspace)
+    })
+    .await
+    .map_err(|error| {
+        AppError::Internal(format!(
+            "managed Workspace cleanup task failed for {display}: {error}"
+        ))
+    })?
+    .map_err(|error| {
+        AppError::Internal(format!(
+            "failed to remove managed Workspace {display}: {error}"
+        ))
+    })
 }
 
 /// Derive legacy Conversation workspace presentation from the immutable
 /// AgentSession resource identity.
 ///
 /// A non-empty path is not evidence that the user selected a custom workpath:
-/// the server-owned `default-workspace` and managed process resource both
-/// carry the configured absolute work root. Losing that distinction makes a
-/// refreshed default Session jump into a path drawer in the desktop sidebar.
+/// the server-owned `default-workspace` and managed process resource carry the
+/// installation authority from which a per-Session directory is derived.
+/// Losing that distinction makes a refreshed default Session jump into a path
+/// drawer in the desktop sidebar.
 /// Keep the old response fields while deriving them from the frozen binding,
 /// never from path-shape heuristics.
 fn workspace_projection_flags(
@@ -4317,24 +4672,7 @@ fn workspace_projection_flags(
     }
 
     let custom_workspace = has_selected_workspace(binding);
-    let workspace_resource = binding
-        .typed_resource_bindings
-        .iter()
-        .find(|resource| resource.resource_kind.as_ref() == "workspace");
-    let uses_managed_default = !custom_workspace
-        && workspace_resource.map_or_else(
-            || {
-                binding.typed_resource_bindings.iter().any(|resource| {
-                    resource.resource_kind.as_ref() == "process_session"
-                        && resource.resource_id.as_ref()
-                            == super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID
-                })
-            },
-            |resource| {
-                resource.resource_id.as_ref()
-                    == super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID
-            },
-        );
+    let uses_managed_default = uses_managed_session_workspace(binding);
     let companion_workspace = binding.typed_resource_bindings.iter().any(|resource| {
         matches!(
             resource.resource_kind.as_ref(),
@@ -4533,6 +4871,13 @@ fn canonical_conversation_response(
         "is_temporary_workspace".to_owned(),
         Value::Bool(is_temporary_workspace),
     );
+    extra.remove("temp_workspace_id");
+    if is_temporary_workspace {
+        extra.insert(
+            "temp_workspace_id".to_owned(),
+            Value::String(session.agent_session_id.as_ref().to_owned()),
+        );
+    }
     if let Some(workspace) = workspace {
         extra.insert("workspace".to_owned(), Value::String(workspace));
     }
@@ -4918,9 +5263,9 @@ mod session_boundary_tests {
         canonical_message_response_with_observation, companion_archive_message,
         cron_session_projection_from_response, delete_cleanup_requires_reconciliation,
         freeze_selected_workspace, frozen_workspace_root, has_selected_workspace,
-        initial_delivery_requested, NomiCoreSessionOwner,
+        initial_delivery_requested, materialize_managed_session_workspace, NomiCoreSessionOwner,
         parse_canonical_autowork_revision, session_projection_revision, ssh_teardown_loss,
-        visible_conversation_execution, workspace_projection_flags,
+        remove_managed_session_workspace, visible_conversation_execution, workspace_projection_flags,
         SELECTED_WORKSPACE_RESOURCE_PREFIX,
     };
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -5241,8 +5586,10 @@ mod session_boundary_tests {
         .unwrap();
 
         assert!(has_selected_workspace(&binding));
+        let managed_root = std::env::temp_dir().join("conversations");
         assert_eq!(
             frozen_workspace_root(
+                &managed_root,
                 OWNER_ID,
                 &AgentSessionId::from(SESSION_ID),
                 &binding,
@@ -5412,20 +5759,28 @@ mod session_boundary_tests {
     }
 
     #[test]
-    fn frozen_workspace_projection_is_exact_and_owner_scoped() {
-        let workspace = std::env::temp_dir().join("uarc-canonical-workspace");
-        let workspace = workspace.to_string_lossy().into_owned();
+    fn frozen_workspace_projection_is_session_isolated_and_owner_scoped() {
+        let work_root = std::env::temp_dir().join("uarc-canonical-work-root");
+        let managed_root = work_root.join("conversations");
+        let workspace = work_root.to_string_lossy().into_owned();
         let session_id = AgentSessionId::from(SESSION_ID);
         assert_eq!(
             frozen_workspace_root(
+                &managed_root,
                 OWNER_ID,
                 &session_id,
                 &frozen_binding(&workspace, OWNER_ID),
             )
             .unwrap(),
-            Some(workspace)
+            Some(
+                managed_root
+                    .join(SESSION_ID)
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
         let error = frozen_workspace_root(
+            &managed_root,
             OWNER_ID,
             &session_id,
             &frozen_binding(
@@ -5442,9 +5797,41 @@ mod session_boundary_tests {
         );
         no_workspace.typed_resource_bindings.clear();
         assert_eq!(
-            frozen_workspace_root(OWNER_ID, &session_id, &no_workspace).unwrap(),
+            frozen_workspace_root(&managed_root, OWNER_ID, &session_id, &no_workspace)
+                .unwrap(),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn managed_workspace_stays_below_data_root_and_cleanup_preserves_data() {
+        let data_root = tempfile::tempdir().unwrap();
+        std::fs::write(data_root.path().join("nomifun-backend.db"), b"database").unwrap();
+        std::fs::write(data_root.path().join("encryption_key"), b"secret").unwrap();
+        let managed_root = data_root.path().join("conversations");
+        let session_id = AgentSessionId::from(SESSION_ID);
+
+        let workspace = std::path::PathBuf::from(
+            materialize_managed_session_workspace(&managed_root, &session_id)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(workspace.parent(), Some(managed_root.as_path()));
+        assert!(workspace.is_dir());
+        assert!(
+            nomifun_file::list_workspace_level(&workspace, ".", None)
+                .unwrap()
+                .is_empty(),
+            "a new managed Session must not expose data-root siblings",
+        );
+
+        std::fs::write(workspace.join("result.txt"), b"owned by Session").unwrap();
+        remove_managed_session_workspace(&managed_root, &session_id)
+            .await
+            .unwrap();
+        assert!(!workspace.exists());
+        assert!(data_root.path().join("nomifun-backend.db").is_file());
+        assert!(data_root.path().join("encryption_key").is_file());
     }
 
     #[test]
@@ -6134,6 +6521,13 @@ impl NomiCoreAgentApiState {
             // Manual risk acceptance is not physical cleanup proof. Do not
             // rewrite the retained unknown outcome as `succeeded`; the durable
             // non-private audit fact is the sole authority allowing deletion.
+            self.session_owner
+                .remove_workspace_for_binding(
+                    owner_id,
+                    &session_id,
+                    &deleting_session.agent_binding,
+                )
+                .await?;
             self.ssh_pool
                 .acknowledge_persisted_agent_session_teardowns(agent_session_id);
             return Ok(());
@@ -6171,6 +6565,13 @@ impl NomiCoreAgentApiState {
             )))?;
         self.ssh_pool
             .acknowledge_persisted_agent_session_teardowns(agent_session_id);
+        self.session_owner
+            .remove_workspace_for_binding(
+                owner_id,
+                &session_id,
+                &deleting_session.agent_binding,
+            )
+            .await?;
         Ok(())
     }
 
@@ -6651,6 +7052,14 @@ impl nomifun_gateway::ConversationCapabilityPort for GatewayAgentSessionCapabili
                 active_capabilities,
                 &format!("gateway-create:{}", Uuid::now_v7()),
                 now_ms(),
+            )
+            .await?;
+        self.state
+            .session_owner
+            .materialize_workspace_for_binding(
+                user_id,
+                &opened.session.agent_session_id,
+                &opened.session.agent_binding,
             )
             .await?;
         self.state
@@ -9777,6 +10186,14 @@ async fn create_nomi_core_agent_session(
         .await?;
     state
         .session_owner
+        .materialize_workspace_for_binding(
+            owner.as_ref(),
+            &opened.session.agent_session_id,
+            &opened.session.agent_binding,
+        )
+        .await?;
+    state
+        .session_owner
         .initialize_idmm_state(opened.session.agent_session_id.as_ref(), idmm_config)
         .await?;
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
@@ -12642,6 +13059,10 @@ async fn warm_nomi_core_agent_session(
         .session_operation_lock(session_id.as_ref())
         .read_owned()
         .await;
+    state
+        .session_owner
+        .materialize_session_workspace(owner.as_ref(), &session_id)
+        .await?;
     let mut projection = state
         .session_owner
         .canonical_conversation_projection(owner.as_ref(), &session_id)
@@ -12656,15 +13077,16 @@ async fn warm_nomi_core_agent_session(
         .and_then(Value::as_str)
         .is_none_or(|workspace| workspace.trim().is_empty())
     {
-        let fallback = state
-            .session_owner
-            .fallback_workspace_root
-            .join(session_id.as_ref());
-        tokio::fs::create_dir_all(&fallback)
-            .await
-            .map_err(|error| AppError::Internal(error.to_string()))?;
-        projection.extra["workspace"] =
-            Value::String(fallback.to_string_lossy().into_owned());
+        let fallback = materialize_managed_session_workspace(
+            &state.session_owner.managed_workspace_root,
+            &session_id,
+        )
+        .await?;
+        projection.extra["workspace"] = Value::String(fallback);
+        projection.extra["custom_workspace"] = Value::Bool(false);
+        projection.extra["is_temporary_workspace"] = Value::Bool(true);
+        projection.extra["temp_workspace_id"] =
+            Value::String(session_id.as_ref().to_owned());
     }
     let (options, _) = runtime_options_from_session(owner.as_ref(), projection, None)?;
     state
@@ -12778,6 +13200,10 @@ async fn browse_nomi_core_agent_session_workspace(
         return Err(AppError::BadRequest("path must not be empty".to_owned()).into());
     }
     let session_id = parse_agent_session_id(&agent_session_id)?;
+    state
+        .session_owner
+        .materialize_session_workspace(owner.as_ref(), &session_id)
+        .await?;
     let projection = state
         .session_owner
         .canonical_conversation_projection(owner.as_ref(), &session_id)
@@ -13155,6 +13581,14 @@ async fn fork_nomi_core_agent_session(
             request.title,
             &operation_id,
             now_ms(),
+        )
+        .await?;
+    state
+        .session_owner
+        .materialize_workspace_for_binding(
+            owner.as_ref(),
+            &fork.child_session.agent_session_id,
+            &fork.child_session.agent_binding,
         )
         .await?;
     state

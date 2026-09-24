@@ -7,6 +7,9 @@ use async_trait::async_trait;
 use nomifun_api_types::AgentBindingValueDto;
 use nomifun_common::AppError;
 
+const DEFAULT_WORKSPACE_RESOURCE_ID: &str = "default-workspace";
+const MANAGED_PROCESS_SESSION_RESOURCE_ID: &str = "managed-process-session";
+
 /// Resolve the single physical workspace root frozen into an Agent binding.
 /// Interactive collaboration and AutoWork both call this authority boundary;
 /// neither may infer a workspace from mutable Conversation metadata or model
@@ -58,6 +61,88 @@ pub fn resolve_frozen_automation_workspace(
     binding: &AgentBindingValueDto,
 ) -> Result<Option<String>, AppError> {
     resolve_frozen_execution_workspace(owner_id, binding)
+}
+
+fn uses_managed_session_workspace(binding: &AgentBindingValueDto) -> bool {
+    let selected_workspace = binding.typed_resource_bindings.iter().any(|resource| {
+        resource.resource_kind == "workspace"
+            && resource.resource_id != DEFAULT_WORKSPACE_RESOURCE_ID
+    });
+    !selected_workspace
+        && binding.typed_resource_bindings.iter().any(|resource| {
+            (resource.resource_kind == "workspace"
+                && resource.resource_id == DEFAULT_WORKSPACE_RESOURCE_ID)
+                || (resource.resource_kind == "process_session"
+                    && resource.resource_id == MANAGED_PROCESS_SESSION_RESOURCE_ID)
+        })
+}
+
+/// Resolve the physical workspace for one concrete AgentSession.
+///
+/// Reusable Agent bindings freeze the installation-owned default resource, not
+/// a shared writable directory. The current host supplies its managed root and
+/// the canonical Session ID selects one isolated child. Explicitly selected
+/// workspaces retain their exact frozen path.
+pub fn resolve_frozen_session_workspace(
+    owner_id: &str,
+    binding: &AgentBindingValueDto,
+    session_id: &str,
+    managed_workspace_root: &Path,
+) -> Result<Option<String>, AppError> {
+    let frozen = resolve_frozen_execution_workspace(owner_id, binding)?;
+    if frozen.is_none() || !uses_managed_session_workspace(binding) {
+        return Ok(frozen);
+    }
+    nomifun_common::validate_uuidv7(session_id).map_err(|error| {
+        AppError::Conflict(format!(
+            "managed Workspace requires a canonical AgentSession UUIDv7: {error}"
+        ))
+    })?;
+    if !managed_workspace_root.is_absolute()
+        || nomifun_common::workspace_path_has_edge_whitespace_segment(managed_workspace_root)
+    {
+        return Err(AppError::Conflict(
+            "managed Workspace root is not a canonical absolute path".to_owned(),
+        ));
+    }
+    Ok(Some(
+        managed_workspace_root
+            .join(session_id)
+            .to_string_lossy()
+            .into_owned(),
+    ))
+}
+
+/// Revalidate a queue/collaboration workspace against the exact physical
+/// Session workspace derived from the frozen resource identity.
+pub fn admit_frozen_session_workspace(
+    owner_id: &str,
+    binding: Option<&AgentBindingValueDto>,
+    session_id: &str,
+    managed_workspace_root: &Path,
+    requested: Option<&str>,
+) -> Result<Option<String>, AppError> {
+    let bound = binding
+        .map(|binding| {
+            resolve_frozen_session_workspace(
+                owner_id,
+                binding,
+                session_id,
+                managed_workspace_root,
+            )
+        })
+        .transpose()?
+        .flatten();
+    if let Some(requested) = requested {
+        validate_workspace_root(requested)?;
+        if bound.as_deref() != Some(requested) {
+            return Err(AppError::Forbidden(
+                "Agent execution workspace is outside the frozen Session resource binding"
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(bound)
 }
 
 /// Revalidate a queue-supplied workspace against the same frozen binding used
@@ -216,7 +301,10 @@ mod tests {
         TypedResourceBindingDto,
     };
 
-    use super::resolve_frozen_automation_workspace;
+    use super::{
+        admit_frozen_session_workspace, resolve_frozen_automation_workspace,
+        resolve_frozen_session_workspace,
+    };
 
     fn binding(resources: Vec<TypedResourceBindingDto>) -> AgentBindingValueDto {
         AgentBindingValueDto {
@@ -287,6 +375,56 @@ mod tests {
                 &binding(vec![resource("process_session", "owner", None)]),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn managed_default_resolves_to_one_isolated_session_child() {
+        const SESSION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000031";
+        let work_root = std::env::temp_dir().join("nomifun-managed-work-root");
+        let managed_root = work_root.join("conversations");
+        let frozen_root = work_root.to_string_lossy().into_owned();
+        let mut workspace = resource("workspace", "owner", Some(&frozen_root));
+        workspace.resource_id = "default-workspace".to_owned();
+        let mut process = resource("process_session", "owner", Some(&frozen_root));
+        process.resource_id = "managed-process-session".to_owned();
+        let binding = binding(vec![workspace, process]);
+        let expected = managed_root
+            .join(SESSION_ID)
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            resolve_frozen_session_workspace(
+                "owner",
+                &binding,
+                SESSION_ID,
+                &managed_root,
+            )
+            .unwrap(),
+            Some(expected.clone()),
+        );
+        assert_eq!(
+            admit_frozen_session_workspace(
+                "owner",
+                Some(&binding),
+                SESSION_ID,
+                &managed_root,
+                Some(&expected),
+            )
+            .unwrap(),
+            Some(expected),
+        );
+        assert!(
+            admit_frozen_session_workspace(
+                "owner",
+                Some(&binding),
+                SESSION_ID,
+                &managed_root,
+                Some(&frozen_root),
+            )
+            .is_err(),
+            "the shared installation root must never be admitted as a Session workspace",
         );
     }
 }

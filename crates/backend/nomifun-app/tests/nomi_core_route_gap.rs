@@ -3208,6 +3208,12 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         (status, serde_json::from_slice(&bytes).unwrap())
     }
     let (router, services) = common::build_local_trust_app(TRUST).await;
+    fs::create_dir_all(&services.work_dir).unwrap();
+    fs::write(
+        services.work_dir.join("work-root-must-not-leak.txt"),
+        b"installation-owned",
+    )
+    .unwrap();
     create_chat_provider(&router, TRUST, "Primary model fixture", "primary-chat", 0).await;
     create_chat_provider(&router, TRUST, "Fallback model fixture", "fallback-chat", 1).await;
     let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
@@ -3228,6 +3234,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     assert!(alternate["model"].is_string());
     let selection = json!({ "provider_id": alternate["provider_id"], "model": alternate["model"] });
     let mut sessions = Vec::new();
+    let mut session_ids = Vec::new();
+    let mut session_workspaces = Vec::new();
     for _ in 0..2 {
         let (status, result) = call(router.clone(), "POST", "/api/agent-sessions", json!({
             "preset_id": preset_id, "title": "Chosen model", "model": selection,
@@ -3252,6 +3260,32 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
             projection["data"]["extra"]["is_temporary_workspace"],
             true,
             "the default-workspace resource must survive projection as a Nomi-managed workpath"
+        );
+        assert_eq!(projection["data"]["extra"]["temp_workspace_id"], id);
+        let workspace = PathBuf::from(
+            projection["data"]["extra"]["workspace"]
+                .as_str()
+                .expect("managed workspace path"),
+        );
+        assert_eq!(
+            workspace.parent(),
+            Some(services.work_dir.join("conversations").as_path()),
+        );
+        assert_eq!(workspace.file_name().and_then(|name| name.to_str()), Some(id));
+        assert!(workspace.is_dir(), "managed workspace must exist at Session creation");
+        let (status, listing) = call(
+            router.clone(),
+            "GET",
+            &format!("/api/agent-sessions/{id}/workspace?path=."),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{listing}");
+        assert!(
+            listing["data"].as_array().is_some_and(|entries| entries.iter().all(|entry|
+                entry["name"] != "work-root-must-not-leak.txt"
+            )),
+            "a managed Session listing must not expose siblings from the installation work root",
         );
         if sessions.is_empty() {
             let original_workspace = projection["data"]["extra"]["workspace"].clone();
@@ -3301,6 +3335,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
             .await;
             assert_eq!(status, StatusCode::OK, "{disabled}");
         }
+        session_ids.push(id.to_owned());
+        session_workspaces.push(workspace);
         let variant = binding["preset_revision_ref"]["preset_id"].as_str().unwrap();
         let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{variant}/editor"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
@@ -3317,6 +3353,103 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         sessions[0]["typed_resource_bindings"],
         sessions[1]["typed_resource_bindings"],
         "same model resolves the same owner-scoped resources"
+    );
+    assert_ne!(
+        session_workspaces[0], session_workspaces[1],
+        "default Sessions must never share one writable workspace",
+    );
+    let (status, fork) = call(
+        router.clone(),
+        "POST",
+        &format!("/api/agent-sessions/{}/forks", session_ids[1]),
+        json!({
+            "target_agent_binding": sessions[1],
+            "parent_through_seq": 0,
+            "title": "Isolated child",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{fork}");
+    let child_id = fork["data"]["child_agent_session_id"]
+        .as_str()
+        .expect("fork child Session id");
+    let (status, child_projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{child_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{child_projection}");
+    let child_workspace = PathBuf::from(
+        child_projection["data"]["extra"]["workspace"]
+            .as_str()
+            .expect("fork child workspace"),
+    );
+    assert!(child_workspace.is_dir(), "fork must materialize its workspace before returning");
+    assert_ne!(
+        child_workspace, session_workspaces[1],
+        "a fork of a managed Session must receive its own writable workspace",
+    );
+    let (status, deleted) = call(
+        router.clone(),
+        "DELETE",
+        &format!("/api/agent-sessions/{}", session_ids[0]),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{deleted}");
+    assert!(!session_workspaces[0].exists(), "delete must reclaim only its managed workspace");
+    assert!(session_workspaces[1].is_dir(), "deleting one Session must preserve its sibling");
+    let custom_workspace = services
+        .work_dir
+        .parent()
+        .expect("test work root parent")
+        .join("user-selected-project");
+    fs::create_dir_all(&custom_workspace).unwrap();
+    fs::write(custom_workspace.join("keep.txt"), b"user-owned").unwrap();
+    let (status, custom) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({
+            "preset_id": preset_id,
+            "title": "Custom workspace",
+            "model": selection,
+            "resource_selections": [{ "resource_kind": "workspace", "resource_id": "default-workspace" }],
+            "workspace": custom_workspace.to_string_lossy(),
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{custom}");
+    let custom_id = custom["data"]["agent_session_id"]
+        .as_str()
+        .expect("custom Session id");
+    let (status, custom_projection) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{custom_id}/projection"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{custom_projection}");
+    assert_eq!(custom_projection["data"]["extra"]["custom_workspace"], true);
+    assert_eq!(
+        custom_projection["data"]["extra"]["is_temporary_workspace"],
+        false,
+    );
+    let (status, custom_deleted) = call(
+        router.clone(),
+        "DELETE",
+        &format!("/api/agent-sessions/{custom_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{custom_deleted}");
+    assert_eq!(
+        fs::read_to_string(custom_workspace.join("keep.txt")).unwrap(),
+        "user-owned",
+        "Session deletion must never reclaim a user-selected workspace",
     );
     let (_, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{preset_id}/editor"), json!({})).await;
     assert_eq!(reloaded["data"]["revision"], original["revision"]);
