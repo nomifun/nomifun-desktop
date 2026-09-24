@@ -131,7 +131,11 @@ test('keeps model selection on the left and reasoning control on the right', asy
     <ReasoningPicker />
   </SWRConfig></MemoryRouter></I18nextProvider>);
 
-  const controls = within(page.getByTestId('chat-model-selector-controls')).getAllByRole('button');
+  const controlGroup = page.getByTestId('chat-model-selector-controls');
+  const controls = within(controlGroup).getAllByRole('button');
+  expect(controlGroup.classList.contains('sendbox-model-reasoning-group')).toBe(true);
+  expect(controls[0]?.classList.contains('sendbox-model-segment')).toBe(true);
+  expect(controls[1]?.classList.contains('sendbox-reasoning-segment')).toBe(true);
   expect(controls.map(button => button.getAttribute('aria-label'))).toEqual([
     '对话模型',
     '本会话思考深度: 自动',

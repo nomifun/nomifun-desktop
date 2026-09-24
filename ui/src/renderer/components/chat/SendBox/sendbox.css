@@ -192,6 +192,60 @@
   color: var(--text-primary) !important;
 }
 
+/* Model and per-session reasoning form one compound control. Each segment
+ * keeps its own dropdown while sharing one surface, scale and focus language. */
+.sendbox-model-reasoning-group {
+  display: inline-flex;
+  align-items: stretch;
+  height: 28px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-fill-1) 76%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-border-2) 64%, transparent);
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment {
+  height: 28px;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment {
+  padding-inline: 10px 8px !important;
+}
+
+.sendbox-model-reasoning-group .sendbox-reasoning-segment {
+  position: relative;
+  min-width: 52px;
+  padding-inline: 9px 8px !important;
+}
+
+.sendbox-model-reasoning-group .sendbox-reasoning-segment::before {
+  content: '';
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  left: 0;
+  width: 1px;
+  background: var(--color-border-2);
+  pointer-events: none;
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment:hover,
+.sendbox-model-reasoning-group .sendbox-model-segment:active,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment:hover,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment:active {
+  background: var(--color-fill-2) !important;
+  color: var(--text-primary) !important;
+}
+
+.sendbox-model-reasoning-group .sendbox-model-segment:focus-visible,
+.sendbox-model-reasoning-group .sendbox-reasoning-segment:focus-visible {
+  box-shadow: inset 0 0 0 1px rgb(var(--primary-6)) !important;
+}
+
 /* The unified collaboration pill keeps the former policy control's enabled
  * affordance even though it now shares the generic model-pill surface. */
 .sendbox-actions .nomi-sendbox-collaboration-btn[aria-pressed='true'],
