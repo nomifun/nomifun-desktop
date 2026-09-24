@@ -49,9 +49,16 @@ impl LegacyStream {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return Err(McpOwnerError::credential_required(response.headers()));
         }
-        if response.status() != reqwest::StatusCode::OK || response.url() != &base {
+        if response.status() != reqwest::StatusCode::OK {
+            let status = response.status();
+            return Err(McpOwnerError::http_error(
+                status,
+                format!("MCP legacy SSE server returned HTTP {}", status.as_u16()),
+            ));
+        }
+        if response.url() != &base {
             return Err(McpOwnerError::connection_failed(
-                "MCP legacy SSE requires HTTP 200 without redirects",
+                "MCP legacy SSE requires a connection without redirects",
             ));
         }
         let mime = response
@@ -164,8 +171,13 @@ pub(super) async fn accept_ack(mut response: reqwest::Response) -> Result<(), Mc
         return Err(McpOwnerError::credential_required(response.headers()));
     }
     if response.status() != reqwest::StatusCode::ACCEPTED {
-        return Err(McpOwnerError::protocol_failed(
-            "MCP legacy message endpoint must acknowledge with HTTP 202",
+        let status = response.status();
+        return Err(McpOwnerError::http_error(
+            status,
+            format!(
+                "MCP legacy message endpoint returned HTTP {} instead of 202",
+                status.as_u16()
+            ),
         ));
     }
     let mut bytes = 0usize;

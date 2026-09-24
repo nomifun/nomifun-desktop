@@ -3,7 +3,7 @@ import CopyIconButton from '@/renderer/components/base/CopyIconButton';
 import { normalizeTestId } from './skillPresentation';
 import { marketSourceLabel, translateMarketDescription } from './skillMarket';
 import { Button, Tag } from '@arco-design/web-react';
-import { Plus } from '@icon-park/react';
+import { Plus, Refresh } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -13,6 +13,8 @@ type SkillMarketCardProps = {
   adding: boolean;
   added: boolean;
   addedStateLoading: boolean;
+  addedActionEnabled?: boolean;
+  addedActionLabel?: string;
   onAdd: (item: ISkillMarketItem) => void;
 };
 
@@ -46,6 +48,8 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
   adding,
   added,
   addedStateLoading,
+  addedActionEnabled = false,
+  addedActionLabel,
   onAdd,
 }) => {
   const { t } = useTranslation();
@@ -56,6 +60,7 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
   const visibleRawTags = rawTags.slice(0, MAX_VISIBLE_TAGS);
   const overflowCount = Math.max(0, rawTags.length - MAX_VISIBLE_TAGS);
   const description = translateMarketDescription(item.description, item, localeKey);
+  const actionEnabled = !added || addedActionEnabled;
 
   return (
     <div
@@ -78,13 +83,15 @@ const SkillMarketCard: React.FC<SkillMarketCardProps> = ({
           type='secondary'
           data-testid={`btn-add-market-skill-${testId}`}
           className='!shrink-0 !rounded-[100px] !h-26px !px-10px !text-12px !font-medium !border !border-solid !border-[var(--color-border-2)] !bg-[var(--color-fill-2)] !text-[var(--color-text-1)] !shadow-none hover:!border-[var(--color-border-3)] hover:!bg-[var(--color-fill-3)] hover:!text-[var(--color-text-1)]'
-          icon={added ? undefined : <Plus theme='outline' size={12} strokeWidth={3} />}
+          icon={added ? (addedActionEnabled ? <Refresh size={12} /> : undefined) : <Plus theme='outline' size={12} strokeWidth={3} />}
           loading={adding}
-          disabled={adding || added || addedStateLoading}
+          disabled={adding || !actionEnabled || addedStateLoading}
           onClick={() => onAdd(item)}
         >
           {added
-            ? t('common.added', { defaultValue: 'Added' })
+            ? (addedActionEnabled
+                ? (addedActionLabel ?? t('common.refresh', { defaultValue: 'Refresh' }))
+                : t('common.added', { defaultValue: 'Added' }))
             : t('common.add', { defaultValue: 'Add' })}
         </Button>
       </div>

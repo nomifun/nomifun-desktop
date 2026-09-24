@@ -39,6 +39,53 @@ timeout, HTTP, RPC, and protocol errors.
 
 OAuth-backed HTTP/SSE servers use the `/api/mcp/oauth/*` flow.
 
+The canonical owner currently supports Streamable HTTP/stdio at `2025-03-26`
+and explicit legacy SSE at `2024-11-05`. It does not silently convert between
+transports and does not yet claim the `2026-07-28` `server/discover` lifecycle
+without `initialize`; a server that only supports that lifecycle returns a
+typed protocol error. That is a separate owner and security-model migration,
+not part of market configuration import.
+
+### MCP market boundary
+
+The MCP market is a **configuration catalog**, not a package manager. When an
+entry is added, NomiFun ranks the configuration examples in its market
+documentation (preferring portable `npx`/`uvx` launchers and HTTPS over Docker,
+global commands, or placeholder endpoints), normalizes common forms such as
+`streamableHttp` and `baseUrl`, and imports the result disabled. It does not
+install Node.js, Docker, Python/uv, browser drivers, complete third-party login,
+or create API keys.
+
+The confirmation screen shows the actual command, arguments, URL, env/header
+keys, and fields that still need values. A server containing `${...}`, `<...>`,
+`xxxxx`, `YOUR_*`, or similar placeholders cannot be tested until those fields
+are completed, preventing template URLs from being contacted or unconfigured
+processes from being launched. Failed entries previously imported from the
+market expose a **Repair config** action; replacements are reviewed again and
+remain disabled.
+
+A connection test only proves that the configuration completed the MCP
+handshake and `tools/list` at that moment; it is not a live presence signal.
+Failures distinguish missing runtimes, HTTP status, timeout, RPC, and protocol
+errors. URL-based servers enter the OAuth flow only after an explicit OAuth
+Bearer challenge, so API-key/header configurations are not treated as OAuth.
+
+Portable package runners (`npx`, `bunx`, `uvx`, and equivalent launcher
+forms) get a separate 120-second first-run bootstrap budget during a manual
+test; ordinary MCP handshakes keep the 30-second budget. Stdio children receive
+only proxy-related variables from the parent or detected system proxy through
+the shared proxy policy (including its stale loopback-proxy guard), while API
+tokens and unrelated parent environment remain isolated. Raw child stderr is
+never returned or logged: it is drained and
+reduced to non-secret categories such as package-not-found, download/network,
+missing dependency, missing configuration, permission, or early process exit.
+
+An HTTP URL on `localhost` is only a client connection descriptor. NomiFun does
+not start the referenced application or Docker container. A failed local probe
+therefore reports the host and port and asks the user to start that prerequisite
+service; it no longer presents every runtime or service failure as malformed
+MCP JSON.
+
 ## Importing and Syncing Agent Configs
 
 `GET /api/mcp/agent-configs` detects MCP config files from supported local agent

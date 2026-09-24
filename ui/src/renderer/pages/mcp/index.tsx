@@ -30,6 +30,7 @@ const McpPage: React.FC = () => {
     saveMcpServers,
     setMcpServers,
   } = useMcpServers();
+  const [headerActionHost, setHeaderActionHost] = React.useState<HTMLDivElement | null>(null);
   const tabParam = searchParams.get('tab');
   const activeTab: McpTab = isMcpTab(tabParam) ? tabParam : 'servers';
 
@@ -48,6 +49,11 @@ const McpPage: React.FC = () => {
         defaultValue: 'Register MCP servers, browse MCP markets, and manage plugins.',
       })}
       maxWidthClass='md:max-w-1200px'
+      actions={
+        activeTab === 'servers' ? (
+          <div ref={setHeaderActionHost} data-testid='mcp-page-header-actions' />
+        ) : undefined
+      }
     >
       <Tabs
         activeTab={activeTab}
@@ -70,6 +76,7 @@ const McpPage: React.FC = () => {
               mcpServers={mcpServers}
               saveMcpServers={saveMcpServers}
               setMcpServers={setMcpServers}
+              headerActionHost={activeTab === 'servers' ? headerActionHost : null}
             />
           )}
         </Tabs.TabPane>

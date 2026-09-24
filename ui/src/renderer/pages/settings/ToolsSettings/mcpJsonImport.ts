@@ -45,6 +45,38 @@ const toStringRecord = (value: unknown): Record<string, string> | undefined => {
   return Object.fromEntries(entries) as Record<string, string>;
 };
 
+const configValue = (
+  transportConfig: Record<string, unknown>,
+  config: Record<string, unknown>,
+  keys: string[]
+): unknown => {
+  for (const key of keys) {
+    if (hasOwn(transportConfig, key)) return transportConfig[key];
+  }
+  for (const key of keys) {
+    if (hasOwn(config, key)) return config[key];
+  }
+  return undefined;
+};
+
+const normalizeTransportType = (value: unknown): IMcpServerTransport['type'] | undefined | null => {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || !value.trim()) return null;
+
+  switch (value.trim().toLowerCase().replace(/[\s_-]/g, '')) {
+    case 'stdio':
+      return 'stdio';
+    case 'sse':
+      return 'sse';
+    case 'http':
+      return 'http';
+    case 'streamablehttp':
+      return 'streamable_http';
+    default:
+      return null;
+  }
+};
+
 const normalizeArgs = (value: unknown): string[] | undefined => {
   if (value === undefined) return [];
   if (typeof value === 'string') return [value];
@@ -53,7 +85,21 @@ const normalizeArgs = (value: unknown): string[] | undefined => {
 };
 
 const looksLikeBareServer = (value: Record<string, unknown>): boolean =>
-  ['command', 'args', 'env', 'url', 'headers', 'type', 'transport', 'description'].some((key) => hasOwn(value, key));
+  [
+    'command',
+    'args',
+    'env',
+    'url',
+    'baseUrl',
+    'base_url',
+    'endpoint',
+    'serverUrl',
+    'server_url',
+    'headers',
+    'type',
+    'transport',
+    'description',
+  ].some((key) => hasOwn(value, key));
 
 const normalizeArrayServer = (
   serverItem: unknown
@@ -79,16 +125,26 @@ const parseTransport = (
   const transportObject = isRecord(config.transport) ? config.transport : undefined;
   const transportConfig = transportObject ?? config;
   const typeFromTransport = transportObject?.type ?? config.transport;
-  const transportType = stringOrUndefined(config.type ?? typeFromTransport);
+  const transportType = normalizeTransportType(config.type ?? typeFromTransport);
+
+  if (transportType === null) {
+    return { isValid: false, errorKey: 'settings.mcpJsonFormatError' };
+  }
 
   if (hasOwn(transportConfig, 'command') || transportType === 'stdio') {
-    const command = nonEmptyString(transportConfig.command);
+    const command = nonEmptyString(configValue(transportConfig, config, ['command']));
     if (!command) {
       return { isValid: false, errorKey: 'settings.mcpJsonStdioCommandRequiredError' };
     }
 
-    const args = normalizeArgs(transportConfig.args);
+    const args = normalizeArgs(configValue(transportConfig, config, ['args']));
     if (!args) {
+      return { isValid: false, errorKey: 'settings.mcpJsonFormatError' };
+    }
+
+    const rawEnv = configValue(transportConfig, config, ['env']);
+    const env = rawEnv === undefined ? {} : toStringRecord(rawEnv);
+    if (!env) {
       return { isValid: false, errorKey: 'settings.mcpJsonFormatError' };
     }
 
@@ -98,23 +154,31 @@ const parseTransport = (
         type: 'stdio',
         command,
         args,
-        env: toStringRecord(transportConfig.env) ?? {},
+        env,
       },
     };
   }
 
-  const url = nonEmptyString(transportConfig.url ?? config.url);
+  const url = nonEmptyString(
+    configValue(transportConfig, config, ['url', 'baseUrl', 'base_url', 'endpoint', 'serverUrl', 'server_url'])
+  );
   if (!url) {
     return { isValid: false, errorKey: 'settings.mcpJsonUrlRequiredError' };
   }
 
-  const normalizedType = transportType === 'sse' || url.includes('/sse') ? 'sse' : 'http';
+  const rawHeaders = configValue(transportConfig, config, ['headers']);
+  const headers = rawHeaders === undefined ? undefined : toStringRecord(rawHeaders);
+  if (rawHeaders !== undefined && !headers) {
+    return { isValid: false, errorKey: 'settings.mcpJsonFormatError' };
+  }
+
+  const normalizedType = transportType ?? (url.toLowerCase().includes('/sse') ? 'sse' : 'http');
   return {
     isValid: true,
     transport: {
       type: normalizedType,
       url,
-      headers: toStringRecord(transportConfig.headers ?? config.headers),
+      headers,
     },
   };
 };

@@ -1,7 +1,8 @@
 import type { IMcpServerTransport } from '@/common/config/storage';
 
 const SENSITIVE_FIELD = /(api[_ -]?key|token|secret|password|authorization|bearer)/i;
-const PLACEHOLDER_VALUE = /(\$\{[^}]+}|<[^>]+>|your[_ -]?[a-z0-9_ -]*(key|token|secret|password)|api[_ -]?key|token here|secret here|appbuilder api key)/i;
+const PLACEHOLDER_VALUE = /(\$\{[^}]+}|<[^>]+>|x{4,}|\*{4,}|(?:your|replace|insert)[_ -]+[a-z0-9_ -]+|token here|secret here|appbuilder api key|change[_ -]?me|redacted)/i;
+const PLACEHOLDER_LABEL = /^(api[_ -]?key|token|secret|password)$/i;
 const WHOLE_URL_PLACEHOLDER = /^(\$\{[^}]+}|<[^>]+>|your[_ -]?[a-z0-9_ -]*(url|endpoint|server)|mcp[_ -]?url|server[_ -]?url)$/i;
 const API_KEY_URL_BY_HOST: Record<string, string> = {
   'appbuilder.baidu.com': 'https://appbuilder.baidu.com/console',
@@ -10,7 +11,7 @@ const API_KEY_URL_BY_HOST: Record<string, string> = {
 const isPlaceholderValue = (value: string): boolean => {
   const trimmed = value.trim();
   if (!trimmed) return true;
-  return PLACEHOLDER_VALUE.test(trimmed);
+  return PLACEHOLDER_VALUE.test(trimmed) || PLACEHOLDER_LABEL.test(trimmed);
 };
 
 const addField = (fields: Set<string>, field: string) => {
@@ -20,10 +21,7 @@ const addField = (fields: Set<string>, field: string) => {
 const scanStringRecord = (fields: Set<string>, prefix: string, record: Record<string, string> | undefined) => {
   if (!record) return;
   for (const [key, value] of Object.entries(record)) {
-    if (SENSITIVE_FIELD.test(key) && isPlaceholderValue(value)) {
-      addField(fields, `${prefix}.${key}`);
-    }
-    if (SENSITIVE_FIELD.test(value) && isPlaceholderValue(value)) {
+    if (isPlaceholderValue(value)) {
       addField(fields, `${prefix}.${key}`);
     }
   }
@@ -57,19 +55,32 @@ const scanUrl = (fields: Set<string>, url: string | undefined) => {
 
   try {
     const parsed = new URL(url);
+    if (isPlaceholderValue(`${parsed.hostname}${parsed.pathname}${parsed.hash}`)) {
+      addField(fields, 'url');
+    }
     for (const [key, value] of parsed.searchParams.entries()) {
-      if (SENSITIVE_FIELD.test(key) && isPlaceholderValue(value)) {
+      if (isPlaceholderValue(value)) {
         addField(fields, `url.${key}`);
       }
     }
   } catch {
-    // URL validity is handled by MCP import/edit validation.
+    if (isPlaceholderValue(url)) {
+      addField(fields, 'url');
+    }
   }
 };
 
 export const getMcpConfigurationFields = (transport: IMcpServerTransport): string[] => {
   const fields = new Set<string>();
   if (transport.type === 'stdio') {
+    if (isPlaceholderValue(transport.command)) {
+      addField(fields, 'command');
+    }
+    for (const [index, arg] of (transport.args ?? []).entries()) {
+      if (isPlaceholderValue(arg)) {
+        addField(fields, `args.${index}`);
+      }
+    }
     scanStringRecord(fields, 'env', transport.env);
     return [...fields];
   }

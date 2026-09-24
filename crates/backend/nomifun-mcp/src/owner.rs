@@ -63,6 +63,7 @@ pub struct McpOwnerError {
     code: String,
     message: String,
     authentication_challenge: Option<String>,
+    http_status: Option<u16>,
 }
 
 impl McpOwnerError {
@@ -72,6 +73,7 @@ impl McpOwnerError {
             code: code.into(),
             message: sanitize_diagnostic(&message),
             authentication_challenge: None,
+            http_status: None,
         }
     }
 
@@ -85,6 +87,10 @@ impl McpOwnerError {
 
     pub(crate) fn authentication_challenge(&self) -> Option<&str> {
         self.authentication_challenge.as_deref()
+    }
+
+    pub(crate) fn http_status(&self) -> Option<u16> {
+        self.http_status
     }
 
     fn credential_required(headers: &reqwest::header::HeaderMap) -> Self {
@@ -102,6 +108,12 @@ impl McpOwnerError {
 
     fn connection_failed(message: impl Into<String>) -> Self {
         Self::new("MCP_CONNECTION_FAILED", message)
+    }
+
+    fn http_error(status: reqwest::StatusCode, message: impl Into<String>) -> Self {
+        let mut error = Self::new("MCP_HTTP_ERROR", message);
+        error.http_status = Some(status.as_u16());
+        error
     }
 
     fn protocol_failed(message: impl Into<String>) -> Self {
@@ -1017,8 +1029,8 @@ impl McpSession {
             return Err(McpOwnerError::credential_required(response.headers()));
         }
         if status != reqwest::StatusCode::ACCEPTED {
-            return Err(McpOwnerError::new(
-                "MCP_HTTP_ERROR",
+            return Err(McpOwnerError::http_error(
+                status,
                 format!(
                     "MCP server returned HTTP {} instead of an empty 202 acknowledgment",
                     status.as_u16()
@@ -1216,8 +1228,8 @@ async fn parse_response(
     }
     if !status.is_success() {
         let _ = drain_response_body(response).await;
-        return Err(McpOwnerError::new(
-            "MCP_HTTP_ERROR",
+        return Err(McpOwnerError::http_error(
+            status,
             format!("MCP server returned HTTP {}", status.as_u16()),
         ));
     }
