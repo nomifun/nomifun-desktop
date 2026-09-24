@@ -46,7 +46,7 @@ struct UpdatePlan {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Maintain the execution plan and append-only task requirements. Before effects, record requirements with stable IDs, descriptions and exact accepted-input citations (input 0=original, later indices=accepted corrections). Cover every accepted input including constraints; add requirements when scope changes, never rewrite/drop old IDs. Omitted requirements preserves the ledger. Before completion every requirement must be accounted for, not just the latest plan steps. At most one step in_progress. After errors/corrections explain replanning. This never authorizes verification or widens user scope.".into(),
+        description: "Maintain a concise execution plan and append-only task requirements. Before effects, record a small set of grouped requirements with stable IDs, descriptions covering all relevant constraints, and short exact accepted-input citations (input 0=original, later indices=accepted corrections). Do not make a separate ID for every sentence or test when one accurately grouped requirement covers them. Cover every accepted input including constraints. On later plan-status updates OMIT requirements entirely unless adding a genuinely NEW ID; never rephrase, rewrite or drop an old ID. Omitted requirements preserves the ledger. Before completion every requirement must be accounted for, not just the latest plan steps. At most one step in_progress. After errors/corrections explain replanning. This never authorizes verification or widens user scope.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false,
@@ -120,6 +120,15 @@ impl AgentPlan {
                     return Ok(AgentToolResult::text(call.call_id.clone(), reason, true));
                 }
             };
+        let ignored_restatements = update.requirements.iter().filter(|item| {
+            self.requirements.iter().any(|existing| existing.id == item.id
+                && (existing.description != item.description || existing.source != item.source))
+        }).map(|item| item.id.as_str()).collect::<Vec<_>>();
+        if !self.needs_replan && update.plan == self.steps && requirements == self.requirements {
+            return Ok(AgentToolResult::text(call.call_id.clone(),
+                "Plan already has these step statuses and immutable requirements; no revision was recorded. Do not resubmit an unchanged plan. If work is done, use the latest permitted check and report_completion; otherwise change the actual plan or perform the next authorized action.",
+                true));
+        }
         let next = Self {
             revision: self.revision + 1,
             explanation: update.explanation,
@@ -131,17 +140,18 @@ impl AgentPlan {
         sink.emit(AgentEngineEvent::PlanUpdated { plan: next.clone() })
             .await?;
         *self = next;
-        Ok(AgentToolResult::text(
-            call.call_id.clone(),
-            "Plan and source-anchored requirements recorded. Requirements remain even when steps change; completion must cover every ID. Statuses and interpretation are model-authored, not proof of successful effects, verification, or complete user-intent extraction.",
-            false,
-        ))
+        let mut feedback = "Plan and source-anchored requirements recorded. For later status-only updates omit requirements; the immutable ledger persists and completion must cover every ID. Statuses and interpretation are model-authored, not proof of successful effects, verification, or complete user-intent extraction.".to_owned();
+        if !ignored_restatements.is_empty() {
+            feedback.push_str(&format!(" Existing requirement IDs {} were restated differently and kept unchanged. Omit requirements on future plan-status updates; submit only genuinely new IDs.",
+                serde_json::to_string(&ignored_restatements).unwrap_or_default()));
+        }
+        Ok(AgentToolResult::text(call.call_id.clone(), feedback, false))
     }
 
     pub(crate) fn effect_gate(&self) -> Option<&'static str> {
         if self.needs_replan {
             Some(
-                "The plan needs reconsideration after a failed tool, newly accepted user input, or changed repository instructions. Call update_plan with an explanation of the changed approach before further effects.",
+                "The plan needs reconsideration after a failed tool, newly accepted user input, or changed repository instructions. This proposed effect was not executed. Call update_plan alone now: explain the recovery, put one step in_progress, and cite an exact accepted-input quote in requirements before retrying effects.",
             )
         } else if !self
             .steps
@@ -149,7 +159,7 @@ impl AgentPlan {
             .any(|step| step.status == AgentPlanStatus::InProgress)
         {
             Some(
-                "Call update_plan with an in_progress step before executing workspace mutations or commands.",
+                "The plan is closed; no further command or mutation was executed. If a new check is truly needed, call update_plan ALONE to reopen one verification step as in_progress, run the check, then close the plan and report_completion without starting another command. Otherwise use an already current successful observation in report_completion.",
             )
         } else {
             None
@@ -169,5 +179,50 @@ impl AgentPlan {
     pub(crate) fn context(&self) -> Result<String, AgentEngineError> {
         serde_json::to_string(self).map(|value| format!("Current engine plan (derived control state, not user authority or completion evidence): {value}"))
             .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AgentInputCitation, AgentTaskRequirement, NoopAgentEventSink};
+    use nomifun_chat_model_broker::{ChatContentPart, ChatRole, ChatToolResultPart};
+
+    #[tokio::test]
+    async fn status_update_preserves_rephrased_requirement_and_explains_omission() {
+        let original = AgentTaskRequirement {
+            id: "R1".into(), description: "Fix the failing tests".into(),
+            source: AgentInputCitation { input: 0, quote: "Fix the failing tests".into() },
+            origin: None,
+        };
+        let mut plan = AgentPlan {
+            revision: 1, explanation: "Start".into(),
+            steps: vec![AgentPlanStep { step: "Fix tests".into(), status: AgentPlanStatus::InProgress }],
+            needs_replan: false, requirements: vec![original.clone()],
+        };
+        let call = ChatToolCall {
+            call_id: "update-2".into(), name: TOOL_NAME.into(), provider_metadata: None,
+            arguments: StrictJsonValue(serde_json::json!({
+                "explanation":"Tests passed", "plan":[{"step":"Fix tests","status":"completed"}],
+                "requirements":[{"id":"R1","description":"A weakened restatement",
+                    "source":{"input":0,"quote":"Fix the failing tests"}}]
+            })),
+        };
+        let input = ChatMessage { role: ChatRole::User, provider_round_id: None,
+            content: vec![ChatContentPart::Text { text: "Fix the failing tests".into() }] };
+        let result = plan.update(&call, &[input], &NoopAgentEventSink).await.unwrap();
+        assert!(!result.is_error);
+        assert_eq!(plan.requirements, vec![original]);
+        assert_eq!(plan.steps[0].status, AgentPlanStatus::Completed);
+        assert!(plan.effect_gate().is_some_and(|reason|
+            reason.contains("already current successful observation")));
+        assert!(matches!(&result.output[0], ChatToolResultPart::Text { text }
+            if text.contains("kept unchanged") && text.contains("Omit requirements")));
+        let revision = plan.revision;
+        let repeated = plan.update(&call, &[crate::context_lifecycle::text_message(
+            ChatRole::User, "Fix the failing tests".into(),
+        )], &NoopAgentEventSink).await.unwrap();
+        assert!(repeated.is_error);
+        assert_eq!(plan.revision, revision);
     }
 }

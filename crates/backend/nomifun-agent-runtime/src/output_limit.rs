@@ -5,6 +5,8 @@ use nomifun_chat_model_broker::{
     ChatContentPart, ChatMessage, ChatModelRequest, ChatRole, ToolCallId,
 };
 
+// Bound consecutive truncated model steps. A later complete step establishes
+// a new safe boundary and must not consume this recovery budget forever.
 const MAX_CONTINUATIONS: u8 = 2;
 
 #[derive(Default)]
@@ -19,6 +21,26 @@ impl OutputLimitRecovery {
         }
         self.continued += 1;
         true
+    }
+
+    pub(crate) fn observe_complete_step(&mut self) {
+        self.continued = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn isolated_later_truncation_gets_a_fresh_bounded_recovery_window() {
+        let mut recovery = OutputLimitRecovery::default();
+        assert!(recovery.admit(true));
+        assert!(recovery.admit(true));
+        assert!(!recovery.admit(true));
+        recovery.observe_complete_step();
+        assert!(recovery.admit(true));
+        assert!(!recovery.admit(false));
     }
 }
 

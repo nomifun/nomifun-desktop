@@ -13,6 +13,9 @@ Usage:
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Browser
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BeforeToolSmoke
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -CodingSmoke
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -GameSmoke
+  powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -LongCodingSmoke
   powershell.exe -NoLogo -NoProfile -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -BrowserGui -DataDir C:/new-disposable-gui-data
   powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/validation/run-nomi-core-live-provider-from-windows-credential-manager.ps1 -Delete
 #>
@@ -25,6 +28,9 @@ param(
   [switch]$BrowserGui,
   [switch]$ModelSmoke,
   [switch]$BeforeToolSmoke,
+  [switch]$CodingSmoke,
+  [switch]$GameSmoke,
+  [switch]$LongCodingSmoke,
   [string]$DataDir,
   [string]$TargetName = 'NomiFun/StepFun/LiveProvider'
 )
@@ -34,8 +40,8 @@ $ErrorActionPreference = 'Stop'
 if ($Setup -and $Delete) {
   throw 'Setup and Delete cannot be used together.'
 }
-if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke).Where({ [bool]$_ }).Count -gt 1) {
-  throw 'Browser, BrowserGui, ModelSmoke, and BeforeToolSmoke are mutually exclusive.'
+if (@($Browser, $BrowserGui, $ModelSmoke, $BeforeToolSmoke, $CodingSmoke, $GameSmoke, $LongCodingSmoke).Where({ [bool]$_ }).Count -gt 1) {
+  throw 'Smoke modes are mutually exclusive.'
 }
 if ($BrowserGui -and ([string]::IsNullOrWhiteSpace($DataDir) -or -not [IO.Path]::IsPathRooted($DataDir) -or (Test-Path -LiteralPath $DataDir))) {
   throw 'BrowserGui requires a new absolute DataDir and cannot be combined with Browser.'
@@ -214,6 +220,12 @@ try {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
   } elseif ($BeforeToolSmoke) {
     & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --before-tool-smoke
+  } elseif ($CodingSmoke) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
+  } elseif ($GameSmoke) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
+  } elseif ($LongCodingSmoke) {
+    & bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
   } else {
     & bun run test:nomi-core-live-provider
   }

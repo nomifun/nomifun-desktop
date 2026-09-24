@@ -13,10 +13,14 @@ fn object(properties: serde_json::Value, required: &[&str]) -> StrictJsonValue {
 
 fn launch(include_wait: bool) -> StrictJsonValue {
     let mut properties = json!({
-        "command":{"type":"string","minLength":1,"maxLength":32768},
-        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536}},
-        "cwd":{"type":"string","maxLength":4096},
-        "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
+        "command":{"type":"string","minLength":1,"maxLength":32768,
+            "description":"Executable name or path only, such as bun or git. Do not put arguments, pipes or a whole shell command here; use args for each argument."},
+        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},
+            "description":"Separate argument tokens, for example [\"test\",\"tests/unit.test.js\"]. Omit when empty; never send null."},
+        "cwd":{"type":"string","maxLength":4096,
+            "description":"Optional workspace-relative directory; omit to use the bound workspace root."},
+        "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536},
+            "description":"Optional string-valued environment overrides. Omit when empty; never send null."},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
         "tty":{"type":"boolean","default":false},
         "cols":{"type":"integer","minimum":1,"maximum":65535},

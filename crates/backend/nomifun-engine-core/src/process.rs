@@ -723,6 +723,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Bun on PATH for a live coding process check"]
+    async fn managed_owner_launches_bun_from_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner = ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let mut request = EngineProcessRequest::pipe("bun");
+        request.args = vec!["--version".into()];
+        request.timeout_ms = 10_000;
+        let outcome = owner.execute(request, CancellationToken::new()).await.unwrap();
+        assert!(matches!(outcome, EngineProcessPoll::Exited { exit_code: Some(0), .. }));
+    }
+
+    #[tokio::test]
     async fn workspace_escape_is_rejected_before_spawn() {
         let directory = tempfile::tempdir().unwrap();
         let owner =
@@ -781,7 +793,10 @@ mod tests {
         let owner =
             ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
         let mut request = sleeper_request();
-        request.timeout_ms = 100;
+        // Windows job adoption can take longer than 100 ms under a parallel
+        // test load; the deadline must exercise the running child, not cancel
+        // the start future before it has returned a session.
+        request.timeout_ms = 1_000;
         let outcome = owner
             .execute(request, CancellationToken::new())
             .await

@@ -7,7 +7,7 @@
 //! from activating the planning/completion ledger or invalidating repository
 //! observations.
 
-use crate::AgentToolBinding;
+use crate::{AgentToolBinding, AgentToolResult};
 
 /// Tools whose use can grow into a multi-step task that needs source-anchored
 /// requirements and completion accounting. Explicit `update_plan`, steering,
@@ -40,6 +40,22 @@ pub(crate) fn affects_workspace(binding: &AgentToolBinding) -> bool {
         }
         _ => false,
     }
+}
+
+/// A process call can execute correctly while the command itself exits with
+/// failure. The tool result is still a valid observation, but later effects
+/// must wait for the model to inspect that outcome and replan.
+pub(crate) fn failed_process_observation(
+    binding: &AgentToolBinding,
+    result: &AgentToolResult,
+) -> bool {
+    if binding.capability_id.as_ref() != "workspace.process" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&result.output_text())
+        .ok()
+        .and_then(|value| value.get("success").and_then(serde_json::Value::as_bool))
+        == Some(false)
 }
 
 /// A successful collaboration handoff transfers completion ownership to the
@@ -134,5 +150,27 @@ mod tests {
         let fork = binding("agent.collaboration", "agent/fork");
         assert!(completes_turn_on_success(&fork));
         assert!(!completes_turn_on_success(&workspace));
+    }
+
+    #[test]
+    fn nonzero_process_exit_is_a_failed_observation_even_when_dispatch_succeeded() {
+        let process = binding("workspace.process", "workspace.process/exec");
+        let failed = crate::AgentToolResult::text(
+            "call-1".into(),
+            serde_json::json!({"state":"exited","exit_code":1,"success":false}).to_string(),
+            false,
+        );
+        let successful = crate::AgentToolResult::text(
+            "call-2".into(),
+            serde_json::json!({"state":"exited","exit_code":0,"success":true}).to_string(),
+            false,
+        );
+        let invalid_arguments = crate::AgentToolResult::text(
+            "call-3".into(), "Invalid arguments; no process launched", true,
+        );
+        assert!(failed_process_observation(&process, &failed));
+        assert!(!failed_process_observation(&process, &successful));
+        assert!(!failed_process_observation(&process, &invalid_arguments));
+        assert!(!failed_process_observation(&binding("workspace.files", "workspace.files/read"), &failed));
     }
 }

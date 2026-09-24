@@ -10,11 +10,13 @@ use std::fmt;
 use std::future::Future;
 use std::io::Read as _;
 use std::path::Path;
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode, header};
+use futures_util::FutureExt;
 use nomifun_app::bootstrap::{NomiCoreApplication, ServerEnvironment};
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -49,6 +51,9 @@ const AUTOWORK_TAG: &str = "live-commercial-model-smoke";
 const CREDENTIAL_AUDIT_SETTLE_DELAY: Duration = Duration::from_millis(100);
 const CREDENTIAL_AUDIT_ATTEMPTS: usize = 5;
 const CREDENTIAL_AUDIT_REQUIRED_CLEAN_SCANS: usize = 2;
+// A 64-step coding turn can legitimately outlast the ordinary smoke window
+// when the live provider must compact context and run real process checks.
+const LONG_CODING_TURN_DEADLINE: Duration = Duration::from_secs(1_500);
 
 struct LiveFixture {
     _environment: ServerEnvironment,
@@ -61,6 +66,7 @@ enum LiveCase {
     WorkspaceFile,
     CodingPreset,
     SnakeGame,
+    LongCoding,
     Companion,
     CreativeStudio,
 }
@@ -946,14 +952,38 @@ async fn session_messages_after(
     ))
 }
 
+async fn session_events(router: &Router, session_id: &str) -> Result<Vec<Value>, SmokeFailure> {
+    let mut cursor = 0_u64;
+    let mut events = Vec::new();
+    for _ in 0..SESSION_MESSAGE_MAX_PAGES {
+        let response = successful_json(router, "long_coding.events", Method::GET,
+            format!("/api/agent-sessions/{session_id}/events?after_seq={cursor}&limit=500"),
+            None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+        let page = envelope_data("long_coding.events", response)?;
+        let next = page.pointer("/next_cursor/seq").and_then(Value::as_u64)
+            .ok_or_else(|| SmokeFailure::new("long_coding.events", "SESSION_CURSOR_MISSING", 502))?;
+        if next < cursor {
+            return Err(SmokeFailure::new("long_coding.events", "SESSION_CURSOR_REGRESSED", 409));
+        }
+        let items = page.get("events").and_then(Value::as_array)
+            .ok_or_else(|| SmokeFailure::new("long_coding.events", "SESSION_EVENTS_MISSING", 502))?;
+        events.extend(items.iter().cloned());
+        if next == cursor { return Ok(events); }
+        cursor = next;
+    }
+    Err(SmokeFailure::new("long_coding.events", "SESSION_EVENT_PAGE_LIMIT_EXCEEDED", 503))
+}
+
 fn first_durable_error_code(messages: &[Value]) -> Option<String> {
     for message in messages {
         let Some(projection) = message.get("projection") else {
             continue;
         };
+        let tool_summary = projection.get("tool_summary");
         let is_error = projection.get("status").and_then(Value::as_str) == Some("error")
             || projection.get("type").and_then(Value::as_str) == Some("error")
-            || projection.get("error").is_some();
+            || projection.get("error").is_some()
+            || tool_summary.and_then(|summary| summary.get("error")).is_some();
         if !is_error {
             continue;
         }
@@ -968,18 +998,24 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
             }
             return Some(code);
         }
-        let output = projection.get("output").and_then(Value::as_str).unwrap_or_default();
-        if projection["name"] == "exec_command"
+        let output = projection.get("output").and_then(Value::as_str)
+            .or_else(|| tool_summary.and_then(|summary| summary.get("error")).and_then(Value::as_str))
+            .unwrap_or_default();
+        let name = projection.get("name").and_then(Value::as_str)
+            .or_else(|| tool_summary.and_then(|summary| summary.get("name")).and_then(Value::as_str));
+        if name == Some("exec_command")
             && output.contains("Capability Kernel rejected Agent Runtime Tool (INVALID_PAYLOAD)")
         {
-            let args = &projection["args"];
-            let code = if args.get("env").is_some_and(Value::is_null) {
+            let args = projection.get("args").or_else(|| tool_summary.and_then(|summary| summary.get("args")));
+            let code = if args.is_none() {
+                "CODING_EXEC_ARGUMENTS_NOT_PROJECTED"
+            } else if args.is_some_and(|args| args.get("env").is_some_and(Value::is_null)) {
                 "CODING_EXEC_NULL_ENV"
-            } else if args.get("args").is_some_and(Value::is_null) {
+            } else if args.is_some_and(|args| args.get("args").is_some_and(Value::is_null)) {
                 "CODING_EXEC_NULL_ARGS"
-            } else if args["command"] != "git" || args["args"] != json!(["--version"]) {
+            } else if args.is_some_and(|args| args["command"] != "git" || args["args"] != json!(["--version"])) {
                 "CODING_EXEC_COMMAND_SHAPE_MISMATCH"
-            } else if !object_has_only_keys(args, &["operation", "command", "args", "timeout_ms"]) {
+            } else if args.is_some_and(|args| !object_has_only_keys(args, &["operation", "command", "args", "timeout_ms"])) {
                 "CODING_EXEC_EXTRA_FIELDS_REJECTED"
             } else {
                 "CODING_EXEC_CANONICAL_ARGS_REJECTED"
@@ -1015,7 +1051,7 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
         } else if output.starts_with("Invalid plan:") {
             "CODING_PLAN_ARGUMENTS_INVALID"
         } else {
-            match projection.get("name").and_then(Value::as_str) {
+            match name {
                 Some("update_plan") => "CODING_PLAN_REJECTED",
                 Some("report_completion") => "CODING_COMPLETION_REJECTED",
                 Some("write_file") => "CODING_WRITE_REJECTED",
@@ -1083,6 +1119,9 @@ fn admission_conflict_code(value: &Value) -> Option<&'static str> {
     match value {
         Value::String(message) => [
             ("compaction ended with MaxOutputTokens", "CODING_COMPACTION_OUTPUT_LIMIT"),
+            ("source exceeds the remaining bounded compaction budget", "CODING_COMPACTION_SOURCE_BUDGET"),
+            ("per-turn compaction call budget exhausted", "CODING_COMPACTION_CALL_BUDGET"),
+            ("compaction summary must retain identity", "CODING_COMPACTION_SUMMARY_INVALID"),
             ("Mandatory instructions/task state/accepted inputs and pending images exceed", "CODING_COMPACTION_MANDATORY_BUDGET"),
             ("summary request exceeds its input budget", "CODING_COMPACTION_INPUT_BUDGET"),
             ("compaction cannot fit the retained request/instructions/tools", "CODING_COMPACTION_RETAINED_BUDGET"),
@@ -1152,6 +1191,126 @@ fn admission_conflict_code(value: &Value) -> Option<&'static str> {
     }
 }
 
+async fn emit_live_turn_failure_trace(root: &Path) {
+    let db_path = root.join("data").join("nomifun-backend.db");
+    let Ok(pool) = nomifun_db::sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display())).await else {
+        return;
+    };
+    let rows: Result<Vec<Option<String>>, _> = nomifun_db::sqlx::query_scalar(
+        "SELECT inline_json FROM agent_events WHERE kind = 'turn/failed' ORDER BY seq LIMIT 8"
+    ).fetch_all(&pool).await;
+    if let Ok(rows) = rows {
+        for (index, row) in rows.into_iter().enumerate() {
+            let Some(value) = row.and_then(|row| serde_json::from_str::<Value>(&row).ok()) else { continue };
+            let code = value.pointer("/error/code").and_then(Value::as_str)
+                .map(str::to_owned).unwrap_or_else(|| "NONE".to_owned());
+            let diagnosis = admission_conflict_code(&value).unwrap_or("NONE");
+            let detail = value.pointer("/error/detail").and_then(Value::as_str).unwrap_or_default();
+            let safe_detail = detail.split_whitespace().take(24).map(|word| {
+                if word.len() > 20 || word.contains(['\\', '/', '@', '='])
+                    || (word.starts_with("sk-") && word.len() > 6) {
+                    return "REDACTED".to_owned();
+                }
+                word.chars().filter(|ch| ch.is_ascii_alphanumeric()
+                    || matches!(ch, ':' | '.' | '(' | ')' | '-' | '_'))
+                    .collect::<String>()
+            }).collect::<Vec<_>>().join("_");
+            eprintln!("NOMIFUN_LIVE_SMOKE_TURN_FAILURE index={index} code={} diagnosis={diagnosis} steps={} detail={safe_detail}",
+                sanitize_code(code), value.get("model_steps").and_then(Value::as_u64).unwrap_or(0));
+        }
+    }
+    pool.close().await;
+}
+
+async fn emit_live_runtime_progress_trace(root: &Path) {
+    let db_path = root.join("data").join("nomifun-backend.db");
+    let Ok(pool) = nomifun_db::sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display())).await else {
+        return;
+    };
+    let rows: Result<Vec<Option<String>>, _> = nomifun_db::sqlx::query_scalar(
+        "SELECT inline_json FROM agent_events WHERE kind = 'runtime/progress-recorded' ORDER BY seq"
+    ).fetch_all(&pool).await;
+    if let Ok(rows) = rows {
+        let mut steps = 0_u32;
+        let mut compact_calls = 0_u32;
+        let mut compacted = 0_u32;
+        let mut degraded = 0_u32;
+        let mut reads = 0_u32;
+        let mut execs = 0_u32;
+        let mut writes = 0_u32;
+        let mut reports = 0_u32;
+        let mut control_calls = std::collections::BTreeMap::<String, &'static str>::new();
+        let mut control_errors = Vec::<String>::new();
+        for row in rows {
+            let Some(value) = row.and_then(|row| serde_json::from_str::<Value>(&row).ok()) else { continue };
+            let event = value.pointer("/event/event").and_then(Value::as_str).unwrap_or_default();
+            match event {
+                "model_step_started" => steps += 1,
+                "compaction_started" => compact_calls += 1,
+                "context_compacted" => {
+                    compacted += 1;
+                    if value.pointer("/event/summary").and_then(Value::as_str)
+                        .is_some_and(|summary| summary.contains("Automatic summary incomplete")) {
+                        degraded += 1;
+                    }
+                }
+                "completion_reported" => reports += 1,
+                "tool_call_completed" => {
+                    let name = value.pointer("/event/call/name").and_then(Value::as_str);
+                    let call_id = value.pointer("/event/call/call_id").and_then(Value::as_str);
+                    if let (Some(name @ ("update_plan" | "report_completion")), Some(call_id)) = (name, call_id) {
+                        control_calls.insert(call_id.to_owned(), if name == "update_plan" { "PLAN" } else { "REPORT" });
+                    }
+                }
+                "tool_completed" => {
+                    let call_id = value.pointer("/event/result/call_id").and_then(Value::as_str);
+                    if let Some(name) = call_id.and_then(|id| control_calls.get(id))
+                        && value.pointer("/event/result/is_error").and_then(Value::as_bool) == Some(true) {
+                        let response = value.pointer("/event/result/output/0/text").and_then(Value::as_str).unwrap_or_default();
+                        control_errors.push(format!("{name}:{}", control_error_code(response)));
+                        if control_errors.len() > 12 { control_errors.remove(0); }
+                    }
+                }
+                "tool_started" => match value.pointer("/event/action_id").and_then(Value::as_str) {
+                    Some("workspace.files/read") => reads += 1,
+                    Some("workspace.process/exec") => execs += 1,
+                    Some("workspace.files/write" | "workspace.files/patch") => writes += 1,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        eprintln!("NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS steps={steps} compact_calls={compact_calls} compacted={compacted} degraded={degraded} reads={reads} execs={execs} writes={writes} reports={reports}");
+        eprintln!("NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence={}",
+            if control_errors.is_empty() { "NONE".to_owned() } else { control_errors.join(",") });
+    }
+    pool.close().await;
+}
+
+fn control_error_code(response: &str) -> &'static str {
+    if response.starts_with("Invalid plan:") { "PLAN_SCHEMA" }
+    else if response.contains("Requirement source input") { "REQUIREMENT_INPUT_INDEX" }
+    else if response.contains("Source quote does not occur") { "REQUIREMENT_QUOTE_MISMATCH" }
+    else if response.contains("accepted input sources") { "REQUIREMENT_SOURCE" }
+    else if response.contains("Existing requirements are immutable") { "REQUIREMENT_REWRITE" }
+    else if response.contains("Plan already has these step statuses") { "PLAN_NOOP" }
+    else if response.contains("every accepted input") { "REQUIREMENT_COVERAGE" }
+    else if response.contains("current plan steps") { "PLAN_STEPS" }
+    else if response.contains("plan step") { "PLAN_OPEN" }
+    else if response.contains("Evidence is failed") { "EVIDENCE_STALE" }
+    else if response.starts_with("Invalid completion report:") { "REPORT_SCHEMA" }
+    else { "OTHER" }
+}
+
+#[test]
+fn live_control_diagnostics_use_fixed_categories_only() {
+    assert_eq!(control_error_code("Source quote does not occur in that accepted input"),
+        "REQUIREMENT_QUOTE_MISMATCH");
+    assert_eq!(control_error_code("Invalid plan: missing field `explanation`"),
+        "PLAN_SCHEMA");
+    assert_eq!(control_error_code("private diagnostic SHOULD_NOT_EMIT"), "OTHER");
+}
+
 fn find_typed_code(value: &Value) -> Option<String> {
     match value {
         Value::Object(values) => {
@@ -1202,6 +1361,187 @@ fn exact_assistant_marker_count(messages: &[Value], marker: &str) -> usize {
                 .is_some_and(|content| content.trim() == marker)
         })
         .count()
+}
+
+// Bounded, content-free diagnostics for live coding acceptance. The fixture
+// directory and Provider credential never appear in this line.
+fn emit_live_coding_trace(phase: &str, messages: &[Value], file: &Path) {
+    let mut read = 0_u16;
+    let mut write = 0_u16;
+    let mut patch = 0_u16;
+    let mut exec = 0_u16;
+    let mut plan = 0_u16;
+    let mut completion = 0_u16;
+    let mut tool_errors = 0_u16;
+    let mut flow = String::new();
+    for message in messages {
+        if message.get("presentation_intent").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let projection = &message["projection"];
+        let name = projection.pointer("/tool_summary/name").and_then(Value::as_str)
+            .or_else(|| projection.get("name").and_then(Value::as_str));
+        match name {
+            Some("read_file") => read = read.saturating_add(1),
+            Some("write_file") => write = write.saturating_add(1),
+            Some("apply_patch") => patch = patch.saturating_add(1),
+            Some("exec_command") => exec = exec.saturating_add(1),
+            Some("update_plan") => plan = plan.saturating_add(1),
+            Some("report_completion") => completion = completion.saturating_add(1),
+            _ => {}
+        }
+        if flow.len() < 96 {
+            let marker = match name {
+                Some("read_file") => 'R',
+                Some("write_file") => 'W',
+                Some("apply_patch") => 'P',
+                Some("exec_command") => 'E',
+                Some("update_plan") => 'U',
+                Some("report_completion") => 'C',
+                _ => 'O',
+            };
+            flow.push(marker);
+            if marker == 'E' {
+                let exit_code = projection.get("output").and_then(Value::as_str)
+                    .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                    .and_then(|output| output.get("exit_code").and_then(Value::as_i64));
+                flow.push(match exit_code { Some(0) => '0', Some(_) => '1', None => 'x' });
+            }
+        }
+        if projection.get("status").and_then(Value::as_str) == Some("error")
+            || projection.get("error").is_some()
+        {
+            tool_errors = tool_errors.saturating_add(1);
+        }
+    }
+    let content = std::fs::read_to_string(file).ok();
+    let lower = content.as_ref().map(|text| text.to_ascii_lowercase());
+    let has = |needle: &str| lower.as_ref().is_some_and(|text| text.contains(needle));
+    let final_replies = messages.iter().filter_map(assistant_text_projection).count();
+    eprintln!(
+        "NOMIFUN_LIVE_SMOKE_CODING_TRACE phase={phase} read={read} write={write} patch={patch} exec={exec} plan={plan} completion={completion} tool_errors={tool_errors} final_replies={final_replies} file_exists={} file_bytes={} html={} script={} canvas={} keydown={}",
+        content.is_some(), content.as_ref().map_or(0, String::len),
+        has("<html"), has("<script"), has("canvas"), has("keydown"),
+    );
+    eprintln!("NOMIFUN_LIVE_SMOKE_CODING_FLOW phase={phase} flow={flow}");
+}
+
+async fn emit_live_coding_history_trace(
+    router: &Router,
+    session_id: &str,
+    phase: &'static str,
+) -> Result<(u16, u16, u16), SmokeFailure> {
+    let response = successful_json(router, phase, Method::GET,
+        format!("/api/agent-sessions/{session_id}/message-history?page_size=500"),
+        None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let page = envelope_data(phase, response)?;
+    let items = page.get("items").and_then(Value::as_array).ok_or_else(||
+        SmokeFailure::new(phase, "LONG_CODING_HISTORY_MISSING", 502))?;
+    let mut reads_instruction = 0_u16;
+    let mut reads_source = 0_u16;
+    let mut reads_tests = 0_u16;
+    let mut reads_other = 0_u16;
+    let mut errors = 0_u16;
+    let mut invalid_payload = 0_u16;
+    let mut not_found = 0_u16;
+    let mut scope_rejected = 0_u16;
+    let mut capability_unavailable = 0_u16;
+    let mut admission = 0_u16;
+    let mut process_error = 0_u16;
+    let mut command_exit = 0_u16;
+    let mut tool_search = 0_u16;
+    let mut discovery_revealed_write = 0_u16;
+    let mut other_tools = 0_u16;
+    let mut exec_failed = 0_u16;
+    let mut exec_succeeded = 0_u16;
+    let mut exec_unknown = 0_u16;
+    let mut test_launches = 0_u16;
+    let mut failure_names = Vec::new();
+    let mut terminal_diagnosis = "NONE";
+    for item in items {
+        let content = &item["content"];
+        if content.get("error").is_some() {
+            if let Some(code) = admission_conflict_code(content) {
+                terminal_diagnosis = code;
+            }
+        }
+        let Some(name) = content.get("name").and_then(Value::as_str) else { continue };
+        let output = content.get("output").and_then(Value::as_str).unwrap_or_default();
+        if content.get("status").and_then(Value::as_str) == Some("error") {
+            errors = errors.saturating_add(1);
+            if failure_names.len() < 12 {
+                let name = match name {
+                    "read_file" | "write_file" | "apply_patch" | "exec_command"
+                    | "start_process" | "poll_process" | "git_status" | "git_diff"
+                    | "search_files" | "update_plan" | "report_completion" => name,
+                    _ => "other",
+                };
+                failure_names.push(name);
+            }
+        }
+        if output.contains("INVALID_PAYLOAD") {
+            invalid_payload = invalid_payload.saturating_add(1);
+        }
+        if output.contains("RESOURCE_NOT_FOUND") || output.contains("not found") {
+            not_found = not_found.saturating_add(1);
+        }
+        if output.contains("INSTRUCTION_SCOPE") || output.contains("instruction scope") {
+            scope_rejected = scope_rejected.saturating_add(1);
+        }
+        if output.contains("CAPABILITY_UNAVAILABLE") || output.contains("capability unavailable") {
+            capability_unavailable = capability_unavailable.saturating_add(1);
+        }
+        if output.contains("admission") || output.contains("ADMISSION") {
+            admission = admission.saturating_add(1);
+        }
+        if output.contains("process") || output.contains("Process") {
+            process_error = process_error.saturating_add(1);
+        }
+        if output.contains("exit_code") || output.contains("Exit code") {
+            command_exit = command_exit.saturating_add(1);
+        }
+        if name == "ToolSearch" {
+            tool_search = tool_search.saturating_add(1);
+            if output.contains("write_file") || output.contains("apply_patch") {
+                discovery_revealed_write = discovery_revealed_write.saturating_add(1);
+            }
+        } else if !matches!(name, "read_file" | "write_file" | "apply_patch" | "exec_command" | "update_plan" | "report_completion") {
+            other_tools = other_tools.saturating_add(1);
+        }
+        if name == "read_file" {
+            let args = &content["args"];
+            let path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+            if args.get("format").and_then(Value::as_str) == Some("instruction_scope") {
+                reads_instruction = reads_instruction.saturating_add(1);
+            } else if path.ends_with("ledger.js") || path.ends_with("ranking.js") {
+                reads_source = reads_source.saturating_add(1);
+            } else if path.ends_with(".test.js") {
+                reads_tests = reads_tests.saturating_add(1);
+            } else {
+                reads_other = reads_other.saturating_add(1);
+            }
+        }
+        if matches!(name, "exec_command" | "start_process") {
+            let args = &content["args"];
+            if matches!(args.get("command").and_then(Value::as_str), Some("bun" | "bun.exe"))
+                && args.get("args").and_then(Value::as_array)
+                    .and_then(|args| args.first()).and_then(Value::as_str) == Some("test") {
+                test_launches = test_launches.saturating_add(1);
+            }
+        }
+        if matches!(name, "exec_command" | "poll_process") {
+            let exit_code = serde_json::from_str::<Value>(output).ok()
+                .and_then(|value| value.get("exit_code").and_then(Value::as_i64));
+            match exit_code {
+                Some(0) => exec_succeeded = exec_succeeded.saturating_add(1),
+                Some(_) => exec_failed = exec_failed.saturating_add(1),
+                None => exec_unknown = exec_unknown.saturating_add(1),
+            }
+        }
+    }
+    eprintln!("NOMIFUN_LIVE_SMOKE_CODING_HISTORY phase={phase} instruction={reads_instruction} source={reads_source} tests={reads_tests} other={reads_other} errors={errors} invalid_payload={invalid_payload} not_found={not_found} scope_rejected={scope_rejected} capability_unavailable={capability_unavailable} admission={admission} process_error={process_error} command_exit={command_exit} tool_search={tool_search} discovery_revealed_write={discovery_revealed_write} other_tools={other_tools} exec_failed={exec_failed} exec_succeeded={exec_succeeded} exec_unknown={exec_unknown} test_launches={test_launches}");
+    eprintln!("NOMIFUN_LIVE_SMOKE_CODING_FAILURES phase={phase} names={} diagnosis={terminal_diagnosis}", failure_names.join(","));
+    Ok((exec_failed, exec_succeeded, test_launches))
 }
 
 async fn wait_for_session_marker(
@@ -1860,6 +2200,7 @@ async fn run_live_workspace_file_chain(
         let observed = envelope_data("file.session", observed)?;
         if observed.pointer("/head/status").and_then(Value::as_str) == Some("ready") {
             let file = work_dir.join(file_name);
+            emit_live_coding_trace(if snake_game { "snake_game" } else if official_coding { "coding" } else { "file" }, &messages, &file);
             let content = std::fs::read_to_string(&file).ok();
             let valid_file = if snake_game {
                 content.as_ref().is_some_and(|content| {
@@ -1914,6 +2255,251 @@ async fn run_live_workspace_file_chain(
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+async fn wait_for_live_coding_turn(
+    router: &Router,
+    session_id: &str,
+    after_seq: u64,
+    phase: &'static str,
+) -> Result<(Vec<Value>, bool), SmokeFailure> {
+    let deadline = tokio::time::Instant::now() + LONG_CODING_TURN_DEADLINE;
+    loop {
+        let (messages, _) = session_messages_after(router, phase, session_id, after_seq).await?;
+        let terminal_messages = messages.iter()
+            .filter(|message| message.get("presentation_intent").and_then(Value::as_str) != Some("tool"))
+            .cloned().collect::<Vec<_>>();
+        if let Some(code) = first_durable_error_code(&terminal_messages) {
+            return Err(SmokeFailure::new(phase, code, 422));
+        }
+        let observed = successful_json(router, phase, Method::GET,
+            format!("/api/agent-sessions/{session_id}"), None,
+            LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+        let observed = envelope_data(phase, observed)?;
+        if observed.pointer("/head/status").and_then(Value::as_str) == Some("ready") {
+            let replies = messages.iter().filter_map(assistant_text_projection)
+                .filter(|reply| reply.get("content").and_then(Value::as_str)
+                    .is_some_and(|text| !text.trim().is_empty())).count();
+            let tools = messages.iter().filter(|message|
+                message.get("presentation_intent").and_then(Value::as_str) == Some("tool")).count();
+            let events = session_events(router, session_id).await?;
+            let started = events.iter().filter(|event|
+                event.get("kind").and_then(Value::as_str) == Some("turn/started"))
+                .filter_map(|event| event.get("seq").and_then(Value::as_u64)).max();
+            let terminal = events.iter().filter(|event|
+                event.get("seq").and_then(Value::as_u64).is_some_and(|seq| started.is_some_and(|start| seq > start))
+                    && matches!(event.get("kind").and_then(Value::as_str), Some("turn/completed" | "turn/failed" | "turn/cancelled")))
+                .max_by_key(|event| event.get("seq").and_then(Value::as_u64).unwrap_or(0));
+            let completed = terminal.is_some_and(|event|
+                event.get("kind").and_then(Value::as_str) == Some("turn/completed"));
+            let failed_turn = !completed;
+            let terminal_code = terminal.and_then(|event| event.pointer("/payload/value/error/code"))
+                .and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| "NONE".to_owned());
+            let terminal_code = sanitize_code(terminal_code);
+            let diagnosis = terminal.and_then(|event| event.pointer("/payload/value/error/detail"))
+                .and_then(admission_conflict_code).unwrap_or("NONE");
+            eprintln!("NOMIFUN_LIVE_SMOKE_CODING_TERMINAL phase={phase} replies={replies} tools={tools} failed_turn={failed_turn} code={terminal_code} diagnosis={diagnosis}");
+            return Ok((messages, completed));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(SmokeFailure::new(phase, "LONG_CODING_TURN_DEADLINE_EXCEEDED", 408));
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn run_live_long_coding_chain(
+    router: &Router,
+    api_key: &str,
+    model: &str,
+    work_dir: &Path,
+) -> Result<(), SmokeFailure> {
+    const INITIAL_SOURCE: &str = r#"export function parseCsv(text) {
+  return text.trim().split(/\r?\n/).map((line) => line.split(','));
+}
+
+export function summarizePaid(csv) {
+  const rows = parseCsv(csv);
+  const totals = new Map();
+  for (const [customer, cents, status] of rows.slice(1)) {
+    if (status !== 'paid') continue;
+    totals.set(customer, (totals.get(customer) ?? 0) + Number(cents));
+  }
+  return [...totals].map(([customer, cents]) => ({ customer, cents, count: 1 }))
+    .sort((a, b) => a.customer.localeCompare(b.customer));
+}
+"#;
+    const FIRST_TESTS: &str = r#"import { test, expect } from 'bun:test';
+import { parseCsv, summarizePaid } from '../src/ledger.js';
+
+test('quoted commas and doubled quotes', () => {
+  expect(parseCsv('customer,cents,status\n"North, Inc",105,paid\n"A ""B"" Shop",200,paid'))
+    .toEqual([['customer','cents','status'],['North, Inc','105','paid'],['A "B" Shop','200','paid']]);
+});
+test('CRLF, final newline and empty quoted field', () => {
+  expect(parseCsv('customer,cents,status\r\n"",0,paid\r\n'))
+    .toEqual([['customer','cents','status'],['','0','paid']]);
+});
+test('paid amounts aggregate as integer cents and count paid rows', () => {
+  expect(summarizePaid('customer,cents,status\n"North, Inc",105,paid\n"North, Inc",-5,paid\nSouth,200,void\nSouth,50,paid'))
+    .toEqual([{customer:'North, Inc',cents:100,count:2},{customer:'South',cents:50,count:1}]);
+});
+test('invalid money and malformed quotes are rejected', () => {
+  expect(() => summarizePaid('customer,cents,status\nNorth,2.5,paid')).toThrow();
+  expect(() => parseCsv('customer,cents,status\n"unterminated,10,paid')).toThrow();
+});
+"#;
+    const SECOND_TESTS: &str = r#"import { test, expect } from 'bun:test';
+import { rankCustomers } from '../src/ranking.js';
+
+const data = 'customer,cents,status\nZed,100,paid\nAmy,200,paid\nBea,200,paid\nAmy,-50,paid\nZed,999,void';
+test('ranks by total descending and breaks ties by customer name', () => {
+  expect(rankCustomers(data, 3)).toEqual([
+    {customer:'Bea',cents:200,count:1},
+    {customer:'Amy',cents:150,count:2},
+    {customer:'Zed',cents:100,count:1},
+  ]);
+});
+test('limit zero and invalid limits', () => {
+  expect(rankCustomers(data, 0)).toEqual([]);
+  expect(() => rankCustomers(data, -1)).toThrow();
+  expect(() => rankCustomers(data, 1.5)).toThrow();
+});
+"#;
+
+    let prepare = || -> Result<(), SmokeFailure> {
+        for directory in [work_dir.join("src"), work_dir.join("tests")] {
+            std::fs::create_dir_all(directory).map_err(|_| SmokeFailure::new(
+                "long_coding.fixture", "LONG_CODING_DIRECTORY_CREATE_FAILED", 500))?;
+        }
+        for (name, content) in [
+            ("src/ledger.js", INITIAL_SOURCE),
+            ("tests/ledger.test.js", FIRST_TESTS),
+            ("AGENTS.md", "# Ledger project instructions\nEdit only src/ and README.md. Keep supplied tests unchanged. Run bun test after edits. Do not commit.\n"),
+            ("package.json", "{\"type\":\"module\",\"scripts\":{\"test\":\"bun test\"}}\n"),
+            ("README.md", "# Ledger fixture\n\nRepair the CSV and paid-invoice logic.\n"),
+        ] {
+            std::fs::write(work_dir.join(name), content).map_err(|_| SmokeFailure::new(
+                "long_coding.fixture", "LONG_CODING_FILE_CREATE_FAILED", 500))?;
+        }
+        for args in [["init", "-q"].as_slice(), ["add", "--all"].as_slice()] {
+            let result = std::process::Command::new("git").args(args)
+                .current_dir(work_dir).output()
+                .map_err(|_| SmokeFailure::new("long_coding.fixture", "LONG_CODING_GIT_UNAVAILABLE", 503))?;
+            if !result.status.success() {
+                return Err(SmokeFailure::new("long_coding.fixture", "LONG_CODING_GIT_SETUP_FAILED", 503));
+            }
+        }
+        Ok(())
+    };
+    prepare()?;
+    let provider_id = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let created = successful_json(router, "long_coding.preset", Method::POST,
+        "/api/agent-presets/from-template/coding.codex".to_owned(),
+        Some(json!({"reuse_existing":false,"display_name":"Live long coding Agent",
+            "model":{"provider_id":provider_id,"model":model}})),
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let preset = envelope_data("long_coding.preset", created)?;
+    let preset_id = required_string("long_coding.preset", &preset, "/preset/preset_id",
+        "LONG_CODING_PRESET_ID_MISSING")?;
+    let (session_id, _) = create_session(router, &preset_id, &provider_id, model,
+        coding_resource_selections()).await?;
+
+    let cursor = session_message_cursor(router, "long_coding.first.cursor", &session_id).await?;
+    start_session_turn(router, "long_coding.first.turn", &session_id,
+        &uuid::Uuid::now_v7().to_string(),
+        "Fix src/ledger.js so tests/ledger.test.js passes while preserving its parseCsv and summarizePaid exports. Follow AGENTS.md and work directly without delegation. Run `bun test tests/ledger.test.js` before editing to observe the failing baseline, then edit only the source and rerun the same check. Do not edit tests or search for unrelated setup files. Finish with the actual test result and any limitation.".to_owned()).await?;
+    let (first_messages, first_completed) = wait_for_live_coding_turn(router, &session_id, cursor,
+        "long_coding.first.result").await?;
+    let mut all_turns_completed = first_completed;
+    emit_live_coding_trace("long_first", &first_messages, &work_dir.join("src/ledger.js"));
+    let (failed_checks, successful_checks, test_launches) =
+        emit_live_coding_history_trace(router, &session_id, "long_coding.first.history").await?;
+    if failed_checks == 0 || successful_checks == 0 || test_launches < 2 {
+        return Err(SmokeFailure::new("long_coding.first.history", "LONG_CODING_PROCESS_EVIDENCE_MISSING", 422));
+    }
+    if std::fs::read_to_string(work_dir.join("tests/ledger.test.js")).ok().as_deref() != Some(FIRST_TESTS) {
+        return Err(SmokeFailure::new("long_coding.first.result", "LONG_CODING_TESTS_MODIFIED", 422));
+    }
+    let mut first_check = std::process::Command::new("bun").arg("test")
+        .arg("tests/ledger.test.js").current_dir(work_dir).output()
+        .map_err(|_| SmokeFailure::new("long_coding.first.check", "LONG_CODING_CHECK_UNAVAILABLE", 503))?;
+    let first_cases = [
+        ("quote", "quoted commas and doubled quotes"),
+        ("newline", "CRLF, final newline and empty quoted field"),
+        ("summary", "paid amounts aggregate as integer cents and count paid rows"),
+        ("malformed", "invalid money and malformed quotes are rejected"),
+    ];
+    for recovery in 0..2 {
+        let output = String::from_utf8_lossy(&first_check.stderr);
+        let failed = first_cases.iter().filter_map(|(label, title)|
+            output.contains(&format!("(fail) {title}")).then_some(*label)).collect::<Vec<_>>();
+        eprintln!("NOMIFUN_LIVE_SMOKE_CODING_CHECK phase=long_first attempt={recovery} quote={} newline={} summary={} malformed={} syntax={} import={} assertion={} zero_tests={}",
+            !failed.contains(&"quote"), !failed.contains(&"newline"),
+            !failed.contains(&"summary"), !failed.contains(&"malformed"),
+            output.contains("SyntaxError") || output.contains("syntax error"),
+            output.contains("Cannot find module") || output.contains("export named"),
+            output.contains("expect(received)") || output.contains("expect(") || output.contains("toEqual"),
+            output.contains("0 tests") || output.contains("No tests found"));
+        if first_check.status.success() { break; }
+        let mut specifics = Vec::new();
+        if failed.contains(&"quote") { specifics.push("A comma inside quotes and doubled quotes must be parsed correctly."); }
+        if failed.contains(&"newline") { specifics.push("CRLF and a final newline must not add records."); }
+        if failed.contains(&"summary") { specifics.push("North, Inc has two paid rows totaling 100 cents; void rows do not count."); }
+        if failed.contains(&"malformed") { specifics.push("Both a fractional-cent amount and an unterminated quoted CSV field must throw."); }
+        let cursor = session_message_cursor(router, "long_coding.repair.cursor", &session_id).await?;
+        start_session_turn(router, "long_coding.repair.turn", &session_id,
+            &uuid::Uuid::now_v7().to_string(),
+            format!("The independent `bun test tests/ledger.test.js` check still exits nonzero. Failing cases: {}. {} Continue this same task directly; do not delegate or search for other setup files. The relevant files are AGENTS.md, src/ledger.js and tests/ledger.test.js. Correct src/ledger.js without editing supplied tests, rerun the check, and state what actually passed. Do not stop after a failed command.",
+                if failed.is_empty() { "unclassified test-runner failure".to_owned() } else { failed.join(", ") }, specifics.join(" "))).await?;
+        let (messages, completed) = wait_for_live_coding_turn(router, &session_id, cursor,
+            "long_coding.repair.result").await?;
+        all_turns_completed &= completed;
+        emit_live_coding_trace("long_repair", &messages, &work_dir.join("src/ledger.js"));
+        if std::fs::read_to_string(work_dir.join("tests/ledger.test.js")).ok().as_deref() != Some(FIRST_TESTS) {
+            return Err(SmokeFailure::new("long_coding.repair.result", "LONG_CODING_TESTS_MODIFIED", 422));
+        }
+        first_check = std::process::Command::new("bun").arg("test")
+            .arg("tests/ledger.test.js").current_dir(work_dir).output()
+            .map_err(|_| SmokeFailure::new("long_coding.repair.check", "LONG_CODING_CHECK_UNAVAILABLE", 503))?;
+    }
+    if !first_check.status.success() {
+        return Err(SmokeFailure::new("long_coding.first.check", "LONG_CODING_REPAIR_FAILED", 422));
+    }
+
+    std::fs::write(work_dir.join("tests/ranking.test.js"), SECOND_TESTS).map_err(|_| SmokeFailure::new(
+        "long_coding.second.fixture", "LONG_CODING_FILE_CREATE_FAILED", 500))?;
+    let cursor = session_message_cursor(router, "long_coding.second.cursor", &session_id).await?;
+    start_session_turn(router, "long_coding.second.turn", &session_id,
+        &uuid::Uuid::now_v7().to_string(),
+        "Continue in this same coding session without delegation. I added tests/ranking.test.js; implement src/ranking.js to pass it while preserving the ledger repair. Do not edit either test file. Run the complete `bun test` suite and update README.md with the API and verification command. Finish with the observed result and any limitation.".to_owned()).await?;
+    let (second_messages, second_completed) = wait_for_live_coding_turn(router, &session_id, cursor,
+        "long_coding.second.result").await?;
+    all_turns_completed &= second_completed;
+    emit_live_coding_trace("long_second", &second_messages, &work_dir.join("src/ranking.js"));
+    let _ = emit_live_coding_history_trace(router, &session_id, "long_coding.second.history").await?;
+    if !second_messages.iter().filter_map(assistant_text_projection).any(|reply|
+        reply.get("content").and_then(Value::as_str).is_some_and(|text| !text.trim().is_empty())) {
+        return Err(SmokeFailure::new("long_coding.second.result", "LONG_CODING_FINAL_REPLY_MISSING", 422));
+    }
+    if std::fs::read_to_string(work_dir.join("tests/ledger.test.js")).ok().as_deref() != Some(FIRST_TESTS)
+        || std::fs::read_to_string(work_dir.join("tests/ranking.test.js")).ok().as_deref() != Some(SECOND_TESTS) {
+        return Err(SmokeFailure::new("long_coding.second.result", "LONG_CODING_TESTS_MODIFIED", 422));
+    }
+    if !std::fs::read_to_string(work_dir.join("README.md")).ok().is_some_and(|text|
+        text.contains("rankCustomers") && text.contains("bun test")) {
+        return Err(SmokeFailure::new("long_coding.second.result", "LONG_CODING_DOCUMENTATION_MISSING", 422));
+    }
+    let final_check = std::process::Command::new("bun").arg("test")
+        .current_dir(work_dir).output()
+        .map_err(|_| SmokeFailure::new("long_coding.second.check", "LONG_CODING_CHECK_UNAVAILABLE", 503))?;
+    if !final_check.status.success() {
+        return Err(SmokeFailure::new("long_coding.second.check", "LONG_CODING_FEATURE_FAILED", 422));
+    }
+    if !all_turns_completed {
+        return Err(SmokeFailure::new("long_coding.terminal", "LONG_CODING_TURN_FAILED", 422));
+    }
+    Ok(())
 }
 
 async fn run_live_companion_chain(
@@ -2101,7 +2687,7 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     })?;
     let fixture = build_fixture(&root).await?;
     let router = fixture.application.router();
-    let result = match case {
+    let result = AssertUnwindSafe(async { match case {
         LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
             &router,
             api_key.as_str(),
@@ -2110,10 +2696,13 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
             matches!(case, LiveCase::CodingPreset | LiveCase::SnakeGame),
             matches!(case, LiveCase::SnakeGame),
         ).await,
+        LiveCase::LongCoding => run_live_long_coding_chain(
+            &router, api_key.as_str(), &model, &root.path().join("work")).await,
         LiveCase::SelectedModel => run_selected_model_chain(&router, api_key.as_str(), &model).await,
         LiveCase::Companion => run_live_companion_chain(&router, api_key.as_str(), &model).await,
         LiveCase::CreativeStudio => run_live_creative_studio_chain(&router, api_key.as_str(), &model).await,
-    };
+    }}).catch_unwind().await.unwrap_or_else(|_| Err(SmokeFailure::new(
+        "live.case", "LIVE_CASE_PANICKED", 500)));
     drop(router);
     let LiveFixture {
         _environment: environment,
@@ -2138,6 +2727,10 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     // credential audit so no buffered log write can occur after a clean scan.
     drop(environment);
     close_result?;
+    if matches!(case, LiveCase::LongCoding) {
+        emit_live_runtime_progress_trace(root.path()).await;
+        emit_live_turn_failure_trace(root.path()).await;
+    }
     let audit_result = hard_deadline(
         "credential.audit",
         "CREDENTIAL_AUDIT_DEADLINE_EXCEEDED",
@@ -2187,6 +2780,15 @@ async fn nomi_core_snake_game_reaches_live_stepfun() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --long-coding-smoke"]
+async fn nomi_core_long_coding_reaches_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(LiveCase::LongCoding).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; use the runner --companion-smoke"]
 async fn nomi_core_official_companion_reaches_live_stepfun() {
     if let Err(failure) = run_live_provider_smoke(LiveCase::Companion).await {
@@ -2220,6 +2822,9 @@ mod evidence_tests {
 
     #[test]
     fn admission_diagnostics_emit_only_static_codes_and_preserve_failure() {
+        let projected_tool_failure = json!({"projection":{"state":"recorded",
+            "tool_summary":{"name":"read_file","error":"RESOURCE_NOT_FOUND: omitted path"}}});
+        assert_eq!(first_durable_error_code(&[projected_tool_failure]).as_deref(), Some("CODING_READ_REJECTED"));
         let location = trusted_error_source_location(&json!({"detail":"process controls cannot change launch parameters; NEVER_PRINT_ME"})).unwrap();
         assert!(location.starts_with("DIAG_PROCESS_HOST_L"));
         assert!(!location.contains("NEVER_PRINT_ME"));
