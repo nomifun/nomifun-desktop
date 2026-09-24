@@ -129,6 +129,7 @@ impl AgentSendError {
             );
         }
         let guarded = detail.starts_with("model step limit of ")
+            || detail.starts_with("model output remained truncated after the bounded continuation budget;")
             || detail.starts_with("execution plan remains unresolved;")
             || detail.starts_with("failed patch targets have not been re-observed;")
             || detail.starts_with("processes remain running;")
@@ -1214,6 +1215,7 @@ mod tests {
             "execution plan remains unresolved; completion was not accepted",
             "completion account is missing or stale; call report_completion",
             "engine control repeatedly rejected; report_completion failed four consecutive times",
+            "model output remained truncated after the bounded continuation budget; task completion was not accepted",
         ] {
             let error = AgentSendError::from_engine_turn_failure(detail);
             assert_eq!(error.code(), Some(AgentErrorCode::NomifunTaskIncomplete));

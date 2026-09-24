@@ -55,7 +55,8 @@ pub(crate) fn validate_citation(
         .get(citation.input)
         .filter(|input| input.role == ChatRole::User)
         .ok_or_else(|| {
-            "Requirement source must identify an accepted current-turn user input".to_owned()
+            format!("Requirement source input {} is not an accepted current-turn user input (valid indices: 0..{}). Use the current turn's user text, not prior history.",
+                citation.input, inputs.len())
         })?;
     if citation.quote.len() > 512 {
         return Err("Requirement source quote exceeds 512 UTF-8 bytes".into());
@@ -80,13 +81,15 @@ pub(crate) fn validate_citation(
     if !input.content.iter().any(
         |part| matches!(part, ChatContentPart::Text { text } if text.contains(&citation.quote)),
     ) {
-        return Err("Source quote does not occur in that accepted input; tool output, summaries and invented quotations are not user sources".into());
+        return Err(format!("Source quote does not occur verbatim in accepted input {}. Copy a short exact contiguous substring, including punctuation/backticks, from this turn's user message; do not paraphrase or quote tool output/summary. On later plan-status updates omit requirements entirely.",
+            citation.input));
     }
     Ok(())
 }
 
-/// Repeating an unchanged ID is harmless; rewriting/deleting its obligation
-/// is not. New input may explain why old work is no longer applicable, but the
+/// Repeating an ID cannot rewrite/delete its obligation. Keep the immutable
+/// original even if a model restates it differently during a plan-status
+/// update. New input may explain why old work is no longer applicable, but the
 /// old requirement remains in the completion account with a scope citation.
 pub(crate) fn merge(
     current: &[AgentTaskRequirement],
@@ -114,18 +117,52 @@ pub(crate) fn merge(
         {
             return Err("Requirements need unique ASCII IDs (letters/digits/-/_), bounded descriptions and accepted input sources".into());
         }
-        validate_citation(&item.source, inputs, true)?;
-        if let Some(existing) = current.iter().find(|existing| existing.id == item.id) {
-            if existing.description != item.description || existing.source != item.source {
-                return Err("Existing requirements are immutable; add a new requirement and account for scope changes explicitly at completion".into());
-            }
+        if current.iter().any(|existing| existing.id == item.id) {
+            // An attempted rewrite is not authority and cannot replace the
+            // original. Accept the unrelated plan-status transition so a
+            // model cannot become trapped in an update/report retry loop.
+            continue;
         } else {
+            validate_citation(&item.source, inputs, true)?;
             next.push(item.clone());
         }
     }
     validate_ledger_budget(&next)?;
     require_input_coverage(&next, inputs.len())?;
     Ok(next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_existing_requirement_is_ignored_without_rewriting_the_ledger() {
+        let input = crate::context_lifecycle::text_message(
+            ChatRole::User, "Fix the failing tests".into(),
+        );
+        let original = AgentTaskRequirement {
+            id: "R1".into(), description: "Make tests pass".into(),
+            source: AgentInputCitation { input: 0, quote: "Fix the failing tests".into() },
+            origin: None,
+        };
+        let mut rewritten = original.clone();
+        rewritten.description = "Pass every test".into();
+        assert_eq!(merge(std::slice::from_ref(&original), &[rewritten], std::slice::from_ref(&input)).unwrap(), vec![original.clone()]);
+        assert_eq!(merge(std::slice::from_ref(&original), &[], &[input]).unwrap(), vec![original]);
+    }
+
+    #[test]
+    fn quote_mismatch_feedback_identifies_current_input_without_echoing_it() {
+        let input = crate::context_lifecycle::text_message(
+            ChatRole::User, "Fix src/ledger.js exactly".into(),
+        );
+        let citation = AgentInputCitation { input: 0, quote: "Fix the ledger".into() };
+        let error = validate_citation(&citation, &[input], false).unwrap_err();
+        assert!(error.contains("accepted input 0"));
+        assert!(error.contains("exact contiguous substring"));
+        assert!(!error.contains("src/ledger.js"));
+    }
 }
 
 pub(crate) fn validate_ledger_budget(next: &[AgentTaskRequirement]) -> Result<(), String> {

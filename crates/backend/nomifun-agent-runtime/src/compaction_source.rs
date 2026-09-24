@@ -23,6 +23,10 @@ pub(crate) struct SummaryChunk<'a> {
 }
 
 impl SummarySource {
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
     /// The caller removes binary/private fields before this method. One JSON
     /// message per line makes complete records self-contained summary data.
     pub fn push(&mut self, message: &ChatMessage) -> Result<(), AgentEngineError> {
@@ -59,6 +63,37 @@ impl SummarySource {
             .ok_or_else(|| invalid("source exceeds the remaining bounded compaction budget"))
     }
 
+    /// Split a rejected summary fragment without losing or repeating bytes.
+    /// Prefer a message boundary, then use a UTF-8 boundary when one message
+    /// itself is too large. Both halves retain exact source coordinates.
+    pub fn split_range(&self, start: usize, end: usize) -> Option<(SummaryChunk<'_>, SummaryChunk<'_>)> {
+        if end <= start + 512 || end > self.text.len() { return None; }
+        let halfway = start + (end - start) / 2;
+        let boundary = self.records.iter()
+            .map(|(record_end, _)| *record_end)
+            .filter(|record_end| *record_end > start + 256 && *record_end < end - 256)
+            .min_by_key(|record_end| record_end.abs_diff(halfway));
+        let mut middle = boundary.unwrap_or(halfway);
+        while middle < end && !self.text.is_char_boundary(middle) { middle += 1; }
+        if middle <= start + 256 || middle >= end - 256 { return None; }
+        Some((self.chunk(start, middle)?, self.chunk(middle, end)?))
+    }
+
+    fn chunk(&self, start: usize, end: usize) -> Option<SummaryChunk<'_>> {
+        if start >= end || end > self.text.len()
+            || !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) { return None; }
+        let first = self.records.partition_point(|(record_end, _)| *record_end <= start);
+        let last = self.records.partition_point(|(record_end, _)| *record_end < end);
+        let first_role = self.records.get(first)?.1;
+        let message_start = if first == 0 { 0 } else { self.records[first - 1].0 };
+        Some(SummaryChunk {
+            text: &self.text[start..end], start, end,
+            first_message: first, last_message: last, first_role,
+            starts_mid_message: start != message_start,
+            ends_mid_message: end != self.records.get(last)?.0,
+        })
+    }
+
     fn plan(
         &self,
         max_bytes: usize,
@@ -85,24 +120,7 @@ impl SummarySource {
             if end <= start {
                 return None;
             }
-            let last = self
-                .records
-                .partition_point(|(record_end, _)| *record_end < end);
-            let message_start = if first == 0 {
-                0
-            } else {
-                self.records[first - 1].0
-            };
-            chunks.push(SummaryChunk {
-                text: &self.text[start..end],
-                start,
-                end,
-                first_message: first,
-                last_message: last,
-                first_role: self.records[first].1,
-                starts_mid_message: start != message_start,
-                ends_mid_message: end != self.records[last].0,
-            });
+            chunks.push(self.chunk(start, end)?);
             start = end;
         }
         Some(chunks)
@@ -111,4 +129,28 @@ impl SummarySource {
 
 fn invalid(message: &str) -> AgentEngineError {
     AgentEngineError::Compaction(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_chat_model_broker::{ChatContentPart, ChatMessage};
+
+    #[test]
+    fn split_retry_fragments_cover_exact_utf8_source_once() {
+        let mut source = SummarySource::default();
+        source.push(&ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: "é".repeat(600) }],
+            provider_round_id: None,
+        }).unwrap();
+        let chunks = source.chunks(4096, 1).unwrap();
+        let original = &chunks[0];
+        let (first, second) = source.split_range(original.start, original.end).unwrap();
+        assert_eq!(first.end, second.start);
+        assert_eq!(format!("{}{}", first.text, second.text), original.text);
+        assert!(first.ends_mid_message);
+        assert!(second.starts_mid_message);
+        assert_eq!(first.first_message, second.first_message);
+    }
 }

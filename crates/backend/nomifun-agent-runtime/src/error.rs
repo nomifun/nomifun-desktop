@@ -66,6 +66,9 @@ pub enum AgentEngineError {
     #[error("Nomi compaction failed: {0}")]
     Compaction(String),
 
+    #[error("Nomi compaction failed: compaction ended with MaxOutputTokens")]
+    CompactionOutputLimit,
+
     #[error("Nomi process owner failed: {0}")]
     Process(String),
 

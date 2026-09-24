@@ -250,6 +250,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn process_launch_failure_uses_fixed_model_guidance_without_host_details() {
+        let error = KernelError::capability_execution_failed(
+            "CAPABILITY_UNAVAILABLE",
+            "process spawn failed: secret=NEVER_EMIT and private cwd",
+        );
+        let mapped = kernel_error_for_action(error, true).to_string();
+        assert!(mapped.contains("command field must contain only the executable"));
+        assert!(mapped.contains("\"args\":[\"test\""));
+        assert!(!mapped.contains("NEVER_EMIT"));
+
+        let unrelated = kernel_error_for_action(
+            KernelError::capability_execution_failed(
+                "CAPABILITY_UNAVAILABLE",
+                "process spawn failed: secret=NEVER_EMIT",
+            ),
+            false,
+        ).to_string();
+        assert!(!unrelated.contains("Put only the executable in command"));
+    }
+
     #[tokio::test]
     async fn compiled_plan_invokes_the_kernel_with_exact_snapshot_authority() {
         let fixture = kernel_fixture();

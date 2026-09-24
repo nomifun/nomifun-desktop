@@ -5,6 +5,27 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Long-running coding Agent recovery is more resilient.** Windows native
+  process tools resolve executable names from PATH, failed commands enter
+  explicit replanning, and completion feedback identifies stale evidence.
+  Rephrased requirement IDs no longer trap a plan update: their original
+  obligations stay unchanged while the independent step statuses advance;
+  unchanged plan submissions no longer create pointless revisions.
+  Coding turns have a larger bounded step budget. Context compaction now
+  tolerates verbose summaries, retries truncated output with fresh identities,
+  and splits only the rejected source range when needed. Each preparation has
+  a bounded summarization budget. If those attempts still cannot summarize
+  history, the Agent continues with an explicit verification warning;
+  canonical events remain intact. Isolated later model-output truncations get
+  a fresh bounded continuation window and exhausted windows are reported as
+  incomplete tasks rather than generic upstream failures.
+
+- **Agent Workbench now controls the default Agent for new Guid conversations.**
+  Users can choose any conversation-capable official Agent or saved personal
+  Agent, while one-off Guid draft switches no longer overwrite that default.
+  Existing selections are retained as an upgrade fallback, and unavailable
+  defaults safely return to the General Agent.
+
 - **Explicit multi-Agent and subagent requests launch real collaboration again.**
   The unified Runtime now consumes each Session's delegation policy, restores
   the collaboration guidance lost with the legacy Runtime removal, and routes

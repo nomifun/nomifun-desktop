@@ -19,6 +19,7 @@
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --model-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --file-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --coding-smoke
+ *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --long-coding-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --game-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --general-desktop-smoke
  *   bun scripts/validation/run-nomi-core-live-provider-smoke.mjs --companion-smoke
@@ -63,13 +64,14 @@ const ALLOWED_MODELS = new Set([DEFAULT_MODEL]);
 const MODEL_TEST_NAME = 'nomi_core_selected_model_reaches_live_stepfun';
 const FILE_TEST_NAME = 'nomi_core_workspace_file_reaches_live_stepfun';
 const CODING_TEST_NAME = 'nomi_core_official_coding_agent_reaches_live_stepfun';
+const LONG_CODING_TEST_NAME = 'nomi_core_long_coding_reaches_live_stepfun';
 const GAME_TEST_NAME = 'nomi_core_snake_game_reaches_live_stepfun';
 const GENERAL_DESKTOP_TEST_NAME = 'nomi_core_general_desktop_reaches_live_stepfun';
 const COMPANION_TEST_NAME = 'nomi_core_official_companion_reaches_live_stepfun';
 const CREATIVE_TEST_NAME = 'nomi_core_official_creative_studio_reaches_live_stepfun';
 const BEFORE_TOOL_TEST_NAME = 'nomi_core_product_before_tool_reaches_live_stepfun';
 const BEFORE_TOOL_STAGE_PHASES = ['before_tool.publish_select', 'before_tool.allow', 'before_tool.deny', 'before_tool.continuation'];
-const GLOBAL_TIMEOUT_MS = 30 * 60 * 1000;
+const GLOBAL_TIMEOUT_MS = (process.argv.includes('--long-coding-smoke') ? 75 : 30) * 60 * 1000;
 const CARGO_OUTPUT_LIMIT_BYTES = 32 * 1024 * 1024;
 const TEST_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
 const FAILURE_SENTINEL =
@@ -79,6 +81,7 @@ const selfTest = process.argv.includes('--self-test');
 const modelSmoke = process.argv.includes('--model-smoke');
 const fileSmoke = process.argv.includes('--file-smoke');
 const codingSmoke = process.argv.includes('--coding-smoke');
+const longCodingSmoke = process.argv.includes('--long-coding-smoke');
 const gameSmoke = process.argv.includes('--game-smoke');
 const generalDesktopSmoke = process.argv.includes('--general-desktop-smoke');
 const companionSmoke = process.argv.includes('--companion-smoke');
@@ -86,6 +89,12 @@ const creativeSmoke = process.argv.includes('--creative-smoke');
 const beforeToolSmoke = process.argv.includes('--before-tool-smoke');
 const retainNativeFixture = process.argv.includes('--retain-native-fixture');
 const globalDeadline = Date.now() + GLOBAL_TIMEOUT_MS;
+
+function cargoFailureCode(stderr) {
+  return stderr.includes('rust-lld: error: failed to write output') && /permission denied/i.test(stderr)
+    ? 'CARGO_LINK_OUTPUT_UNAVAILABLE'
+    : 'CARGO_BUILD_FAILED';
+}
 
 function isCredentialEnvironmentName(name) {
   return name.toUpperCase() === API_KEY_ENVIRONMENT_NAME;
@@ -405,7 +414,7 @@ async function resolveToolchainEnvironment() {
 
 async function main() {
   const userArgs = process.argv.slice(2);
-  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--retain-native-fixture'];
+  const allowedFlags = ['--compile-only', '--self-test', '--browser', '--browser-gui', '--model-smoke', '--file-smoke', '--coding-smoke', '--long-coding-smoke', '--game-smoke', '--general-desktop-smoke', '--companion-smoke', '--creative-smoke', '--before-tool-smoke', '--retain-native-fixture'];
   if (userArgs.some((arg, index) => {
     if (arg === '--data-dir') return !browserGui || !userArgs[index + 1] || userArgs[index + 1].startsWith('--');
     if (index > 0 && userArgs[index - 1] === '--data-dir') return false;
@@ -415,7 +424,7 @@ async function main() {
     process.exitCode = 2;
     return;
   }
-  if (([browser, browserGui, modelSmoke, fileSmoke, codingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
+  if (([browser, browserGui, modelSmoke, fileSmoke, codingSmoke, longCodingSmoke, gameSmoke, generalDesktopSmoke, companionSmoke, creativeSmoke, beforeToolSmoke].filter(Boolean).length > 1) || (retainNativeFixture && !beforeToolSmoke)) {
     emitFailure('live_smoke_status=not_run', 'RUNNER_MODE_SELECTION_INVALID', 400);
     process.exitCode = 2;
     return;
@@ -515,7 +524,7 @@ async function main() {
   if (compile.status !== 0) {
     emitFailure(
       compileOnly ? 'live_smoke_compile_status=fail' : 'live_smoke_status=not_run',
-      'CARGO_BUILD_FAILED',
+      cargoFailureCode(compile.stderr),
       503,
     );
     process.exitCode = compile.status ?? 1;
@@ -568,11 +577,11 @@ async function main() {
 
   let test;
   try {
-    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
+    console.log(`live_smoke_phase=execute mode=${browserGui ? 'browser_gui' : browser ? 'browser_frontend' : beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
     test = await runCaptured(
       executable,
       browserGui ? [guiDataDir, '--live-frontend'] : browser ? ['--live-agent-only'] : [
-        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME,
+        beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME,
         '--exact',
         '--ignored',
         '--test-threads=1',
@@ -619,6 +628,26 @@ async function main() {
   const stages = beforeToolSmoke ? beforeToolStagesFromOutput(test.stderr) : [];
   for (const phase of stages) console.log(`live_smoke_stage=${phase} status=pass`);
   for (const line of test.stderr.split(/\r?\n/)) {
+    const codingTrace = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_TRACE phase=(file|coding|snake_game|long_first|long_repair|long_second) read=([0-9]{1,4}) write=([0-9]{1,4}) patch=([0-9]{1,4}) exec=([0-9]{1,4}) plan=([0-9]{1,4}) completion=([0-9]{1,4}) tool_errors=([0-9]{1,4}) final_replies=([0-9]{1,4}) file_exists=(true|false) file_bytes=([0-9]{1,8}) html=(true|false) script=(true|false) canvas=(true|false) keydown=(true|false)$/);
+    if (codingTrace) console.log(`live_smoke_coding_trace=${codingTrace[0].slice('NOMIFUN_LIVE_SMOKE_CODING_TRACE '.length)}`);
+    const codingFlow = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_FLOW phase=(file|coding|snake_game|long_first|long_repair|long_second) flow=([RWPEUCO01x]{0,96})$/);
+    if (codingFlow) console.log(`live_smoke_coding_flow=phase=${codingFlow[1]} flow=${codingFlow[2]}`);
+    const codingCheck = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_CHECK phase=long_first attempt=([0-2]) quote=(true|false) newline=(true|false) summary=(true|false) malformed=(true|false) syntax=(true|false) import=(true|false) assertion=(true|false) zero_tests=(true|false)$/);
+    if (codingCheck) console.log(`live_smoke_coding_check=${codingCheck[0].slice('NOMIFUN_LIVE_SMOKE_CODING_CHECK '.length)}`);
+    const codingHistory = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_HISTORY phase=long_coding\.(?:first|second)\.history instruction=([0-9]{1,4}) source=([0-9]{1,4}) tests=([0-9]{1,4}) other=([0-9]{1,4}) errors=([0-9]{1,4}) invalid_payload=([0-9]{1,4}) not_found=([0-9]{1,4}) scope_rejected=([0-9]{1,4}) capability_unavailable=([0-9]{1,4}) admission=([0-9]{1,4}) process_error=([0-9]{1,4}) command_exit=([0-9]{1,4}) tool_search=([0-9]{1,4}) discovery_revealed_write=([0-9]{1,4}) other_tools=([0-9]{1,4}) exec_failed=([0-9]{1,4}) exec_succeeded=([0-9]{1,4}) exec_unknown=([0-9]{1,4}) test_launches=([0-9]{1,4})$/);
+    if (codingHistory) console.log(`live_smoke_coding_history=${codingHistory[0].slice('NOMIFUN_LIVE_SMOKE_CODING_HISTORY '.length)}`);
+    const codingFailures = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_FAILURES phase=long_coding\.(?:first|second)\.history names=([a-z_,]{0,180}) diagnosis=([A-Z0-9_]{1,96})$/);
+    if (codingFailures && codingFailures[1].split(',').filter(Boolean).every(name => ['read_file', 'write_file', 'apply_patch', 'exec_command', 'start_process', 'poll_process', 'git_status', 'git_diff', 'search_files', 'update_plan', 'report_completion', 'other'].includes(name))) {
+      console.log(`live_smoke_coding_failures=${codingFailures[0].slice('NOMIFUN_LIVE_SMOKE_CODING_FAILURES '.length)}`);
+    }
+    const codingTerminal = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_TERMINAL phase=long_coding\.(?:first|repair|second)\.result replies=([0-9]{1,4}) tools=([0-9]{1,4}) failed_turn=(true|false) code=([A-Z0-9_]{1,96}) diagnosis=([A-Z0-9_]{1,96})$/);
+    if (codingTerminal) console.log(`live_smoke_coding_terminal=${codingTerminal[0].slice('NOMIFUN_LIVE_SMOKE_CODING_TERMINAL '.length)}`);
+    const turnFailure = line.match(/^NOMIFUN_LIVE_SMOKE_TURN_FAILURE index=([0-7]) code=([A-Z0-9_]{1,96}) diagnosis=([A-Z0-9_]{1,96}) steps=([0-9]{1,4}) detail=([A-Za-z0-9_:().-]{0,240})$/);
+    if (turnFailure) console.log(`live_smoke_turn_failure=${turnFailure[0].slice('NOMIFUN_LIVE_SMOKE_TURN_FAILURE '.length)}`);
+    const runtimeProgress = line.match(/^NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS steps=([0-9]{1,5}) compact_calls=([0-9]{1,5}) compacted=([0-9]{1,5}) degraded=([0-9]{1,5}) reads=([0-9]{1,5}) execs=([0-9]{1,5}) writes=([0-9]{1,5}) reports=([0-9]{1,5})$/);
+    if (runtimeProgress) console.log(`live_smoke_runtime_progress=${runtimeProgress[0].slice('NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS '.length)}`);
+    const controlErrors = line.match(/^NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence=([A-Z_:,]{1,450})$/);
+    if (controlErrors) console.log(`live_smoke_control_errors=${controlErrors[1]}`);
     const compact = line.match(/^NOMIFUN_LIVE_SMOKE_COMPACTION summaries=([0-9]{1,4}) replacements=([0-9]{1,4})$/);
     if (compact) console.log(`live_smoke_compaction summaries=${compact[1]} replacements=${compact[2]}`);
     const recovery = line.match(/^NOMIFUN_LIVE_SMOKE_RECOVERY phase=(engine\.(?:nomi|coding)\.(?:create|patch|exec|continue)) controls=([0-9]{1,4}) pre_execution=([0-9]{1,4})$/);
@@ -641,7 +670,7 @@ async function main() {
       return;
     }
     // libtest exits successfully even when an exact filter matches zero tests.
-    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
+    const selected = beforeToolSmoke ? BEFORE_TOOL_TEST_NAME : fileSmoke ? FILE_TEST_NAME : codingSmoke ? CODING_TEST_NAME : longCodingSmoke ? LONG_CODING_TEST_NAME : gameSmoke ? GAME_TEST_NAME : generalDesktopSmoke ? GENERAL_DESKTOP_TEST_NAME : companionSmoke ? COMPANION_TEST_NAME : creativeSmoke ? CREATIVE_TEST_NAME : MODEL_TEST_NAME;
     if (!selectedTestPassed(test.stdout, selected)) {
       emitFailure('live_smoke_status=not_run', 'SELECTED_TEST_DID_NOT_PASS', 503);
       process.exitCode = 2;
@@ -669,13 +698,21 @@ async function main() {
       process.exitCode = 2;
       return;
     }
-    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
+    console.log(`live_smoke_mode=${beforeToolSmoke ? 'before_tool' : fileSmoke ? 'workspace_file' : codingSmoke ? 'coding_agent' : longCodingSmoke ? 'long_coding' : gameSmoke ? 'snake_game' : generalDesktopSmoke ? 'general_desktop' : companionSmoke ? 'companion' : creativeSmoke ? 'creative_studio' : 'selected_model'} model=${model}`);
     console.log('live_smoke_status=pass code=OK status=200');
     process.exitCode = 0;
     return;
   }
 
   const typed = typedFailureFromOutput(`${test.stdout}\n${test.stderr}`);
+  if (!typed) {
+    const panicLine = `${test.stdout}\n${test.stderr}`.split(/\r?\n/)
+      .find(line => line.includes('panicked at '));
+    if (panicLine) {
+      const location = panicLine.match(/(?:nomi_core_live_provider_smoke|turn|engine|history_process_display)\.rs:(\d{1,5}):(\d{1,5})/);
+      console.error(`live_smoke_panic=${location ? `known_source_line_${location[1]}` : 'location_unavailable'}`);
+    }
+  }
   if (browser) {
     const evidence = browserEvidenceFromOutput(test.stderr);
     if (evidence) console.error(`browser_live_evidence=${JSON.stringify(evidence)}`);
@@ -705,6 +742,10 @@ async function main() {
 }
 
 function runSelfTest() {
+  if (cargoFailureCode("rust-lld: error: failed to write output 'test.exe': permission denied") !== 'CARGO_LINK_OUTPUT_UNAVAILABLE' ||
+      cargoFailureCode('error[E0308]: mismatched types') !== 'CARGO_BUILD_FAILED') {
+    throw new Error('cargo failure classification self-test failed');
+  }
   const proof = 'BROWSER_WORKSPACE_SMOKE_PASS ' + JSON.stringify({ scope: 'live-agent-only', native_fixture_profile_cleanup: true, agent: { real_provider: true, native_auto_open: true, trusted_click_value: 2, canonical_action_shape: true, evidence_driven_cancel: true, terminal_before_unlock: true } });
   if (!browserProofFromOutput(proof) || browserProofFromOutput('') || browserProofFromOutput(proof.replace('"trusted_click_value":2', '"trusted_click_value":4'))) throw new Error('browser proof parsing failed');
   const evidence = browserEvidenceFromOutput('NOMIFUN_BROWSER_LIVE_EVIDENCE ' + JSON.stringify({ count: 3, secret: 'DO_NOT_EMIT', tools: [{ name: 'DO_NOT_EMIT', args: 'DO_NOT_EMIT' }] }));

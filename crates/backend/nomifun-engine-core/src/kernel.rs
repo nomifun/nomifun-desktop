@@ -266,7 +266,7 @@ impl KernelEngineToolInvoker {
             .registry
             .invoke(&self.snapshot, &active, request)
             .await
-            .map_err(kernel_error)?;
+            .map_err(|error| kernel_error_for_action(error, is_process))?;
         Ok(EngineToolResult::text(
             invocation.call.call_id,
             serde_json::to_string(&output.0).map_err(|error| {
@@ -320,6 +320,30 @@ fn kernel_error(error: KernelError) -> EngineToolError {
         code,
         message,
     }
+}
+
+/// Keep host diagnostics private while returning actionable, fixed guidance
+/// for the common process launch failures seen by coding Agents. The raw
+/// command, cwd, environment and owner error never cross the model boundary.
+fn kernel_error_for_action(error: KernelError, is_process: bool) -> EngineToolError {
+    if is_process && error.canonical_code().as_ref() == "CAPABILITY_UNAVAILABLE" {
+        let detail = error.capability_execution_failure()
+            .map(|failure| failure.message.as_str()).unwrap_or_default();
+        let guidance = if detail.contains("process spawn failed") {
+            "Process launch failed. The command field must contain only the executable; put options in args. Example: {\"command\":\"bun\",\"args\":[\"test\",\"tests/example.test.js\"]}. Do not send the whole command line as command. Verify the executable is available. No successful launch was reported; change the request before retrying."
+        } else if detail.contains("invalid working directory") || detail.contains("cwd must be") {
+            "Process cwd is unavailable. Use a normalized workspace-relative directory, then retry with a new call."
+        } else if detail.contains("process controls cannot change launch parameters") {
+            "A process control call cannot change command, args, cwd or env. Use the existing process_id only."
+        } else {
+            "The process owner could not complete this call. Its effects may be uncertain; inspect current state before any changed retry."
+        };
+        return EngineToolError::CapabilityKernel {
+            code: "CAPABILITY_UNAVAILABLE".into(),
+            message: guidance.into(),
+        };
+    }
+    kernel_error(error)
 }
 
 fn validate_snapshot_registry(

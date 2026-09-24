@@ -8,7 +8,7 @@ use std::{
     io,
     mem,
     os::windows::ffi::{OsStrExt, OsStringExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     ptr,
     sync::{
         Arc, Mutex, OnceLock,
@@ -3767,7 +3767,8 @@ struct PreparedCommand {
 impl PreparedCommand {
     fn new(request: &NormalizedProcessRequest) -> Result<Self, ProcessError> {
         let (program, args) = command_argv(&request.command)?;
-        let application = encode_nul_terminated(&program, "program")?;
+        let application_program = resolve_program_on_path(&program, &request.env);
+        let application = encode_nul_terminated(&application_program, "program")?;
         let command_line = encode_command_line(&program, &args)?;
         let cwd = encode_nul_terminated(request.cwd.as_os_str(), "working directory").map_err(
             |error| ProcessError::InvalidWorkingDirectory {
@@ -3783,6 +3784,45 @@ impl PreparedCommand {
             environment,
         })
     }
+}
+
+/// With a non-null lpApplicationName, CreateProcessW does not search PATH for
+/// a bare command. Resolve only native executable names from the effective
+/// child PATH. Never search the current directory or interpret .cmd/.bat via
+/// a shell; explicit paths keep their existing direct-launch semantics.
+fn resolve_program_on_path(
+    program: &OsStr,
+    overrides: &std::collections::BTreeMap<OsString, OsString>,
+) -> OsString {
+    let units = program.encode_wide().collect::<Vec<_>>();
+    if units.iter().any(|unit| matches!(*unit, value if value == b'\\' as u16
+        || value == b'/' as u16 || value == b':' as u16)) {
+        return program.to_os_string();
+    }
+    let path = Path::new(program);
+    let explicit_extension = path.extension().is_some();
+    let effective_path = overrides.iter()
+        .find(|(key, _)| compare_os_case_insensitive(key, OsStr::new("PATH")) == Ordering::Equal)
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var_os("PATH"));
+    let Some(effective_path) = effective_path else { return program.to_os_string() };
+    for directory in std::env::split_paths(&effective_path) {
+        if !directory.is_absolute() { continue; }
+        let base = directory.join(program);
+        let candidates = if explicit_extension {
+            vec![base]
+        } else {
+            vec![base.with_extension("exe"), base.with_extension("com"), base]
+        };
+        for candidate in candidates {
+            if candidate.is_file() {
+                if let Ok(canonical) = std::fs::canonicalize(&candidate) {
+                    return canonical.into_os_string();
+                }
+            }
+        }
+    }
+    program.to_os_string()
 }
 
 fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), ProcessError> {
@@ -5160,6 +5200,21 @@ mod tests {
             environment_entries(&block),
             vec!["alpha=first", "Beta=middle", "PATH=new", "ZETA=last"]
         );
+    }
+
+    #[test]
+    fn bare_program_resolves_only_native_executables_on_effective_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("fixture.exe");
+        std::fs::write(&executable, b"").unwrap();
+        let overrides = BTreeMap::from([(
+            OsString::from("Path"), directory.path().as_os_str().to_os_string(),
+        )]);
+        let expected = std::fs::canonicalize(&executable).unwrap().into_os_string();
+        assert_eq!(resolve_program_on_path(OsStr::new("fixture"), &overrides), expected);
+        assert_eq!(resolve_program_on_path(OsStr::new("fixture.exe"), &overrides), expected);
+        assert_eq!(resolve_program_on_path(OsStr::new("missing"), &overrides), OsString::from("missing"));
+        assert_eq!(resolve_program_on_path(executable.as_os_str(), &overrides), executable.as_os_str());
     }
 
     #[test]

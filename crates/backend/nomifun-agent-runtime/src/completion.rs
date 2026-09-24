@@ -98,7 +98,7 @@ struct Submission {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Before finishing a tool/plan turn, close the plan and submit a single-call completion account. Record source-anchored requirements using update_plan first. Include every current plan step once and assign EVERY recorded requirement ID to exactly one criterion, including obligations from removed steps. supported requires current successful observations, not inferred test/task success. unverified/blocked require reasons. scope_changed requires an exact quote from a LATER accepted user input for all assigned requirements (any current accepted input is later than an imported historical requirement), no evidence_call_ids, and is disclosed in the final answer; it is not completed original work. Later tools/plans/input invalidate the report. This grants no verification or extra work authority.".into(),
+        description: "Call update_plan successfully before this tool. Close every plan step and settle all processes, then submit report_completion ALONE. Include every current plan step once and assign EVERY recorded requirement ID to exactly one criterion, including obligations from removed steps. supported requires current successful observations, not inferred test/task success. unverified/blocked require reasons. scope_changed requires an exact quote from a LATER accepted user input for all assigned requirements (any current accepted input is later than an imported historical requirement), no evidence_call_ids, and is disclosed in the final answer; it is not completed original work. Later tools/plans/input invalidate the report. This grants no verification or extra work authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
@@ -254,6 +254,9 @@ impl CompletionTracker {
     ) -> Result<AgentCompletionReport, String> {
         crate::stream_limits::serialized_size(&call.arguments, 48 * 1024)
             .map_err(|_| "Completion report exceeds the 48 KiB serialized budget".to_owned())?;
+        if plan.revision == 0 || plan.needs_replan {
+            return Err("Call update_plan alone first; report_completion cannot close a missing or stale plan".into());
+        }
         crate::requirements::require_input_coverage(&plan.requirements, inputs.len())?;
         let submission: Submission = serde_json::from_value(call.arguments.0.clone())
             .map_err(|error| format!("Invalid completion report: {error}"))?;
@@ -265,7 +268,7 @@ impl CompletionTracker {
             return Err("Completion report needs a bounded summary and 1..16 criteria".into());
         }
         if plan.is_open() || !work.running_processes.is_empty() {
-            return Err("Close or explicitly block all plan steps and settle processes before reporting completion".into());
+            return Err("Do not retry report_completion yet. Call update_plan ALONE first with every current step completed or explicitly blocked, and settle any running process. After that result is recorded, call report_completion ALONE in a later model step.".into());
         }
         let expected: BTreeSet<&str> = if plan.steps.is_empty() {
             BTreeSet::from(["response"])
@@ -275,14 +278,20 @@ impl CompletionTracker {
         let mut seen = BTreeSet::new();
         let mut covered_requirements = BTreeSet::new();
         for criterion in &submission.criteria {
-            if !expected.contains(criterion.step.as_str())
-                || !seen.insert(criterion.step.as_str())
-                || criterion.rationale.trim().is_empty()
+            if !expected.contains(criterion.step.as_str()) {
+                return Err(format!("Criterion step must exactly match a current plan step. Current step labels: {}",
+                    serde_json::to_string(&expected).unwrap_or_default()));
+            }
+            if !seen.insert(criterion.step.as_str()) {
+                return Err(format!("Completion criterion repeats the step label {}. Include each current step once.",
+                    serde_json::to_string(&criterion.step).unwrap_or_default()));
+            }
+            if criterion.rationale.trim().is_empty()
                 || criterion.rationale.len() > 1024
                 || criterion.evidence_call_ids.len() > 8
                 || criterion.requirement_ids.len() > 32
             {
-                return Err("Each current plan step needs exactly one bounded completion criterion and rationale".into());
+                return Err("Each criterion needs a nonempty rationale of at most 1024 bytes, at most 8 evidence call IDs, and at most 32 requirement IDs".into());
             }
             let blocked = plan.steps.iter().any(|step| {
                 step.step == criterion.step && step.status == AgentPlanStatus::Blocked
@@ -314,9 +323,8 @@ impl CompletionTracker {
                     .find(|item| &item.id == id)
                     .ok_or_else(|| "Completion refers to an unknown requirement ID".to_owned())?;
                 if !covered_requirements.insert(id.as_str()) {
-                    return Err(
-                        "Assign each requirement ID to exactly one completion criterion".into(),
-                    );
+                    return Err(format!("Requirement ID {} appears in more than one completion criterion. Keep it only in the single matching step.",
+                        serde_json::to_string(id).unwrap_or_default()));
                 }
                 if scope_changed
                     && criterion.scope_change.as_ref().is_none_or(|source| {
@@ -348,15 +356,22 @@ impl CompletionTracker {
                         || !observation.usable_at_observation
                         || observation.workspace_epoch != work.workspace_observation_epoch)
                 {
-                    return Err("Evidence is failed, unsettled, overlapping or stale for the current workspace; mark unverified/blocked or inspect within the user's scope".into());
+                    let guidance = stale_evidence_guidance(
+                        &self.observations, work.workspace_observation_epoch);
+                    return Err(format!("Evidence is failed, unsettled, overlapping or stale for the current workspace. Do not repeat this report unchanged. {guidance}"));
                 }
             }
         }
         if seen != expected {
-            return Err("Completion report omits current plan steps".into());
+            return Err(format!("Completion report omits current plan steps: {}",
+                serde_json::to_string(&expected.difference(&seen).collect::<Vec<_>>()).unwrap_or_default()));
         }
         if covered_requirements.len() != plan.requirements.len() {
-            return Err("Completion omits recorded requirements; removing or renaming plan steps cannot discard user obligations".into());
+            let missing = plan.requirements.iter()
+                .filter(|item| !covered_requirements.contains(item.id.as_str()))
+                .map(|item| item.id.as_str()).take(32).collect::<Vec<_>>();
+            return Err(format!("Completion omits recorded requirements; assign these IDs to exactly one current criterion: {}. Removing or renaming plan steps cannot discard user obligations.",
+                serde_json::to_string(&missing).unwrap_or_default()));
         }
         Ok(AgentCompletionReport {
             plan_revision: plan.revision,
@@ -367,6 +382,41 @@ impl CompletionTracker {
             criteria: submission.criteria,
             requirements: plan.requirements.clone(),
         })
+    }
+}
+
+fn stale_evidence_guidance(observations: &[AgentCompletionObservation], epoch: u32) -> String {
+    let usable = observations.iter().rev()
+        .filter(|item| item.invocation_attempted && item.successful
+            && item.usable_at_observation && item.workspace_epoch == epoch)
+        .take(8).map(|item| item.call_id.as_str()).collect::<Vec<_>>();
+    if usable.is_empty() {
+        "No current usable observation exists. If verification is authorized, reopen one plan step as in_progress with update_plan, run the final check, close the plan, then report without any further command; otherwise mark unverified with a reason.".to_owned()
+    } else {
+        format!("Current usable observation call IDs (not semantic proof): {}. Inspect the actual result and cite the matching successful call ID. A blocked/rejected call is not evidence; do not launch another command merely to refresh an already usable observation.",
+            serde_json::to_string(&usable).unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_evidence_feedback_prefers_current_success_over_another_command() {
+        let observations = vec![
+            AgentCompletionObservation { call_id: "verified".into(), tool_name: "exec_command".into(),
+                workspace_epoch: 2, invocation_attempted: true, successful: true,
+                usable_at_observation: true, command_exit_code: Some(0), command: None },
+            AgentCompletionObservation { call_id: "blocked".into(), tool_name: "exec_command".into(),
+                workspace_epoch: 2, invocation_attempted: false, successful: false,
+                usable_at_observation: false, command_exit_code: None, command: None },
+        ];
+        let guidance = stale_evidence_guidance(&observations, 2);
+        assert!(guidance.contains("verified"));
+        assert!(!guidance.contains("\"blocked\""));
+        assert!(guidance.contains("do not launch another command"));
+        assert!(stale_evidence_guidance(&observations, 3).contains("reopen one plan step"));
     }
 }
 

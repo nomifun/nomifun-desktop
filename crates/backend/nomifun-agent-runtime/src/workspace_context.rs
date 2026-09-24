@@ -297,6 +297,7 @@ pub(crate) struct ScopedInstructions {
     // newly created descendant instruction file cannot remain invisible.
     recursive_scopes: BTreeSet<String>,
     dirty: bool,
+    loaded: bool,
 }
 
 struct InstructionAuthority {
@@ -421,6 +422,7 @@ impl ScopedInstructions {
             directories: BTreeSet::from([String::new()]),
             recursive_scopes: BTreeSet::new(),
             dirty: false,
+            loaded: false,
             layers: BTreeMap::new(),
         }
     }
@@ -613,6 +615,21 @@ impl ScopedInstructions {
                     .into(),
             ));
         }
+        let read_only_batch = calls.iter().all(|call| {
+            self.authority.tool_plan.binding(&call.name).is_some_and(|binding|
+                matches!(binding.effect_class, crate::AgentEffectClass::ReadOnly))
+        });
+        // The owner still resolves each explicit read target above. During a
+        // read-only burst, already loaded instruction files cannot have been
+        // changed by this turn; avoid re-reading the same ancestors on every
+        // model step. Effects, commands, redirects and new directories retain
+        // the normal fresh instruction check.
+        if read_only_batch && self.loaded && !self.dirty && redirect.is_none()
+            && recursive == self.recursive_scopes
+            && directories.is_subset(&self.directories)
+        {
+            return Ok(None);
+        }
         match self.refresh(directories, tools, sink, cancellation).await {
             Ok(changed) => {
                 self.recursive_scopes = recursive;
@@ -800,9 +817,11 @@ impl ScopedInstructions {
             .await?;
             self.layers = next;
             self.directories = known;
+            self.loaded = true;
             return Ok(true);
         }
         self.directories = known;
+        self.loaded = true;
         Ok(false)
     }
 }

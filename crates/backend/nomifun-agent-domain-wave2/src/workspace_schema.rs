@@ -20,7 +20,8 @@ pub(super) fn input(action: &str) -> Option<StrictJsonValue> {
             "properties":{
                 "format":{"type":"string", "enum":["text", "image", "instruction_scope"], "default":"text"},
                 "recursive":{"type":"boolean", "default":false},
-                "missing_ok":{"type":"boolean", "default":false},
+                "missing_ok":{"type":"boolean", "default":false,
+                    "description":"Use true when checking an optional file such as AGENTS.md so absence is reported as a normal observation."},
                 "path":path(),
                 "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0},
                 "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384},

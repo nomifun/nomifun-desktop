@@ -251,6 +251,7 @@ pub(crate) async fn run_compaction_recorded(
     match terminal.expect("loop exits only after terminal") {
         ChatFinishReason::Completed if !summary.trim().is_empty() => {}
         ChatFinishReason::Cancelled => return Err(AgentEngineError::Cancelled),
+        ChatFinishReason::MaxOutputTokens => return Err(AgentEngineError::CompactionOutputLimit),
         finish_reason => {
             return Err(AgentEngineError::Compaction(format!(
                 "compaction ended with {finish_reason:?}"
