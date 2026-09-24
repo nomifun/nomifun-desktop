@@ -877,6 +877,10 @@ pub enum SessionReasoningEffortDto {
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+    Max,
+    Ultra,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1422,20 +1426,26 @@ mod snapshot_tests {
 
     #[test]
     fn session_reasoning_effort_accepts_only_the_bounded_override() {
-        let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
-            "preset_id": PRESET_ID,
-            "reasoning_effort": "high"
-        }))
-        .expect("bounded session reasoning override");
-        assert_eq!(
-            request.reasoning_effort,
-            Some(SessionReasoningEffortDto::High)
-        );
+        for (raw, expected) in [
+            ("low", SessionReasoningEffortDto::Low),
+            ("medium", SessionReasoningEffortDto::Medium),
+            ("high", SessionReasoningEffortDto::High),
+            ("xhigh", SessionReasoningEffortDto::XHigh),
+            ("max", SessionReasoningEffortDto::Max),
+            ("ultra", SessionReasoningEffortDto::Ultra),
+        ] {
+            let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+                "preset_id": PRESET_ID,
+                "reasoning_effort": raw
+            }))
+            .expect("bounded session reasoning override");
+            assert_eq!(request.reasoning_effort, Some(expected));
+        }
 
         assert!(
             serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
                 "preset_id": PRESET_ID,
-                "reasoning_effort": "max"
+                "reasoning_effort": "extreme"
             }))
             .is_err()
         );

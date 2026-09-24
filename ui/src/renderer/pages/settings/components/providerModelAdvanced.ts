@@ -16,7 +16,9 @@ ProtocolEndpointDescriptor
 import type { ProviderConnectionInput as CanonicalProviderConnectionInput } from '@/common/types/provider/providerConnection';
 import type { ProviderModelCapabilityInput as CanonicalProviderModelCapabilityInput } from '@/common/types/provider/providerModel';
 import {
+  isSessionReasoningEffort,
   protocolSupportsReasoningEffort,
+  reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
 
@@ -86,7 +88,7 @@ export interface CatalogCapabilitySuggestion {
 export type ProviderModelCapabilityInput = CanonicalProviderModelCapabilityInput;
 export type ProviderConnectionInput = CanonicalProviderConnectionInput;
 export type ModelReasoningEffort = SessionReasoningEffort;
-export { protocolSupportsReasoningEffort };
+export { protocolSupportsReasoningEffort, reasoningEffortsForProtocol };
 
 /** Persisted connection metadata used while resolving a capability. */
 export interface ProviderConnectionDescriptor {
@@ -746,7 +748,7 @@ export const providerParamReasoningEffort = (raw: string): ModelReasoningEffort 
 };
 
 const matchesReasoningEffort = (value: string): value is ModelReasoningEffort =>
-  value === 'low' || value === 'medium' || value === 'high';
+  isSessionReasoningEffort(value);
 
 /**
  * Store one normalized model default in the canonical task-scoped params.
@@ -854,7 +856,8 @@ export const validateModelDefinition = (
         capability.task !== 'chat' ||
         !protocolSupportsReasoningEffort(capability.protocol) ||
         typeof effort !== 'string' ||
-        !matchesReasoningEffort(effort)
+        !matchesReasoningEffort(effort) ||
+        !reasoningEffortsForProtocol(capability.protocol).includes(effort)
       ) {
         errors.push({ task: capability.task, code: 'invalid_provider_params' });
       }

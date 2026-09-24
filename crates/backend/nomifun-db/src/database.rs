@@ -211,18 +211,36 @@ async fn validate_restorable_database_contract(pool: &SqlitePool) -> Result<(), 
 /// Backup and restore artifacts must already be current; they are preservation
 /// boundaries and must not be mutated as part of validation.
 pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(), DbError> {
-    // Validate the complete canonical lineage. Unknown versions, edited
-    // checksums and historical prefixes fail closed without mutating the dataset.
+    if !validate_known_migration_lineage_prefix(pool).await? {
+        let expected = DB_MIGRATOR.iter().count();
+        let observed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(pool)
+            .await
+            .map_err(DbError::Query)?;
+        return Err(DbError::Init(format!(
+            "database migration lineage contains {observed} rows but this binary requires exactly {expected}",
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an exact checksum-matching prefix and report whether it is current.
+/// Startup may migrate a known prefix in place; backup validation still calls
+/// [`validate_current_migration_lineage`] and requires the complete lineage.
+pub async fn validate_known_migration_lineage_prefix(
+    pool: &SqlitePool,
+) -> Result<bool, DbError> {
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
     if expected
         .first()
         .is_none_or(|migration| migration.version != CANONICAL_BASELINE_MIGRATION_VERSION)
-        || expected.len() != 3
+        || expected.len() != 4
         || expected[1].version != 2
         || expected[2].version != 3
+        || expected[3].version != 4
     {
         return Err(DbError::Init(
-            "database lineage must contain the canonical baseline, model context, and session reasoning migrations".into(),
+            "database lineage must contain the canonical baseline, model context, and both session reasoning migrations".into(),
         ));
     }
 
@@ -231,9 +249,9 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
             .fetch_all(pool)
             .await
             .map_err(DbError::Query)?;
-    if rows.len() != expected.len() {
+    if rows.is_empty() || rows.len() > expected.len() {
         return Err(DbError::Init(format!(
-            "database migration lineage contains {} rows but this binary requires exactly {}",
+            "database migration lineage contains {} rows but this binary recognizes at most {}",
             rows.len(),
             expected.len(),
         )));
@@ -253,7 +271,7 @@ pub async fn validate_current_migration_lineage(pool: &SqlitePool) -> Result<(),
             )));
         }
     }
-    Ok(())
+    Ok(rows.len() == expected.len())
 }
 
 /// Return true only for the exact retired N1/M1 canonical baseline that may
@@ -484,7 +502,9 @@ async fn clean_start_unified_plugin_schema(
         return Ok(());
     }
     let expected = DB_MIGRATOR.iter().collect::<Vec<_>>();
-    if rows.len() == expected.len()
+    // A complete checksum-matching prefix is an ordinary older application
+    // version and may receive only the pending forward migrations below.
+    if rows.len() <= expected.len()
         && rows.iter().zip(expected.iter()).all(|(row, migration)| {
             row.try_get::<i64, _>("version").ok() == Some(migration.version)
                 && row.try_get::<bool, _>("success").ok() == Some(true)
@@ -821,6 +841,7 @@ mod tests {
             "PRAGMA foreign_keys = OFF;\n\
              DELETE FROM _sqlx_migrations WHERE version >= 2;\n\
              ALTER TABLE provider_model_capabilities DROP COLUMN compaction_threshold_pct;\n\
+             ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v2;\n\
              ALTER TABLE agent_sessions DROP COLUMN reasoning_effort;\n",
         );
         for table in CANONICAL_PLUGIN_TABLES_FOR_TEST.iter().rev() {
@@ -938,6 +959,10 @@ mod tests {
             .execute(database.pool())
             .await
             .unwrap();
+        sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v2")
+            .execute(database.pool())
+            .await
+            .unwrap();
         sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort")
             .execute(database.pool())
             .await
@@ -958,6 +983,55 @@ mod tests {
         let reopened = init_database(&path).await.unwrap();
         validate_current_migration_lineage(reopened.pool()).await.unwrap();
         reopened.close().await;
+    }
+
+    #[tokio::test]
+    async fn extended_reasoning_migration_preserves_existing_session_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reasoning-effort-v2.db");
+        let database = init_database(&path).await.unwrap();
+        let session_id = "0190f5fe-7c00-7a00-8000-000000000141";
+        sqlx::query(
+            "INSERT INTO agent_sessions (\
+                agent_session_id, owner_ref_json, state, archived, pinned, \
+                agent_binding_json, next_seq, created_at, reasoning_effort, reasoning_effort_v2\
+             ) VALUES (?, ?, 'live', 0, 0, '{}', 1, 1, 'high', 'high')",
+        )
+        .bind(session_id)
+        .bind(r#"{"principal_kind":"user","principal_id":"reasoning-migration"}"#)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v2")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE schema_metadata SET migration_head = 2, \
+             canonical_schema_manifest_digest = \
+             'd6fcfed0f24fac2e3045e1a920e36b2d6a3751f7adb2d59de363e171e20e6b1f' \
+             WHERE singleton_key = 'canonical'",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
+        database.close().await;
+
+        let upgraded = init_database(&path).await.unwrap();
+        validate_current_migration_lineage(upgraded.pool()).await.unwrap();
+        let effort: Option<String> = sqlx::query_scalar(
+            "SELECT reasoning_effort_v2 FROM agent_sessions WHERE agent_session_id = ?",
+        )
+        .bind(session_id)
+        .fetch_one(upgraded.pool())
+        .await
+        .unwrap();
+        assert_eq!(effort.as_deref(), Some("high"));
+        upgraded.close().await;
     }
 
     #[tokio::test]

@@ -41,7 +41,7 @@ export const filterCompatibleChatModelGroups = (
 export default function ChatModelSelector({ providers, currentModel, getAvailableModels, onSelectModel,
   disabled = false, compact = false, className = '', readOnlyLabel, testId = 'chat-model-selector',
   requiredTraits = [], requiredTechnicalCapabilities = [], popupVisible, onPopupVisibleChange,
-  reasoningEffort, reasoningEffortSupported = false, reasoningEffortDisabled = false,
+  reasoningEffort, reasoningEffortOptions = [], reasoningEffortDisabled = false,
   onReasoningEffortChange,
 }: {
   providers: IProvider[];
@@ -58,7 +58,7 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
   popupVisible?: boolean;
   onPopupVisibleChange?: (visible: boolean) => void;
   reasoningEffort?: SessionReasoningEffort;
-  reasoningEffortSupported?: boolean;
+  reasoningEffortOptions?: readonly SessionReasoningEffort[];
   reasoningEffortDisabled?: boolean;
   onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
 }) {
@@ -73,7 +73,7 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
     ? modelDisplayLabel(currentModel.use_model, model?.display_name)
     : t('conversation.welcome.selectModel'));
   const showReasoning = Boolean(onReasoningEffortChange)
-    && (reasoningEffortSupported || reasoningEffort !== undefined);
+    && (reasoningEffortOptions.length > 0 || reasoningEffort !== undefined);
   const reasoningLabel = t(`conversation.reasoningEffort.${reasoningEffort ?? 'auto'}`);
   const reasoningAriaLabel = `${t('conversation.reasoningEffort.label')}: ${reasoningLabel}`;
   const groups = providers.filter(item => item.enabled !== false)
@@ -153,13 +153,12 @@ export default function ChatModelSelector({ providers, currentModel, getAvailabl
     selectedKeys={[`reasoning:${reasoningEffort ?? 'auto'}`]}
   >
     <Menu.ItemGroup key='reasoning-effort' title={t('conversation.reasoningEffort.label')}>
-      {([undefined, 'low', 'medium', 'high'] as const).map(effort => {
+      {([undefined, ...reasoningEffortOptions] as const).map(effort => {
         const selected = effort === reasoningEffort;
-        const fixedEffortUnavailable = effort !== undefined && !reasoningEffortSupported;
         return <Menu.Item
           key={`reasoning:${effort ?? 'auto'}`}
           data-testid={`${testId}-reasoning-${effort ?? 'auto'}`}
-          disabled={reasoningEffortDisabled || fixedEffortUnavailable}
+          disabled={reasoningEffortDisabled}
           onClick={() => {
             setReasoningPopupVisible(false);
             if (selected) return;

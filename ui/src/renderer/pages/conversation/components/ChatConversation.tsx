@@ -64,7 +64,7 @@ import {
   capabilitySupportsTechnicalCapability,
 } from '@/common/utils/providerModels';
 import {
-  protocolSupportsReasoningEffort,
+  reasoningEffortsForProtocol,
   type SessionReasoningEffort,
 } from '@/common/types/reasoningEffort';
 
@@ -282,10 +282,10 @@ const NomiConversationPanel: React.FC<{
       if (!switched) return false;
       await saveNomiDefaultModel(provider.id, modelName);
       const capability = capabilityOf(provider, modelName, 'chat');
-      if (
-        !protocolSupportsReasoningEffort(capability?.protocol)
-        || !capabilitySupportsTechnicalCapability(capability, 'reasoning')
-      ) {
+      const options = capabilitySupportsTechnicalCapability(capability, 'reasoning')
+        ? reasoningEffortsForProtocol(capability?.protocol)
+        : [];
+      if (reasoningEffort !== undefined && !options.includes(reasoningEffort)) {
         setReasoningEffort(undefined);
       }
       void refreshConversationCache(conversation.id).catch((error) => {
@@ -301,7 +301,7 @@ const NomiConversationPanel: React.FC<{
       modelSwitchingRef.current = false;
       setModelSwitching(false);
     }
-  }, [conversation.id, t]);
+  }, [conversation.id, reasoningEffort, t]);
 
   const modelSelection = useNomiModelSelection({
     initialModel: conversation.model,

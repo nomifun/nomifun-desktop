@@ -1853,7 +1853,10 @@
         "enum": [
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
         ],
         "type": "string"
       },

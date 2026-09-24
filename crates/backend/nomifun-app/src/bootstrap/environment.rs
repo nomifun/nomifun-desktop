@@ -330,12 +330,19 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
 
     let plugin_clean_start =
         nomifun_db::requires_unified_plugin_clean_start(pool).await?;
-    if !plugin_clean_start {
-        if let Err(error) = nomifun_db::validate_current_migration_lineage(pool).await {
-            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-                "database migration lineage is not the exact canonical baseline: {error}"
-            )));
+    let lineage_current = if plugin_clean_start {
+        false
+    } else {
+        match nomifun_db::validate_known_migration_lineage_prefix(pool).await {
+            Ok(current) => current,
+            Err(error) => {
+                return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                    "database migration lineage is not a recognized canonical prefix: {error}"
+                )));
+            }
         }
+    };
+    if lineage_current {
         if let Err(error) = nomifun_db::validate_id_schema_contract(pool).await {
             return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
                 "database does not satisfy the complete v3 ID schema contract: {error}"
@@ -346,11 +353,11 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
                 "database does not satisfy the complete v3 ID data contract: {error}"
             )));
         }
-    }
-    if let Err(error) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await {
-        return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
-            "database does not satisfy the canonical Agent Store schema contract: {error}"
-        )));
+        if let Err(error) = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(format!(
+                "database does not satisfy the canonical Agent Store schema contract: {error}"
+            )));
+        }
     }
 
     for (table, column, declared_type, not_null, primary_key) in [
@@ -759,6 +766,36 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nomifun-backend.db");
         let database = nomifun_db::init_database(&path).await.unwrap();
+        database.close().await;
+
+        assert_eq!(
+            probe_existing_v3_database(&path).await.unwrap(),
+            ExistingV3DatabaseProbe::Current
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_accepts_a_checksum_matching_prefix_for_forward_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nomifun-backend.db");
+        let database = nomifun_db::init_database(&path).await.unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE agent_sessions DROP COLUMN reasoning_effort_v2")
+            .execute(database.pool())
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE schema_metadata SET migration_head = 2, \
+             canonical_schema_manifest_digest = \
+             'd6fcfed0f24fac2e3045e1a920e36b2d6a3751f7adb2d59de363e171e20e6b1f' \
+             WHERE singleton_key = 'canonical'",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap();
         database.close().await;
 
         assert_eq!(

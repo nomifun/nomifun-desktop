@@ -424,6 +424,35 @@ async fn session_reasoning_effort_is_persisted_and_updated_independently() {
     assert_eq!(updated.metadata.title, frozen_title);
     assert_eq!(updated.agent_binding, frozen_binding);
 
+    for effort in [
+        ReasoningEffort::XHigh,
+        ReasoningEffort::Max,
+        ReasoningEffort::Ultra,
+    ] {
+        store
+            .update_session_reasoning_effort(&owner(), &session_id, Some(effort))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_live_session(&session_id)
+                .await
+                .unwrap()
+                .metadata
+                .reasoning_effort,
+            Some(effort)
+        );
+    }
+    let stored: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT reasoning_effort, reasoning_effort_v2 FROM agent_sessions \
+         WHERE agent_session_id = ?",
+    )
+    .bind(session_id.as_ref())
+    .fetch_one(store.test_pool())
+    .await
+    .unwrap();
+    assert_eq!(stored, (None, Some("ultra".to_owned())));
+
     store
         .update_session_reasoning_effort(&owner(), &session_id, None)
         .await

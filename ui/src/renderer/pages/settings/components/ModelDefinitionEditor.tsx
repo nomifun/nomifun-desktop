@@ -46,6 +46,7 @@ import {
   providerParamChainRounds,
   providerParamReasoningEffort,
   protocolDescriptorForDraft,
+  reasoningEffortsForProtocol,
   protocolSupportsReasoningEffort,
   providerParamVoice,
   reconcileCapabilityRecommendations,
@@ -1065,6 +1066,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         const outputLimitEditorOpen =
           Boolean(editingOutputLimitByTask[capability.task]) || outputLimitMissing;
         const reasoningEffort = providerParamReasoningEffort(capability.providerParamsJson);
+        const reasoningEffortOptions = reasoningEffortsForProtocol(capability.protocol);
         const hasReasoningEffort =
           parsedProviderParams.ok &&
           Object.prototype.hasOwnProperty.call(parsedProviderParams.value, 'reasoning_effort');
@@ -2029,9 +2031,7 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
                     >
                       {([
                         { value: undefined, key: 'auto' },
-                        { value: 'low' as const, key: 'low' },
-                        { value: 'medium' as const, key: 'medium' },
-                        { value: 'high' as const, key: 'high' },
+                        ...reasoningEffortOptions.map((value) => ({ value, key: value })),
                       ] satisfies Array<{ value: ModelReasoningEffort | undefined; key: string }>).map((option) => {
                         const selected = option.value === undefined
                           ? !hasReasoningEffort

@@ -25,6 +25,7 @@ import {
   providerParamChainRounds,
   providerParamReasoningEffort,
   providerParamVoice,
+  reasoningEffortsForProtocol,
   protocolSupportsReasoningEffort,
   reconcileCapabilityRecommendations,
   removeCapabilityTask,
@@ -933,6 +934,8 @@ describe('model id entry', () => {
 describe('model reasoning effort', () => {
   test('reads, writes, clears, and preserves unrelated provider params', () => {
     expect(providerParamReasoningEffort('{"reasoning_effort":"medium"}')).toBe('medium');
+    expect(providerParamReasoningEffort('{"reasoning_effort":"max"}')).toBe('max');
+    expect(providerParamReasoningEffort('{"reasoning_effort":"ultra"}')).toBe('ultra');
     expect(providerParamReasoningEffort('{"reasoning_effort":"extreme"}')).toBeUndefined();
     expect(providerParamReasoningEffort('not json')).toBeUndefined();
 
@@ -953,6 +956,12 @@ describe('model reasoning effort', () => {
     for (const protocol of ['anthropic.messages', 'bedrock.anthropic_messages', '']) {
       expect(protocolSupportsReasoningEffort(protocol)).toBe(false);
     }
+    expect(reasoningEffortsForProtocol('openai.responses')).toEqual([
+      'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
+    ]);
+    expect(reasoningEffortsForProtocol('gemini.generate_text')).toEqual([
+      'low', 'medium', 'high',
+    ]);
   });
 
   test('validation rejects malformed or unsupported authored reasoning levels', () => {
@@ -968,8 +977,22 @@ describe('model reasoning effort', () => {
       'https://api.stepfun.com/v1'
     ).valid).toBe(true);
     expect(validateModelDefinition(
+      { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"ultra"}' }] },
+      { chat: chatManifest },
+      'https://api.stepfun.com/v1'
+    ).valid).toBe(true);
+    expect(validateModelDefinition(
       { model: 'reasoner', capabilities: [{ ...base, providerParamsJson: '{"reasoning_effort":"extreme"}' }] },
       { chat: chatManifest },
+      'https://api.stepfun.com/v1'
+    ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
+    expect(validateModelDefinition(
+      { model: 'reasoner', capabilities: [{
+        ...base,
+        protocol: 'gemini.generate_text',
+        providerParamsJson: '{"reasoning_effort":"max"}',
+      }] },
+      { chat: manifest('chat', 'gemini.generate_text') },
       'https://api.stepfun.com/v1'
     ).errors).toContainEqual({ task: 'chat', code: 'invalid_provider_params' });
     expect(validateModelDefinition(
