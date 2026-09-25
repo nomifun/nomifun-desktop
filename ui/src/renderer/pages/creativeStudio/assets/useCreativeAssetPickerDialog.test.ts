@@ -56,6 +56,8 @@ describe('Creative asset picker dialog', () => {
     expect(source.includes("role='alert'")).toBe(true);
     expect(source.includes('onRetry')).toBe(true);
     expect(source.includes('onConfirm ?? onCancel')).toBe(true);
+    expect(pickerCss.includes('grid-auto-rows: max-content')).toBe(true);
+    expect(pickerCss.includes('margin-top: auto')).toBe(true);
     expect(pickerCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
   });
 
