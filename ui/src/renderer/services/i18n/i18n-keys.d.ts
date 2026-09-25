@@ -6095,6 +6095,8 @@ export type I18nKey =
   | 'settings.mcpNextStep'
   | 'settings.mcpNoDescription'
   | 'settings.mcpNoServersFound'
+  | 'settings.mcpNoToolsAfterFailure'
+  | 'settings.mcpNoToolsAvailable'
   | 'settings.mcpOAuthLoginFailed'
   | 'settings.mcpOAuthLoginSuccess'
   | 'settings.mcpOneKeyImport'

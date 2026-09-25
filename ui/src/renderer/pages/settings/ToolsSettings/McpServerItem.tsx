@@ -36,7 +36,7 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
       key={server.mcp_server_id}
       activeKey={isCollapsed ? ['1'] : []}
       onChange={onToggleCollapse}
-      className='mb-4 [&_div.arco-collapse-item-header-title]:flex-1'
+      className='mb-4 [&_div.arco-collapse-item-header-title]:!block [&_div.arco-collapse-item-header-title]:!min-w-0 [&_div.arco-collapse-item-header-title]:!flex-1'
     >
       <Collapse.Item
         header={
@@ -52,7 +52,7 @@ const McpServerItem: React.FC<McpServerItemProps> = ({
           />
         }
         name='1'
-        className={'[&_div.arco-collapse-item-content-box]:py-3'}
+        className='[&_div.arco-collapse-item-content-box]:!py-6px'
       >
         <McpServerToolsList server={server} />
       </Collapse.Item>

@@ -13,7 +13,8 @@ import { supportsMcpOAuthLogin } from '@/renderer/hooks/mcp/mcpAuthConfig';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
 import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
-import { Button,Dropdown,Menu,Message,Modal,Pagination } from '@arco-design/web-react';
+import NomiPagination from '@/renderer/components/base/NomiPagination';
+import { Button,Dropdown,Menu,Message,Modal } from '@arco-design/web-react';
 import { Down,Plus } from '@icon-park/react';
 import React,{ useCallback,useEffect,useMemo,useRef,useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -250,8 +251,7 @@ const ModalMcpManagementSection: React.FC<{
         )}
         {visibleMcpServers.length > MCP_SERVER_PAGE_SIZE && (
           <div data-testid='mcp-server-pagination' className='mt-12px flex justify-end'>
-            <Pagination
-              size='small'
+            <NomiPagination
               current={effectivePage}
               pageSize={MCP_SERVER_PAGE_SIZE}
               total={visibleMcpServers.length}

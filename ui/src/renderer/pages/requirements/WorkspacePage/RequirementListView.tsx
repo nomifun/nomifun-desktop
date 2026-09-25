@@ -6,7 +6,7 @@
 
 /**
  * RequirementListView — the workspace list surface. Renders a headerless,
- * table-like stack of `RequirementListRow`s with an Arco `Pagination` footer. Handles
+ * table-like stack of `RequirementListRow`s with the shared pagination footer. Handles
  * the three non-list states presentationally:
  *   - error            → Arco `Result` with a Retry action (`onRetry`)
  *   - empty (settled)  → `WorkspaceEmptyState` with the create CTA
@@ -15,11 +15,12 @@
  * Pure/presentational: data, selection set, and the detail drawer all live in
  * the parent (WorkspacePage); this component only fans callbacks back out.
  */
-import { Button, Pagination, Result } from '@arco-design/web-react';
+import { Button, Result } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { IRequirement, RequirementStatus } from '@/common/adapter/ipcBridge';
+import NomiPagination from '@/renderer/components/base/NomiPagination';
 import RequirementListRow from './RequirementListRow';
 import WorkspaceEmptyState from './WorkspaceEmptyState';
 import type { RequirementId } from '@/common/types/ids';
@@ -127,7 +128,7 @@ const RequirementListView: React.FC<RequirementListViewProps> = ({
       </div>
 
       <div className='flex justify-end'>
-        <Pagination
+        <NomiPagination
           className='requirements-pagination'
           current={page}
           pageSize={pageSize}
