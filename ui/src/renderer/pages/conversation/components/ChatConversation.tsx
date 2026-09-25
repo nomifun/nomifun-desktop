@@ -26,21 +26,12 @@ import ChatSlider from './ChatSlider.tsx';
 import { isConversationProcessing } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import NomiChat from '../platforms/nomi/NomiChat';
 import { useNomiModelSelection } from '../platforms/nomi/useNomiModelSelection';
-import CollaborationComposerControl from '@/renderer/components/collaboration/CollaborationComposerControl';
-import {
-  toAppliedCollaborationTemplate,
-  type AppliedCollaborationTemplate,
-} from '@/renderer/components/collaboration/collaborationTemplateModel';
-import type { CollaborationPolicyValue } from '@/renderer/components/collaboration/CollaborationPolicyControl';
-import type { TExecutionModelRef } from '@/common/types/agentExecution/agentExecutionTypes';
 import { ExecutionProvider } from '../execution/ExecutionContext';
 import ExecutionConversationLayout from '../execution/ExecutionConversationLayout';
 import ReadOnlyConversationView from '../execution/ReadOnlyConversationView';
 import SshHostStatusPill from './SshHostStatusPill';
 import SystemPermissionReminder from './SystemPermissionReminder';
 import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
-import { useExecutionModelPool } from '../execution/useExecutionModelPool';
-import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
 import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import {
@@ -121,7 +112,6 @@ const NomiConversationLayout: React.FC<{
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
   agentSelectorNode?: React.ReactNode;
-  collaborationControlNode: React.ReactNode;
   currentAgentLabel: string;
   modelSelectionDisabled?: boolean;
   reasoningEffort?: SessionReasoningEffort;
@@ -132,7 +122,6 @@ const NomiConversationLayout: React.FC<{
   chatLayoutProps,
   modelSelection,
   agentSelectorNode,
-  collaborationControlNode,
   currentAgentLabel,
   modelSelectionDisabled,
   reasoningEffort,
@@ -162,7 +151,6 @@ const NomiConversationLayout: React.FC<{
         currentAgent={conversation.preset_id
           ? { presetId: conversation.preset_id, label: currentAgentLabel }
           : undefined}
-        collaboratorSelectorNode={collaborationControlNode}
         modelSelectionDisabled={modelSelectionDisabled}
         reasoningEffort={reasoningEffort}
         reasoningEffortUpdating={reasoningEffortUpdating}
@@ -211,54 +199,7 @@ const NomiConversationPanel: React.FC<{
       : { kind: 'template', templateKey: 'chat.minimal' },
     [conversation.preset_id, creation.draft.presetId, creation.draft.selectedAgent, officialTemplateKey],
   );
-  const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
-    const pool = conversation.execution_model_pool;
-    return pool?.mode === 'range' ? pool.models.slice(1) : [];
-  });
-  const [collaborationPolicy, setCollaborationPolicy] = useState<CollaborationPolicyValue>({
-    delegationPolicy: conversation.delegation_policy ?? 'automatic',
-    decisionPolicy: conversation.decision_policy ?? 'automatic',
-  });
-  const [selectedCollaborationTemplate, setSelectedCollaborationTemplate] =
-    useState<AppliedCollaborationTemplate | null>(null);
-  useEffect(() => {
-    setCollaborationPolicy({
-      delegationPolicy: conversation.delegation_policy ?? 'automatic',
-      decisionPolicy: conversation.decision_policy ?? 'automatic',
-    });
-  }, [conversation.decision_policy, conversation.delegation_policy]);
-
-  const storedExecutionTemplateId = conversation.execution_template_id ?? null;
-  useEffect(() => {
-    if (!storedExecutionTemplateId) {
-      setSelectedCollaborationTemplate(null);
-      return;
-    }
-    let cancelled = false;
-    void ipcBridge.agentExecutionTemplate.get
-      .invoke({ execution_template_id: storedExecutionTemplateId })
-      .then((template) => {
-        if (!cancelled) {
-          setSelectedCollaborationTemplate(toAppliedCollaborationTemplate(template));
-        }
-      })
-      .catch((error) => {
-        console.error('[ChatConversation] Failed to resolve collaboration template:', error);
-        if (!cancelled) setSelectedCollaborationTemplate(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [storedExecutionTemplateId]);
-  const { configuredPairs, allPairs, isLoading: isModelCatalogLoading } = useExecutionModelPool();
-  const collaboratorReconciliation = useMemo(
-    () => (isModelCatalogLoading ? null : reconcileModelRefs(collaborators, configuredPairs, allPairs)),
-    [allPairs, collaborators, configuredPairs, isModelCatalogLoading],
-  );
-  const activeCollaborators = collaboratorReconciliation?.active ?? [];
-
   const { t } = useTranslation();
-  const frozenSessionConfigHint = t('conversation.chat.frozenSessionConfigHint');
   const [modelSwitching, setModelSwitching] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<SessionReasoningEffort | undefined>(
     conversation.reasoning_effort
@@ -336,54 +277,6 @@ const NomiConversationPanel: React.FC<{
       setReasoningEffortUpdating(false);
     }
   }, [conversation, reasoningEffort, t]);
-
-  // Main model reference used by the collaboration selector.
-  const mainModelRef = useMemo<TExecutionModelRef | null>(
-    () =>
-      modelSelection.current_model
-        ? {
-            provider_id: modelSelection.current_model.id,
-            model: modelSelection.current_model.use_model,
-          }
-        : null,
-    [modelSelection.current_model?.id, modelSelection.current_model?.use_model],
-  );
-
-  const rejectFrozenCollaboratorsChange = useCallback((_next: TExecutionModelRef[]) => {}, []);
-  const rejectFrozenTemplateChange = useCallback((_next: AppliedCollaborationTemplate | null) => {}, []);
-  const rejectFrozenPolicyChange = useCallback((_next: CollaborationPolicyValue) => {}, []);
-
-  useEffect(() => {
-    if (!collaboratorReconciliation || collaboratorReconciliation.removed.length === 0) return;
-    if (sameModelRefs(collaborators, collaboratorReconciliation.retained)) return;
-    setCollaboratorsState(collaboratorReconciliation.retained);
-  }, [collaboratorReconciliation, collaborators]);
-
-  // Existing AgentSessions retain the collaboration facts selected at launch.
-  // The unified control remains visible as a read-only summary; changing those
-  // facts requires creating a new Session from Guid.
-  const collaborationAvailable = Boolean(
-    conversation.linked_execution_id
-      || conversation.execution_template_id
-      || conversation.execution_model_pool?.mode === 'range'
-      || conversation.agent_snapshot?.enabled_capabilities.includes('agent.collaboration')
-  );
-  const collaborationControlNode = collaborationAvailable ? (
-    <CollaborationComposerControl
-      value={activeCollaborators}
-      onChange={rejectFrozenCollaboratorsChange}
-      mainModel={mainModelRef}
-      selectedTemplate={selectedCollaborationTemplate}
-      workDir={conversation.extra?.workspace}
-      onTemplateApply={rejectFrozenTemplateChange}
-      onTemplateClear={() => rejectFrozenTemplateChange(null)}
-      policy={collaborationPolicy}
-      onPolicyChange={rejectFrozenPolicyChange}
-      runtimeType={conversation.type}
-      disabled
-      disabledReason={frozenSessionConfigHint}
-    />
-  ) : null;
 
   const { info: presetPresetInfo } = useAgentInfo(conversation);
   const [agentSwitch, setAgentSwitch] = useState<{
@@ -608,7 +501,6 @@ const NomiConversationPanel: React.FC<{
           chatLayoutProps={chatLayoutProps}
           modelSelection={modelSelection}
           agentSelectorNode={agentSelectorNode}
-          collaborationControlNode={collaborationControlNode}
           currentAgentLabel={currentAgentLabel}
           modelSelectionDisabled={modelSwitching || agentSwitch?.applying === true}
           reasoningEffort={reasoningEffort}

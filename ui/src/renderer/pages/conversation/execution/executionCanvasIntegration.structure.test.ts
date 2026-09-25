@@ -79,11 +79,17 @@ describe('conversation execution canvas integration', () => {
     expect(projectedSource.includes('expected_execution_version: detail.execution.version')).toBe(true);
   });
 
-  test('keeps the collaboration panel recoverable from the desktop layout', () => {
+  test('keeps the collaboration panel on the workspace rail without a duplicate header toggle', () => {
     const layoutSource = readSource(new URL('./ExecutionConversationLayout.tsx', import.meta.url));
+    const railSource = readSource(new URL('../components/ChatLayout/WorkspaceToolRail.tsx', import.meta.url));
 
-    expect(layoutSource.includes('execution.toggleCanvas')).toBe(true);
-    expect(layoutSource.includes("'agentExecution.panel.open'")).toBe(true);
+    expect(layoutSource.includes('workspaceCollaboration={{')).toBe(true);
+    expect(layoutSource.includes('onClick: execution.toggleCanvas')).toBe(true);
+    expect(layoutSource.includes('headerExtra=')).toBe(false);
+    expect(layoutSource.includes('agentExecution.panel.open')).toBe(false);
+    expect(layoutSource.includes('agentExecution.panel.collapse')).toBe(false);
+    expect(railSource.includes('collaboration?.available')).toBe(true);
+    expect(railSource.includes('onClick={collaboration.onClick}')).toBe(true);
   });
 
   test('projects linked executions for every conversation runtime and companion sessions', () => {

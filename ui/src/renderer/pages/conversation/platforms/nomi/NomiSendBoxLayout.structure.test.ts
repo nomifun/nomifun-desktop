@@ -19,15 +19,11 @@ describe('Nomi sendbox control layout', () => {
     const rightToolsIndex = source.indexOf('rightTools={');
     const modelIndex = source.indexOf('<NomiModelSelector', rightToolsIndex);
     const contextRingIndex = source.indexOf('<ContextUsageRing', rightToolsIndex);
-    const sideToolsIndex = source.indexOf('sideTools={');
-    const collaboratorIndex = source.indexOf('{collaboratorSelectorNode}', sideToolsIndex);
 
     expect(sendBoxIndex).toBeGreaterThan(-1);
     expect(rightToolsIndex).toBeGreaterThan(sendBoxIndex);
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
-    expect(collaboratorIndex).toBeGreaterThan(sideToolsIndex);
-    expect(collaboratorIndex).toBeLessThan(rightToolsIndex);
     expect(source.includes('topRightTools=')).toBe(false);
     expect(source.includes('ContextUsagePill')).toBe(false);
     expect(source.includes("data-testid='nomi-context-usage-slot'")).toBe(false);
@@ -54,51 +50,34 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });
 
-  test('keeps collaboration models and policy together in the side rail', () => {
+  test('keeps collaboration configuration on Guid and omits the redundant conversation composer trigger', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
-
-    const collaborationBlock = chatSource.slice(
-      chatSource.indexOf('const collaborationControlNode'),
-      chatSource.indexOf('const { groups: healGroups'),
-    );
-    expect(collaborationBlock.includes('<CollaborationComposerControl')).toBe(true);
     const sharedControl = readSource(new URL('../../../../components/collaboration/CollaborationComposerControl.tsx', import.meta.url));
     const homeSource = readSource(new URL('../../../guid/GuidPage.tsx', import.meta.url));
+
     expect(homeSource.includes('<CollaborationComposerControl')).toBe(true);
     expect(homeSource.includes('collaboration: collaborationEnabled ? collaboration.config : undefined')).toBe(true);
-    expect(collaborationBlock.includes('onChange={rejectFrozenCollaboratorsChange}')).toBe(true);
     expect(sharedControl.includes('panelFooter={')).toBe(true);
     expect(sharedControl.includes('<CollaborationPolicyControl')).toBe(true);
-    expect(collaborationBlock.includes('onPolicyChange={rejectFrozenPolicyChange}')).toBe(true);
-    expect(collaborationBlock.includes('disabledReason={frozenSessionConfigHint}')).toBe(true);
     expect(sharedControl.includes('embedded')).toBe(true);
     expect(sharedControl.includes("triggerLabel={t('collaboration.policy.button'")).toBe(true);
     expect(sharedControl.includes("className='nomi-sendbox-model-btn nomi-sendbox-collaboration-btn'")).toBe(true);
-    expect(chatSource.includes('extraRightTools={collaborationPolicyNode}')).toBe(false);
-
-    const rightToolsIndex = sendBoxSource.indexOf('rightTools={');
-    const contextRingIndex = sendBoxSource.indexOf('<ContextUsageRing', rightToolsIndex);
-    const modelIndex = sendBoxSource.indexOf('<NomiModelSelector', rightToolsIndex);
-    const sideToolsIndex = sendBoxSource.indexOf('sideTools={');
-    const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', sideToolsIndex);
-
-    expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
-    expect(modelIndex).toBeGreaterThan(contextRingIndex);
-    expect(collaboratorIndex).toBeGreaterThan(sideToolsIndex);
-    expect(collaboratorIndex).toBeLessThan(rightToolsIndex);
+    expect(chatSource.includes('CollaborationComposerControl')).toBe(false);
+    expect(chatSource.includes('collaborationControlNode')).toBe(false);
+    expect(nomiChatSource.includes('collaboratorSelectorNode')).toBe(false);
+    expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
+    expect(sendBoxSource.includes('sideTools={compactProductComposer ? undefined : capabilityControls}')).toBe(true);
   });
 
-  test('reconciles frozen conversation collaborators for display without persisting a replacement range', () => {
+  test('does not load frozen collaboration configuration solely for the conversation composer', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
 
-    expect(chatSource.includes('import { reconcileModelRefs, sameModelRefs }')).toBe(true);
-    expect(chatSource.includes('const activeCollaborators = collaboratorReconciliation?.active ?? []')).toBe(true);
-    expect(chatSource.includes('value={activeCollaborators}')).toBe(true);
+    expect(chatSource.includes('agentExecutionTemplate.get')).toBe(false);
+    expect(chatSource.includes('useExecutionModelPool')).toBe(false);
+    expect(chatSource.includes('reconcileModelRefs')).toBe(false);
     expect(chatSource.includes('buildConversationModelPool')).toBe(false);
-    expect(chatSource.includes('collaboratorReconciliation.removed.length === 0')).toBe(true);
-    expect(chatSource.includes('sameModelRefs(collaborators, collaboratorReconciliation.retained)')).toBe(true);
-    expect(chatSource.includes('setCollaboratorsState(collaboratorReconciliation.retained)')).toBe(true);
     expect(chatSource.includes('ipcBridge.conversation.update.invoke')).toBe(false);
   });
 
@@ -131,7 +110,7 @@ describe('Nomi sendbox control layout', () => {
     expect(sendBoxSource.includes('{!modelLocked && (')).toBe(false);
     expect(sendBoxSource.includes('modelLocked')).toBe(false);
     expect(sendBoxSource.includes('<NomiModelSelector')).toBe(true);
-    expect(sendBoxSource.includes('{collaboratorSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes('collaboratorSelectorNode')).toBe(false);
     expect(sendBoxSource.includes('<SessionCapabilityPicker')).toBe(false);
     expect(sendBoxSource.includes('updateCapabilitySelection')).toBe(false);
     expect(selectorSource.includes('const modelControl = disabled ? modelTrigger')).toBe(true);

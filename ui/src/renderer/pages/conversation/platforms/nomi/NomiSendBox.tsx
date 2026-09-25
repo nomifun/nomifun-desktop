@@ -10,7 +10,6 @@ import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import contentStyles from '../../components/ConversationContentColumn.module.css';
-import { ComposerToolRail } from '@/renderer/components/chat/SessionCapabilityPicker';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import ComposerAttachments from '@/renderer/components/chat/ComposerAttachments';
@@ -131,8 +130,6 @@ const NomiSendBox: React.FC<{
   reasoningEffort?: SessionReasoningEffort;
   reasoningEffortUpdating?: boolean;
   onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
-  /** Existing collaboration control, rendered in the composer side rail. */
-  collaboratorSelectorNode?: React.ReactNode;
   /**
    * Extra node(s) rendered in the bottom right-tools group. A projected task
    * uses this to surface its task-requirement control inside the participant conversation.
@@ -154,7 +151,6 @@ const NomiSendBox: React.FC<{
   reasoningEffort,
   reasoningEffortUpdating = false,
   onReasoningEffortChange,
-  collaboratorSelectorNode,
   extraRightTools,
   creationEnabled = true,
   compactProductComposer = false,
@@ -837,15 +833,7 @@ const NomiSendBox: React.FC<{
       />
       <SendBox
         key={conversation_id}
-        sideTools={compactProductComposer
-          ? undefined
-          : capabilityControls !== undefined
-            ? capabilityControls
-            : collaboratorSelectorNode
-              ? <ComposerToolRail ariaLabel={t('guid.collaboration.models.label')}>
-                  {collaboratorSelectorNode}
-                </ComposerToolRail>
-              : undefined}
+        sideTools={compactProductComposer ? undefined : capabilityControls}
         prefix={compactProductComposer ? undefined : <ComposerSceneHeader agent={agentSelectorNode} sceneSelectionEnabled={creationEnabled} />}
         data-testid='nomi-sendbox'
         showPinnedPlan={!compactProductComposer}
