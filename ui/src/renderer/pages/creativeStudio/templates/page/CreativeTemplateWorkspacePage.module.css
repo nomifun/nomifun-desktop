@@ -1,4 +1,4 @@
-.page {
+:global(:root:not([data-theme='dark'])) .page {
   --color-bg-1: #f4f2ed;
   --color-bg-2: #fbfaf7;
   --color-bg-3: #eeeae4;
@@ -87,6 +87,10 @@
   --warning-1: 255, 247, 232;
   --warning-6: 210, 95, 0;
   color-scheme: light;
+}
+
+:global([data-theme='dark']) .page {
+  color-scheme: dark;
 }
 
 .page {
