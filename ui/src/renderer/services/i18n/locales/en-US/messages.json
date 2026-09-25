@@ -48,6 +48,14 @@
     "preparedResponse": "Prepared the result",
     "prepareResponse": "Prepare the result",
     "failedOperations": "{{count}} operations did not complete",
+    "recoveredOperations": "{{count}} operations encountered an error",
+    "recoveredAfterRetry": "{{target}} recovered · retried {{count}} times",
+    "summarySeparator": ", ",
+    "skippedAfterFailure": "Skipped after an earlier failed operation",
+    "invalidArguments": "Invalid arguments; operation not run",
+    "commandNotExecuted": "Command not run",
+    "operationNotExecuted": "Operation not run",
+    "canceledOperation": "Operation canceled",
     "repeatedOperation": "{{label}} · {{count}} times",
     "contextCompressed": "Context compressed",
     "searchedTarget": "Searched {{target}}",
@@ -57,8 +65,17 @@
     "collapseText": "Collapse note",
     "status": "{{target}}"
   },
-  "turnDuration": "Took {{duration}}",
-  "turnDurationUnknown": "Time --",
+  "turnDuration": "Worked for {{duration}}",
+  "turnDurationUnknown": "Worked for --",
+  "toolProtocolError": {
+    "title": "Invalid tool-call format · not executed",
+    "detail": "The model emitted a tool request as text. It was not executed. The original record is available below."
+  },
+  "turnDurationUnits": {
+    "hour": "h",
+    "minute": "m",
+    "second": "s"
+  },
   "turnProcess": {
     "expand": "Expand execution progress",
     "collapse": "Collapse execution progress",
@@ -96,6 +113,7 @@
     "verified": "Integrity verified (SHA-256)",
     "open": "Open",
     "openImage": "Open image",
+    "selectImage": "Select {{name}}",
     "saveImage": "Save image",
     "copyImagePath": "Copy image path",
     "reveal": "Reveal in folder",

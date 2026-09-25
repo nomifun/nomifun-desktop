@@ -181,7 +181,7 @@ const localRuntimeToolNames = new Set([
 const isRuntimePreflightNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
   if (status !== 'error' || !localRuntimeToolNames.has(toDisplayText(name).trim())) return false;
   const text = toDisplayText(output).trimStart();
-  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |The plan needs reconsideration after )/.test(text);
+  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |The plan needs reconsideration after |Capability Kernel rejected Agent Runtime Tool \(CAPABILITY_UNAVAILABLE\): Process launch failed\. The command field must contain only the executable;)/.test(text);
 };
 
 /**

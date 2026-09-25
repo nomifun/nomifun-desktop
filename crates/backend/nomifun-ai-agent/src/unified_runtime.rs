@@ -169,8 +169,8 @@ impl TurnProjection {
     fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
         let projected = match event {
             AgentEngineEvent::TurnStarted { .. } => Some(EngineProgress::Started),
-            AgentEngineEvent::OutputTextDelta { text, .. } => {
-                Some(EngineProgress::Text(TextEventData { content: text }))
+            AgentEngineEvent::OutputTextDelta { step, text } => {
+                Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
             }
             AgentEngineEvent::ReasoningDelta { text, .. } => {
                 Some(EngineProgress::Thinking(ThinkingEventData {

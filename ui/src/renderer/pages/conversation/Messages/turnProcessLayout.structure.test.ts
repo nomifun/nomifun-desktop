@@ -15,7 +15,7 @@ const modelSource = readFileSync(new URL('./turnDisclosureModel.ts', import.meta
 type MessagesLocale = Record<string, unknown> & {
   turnDuration: string;
   turnDurationUnknown: string;
-  turnProcess: { expand: string; collapse: string };
+  turnProcess: { expand: string; collapse: string; runningSummary?: string };
 };
 const zhMessages = JSON.parse(
   readFileSync(new URL('../../../services/i18n/locales/zh-CN/messages.json', import.meta.url), 'utf8')
@@ -32,18 +32,20 @@ const cssRuleFor = (selector: string) => {
   return open >= 0 && close > open ? cssSource.slice(open + 1, close) : '';
 };
 
-describe('turn process disclosure result-first layout', () => {
-  test('shows only duration and disclosure affordance in the turn header', () => {
+describe('turn process continuous work journal layout', () => {
+  test('uses a quiet worked-duration disclosure header', () => {
     expect(disclosureSource.includes('messages.turnDuration')).toBe(true);
     expect(disclosureSource.includes('messages.turnProcessed')).toBe(false);
     expect(disclosureSource.includes('messages.turnCanceled')).toBe(false);
     expect(disclosureSource.includes('messages.turnFailed')).toBe(false);
     expect(disclosureSource.includes('messages.turnSuccess')).toBe(false);
-    expect(zhMessages.turnDuration).toBe('用时 {{duration}}');
-    expect(zhMessages.turnDurationUnknown).toBe('用时 --');
-    expect(enMessages.turnDuration).toBe('Took {{duration}}');
-    expect(enMessages.turnDurationUnknown).toBe('Time --');
-    expect(zhMessages.turnProcess).toEqual({ expand: '展开思考过程', collapse: '收起思考过程' });
+    expect(zhMessages.turnDuration).toBe('已工作 {{duration}}');
+    expect(zhMessages.turnDurationUnknown).toBe('已工作 --');
+    expect(enMessages.turnDuration).toBe('Worked for {{duration}}');
+    expect(enMessages.turnDurationUnknown).toBe('Worked for --');
+    expect(zhMessages.turnProcess.expand).toBe('展开执行进度');
+    expect(zhMessages.turnProcess.collapse).toBe('收起执行进度');
+    expect(disclosureSource.includes('messages.turnProcess.runningSummary')).toBe(false);
   });
 
   test('keeps the duration live while the current turn is running', () => {
@@ -53,9 +55,10 @@ describe('turn process disclosure result-first layout', () => {
     expect(disclosureSource.includes("item.running && 'turn-process-disclosure--live'")).toBe(true);
   });
 
-  test('opens running thought by default and collapses when the turn settles', () => {
+  test('keeps the work journal open by default while allowing manual collapse', () => {
     expect(disclosureSource.includes('hasProcessItems && !defaultCollapsed')).toBe(true);
-    expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(true);
+    expect(modelSource.includes('defaultCollapsed: false')).toBe(true);
+    expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(false);
     expect(disclosureSource.includes('shouldResetTurnProcessDisclosureExpansion')).toBe(true);
   });
 
@@ -74,17 +77,24 @@ describe('turn process disclosure result-first layout', () => {
     expect(modelSource.includes("entry.role === 'metadata'")).toBe(true);
   });
 
-  test('renders thinking directly as paragraphs and removes private replay placeholders', () => {
-    expect(processTraceSource.includes('turn-process-trace--thinking')).toBe(true);
+  test('renders public progress as prose while keeping private reasoning summarized', () => {
+    expect(processTraceSource.includes("case 'text':")).toBe(true);
+    expect(processTraceSource.includes("data-testid='process-narration'")).toBe(true);
+    expect(processTraceSource.includes('<MarkdownView')).toBe(true);
     expect(processTraceSource.includes('Private reasoning omitted')).toBe(true);
     expect(processTraceSource.includes('<MessageThinking')).toBe(false);
     expect(messageListSource.includes('isHiddenProcessItem')).toBe(true);
     expect(messageListSource.includes("item.type !== 'thinking' && item.type !== 'text'")).toBe(true);
   });
 
-  test('uses compact process rhythm and muted receipt rows', () => {
-    expect(cssRuleFor('.turn-process-disclosure__body').includes('gap: 8px')).toBe(true);
-    expect(cssRuleFor('.turn-process-disclosure__body').includes('padding: 10px 0 12px')).toBe(true);
+  test('uses an unbounded document flow with compact muted receipt rows', () => {
+    const bodyRule = cssRuleFor('.turn-process-disclosure__body');
+    expect(bodyRule.includes('gap: 14px')).toBe(true);
+    expect(bodyRule.includes('padding: 14px 0 4px')).toBe(true);
+    expect(bodyRule.includes('overflow: visible')).toBe(true);
+    expect(bodyRule.includes('max-height')).toBe(false);
+    expect(bodyRule.includes('overflow-y: auto')).toBe(false);
+    expect(bodyRule.includes('border-bottom')).toBe(false);
     expect(
       cssRuleFor('.turn-process-disclosure__body .turn-process-trace__row').includes(
         'color: var(--color-text-3'
@@ -92,14 +102,24 @@ describe('turn process disclosure result-first layout', () => {
     ).toBe(true);
     expect(
       cssRuleFor('.turn-process-disclosure__body .turn-process-trace__paragraph').includes(
-        'color: var(--color-text-2'
+        'color: var(--color-text-1'
       )
     ).toBe(true);
+
+    const receiptBodyRule = cssRuleFor('.turn-process-receipt__body');
+    expect(receiptBodyRule.includes('max-height: min(360px, 42vh)')).toBe(true);
+    expect(receiptBodyRule.includes('overflow-y: auto')).toBe(true);
   });
 
-  test('shimmers only live duration and the current thinking line', () => {
-    expect(cssSource.includes('.turn-process-disclosure--live .turn-process-disclosure__label')).toBe(true);
-    expect(cssSource.includes('@keyframes turn-process-shimmer')).toBe(true);
+  test('lets Markdown control public-progress whitespace instead of inheriting pre-wrap', () => {
+    const paragraphRule = cssRuleFor('\n.turn-process-trace__paragraph {');
+    expect(paragraphRule.includes('white-space: normal')).toBe(true);
+    expect(paragraphRule.includes('white-space: pre-wrap')).toBe(false);
+  });
+
+  test('animates only the current activity rather than the whole duration label', () => {
+    expect(cssSource.includes('.turn-process-disclosure--live .turn-process-disclosure__label')).toBe(false);
+    expect(cssSource.includes('@keyframes turn-process-shimmer')).toBe(false);
     expect(cssSource.includes('@keyframes turn-process-current-fade')).toBe(true);
     expect(cssSource.includes('.turn-process-trace__thinking-last-line')).toBe(true);
     expect(cssSource.includes('.turn-process-disclosure__item--current .turn-process-trace__row--running')).toBe(false);

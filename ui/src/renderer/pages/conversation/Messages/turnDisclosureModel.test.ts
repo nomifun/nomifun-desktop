@@ -34,7 +34,7 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
-  test('collapses completed intermediate steps into a disclosure before the final answer', () => {
+  test('keeps completed intermediate steps readable before the final answer', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -54,7 +54,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.state).toBe('completed');
     expect(disclosure.processItemIds).toEqual(['analysis', 'tool']);
     expect(disclosure.startAt).toBe(1000);
@@ -171,7 +171,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.processItemIds).toEqual(['analysis', 'tool']);
     expect(disclosure.startAt).toBe(1000);
     expect(disclosure.endAt).toBe(3200);
@@ -191,7 +191,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.processItemIds).toEqual([]);
     expect(disclosure.sourceMessageIds).toEqual([]);
     expect(disclosure.startAt).toBe(1000);
@@ -213,7 +213,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.processItemIds).toEqual(['tool']);
     expect(disclosure.processItemStates).toEqual({ tool: 'completed' });
   });
@@ -320,7 +320,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.processItemIds).toEqual(['active-process', 'partial-answer']);
   });
 
@@ -337,7 +337,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.state).toBe('completed');
     expect(disclosure.processItemStates).toEqual({ tool: 'failed' });
   });
@@ -471,7 +471,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['tool', 'assistant-text']);
   });
 
-  test('collapses a completed process-only segment once the next user request closes it', () => {
+  test('keeps a completed process-only segment readable once the next request closes it', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
@@ -489,7 +489,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
     expect(disclosure.state).toBe('completed');
     expect(disclosure.processItemIds).toEqual(['tool-1']);
   });
@@ -914,7 +914,7 @@ describe('stop notice', () => {
     expect(disclosure.state).toBe('canceled');
     expect(disclosure.endAt).toBe(5_000);
     expect(disclosure.running).toBe(false);
-    expect(disclosure.defaultCollapsed).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
   });
 
   test('ignores a stop notice that predates the tail turn', () => {

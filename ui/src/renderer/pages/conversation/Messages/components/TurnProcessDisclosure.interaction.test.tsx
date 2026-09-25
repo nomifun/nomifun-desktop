@@ -15,7 +15,7 @@ const steps: Step[] = [
 const disclosure = (running: boolean) => ({
   id: 'turn-1', processItems: steps, startAt: 1, endAt: 1001,
   state: running ? 'running' as const : 'completed' as const,
-  running, defaultCollapsed: true,
+  running, defaultCollapsed: !running,
 });
 const view = (running: boolean) => (
   <I18nextProvider i18n={i18n}>
@@ -33,8 +33,7 @@ afterEach(cleanup);
 
 test('only the latest running process row is current; no row animates after the turn finishes', () => {
   const { container, rerender } = render(view(true));
-  expect(container.querySelector('.turn-process-disclosure__body')).toBeNull();
-  fireEvent.click(container.querySelector('.turn-process-disclosure__toggle')!);
+  expect(container.querySelector('.turn-process-disclosure__body')).not.toBeNull();
   const current = container.querySelector('.turn-process-disclosure__item--current');
   expect(current?.textContent).toBe('tool-result');
   expect(container.querySelector('.turn-process-disclosure__item--thinking.turn-process-disclosure__item--current')).toBeNull();

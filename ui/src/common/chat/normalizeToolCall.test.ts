@@ -113,6 +113,21 @@ describe('normalizeToolCall', () => {
     expect(result?.output).toBe(output);
   });
 
+  it('treats the local command-shape rejection as not executed', () => {
+    const output = 'Capability Kernel rejected Agent Runtime Tool (CAPABILITY_UNAVAILABLE): Process launch failed. The command field must contain only the executable; put options in args. No successful launch was reported.';
+    const result = normalizeToolCall({
+      type: 'tool_call',
+      content: {
+        call_id: 'call-command-shape', name: 'exec_command', status: 'error',
+        args: { command: 'ls -la' }, output,
+      },
+    } as any);
+
+    expect(result?.status).toBe('canceled');
+    expect(result?.notExecutedReason).toBe('runtime_preflight');
+    expect(result?.output).toBe(output);
+  });
+
   it('keeps remote and actual local failures red even if the text resembles a preflight', () => {
     for (const [name, output] of [
       ['mcp__server__write_file__abcdefghijklmnop', 'Operations not executed: remote service error'],

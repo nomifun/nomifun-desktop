@@ -48,15 +48,14 @@ export function shouldResetTurnProcessDisclosureExpansion(
   if (previous.itemId !== next.itemId) return true;
   if (previous.hasProcessItems !== next.hasProcessItems) return true;
   if (previous.defaultCollapsed !== next.defaultCollapsed) return true;
-  if (previous.running !== next.running) return true;
   return false;
 }
 
 const formatTurnDuration = (ms: number, t: ReturnType<typeof useTranslation>['t']): string => {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-  const sUnit = t('common.unit.second_short', { defaultValue: 's' });
-  const mUnit = t('common.unit.minute_short', { defaultValue: 'm' });
-  const hUnit = t('common.unit.hour_short', { defaultValue: 'h' });
+  const sUnit = t('messages.turnDurationUnits.second', { defaultValue: 's' });
+  const mUnit = t('messages.turnDurationUnits.minute', { defaultValue: 'm' });
+  const hUnit = t('messages.turnDurationUnits.hour', { defaultValue: 'h' });
 
   if (totalSeconds < 60) return `${totalSeconds}${sUnit}`;
   const minutes = Math.floor(totalSeconds / 60);
@@ -96,7 +95,7 @@ function TurnProcessDisclosure<T>({
     const shouldReset = shouldResetTurnProcessDisclosureExpansion(expansionSnapshotRef.current, nextSnapshot);
     expansionSnapshotRef.current = nextSnapshot;
     if (shouldReset) setExpanded(getDefaultExpanded(hasProcessItems, item.defaultCollapsed));
-  }, [hasProcessItems, item.defaultCollapsed, item.id, item.running]);
+  }, [hasProcessItems, item.defaultCollapsed, item.id]);
 
   useEffect(() => {
     if (highlighted && hasProcessItems) setExpanded(true);
@@ -127,12 +126,7 @@ function TurnProcessDisclosure<T>({
         defaultValue: 'Took {{duration}}',
       })
     : t('messages.turnDurationUnknown', { defaultValue: 'Time --' });
-  const label = item.running
-    ? t('messages.turnProcess.runningSummary', {
-        duration: durationLabel,
-        defaultValue: 'Processing · {{duration}}',
-      })
-    : durationLabel;
+  const label = durationLabel;
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
   const headerContent = (

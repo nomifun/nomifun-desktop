@@ -20,6 +20,8 @@ export interface TurnProcessReceiptView<T> {
   icon: TurnProcessReceiptIcon;
   defaultExpanded: boolean;
   hasDetail?: boolean;
+  /** The operation failed transiently, but the owning turn continued. */
+  recovered?: boolean;
 }
 
 interface TurnProcessReceiptProps<T> {
@@ -57,9 +59,12 @@ export function shouldResetTurnProcessReceiptExpansion(
 const ReceiptIcon: React.FC<{
   icon: TurnProcessReceiptIcon;
   state: TurnDisclosureProcessState;
-}> = ({ icon, state }) => {
+  recovered?: boolean;
+}> = ({ icon, state, recovered = false }) => {
   if (state === 'running') return <Spin size={12} />;
-  if (state === 'failed' || state === 'canceled') return <Attention theme='outline' size='15' fill='currentColor' />;
+  if (recovered || state === 'failed' || state === 'canceled') {
+    return <Attention theme='outline' size='15' fill='currentColor' />;
+  }
   if (icon === 'file') return <FolderOpen theme='outline' size='15' fill='currentColor' />;
   if (icon === 'edit') return <Edit theme='outline' size='15' fill='currentColor' />;
   if (icon === 'thinking') return <Brain theme='outline' size='15' fill='currentColor' />;
@@ -93,13 +98,13 @@ function TurnProcessReceipt<T>({ receipt, highlighted = false, renderProcessItem
   const receiptIconMarker =
     receipt.state === 'running'
       ? 'loading'
-      : receipt.state === 'failed' || receipt.state === 'canceled'
+      : receipt.recovered || receipt.state === 'failed' || receipt.state === 'canceled'
         ? 'attention'
         : receiptIconMarkerByIcon[receipt.icon];
   const headerContent = (
     <>
       <span className='turn-process-receipt__icon' aria-hidden='true' data-receipt-icon={receiptIconMarker}>
-        <ReceiptIcon icon={receipt.icon} state={receipt.state} />
+        <ReceiptIcon icon={receipt.icon} state={receipt.state} recovered={receipt.recovered} />
       </span>
       <span className='turn-process-receipt__label'>{receipt.label}</span>
       {canExpand && (
@@ -113,7 +118,13 @@ function TurnProcessReceipt<T>({ receipt, highlighted = false, renderProcessItem
   );
 
   return (
-    <div className={classNames('turn-process-receipt', `turn-process-receipt--${receipt.state}`)}>
+    <div
+      className={classNames(
+        'turn-process-receipt',
+        `turn-process-receipt--${receipt.state}`,
+        receipt.recovered && 'turn-process-receipt--recovered'
+      )}
+    >
       {canExpand ? (
         <button
           type='button'

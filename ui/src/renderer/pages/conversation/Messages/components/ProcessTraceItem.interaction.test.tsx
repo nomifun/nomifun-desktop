@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import type { IMessageText, IMessageThinking, IMessageToolCall, IMessageToolGroup } from '@/common/chat/chatLib';
 import { parseConversationId } from '@/common/types/ids';
 import ProcessTraceItem from './ProcessTraceItem';
@@ -22,17 +23,33 @@ describe('replayed process trace', () => {
     expect(container.childElementCount).toBe(0);
   });
 
-  test('intermediate assistant prose is replaced by one neutral result-preparation status', () => {
+  test('a model-emitted tool-call payload never becomes a public process paragraph', () => {
+    const item: IMessageText = {
+      id: 'raw-tool-payload', type: 'text', conversation_id: conversationId,
+      position: 'left', created_at: 1,
+      content: { content: '<tool_call>\n\n<function=write_file>\n<parameter=content>\n<!DOCTYPE html>' },
+    };
+    const { container } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+    );
+    expect(container.querySelector('summary')?.textContent).toContain('Invalid tool-call format');
+    expect(container.querySelector('pre')).toBeNull();
+    expect(container.textContent).not.toContain('<!DOCTYPE html>');
+  });
+
+  test('intermediate assistant prose remains visible in chronological order', () => {
     const note = 'Repeating progress should remain inspectable. '.repeat(12);
     const item: IMessageText = {
       id: 'long-progress', type: 'text', conversation_id: conversationId,
       position: 'left', created_at: 1, content: { content: note },
     };
     const { container } = render(
-      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider>
+      <MemoryRouter><I18nextProvider i18n={i18n}><ProcessTraceItem item={item} /></I18nextProvider></MemoryRouter>
     );
-    expect(container.textContent).toContain('Prepared the result');
-    expect(container.textContent).not.toContain('Repeating progress');
+    const narrationText = container.querySelector('.markdown-shadow')?.shadowRoot?.textContent ?? '';
+    expect(narrationText).toContain('Repeating progress should remain inspectable.');
+    expect(container.textContent).not.toContain('Prepared the result');
+    expect(container.querySelector('[data-testid="process-narration"]')).not.toBeNull();
     expect(container.querySelector('button')).toBeNull();
   });
 
@@ -66,6 +83,43 @@ describe('replayed process trace', () => {
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect(getByText('src/app.ts')).toBeDefined();
     expect(getByText('file contents')).toBeDefined();
+  });
+
+  test('an expanded stage shows its file operations directly without a second group disclosure', () => {
+    const item: IMessageToolGroup = {
+      id: 'edited-files', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 2,
+      content: ['src/a.ts', 'src/b.ts', 'src/c.ts'].map((path, index) => ({
+        call_id: `edit-${index}`, name: 'write_file', status: 'Success' as const,
+        description: path, render_output_as_markdown: false,
+      })),
+    };
+    const { container } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
+    );
+
+    expect(container.querySelectorAll('.turn-process-trace > .turn-process-trace-tool')).toHaveLength(3);
+    expect(container.textContent).toContain('Edited a.ts');
+    expect(container.textContent).toContain('Edited c.ts');
+  });
+
+  test('a single stage operation keeps raw tool output closed until that operation is opened', () => {
+    const item: IMessageToolCall = {
+      id: 'single-write', type: 'tool_call', conversation_id: conversationId,
+      position: 'left', created_at: 2,
+      content: {
+        call_id: 'write-one', name: 'write_file', status: 'completed',
+        args: { path: 'snake_game.html' },
+        output: '{"written":true}', artifacts: [],
+      },
+    };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
+    );
+    expect(container.textContent).toContain('Edited snake_game.html');
+    expect(container.textContent).not.toContain('"written":true');
+    fireEvent.click(getByRole('button'));
+    expect(container.textContent).toContain('"written":true');
   });
 
   test('a deferred file call remains inspectable without a red failure row', () => {
@@ -132,6 +186,26 @@ describe('replayed process trace', () => {
     fireEvent.click(toggle);
     expect(container.textContent).toContain('first_tool');
     expect(container.textContent).toContain('third_tool');
+  });
+
+  test('intermediate failures in a continuing turn use a recovered receipt', () => {
+    const item: IMessageToolGroup = {
+      id: 'recovered-tools', type: 'tool_group', conversation_id: conversationId,
+      position: 'left', created_at: 4,
+      content: [{
+        call_id: 'failed-once', name: 'run_command', description: 'targeted test',
+        status: 'Error' as const, render_output_as_markdown: false,
+      }],
+    };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} recoverFailures /></I18nextProvider>
+    );
+
+    expect(container.querySelector('.turn-process-trace__row--failed')).toBeNull();
+    expect(container.querySelector('.turn-process-trace__row--recovered')).not.toBeNull();
+    expect(container.textContent).toContain('Failed targeted test');
+    fireEvent.click(getByRole('button'));
+    expect(container.textContent).toContain('targeted test');
   });
 
   test('identical completed operations render once with their repeat count', () => {

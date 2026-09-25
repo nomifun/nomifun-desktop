@@ -66,6 +66,78 @@ const textContent = (message: TMessage): string => {
 };
 
 describe('mergeFetchedMessagesForConversation', () => {
+  test('history refresh during step two preserves its newer live text without rewriting step one', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('live-step-turn');
+    const first = fetchedMessage(baseMessage({
+      id: 'first', msg_id: 'live-step-one', message_id: messageId('live-step-one'),
+      conversation_id: conversationId, turn_id: turnId, created_at: 1000,
+      content: { content: 'I found the cause.' },
+    }));
+    const second = fetchedMessage(baseMessage({
+      id: 'second', msg_id: 'live-step-two', message_id: messageId('live-step-two'),
+      conversation_id: conversationId, turn_id: turnId, created_at: 2000,
+      content: { content: 'Checking' },
+    }));
+    const live = baseMessage({
+      id: 'live', msg_id: 'live-step-two', conversation_id: conversationId,
+      turn_id: turnId, created_at: 2000, content: { content: 'Checking the completed fix now.' },
+    });
+    const merged = mergeFetchedMessagesForConversation([first, live], [second, first], conversationId);
+    expect(merged.map(textContent)).toEqual(['I found the cause.', 'Checking the completed fix now.']);
+  });
+
+  test('rehydrates public progress on both sides of a tool receipt without concatenating steps', () => {
+    const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
+    const turnId = messageId('journal-turn');
+    const firstStreamId = messageId('journal-first-step');
+    const secondStreamId = messageId('journal-second-step');
+    const user = fetchedMessage(baseMessage({
+      id: 'journal-user', msg_id: 'journal-user', conversation_id: conversationId,
+      turn_id: turnId, position: 'right', created_at: 1000,
+      content: { content: 'Investigate the failure' },
+    }));
+    const first = fetchedMessage(baseMessage({
+      id: 'journal-first', msg_id: 'journal-first-step', message_id: firstStreamId,
+      conversation_id: conversationId, turn_id: turnId, created_at: 1500,
+      content: { content: 'I found the cause.' },
+    }));
+    const tool = fetchedMessage(baseMessage({
+      id: 'journal-tool', msg_id: 'journal-tool', conversation_id: conversationId,
+      turn_id: turnId, type: 'tool_call', created_at: 2500,
+      content: { call_id: 'read-one', name: 'read_file', status: 'completed', artifacts: [] },
+    } as any));
+    const second = fetchedMessage(baseMessage({
+      id: 'journal-second', msg_id: 'journal-second-step', message_id: secondStreamId,
+      conversation_id: conversationId, turn_id: turnId, created_at: 3500,
+      content: { content: 'The check passed and the fix is ready.' },
+    }));
+    const terminal = fetchedMessage(baseMessage({
+      id: 'journal-terminal', msg_id: 'journal-terminal', conversation_id: conversationId,
+      turn_id: turnId, type: 'agent_status', position: 'center', created_at: 4000,
+      content: { backend: 'nomi', status: 'prepared', turn_summary: true, finished_at_ms: 4000 },
+    } as any));
+    const liveSecond = baseMessage({
+      id: 'live-journal-second', msg_id: 'journal-first-step', conversation_id: conversationId,
+      turn_id: turnId, created_at: 3500,
+      content: { content: 'The check passed and the fix is ready.' },
+    });
+
+    const merged = mergeFetchedMessagesForConversation(
+      [user, first, tool, liveSecond],
+      [terminal, second, tool, first, user],
+      conversationId
+    );
+    expect(merged.filter((message) => message.type === 'text').map(textContent)).toEqual([
+      'Investigate the failure',
+      'I found the cause.',
+      'The check passed and the fix is ready.',
+    ]);
+    expect(merged.slice(1, 4).map((message) => message.type)).toEqual([
+      'text', 'tool_call', 'text',
+    ]);
+  });
+
   test('orders a newest-first initial history page chronologically before rendering', () => {
     const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000004');
     const oldest = baseMessage({

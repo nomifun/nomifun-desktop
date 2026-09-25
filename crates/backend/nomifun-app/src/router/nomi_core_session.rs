@@ -1527,6 +1527,12 @@ impl NomiCoreSessionOwner {
     ) -> Option<WebSocketMessage<Value>> {
         let mut event_data = serde_json::to_value(event).ok()?;
         normalize_keys_to_snake_case(&mut event_data);
+        let step_message_id = match event {
+            AgentStreamEvent::Text(data) => data.step.and_then(|step|
+                super::engine_journal::canonical_assistant_step_message_id(root_message_id, step).ok()),
+            _ => None,
+        };
+        let assistant_message_id = step_message_id.as_deref().unwrap_or(assistant_message_id);
         Some(WebSocketMessage::new(
             "message.stream",
             json!({
@@ -5362,6 +5368,25 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn canonical_stream_steps_use_the_same_identity_as_durable_public_messages() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let fallback = NomiCoreSessionOwner::canonical_assistant_stream_message_id(root).unwrap();
+        for step in [1_u16, 2, 300] {
+            let event: AgentStreamEvent = serde_json::from_value(json!({
+                "type": "content", "data": { "content": "progress", "step": step },
+            })).unwrap();
+            let wire = NomiCoreSessionOwner::canonical_stream_wire_event(
+                &session_id, root, &fallback, &event,
+            ).unwrap();
+            assert_eq!(wire.data["msg_id"],
+                super::super::engine_journal::canonical_assistant_step_message_id(root, step).unwrap());
+            assert_eq!(wire.data["turn_id"], root);
+            if step > 1 { assert_ne!(wire.data["msg_id"], fallback); }
+        }
+    }
+
+    #[test]
     fn failed_turn_summary_rehydrates_as_the_same_compact_error_message() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let root_message_id = "0190f5fe-7c00-7a00-8abc-012345678911";
@@ -5472,6 +5497,37 @@ mod session_boundary_tests {
         assert_eq!(tool.content["output"], "file contents");
         assert_eq!(tool.content["status"], "completed");
         assert_eq!(tool.content["turn_id"], root);
+    }
+
+    #[test]
+    fn history_projects_public_step_text_with_its_turn_identity() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
+        let message = canonical_message_response(
+            &session_id,
+            1_000,
+            MessageProjection {
+                session_id: session_id.clone(),
+                projection_id: format!("message:{message_id}"),
+                first_seq: 3,
+                last_seq: 8,
+                presentation_intent: "message".to_owned(),
+                message_type: None,
+                message_status: None,
+                projection: json!({
+                    "correlation_id": message_id,
+                    "content": "I found the cause.",
+                    "turn_id": root,
+                    "state": "completed"
+                }),
+                semantic_digest: "digest".to_owned(),
+            },
+        ).unwrap().unwrap();
+
+        assert_eq!(message.r#type, MessageType::Text);
+        assert_eq!(message.content["content"], "I found the cause.");
+        assert_eq!(message.content["turn_id"], root);
     }
 
     #[test]
@@ -12400,6 +12456,14 @@ fn canonical_message_response_with_observation(
             MessageType::Text,
             json!({
                 "content": document.get("content").and_then(Value::as_str).unwrap_or_default(),
+                "turn_id": document.get("turn_id"),
+                "display_at_ms": document.get("display_at_ms").and_then(Value::as_i64).unwrap_or_else(|| {
+                    // created_at remains the stable keyset/order cursor. The
+                    // displayed clock comes from the message, not Session age.
+                    let uuid = Uuid::parse_str(message_id).expect("validated above");
+                    let bytes = uuid.as_bytes();
+                    bytes[..6].iter().fold(0_i64, |time, byte| (time << 8) | i64::from(*byte))
+                }),
             }),
             if state == "accepted" {
                 MessagePosition::Right
