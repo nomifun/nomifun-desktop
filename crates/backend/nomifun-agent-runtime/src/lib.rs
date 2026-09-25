@@ -35,6 +35,7 @@ pub use history_port::{AgentHistoryPage, AgentHistoryPort, AgentRecordedTurn};
 pub use history::replay_closed_turn;
 mod model;
 mod output_limit;
+mod public_output;
 mod planning;
 mod patch_recovery;
 pub use patch_recovery::AgentPatchRecoveryState;

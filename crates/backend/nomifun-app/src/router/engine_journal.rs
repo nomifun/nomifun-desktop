@@ -51,12 +51,19 @@ struct Cursor {
     draining: bool,
     terminal: bool,
     uncertain: bool,
-    assistant_parts: u64,
-    assistant_text: Vec<u8>,
+    assistant_step: Option<AssistantStepCursor>,
     last_assistant_event_id: Option<EventId>,
     assistant_message_id: Option<String>,
     thinking_messages: BTreeMap<u16, (String, u64)>,
     tool_message_ids: BTreeMap<String, String>,
+}
+
+struct AssistantStepCursor {
+    step: u16,
+    message_id: String,
+    parts: u64,
+    text: Vec<u8>,
+    last_event_id: Option<EventId>,
 }
 
 pub(super) struct Journal {
@@ -91,15 +98,26 @@ fn failure(message: impl std::fmt::Display) -> AppError {
 pub(super) fn canonical_assistant_message_id(
     root_message_id: &str,
 ) -> Result<String, AppError> {
+    canonical_assistant_step_message_id(root_message_id, 1)
+}
+
+pub(super) fn canonical_assistant_step_message_id(
+    root_message_id: &str,
+    step: u16,
+) -> Result<String, AppError> {
     let root = Uuid::parse_str(root_message_id)
         .map_err(|error| failure(format!("turn root is not a UUID: {error}")))?;
-    if root.get_version_num() != 7 {
+    if root.get_version_num() != 7 || step == 0 {
         return Err(failure("turn root is not UUIDv7"));
     }
     let mut bytes = *root.as_bytes();
     // Preserve version/variant/time ordering while selecting a deterministic,
-    // distinct point in the UUIDv7 random suffix.
-    bytes[15] ^= 1;
+    // distinct point in the UUIDv7 random suffix for each model step. Step 1
+    // retains the existing canonical assistant ID used by the live relay.
+    let suffix = u16::from_be_bytes([bytes[14], bytes[15]]) ^ step;
+    let suffix_bytes = suffix.to_be_bytes();
+    bytes[14] = suffix_bytes[0];
+    bytes[15] = suffix_bytes[1];
     let assistant = Uuid::from_bytes(bytes);
     if assistant == root || assistant.get_version_num() != 7 {
         return Err(failure("assistant message identity derivation failed"));
@@ -301,18 +319,36 @@ impl EngineTurnJournal {
     async fn append_assistant_part(
         journal: &Journal,
         cursor: &mut Cursor,
+        step: u16,
         text: &str,
     ) -> Result<(), AppError> {
         if text.is_empty() {
             return Ok(());
         }
-        let part = cursor.assistant_parts.saturating_add(1);
-        let message_id = cursor
-            .assistant_message_id
-            .get_or_insert_with(|| Uuid::now_v7().to_string())
-            .clone();
+        if cursor.assistant_step.as_ref().is_some_and(|current| current.step != step) {
+            let previous = cursor.assistant_step.take().expect("checked above");
+            if step <= previous.step {
+                return Err(failure("assistant model step moved backwards"));
+            }
+            let completed = Self::assistant_completion_event(journal, &previous);
+            let completed_id = completed.event_id.clone();
+            journal.store.append_event(&completed).await.map_err(failure)?;
+            cursor.last_assistant_event_id = Some(completed_id);
+        }
+        if cursor.assistant_step.is_none() {
+            cursor.assistant_step = Some(AssistantStepCursor {
+                step,
+                message_id: canonical_assistant_step_message_id(journal.root.as_ref(), step)?,
+                parts: 0,
+                text: Vec::new(),
+                last_event_id: None,
+            });
+        }
+        let current = cursor.assistant_step.as_mut().expect("initialized above");
+        let part = current.parts.saturating_add(1);
+        let message_id = current.message_id.clone();
         let identity = format!(
-            "assistant-part:{}:{}:{part}",
+            "assistant-part:{}:{}:{step}:{part}",
             journal.session.as_ref(),
             journal.operation.as_ref(),
         );
@@ -336,14 +372,51 @@ impl EngineTurnJournal {
                 ),
                 payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
                     "content": text,
+                    "turn_id": journal.root.as_ref(),
+                    "display_at_ms": now_ms(),
                 }))),
             },
         };
         journal.store.append_event(&append).await.map_err(failure)?;
-        cursor.assistant_parts = part;
-        cursor.assistant_text.extend_from_slice(text.as_bytes());
+        current.parts = part;
+        current.text.extend_from_slice(text.as_bytes());
+        current.last_event_id = Some(event_id.clone());
         cursor.last_assistant_event_id = Some(event_id);
         Ok(())
+    }
+
+    fn assistant_completion_event(
+        journal: &Journal,
+        step: &AssistantStepCursor,
+    ) -> SessionEventAppend {
+        let identity = format!(
+            "assistant-complete:{}:{}:{}",
+            journal.session.as_ref(),
+            journal.operation.as_ref(),
+            step.step,
+        );
+        SessionEventAppend {
+            agent_session_id: journal.session.clone(),
+            event_id: EventId::from(identity.clone()),
+            producer_id: EventProducerId::from("runtime_supervisor"),
+            idempotency_key: IdempotencyKey::from(identity),
+            runtime_binding_id: None,
+            runtime_producer_seq: None,
+            semantic_event: SemanticSessionEventDraft {
+                kind: SessionEventKind("message/completed".to_owned()),
+                kind_version: 1,
+                correlation_id: CorrelationId::from(step.message_id.clone()),
+                causation_event_id: Some(
+                    step.last_event_id
+                        .clone()
+                        .unwrap_or_else(|| journal.root.clone()),
+                ),
+                payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                    "part_count": step.parts,
+                    "content_digest": digest_bytes(&step.text),
+                }))),
+            },
+        }
     }
 
     async fn append_thinking_part(
@@ -625,39 +698,21 @@ impl EngineTurnJournal {
                 Ok(())
             }
             AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. } => {
-                let assistant_message_id = cursor
-                    .assistant_message_id
-                    .clone()
-                    .unwrap_or_else(|| Uuid::now_v7().to_string());
-                let message_identity = format!(
-                    "assistant-complete:{}:{}",
-                    journal.session.as_ref(),
-                    journal.operation.as_ref(),
-                );
-                let message_event_id = EventId::from(message_identity.clone());
-                let message = SessionEventAppend {
-                    agent_session_id: journal.session.clone(),
-                    event_id: message_event_id.clone(),
-                    producer_id: EventProducerId::from("runtime_supervisor"),
-                    idempotency_key: IdempotencyKey::from(message_identity),
-                    runtime_binding_id: None,
-                    runtime_producer_seq: None,
-                    semantic_event: SemanticSessionEventDraft {
-                        kind: SessionEventKind("message/completed".to_owned()),
-                        kind_version: 1,
-                        correlation_id: CorrelationId::from(assistant_message_id),
-                        causation_event_id: Some(
-                            cursor
-                                .last_assistant_event_id
-                                .clone()
-                                .unwrap_or_else(|| journal.root.clone()),
-                        ),
-                        payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                            "part_count": cursor.assistant_parts,
-                            "content_digest": digest_bytes(&cursor.assistant_text),
-                        }))),
-                    },
+                let empty_step = AssistantStepCursor {
+                    step: 1,
+                    message_id: cursor
+                        .assistant_message_id
+                        .clone()
+                        .unwrap_or_else(|| Uuid::now_v7().to_string()),
+                    parts: 0,
+                    text: Vec::new(),
+                    last_event_id: None,
                 };
+                let message = Self::assistant_completion_event(
+                    journal,
+                    cursor.assistant_step.as_ref().unwrap_or(&empty_step),
+                );
+                let message_event_id = message.event_id.clone();
                 let (kind, payload) = match event {
                     AgentEngineEvent::TurnCompleted { model_steps, finish_reason } => (
                         "turn/completed",
@@ -779,8 +834,8 @@ impl EngineTurnJournal {
             cursor.uncertain = true;
             Self::append_progress(&journal, &cursor, &event_value).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
-            if let Some(AgentEngineEvent::OutputTextDelta { text, .. }) = &runtime_event {
-                Self::append_assistant_part(&journal, &mut cursor, text).await?;
+            if let Some(AgentEngineEvent::OutputTextDelta { step, text }) = &runtime_event {
+                Self::append_assistant_part(&journal, &mut cursor, *step, text).await?;
             }
             if let Some(AgentEngineEvent::ReasoningDelta { step, text }) = &runtime_event {
                 Self::append_thinking_part(&journal, &mut cursor, *step, text).await?;
@@ -973,6 +1028,69 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
 mod history_display_tests {
     use super::*;
     use super::super::runtime_event_buffer::AgentEventBuffer;
+
+    #[tokio::test]
+    async fn public_progress_keeps_model_steps_separate_across_tool_history() {
+        let (journal, pool) = test_fixture().await;
+        for event in [
+            serde_json::to_value(AgentEngineEvent::OutputTextDelta {
+                step: 1,
+                text: "I found the cause.".into(),
+            }).unwrap(),
+            json!({
+                "event": "host_tool_dispatch",
+                "dispatch": {
+                    "operation_id": "read-op",
+                    "call_id": "read-call",
+                    "capability_id": "workspace.files",
+                    "action_id": "workspace.files/read",
+                    "model_name": "read_file"
+                }
+            }),
+            json!({
+                "event": "host_tool_settled",
+                "operation_id": "read-op",
+                "call_id": "read-call",
+                "result": "read complete"
+            }),
+            serde_json::to_value(AgentEngineEvent::OutputTextDelta {
+                step: 2,
+                text: "The check passed.".into(),
+            }).unwrap(),
+        ] {
+            journal.append(event.to_string(), None, EngineJournalWrite::Progress)
+                .await.unwrap();
+        }
+        journal.append(json!({"phase":"cleanup"}).to_string(), None, EngineJournalWrite::Cleanup)
+            .await.unwrap();
+        journal.append(
+            serde_json::to_string(&AgentEngineEvent::TurnCompleted {
+                model_steps: 2,
+                finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+            }).unwrap(),
+            None,
+            EngineJournalWrite::Terminal,
+        ).await.unwrap();
+
+        let store = AgentSessionStore::from_pool(pool).await.unwrap();
+        let (history, _, _) = store.message_history_before(&journal.0.session, None, 50)
+            .await.unwrap();
+        let mut notes = history.iter()
+            .filter(|row| row.presentation_intent == "message"
+                && row.projection["content"].as_str().is_some_and(|text| {
+                    text == "I found the cause." || text == "The check passed."
+                }))
+            .collect::<Vec<_>>();
+        notes.sort_by_key(|row| row.first_seq);
+        let tool = history.iter().find(|row| row.presentation_intent == "tool")
+            .expect("tool history exists");
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].first_seq < tool.first_seq);
+        assert!(tool.first_seq < notes[1].first_seq);
+        assert_ne!(notes[0].projection_id, notes[1].projection_id);
+        assert!(notes.iter().all(|row| row.projection["state"] == "completed"));
+        assert!(notes.iter().all(|row| row.projection["turn_id"] == journal.0.root.as_ref()));
+    }
 
     #[tokio::test]
     async fn engine_step_limit_projects_a_local_incomplete_turn_error() {

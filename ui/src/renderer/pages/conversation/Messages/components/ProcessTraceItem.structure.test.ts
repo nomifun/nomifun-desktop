@@ -19,14 +19,16 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('messages.toolDetailOutput')).toBe(true);
   });
 
-  test('renders thinking as neutral process content instead of legacy receipts', () => {
+  test('renders public narration as prose and thinking as a neutral status', () => {
     expect(source.includes('ThinkingStreamPanel')).toBe(false);
     expect(source.includes('useStreamingThinkingText')).toBe(false);
     expect(source.includes('shouldAutoCollapseThinkingStreamPanel')).toBe(false);
     expect(source.includes('turn-process-thinking-stream')).toBe(false);
     expect(source.includes("case 'thinking':")).toBe(true);
     expect(source.includes('<MessageThinking')).toBe(false);
-    expect(source.includes('turn-process-trace--thinking')).toBe(true);
+    expect(source.includes("data-testid='process-narration'")).toBe(true);
+    expect(source.includes('getPublicProcessNarration')).toBe(true);
+    expect(source.includes('<MarkdownView')).toBe(true);
     expect(source.includes('Private reasoning omitted')).toBe(true);
     expect(source.includes('ThinkingTraceRow')).toBe(false);
     expect(source.includes('messages.processReceipt.thinkingCompletedDuration')).toBe(false);
@@ -80,6 +82,13 @@ describe('ProcessTraceItem Codex-style execution rows', () => {
     expect(source.includes('stateOverride?: TurnDisclosureProcessState')).toBe(true);
     expect(source.includes('const state = stateOverride ?? getProcessItemState(item);')).toBe(true);
     expect(source.includes('stateOverride={stateOverride}')).toBe(true);
-    expect(source.includes("`turn-process-trace__row--${row.state}`")).toBe(true);
+    expect(source.includes("`turn-process-trace__row--${visualState}`")).toBe(true);
+  });
+
+  test('downgrades recoverable tool failures to an amber inspectable receipt', () => {
+    expect(source.includes('recoverFailures?: boolean')).toBe(true);
+    expect(source.includes("turn-process-trace__row--recovered")).toBe(true);
+    expect(source.includes('messages.processReceipt.recoveredOperations')).toBe(true);
+    expect(source.includes("presentationState={recovered ? 'recovered' : undefined}")).toBe(true);
   });
 });

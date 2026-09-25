@@ -132,6 +132,8 @@ export type IMessageText = IMessage<
   'text',
   {
     content: string;
+    /** Actual message time; created_at remains the durable pagination cursor. */
+    display_at_ms?: number;
     interaction?: {
       kind: 'robot' | 'desktop'; robot_id: string; connection_id: string; request_id: string;
       input_modality: 'speech' | 'text'; output_mode: 'spoken' | 'desktop';

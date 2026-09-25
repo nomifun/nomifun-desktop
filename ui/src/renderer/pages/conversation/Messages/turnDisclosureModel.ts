@@ -177,7 +177,7 @@ const buildEmptyRunningDisclosure = (
     state: 'running',
     processItemStates: {},
     running: true,
-    defaultCollapsed: true,
+    defaultCollapsed: false,
   };
 };
 
@@ -257,7 +257,7 @@ function buildSegmentOutput(
   // segments. Only the last assistant row across the whole turn is final
   // answer content; earlier assistant rows remain part of the process trace.
   // A streaming assistant row is still provisional. A later tool call or
-  // model step can replace it, so keep it in the bounded process disclosure
+  // model step can replace it, so keep it in the work journal
   // until the turn actually closes.
   const finalAssistantIndex = isClosed && finalAssistantForTurn
     ? segment.findIndex((entry) => entry === finalAssistantForTurn)
@@ -326,7 +326,7 @@ function buildSegmentOutput(
       processItems.map((entry) => [entry.id, getEffectiveProcessState(entry, stateOptions)])
     ),
     running: state === 'running',
-    defaultCollapsed: true,
+    defaultCollapsed: false,
   };
 
   const output: TurnDisclosureOutputItem[] = [];
@@ -402,7 +402,7 @@ const coalesceTurnDisclosures = (
       state,
       processItemStates: { ...existing.processItemStates, ...item.processItemStates },
       running: state === 'running',
-      defaultCollapsed: true,
+      defaultCollapsed: false,
     };
   }
 
@@ -475,7 +475,7 @@ const applyStopNotice = (
     state: 'canceled',
     endAt: stopNotice.stoppedAt,
     running: false,
-    defaultCollapsed: true,
+    defaultCollapsed: false,
   };
   return next;
 };

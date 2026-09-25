@@ -19,6 +19,8 @@ struct ProjectionDocument {
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content_digest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,6 +143,7 @@ pub(crate) fn reduce_agent_messages(
             state: None,
             content: None,
             turn_id: None,
+            display_at_ms: None,
             content_digest: None,
             part_count: None,
             tool_summary: None,
@@ -241,6 +244,9 @@ fn apply_projection_semantics(
             }
         }
         "message/content-part" => {
+            if document.display_at_ms.is_none() {
+                document.display_at_ms = payload.get("display_at_ms").and_then(Value::as_i64).filter(|time| *time > 0);
+            }
             let content = payload
                 .get("content")
                 .and_then(Value::as_str)
@@ -249,6 +255,14 @@ fn apply_projection_semantics(
                         "message/content-part requires bounded content".to_owned(),
                     )
                 })?;
+            if let Some(turn_id) = payload.get("turn_id").and_then(Value::as_str) {
+                if document.turn_id.as_deref().is_some_and(|existing| existing != turn_id) {
+                    return Err(SessionStoreError::InvalidEvent(
+                        "message/content-part changed its owning turn".to_owned(),
+                    ));
+                }
+                document.turn_id = Some(turn_id.to_owned());
+            }
             document.state = Some("streaming".to_owned());
             document
                 .content

@@ -58,6 +58,7 @@ pub enum AgentErrorCode {
     /// 故意 **不** 计入 is_provider_fault(不触发换模型)。
     UserLlmProviderImageUnsupported,
     UserLlmProviderInvalidToolSchema,
+    UserLlmProviderInvalidToolCall,
     UserLlmProviderContextTooLarge,
     UserLlmProviderRateLimited,
     UserLlmProviderTimeout,

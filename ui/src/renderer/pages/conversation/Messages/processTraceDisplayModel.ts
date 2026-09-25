@@ -28,6 +28,93 @@ export const shouldShowToolRowDetail = (
   return Boolean(row.input || row.output || row.truncated);
 };
 
+/**
+ * Private thinking snapshots and routine model lifecycle updates do not
+ * describe completed work. Keep at most the current live activity at the tail
+ * of the journal; all public narration and tool receipts retain their order.
+ */
+export const selectJournalProcessItems = <T>(
+  items: T[],
+  options: {
+    running: boolean;
+    isPrivateActivity: (item: T) => boolean;
+    isRunning: (item: T) => boolean;
+    textOf?: (item: T) => string | undefined;
+    finalText?: string;
+  }
+): T[] =>
+  items.filter((item, index) => {
+    const text = options.textOf?.(item);
+    if (!options.running && text !== undefined && isProcessTextEchoOfFinal(text, options.finalText)) return false;
+    return !options.isPrivateActivity(item) ||
+      (options.running && index === items.length - 1 && options.isRunning(item));
+  });
+
+/**
+ * Some model adapters emit an XML-shaped tool invocation as ordinary text
+ * after a rejected tool call. It is neither public progress nor a successful
+ * file result. Keep surrounding narration, but never expand the arguments or
+ * embedded file content into the transcript. A fenced example stays visible.
+ */
+export const projectAssistantText = (content: string): { text: string; hasToolPayload: boolean } => {
+  if (!/<tool_call>/i.test(content)) return { text: content.trim(), hasToolPayload: false };
+  const lines = content.split(/\r?\n/);
+  const visible: string[] = [];
+  let fence: { marker: string; length: number } | undefined;
+  let inToolPayload = false;
+  let removed = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (inToolPayload) {
+      const closingTag = line.match(/<\/tool_call>/i);
+      if (closingTag) {
+        inToolPayload = false;
+        const after = line.slice((closingTag.index ?? 0) + closingTag[0].length).trimStart();
+        if (after) visible.push(after);
+      }
+      continue;
+    }
+
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      if (!fence) fence = { marker, length: fenceMatch[1].length };
+      else if (marker === fence.marker && fenceMatch[1].length >= fence.length) fence = undefined;
+    }
+
+    const openingTag = !fence ? line.match(/<tool_call>/i) : null;
+    if (openingTag) {
+      const before = line.slice(0, openingTag.index).trimEnd();
+      const after = line.slice((openingTag.index ?? 0) + openingTag[0].length).trim();
+      const nextNonEmpty = after || lines.slice(index + 1, index + 5).find((candidate) => candidate.trim());
+      if (nextNonEmpty && /^<function=[^>\n]+>/i.test(nextNonEmpty.trim())) {
+        if (before) visible.push(before);
+        if (visible.length && visible.at(-1)?.trim()) visible.push('');
+        inToolPayload = true;
+        removed = true;
+        continue;
+      }
+    }
+    visible.push(line);
+  }
+
+  const result = visible.join('\n');
+  return { text: (removed ? result.replace(/\n{3,}/g, '\n\n') : result).trim(), hasToolPayload: removed };
+};
+
+export const stripInternalToolCallPayload = (content: string): string => projectAssistantText(content).text;
+
+/** One completed turn should not show its final answer twice. */
+export const isProcessTextEchoOfFinal = (processText: string, finalText?: string): boolean => {
+  if (!finalText) return false;
+  const process = projectAssistantText(processText);
+  const final = projectAssistantText(finalText);
+  if (process.hasToolPayload || final.hasToolPayload) return false;
+  const normalize = (value: string) => value.replace(/\s+/g, ' ').trim();
+  return Boolean(process.text) && normalize(process.text) === normalize(final.text);
+};
+
 /** A model can repeat the same progress sentence after each tool boundary. */
 export const deduplicateProcessText = <T>(
   items: T[],

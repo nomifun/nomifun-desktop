@@ -71,9 +71,12 @@ pub struct SessionAssignedEventData {
 }
 
 /// Data for the `Text` event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TextEventData {
     pub content: String,
+    /// Canonical model-step identity shared by realtime and durable history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<u16>,
 }
 
 /// Data for the `Tips` event.
@@ -210,8 +213,7 @@ mod tests {
 
     #[test]
     fn text_event_roundtrip() {
-        let event = AgentStreamEvent::Text(TextEventData {
-            content: "Hello world".into(),
+        let event = AgentStreamEvent::Text(TextEventData { step: None, content: "Hello world".into(),
         });
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "content");
@@ -473,7 +475,7 @@ mod tests {
                 }),
                 "output_discarded",
             ),
-            (AgentStreamEvent::Text(TextEventData { content: "x".into() }), "content"),
+            (AgentStreamEvent::Text(TextEventData { step: None, content: "x".into() }), "content"),
             (
                 AgentStreamEvent::Tips(TipsEventData { content: "x".into(), tip_type: TipType::Warning }),
                 "tips",

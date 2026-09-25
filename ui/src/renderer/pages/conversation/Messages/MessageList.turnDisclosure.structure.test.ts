@@ -44,11 +44,28 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes("'position' in item && item.position === 'right'")).toBe(false);
   });
 
-  test('does not reuse legacy process cards inside receipt expansion', () => {
+  test('renders chronological journal receipts without legacy process cards', () => {
     expect(source.includes('renderProcessTraceItem(')).toBe(true);
-    expect(source).toMatch(/renderProcessTraceItem\(\s*processItem, 'list', workspaceRoots,/);
+    expect(source.includes('renderJournalProcessItem')).toBe(true);
+    expect(source.includes('journal-receipt-')).toBe(true);
+    expect(source.includes('<TurnProcessReceipt')).toBe(true);
     expect(source.includes('MessageToolGroupSummary')).toBe(false);
     expect(source.includes('defaultExpanded={true}')).toBe(false);
+  });
+
+  test('preserves process arrival order instead of collapsing narration or tool batches', () => {
+    expect(source.includes('collapseProcessNarration')).toBe(false);
+    expect(source.includes('coalesceToolProcessSummaries')).toBe(false);
+    expect(source.includes('deduplicateProcessText')).toBe(false);
+    expect(source.includes('item={item}')).toBe(true);
+    expect(source.includes('finalText: item.finalAnswer')).toBe(true);
+  });
+
+  test('summarizes each adjacent tool stage behind one localized disclosure row', () => {
+    expect(source.includes('const summarySeparator = t(')).toBe(true);
+    expect(source.includes("messages.processReceipt.summarySeparator")).toBe(true);
+    expect(source.includes('defaultExpanded: false')).toBe(true);
+    expect(source.includes('hasDetail: true')).toBe(true);
   });
 
   test('keeps thinking in the process disclosure content without turning it into a receipt', () => {
@@ -81,7 +98,8 @@ describe('MessageList turn completion disclosure structure', () => {
     expect(source.includes('processItemStates: Record<string, TurnDisclosureProcessState>')).toBe(true);
     expect(source.includes('processItemStates: entry.processItemStates')).toBe(true);
     expect(source.includes('getDisclosureProcessItemState')).toBe(true);
-    expect(source.includes('item.running ? undefined : getDisclosureProcessItemState(processItem)')).toBe(true);
+    expect(source.includes('item.running ? undefined : processState')).toBe(true);
+    expect(source.includes('recoverFailures={recoverFailures}')).toBe(true);
   });
 
   test('uses canonical timing metadata without rendering a redundant status row', () => {
@@ -116,12 +134,13 @@ describe('MessageList turn completion disclosure structure', () => {
 
   test('renders barrier-skipped receipt summaries with dedicated copy', () => {
     expect(source.includes('part.skipped')).toBe(true);
-    expect(source.includes('messages.toolSummary.skipped')).toBe(true);
+    expect(source.includes('messages.processReceipt.skippedAfterFailure')).toBe(true);
   });
 
   test('renders pre-dispatch argument rejection with dedicated neutral copy', () => {
     expect(source.includes("part.notExecutedReason === 'invalid_arguments'")).toBe(true);
-    expect(source.includes('messages.toolSummary.invalidArguments')).toBe(true);
+    expect(source.includes('messages.processReceipt.invalidArguments')).toBe(true);
+    expect(source.includes('messages.processReceipt.commandNotExecuted')).toBe(true);
   });
 
   test('uses plan events as hard boundaries between tool receipt groups', () => {
@@ -135,6 +154,6 @@ describe('MessageList turn completion disclosure structure', () => {
 
   test('suppresses only legacy synthetic plan-tool failures with a persisted plan projection', () => {
     expect(source.includes("from './planToolVisibility'")).toBe(true);
-    expect(source.includes('isSupersededPlanToolFailure(message, list.slice(i + 1))')).toBe(true);
+    expect(source.includes('isSupersededPlanToolFailure(message, journalSources.slice(i + 1))')).toBe(true);
   });
 });

@@ -3,13 +3,13 @@ import { describe, expect, test } from 'bun:test';
 import { shouldResetTurnProcessDisclosureExpansion } from './TurnProcessDisclosure';
 
 describe('TurnProcessDisclosure expansion state', () => {
-  test('resets the same turn when it finishes so the process collapses', () => {
+  test('keeps a manual disclosure choice when a turn finishes', () => {
     expect(
       shouldResetTurnProcessDisclosureExpansion(
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: true },
-        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: true, running: false }
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false, running: true },
+        { itemId: 'turn-disclosure-1', hasProcessItems: true, defaultCollapsed: false, running: false }
       )
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test('preserves manual expansion while the turn lifecycle is unchanged', () => {

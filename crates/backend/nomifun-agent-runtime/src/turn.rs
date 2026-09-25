@@ -503,6 +503,7 @@ pub(crate) async fn run_turn(
             }
         };
         let mut step = StepState::default();
+        let mut public_output = crate::public_output::PublicOutputGuard::default();
         let mut saw_terminal = false;
         let mut semantic_output_seen = false;
 
@@ -574,14 +575,18 @@ pub(crate) async fn run_turn(
                         )
                         .await;
                     }
-                    output_text.push_str(&text);
-                    step.append_text(&text);
-                    event_sink
-                        .emit(AgentEngineEvent::OutputTextDelta {
-                            step: model_steps,
-                            text,
-                        })
-                        .await?;
+                    let visible = public_output.push(&text);
+                    if !visible.text.is_empty() {
+                        output_text.push_str(&visible.text);
+                        step.append_text(&visible.text);
+                        event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                            step: model_steps, text: visible.text,
+                        }).await?;
+                    }
+                    if visible.invalid_tool_call {
+                        return fail_turn(&event_sink, model_steps,
+                            "model emitted tool-call markup as text instead of a native tool call; no tool from this output was executed").await;
+                    }
                 }
                 ChatModelEvent::ReasoningDelta { text } => {
                     if text.is_empty() {
@@ -689,6 +694,14 @@ pub(crate) async fn run_turn(
                         .await?;
                 }
                 ChatModelEvent::Completed { finish_reason } => {
+                    let remaining = public_output.finish();
+                    if !remaining.is_empty() {
+                        output_text.push_str(&remaining);
+                        step.append_text(&remaining);
+                        event_sink.emit(AgentEngineEvent::OutputTextDelta {
+                            step: model_steps, text: remaining,
+                        }).await?;
+                    }
                     if saw_terminal {
                         return fail_turn(
                             &event_sink,
@@ -3813,6 +3826,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_tool_text_cannot_complete_a_turn_or_execute_a_tool() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta { text: "I will write the file. <tool_".into() }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "call>\n<function=write_file>\n<parameter=content>".into() }),
+                Ok(ChatModelEvent::OutputTextDelta { text: "SHOULD_NEVER_REACH_THE_UI".into() }),
+                Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
+            ]]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(ConcurrencyTool {
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(1),
+        });
+        let result = open_session(model, tools.clone()).run_turn(AgentTurnRequest::new(
+            request(), tool_plan(), principal(), 1,
+        )).await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(message))
+            if message.contains("tool-call markup as text")));
+        assert!(tools.order.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn plain_text_turn_completes_without_tools() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![vec![
@@ -3851,7 +3887,9 @@ mod tests {
         assert!(requests[0].input.tools.iter().any(|tool| tool.name == "read_file"));
         assert!(requests[0].input.instructions.iter().any(|instruction|
             instruction.contains("Do not emit chain-of-thought")
-                && instruction.contains("reserve the final response for the result")));
+                && instruction.contains("give brief public progress updates")
+                && instruction.contains("never XML-shaped <tool_call> text")
+                && instruction.contains("reserve the final response for the outcome")));
         assert!(!requests[0].input.tools.iter().any(|tool| matches!(tool.name.as_str(),
             crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::tool_archive::SEARCH)));
         assert!(!requests[0].input.instructions.iter().any(|instruction|

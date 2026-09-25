@@ -48,6 +48,14 @@
     "preparedResponse": "已整理结果",
     "prepareResponse": "整理结果",
     "failedOperations": "{{count}} 项操作未完成",
+    "recoveredOperations": "{{count}} 项操作出现异常",
+    "recoveredAfterRetry": "{{target}} 已恢复 · 重试 {{count}} 次",
+    "summarySeparator": "，",
+    "skippedAfterFailure": "此前操作失败，已跳过后续调用",
+    "invalidArguments": "参数不符合要求，操作未执行",
+    "commandNotExecuted": "命令未执行",
+    "operationNotExecuted": "操作未执行",
+    "canceledOperation": "操作已取消",
     "repeatedOperation": "{{label}} · {{count}} 次",
     "contextCompressed": "上下文已自动压缩",
     "searchedTarget": "已搜索 {{target}}",
@@ -57,8 +65,17 @@
     "collapseText": "收起说明",
     "status": "{{target}}"
   },
-  "turnDuration": "用时 {{duration}}",
-  "turnDurationUnknown": "用时 --",
+  "turnDuration": "已工作 {{duration}}",
+  "turnDurationUnknown": "已工作 --",
+  "toolProtocolError": {
+    "title": "工具调用格式异常 · 未执行",
+    "detail": "模型把工具请求输出成了正文，这段内容没有被执行。原始记录仅用于诊断。"
+  },
+  "turnDurationUnits": {
+    "hour": "小时",
+    "minute": "分",
+    "second": "秒"
+  },
   "turnProcess": {
     "expand": "展开执行进度",
     "collapse": "收起执行进度",
@@ -96,6 +113,7 @@
     "verified": "完整性已校验(SHA-256)",
     "open": "打开",
     "openImage": "打开图片",
+    "selectImage": "选择 {{name}}",
     "saveImage": "保存图片",
     "copyImagePath": "复制图片路径",
     "reveal": "在文件夹中显示",

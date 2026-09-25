@@ -307,60 +307,66 @@ const TurnDeliverablesCard: React.FC<{
   const { pending, available } = useTurnDeliverableAvailability(items, workspace);
   const [showAll, setShowAll] = useState(false);
   const [showAllImages, setShowAllImages] = useState(false);
+  const verifiedImages = available.filter(isVerifiedImageDeliverable);
+  const fileDeliverables = available.filter((item) => !isVerifiedImageDeliverable(item));
+  const imageIdentity = verifiedImages.map((item) => item.artifactId).join('|');
+  const [selectedImageId, setSelectedImageId] = useState<string | undefined>();
+
+  useEffect(() => {
+    if (!verifiedImages.length) {
+      setSelectedImageId(undefined);
+      return;
+    }
+    setSelectedImageId((current) =>
+      current && verifiedImages.some((item) => item.artifactId === current)
+        ? current
+        : verifiedImages[0].artifactId
+    );
+  }, [imageIdentity]);
 
   if (pending || available.length === 0) return null;
 
-  const verifiedImages = available.filter(isVerifiedImageDeliverable);
-  const fileDeliverables = available.filter((item) => !isVerifiedImageDeliverable(item));
   const visibleImages = showAllImages
     ? verifiedImages
     : verifiedImages.slice(0, DEFAULT_VISIBLE_COUNT);
   const hiddenImageCount = verifiedImages.length - visibleImages.length;
+  const selectedImage = verifiedImages.find((item) => item.artifactId === selectedImageId) ?? verifiedImages[0];
   const visible = showAll ? fileDeliverables : fileDeliverables.slice(0, DEFAULT_VISIBLE_COUNT);
   const hiddenCount = fileDeliverables.length - visible.length;
 
   return (
-    <div
+    <section
       data-testid='turn-deliverables-card'
       data-partial={partial ? 'true' : undefined}
-      className='w-full box-border rounded-8px overflow-hidden border border-solid border-[var(--aou-2)]'
+      className='turn-deliverables'
     >
-      <div className='flex items-center gap-8px px-12px py-8px select-none'>
-        <span className='w-8px h-8px rounded-full shrink-0' style={{ backgroundColor: diffColors.addition }}></span>
-        <span className='text-14px text-t-primary font-medium'>
-          {partial
-            ? t('messages.turnDeliverables.partialTitle', {
-                count: available.length,
-                defaultValue: 'Showing {{count}} changed files from this turn (scroll up to load the rest)',
-              })
-            : verifiedImages.length === available.length
-              ? t('messages.turnDeliverables.imagesTitle', {
-                  count: verifiedImages.length,
-                  defaultValue: 'Generated {{count}} images',
-                })
-              : verifiedImages.length > 0
-                ? t('messages.turnDeliverables.mixedTitle', {
-                    count: available.length,
-                    defaultValue: 'Generated {{count}} items',
-                  })
-                : t('messages.turnDeliverables.title', {
-                    count: fileDeliverables.length,
-                    defaultValue: 'Generated {{count}} files',
-                  })}
-        </span>
-      </div>
-
-      {verifiedImages.length > 0 && (
+      {selectedImage && (
         <div
           data-testid='turn-deliverables-images'
-          className={classNames(
-            'grid grid-cols-1 gap-8px px-12px pb-12px',
-            verifiedImages.length > 1 && 'md:grid-cols-2'
-          )}
+          className='turn-deliverables__media-layout'
         >
-          {visibleImages.map((item) => (
-            <VerifiedImageArtifactCard key={item.artifactId} item={item} workspace={workspace} />
-          ))}
+          <VerifiedImageArtifactCard
+            key={selectedImage.artifactId}
+            item={selectedImage}
+            workspace={workspace}
+          />
+          {verifiedImages.length > 1 && (
+            <div className='turn-deliverables__thumbnail-rail' aria-label={t('messages.turnDeliverables.imagesTitle', {
+              count: verifiedImages.length,
+              defaultValue: 'Generated {{count}} images',
+            })}>
+              {visibleImages.map((item) => (
+                <VerifiedImageArtifactCard
+                  key={item.artifactId}
+                  item={item}
+                  workspace={workspace}
+                  variant='thumbnail'
+                  selected={item.artifactId === selectedImage.artifactId}
+                  onSelect={() => setSelectedImageId(item.artifactId)}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -368,7 +374,7 @@ const TurnDeliverablesCard: React.FC<{
         <button
           type='button'
           aria-expanded={showAllImages}
-          className='w-full flex items-center gap-8px px-12px py-6px text-13px text-t-secondary cursor-pointer bg-transparent border-none border-t border-t-solid border-t-[var(--aou-2)] hover:bg-3 transition-colors'
+          className='turn-deliverables__more'
           onClick={() => setShowAllImages(!showAllImages)}
         >
           <Down
@@ -387,7 +393,18 @@ const TurnDeliverablesCard: React.FC<{
       )}
 
       {fileDeliverables.length > 0 && (
-        <div className='w-full bg-2'>
+        <div className='turn-deliverables__files'>
+          <div className='turn-deliverables__files-title'>
+            {partial
+              ? t('messages.turnDeliverables.partialTitle', {
+                  count: fileDeliverables.length,
+                  defaultValue: 'Showing {{count}} changed files from this turn (scroll up to load the rest)',
+                })
+              : t('messages.turnDeliverables.title', {
+                  count: fileDeliverables.length,
+                  defaultValue: 'Generated {{count}} files',
+                })}
+          </div>
           {visible.map((item) => (
             <DeliverableRow key={item.absolutePath ?? item.relativePath} item={item} />
           ))}
@@ -395,7 +412,7 @@ const TurnDeliverablesCard: React.FC<{
             <button
               type='button'
               aria-expanded={showAll}
-              className='w-full flex items-center gap-8px px-12px py-6px text-13px text-t-secondary cursor-pointer bg-transparent border-none hover:bg-3 transition-colors'
+              className='turn-deliverables__more'
               onClick={() => setShowAll(!showAll)}
             >
               <Down
@@ -414,7 +431,7 @@ const TurnDeliverablesCard: React.FC<{
           )}
         </div>
       )}
-    </div>
+    </section>
   );
 };
 

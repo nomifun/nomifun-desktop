@@ -55,13 +55,11 @@ async fn relay_sends_thinking_then_final_message() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "Hello".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "Hello".into(),
         }))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: " World".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " World".into(),
         }))
         .unwrap();
     event_tx
@@ -101,14 +99,12 @@ async fn editable_channel_retracts_discarded_draft_and_keeps_the_steering_prefix
 
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "prefix ".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "prefix ".into(),
         }))
         .unwrap();
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "discard me".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "discard me".into(),
         }))
         .unwrap();
     event_tx
@@ -117,8 +113,7 @@ async fn editable_channel_retracts_discarded_draft_and_keeps_the_steering_prefix
         ))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "answer".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "answer".into(),
         }))
         .unwrap();
     event_tx
@@ -154,16 +149,14 @@ async fn editable_channel_accepted_turn_discard_retracts_every_race_tail_pass_be
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "pass A".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "pass A".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: " + pass B".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " + pass B".into(),
         }))
         .unwrap();
     event_tx
@@ -212,14 +205,12 @@ async fn send_once_channel_never_releases_discarded_draft() {
 
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "prefix ".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "prefix ".into(),
         }))
         .unwrap();
     event_tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "discard me".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "discard me".into(),
         }))
         .unwrap();
     event_tx
@@ -228,8 +219,7 @@ async fn send_once_channel_never_releases_discarded_draft() {
         ))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "answer".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "answer".into(),
         }))
         .unwrap();
     event_tx
@@ -265,16 +255,14 @@ async fn send_once_channel_accepted_turn_discard_retracts_every_race_tail_pass_b
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "pass A".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "pass A".into(),
         }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Start(StartEventData::default()))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: " + pass B".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " + pass B".into(),
         }))
         .unwrap();
     event_tx
@@ -315,8 +303,7 @@ async fn relay_handles_error_event() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>private</think>partial answer".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>private</think>partial answer".into(),
         }))
         .unwrap();
     event_tx
@@ -352,8 +339,7 @@ async fn weixin_buffers_pending_text_through_tool_call_until_finish() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "Here is the plan:".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "Here is the plan:".into(),
         }))
         .unwrap();
     event_tx
@@ -408,8 +394,7 @@ async fn telegram_does_not_flush_text_before_tool_call() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "Here is the plan:".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "Here is the plan:".into(),
         }))
         .unwrap();
     event_tx
@@ -493,8 +478,7 @@ async fn relay_handles_channel_closed() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>private</think>partial".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>private</think>partial".into(),
         }))
         .unwrap();
     drop(event_tx);
@@ -529,8 +513,7 @@ async fn telegram_streaming_and_final_messages_use_html_parse_mode() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "**bold** & <raw>".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "**bold** & <raw>".into(),
         }))
         .unwrap();
     event_tx
@@ -628,8 +611,7 @@ async fn lark_messages_have_no_parse_mode() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "**bold** text".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "**bold** text".into(),
         }))
         .unwrap();
     event_tx
@@ -674,7 +656,7 @@ async fn telegram_inline_think_across_deltas_never_leaks() {
 
     for chunk in ["<think>secret ", "reasoning</think>", "The answer."] {
         event_tx
-            .send(AgentStreamEvent::Text(TextEventData { content: chunk.into() }))
+            .send(AgentStreamEvent::Text(TextEventData { step: None, content: chunk.into() }))
             .unwrap();
     }
     event_tx
@@ -715,7 +697,7 @@ async fn telegram_pure_thinking_turn_gets_no_text_output_card() {
 
     for chunk in ["<think>plan a", " plan b</think>"] {
         event_tx
-            .send(AgentStreamEvent::Text(TextEventData { content: chunk.into() }))
+            .send(AgentStreamEvent::Text(TextEventData { step: None, content: chunk.into() }))
             .unwrap();
     }
     event_tx
@@ -759,7 +741,7 @@ async fn telegram_minimax_orphan_close_final_is_clean() {
 
     for chunk in ["raw reasoning\n", "</think>\n", "Answer only."] {
         event_tx
-            .send(AgentStreamEvent::Text(TextEventData { content: chunk.into() }))
+            .send(AgentStreamEvent::Text(TextEventData { step: None, content: chunk.into() }))
             .unwrap();
     }
     event_tx
@@ -793,8 +775,7 @@ async fn weixin_inline_think_merged_final_is_stripped() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>t1</think>Visible before tool.".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>t1</think>Visible before tool.".into(),
         }))
         .unwrap();
     event_tx
@@ -811,8 +792,7 @@ async fn weixin_inline_think_merged_final_is_stripped() {
         }))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "<think>t2</think>After tool.".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>t2</think>After tool.".into(),
         }))
         .unwrap();
     event_tx
@@ -848,7 +828,7 @@ async fn weixin_all_think_buffer_skips_flush_then_recovers() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: "<think>only reasoning".into() }))
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>only reasoning".into() }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -864,7 +844,7 @@ async fn weixin_all_think_buffer_skips_flush_then_recovers() {
         }))
         .unwrap();
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: " more</think>Done.".into() }))
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: " more</think>Done.".into() }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None }))
@@ -896,7 +876,7 @@ async fn weixin_pure_thinking_turn_sends_nothing() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData { content: "<think>x</think>".into() }))
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "<think>x</think>".into() }))
         .unwrap();
     event_tx
         .send(AgentStreamEvent::Finish(FinishEventData { session_id: None, stop_reason: None }))
@@ -928,8 +908,7 @@ async fn telegram_final_answer_ending_on_lt_is_preserved() {
     let rx = event_tx.subscribe();
 
     event_tx
-        .send(AgentStreamEvent::Text(TextEventData {
-            content: "the less-than symbol is <".into(),
+        .send(AgentStreamEvent::Text(TextEventData { step: None, content: "the less-than symbol is <".into(),
         }))
         .unwrap();
     event_tx

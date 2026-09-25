@@ -100,6 +100,15 @@ impl AgentSendError {
     /// files before this guard fired.
     pub fn from_engine_turn_failure(detail: impl Into<String>) -> Self {
         let detail = detail.into();
+        if detail.starts_with("model emitted tool-call markup as text") {
+            return Self::new(
+                "The model emitted an invalid tool call",
+                AgentErrorCode::UserLlmProviderInvalidToolCall,
+                AgentErrorOwnership::UserLlmProvider,
+                Some(detail), false, false,
+                resolution(AgentErrorResolutionKind::ChangeModel, Some(AgentErrorResolutionTarget::ProviderSettings)),
+            );
+        }
         if detail.starts_with("Internal error:") {
             return Self::new(
                 "Nomi failed while executing the Agent turn",
@@ -1210,6 +1219,10 @@ mod tests {
 
     #[test]
     fn engine_completion_guard_is_not_reported_as_an_upstream_outage() {
+        let malformed = AgentSendError::from_engine_turn_failure("model emitted tool-call markup as text instead of a native tool call");
+        assert_eq!(malformed.code(), Some(AgentErrorCode::UserLlmProviderInvalidToolCall));
+        assert_eq!(malformed.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
+        assert_eq!(malformed.stream_error().retryable, Some(false));
         for detail in [
             "model step limit of 32 exceeded",
             "execution plan remains unresolved; completion was not accepted",

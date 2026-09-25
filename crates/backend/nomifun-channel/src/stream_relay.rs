@@ -1203,7 +1203,7 @@ mod media_tests {
         );
 
         let (tx, rx) = tokio::sync::broadcast::channel(16);
-        tx.send(AgentStreamEvent::Text(TextEventData { content: "图来咯～".into() })).unwrap();
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "图来咯～".into() })).unwrap();
         // Two completed tool calls returning the SAME asset id → must dedupe to one send.
         for _ in 0..2 {
             tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -1924,8 +1924,7 @@ mod media_tests {
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(8);
-        tx.send(AgentStreamEvent::Text(TextEventData {
-            content: "Image generated successfully".into(),
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "Image generated successfully".into(),
         }))
         .unwrap();
         tx.send(AgentStreamEvent::ToolCall(ToolCallEventData {
@@ -1971,8 +1970,7 @@ mod media_tests {
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(1);
-        tx.send(AgentStreamEvent::Text(TextEventData {
-            content: "unverified partial success".into(),
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "unverified partial success".into(),
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData {
@@ -2005,8 +2003,7 @@ mod media_tests {
             None,
         );
         let (tx, rx) = tokio::sync::broadcast::channel(1);
-        tx.send(AgentStreamEvent::Text(TextEventData {
-            content: "unverified partial success".into(),
+        tx.send(AgentStreamEvent::Text(TextEventData { step: None, content: "unverified partial success".into(),
         }))
         .unwrap();
         tx.send(AgentStreamEvent::Finish(FinishEventData {

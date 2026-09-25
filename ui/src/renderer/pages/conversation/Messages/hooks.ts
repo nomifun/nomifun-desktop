@@ -615,6 +615,11 @@ const normalizePersistedIncompleteTurnError = (
   const error = isRecord(parsed.error) ? parsed.error : undefined;
   if (error?.code !== 'UNKNOWN_UPSTREAM_ERROR' || typeof error.detail !== 'string') return undefined;
   const detail = error.detail;
+  if (detail.startsWith('model emitted tool-call markup as text')) return {
+    message, code: 'USER_LLM_PROVIDER_INVALID_TOOL_CALL', ownership: 'user_llm_provider', detail,
+    retryable: false, feedback_recommended: false,
+    resolution: { kind: 'change_model', target: 'provider_settings' },
+  };
   if (![
     'model step limit of ',
     'execution plan remains unresolved;',
@@ -753,6 +758,8 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
 
 const normalizeDecodedTextMetadata = (parsed: Record<string, unknown>): Partial<IMessageText['content']> => {
   const metadata: Partial<IMessageText['content']> = {
+    ...(typeof parsed.display_at_ms === 'number' && Number.isFinite(parsed.display_at_ms) && parsed.display_at_ms > 0
+      ? { display_at_ms: parsed.display_at_ms } : {}),
     ...(parsed.replace === true ? { replace: true } : {}),
     ...(parsed.agentMessage === true ? { agentMessage: true } : {}),
     ...(typeof parsed.senderName === 'string' ? { senderName: parsed.senderName } : {}),
@@ -955,6 +962,9 @@ export const mergeFetchedMessagesForConversation = (
     if (!streamMessage) return dbMessage;
 
     if (dbMessage.type === 'text' && streamMessage.type === 'text') {
+      // A completed turn's durable step owns its final content. While running,
+      // the same per-step identity may have a newer live suffix than history.
+      if (dbMessage.turn_id && settledTurnIds.has(dbMessage.turn_id)) return dbMessage;
       return withFetchedCanonicalIdentity(dbMessage, preferTextMessageVersion(dbMessage, streamMessage));
     }
     if (dbMessage.type === 'thinking' && streamMessage.type === 'thinking') {

@@ -175,6 +175,10 @@
         "title": "The Agent did not finish this task",
         "body": "This turn stopped after some actions may have succeeded. Check the project files and process record before continuing."
       },
+      "USER_LLM_PROVIDER_INVALID_TOOL_CALL": {
+        "title": "Invalid model tool call",
+        "body": "The model returned a tool request as ordinary text, so that call was not executed. Change model to continue; earlier file changes are preserved."
+      },
       "NOMIFUN_TOOL_RESULT_ENCODING_ERROR": {
         "title": "Nomi could not encode a tool result",
         "body": "A tool result conflicted with the selected model's function-response format. Retrying the same message will not resolve it; please send feedback."

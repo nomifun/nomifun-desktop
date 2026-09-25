@@ -13,7 +13,6 @@ const typographySource = readFileSync(new URL('../typography.ts', import.meta.ur
 describe('MessageText process action chrome', () => {
   test('keeps copy and time visible while allowing active process text to hide the row', () => {
     expect(source.includes('hideActions?: boolean')).toBe(true);
-    expect(source.includes('const shouldShowActions = !hideActions;')).toBe(true);
     expect(source.includes("data-testid='message-copy-action'")).toBe(true);
     expect(source.includes("fill='currentColor'")).toBe(true);
     const copyButtonSource =

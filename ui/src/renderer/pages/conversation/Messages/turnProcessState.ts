@@ -7,6 +7,8 @@
 import type { IMessageToolCall, IMessageToolGroup, TMessage } from '@/common/chat/chatLib';
 import { normalizeToolMessages } from '@/common/chat/normalizeToolCall';
 import type { TurnDisclosureProcessState } from './turnDisclosureModel';
+import { projectAssistantText } from './processTraceDisplayModel';
+import { toDisplayText } from '@/common/chat/displayText';
 
 type ToolProcessMessage = IMessageToolGroup | IMessageToolCall;
 
@@ -59,6 +61,9 @@ export const getProcessItemState = (item: ProcessStateItem): TurnDisclosureProce
   }
 
   switch (item.type) {
+    case 'text':
+      return item.position === 'left' && projectAssistantText(toDisplayText(item.content.content)).hasToolPayload
+        ? 'failed' : 'completed';
     case 'thinking':
       return item.content.status === 'done' ? 'completed' : 'running';
     case 'tool_call':

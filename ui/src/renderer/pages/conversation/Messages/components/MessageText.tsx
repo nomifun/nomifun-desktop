@@ -24,6 +24,8 @@ import { stripThinkTags, hasThinkTags } from '@renderer/utils/chat/thinkTagFilte
 import { stripSkillSuggest, hasSkillSuggest } from '@renderer/utils/chat/skillSuggestParser';
 import { MESSAGE_BODY_CLASS_NAME, MESSAGE_BODY_FONT_SIZE, MESSAGE_BODY_LINE_HEIGHT } from '../typography';
 import { parseMessageFileMarker } from './messageFileMarker';
+import { projectAssistantText } from '../processTraceDisplayModel';
+import AssistantProtocolNotice from './AssistantProtocolNotice';
 
 /**
  * Format a timestamp for message display.
@@ -86,9 +88,10 @@ const MessageText: React.FC<{
   hideActions?: boolean;
   actionsOnly?: boolean;
 }> = ({ message, hideActions = false, actionsOnly = false }) => {
+  const { t } = useTranslation();
   // Filter think tags from content before rendering
   // 在渲染前过滤 think 标签
-  const contentToRender = useMemo(() => {
+  const presentation = useMemo(() => {
     let content = toDisplayText(message.content.content);
     if (hasThinkTags(content)) {
       content = stripThinkTags(content);
@@ -97,18 +100,20 @@ const MessageText: React.FC<{
     if (hasSkillSuggest(content)) {
       content = stripSkillSuggest(content);
     }
-    return content;
-  }, [message.content.content]);
+    return message.position === 'left'
+      ? projectAssistantText(content)
+      : { text: content, hasToolPayload: false };
+  }, [message.content.content, message.position]);
+  const contentToRender = presentation.text;
 
   const { text, files } = parseMessageFileMarker(contentToRender, message.position);
   const { data, json } = useFormatContent(text);
-  const { t } = useTranslation();
   const [showCopyAlert, setShowCopyAlert] = useState(false);
   const isUserMessage = message.position === 'right';
   const isAgentMessage = message.position === 'left' && message.content.agentMessage === true;
   const shouldRenderPlainText = isUserMessage;
   const conversationContext = useConversationContextSafe();
-  const shouldShowActions = !hideActions;
+  const shouldShowActions = !hideActions && Boolean(contentToRender.trim());
   const resolvedFiles = useMemo(
     () => files.map((file_path) => resolveMessageFilePath(file_path, conversationContext?.workspace)),
     [conversationContext?.workspace, files]
@@ -126,7 +131,7 @@ const MessageText: React.FC<{
   // 过滤空内容，避免渲染空DOM
   const hasRenderableContent = contentToRender.trim().length > 0;
 
-  if (!hasRenderableContent) {
+  if (!hasRenderableContent && !presentation.hasToolPayload) {
     return null;
   }
 
@@ -202,7 +207,7 @@ const MessageText: React.FC<{
       {editButton}
       {message.created_at && (
         <span className='text-12px leading-20px text-inherit select-none'>
-          {formatMessageTime(message.created_at)}
+          {formatMessageTime(message.content.display_at_ms ?? message.created_at)}
         </span>
       )}
     </div>
@@ -306,6 +311,7 @@ const MessageText: React.FC<{
             )}
           </div>
         )}
+        {presentation.hasToolPayload && <AssistantProtocolNotice raw={toDisplayText(message.content.content)} />}
         {message.content.observations?.map((observation) => (
           <div key={observation.image.id} className='mt-8px flex max-w-full flex-col gap-6px rd-8px border border-solid border-arco-2 p-10px'>
             <span className='text-12px text-t-secondary'>{t('nomi.robot.visualObservation')}</span>

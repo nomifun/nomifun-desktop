@@ -1572,8 +1572,7 @@ mod tests {
 
     #[test]
     fn text_event_produces_append() {
-        let event = AgentStreamEvent::Text(TextEventData {
-            content: "Hello".into(),
+        let event = AgentStreamEvent::Text(TextEventData { step: None, content: "Hello".into(),
         });
         let action = ChannelMessageService::process_stream_event(&event);
         match action {

@@ -104,7 +104,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run one bounded command to a terminal owner result. A zero exit is an observation, not proof that requested verification passed.",
+        description: "Run an executable with a separate args array, not a shell command line. command must contain only the executable name/path; use args for flags and parameters. For shell syntax invoke the platform shell explicitly (Windows: powershell.exe with args [\"-NoProfile\",\"-Command\",\"...\"]). Prefer read_file/search_files for workspace inspection. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -378,8 +378,8 @@ fn patch_schema() -> Value {
 
 fn process_launch(include_wait: bool) -> Value {
     let mut properties = json!({
-        "command":{"type":"string","minLength":1,"maxLength":32768},
-        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536}},
+        "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable name or path only, for example git, bun, or powershell.exe. Never include arguments such as ls -la in this field."},
+        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Separate argument tokens, for example [\"status\",\"--short\"] for git."},
         "cwd":{"type":"string","maxLength":4096},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},

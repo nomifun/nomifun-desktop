@@ -8,6 +8,14 @@ import { describe, expect, test } from 'bun:test';
 import { getProcessItemState, getToolMessagesProcessState } from './turnProcessState';
 
 describe('turn process state', () => {
+  test('does not mark unparsed tool-call text as completed work', () => {
+    expect(getProcessItemState({
+      type: 'text', position: 'left', content: { content: '<tool_call>\n<function=write_file>\ncontent' },
+    } as any)).toBe('failed');
+    expect(getProcessItemState({
+      type: 'text', position: 'left', content: { content: '```xml\n<tool_call>\n<function=write_file>\n```' },
+    } as any)).toBe('completed');
+  });
   test('surfaces failed and canceled tool states', () => {
     expect(
       getToolMessagesProcessState([
