@@ -45,8 +45,6 @@ const NomiChat: React.FC<{
   reasoningEffort?: SessionReasoningEffort;
   reasoningEffortUpdating?: boolean;
   onReasoningEffortChange?: (value: SessionReasoningEffort | undefined) => Promise<void> | void;
-  /** Conversation collaborator-model control rendered after the main model. */
-  collaboratorSelectorNode?: React.ReactNode;
   /** Extra right-side tools used by projected task transcripts. */
   extraRightTools?: React.ReactNode;
   /** Only Sessions frozen with creation.media own generation task history. */
@@ -75,7 +73,6 @@ const NomiChat: React.FC<{
   reasoningEffort,
   reasoningEffortUpdating,
   onReasoningEffortChange,
-  collaboratorSelectorNode,
   extraRightTools,
   creationTasksEnabled = false,
   creationEnabled = true,
@@ -146,7 +143,6 @@ const NomiChat: React.FC<{
               reasoningEffort={reasoningEffort}
               reasoningEffortUpdating={reasoningEffortUpdating}
               onReasoningEffortChange={onReasoningEffortChange}
-              collaboratorSelectorNode={collaboratorSelectorNode}
               extraRightTools={extraRightTools}
               creationEnabled={creationEnabled}
               compactProductComposer={compactProductComposer}
