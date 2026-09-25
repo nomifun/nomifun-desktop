@@ -19,6 +19,7 @@ import {
   applyWeixinPairingMutations,
   buildWeixinEnableConfig,
   findWeixinPluginStatusById,
+  formatWeixinLoginFailure,
   isWeixinRuntimeConnected,
   type WeixinAuthorizedUserMutation,
   type WeixinPairingMutation,
@@ -355,7 +356,12 @@ const WeixinConfigForm: React.FC<WeixinConfigFormProps> = ({
           if (msg.includes('expired') || msg.includes('too many')) {
             Message.warning(t('settings.weixin.loginExpired', 'QR code expired, please try again'));
           } else {
-            Message.error(t('settings.weixin.loginError', 'WeChat login failed'));
+            Message.error(
+              formatWeixinLoginFailure(
+                t('settings.weixin.loginError', 'WeChat login failed'),
+                evt.message
+              )
+            );
           }
           setLoginState('idle');
           setQrcodeDataUrl(null);

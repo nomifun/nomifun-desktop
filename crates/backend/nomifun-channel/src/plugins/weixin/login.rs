@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use reqwest::Client;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
@@ -103,8 +102,8 @@ pub fn weixin_login_stream() -> mpsc::Receiver<WeixinLoginEvent> {
 
 /// Internal login flow that drives the SSE event sequence.
 async fn login_flow(tx: mpsc::Sender<WeixinLoginEvent>) {
-    let client = match Client::builder().timeout(Duration::from_secs(40)).build() {
-        Ok(c) => c,
+    let api = match WeixinApi::new(LOGIN_BASE_URL, "", Duration::from_secs(40)) {
+        Ok(api) => api,
         Err(e) => {
             let _ = tx
                 .send(WeixinLoginEvent::Error(format!("HTTP client init failed: {e}")))
@@ -112,8 +111,6 @@ async fn login_flow(tx: mpsc::Sender<WeixinLoginEvent>) {
             return;
         }
     };
-
-    let api = WeixinApi::new(client, LOGIN_BASE_URL, "");
 
     // Step 1: Fetch QR code
     let qr_data = match api.get_bot_qrcode().await {
