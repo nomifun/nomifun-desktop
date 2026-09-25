@@ -53,7 +53,9 @@ prost = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
+# The WeChat wire protocol uses UUIDv4 client ids. Declare the feature here
+# instead of relying on unrelated desktop dependencies to unify it in.
+uuid = { workspace = true, optional = true, features = ["v4"] }
 nostr = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 # WeChat (iLink) CDN media: AES-128-ECB encryption + plaintext MD5.
