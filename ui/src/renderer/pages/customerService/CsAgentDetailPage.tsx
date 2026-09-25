@@ -28,6 +28,7 @@ import { ipcBridge } from '@/common';
 import type { ICsAgent, ICsAgentPatch, ICsHandoff, ICsNote } from '@/common/adapter/ipcBridge';
 import { parseCsAgentId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
 import NomiInput from '@/renderer/components/base/NomiInput';
+import { NOMI_PAGINATION_CLASS_NAME } from '@/renderer/components/base/NomiPagination';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
 import { useModelsForTask } from '@renderer/hooks/agent/useModelsForTask';
 import CsChannelBotsSection from './CsChannelBotsSection';
@@ -689,10 +690,10 @@ const CsAgentDetailContent: React.FC<{ csAgentId: CsAgentId | null }> = ({ csAge
                     rowKey='cs_note_id'
                     data={notes}
                     pagination={{
+                      className: NOMI_PAGINATION_CLASS_NAME,
                       current: notePage,
                       pageSize: NOTE_PAGE_SIZE,
                       total: notes.length,
-                      size: 'small',
                       showTotal: true,
                       hideOnSinglePage: notes.length <= NOTE_PAGE_SIZE,
                       onChange: (page) => setNotePage(page),

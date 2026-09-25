@@ -1048,6 +1048,8 @@
   "mcpRemoveError": "MCP configuration removal failed",
   "unknownError": "Unknown error",
   "mcpNoDescription": "No description",
+  "mcpNoToolsAvailable": "No tools to display",
+  "mcpNoToolsAfterFailure": "The connection failed, so no tools are available to display",
   "mcpAuthRequired": "Authentication required",
   "mcpOAuthLoginSuccess": "OAuth login successful",
   "mcpOAuthLoginFailed": "OAuth login failed",

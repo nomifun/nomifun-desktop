@@ -26,26 +26,26 @@ const getStatusIcon = (
   isTestingConnection?: boolean
 ) => {
   if (isTestingConnection || last_test_status === 'testing' || oauthStatus?.isChecking) {
-    return <LoadingOne fill={iconColors.primary} className='h-[24px]' />;
+    return <LoadingOne size='18' fill={iconColors.primary} />;
   }
 
   if (last_test_status === 'error') {
-    return <CloseSmall fill={iconColors.danger} className='h-[24px]' />;
+    return <CloseSmall size='18' fill={iconColors.danger} />;
   }
 
   if (oauthStatus?.needsLogin) {
-    return <span className='text-orange-500 text-xl font-bold leading-none'>△</span>;
+    return <span className='text-16px font-bold leading-none text-orange-500'>△</span>;
   }
 
   if (last_test_status === 'connected') {
-    return <Check fill={iconColors.success} className='h-[24px] items-center' />;
+    return <Check size='18' fill={iconColors.success} />;
   }
 
   if (oauthStatus?.isAuthenticated) {
-    return <Check fill={iconColors.success} className='h-[24px] items-center' />;
+    return <Check size='18' fill={iconColors.success} />;
   }
 
-  return <Info theme='outline' fill={iconColors.secondary} className='h-[24px]' />;
+  return <Info theme='outline' size='18' fill={iconColors.secondary} />;
 };
 
 const formatStatusTimestamp = (timestamp?: number): string | null => {
@@ -150,7 +150,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
       })
     : getStatusText(server.last_test_status, oauthStatus, isTestingConnection, t);
   const statusIcon = needsConfiguration ? (
-    <span className='text-orange-500 text-xl font-bold leading-none'>!</span>
+    <span className='text-16px font-bold leading-none text-orange-500'>!</span>
   ) : (
     getStatusIcon(server.last_test_status, oauthStatus, isTestingConnection)
   );
@@ -175,25 +175,30 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   const isError = !needsConfiguration && server.last_test_status === 'error';
 
   return (
-    <div className='flex items-center justify-between group'>
-      <div className='flex items-center gap-2'>
-        <span>{server.name}</span>
+    <div className='group flex min-w-0 w-full items-center justify-between gap-8px'>
+      <div className='flex min-w-0 flex-1 items-center gap-8px'>
+        <span className='min-w-0 truncate text-14px leading-24px'>{server.name}</span>
         {statusPopoverContent ? (
           <Popover content={statusPopoverContent} trigger='hover' position='top'>
-            <span className='flex items-center cursor-default'>{statusIcon}</span>
+            <span className='inline-flex size-24px flex-none cursor-default items-center justify-center line-height-0'>
+              {statusIcon}
+            </span>
           </Popover>
         ) : (
           <Tooltip content={statusText} position='top'>
-            <span className='flex items-center cursor-default'>{statusIcon}</span>
+            <span className='inline-flex size-24px flex-none cursor-default items-center justify-center line-height-0'>
+              {statusIcon}
+            </span>
           </Tooltip>
         )}
-        {isError && <FeedbackButton />}
+        {isError && <FeedbackButton className='!h-24px !px-6px !py-0 [&_svg]:!pt-0' />}
         {needsConfiguration && !server.builtin && (
           <Button
             size='mini'
             type='outline'
             status='warning'
             icon={<Write size={'14'} />}
+            className='!h-24px [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
             title={statusText}
             onClick={() => onEditServer(server)}
           >
@@ -205,6 +210,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             size='mini'
             type='primary'
             icon={<Login size={'14'} />}
+            className='!h-24px [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
             title={t('settings.mcpLogin') || 'Login'}
             loading={isLoggingIn}
             onClick={() => onOAuthLogin(server)}
@@ -216,13 +222,17 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           <Button
             size='mini'
             icon={<Refresh size={'14'} />}
+            className='!size-24px !p-0 [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
             title={t('settings.mcpTestConnection')}
             loading={isTestingConnection}
             onClick={() => onTestConnection(server)}
           />
         )}
       </div>
-      <div className='flex items-center gap-2 invisible group-hover:visible' onClick={(e) => e.stopPropagation()}>
+      <div
+        className='invisible flex flex-none items-center gap-8px group-hover:visible'
+        onClick={(e) => e.stopPropagation()}
+      >
         {!server.builtin && (
           <Dropdown
             trigger='hover'
@@ -243,7 +253,11 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
               </Menu>
             }
           >
-            <Button size='mini' icon={<SettingOne size={'14'} />} />
+            <Button
+              size='mini'
+              icon={<SettingOne size={'14'} />}
+              className='!size-24px !p-0 [&_.arco-btn-icon]:inline-flex [&_.arco-btn-icon]:items-center'
+            />
           </Dropdown>
         )}
       </div>

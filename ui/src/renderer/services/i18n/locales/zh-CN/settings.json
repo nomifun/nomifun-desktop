@@ -1048,6 +1048,8 @@
   "mcpRemoveError": "MCP 配置移除失败",
   "unknownError": "未知错误",
   "mcpNoDescription": "暂无描述",
+  "mcpNoToolsAvailable": "暂无可展示的工具",
+  "mcpNoToolsAfterFailure": "连接失败，暂未获取到可展示的工具",
   "mcpAuthRequired": "需要身份验证",
   "mcpOAuthLoginSuccess": "OAuth 登录成功",
   "mcpOAuthLoginFailed": "OAuth 登录失败",

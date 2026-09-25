@@ -30,6 +30,7 @@ import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
+import { NOMI_PAGINATION_CLASS_NAME } from '@/renderer/components/base/NomiPagination';
 import { creativeAssetDisplayTitle, formatCreativeAssetBytes } from '../presentation';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
 import CreativeAssetActionsMenu from './CreativeAssetActionsMenu';
@@ -620,21 +621,23 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
 
       {sourceAppearance && pagination ? (
         <nav
-          className={styles.sourcePagination}
+          className={classNames(styles.sourcePagination, NOMI_PAGINATION_CLASS_NAME)}
           aria-label={labels.pagination}
           data-empty={pagination.total <= 0 || undefined}
         >
           <button
             type='button'
+            data-nomi-pagination-control
             aria-label={labels.previousPage}
             disabled={pagination.loading || pagination.page <= 1}
             onClick={() => pagination.onPageChange(pagination.page - 1)}
           >
             <Left theme='outline' size={13} fill='currentColor' strokeWidth={3} />
           </button>
-          <span className={styles.sourcePageNumber} aria-current='page'>{pagination.page}</span>
+          <span data-nomi-pagination-page aria-current='page'>{pagination.page}</span>
           <button
             type='button'
+            data-nomi-pagination-control
             aria-label={labels.nextPage}
             disabled={pagination.loading || pagination.page >= totalPages}
             onClick={() => pagination.onPageChange(pagination.page + 1)}
@@ -645,7 +648,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
               <Right theme='outline' size={13} fill='currentColor' strokeWidth={3} />
             )}
           </button>
-          <span className={styles.sourcePageSize}>{labels.pageSize(pagination.pageSize)}</span>
+          <span data-nomi-pagination-option>{labels.pageSize(pagination.pageSize)}</span>
         </nav>
       ) : null}
       </div>

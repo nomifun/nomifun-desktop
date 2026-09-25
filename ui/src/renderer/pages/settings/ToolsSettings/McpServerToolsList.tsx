@@ -11,34 +11,36 @@ const McpServerToolsList: React.FC<McpServerToolsListProps> = ({ server }) => {
   const { t } = useTranslation();
 
   if (!server.tools || server.tools.length === 0) {
-    return null;
+    return (
+      <div className='py-2px text-12px leading-20px text-t-tertiary' role='status'>
+        {server.last_test_status === 'error'
+          ? t('settings.mcpNoToolsAfterFailure')
+          : t('settings.mcpNoToolsAvailable')}
+      </div>
+    );
   }
 
   return (
-    <div className='space-y-3'>
-      <div>
-        <div className='space-y-2'>
-          {server.tools.map((tool, index) => (
-            // border-2 是颜色类（--bg-2），和这张卡片自己的 bg-2 同色，等于没有边框；
-            // 卡片描边统一用 Arco 的 border-arco-2（--color-border-2）。
-            // `border-2` is a colour (--bg-2) identical to this card's own bg-2.
-            <div key={index} className='rounded-lg border border-solid border-arco-2 bg-2 px-4 py-3'>
-              <div className='flex gap-4'>
-                <div className='flex-shrink-0 min-w-0 w-1/3'>
-                  <div className='break-words text-sm font-semibold text-t-primary'>{tool.name}</div>
-                </div>
-                <div className='flex-1 min-w-0'>
-                  <Tooltip content={tool.description || t('settings.mcpNoDescription')}>
-                    <div className='line-clamp-1 cursor-pointer text-xs leading-5 text-t-secondary'>
-                      {tool.description || t('settings.mcpNoDescription')}
-                    </div>
-                  </Tooltip>
-                </div>
-              </div>
+    <div className='relative grid grid-cols-2 gap-x-24px gap-y-0' data-testid='mcp-tool-grid'>
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute bottom-2px left-1/2 top-2px w-1px -translate-x-1/2 bg-[var(--color-border-2)]'
+        data-testid='mcp-tool-column-divider'
+      />
+      {server.tools.map((tool) => (
+        <div key={tool.name} className='flex min-w-0 items-center gap-6px py-2px' data-testid='mcp-tool-item'>
+          <Tooltip content={tool.name}>
+            <div className='max-w-[55%] min-w-0 flex-none truncate text-13px font-normal leading-20px text-t-primary'>
+              {tool.name}
             </div>
-          ))}
+          </Tooltip>
+          <Tooltip content={tool.description || t('settings.mcpNoDescription')}>
+            <div className='min-w-0 flex-1 truncate cursor-default text-12px leading-20px text-t-secondary'>
+              {tool.description || t('settings.mcpNoDescription')}
+            </div>
+          </Tooltip>
         </div>
-      </div>
+      ))}
     </div>
   );
 };

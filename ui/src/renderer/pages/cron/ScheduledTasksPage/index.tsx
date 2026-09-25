@@ -8,7 +8,7 @@ import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Button, Switch, Message, Empty, Pagination, Spin, Tooltip, Input } from '@arco-design/web-react';
+import { Button, Switch, Message, Empty, Spin, Tooltip, Input } from '@arco-design/web-react';
 import { useAllCronJobs } from '@renderer/pages/cron/useCronJobs';
 import { formatSchedule, formatNextRun } from '@renderer/pages/cron/cronUtils';
 import { type ICronJob } from '@/common/adapter/ipcBridge';
@@ -25,6 +25,7 @@ import { parseScheduledConversationId } from './scheduledConversationId';
 import { DESKTOP_SCHEDULED_TASK_COLUMNS } from './scheduledTaskLayout';
 import ScheduledTaskActions from './ScheduledTaskActions';
 import { getConversationCreateErrorMessage } from '@renderer/pages/conversation/utils/conversationCreateError';
+import NomiPagination from '@/renderer/components/base/NomiPagination';
 
 const DEFAULT_PAGE_SIZE = 20;
 
@@ -352,7 +353,7 @@ const ScheduledTasksPage: React.FC = () => {
             </div>
 
             <div className='mt-12px flex justify-end'>
-              <Pagination
+              <NomiPagination
                 className='scheduled-tasks-pagination'
                 current={page}
                 pageSize={pageSize}

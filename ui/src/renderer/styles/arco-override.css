@@ -918,45 +918,97 @@ body[arco-theme='dark'] .arco-message.arco-message-error {
   }
 }
 
-/* List pagination — Arco's default active page chip and the
- * prev/next arrows use the saturated brand primary, which reads as a harsh
- * colored block. Soften to calm neutral fills/text via theme tokens so it
- * looks restrained in both light and dark themes. Scoped to the list pages
- * that use this shared pagination treatment. */
-.requirements-pagination .arco-pagination-item-active,
-.scheduled-tasks-pagination .arco-pagination-item-active,
-.memory-pagination .arco-pagination-item-active,
-.requirements-pagination .arco-pagination-item-active:hover,
-.scheduled-tasks-pagination .arco-pagination-item-active:hover,
-.memory-pagination .arco-pagination-item-active:hover {
+/* Product pagination — shared by list pages, table pagination and bespoke
+ * paging controls. Keep the selected page calm and legible in every color
+ * scheme instead of inheriting Arco's saturated primary block. */
+.nomi-pagination {
+  color: var(--color-text-1);
+}
+
+.nomi-pagination .arco-pagination-total-text {
+  color: var(--color-text-1);
+}
+
+.nomi-pagination .arco-pagination-item-active,
+.nomi-pagination .arco-pagination-item-active:hover,
+.nomi-pagination [data-nomi-pagination-page] {
   background-color: var(--color-fill-2) !important;
   border-color: transparent !important;
   color: var(--color-text-1) !important;
   font-weight: 500;
 }
 
-.requirements-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover,
-.scheduled-tasks-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover,
-.memory-pagination .arco-pagination-item:not(.arco-pagination-item-active):hover {
+.nomi-pagination .arco-pagination-item:not(.arco-pagination-item-disabled):not(.arco-pagination-item-active):hover,
+.nomi-pagination [data-nomi-pagination-control]:hover:not(:disabled) {
   color: var(--color-text-1) !important;
   background-color: var(--color-fill-1) !important;
 }
 
-.requirements-pagination .arco-pagination-item-prev,
-.scheduled-tasks-pagination .arco-pagination-item-prev,
-.memory-pagination .arco-pagination-item-prev,
-.requirements-pagination .arco-pagination-item-next,
-.scheduled-tasks-pagination .arco-pagination-item-next,
-.memory-pagination .arco-pagination-item-next {
+.nomi-pagination .arco-pagination-item-prev,
+.nomi-pagination .arco-pagination-item-next,
+.nomi-pagination [data-nomi-pagination-control] {
   color: var(--color-text-2) !important;
 }
 
-.requirements-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
-.scheduled-tasks-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
-.memory-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
-.requirements-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover,
-.scheduled-tasks-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover,
-.memory-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover {
+.nomi-pagination .arco-pagination-item-prev:not(.arco-pagination-item-disabled):hover,
+.nomi-pagination .arco-pagination-item-next:not(.arco-pagination-item-disabled):hover {
   color: var(--color-text-1) !important;
   background-color: var(--color-fill-1) !important;
+}
+
+.nomi-pagination .arco-select-view,
+.nomi-pagination .arco-pagination-jumper-input,
+.nomi-pagination [data-nomi-pagination-option] {
+  border-color: transparent !important;
+  background-color: var(--color-bg-2) !important;
+  color: var(--color-text-1) !important;
+}
+
+.nomi-pagination [data-nomi-pagination-control],
+.nomi-pagination [data-nomi-pagination-page] {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0;
+  place-items: center;
+  border: 0 solid transparent;
+  border-radius: var(--border-radius-small);
+  font: inherit;
+  font-size: 14px;
+}
+
+.nomi-pagination [data-nomi-pagination-control] {
+  cursor: pointer;
+  background-color: transparent;
+}
+
+.nomi-pagination [data-nomi-pagination-control]:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-primary-light-3);
+}
+
+.nomi-pagination [data-nomi-pagination-control]:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-4) !important;
+  background-color: transparent !important;
+}
+
+.nomi-pagination [data-nomi-pagination-option] {
+  display: inline-flex;
+  min-width: 94px;
+  min-height: 32px;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--border-radius-small);
+  font-size: 14px;
+  white-space: nowrap;
+}
+
+.nomi-pagination[data-empty='true'] [data-nomi-pagination-page] {
+  background-color: transparent !important;
+  color: var(--color-text-4) !important;
 }

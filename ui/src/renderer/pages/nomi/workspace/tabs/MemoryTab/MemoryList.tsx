@@ -6,8 +6,9 @@
 
 import React, { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Message, Pagination, Spin } from '@arco-design/web-react';
+import { Message, Spin } from '@arco-design/web-react';
 import BatchActionBar from '@/renderer/components/base/BatchActionBar';
+import NomiPagination from '@/renderer/components/base/NomiPagination';
 import type { ICompanionMemory } from '@/common/adapter/ipcBridge';
 import type { CompanionMemoryId } from '@/common/types/ids';
 import MemoryListEmpty from './MemoryListEmpty';
@@ -112,16 +113,13 @@ const MemoryList: React.FC<MemoryListProps> = ({ list, activeId, onOpen, onDelet
         ))}
       </div>
 
-      <div className='mt-10px flex flex-wrap items-center justify-between gap-10px'>
-        <span className='text-12px leading-18px text-t-tertiary tabular-nums'>
-          {t('nomi.memories.total', { count: total, defaultValue: '共 {{count}} 条记忆' })}
-        </span>
-        <Pagination
+      <div className='mt-10px flex justify-end'>
+        <NomiPagination
           className='memory-pagination'
-          size='small'
           current={page}
           pageSize={pageSize}
           total={total}
+          showTotal={() => t('nomi.memories.total', { count: total, defaultValue: '共 {{count}} 条记忆' })}
           sizeCanChange
           sizeOptions={MEMORY_PAGE_SIZE_OPTIONS}
           showJumper={total > pageSize}
