@@ -2,7 +2,8 @@ import { ipcBridge } from '@/common';
 import type { IProvider } from '@/common/config/storage';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useCallback, useMemo } from 'react';
-import useSWR, { type SWRConfiguration } from 'swr';
+import useSWR, { useSWRConfig, type SWRConfiguration } from 'swr';
+import useSWRSubscription from 'swr/subscription';
 
 export interface ModelProviderListResult {
   /** Enabled providers in selector order. Task membership is filtered from
@@ -19,7 +20,7 @@ export interface ModelProviderListResult {
 export const PROVIDERS_SWR_KEY = 'providers';
 
 // Provider config is local application state. Keep it stable after the initial
-// load and refresh only through explicit mutate() calls after CRUD operations.
+// load and refresh after editor CRUD or a conversation configuration event.
 const PROVIDERS_SWR_OPTIONS: SWRConfiguration<IProvider[], Error> = {
   revalidateOnFocus: false,
   revalidateOnReconnect: false,
@@ -31,6 +32,14 @@ const fetchProviders = async (): Promise<IProvider[]> => {
 };
 
 export const useProvidersQuery = () => {
+  const { mutate } = useSWRConfig();
+  // SWR shares one subscription per cache/key across all model selectors.
+  useSWRSubscription('providers.changed', () => {
+    const refresh = () => { void mutate(PROVIDERS_SWR_KEY).catch(() => undefined); };
+    const stopChanges = ipcBridge.mode.onProvidersChanged.on(refresh);
+    const stopReconnect = ipcBridge.conversation.reconnected.on(refresh);
+    return () => { stopChanges(); stopReconnect(); };
+  });
   return useSWR<IProvider[]>(PROVIDERS_SWR_KEY, fetchProviders, PROVIDERS_SWR_OPTIONS);
 };
 

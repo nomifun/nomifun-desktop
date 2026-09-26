@@ -87,6 +87,16 @@ pub trait ProductionProviderRepository: Send + Sync {
         &self,
         provider_id: &ProviderIdRef,
     ) -> Result<Option<ProviderRepositoryRecord>, ProductionRepositoryError>;
+
+    /// Hosts may fence the exact selected model graph, so adding an unrelated
+    /// model does not invalidate an in-flight conversation. The returned digest
+    /// must still cover every invocation/credential field of this route.
+    async fn find_provider_for_route(
+        &self,
+        route: &ResolvedChatRoute,
+    ) -> Result<Option<ProviderRepositoryRecord>, ProductionRepositoryError> {
+        self.find_provider(&route.provider_id).await
+    }
 }
 
 /// Adapter-facing model repository.
@@ -247,7 +257,7 @@ impl ProductionRouteResolver {
         for route in routes.candidates() {
             let provider = self
                 .provider_repository
-                .find_provider(&route.provider_id)
+                .find_provider_for_route(route)
                 .await
                 .map_err(|error| repository_error("provider repository", error))?
                 .ok_or_else(|| {

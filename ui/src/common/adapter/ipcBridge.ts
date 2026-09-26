@@ -1560,6 +1560,9 @@ export const fileSnapshot = {
 // ---------------------------------------------------------------------------
 
 export const mode = {
+  onProvidersChanged: wsMappedEmitter<{ provider_id: ProviderId }>('providers.changed', (raw) => ({
+    provider_id: parseProviderId(raw.provider_id),
+  })),
   listProviders: withResponseMap(httpGet<ProviderResponse[], void>('/api/providers'), (providers) =>
     providers.map(fromProviderResponse)
   ),

@@ -7,6 +7,26 @@
   "packages": [
     {
       "package": {
+        "id": "nomifun.model-management",
+        "version": "1.0.0"
+      },
+      "source": {
+        "source_kind": "bundled",
+        "source_identity": "nomifun.model-management"
+      },
+      "capabilities": [
+        {
+          "capability": {
+            "id": "model.management"
+          },
+          "kind": "tool"
+        }
+      ],
+      "skills": [],
+      "mcp_tools": []
+    },
+    {
+      "package": {
         "id": "nomifun.web-research",
         "version": "1.0.0"
       },

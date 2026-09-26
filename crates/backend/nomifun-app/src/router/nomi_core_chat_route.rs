@@ -28,7 +28,7 @@ use nomifun_db::{
 };
 use uuid::Uuid;
 
-use super::chat_broker_host::provider_config_digest;
+use super::chat_broker_host::provider_model_config_digest;
 
 const MAX_DEFAULT_CHAT_CANDIDATES: usize = 32;
 
@@ -202,7 +202,7 @@ impl NomiCoreDefaultChatRouteResolver {
             }
             desired
         });
-        let mut digest_by_provider = BTreeMap::<String, DigestHex>::new();
+        let mut digest_by_model = BTreeMap::<(String, String), DigestHex>::new();
         let mut rows = capabilities
             .into_iter()
             .filter(|capability| capability.task == "chat")
@@ -252,14 +252,15 @@ impl NomiCoreDefaultChatRouteResolver {
         for (_, capability, protocol, connection_config_ref) in
             rows.into_iter().take(MAX_DEFAULT_CHAT_CANDIDATES)
         {
-            let config_revision_digest = match digest_by_provider
-                .entry(capability.provider_id.clone())
+            let config_revision_digest = match digest_by_model
+                .entry((capability.provider_id.clone(), capability.model.clone()))
             {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.get().clone(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    let digest = provider_config_digest(
+                    let digest = provider_model_config_digest(
                         &self.pool,
                         &ProviderIdRef::from(capability.provider_id.clone()),
+                        &capability.model,
                     )
                     .await
                     .map_err(|_| unavailable())?;

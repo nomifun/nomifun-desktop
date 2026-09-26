@@ -9,6 +9,26 @@
     "packages": [
       {
         "package": {
+          "id": "nomifun.model-management",
+          "version": "1.0.0"
+        },
+        "source": {
+          "source_kind": "bundled",
+          "source_identity": "nomifun.model-management"
+        },
+        "capabilities": [
+          {
+            "capability": {
+              "id": "model.management"
+            },
+            "kind": "tool"
+          }
+        ],
+        "skills": [],
+        "mcp_tools": []
+      },
+      {
+        "package": {
           "id": "nomifun.web-research",
           "version": "1.0.0"
         },
@@ -540,5 +560,5 @@
       }
     ]
   },
-  "payload_digest": "051ff7bd4cc01ce69fb24abedd9b16cd8342b2e2c4703dd26668a102d7bf4b5c"
+  "payload_digest": "7d0190dbf04ca9001393ddff6ee47a2318388874d6acf1b9a9a71a5030d34547"
 }

@@ -42,6 +42,8 @@ pub(crate) async fn build(
 ) -> anyhow::Result<NomiCoreBuiltinPlan> {
     let mut registrations = Vec::new();
     registrations.push(super::nomi_core_tool_discovery::registration()?);
+    registrations.push(super::model_management::registration(services)?);
+    let model_management_tools = super::model_management::capability_ids();
 
     #[cfg(feature = "browser-use")]
     let wave1_search = services.local_web_search.as_ref().map(|provider| {
@@ -228,6 +230,11 @@ pub(crate) async fn build(
 
     let schema_router = NomiPlatformBuiltinToolSchemaRouter::new([
         (
+            model_management_tools.clone(),
+            Arc::new(super::model_management::SchemaResolver)
+                as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
+        ),
+        (
             wave1_tools.clone(),
             Arc::new(NomiWave1SchemaResolver)
                 as Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
@@ -253,6 +260,7 @@ pub(crate) async fn build(
     ])?;
     let tool_capability_ids = wave1_tools
         .into_iter()
+        .chain(model_management_tools)
         .chain(wave2_tools)
         .chain(wave3_tools)
         .chain(wave4_tools)

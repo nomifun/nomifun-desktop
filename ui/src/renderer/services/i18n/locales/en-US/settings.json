@@ -1327,6 +1327,11 @@
     "voiceFreeTextHint": "Some providers use the selected model as the voice; otherwise type the provider's own voice id."
   },
   "modelHub": {
+    "importChatAction": "Add in chat · General Agent",
+    "importChatTitle": "Add model configuration",
+    "importChatHint": "Paste your configuration to add models. Chat content is sent to the current conversation model.",
+    "importChatNeedsModel": "Configure one working chat model first, then let General Agent add your other models.",
+    "importChatPrompt": "Help me add the following configuration to Model Management. First inspect existing providers and supported protocols. Reuse an existing provider without changing its credentials, and do not overwrite existing models. Ask for any required missing information and tell me which models were saved.\n\nProvider or API address:\nModel name / ID:\nPurpose (e.g. chat, images, speech):\nOther configuration (no API key needed for an existing provider):\n",
     "title": "Model Management",
     "subtitle": "Pick models by capability: chat, realtime, voice, vision, image, video, embedding & retrieval.",
     "railTitle": "Models",
