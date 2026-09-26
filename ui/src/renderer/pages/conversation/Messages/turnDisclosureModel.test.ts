@@ -34,7 +34,7 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
-  test('keeps completed intermediate steps readable before the final answer', () => {
+  test('collapses completed intermediate steps while keeping the final answer visible', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user', 'user', { createdAt: 1000 }),
@@ -54,7 +54,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.state).toBe('completed');
     expect(disclosure.processItemIds).toEqual(['analysis', 'tool']);
     expect(disclosure.startAt).toBe(1000);
@@ -337,7 +337,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.state).toBe('completed');
     expect(disclosure.processItemStates).toEqual({ tool: 'failed' });
   });
@@ -471,7 +471,7 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.processItemIds).toEqual(['tool', 'assistant-text']);
   });
 
-  test('keeps a completed process-only segment readable once the next request closes it', () => {
+  test('collapses a completed process-only segment once the next request closes it', () => {
     const result = buildTurnDisclosureItems(
       [
         item('user-1', 'user', { turnId: TURN_1, createdAt: 1000 }),
@@ -489,7 +489,7 @@ describe('buildTurnDisclosureItems', () => {
     const disclosure = result[1];
     expect(disclosure.type).toBe('turn_disclosure');
     if (disclosure.type !== 'turn_disclosure') return;
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
     expect(disclosure.state).toBe('completed');
     expect(disclosure.processItemIds).toEqual(['tool-1']);
   });
@@ -601,6 +601,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure?.type !== 'turn_disclosure') return;
     expect(disclosure.processItemIds).toEqual(['intro-1', 'tool-1']);
     expect(disclosure.endAt).toBe(3000);
+    expect(disclosure.defaultCollapsed).toBe(true);
   });
 
   test('uses the latest fragment state when a canceled turn later completes', () => {
@@ -661,6 +662,7 @@ describe('buildTurnDisclosureItems', () => {
     if (disclosure?.type !== 'turn_disclosure') return;
     expect(disclosure.state).toBe('running');
     expect(disclosure.running).toBe(true);
+    expect(disclosure.defaultCollapsed).toBe(false);
   });
 
   test('does not let an older process state win merely because every fragment includes the global final time', () => {
@@ -914,7 +916,7 @@ describe('stop notice', () => {
     expect(disclosure.state).toBe('canceled');
     expect(disclosure.endAt).toBe(5_000);
     expect(disclosure.running).toBe(false);
-    expect(disclosure.defaultCollapsed).toBe(false);
+    expect(disclosure.defaultCollapsed).toBe(true);
   });
 
   test('ignores a stop notice that predates the tail turn', () => {
