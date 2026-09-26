@@ -115,6 +115,62 @@ describe('CreativeTimelineNode interactions', () => {
     expect(changes.at(-1)?.mergeKey).toContain('timeline:timeline-1:clip-1:move');
   });
 
+  test('inserts a dragged clip between touching clips and commits the final pointer position', () => {
+    let node = timelineNode();
+    node.data.clips = [0, 5_000, 10_000, 15_000].map((startMs, index) => ({
+      ...node.data.clips[0]!, id: `clip-${index + 1}`, startMs,
+      durationMs: index === 3 ? 7_000 : 5_000,
+    }));
+    const originalClips = structuredClone(node.data.clips);
+    const renderTimeline = () => withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data) => { node = { ...node, data }; }}
+      />
+    );
+    const view = render(renderTimeline());
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    const clip = view.container.querySelector<HTMLElement>('[data-timeline-clip-id="clip-4"]');
+    if (!track || !clip) throw new Error('timeline drag fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 100, y: 0, top: 0, right: 700, bottom: 60, left: 100,
+      width: 600, height: 60, toJSON: () => ({}),
+    });
+    clip.setPointerCapture = () => undefined;
+    clip.hasPointerCapture = () => false;
+
+    fireEvent.pointerDown(clip, { button: 0, pointerId: 4, clientX: 285 });
+    for (const [clientX, starts] of [
+      [200, [0, 5_000, 17_000, 10_000]],
+      [200, [0, 5_000, 17_000, 10_000]],
+      [150, [0, 12_000, 17_000, 5_000]],
+      [200, [0, 5_000, 17_000, 10_000]],
+      [800, [0, 5_000, 10_000, 66_500]],
+      [285, [0, 5_000, 10_000, 15_000]],
+    ] as const) {
+      fireEvent.pointerMove(clip, { pointerId: 4, clientX });
+      view.rerender(renderTimeline());
+      expect(node.data.clips).toEqual(originalClips.map((item, index) => ({
+        ...item, startMs: starts[index],
+      })));
+      expect(Number.parseFloat(clip.style.left)).toBeCloseTo(
+        starts[3] / Math.max(60_000, Math.ceil((starts[3] + 7_000) / 5_000) * 5_000) * 100
+      );
+    }
+    fireEvent.pointerUp(clip, { pointerId: 4, clientX: 200 });
+    view.rerender(renderTimeline());
+    expect(node.data.clips.map((item) => item.startMs)).toEqual([0, 5_000, 17_000, 10_000]);
+
+    fireEvent.keyDown(clip, { key: 'ArrowRight', shiftKey: true });
+    view.rerender(renderTimeline());
+    expect(node.data.clips[3]?.startMs).toBe(10_000);
+    fireEvent.keyDown(clip, { key: 'ArrowLeft', shiftKey: true });
+    view.rerender(renderTimeline());
+    expect(node.data.clips[3]?.startMs).toBe(10_000);
+  });
+
   test('seeks the playhead anywhere across the visible 60-second track', () => {
     const view = render(withCanvasTestI18n(
       <CreativeTimelineNode node={timelineNode()} assets={assets} placement='contained' />
