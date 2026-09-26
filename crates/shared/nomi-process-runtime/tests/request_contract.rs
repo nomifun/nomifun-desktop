@@ -107,6 +107,44 @@ fn symlink_capability_root_accepts_the_same_canonical_workspace() {
     assert_eq!(normalized.capability.cwd_roots, vec![normalized.cwd]);
 }
 
+#[cfg(windows)]
+#[test]
+fn junction_cwd_cannot_escape_its_capability_root() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let alias = root.path().join("linked 工作区");
+    junction::create(outside.path(), &alias).unwrap();
+    let mut req = request(PathBuf::from("linked 工作区"));
+    req.capability = CapabilityPolicy::local_owner(root.path().to_path_buf());
+
+    let result = normalize_request(req, root.path());
+    junction::delete(&alias).unwrap();
+
+    assert_eq!(result.unwrap_err().code(), "capability_denied");
+    assert!(outside.path().is_dir(), "removing the junction must retain its target");
+}
+
+#[cfg(windows)]
+#[test]
+fn junction_capability_root_accepts_the_same_canonical_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("中文 workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let alias = root.path().join("workspace alias");
+    junction::create(&workspace, &alias).unwrap();
+    let mut req = request(workspace.clone());
+    req.capability = CapabilityPolicy::local_owner(alias.clone());
+
+    let result = normalize_request(req, root.path());
+    junction::delete(&alias).unwrap();
+
+    let normalized = result.unwrap();
+    let expected = workspace.canonicalize().unwrap();
+    assert_eq!(normalized.cwd.canonicalize().unwrap(), expected);
+    assert_eq!(normalized.capability.cwd_roots.len(), 1);
+    assert_eq!(normalized.capability.cwd_roots[0].canonicalize().unwrap(), expected);
+}
+
 #[test]
 fn non_directory_cwd_fails_before_spawn() {
     let root = tempfile::tempdir().unwrap();
