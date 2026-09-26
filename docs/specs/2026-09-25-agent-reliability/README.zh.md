@@ -4,6 +4,8 @@
 
 最新开发交接见 [DEVELOPMENT-HANDOFF.zh.md](DEVELOPMENT-HANDOFF.zh.md)，分阶段验收见
 [TEST-MATRIX.zh.md](TEST-MATRIX.zh.md)。本文保留各阶段的历史状态和失败记录，不把后来实现追写为当时已通过。
+操作系统命令、tool-call、内部端口、长会话及五类官方 Agent 的三阶段逐项 Case 基线见
+[HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md](HIGH-ORDER-OPERATIONS-CASE-CATALOG.zh.md)；阶段一文档设计已完成，阶段二排查与阶段三修复尚未开始，该目录不是通过报告。
 用户已选择“开发优先、后续机器分阶段测试”；新增用例写好/编译通过不代表行为验收完成。
 最新补充实现见 PAUSE-RESUME-V2.zh.md 和 EVIDENCE-PIPELINE.zh.md。V2 本轮没有执行应用类型检查或行为测试，以下通过记录仅为历史快照。
 
