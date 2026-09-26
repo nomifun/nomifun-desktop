@@ -29,6 +29,11 @@ use crate::{
 };
 use crate::projector::reduce_agent_messages;
 
+#[path = "native_checkpoint_tests.rs"]
+mod native_checkpoint_tests;
+#[path = "native_execution_tests.rs"]
+mod native_execution_tests;
+
 fn session_id() -> AgentSessionId {
     AgentSessionId(Uuid::now_v7().to_string())
 }
@@ -2912,8 +2917,10 @@ async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() 
         .unwrap();
     assert_eq!(
         store.head(&session.agent_session_id).await.unwrap().status,
-        "failed"
+        "reconciliation"
     );
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().active_turn_id.as_deref(), Some("turn-effect"));
+    assert_eq!(store.read_turn_receipt(&session.agent_session_id, &"turn-effect".into()).await.unwrap().status, TurnReceiptStatus::Running);
 
     let retry = EffectEventRequest {
         event_id: event_id("event-effect-retry"),

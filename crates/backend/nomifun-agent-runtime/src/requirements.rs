@@ -58,8 +58,8 @@ pub(crate) fn validate_citation(
             format!("Requirement source input {} is not an accepted current-turn user input (valid indices: 0..{}). Use the current turn's user text, not prior history.",
                 citation.input, inputs.len())
         })?;
-    if citation.quote.len() > 512 {
-        return Err("Requirement source quote exceeds 512 UTF-8 bytes".into());
+    if citation.quote.chars().count() > 512 {
+        return Err("Requirement source quote exceeds 512 characters".into());
     }
     let has_text = input
         .content
@@ -113,7 +113,7 @@ pub(crate) fn merge(
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
             || !seen.insert(&item.id)
             || item.description.trim().is_empty()
-            || item.description.len() > 512
+            || item.description.chars().count() > 512
         {
             return Err("Requirements need unique ASCII IDs (letters/digits/-/_), bounded descriptions and accepted input sources".into());
         }
@@ -126,6 +126,36 @@ pub(crate) fn merge(
             validate_citation(&item.source, inputs, true)?;
             next.push(item.clone());
         }
+    }
+    // The tool schema intentionally permits status-only plans. Do not make
+    // the model transcribe user text to satisfy an undisclosed required field.
+    // Capture a reference to each otherwise-unaccounted FULL accepted input;
+    // the short quote locates the source and never defines/reduces its scope.
+    for (index, input) in inputs.iter().enumerate() {
+        if next.iter().any(|requirement| requirement.source.input == index) {
+            continue;
+        }
+        let quote = input.content.iter().find_map(|part| match part {
+            ChatContentPart::Text { text } if !text.trim().is_empty() => {
+                Some(text.trim_start().chars().take(128).collect::<String>())
+            }
+            _ => None,
+        }).unwrap_or_default();
+        let source = AgentInputCitation { input: index, quote };
+        validate_citation(&source, inputs, true)?;
+        let base = format!("input_{index}");
+        let mut id = base.clone();
+        let mut suffix = 1;
+        while next.iter().any(|requirement| requirement.id == id) {
+            id = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        next.push(AgentTaskRequirement {
+            id,
+            description: format!("Fulfill the complete accepted user input {index}, including all constraints and referenced deliverables. The source quote is a locator, not a summary or a restriction of scope."),
+            source,
+            origin: None,
+        });
     }
     validate_ledger_budget(&next)?;
     require_input_coverage(&next, inputs.len())?;
@@ -150,6 +180,36 @@ mod tests {
         rewritten.description = "Pass every test".into();
         assert_eq!(merge(std::slice::from_ref(&original), &[rewritten], std::slice::from_ref(&input)).unwrap(), vec![original.clone()]);
         assert_eq!(merge(std::slice::from_ref(&original), &[], &[input]).unwrap(), vec![original]);
+    }
+
+    #[test]
+    fn omitted_requirements_capture_full_accepted_input_without_rephrasing_or_losing_constraints() {
+        let text = format!("Fix the code. {} Do not change tests or commit.", "Detailed acceptance criteria. ".repeat(30));
+        let inputs = vec![crate::context_lifecycle::text_message(ChatRole::User, text.clone())];
+        let requirements = merge(&[], &[], &inputs).unwrap();
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].id, "input_0");
+        assert!(requirements[0].description.contains("complete accepted user input"));
+        assert!(requirements[0].description.contains("not a summary"));
+        assert!(text.contains(&requirements[0].source.quote));
+        assert_eq!(requirements[0].source.quote.chars().count(), 128);
+        assert_eq!(merge(&requirements, &[], &inputs).unwrap(), requirements);
+        assert_eq!(inputs[0].content, vec![ChatContentPart::Text { text }], "the complete original input is never replaced by its locator");
+    }
+
+    #[test]
+    fn newly_accepted_input_is_captured_and_explicit_bad_citations_are_still_rejected() {
+        let mut inputs = vec![crate::context_lifecycle::text_message(ChatRole::User, "Fix the bug".into())];
+        let original = merge(&[], &[], &inputs).unwrap();
+        inputs.push(crate::context_lifecycle::text_message(ChatRole::User, "Do not run tests".into()));
+        let next = merge(&original, &[], &inputs).unwrap();
+        assert_eq!(next.len(), 2);
+        assert_eq!(next[0], original[0]);
+        assert_eq!(next[1].source.input, 1);
+        let mut invalid = next[1].clone();
+        invalid.id = "explicit".into();
+        invalid.source.quote = "Invented permission".into();
+        assert!(merge(&original, &[invalid], &inputs).is_err());
     }
 
     #[test]

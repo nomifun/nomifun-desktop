@@ -1,0 +1,253 @@
+{
+  "digest_algorithm": "sorted-json-sha256-v1",
+  "payload": {
+    "schema_version": "1.0.0",
+    "data_generation": 6,
+    "migration_head": 6,
+    "projection_schema_version": 1,
+    "baseline_logical_path": "crates/backend/nomifun-agent-contracts/schema/0001_agent_store.sql",
+    "tables": [
+      {
+        "table_name": "schema_metadata",
+        "owner": "platform.schema",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "plugin_packages",
+        "owner": "platform.plugin-manager",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "plugin_mounts",
+        "owner": "platform.plugin-manager",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "plugin_configs",
+        "owner": "platform.plugin-manager",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "plugin_states",
+        "owner": "platform.plugin-manager",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "installation_role_bindings",
+        "owner": "platform.capability-registry",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "capability_definitions",
+        "owner": "platform.capability-registry",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "capability_catalog_entries",
+        "owner": "platform.capability-registry",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "skill_instructions",
+        "owner": "platform.skill-catalog",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "mcp_servers",
+        "owner": "plugin.mcp-connectors",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "mcp_tool_materializations",
+        "owner": "plugin.mcp-connectors",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "agent_preset_templates",
+        "owner": "platform.agent-preset",
+        "fact_class": "configuration",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_presets",
+        "owner": "platform.agent-preset",
+        "fact_class": "configuration",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_preset_revisions",
+        "owner": "platform.agent-preset",
+        "fact_class": "configuration",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_preset_contribution_locks",
+        "owner": "platform.agent-preset",
+        "fact_class": "configuration",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_bindings",
+        "owner": "platform.agent-preset",
+        "fact_class": "configuration",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "remote_bindings",
+        "owner": "plugin.remote-ingress",
+        "fact_class": "configuration",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "installation_auth",
+        "owner": "plugin.remote-ingress",
+        "fact_class": "fact",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "providers",
+        "owner": "platform.chat-model-broker",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "provider_models",
+        "owner": "platform.chat-model-broker",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "provider_connections",
+        "owner": "platform.chat-model-broker",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "provider_model_capabilities",
+        "owner": "platform.chat-model-broker",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "client_preferences",
+        "owner": "platform.host-configuration",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "system_settings",
+        "owner": "platform.host-configuration",
+        "fact_class": "configuration",
+        "reset_scope": "preserve"
+      },
+      {
+        "table_name": "agent_runtime_snapshots",
+        "owner": "platform.agent-preset-compiler",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_sessions",
+        "owner": "platform.agent-session",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_deletion_audits",
+        "owner": "platform.agent-session",
+        "fact_class": "audit",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_turns",
+        "owner": "platform.agent-session",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_events",
+        "owner": "platform.agent-session",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_payloads",
+        "owner": "platform.agent-session",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_effects",
+        "owner": "platform.agent-session",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_session_resources",
+        "owner": "platform.agent-session",
+        "fact_class": "fact",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_session_heads",
+        "owner": "platform.agent-session",
+        "fact_class": "projection",
+        "reset_scope": "agent_data"
+      },
+      {
+        "table_name": "agent_messages",
+        "owner": "platform.agent-session",
+        "fact_class": "projection",
+        "reset_scope": "agent_data"
+      }
+    ],
+    "forbidden_table_names": [
+      "conversations",
+      "messages",
+      "conversation_delivery_receipts",
+      "conversation_runtime_events",
+      "conversation_mcp_effects",
+      "conversation_hosted_effects",
+      "conversation_git_effects",
+      "conversation_sessions",
+      "session_events",
+      "session_payloads",
+      "session_heads",
+      "message_projection",
+      "runtime_contributions",
+      "service_catalog",
+      "remote_agents",
+      "remote_sessions",
+      "session_retention",
+      "session_restore",
+      "test_sessions",
+      "test_revisions",
+      "effect_coordinator",
+      "runtime_event_store",
+      "legacy_imports",
+      "migration_reports",
+      "capability_packs",
+      "capability_pack_items",
+      "agent_preset_model_routes",
+      "preset_initial_capabilities",
+      "preset_on_demand_capabilities",
+      "preset_skill_bindings",
+      "preset_resource_bindings",
+      "agent_runtime_snapshot_capabilities",
+      "agent_runtime_profiles",
+      "agent_preset_audit_events"
+    ]
+  },
+  "payload_digest": "de5d31539af0cc75f26d2090546a908b39e8719665d3f8dac6eda6e0b26fa036"
+}

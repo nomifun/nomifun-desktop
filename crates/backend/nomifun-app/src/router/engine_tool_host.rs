@@ -424,7 +424,7 @@ impl EngineToolHost {
             || self.has_unobserved()?
             || turn
                 .as_ref()
-                .is_some_and(|turn| !turn.closed || turn.operation == operation)
+                .is_some_and(|turn| !turn.closed || (turn.operation == operation && turn.journal.generation() == journal.generation()))
         {
             return Err(failure("previous tool turn is not safely closed"));
         }
@@ -436,6 +436,12 @@ impl EngineToolHost {
             closed: false,
         });
         Ok(())
+    }
+
+    /// Fence producers BEFORE asking process owners to cancel or join tasks.
+    pub(super) fn execution_window_near_limit(&self) -> Result<bool, AppError> {
+        let turn = self.turn.lock().map_err(|_| failure("turn lock poisoned"))?;
+        Ok(turn.as_ref().is_some_and(|turn| turn.operations.len() >= 448))
     }
 
     /// Fence producers BEFORE asking process owners to cancel or join tasks.

@@ -9,6 +9,7 @@ description = "Adaptive execution loop for the unified Nomi Agent Runtime"
 [dependencies]
 async-trait.workspace = true
 futures.workspace = true
+jsonschema.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-chat-model-broker.workspace = true

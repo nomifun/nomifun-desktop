@@ -27,6 +27,7 @@ pub mod types;
 pub mod watch_service;
 pub mod workspace_listing;
 mod vcs_stage;
+mod workspace_write;
 
 pub use path_safety::{PathAuthority, has_traversal, validate_path, validate_path_for_write};
 pub use resource::{

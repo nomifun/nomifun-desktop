@@ -1711,11 +1711,15 @@ fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
         ChatRetryDirective::Failover
     } else {
         match error.kind {
-            InvokeErrorKind::Auth
-            | InvokeErrorKind::RateLimited
-            | InvokeErrorKind::ProviderError
+            InvokeErrorKind::RateLimited
             | InvokeErrorKind::Network
-            | InvokeErrorKind::Timeout => ChatRetryDirective::Failover,
+            | InvokeErrorKind::Timeout => ChatRetryDirective::RetrySameRoute,
+            InvokeErrorKind::ProviderError
+                if error.http_status.is_some_and(|status| matches!(status, 408 | 500..=599)) =>
+            {
+                ChatRetryDirective::RetrySameRoute
+            }
+            InvokeErrorKind::Auth | InvokeErrorKind::ProviderError => ChatRetryDirective::Failover,
             InvokeErrorKind::Config
             | InvokeErrorKind::InvalidParams
             | InvokeErrorKind::UnsupportedTask
@@ -2236,6 +2240,30 @@ mod tests {
         assert_eq!(mapped.retry, ChatRetryDirective::Failover);
         assert_eq!(mapped.unsupported_feature, Some(ChatModelFeature::ToolCalls));
         assert_eq!(mapped.provider_status, Some(400));
+    }
+
+    #[test]
+    fn transient_http_failures_can_recover_without_a_second_configured_route() {
+        for (kind, status) in [
+            (InvokeErrorKind::RateLimited, 429),
+            (InvokeErrorKind::Network, 502),
+            (InvokeErrorKind::Timeout, 504),
+            (InvokeErrorKind::ProviderError, 503),
+            (InvokeErrorKind::ProviderError, 500),
+            (InvokeErrorKind::ProviderError, 408),
+        ] {
+            let mut source = InvokeError::new(kind, "not copied to the model").with_http_status(status);
+            source.retry_after_ms = Some(7_000);
+            let mapped = invoke_error_to_chat_error(source);
+            assert_eq!(mapped.retry, ChatRetryDirective::RetrySameRoute, "{status}");
+            assert_eq!(mapped.retry_after_ms, Some(7_000));
+            assert_eq!(mapped.provider_status, Some(status));
+            assert!(!mapped.message.contains("not copied"));
+        }
+        for kind in [InvokeErrorKind::Auth, InvokeErrorKind::QuotaExhausted, InvokeErrorKind::InvalidParams] {
+            let mapped = invoke_error_to_chat_error(InvokeError::new(kind, "permanent"));
+            assert_ne!(mapped.retry, ChatRetryDirective::RetrySameRoute);
+        }
     }
 
     #[test]

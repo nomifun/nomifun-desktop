@@ -234,13 +234,10 @@ pub async fn validate_known_migration_lineage_prefix(
     if expected
         .first()
         .is_none_or(|migration| migration.version != CANONICAL_BASELINE_MIGRATION_VERSION)
-        || expected.len() != 4
-        || expected[1].version != 2
-        || expected[2].version != 3
-        || expected[3].version != 4
+        || expected.iter().enumerate().any(|(index, migration)| migration.version != (index + 1) as i64)
     {
         return Err(DbError::Init(
-            "database lineage must contain the canonical baseline, model context, and both session reasoning migrations".into(),
+            "database lineage must be the contiguous canonical forward migration chain".into(),
         ));
     }
 
@@ -940,6 +937,104 @@ mod tests {
         "plugin_artifacts",
     ];
 
+    async fn remove_native_pause_fixture_columns(pool: &SqlitePool) {
+        sqlx::raw_sql("ALTER TABLE agent_turns DROP COLUMN native_pause_revision; \
+            ALTER TABLE agent_turns DROP COLUMN native_pause_json; \
+            ALTER TABLE agent_turns DROP COLUMN native_pause_requested_json; \
+            ALTER TABLE agent_turns DROP COLUMN native_budget_json;")
+            .execute(pool).await.unwrap();
+    }
+
+    async fn remove_native_checkpoint_fixture_columns(pool: &SqlitePool) {
+        // These tests deliberately reconstruct an older schema in a new
+        // temporary database, so remove every later column as well as its
+        // migration receipt. Production migration 005 is forward-only.
+        remove_native_pause_fixture_columns(pool).await;
+        sqlx::raw_sql("ALTER TABLE agent_turns DROP COLUMN native_checkpoint_json; \
+            ALTER TABLE agent_turns DROP COLUMN native_checkpoint_digest; \
+            ALTER TABLE agent_turns DROP COLUMN native_checkpoint_revision; \
+            ALTER TABLE agent_turns DROP COLUMN native_checkpoint_seq; \
+            ALTER TABLE agent_turns DROP COLUMN execution_fence; \
+            ALTER TABLE agent_turns DROP COLUMN execution_owner; \
+            ALTER TABLE agent_turns DROP COLUMN execution_generation; \
+            ALTER TABLE agent_turns DROP COLUMN execution_lease_until;")
+            .execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_pause_forward_migration_repairs_only_nonterminal_head_and_reopens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("native-pause-upgrade.db");
+        let database = init_database(&path).await.unwrap();
+        remove_native_pause_fixture_columns(database.pool()).await;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=7").execute(database.pool()).await.unwrap();
+        sqlx::query("UPDATE schema_metadata SET migration_head=5, canonical_schema_manifest_digest='6c3ea4f8d5d3e12cbc36ebb48d7d86ef79d1794630c1acbab0e646799de92d96' WHERE singleton_key='canonical'")
+            .execute(database.pool()).await.unwrap();
+        let cases = ["running", "completed", "failed", "cancelled"];
+        let mut sessions = Vec::new();
+        for state in cases {
+            let session = uuid::Uuid::now_v7().to_string();
+            let start = format!("{session}:start");
+            let terminal = format!("{session}:terminal");
+            sqlx::query("INSERT INTO agent_sessions (agent_session_id,owner_ref_json,state,archived,pinned,agent_binding_json,next_seq,created_at) VALUES (?,'{}','live',0,0,'{}',3,1)")
+                .bind(&session).execute(database.pool()).await.unwrap();
+            sqlx::query("INSERT INTO agent_events (session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,inline_json) VALUES (?,1,?,'fixture',?,'turn/started',1,'task','{}')")
+                .bind(&session).bind(&start).bind(&start).execute(database.pool()).await.unwrap();
+            if state != "running" {
+                sqlx::query("INSERT INTO agent_events (session_id,seq,event_id,producer_id,idempotency_key,kind,kind_version,correlation_id,causation_event_id,inline_json) VALUES (?,2,?,'fixture',?,?,1,'task',?,'{}')")
+                    .bind(&session).bind(&terminal).bind(&terminal).bind(format!("turn/{state}")).bind(&start).execute(database.pool()).await.unwrap();
+            }
+            sqlx::query("INSERT INTO agent_turns (session_id,turn_id,operation_id,idempotency_key,state,started_event_id,terminal_event_id,accepted_at,started_at,finished_at,execution_owner,execution_fence,native_checkpoint_json) VALUES (?,'task','task','task',?,?,?,1,1,?,'old-owner',4,'{\"progress\":7}')")
+                .bind(&session).bind(state).bind(&start).bind((state != "running").then_some(&terminal))
+                .bind((state != "running").then_some(2i64)).execute(database.pool()).await.unwrap();
+            sqlx::query("INSERT INTO agent_session_heads (session_id,status,active_set_generation,last_seq,unread_count) VALUES (?,'failed',0,2,0)")
+                .bind(&session).execute(database.pool()).await.unwrap();
+            sessions.push((session,state));
+        }
+        database.close().await;
+        for _ in 0..2 {
+            let upgraded = init_database(&path).await.unwrap();
+            validate_current_migration_lineage(upgraded.pool()).await.unwrap();
+            for (session,state) in &sessions {
+                let row: (String,Option<String>,String,i64,String,Option<String>) = sqlx::query_as(
+                    "SELECT h.status,h.active_turn_id,t.state,t.execution_fence,t.native_checkpoint_json,t.native_pause_json FROM agent_session_heads h JOIN agent_turns t ON h.session_id=t.session_id WHERE h.session_id=?")
+                    .bind(session).fetch_one(upgraded.pool()).await.unwrap();
+                assert_eq!(row.2,*state);
+                assert_eq!(row.3,4);
+                assert_eq!(row.4,"{\"progress\":7}");
+                assert!(row.5.is_none());
+                if *state == "running" { assert_eq!(row.0,"reconciliation"); assert_eq!(row.1.as_deref(),Some("task")); }
+                else { assert_eq!(row.0,"failed"); assert!(row.1.is_none()); }
+            }
+            let head: i64 = sqlx::query_scalar("SELECT migration_head FROM schema_metadata WHERE singleton_key='canonical'").fetch_one(upgraded.pool()).await.unwrap();
+            assert_eq!(head,6);
+            upgraded.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn native_checkpoint_forward_migration_preserves_existing_user_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("native-checkpoint-upgrade.db");
+        let database = init_database(&path).await.unwrap();
+        sqlx::query("INSERT INTO client_preferences (key,value,updated_at) VALUES ('checkpoint-upgrade','keep',1)")
+            .execute(database.pool()).await.unwrap();
+        remove_native_checkpoint_fixture_columns(database.pool()).await;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 5").execute(database.pool()).await.unwrap();
+        sqlx::query("UPDATE schema_metadata SET migration_head = 3, canonical_schema_manifest_digest = '263a05e5d0a8bb3e535b531791fc3828600cd37f47b645288b0b98acb4cd8856' WHERE singleton_key = 'canonical'")
+            .execute(database.pool()).await.unwrap();
+        database.close().await;
+        let upgraded = init_database(&path).await.unwrap();
+        validate_current_migration_lineage(upgraded.pool()).await.unwrap();
+        let value: String = sqlx::query_scalar("SELECT value FROM client_preferences WHERE key = 'checkpoint-upgrade'")
+            .fetch_one(upgraded.pool()).await.unwrap();
+        assert_eq!(value, "keep");
+        let digest: String = sqlx::query_scalar("SELECT canonical_schema_manifest_digest FROM schema_metadata WHERE singleton_key='canonical'")
+            .fetch_one(upgraded.pool()).await.unwrap();
+        assert_eq!(digest, nomifun_agent_contracts::digest_payload(&nomifun_agent_contracts::agent_store_schema_manifest_payload()).unwrap().as_ref());
+        upgraded.close().await;
+    }
+
     #[tokio::test]
     async fn existing_baseline_upgrades_in_place_and_reopens() {
         let dir = tempfile::tempdir().unwrap();
@@ -951,6 +1046,7 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
+        remove_native_checkpoint_fixture_columns(database.pool()).await;
         sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 2")
             .execute(database.pool())
             .await
@@ -1002,7 +1098,8 @@ mod tests {
         .execute(database.pool())
         .await
         .unwrap();
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 4")
+        remove_native_checkpoint_fixture_columns(database.pool()).await;
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 4")
             .execute(database.pool())
             .await
             .unwrap();

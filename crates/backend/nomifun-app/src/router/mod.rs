@@ -54,6 +54,7 @@ mod engine_process_recovery;
 mod runtime_event_buffer;
 mod history_process_display;
 mod agent_tool_surface;
+mod agent_tool_presentation;
 mod runtime_attachments;
 mod runtime_skills;
 pub mod engine_skills;

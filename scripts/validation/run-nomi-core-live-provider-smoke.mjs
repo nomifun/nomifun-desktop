@@ -628,6 +628,8 @@ async function main() {
   const stages = beforeToolSmoke ? beforeToolStagesFromOutput(test.stderr) : [];
   for (const phase of stages) console.log(`live_smoke_stage=${phase} status=pass`);
   for (const line of test.stderr.split(/\r?\n/)) {
+    const build = line.match(/^NOMIFUN_LIVE_SMOKE_BUILD digest=([a-f0-9]{64})$/);
+    if (build) console.log(`live_smoke_build_digest=${build[1]}`);
     const codingTrace = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_TRACE phase=(file|coding|snake_game|long_first|long_repair|long_second) read=([0-9]{1,4}) write=([0-9]{1,4}) patch=([0-9]{1,4}) exec=([0-9]{1,4}) plan=([0-9]{1,4}) completion=([0-9]{1,4}) tool_errors=([0-9]{1,4}) final_replies=([0-9]{1,4}) file_exists=(true|false) file_bytes=([0-9]{1,8}) html=(true|false) script=(true|false) canvas=(true|false) keydown=(true|false)$/);
     if (codingTrace) console.log(`live_smoke_coding_trace=${codingTrace[0].slice('NOMIFUN_LIVE_SMOKE_CODING_TRACE '.length)}`);
     const codingFlow = line.match(/^NOMIFUN_LIVE_SMOKE_CODING_FLOW phase=(file|coding|snake_game|long_first|long_repair|long_second) flow=([RWPEUCO01x]{0,96})$/);
@@ -648,6 +650,10 @@ async function main() {
     if (runtimeProgress) console.log(`live_smoke_runtime_progress=${runtimeProgress[0].slice('NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS '.length)}`);
     const controlErrors = line.match(/^NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence=([A-Z_:,]{1,450})$/);
     if (controlErrors) console.log(`live_smoke_control_errors=${controlErrors[1]}`);
+    const toolRejections = line.match(/^NOMIFUN_LIVE_SMOKE_TOOL_REJECTIONS invalid_arguments=([0-9]{1,5}) unavailable_names=([0-9]{1,5}) kernel_rejections=([0-9]{1,5}) delegations=([0-9]{1,5}) text_events=([0-9]{1,5})$/);
+    if (toolRejections) console.log(`live_smoke_tool_rejections=${toolRejections[0].slice('NOMIFUN_LIVE_SMOKE_TOOL_REJECTIONS '.length)}`);
+    const collaborationShapes = line.match(/^NOMIFUN_LIVE_SMOKE_COLLAB_ARGUMENT_SHAPES sequence=(NONE|(?:(?:parallel|planned|other):(?:missing|null|boolean|string|array|object|number):(?:missing|null|boolean|string|array|object|number))(?:,(?:parallel|planned|other):(?:missing|null|boolean|string|array|object|number):(?:missing|null|boolean|string|array|object|number)){0,5})$/);
+    if (collaborationShapes) console.log(`live_smoke_collaboration_argument_shapes=${collaborationShapes[1]}`);
     const compact = line.match(/^NOMIFUN_LIVE_SMOKE_COMPACTION summaries=([0-9]{1,4}) replacements=([0-9]{1,4})$/);
     if (compact) console.log(`live_smoke_compaction summaries=${compact[1]} replacements=${compact[2]}`);
     const recovery = line.match(/^NOMIFUN_LIVE_SMOKE_RECOVERY phase=(engine\.(?:nomi|coding)\.(?:create|patch|exec|continue)) controls=([0-9]{1,4}) pre_execution=([0-9]{1,4})$/);

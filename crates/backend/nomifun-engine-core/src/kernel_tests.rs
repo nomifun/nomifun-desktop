@@ -256,7 +256,7 @@ mod tests {
             "CAPABILITY_UNAVAILABLE",
             "process spawn failed: secret=NEVER_EMIT and private cwd",
         );
-        let mapped = kernel_error_for_action(error, true).to_string();
+        let mapped = kernel_error_for_action(error, true, false).to_string();
         assert!(mapped.contains("command field must contain only the executable"));
         assert!(mapped.contains("\"args\":[\"test\""));
         assert!(!mapped.contains("NEVER_EMIT"));
@@ -267,8 +267,52 @@ mod tests {
                 "process spawn failed: secret=NEVER_EMIT",
             ),
             false,
+            false,
         ).to_string();
         assert!(!unrelated.contains("Put only the executable in command"));
+    }
+
+    #[test]
+    fn file_failure_explains_repair_without_disclosing_host_diagnostics() {
+        let detail = "workspace.files failed: cannot resolve parent of PRIVATE_PATH: secret=NEVER_EMIT";
+        let mapped = kernel_error_for_action(
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true,
+        ).to_string();
+        assert!(mapped.contains("parent is unavailable"));
+        assert!(mapped.contains("created automatically"));
+        assert!(!mapped.contains("PRIVATE_PATH"));
+        assert!(!mapped.contains("NEVER_EMIT"));
+        let unrelated = kernel_error_for_action(
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false,
+        ).to_string();
+        assert!(!unrelated.contains("created automatically"));
+    }
+
+    #[test]
+    fn patch_failure_preserves_bounded_publication_receipt_and_sanitizes_cause() {
+        let detail = json!({
+            "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
+            "cause":"patch hunk line count mismatch: PRIVATE_PATH SECRET_CONTENT",
+            "observation":{
+                "failed_file":1, "published":[0], "restored":[], "restore_published_unconfirmed":[],
+                "retained_created":[0], "skipped_changed_or_unreadable":[], "rollback_failed":[],
+                "temporary_cleanup_unconfirmed":[], "unexpected_private_field":"NEVER_EMIT"
+            },
+            "recovery":"UNTRUSTED_ADVICE"
+        });
+        let result = workspace_write_feedback(&detail.to_string());
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["observation"]["retained_created"], json!([0]));
+        assert_eq!(parsed["observation"]["failed_file"], 1);
+        assert!(parsed["recovery"].as_str().unwrap().contains("old_lines"));
+        for secret in ["PRIVATE_PATH", "SECRET_CONTENT", "NEVER_EMIT", "UNTRUSTED_ADVICE"] {
+            assert!(!result.contains(secret));
+        }
+        let mut malformed = detail;
+        malformed["observation"]["published"] = json!(["PRIVATE_PATH"]);
+        let result = workspace_write_feedback(&malformed.to_string());
+        assert!(!result.contains("PRIVATE_PATH"));
+        assert!(result.contains("hunk"));
     }
 
     #[tokio::test]

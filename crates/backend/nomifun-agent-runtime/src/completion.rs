@@ -44,7 +44,7 @@ pub struct AgentCompletionCriterion {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentCompletionReport {
-    pub plan_revision: u16,
+    pub plan_revision: u32,
     pub observation_revision: u32,
     pub input_revision: usize,
     pub workspace_epoch: u32,
@@ -261,7 +261,7 @@ impl CompletionTracker {
         let submission: Submission = serde_json::from_value(call.arguments.0.clone())
             .map_err(|error| format!("Invalid completion report: {error}"))?;
         if submission.summary.trim().is_empty()
-            || submission.summary.len() > 2048
+            || submission.summary.chars().count() > 2048
             || submission.criteria.is_empty()
             || submission.criteria.len() > 16
         {
@@ -287,11 +287,11 @@ impl CompletionTracker {
                     serde_json::to_string(&criterion.step).unwrap_or_default()));
             }
             if criterion.rationale.trim().is_empty()
-                || criterion.rationale.len() > 1024
+                || criterion.rationale.chars().count() > 1024
                 || criterion.evidence_call_ids.len() > 8
                 || criterion.requirement_ids.len() > 32
             {
-                return Err("Each criterion needs a nonempty rationale of at most 1024 bytes, at most 8 evidence call IDs, and at most 32 requirement IDs".into());
+                return Err("Each criterion needs a nonempty rationale of at most 1024 characters, at most 8 evidence call IDs, and at most 32 requirement IDs".into());
             }
             let blocked = plan.steps.iter().any(|step| {
                 step.step == criterion.step && step.status == AgentPlanStatus::Blocked

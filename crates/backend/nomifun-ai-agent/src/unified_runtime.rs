@@ -31,6 +31,18 @@ use crate::{
 /// Session owner. They must not infer authority from user/model JSON.
 #[async_trait]
 pub trait UnifiedRuntimeHost: Send + Sync {
+    async fn recoverable_preparation_step(&self, _message:&SendMessageData) -> Result<Option<u16>,AppError> { Ok(None) }
+    async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
+    fn supports_execution_checkpoints(&self) -> bool { false }
+    async fn execution_pressure(&self, _message: &SendMessageData)
+        -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
+        Ok(Default::default())
+    }
+    async fn save_execution_checkpoint(
+        &self, _message: &SendMessageData, _checkpoint: &nomifun_agent_runtime::AgentExecutionCheckpoint,
+    ) -> Result<Option<nomifun_agent_runtime::AgentCheckpointReceipt>, AppError> {
+        Ok(None)
+    }
     async fn queue_steer(&self, _delivery: crate::RuntimeSteerDelivery) -> Result<bool, AppError> {
         Err(AppError::BadRequest("Nomi host does not support receipt-bound steering".into()))
     }
@@ -135,15 +147,32 @@ struct TurnProjection {
     output: EngineTurnOutput,
     calls: Mutex<BTreeMap<String, ToolCallEventData>>,
     terminal: Mutex<Option<AgentEngineEvent>>,
+    last_model_step: std::sync::atomic::AtomicU16,
 }
 
 #[async_trait]
 impl AgentEventSink for TurnProjection {
+    fn supports_checkpoints(&self) -> bool { self.host.supports_execution_checkpoints() }
+    async fn execution_pressure(&self) -> Result<nomifun_agent_runtime::AgentExecutionPressure, AgentEngineError> {
+        self.host.execution_pressure(&self.message).await
+            .map_err(|error| AgentEngineError::EventSink(error.to_string()))
+    }
+    async fn save_checkpoint(&self, checkpoint: nomifun_agent_runtime::AgentExecutionCheckpoint)
+        -> Result<Option<nomifun_agent_runtime::AgentCheckpointReceipt>, AgentEngineError> {
+        self.host.save_execution_checkpoint(&self.message, &checkpoint).await
+            .map_err(|error| AgentEngineError::EventSink(error.to_string()))
+    }
     async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+        match &event {
+            AgentEngineEvent::ModelStepStarted { step,.. } => self.last_model_step.store(*step,std::sync::atomic::Ordering::Release),
+            AgentEngineEvent::ExecutionResumed { model_steps,.. } => self.last_model_step.store(*model_steps,std::sync::atomic::Ordering::Release),
+            _ => {}
+        }
         if matches!(
             event,
             AgentEngineEvent::TurnCompleted { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
+                | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
         ) {
             // Publication of a terminal must wait for proven tool/process exit.
@@ -168,7 +197,7 @@ impl AgentEventSink for TurnProjection {
 impl TurnProjection {
     fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
         let projected = match event {
-            AgentEngineEvent::TurnStarted { .. } => Some(EngineProgress::Started),
+            AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
             AgentEngineEvent::OutputTextDelta { step, text } => {
                 Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
             }
@@ -197,7 +226,8 @@ impl TurnProjection {
                 );
                 None
             }
-            AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. } => {
+            AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. }
+            | AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. } => {
                 let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
                 for id in discarded_tool_call_ids { calls.remove(id.as_ref()); }
                 None
@@ -262,10 +292,19 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         let projection = Arc::new(TurnProjection {
             host: self.host.clone(), message: message.clone(), output,
             calls: Mutex::new(BTreeMap::new()), terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
         });
         let session = self.engine.open_session(self.binding.clone(), self.model.clone(),
             self.tools.clone(), Some(projection.clone())).map_err(contract_error)?;
-        let request = self.host.prepare_turn(message, cancellation.clone()).await?;
+        let request = match self.host.prepare_turn(message, cancellation.clone()).await {
+            Ok(request) => request,
+            Err(error) => {
+                if let Some(model_steps) = self.host.recoverable_preparation_step(message).await? {
+                    return Ok(EngineTurnOutcome { model_steps,terminal:EngineTurnTerminal::Paused { reason:"EXECUTION_PREPARATION_BLOCKED".into() } });
+                }
+                return Err(error);
+            }
+        };
         if request.principal.principal_kind != "user" || request.principal.principal_id != self.owner_id {
             return Err(AppError::Conflict("Nomi turn principal differs from its Session owner".into()));
         }
@@ -278,6 +317,7 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                     terminal: match result.terminal {
                         AgentTurnTerminal::Completed { finish_reason } => EngineTurnTerminal::Completed { finish_reason },
                         AgentTurnTerminal::Cancelled => EngineTurnTerminal::Cancelled,
+                        AgentTurnTerminal::Paused { reason } => EngineTurnTerminal::Paused { reason },
                         AgentTurnTerminal::Failed { message } => EngineTurnTerminal::Failed { message },
                     },
                 };
@@ -295,6 +335,13 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 };
                 Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message } })
             }
+            Err(AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_)) => {
+                // No proposed tool batch is executed before a valid model
+                // terminal. Preserve progress for an explicit owner retry;
+                // the SDK must still prove cleanup before publishing pause.
+                Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
+                    terminal:EngineTurnTerminal::Paused { reason:"EXECUTION_MODEL_FAILURE".into() } })
+            }
             Err(error) => Err(contract_error(error)),
         }
     }
@@ -309,6 +356,9 @@ impl EngineSessionDriver for UnifiedSessionDriver {
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
         self.host.cleanup_turn(message).await
     }
+    async fn suspend_after_cleanup_failure(&self, message: &SendMessageData) -> Result<bool,AppError> {
+        self.host.suspend_after_cleanup_failure(message).await
+    }
     async fn record_terminal(&self, message: &SendMessageData, outcome: &EngineTurnOutcome) -> Result<(), AppError> {
         self.host.record_event(message, &runtime_terminal(outcome)).await
     }
@@ -321,6 +371,7 @@ fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
             model_steps: outcome.model_steps, finish_reason: finish_reason.clone(),
         },
         EngineTurnTerminal::Cancelled => AgentEngineEvent::TurnCancelled { model_steps: outcome.model_steps },
+        EngineTurnTerminal::Paused { reason } => AgentEngineEvent::TurnPaused { model_steps: outcome.model_steps, reason: reason.clone() },
         EngineTurnTerminal::Failed { message } => AgentEngineEvent::TurnFailed {
             model_steps: outcome.model_steps, message: message.clone(),
         },

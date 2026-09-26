@@ -10,6 +10,8 @@ mod context_resource;
 mod kernel;
 mod process;
 mod tool;
+mod tool_schema;
+pub use tool_schema::model_tool_schema;
 
 pub use error::{EngineProcessError, EngineToolError};
 pub use context_resource::{EngineContextContent, EngineContextResource, EngineResourceQuery, EngineResourceRead, EngineResourceImageRead, EngineResourcePort};

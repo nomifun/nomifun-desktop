@@ -34,6 +34,34 @@ pub enum AgentEngineEvent {
         step: u16,
         operation_id: OperationId,
     },
+    /// Metadata for the Store's atomic snapshot commit. The snapshot itself
+    /// is latest-state data on the Turn, not another transcript copy.
+    ExecutionCheckpointSaved {
+        step: u16,
+        revision: u64,
+        digest: nomifun_agent_contracts::DigestHex,
+    },
+    ExecutionResumed {
+        checkpoint_revision: u64,
+        checkpoint_step: u16,
+        model_steps: u16,
+        execution_fence: u64,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+    },
+    /// The new window is already committed in this exact checkpoint. This
+    /// event is observability, not an independent budget/authority grant.
+    ExecutionSegmentRenewed {
+        segment: u16,
+        model_steps: u16,
+        checkpoint_revision: u64,
+        reason: crate::AgentSegmentReason,
+    },
+    ExecutionBudgetExhausted {
+        model_steps: u16,
+        segment: u16,
+        checkpoint_revision: Option<u64>,
+        reason: crate::AgentExecutionStopReason,
+    },
     CompactionStarted {
         operation_id: OperationId,
         input_bytes: usize,
@@ -46,6 +74,14 @@ pub enum AgentEngineEvent {
     /// The terminal was explicitly output-limited. Written before dropping
     /// the proposed batch; none of these calls reached tool admission.
     ModelOutputTruncated {
+        step: u16,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        continuation: bool,
+    },
+    /// Non-native tool markup was rejected before any tool admission. This
+    /// closes the proposed batch for replay; it is not a transport retry,
+    /// an executed call/result, an output-limit claim or a success event.
+    ModelResponseRejected {
         step: u16,
         discarded_tool_call_ids: Vec<ToolCallId>,
         continuation: bool,
@@ -129,6 +165,30 @@ pub enum AgentEngineEvent {
         step: u16,
         result: AgentToolResult,
     },
+    /// An owner-backed observation of an earlier invocation, never another
+    /// tool admission or current completion evidence.
+    ToolOutcomeReconciled {
+        step: u16,
+        result: AgentToolResult,
+        source: crate::AgentReconciliationSource,
+        evidence_event_id: Option<String>,
+        owner_operation_id: Option<OperationId>,
+    },
+    OwnerOutcomeReconciled {
+        call_id: Option<ToolCallId>,
+        effect_id: Option<String>,
+        outcome: String,
+        evidence_event_id: String,
+        source: crate::AgentReconciliationSource,
+    },
+    ExecutionTailReconciled {
+        model_steps: u16,
+        source_checkpoint_revision: u64,
+        discarded_tool_call_ids: Vec<ToolCallId>,
+        retained_tool_call_ids: Vec<ToolCallId>,
+        discard_last_model_step: bool,
+        retry_stall_guards: bool,
+    },
     /// Derived model-context ordering after all results are recorded. This is
     /// not execution order, model delivery acknowledgement or cleanup proof.
     ToolResultsOrdered {
@@ -146,6 +206,10 @@ pub enum AgentEngineEvent {
     TurnCancelled {
         model_steps: u16,
     },
+    TurnPaused {
+        model_steps: u16,
+        reason: String,
+    },
     TurnFailed {
         model_steps: u16,
         message: String,
@@ -155,6 +219,18 @@ pub enum AgentEngineEvent {
 #[async_trait]
 pub trait AgentEventSink: Send + Sync {
     async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError>;
+    fn supports_checkpoints(&self) -> bool { false }
+
+    async fn execution_pressure(&self) -> Result<crate::AgentExecutionPressure, AgentEngineError> {
+        Ok(crate::AgentExecutionPressure::default())
+    }
+
+    /// None explicitly means this host does not persist native checkpoints.
+    /// It must never be treated as a durable acknowledgement or resume grant.
+    async fn save_checkpoint(&self, _checkpoint: crate::AgentExecutionCheckpoint)
+        -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+        Ok(None)
+    }
 
     /// Write-ahead admission, not an execution result. Hosts with concurrent
     /// input must serialize this with their inbox: false means no admission

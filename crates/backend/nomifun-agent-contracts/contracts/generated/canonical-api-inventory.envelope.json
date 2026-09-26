@@ -170,6 +170,56 @@
         ]
       },
       {
+        "operation_id": "agent_sessions.execution",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/execution",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.execution.pause",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/execution/pause",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.execution.resume",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/execution/resume",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.execution.effects",
+        "method": "GET",
+        "path": "/api/agent-sessions/{agent_session_id}/execution/effects?operation_id={operation_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
+        "operation_id": "agent_sessions.execution.reconcile",
+        "method": "POST",
+        "path": "/api/agent-sessions/{agent_session_id}/execution/reconcile",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "SESSION_DELETED"
+        ]
+      },
+      {
         "operation_id": "agent_sessions.capabilities",
         "method": "GET",
         "path": "/api/agent-sessions/{agent_session_id}/capabilities",
@@ -433,5 +483,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "8f8505ae9eeed1e8aef81e79815b10b78f429bbf3cda40dadcf4a3259cc244d6"
+  "payload_digest": "e3079ba597a2248631538342d78812738e2fc7a940f414d9cbe15c0023ee17b9"
 }

@@ -51,6 +51,25 @@ pub const MAX_SINGLE_PAYLOAD_BYTES: usize = 1024 * 1024;
 pub const MAX_SESSION_PAYLOAD_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_EVENT_PAGE_SIZE: u32 = 500;
 
+#[path = "native_checkpoint.rs"]
+mod native_checkpoint;
+pub use native_checkpoint::{NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES};
+
+#[path = "native_execution.rs"]
+mod native_execution;
+pub use native_execution::{NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS};
+use native_execution::reject_unleased_native_turn_tx;
+
+#[path = "native_recovery.rs"]
+mod native_recovery;
+pub use native_recovery::{NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED};
+#[path = "native_pause.rs"]
+mod native_pause;
+pub use native_pause::{NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation};
+#[path = "native_effect_reconciliation.rs"]
+mod native_effect_reconciliation;
+pub use native_effect_reconciliation::{NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates};
+
 fn wall_clock_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -125,6 +144,18 @@ const AGENT_STORE_COLUMNS: &[(&str, &[&str])] = &[
             "accepted_at",
             "started_at",
             "finished_at",
+            "native_checkpoint_json",
+            "native_checkpoint_digest",
+            "native_checkpoint_revision",
+            "native_checkpoint_seq",
+            "execution_fence",
+            "execution_owner",
+            "execution_generation",
+            "execution_lease_until",
+            "native_pause_revision",
+            "native_pause_json",
+            "native_pause_requested_json",
+            "native_budget_json",
         ],
     ),
     (
@@ -445,6 +476,10 @@ impl AgentSessionStore {
         payload: Option<&SessionPayloadRecord>,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
+        if matches!(append.semantic_event.kind.0.as_str(), "runtime/progress-recorded" | "context/model-visible-applied") {
+            reject_unleased_native_turn_tx(&mut tx, &append.agent_session_id,
+                &OperationId::from(append.semantic_event.correlation_id.as_ref())).await?;
+        }
         let result = self.append_event_tx(&mut tx, append, payload).await?;
         tx.commit().await?;
         Ok(result)
@@ -681,6 +716,18 @@ impl AgentSessionStore {
         turn: &SessionEventAppend,
         turn_operation_id: &OperationId,
     ) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        self.append_chat_completion_with_lease(message, turn, turn_operation_id, None).await
+    }
+
+    pub async fn append_native_chat_completion(&self, lease: &NativeExecutionLease, message: &SessionEventAppend,
+        turn: &SessionEventAppend) -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
+        if message.agent_session_id != *lease.session_id() { return Err(SessionStoreError::ExecutionFenced); }
+        self.append_chat_completion_with_lease(message, turn, lease.operation_id(), Some(lease)).await
+    }
+
+    async fn append_chat_completion_with_lease(&self, message: &SessionEventAppend, turn: &SessionEventAppend,
+        turn_operation_id: &OperationId, lease: Option<&NativeExecutionLease>)
+        -> Result<(SessionEventAppendResult, SessionEventAppendResult), SessionStoreError> {
         if message.semantic_event.kind.0 != "message/completed"
             || !matches!(
                 turn.semantic_event.kind.0.as_str(),
@@ -701,6 +748,12 @@ impl AgentSessionStore {
         }
         let message_duplicate = duplicate_event_tx(&mut tx, message).await?.is_some();
         let turn_duplicate = duplicate_event_tx(&mut tx, turn).await?.is_some();
+        if let Some(lease) = lease {
+            native_execution::check_native_identity_tx(&mut tx, lease).await?;
+            if !(message_duplicate && turn_duplicate) { native_execution::check_native_lease_tx(&mut tx, lease, true).await?; }
+        } else {
+            reject_unleased_native_turn_tx(&mut tx, &message.agent_session_id, turn_operation_id).await?;
+        }
         if !(message_duplicate && turn_duplicate) {
             ensure_active_turn_tx(
                 &mut tx,
@@ -736,6 +789,10 @@ impl AgentSessionStore {
         require_live_session_tx(&mut tx, append.agent_session_id.as_ref()).await?;
         let duplicate = duplicate_event_tx(&mut tx, append).await?;
         if duplicate.is_none() {
+            let active_lease: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_turns WHERE session_id = ? AND operation_id = ? AND execution_owner IS NOT NULL AND execution_lease_until > ? AND state = 'running'")
+                .bind(append.agent_session_id.as_ref()).bind(turn_operation_id.as_ref()).bind(wall_clock_now_ms())
+                .fetch_one(&mut *tx).await?;
+            if active_lease != 0 { return Err(SessionStoreError::ExecutionLeaseActive); }
             ensure_active_turn_tx(
                 &mut tx,
                 append.agent_session_id.as_ref(),
@@ -2341,15 +2398,41 @@ impl AgentSessionStore {
         session_id: &AgentSessionId,
         turn_operation_id: &nomifun_agent_contracts::OperationId,
     ) -> Result<ChatCausalityFacts, SessionStoreError> {
+        self.read_chat_causality_facts(session_id, turn_operation_id, false).await
+    }
+
+    /// Recovery needs the current Turn and its original input, not every
+    /// completed task in this Session. Keep long-lived Sessions off the hot
+    /// path's memory/CPU budget without inventing another transcript store.
+    pub async fn native_recovery_facts(&self, session_id: &AgentSessionId, operation: &OperationId) -> Result<ChatCausalityFacts, SessionStoreError> {
+        self.read_chat_causality_facts(session_id, operation, true).await
+    }
+
+    async fn read_chat_causality_facts(&self, session_id: &AgentSessionId, turn_operation_id: &OperationId, current_only: bool)
+        -> Result<ChatCausalityFacts, SessionStoreError> {
         let mut tx = self.pool.begin().await?;
         let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
         let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
-        let rows = event_rows_for_session_tx(&mut tx, session_id.as_ref()).await?;
+        let rows = if current_only {
+            if !matches!(head.status.as_str(), "running" | "paused") || head.active_turn_id.as_deref() != Some(turn_operation_id.as_ref()) { return Err(SessionStoreError::ExecutionFenced); }
+            let rows = sqlx::query_as::<_, StoredEventRow>(
+                "SELECT e.session_id,e.seq,e.event_id,e.producer_id,e.idempotency_key,e.runtime_binding_id,e.runtime_producer_seq, \
+                 e.kind,e.kind_version,e.correlation_id,e.causation_event_id,e.inline_json,e.payload_id FROM agent_events e \
+                 JOIN agent_turns t ON t.session_id=e.session_id AND t.operation_id=? JOIN agent_events s ON s.event_id=t.started_event_id \
+                 WHERE e.session_id=? AND (e.seq>=s.seq OR e.event_id=s.causation_event_id) ORDER BY e.seq LIMIT 1000001")
+                .bind(turn_operation_id.as_ref()).bind(session_id.as_ref()).fetch_all(&mut *tx).await?;
+            if rows.len() > 1_000_000 { return Err(SessionStoreError::InvalidPayload("native recovery fact budget exceeded".into())); }
+            rows
+        } else { event_rows_for_session_tx(&mut tx, session_id.as_ref()).await? };
 
         let mut events = Vec::with_capacity(rows.len());
         let mut event_payloads = BTreeMap::new();
         let mut operation_ids = BTreeSet::new();
         let mut turn_route_identities = BTreeSet::new();
+        let execution_generation: Option<i64> = sqlx::query_scalar("SELECT execution_generation FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(session_id.as_ref()).bind(turn_operation_id.as_ref()).fetch_optional(&mut *tx).await?;
+        let execution_fence: Option<i64> = sqlx::query_scalar("SELECT execution_fence FROM agent_turns WHERE session_id=? AND operation_id=?")
+            .bind(session_id.as_ref()).bind(turn_operation_id.as_ref()).fetch_optional(&mut *tx).await?;
         for row in rows {
             let event = event_from_row(row)?;
             let payload = payload_value_for_event_tx(&mut tx, &event).await?;
@@ -2374,6 +2457,8 @@ impl AgentSessionStore {
             event_payloads,
             operation_ids,
             turn_route_identities,
+            execution_generation: as_u64(execution_generation.unwrap_or(0), "execution generation")?,
+            execution_fence: as_u64(execution_fence.unwrap_or(0), "execution fence")?,
         })
     }
 
@@ -2386,6 +2471,38 @@ impl AgentSessionStore {
         &self,
         request: ChatOperationClaimRequest,
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
+        self.claim_chat_operation_with_lease(request, None).await
+    }
+
+    pub async fn claim_native_chat_operation(&self, lease: &NativeExecutionLease, request: ChatOperationClaimRequest)
+        -> Result<SessionEventAppendResult, SessionStoreError> {
+        if request.agent_session_id != *lease.session_id() || request.turn_operation_id != *lease.operation_id() {
+            return Err(SessionStoreError::ExecutionFenced);
+        }
+        self.claim_chat_operation_with_lease(request, Some(lease)).await
+    }
+
+    /// Prove one admitted native request directly. An arbitrary operation_id
+    /// found inside historical model/tool data is not an admission receipt.
+    pub async fn verify_native_chat_operation(&self, lease: &NativeExecutionLease, request: &ChatOperationClaimRequest) -> Result<(), SessionStoreError> {
+        if lease.session_id() != &request.agent_session_id || lease.operation_id() != &request.turn_operation_id { return Err(SessionStoreError::ExecutionFenced); }
+        let mut tx = self.pool.begin().await?;
+        native_execution::check_native_lease_tx(&mut tx, lease, false).await?;
+        let id = format!("model-input-admitted:{}:{}", request.agent_session_id.as_ref(), request.operation_id.as_ref());
+        let row = event_by_event_id_tx(&mut tx, &id).await?.ok_or(SessionStoreError::ExecutionFenced)?;
+        let event = event_from_row(row)?;
+        let payload = payload_value_for_event_tx(&mut tx, &event).await?;
+        if event.agent_session_id != request.agent_session_id || event.kind.0 != "context/model-visible-applied"
+            || payload.get("execution_fence").and_then(Value::as_u64) != Some(lease.fence()) { return Err(SessionStoreError::ExecutionFenced); }
+        validate_existing_claim_payload(&payload, request)?;
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_effects WHERE session_id=? AND state IN ('pending','unknown'))")
+            .bind(lease.session_id().as_ref()).fetch_one(&mut *tx).await?;
+        if pending { return Err(SessionStoreError::RecoveryRequiresReconciliation); }
+        Ok(())
+    }
+
+    async fn claim_chat_operation_with_lease(&self, request: ChatOperationClaimRequest, lease: Option<&NativeExecutionLease>)
+        -> Result<SessionEventAppendResult, SessionStoreError> {
         request
             .route_identity
             .validate()
@@ -2417,12 +2534,18 @@ impl AgentSessionStore {
                     "turn_operation_id": request.turn_operation_id,
                     "route_identity": request.route_identity,
                     "resolved_snapshot_ref": request.resolved_snapshot_ref,
+                    "execution_fence": lease.map(NativeExecutionLease::fence).unwrap_or(0),
                 }))),
             },
         };
 
         let mut tx = self.begin_write_transaction().await?;
         let _session = require_live_session_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        if let Some(lease) = lease {
+            native_execution::check_native_lease_tx(&mut tx, lease, true).await?;
+        } else {
+            reject_unleased_native_turn_tx(&mut tx, &request.agent_session_id, &request.turn_operation_id).await?;
+        }
         let head = head_by_id_tx(&mut tx, request.agent_session_id.as_ref()).await?;
         if head.status != "running"
             || head.active_turn_id.as_deref() != Some(request.turn_operation_id.as_ref())
@@ -2431,10 +2554,23 @@ impl AgentSessionStore {
                 "model operation requires the exact active turn boundary".to_owned(),
             ));
         }
+        if let Some(lease) = lease {
+            if let Some(existing) = event_by_producer_key_tx(&mut tx, append.producer_id.as_ref(), append.idempotency_key.as_ref()).await? {
+                let record = event_from_row(existing)?;
+                let payload = payload_value_for_event_tx(&mut tx, &record).await?;
+                if payload.get("execution_fence").and_then(Value::as_u64).unwrap_or(0) != lease.fence() {
+                    return Err(SessionStoreError::ExecutionFenced);
+                }
+            }
+        }
         if let Some(existing) = duplicate_event_tx(&mut tx, &append).await? {
             let record = event_from_row(existing)?;
             let existing_payload = payload_value_for_event_tx(&mut tx, &record).await?;
             validate_existing_claim_payload(&existing_payload, &request)?;
+            if existing_payload.get("execution_fence").and_then(Value::as_u64).unwrap_or(0)
+                != lease.map(NativeExecutionLease::fence).unwrap_or(0) {
+                return Err(SessionStoreError::ExecutionFenced);
+            }
             let ack = event_ack(&record);
             tx.commit().await?;
             return Ok(SessionEventAppendResult {
@@ -2446,7 +2582,12 @@ impl AgentSessionStore {
             });
         }
 
-        let rows = event_rows_for_session_tx(&mut tx, request.agent_session_id.as_ref()).await?;
+        let rows = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id,seq,event_id,producer_id,idempotency_key,runtime_binding_id,runtime_producer_seq, \
+             kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events \
+             WHERE session_id=? AND (correlation_id=? OR event_id=?) ORDER BY seq")
+            .bind(request.agent_session_id.as_ref()).bind(request.turn_operation_id.as_ref()).bind(request.causation_event_id.as_ref())
+            .fetch_all(&mut *tx).await?;
         let mut turn = None;
         let mut cause = None;
         let mut route_identities = BTreeSet::new();
@@ -4402,7 +4543,7 @@ async fn validate_turn_lifecycle_tx(
             "turn operation {operation_id} already crossed the terminal fence with {existing_kind}"
         )));
     }
-    if head.status != "running"
+    if !matches!(head.status.as_str(), "running" | "paused" | "reconciliation")
         || head.active_turn_id.as_deref() != Some(operation_id)
     {
         return Err(SessionStoreError::Conflict(
@@ -4424,6 +4565,29 @@ async fn project_turn_fact_tx(
 ) -> Result<(), SessionStoreError> {
     let operation_id = event.correlation_id.as_ref();
     match event.kind.0.as_str() {
+        "turn/pause-requested" => {
+            sqlx::query("UPDATE agent_turns SET native_pause_requested_json=? WHERE session_id=? AND operation_id=? AND state='running'")
+                .bind(serde_json::to_string(payload)?).bind(event.agent_session_id.as_ref()).bind(operation_id).execute(&mut **tx).await?;
+        }
+        "turn/paused" => {
+            let state: NativePauseState = serde_json::from_value(payload.get("pause").cloned().ok_or_else(|| SessionStoreError::InvalidEvent("pause state missing".into()))?)?;
+            let prior_revision = state.revision.checked_sub(1).ok_or_else(|| SessionStoreError::InvalidEvent("pause revision must advance".into()))?;
+            let prior_fence = state.execution_fence.checked_sub(1).ok_or_else(|| SessionStoreError::InvalidEvent("pause fence must advance".into()))?;
+            let changed = sqlx::query("UPDATE agent_turns SET native_pause_revision=?,native_pause_json=?,native_pause_requested_json=NULL,execution_fence=?,execution_lease_until=0 WHERE session_id=? AND operation_id=? AND state='running' AND terminal_event_id IS NULL AND native_pause_revision=? AND execution_fence=?")
+                .bind(as_i64(state.revision,"pause revision")?).bind(serde_json::to_string(&state)?)
+                .bind(as_i64(state.execution_fence,"execution fence")?).bind(event.agent_session_id.as_ref()).bind(operation_id)
+                .bind(as_i64(prior_revision,"pause revision")?).bind(as_i64(prior_fence,"execution fence")?).execute(&mut **tx).await?;
+            if changed.rows_affected() != 1 { return Err(SessionStoreError::ExecutionFenced); }
+        }
+        "turn/resume-authorized" => {
+            let budget: nomifun_agent_contracts::NativeExecutionBudget = serde_json::from_value(payload.get("budget").cloned().ok_or_else(|| SessionStoreError::InvalidEvent("resume budget missing".into()))?)?;
+            budget.validate().map_err(|error| SessionStoreError::InvalidEvent(error.into()))?;
+            let pause_revision = payload.get("pause_revision").and_then(Value::as_u64).ok_or_else(|| SessionStoreError::InvalidEvent("resume pause revision missing".into()))?;
+            let changed = sqlx::query("UPDATE agent_turns SET native_pause_json=NULL,native_pause_requested_json=NULL,native_budget_json=?,execution_lease_until=0,execution_generation=? WHERE session_id=? AND operation_id=? AND state='running' AND terminal_event_id IS NULL AND native_pause_json IS NOT NULL AND native_pause_revision=?")
+                .bind(serde_json::to_string(&budget)?).bind(as_i64(event.seq,"resume generation")?).bind(event.agent_session_id.as_ref()).bind(operation_id)
+                .bind(as_i64(pause_revision,"pause revision")?).execute(&mut **tx).await?;
+            if changed.rows_affected() != 1 { return Err(SessionStoreError::ExecutionFenced); }
+        }
         "turn/started" => {
             let source_message_id = payload
                 .get("source_message_id")
@@ -4437,8 +4601,8 @@ async fn project_turn_fact_tx(
                 "INSERT INTO agent_turns (\
                     session_id, turn_id, operation_id, idempotency_key, source_message_id, \
                     admission_json, state, result_json, error_json, started_event_id, \
-                    terminal_event_id, accepted_at, started_at, finished_at\
-                 ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?, ?, NULL)",
+                    terminal_event_id, accepted_at, started_at, finished_at, execution_lease_until\
+                 ) VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, NULL, ?, NULL, ?, ?, NULL, ?)",
             )
             .bind(event.agent_session_id.as_ref())
             .bind(operation_id)
@@ -4449,6 +4613,7 @@ async fn project_turn_fact_tx(
             .bind(event.event_id.as_ref())
             .bind(as_i64(event.seq, "turn accepted sequence")?)
             .bind(as_i64(event.seq, "turn started sequence")?)
+            .bind(wall_clock_now_ms().saturating_add(NATIVE_EXECUTION_LEASE_MS))
             .execute(&mut **tx)
             .await?;
         }
@@ -4467,7 +4632,7 @@ async fn project_turn_fact_tx(
             };
             let result = sqlx::query(
                 "UPDATE agent_turns SET state = ?, result_json = ?, error_json = ?, \
-                    terminal_event_id = ?, finished_at = ? \
+                    terminal_event_id = ?, finished_at = ?, native_pause_json = NULL, native_pause_requested_json = NULL \
                  WHERE session_id = ? AND operation_id = ? AND state = 'running'",
             )
             .bind(state)
@@ -4483,6 +4648,13 @@ async fn project_turn_fact_tx(
                 return Err(SessionStoreError::Conflict(format!(
                     "canonical Agent Turn {operation_id} was not running"
                 )));
+            }
+            // Failure/restart retains the latest progress for recovery and
+            // diagnosis, without reopening its immutable terminal. Completed
+            // and cancelled work must not leave an executable resume candidate.
+            if matches!(state, "completed" | "cancelled") {
+                sqlx::query("UPDATE agent_turns SET native_checkpoint_json = NULL, native_checkpoint_digest = NULL, native_checkpoint_seq = NULL WHERE session_id = ? AND operation_id = ?")
+                    .bind(event.agent_session_id.as_ref()).bind(operation_id).execute(&mut **tx).await?;
             }
         }
         _ => {}
@@ -5313,9 +5485,10 @@ async fn insert_payload_tx(
     .fetch_one(&mut **tx)
     .await?;
     let projected_total = as_u64(total, "payload budget")?.saturating_add(payload.byte_len);
-    if projected_total > MAX_SESSION_PAYLOAD_BYTES {
+    let capacity = native_pause::native_payload_capacity_tx(tx, &payload.agent_session_id).await?;
+    if projected_total > capacity {
         return Err(SessionStoreError::InvalidPayload(format!(
-            "session payload budget exceeds {MAX_SESSION_PAYLOAD_BYTES} bytes"
+            "session payload budget exceeds its authorized {capacity} bytes"
         )));
     }
 
@@ -5689,12 +5862,23 @@ async fn validate_effect_transition_tx(
                     .get("recovery")
                     .and_then(Value::as_str);
                 if append.producer_id.as_ref() != "runtime_supervisor"
-                    || recovery != Some("process_restart_external_reconciliation_required")
+                    || !matches!(recovery,Some("process_restart_external_reconciliation_required"|"native_owner_verified_reconciliation"))
                 {
                     return Err(SessionStoreError::InvalidEvent(
                         "managed effects require process-restart proof before becoming uncertain"
                             .to_owned(),
                     ));
+                }
+            }
+            if terminal_kind == "effect/uncertain" && effect_payload_from_append(append)?.get("recovery").and_then(Value::as_str) == Some("native_owner_verified_reconciliation") {
+                let payload = effect_payload_from_append(append)?;
+                let id = payload.get("reconciliation_event_id").and_then(Value::as_str).ok_or_else(||SessionStoreError::InvalidEvent("owner verification audit missing".into()))?;
+                let audit = event_by_event_id_tx(tx,id).await?.ok_or_else(||SessionStoreError::InvalidEvent("owner verification audit missing".into()))?;
+                let audit = event_from_row(audit)?;
+                let evidence = payload_value_for_event_tx(tx,&audit).await?;
+                if append.producer_id.as_ref() != "runtime_supervisor" || audit.kind.0 != "runtime/effect-reconciliation-attested" || audit.agent_session_id != append.agent_session_id
+                    || evidence.get("effect_id") != payload.get("effect_id") || evidence.get("input_digest") != payload.get("input_digest") {
+                    return Err(SessionStoreError::InvalidEvent("owner verification audit targets another effect".into()));
                 }
             }
             Ok(())
@@ -5714,8 +5898,8 @@ async fn validate_effect_transition_tx(
                 let terminal_payload = effect_payload_from_event(
                     terminal.expect("reconciled effect has uncertain terminal"),
                 )?;
-                if terminal_payload.get("recovery").and_then(Value::as_str)
-                    != Some("process_restart_external_reconciliation_required")
+                if !matches!(terminal_payload.get("recovery").and_then(Value::as_str),
+                    Some("process_restart_external_reconciliation_required"|"native_owner_verified_reconciliation"))
                 {
                     return Err(SessionStoreError::InvalidEvent(
                         "managed effect reconciliation requires a process-restart uncertainty"

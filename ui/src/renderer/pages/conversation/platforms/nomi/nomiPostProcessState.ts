@@ -336,6 +336,14 @@ export const shouldHandleNomiTerminalPostProcess = (
     isAssociated: (messageId: string | undefined, turnId?: string) => boolean;
   }
 ): boolean => {
+  // Pausing closes only this stream generation. It must never synthesize a
+  // completed reply, including when backend final-text metadata is present.
+  if (
+    message.type === 'finish' && message.data &&
+    typeof message.data === 'object' && !Array.isArray(message.data) &&
+    (message.data as Record<string, unknown>).stop_reason === 'paused'
+  ) return false;
+
   // The marker is a terminal-only contract. Treat a malformed ordinary frame
   // carrying it as projection-only rather than allowing it to suppress or
   // discard a local fallback request.

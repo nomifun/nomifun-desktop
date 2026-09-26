@@ -281,6 +281,10 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let outputs = BTreeMap::from([
         (
+            "agent-store-migration-manifest.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(nomifun_agent_contracts::agent_store_schema_manifest_payload())?)?,
+        ),
+        (
             "schemas.json".to_owned(),
             pretty_json(&schemas)?,
         ),

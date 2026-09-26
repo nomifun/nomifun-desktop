@@ -10,6 +10,11 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[path = "native_turn_recovery.rs"]
+mod native_turn_recovery;
+#[path = "native_execution_control.rs"]
+mod native_execution_control;
+
 use async_trait::async_trait;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -125,6 +130,7 @@ use uuid::Uuid;
 pub(crate) struct NomiCoreSessionOwner {
     official_runtime: std::sync::OnceLock<Arc<super::official_runtime::OfficialRuntimeHost>>,
     runtime_control_plane: std::sync::OnceLock<std::sync::Weak<AgentControlPlane>>,
+    native_engines: std::sync::OnceLock<std::sync::Weak<super::engine_session_host::EngineSessionHost>>,
     product_agent_resolver:
         std::sync::OnceLock<std::sync::Weak<NomiCoreProductAgentResolver>>,
     idmm: std::sync::OnceLock<std::sync::Weak<nomifun_idmm::IdmmService>>,
@@ -636,6 +642,7 @@ impl NomiCoreSessionOwner {
             canonical,
             official_runtime: std::sync::OnceLock::new(),
             runtime_control_plane: std::sync::OnceLock::new(),
+            native_engines: std::sync::OnceLock::new(),
             product_agent_resolver: std::sync::OnceLock::new(),
             idmm: std::sync::OnceLock::new(),
             runtime_sessions,
@@ -1442,7 +1449,7 @@ impl NomiCoreSessionOwner {
         );
         let error = AgentSendError::from_app_error(AppError::Conflict(message.to_owned()))
             .into_stream_error();
-        self.canonical
+        let result = self.canonical
             .store()
             .append_turn_terminal(
                 &nomifun_agent_contracts::SessionEventAppend {
@@ -1475,39 +1482,20 @@ impl NomiCoreSessionOwner {
                 },
                 operation_id,
             )
-            .await
-            .map_err(agent_session_store_error)?;
+            .await;
+        match result {
+            Ok(_) | Err(nomifun_agent_session::SessionStoreError::ExecutionLeaseActive) => {},
+            Err(error) => return Err(agent_session_store_error(error)),
+        }
         Ok(())
     }
 
     /// A process restart cannot retain an in-memory Runtime owner. Reconcile
     /// every durable running Turn before publishing routes so the Session is
     /// immediately usable again instead of remaining permanently busy.
-    pub(crate) async fn reconcile_orphaned_active_turns(&self) -> Result<usize, AppError> {
-        let rows = sqlx::query_as::<_, (String, String)>(
-            "SELECT head.session_id, head.active_turn_id \
-             FROM agent_session_heads head \
-             JOIN agent_sessions session ON session.agent_session_id = head.session_id \
-             WHERE session.state = 'live' AND head.status = 'running' \
-               AND head.active_turn_id IS NOT NULL",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| AppError::Internal(error.to_string()))?;
-        let mut reconciled = 0;
-        for (session_id, operation_id) in rows {
-            if self.runtime_sessions.get_runtime(&session_id).is_some() {
-                continue;
-            }
-            self.settle_dispatch_failure(
-                &AgentSessionId::from(session_id),
-                &OperationId::from(operation_id),
-                "Runtime owner was not recoverable after restart",
-            )
-            .await?;
-            reconciled += 1;
-        }
-        Ok(reconciled)
+    pub(crate) async fn reconcile_orphaned_active_turns(self: &Arc<Self>, engine_sessions: Arc<super::engine_session_host::EngineSessionHost>) -> Result<usize, AppError> {
+        let _ = self.native_engines.set(Arc::downgrade(&engine_sessions));
+        self.schedule_native_recovery(engine_sessions).await
     }
 
     /// Allocate one renderer-stream segment for the assistant side of an exact
@@ -1574,6 +1562,14 @@ impl NomiCoreSessionOwner {
         root_message_id: &str,
         terminal: &AgentStreamEvent,
     ) -> WebSocketMessage<Value> {
+        if matches!(terminal, AgentStreamEvent::Finish(data) if data.stop_reason == Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused)) {
+            return WebSocketMessage::new("turn.paused",json!({
+                "conversation_id":session_id,"turn_id":root_message_id,"status":"paused","execution_phase":"paused",
+                "state":"ai_waiting_input","detail":"Execution paused; owner authorization is required to continue.","can_send_message":false,
+                "runtime":{"state":"idle","execution_phase":"paused","can_send_message":false,"has_runtime":true,
+                    "runtime_status":"finished","is_processing":false,"active_turn_id":root_message_id},
+            }));
+        }
         let (state, detail) = match terminal {
             AgentStreamEvent::Error(error) => ("error", error.message.as_str()),
             _ => ("ai_waiting_input", ""),
@@ -1659,12 +1655,14 @@ impl NomiCoreSessionOwner {
         root_message_id: String,
         assistant_message_id: String,
         turn_generation: u64,
+        operation_id: OperationId,
         cancellation: tokio_util::sync::CancellationToken,
         mut events: broadcast::Receiver<AgentStreamEvent>,
     ) {
         let sink = self.user_events.clone();
         let runtimes = self.runtime_sessions.clone();
         let relay_session_id = session_id.clone();
+        let store = self.canonical.store().clone();
         let task = async move {
             loop {
                 let event = tokio::select! {
@@ -1686,6 +1684,12 @@ impl NomiCoreSessionOwner {
                     event,
                     AgentStreamEvent::Finish(_) | AgentStreamEvent::Error(_)
                 );
+                if terminal {
+                    // A fenced old driver may emit a local error after a new
+                    // producer owns the Turn. Only a matching canonical
+                    // terminal may close the product stream.
+                    if !Self::canonical_stream_terminal_agrees(&store, &session_id, &operation_id, turn_generation, &event).await { break; }
+                }
                 if let Some(message) = Self::canonical_stream_wire_event(
                     &session_id,
                     &root_message_id,
@@ -1722,6 +1726,25 @@ impl NomiCoreSessionOwner {
                 agent_session_id = relay_session_id.as_ref(),
                 "canonical stream relay rejected during shutdown"
             );
+        }
+    }
+
+    async fn canonical_stream_terminal_agrees(
+        store: &nomifun_agent_session::AgentSessionStore, session: &AgentSessionId,
+        operation: &OperationId, generation: u64, event: &AgentStreamEvent,
+    ) -> bool {
+        // Read state and generation from one snapshot. An old relay must not
+        // borrow a later generation's pause OR terminal for the same Turn.
+        let state = match store.native_execution_notification_state(session, operation, generation).await {
+            Ok(Some(state)) => state, _ => return false,
+        };
+        if matches!(event, AgentStreamEvent::Finish(data) if data.stop_reason == Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused)) {
+            return state == "paused";
+        }
+        match event {
+            AgentStreamEvent::Error(_) => state == "failed",
+            AgentStreamEvent::Finish(_) => matches!(state.as_str(), "completed" | "cancelled" | "interrupted"),
+            _ => false,
         }
     }
 
@@ -1846,6 +1869,7 @@ impl NomiCoreSessionOwner {
             root_message_id.clone(),
             assistant_message_id,
             generation,
+            operation_id.clone(),
             relay_cancellation.clone(),
             events,
         );
@@ -3265,6 +3289,12 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                     request.agent_session_id.as_ref(),
                     &request.idempotency_key,
                 );
+                if self.canonical.store().has_native_execution_owner(&request.agent_session_id, &operation)
+                    .await.map_err(agent_session_store_error)? {
+                    // Startup recovery, not Cron, owns leased native orphans.
+                    // Do not race its takeover while a Runtime is attaching.
+                    return Ok(nomifun_cron::CronTurnReconciliation::LiveExactOwnerWait);
+                }
                 self.settle_dispatch_failure(
                     &request.agent_session_id,
                     &operation,
@@ -4159,7 +4189,7 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                 .steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
                     receipt_operation_id: receipt.event_id.as_ref().to_owned(),
                     wire_turn_id: root,
-                    turn_generation: started.seq,
+                    turn_generation: self.canonical.store().native_execution_generation(&session_id, &receipt.target_operation_id).await.map_err(agent_session_store_error)?,
                     text: request.content,
                     files: request.files,
                     inject_skills: request.inject_skills,
@@ -4878,6 +4908,7 @@ fn canonical_conversation_response(
         Value::Bool(is_temporary_workspace),
     );
     extra.remove("temp_workspace_id");
+    extra.insert("execution_phase".to_owned(),Value::String(head.status.clone()));
     if is_temporary_workspace {
         extra.insert(
             "temp_workspace_id".to_owned(),
@@ -4911,7 +4942,10 @@ fn canonical_conversation_response(
     )
     .map_err(|error| AppError::Conflict(error.message))?;
     let status = match head.status.as_str() {
-        "running" => ConversationStatus::Running,
+        // The compatibility aggregate remains nonterminal while canonical
+        // ownership is paused or awaiting reconciliation. Otherwise desktop
+        // queue reconciliation interprets Finished as permission to dispatch.
+        "running" | "paused" | "reconciliation" => ConversationStatus::Running,
         "failed" | "open_failed" => ConversationStatus::Finished,
         "opening" => ConversationStatus::Pending,
         _ => ConversationStatus::Finished,
@@ -4938,7 +4972,7 @@ fn canonical_conversation_response(
         } else {
             ConversationRuntimeStateKind::Idle
         },
-        can_send_message: head.status != "running",
+        can_send_message: head.active_turn_id.is_none(),
         has_runtime: head.status == "running",
         runtime_status: Some(status),
         is_processing: head.status == "running",
@@ -7496,6 +7530,14 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             "/api/agent-sessions/{agent_session_id}/projection",
             get(get_nomi_core_agent_session_projection),
         )
+        .route(
+            "/api/agent-sessions/{agent_session_id}/execution",
+            get(get_nomi_core_agent_session_execution),
+        )
+        .route("/api/agent-sessions/{agent_session_id}/execution/pause", post(native_execution_control::pause))
+        .route("/api/agent-sessions/{agent_session_id}/execution/resume", post(native_execution_control::resume))
+        .route("/api/agent-sessions/{agent_session_id}/execution/effects", get(native_execution_control::effects))
+        .route("/api/agent-sessions/{agent_session_id}/execution/reconcile", post(native_execution_control::reconcile))
         .route(
             "/api/agent-sessions/{agent_session_id}/message-history",
             get(get_nomi_core_agent_session_message_history),
@@ -12016,6 +12058,18 @@ async fn get_nomi_core_agent_session(
     Ok(Json(ApiResponse::ok(observation)))
 }
 
+async fn get_nomi_core_agent_session_execution(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+) -> Result<Json<ApiResponse<Option<nomifun_agent_session::NativeExecutionInspection>>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let inspection = state.session_owner.canonical().store()
+        .inspect_latest_native_execution(&authenticated_principal(&owner), &session_id)
+        .await.map_err(agent_session_store_error)?;
+    Ok(Json(ApiResponse::ok(inspection)))
+}
+
 async fn get_nomi_core_agent_session_projection(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -13491,7 +13545,7 @@ async fn steer_nomi_core_agent_session_turn(
             .steer_with_receipt(nomifun_ai_agent::RuntimeSteerDelivery {
                 receipt_operation_id: receipt.event_id.as_ref().to_owned(),
                 wire_turn_id: root,
-                turn_generation: started.seq,
+                turn_generation: state.session_owner.canonical.store().native_execution_generation(&session_id, &receipt.target_operation_id).await.map_err(agent_session_store_error)?,
                 text: turn.content,
                 files: turn.files,
                 inject_skills: turn.inject_skills,

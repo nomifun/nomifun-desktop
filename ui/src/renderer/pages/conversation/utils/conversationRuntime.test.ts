@@ -41,6 +41,15 @@ describe('conversation runtime authority', () => {
     expect(isConversationProcessing(exact)).toBe(true);
   });
 
+  test('a paused canonical turn never grants idle authority to the command queue', () => {
+    const snapshot = {
+      status: 'running', extra: { execution_phase: 'paused' },
+      runtime: { state: 'running', has_runtime: true, is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } satisfies Pick<TChatConversation, 'status' | 'runtime'> & { extra: { execution_phase: 'paused' } };
+    expect(getConversationRuntimeAuthority(snapshot)).toBe('unknown');
+    expect(isConversationProcessing(snapshot)).toBe(false);
+  });
+
   test('Pending is idle only when no processing projection exists', () => {
     expect(
       getConversationRuntimeAuthority({

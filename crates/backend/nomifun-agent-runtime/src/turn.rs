@@ -32,6 +32,9 @@ pub struct AgentTurnRequest {
     /// The runtime loop never changes it or the admitted tool plan.
     pub active_set_generation: u64,
     pub max_model_steps: u16,
+    /// Optional host policy. Without it the legacy explicit step cap remains
+    /// a hard Turn limit; automatic renewal requires a durable event sink.
+    pub segment_policy: Option<crate::AgentSegmentPolicy>,
     pub model_budget: crate::AgentModelBudget,
     pub context_resources: Arc<BTreeMap<String, crate::AgentContextResource>>,
     /// Host-admitted for this turn; false unless both vision authority and the
@@ -47,6 +50,7 @@ pub struct AgentTurnRequest {
     pub prior_task: Option<crate::AgentPriorTask>,
     /// Host-loaded permanent engine state, independent of the history window.
     pub patch_recovery: crate::AgentPatchRecoveryState,
+    pub recovery: Option<Arc<crate::AgentTurnRecovery>>,
 }
 
 impl AgentTurnRequest {
@@ -68,6 +72,7 @@ impl AgentTurnRequest {
             principal,
             active_set_generation,
             max_model_steps: if coding_workflow { CODING_MAX_MODEL_STEPS } else { DEFAULT_MAX_MODEL_STEPS },
+            segment_policy: None,
             model_budget: crate::AgentModelBudget::default(),
             context_resources: Arc::default(),
             context_image_input: false,
@@ -78,11 +83,17 @@ impl AgentTurnRequest {
             history_port: None,
             prior_task: None,
             patch_recovery: Default::default(),
+            recovery: None,
         }
     }
 
     pub fn with_max_model_steps(mut self, max_model_steps: u16) -> Self {
         self.max_model_steps = max_model_steps;
+        self
+    }
+
+    pub fn with_execution_segments(mut self, policy: crate::AgentSegmentPolicy) -> Self {
+        self.segment_policy = Some(policy);
         self
     }
 
@@ -108,6 +119,12 @@ impl AgentTurnRequest {
 
     pub fn with_patch_recovery(mut self, state: crate::AgentPatchRecoveryState) -> Self {
         self.patch_recovery = state;
+        self
+    }
+
+    pub fn with_recovery(mut self, recovery: crate::AgentTurnRecovery) -> Self {
+        self.recovery = Some(Arc::new(recovery));
+        self.prior_task = None;
         self
     }
 
@@ -148,6 +165,7 @@ impl AgentTurnRequest {
                 "max_model_steps must be greater than zero".to_owned(),
             ));
         }
+        if let Some(policy) = self.segment_policy { policy.validate(self.max_model_steps)?; }
         if self.model_request.causality.agent_session_id.as_ref().is_empty() {
             return Err(AgentEngineError::InvalidContract(
                 "model request must identify an AgentSession".to_owned(),
@@ -174,6 +192,14 @@ impl AgentTurnRequest {
             prior.validate_for(binding, self.model_request.causality.turn_operation_id.as_ref())?;
         }
         self.patch_recovery.validate()?;
+        if let Some(recovery) = &self.recovery {
+            recovery.validate_for(binding, &self.model_request.causality.turn_operation_id, self.active_set_generation)?;
+            if let Some(segments) = &recovery.checkpoint.segments {
+                if self.segment_policy != Some(segments.policy) || self.max_model_steps != segments.model_steps_per_segment {
+                    return Err(AgentEngineError::InvalidContract("recovery cannot change its admitted execution budget".into()));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -182,6 +208,7 @@ impl AgentTurnRequest {
 pub enum AgentTurnTerminal {
     Completed { finish_reason: ChatFinishReason },
     Cancelled,
+    Paused { reason: String },
     Failed { message: String },
 }
 
@@ -207,21 +234,70 @@ pub(crate) async fn run_turn(
     cancellation: CancellationToken,
 ) -> Result<AgentTurnResult, AgentEngineError> {
     request.validate_for(&binding)?;
+    let recovery = request.recovery.take();
+    if request.segment_policy.is_some() && !event_sink.supports_checkpoints() {
+        return Err(AgentEngineError::InvalidContract("execution segments require durable checkpoints".into()));
+    }
+    let mut segments = match recovery.as_ref().and_then(|state| state.checkpoint.segments.clone()) {
+        Some(state) => Some(state),
+        None => request.segment_policy.map(|policy| crate::AgentExecutionSegmentState::new(request.max_model_steps, policy)).transpose()?,
+    };
+    let total_model_limit = segments.as_ref().map_or(request.max_model_steps, |state| state.total_model_limit());
+    let requirement = request.model_request.input.messages.last().cloned()
+        .ok_or_else(|| AgentEngineError::ContextAssembly("missing accepted requirement".into()))?;
+    if let Some(recovery) = &recovery {
+        request.model_request.input.messages.pop();
+        crate::history::replay_checkpoint_prefix(&mut request.model_request.input.messages, requirement.clone(), recovery)?;
+        request.model_request.input.messages.push(crate::recovery::notice());
+        request.model_request.input.provider_round_parent = None;
+        let mut targets = request.patch_recovery.targets.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        targets.extend(recovery.checkpoint.patch_recovery.targets.iter().cloned());
+        request.patch_recovery.target_budget_exceeded |= recovery.checkpoint.patch_recovery.target_budget_exceeded || targets.len() > 64;
+        request.patch_recovery.targets = targets.into_iter().take(64).collect();
+    }
     request.model_budget = request.model_budget.for_request(request.model_request.input.max_output_tokens)?;
     let mut context_lifecycle = crate::context_lifecycle::ContextLifecycle::new(request.model_budget, context_budget)?;
+    if let Some(recovery) = &recovery {
+        context_lifecycle.restore_accounting(recovery.prefix.iter().chain(&recovery.tail))?;
+    }
 
     // Emit the root first so instruction reads have durable turn authority.
-    event_sink.emit(AgentEngineEvent::TurnStarted {
-        binding: binding.clone(),
-        turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
-    }).await?;
+    if let Some(recovery) = &recovery {
+        event_sink.emit(AgentEngineEvent::ExecutionResumed {
+            checkpoint_revision: recovery.checkpoint_revision, checkpoint_step: recovery.checkpoint.model_steps,
+            model_steps: recovery.last_model_step, execution_fence: recovery.execution_fence,
+            discarded_tool_call_ids: recovery.discarded_call_ids.clone(),
+        }).await?;
+    } else {
+        event_sink.emit(AgentEngineEvent::TurnStarted {
+            binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
+        }).await?;
+    }
+    // Establish an empty/recovered boundary before preparation can issue
+    // instruction reads or compaction. A claim followed by a setup crash
+    // must not depend on eventually reaching the first model request.
+    if event_sink.supports_checkpoints() && !cancellation.is_cancelled() {
+        let mut initial = recovery.as_ref().map(|state| state.checkpoint.clone()).unwrap_or_else(|| crate::AgentExecutionCheckpoint {
+            version: 1, binding: binding.clone(), turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
+            active_set_generation: request.active_set_generation, model_steps: 0, tool_call_count: 0,
+            accepted_input_count: 1, applied_steering_receipts: Vec::new(), plan: Default::default(), work: Default::default(),
+            patch_recovery: request.patch_recovery.clone(), segments: segments.clone(), control_rejections: Default::default(),
+        });
+        if let Some(recovery) = &recovery { initial.model_steps = recovery.last_model_step; }
+        initial.validate()?;
+        event_sink.save_checkpoint(initial).await?;
+    }
     event_sink.emit(AgentEngineEvent::ExecutionBudgetPrepared {
         context_window_tokens: request.model_budget.context_window_tokens,
         max_output_tokens: request.model_budget.max_output_tokens,
-        max_model_steps: request.max_model_steps,
+        max_model_steps: total_model_limit,
     }).await?;
-    let mut adaptive = crate::adaptive::AdaptiveExecution::default();
+    let mut adaptive = recovery.as_ref().map(|recovery| crate::adaptive::AdaptiveExecution::restore(&recovery.prefix, &request.tool_plan)).unwrap_or_default();
+    if recovery.as_ref().is_some_and(|recovery| recovery.checkpoint.tool_call_count > 0 || recovery.checkpoint.plan.revision > 0) {
+        adaptive.activate(crate::adaptive::LONG_HORIZON_MODULES, crate::AgentRuntimeActivationReason::CheckpointRecovery, event_sink.as_ref()).await?;
+    }
     let mut scoped_instructions = crate::workspace_context::ScopedInstructions::new(&request);
+    if let Some(recovery) = &recovery { scoped_instructions.restore_sequence(recovery.next_instruction_sequence); }
     let mut patch_recovery = crate::patch_recovery::PatchRecovery::restore(&request.patch_recovery)?;
     if request.prior_task.is_some() {
         adaptive
@@ -249,7 +325,12 @@ pub(crate) async fn run_turn(
         .instructions
         .insert(0, crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.into());
     model_request.input.max_output_tokens = Some(request.model_budget.max_output_tokens);
-    model_request.input.instructions.push(request.model_budget.execution_context(request.max_model_steps));
+    model_request.input.instructions.push(request.model_budget.execution_context(total_model_limit));
+    let segment_context_slot = segments.as_ref().map(|state| {
+        let slot = model_request.input.instructions.len();
+        model_request.input.instructions.push(state.context(recovery.as_ref().map_or(0, |state| state.last_model_step)));
+        slot
+    });
     let requested_tool_choice = model_request.input.tool_choice.clone();
     if let Some(prior) = &request.prior_task {
         model_request.input.instructions.push(prior.context()?);
@@ -259,7 +340,7 @@ pub(crate) async fn run_turn(
     }
     let agent_session_id = model_request.causality.agent_session_id.clone();
     let turn_operation_id = model_request.causality.turn_operation_id.clone();
-    let tool_archive_scope = serde_json::json!([agent_session_id, turn_operation_id]).to_string();
+    let tool_archive_scope = serde_json::json!([agent_session_id, turn_operation_id, recovery.as_ref().map(|state| state.execution_fence)]).to_string();
     let mut tool_archive = adaptive
         .tool_history()
         .then(|| crate::tool_archive::ToolArchive::new(tool_archive_scope.clone()));
@@ -268,13 +349,39 @@ pub(crate) async fn run_turn(
     // The host supplies canonical facts; the engine selects its model context.
     // Do this only at turn entry: trimming individual messages inside an active
     // tool cycle would break call/result pairing or discard the accepted input.
-    let requirement = model_request.input.messages.last().cloned()
-        .ok_or_else(|| AgentEngineError::ContextAssembly("missing accepted requirement".into()))?;
     let mut retained_inputs = vec![requirement.clone()];
     let mut steering_receipts = std::collections::BTreeSet::new();
+    let mut steering_receipt_order = Vec::new();
     // Compact before the resource assembler would discard entire old turns.
     // Repository instructions are retained independently, never summarized away.
     let mut long_horizon = adaptive.task_ledger().then(LongHorizonState::default);
+    if let Some(recovery) = &recovery {
+        retained_inputs.extend(recovery.applied_inputs.iter().cloned());
+        steering_receipt_order = recovery.checkpoint.applied_steering_receipts.iter().map(|id| id.as_ref().to_owned()).collect();
+        steering_receipts.extend(steering_receipt_order.iter().cloned());
+        let mut work = recovery.checkpoint.work.clone();
+        work.workspace_observation_epoch = work.workspace_observation_epoch.checked_add(1)
+            .ok_or_else(|| AgentEngineError::InvalidContract("recovered workspace epoch exhausted".into()))?;
+        work.recent_commands.clear(); work.observed_processes.clear();
+        work.command_observed_after_latest_mutation = false;
+        let mut plan = recovery.checkpoint.plan.clone();
+        plan.needs_replan = adaptive.task_ledger();
+        long_horizon = Some(LongHorizonState { execution_plan: plan, work_status: work, ..Default::default() });
+        let mut calls = BTreeMap::new();
+        if let Some(archive) = tool_archive.as_mut() {
+            for event in &recovery.prefix {
+                match event {
+                    AgentEngineEvent::ToolCallCompleted { call, step } if *step > 0 => { calls.insert(call.call_id.clone(), call); }
+                    AgentEngineEvent::ToolCompleted { result, step } | AgentEngineEvent::ToolOutcomeReconciled { result, step, .. } if *step > 0 => {
+                        if let Some(call) = calls.get(&result.call_id) {
+                            archive.record(&call.name, &call.call_id, &call.arguments, &result.output, result.is_error, None, None)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
     let mut adaptive_slots = AdaptiveContextSlots::default();
     let live_context_slot = if let Some(port) = &request.live_context_port {
         let slot = model_request.input.instructions.len();
@@ -304,6 +411,7 @@ pub(crate) async fn run_turn(
         .validate()
         .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
     context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
+    if recovery.is_none() {
     let mut input = model_request.input;
     let current = input.messages.pop().ok_or_else(|| AgentEngineError::ContextAssembly(
         "canonical context has no current message".into(),
@@ -317,17 +425,23 @@ pub(crate) async fn run_turn(
         dropped_history_messages: diagnostics.dropped_history_messages,
         warnings: diagnostics.warnings,
     }).await?;
+    }
 
     let mut output_text = String::new();
     let mut reasoning_text = String::new();
-    let mut model_steps = 0_u16;
-    let mut tool_call_count = 0_u32;
+    let mut model_steps = recovery.as_ref().map_or(0, |state| state.last_model_step);
+    let mut tool_call_count = recovery.as_ref().map_or(0, |state| state.checkpoint.tool_call_count);
     let mut provider_round_id = None;
     let mut completion_review_used = false;
-    let mut control_rejections = ControlRejections::default();
-    let mut admitted_call_ids = std::collections::BTreeSet::new();
+    let mut control_rejections: ControlRejections = recovery.as_ref().map(|state| state.checkpoint.control_rejections.clone()).unwrap_or_default();
+    let mut admitted_call_ids = recovery.as_ref().map(|state| state.reserved_call_ids.clone()).unwrap_or_default();
     let mut stream_budget = crate::stream_limits::StreamBudget::default();
     let mut output_limit_recovery = crate::output_limit::OutputLimitRecovery::default();
+    let mut protocol_recovery = crate::protocol_recovery::ProtocolRecovery::default();
+    if let Some(recovery) = &recovery {
+        output_limit_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
+        protocol_recovery.restore(recovery.prefix.iter().chain(&recovery.tail));
+    }
 
     if cancellation.is_cancelled() {
         return cancelled_turn(
@@ -343,7 +457,7 @@ pub(crate) async fn run_turn(
         .await;
     }
 
-    'model_steps: while model_steps < request.max_model_steps {
+    'model_steps: loop {
         if cancellation.is_cancelled() {
             return cancelled_turn(
                 &event_sink,
@@ -358,12 +472,57 @@ pub(crate) async fn run_turn(
             .await;
         }
 
+        if let Some(current) = segments.as_ref() {
+            let pressure = event_sink.execution_pressure().await?;
+            let due = model_steps >= current.window_end() || pressure.renew_window;
+            let mut stop = pressure.stop;
+            let mut next = None;
+            if stop.is_none() && due {
+                if long_horizon.as_ref().is_some_and(|state| !state.work_status.running_processes.is_empty()) {
+                    stop = Some(crate::AgentExecutionStopReason::NonQuiescentBoundary);
+                } else {
+                    match current.renewed(model_steps) { Ok(state) => next = Some(state), Err(reason) => stop = Some(reason) }
+                }
+            }
+            if due || stop.is_some() {
+                let receipt = persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+                    request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+                    &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, next.as_ref().or(Some(current)), &control_rejections).await?;
+                if stop.is_none() && receipt.is_none() { stop = Some(crate::AgentExecutionStopReason::CheckpointUnavailable); }
+                if let Some(reason) = stop {
+                    event_sink.emit(AgentEngineEvent::ExecutionBudgetExhausted {
+                        model_steps, segment: current.segment, checkpoint_revision: receipt.map(|receipt| receipt.revision), reason,
+                    }).await?;
+                    let reason = reason.code().to_owned();
+                    event_sink.emit(AgentEngineEvent::TurnPaused { model_steps, reason: reason.clone() }).await?;
+                    return Ok(AgentTurnResult { agent_session_id, turn_operation_id, model_steps, output_text, reasoning_text,
+                        tool_call_count, provider_round_id, terminal: AgentTurnTerminal::Paused { reason } });
+                }
+                let next = next.expect("window renewal has a candidate");
+                event_sink.emit(AgentEngineEvent::ExecutionSegmentRenewed {
+                    segment: next.segment, model_steps, checkpoint_revision: receipt.expect("renewal requires durable acknowledgement").revision,
+                    reason: if pressure.renew_window { crate::AgentSegmentReason::JournalWindow } else { crate::AgentSegmentReason::ModelWindow },
+                }).await?;
+                context_lifecycle.begin_segment();
+                stream_budget = Default::default();
+                model_request.input.provider_round_parent = None;
+                segments = Some(next);
+            }
+        }
+        if model_steps >= total_model_limit {
+            return fail_turn(&event_sink, model_steps, format!("model step limit of {} exceeded", total_model_limit)).await;
+        }
+        if let (Some(slot), Some(state)) = (segment_context_slot, segments.as_ref()) {
+            model_request.input.instructions[slot] = state.context(model_steps);
+        }
+
         // This boundary is reached only after the previous batch has settled.
         // Never compact a stream with incomplete tool calls/results.
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, false).await?;
-            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
                 completion_review_used = false;
+                protocol_recovery.observe_new_input();
                 control_rejections.reset();
                 adaptive
                     .activate(
@@ -436,6 +595,9 @@ pub(crate) async fn run_turn(
             &discovered_tools,
             &mut adaptive_slots,
         )?;
+        protocol_recovery.constrain_tool_choice(
+            &mut model_request.input.tool_choice, !model_request.input.tools.is_empty(),
+        );
         context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
         let context_bytes = serde_json::to_vec(&model_request.input)
             .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))?.len();
@@ -443,6 +605,23 @@ pub(crate) async fn run_turn(
             return fail_turn(&event_sink, model_steps,
                 format!("active turn context still exceeds the Nomi byte budget after compaction ({} > {})",
                     context_bytes, context_budget.max_context_bytes)).await;
+        }
+        // Preparation/compaction can itself fill a journal window. Re-enter
+        // the same settled boundary to checkpoint/rotate before spending a
+        // further model request; no model or tool step is replayed here.
+        if segments.is_some() {
+            let pressure = event_sink.execution_pressure().await?;
+            if pressure.renew_window || pressure.stop.is_some() { continue 'model_steps; }
+        }
+        // The preceding batch and context updates have settled. Persist only
+        // quiescent progress; live process handles are never checkpointed as
+        // if they could survive a process restart.
+        persist_execution_checkpoint(event_sink.as_ref(), &binding, &turn_operation_id,
+            request.active_set_generation, model_steps, tool_call_count, retained_inputs.len(),
+            &steering_receipt_order, long_horizon.as_ref(), &patch_recovery, segments.as_ref(), &control_rejections).await?;
+        if cancellation.is_cancelled() {
+            return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
+                model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
         }
         model_steps = model_steps.saturating_add(1);
         let model_operation_id =
@@ -490,7 +669,7 @@ pub(crate) async fn run_turn(
                 .await;
             }
             Err(error) => {
-                if model_steps < request.max_model_steps
+                if model_steps < total_model_limit
                     && context_lifecycle.request_overflow_recovery(&error, false, &model_request.input)?
                 {
                     event_sink.emit(AgentEngineEvent::ContextLimitRecoveryStarted {
@@ -547,7 +726,7 @@ pub(crate) async fn run_turn(
                     .await;
                 }
                 Err(error) => {
-                    if model_steps < request.max_model_steps
+                    if model_steps < total_model_limit
                         && context_lifecycle.request_overflow_recovery(&error, semantic_output_seen, &model_request.input)?
                     {
                         // Release the failed stream before a new model claim.
@@ -584,8 +763,29 @@ pub(crate) async fn run_turn(
                         }).await?;
                     }
                     if visible.invalid_tool_call {
-                        return fail_turn(&event_sink, model_steps,
-                            "model emitted tool-call markup as text instead of a native tool call; no tool from this output was executed").await;
+                        // Stop the actual stream before starting another model
+                        // operation. No model tool batch is admitted until its
+                        // complete native response has passed validation.
+                        drop(stream);
+                        if cancellation.is_cancelled() {
+                            return cancelled_turn(&event_sink, &agent_session_id, &turn_operation_id,
+                                model_steps, &output_text, &reasoning_text, tool_call_count, provider_round_id.clone()).await;
+                        }
+                        let discarded_tool_call_ids = step.call_order.clone();
+                        crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+                        let continuation = protocol_recovery.admit(model_steps < total_model_limit);
+                        event_sink.emit(AgentEngineEvent::ModelResponseRejected {
+                            step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation,
+                        }).await?;
+                        admitted_call_ids.extend(discarded_tool_call_ids);
+                        crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
+                        model_request.input.messages.push(crate::protocol_recovery::notice(continuation));
+                        provider_round_id = None;
+                        if !continuation {
+                            return fail_turn(&event_sink, model_steps,
+                                "model emitted tool-call markup as text after the bounded protocol-correction budget; no tool from the rejected responses was executed").await;
+                        }
+                        continue 'model_steps;
                     }
                 }
                 ChatModelEvent::ReasoningDelta { text } => {
@@ -773,7 +973,7 @@ pub(crate) async fn run_turn(
             // Even complete calls in a truncated batch are NOT executable.
             let discarded_tool_call_ids = step.call_order.clone();
             crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
-            let continuation = output_limit_recovery.admit(model_steps < request.max_model_steps);
+            let continuation = output_limit_recovery.admit(model_steps < total_model_limit);
             event_sink.emit(AgentEngineEvent::ModelOutputTruncated {
                 step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation,
             }).await?;
@@ -791,6 +991,7 @@ pub(crate) async fn run_turn(
         }
         output_limit_recovery.observe_complete_step();
         step.finalize()?;
+        protocol_recovery.observe_valid_step();
         if !step.has_tool_calls() && matches!(finish_reason, ChatFinishReason::ToolCalls) {
             return fail_turn(
                 &event_sink,
@@ -828,7 +1029,7 @@ pub(crate) async fn run_turn(
                     model_request.input.messages.push(ChatMessage { role: ChatRole::Tool,
                         content: vec![ChatContentPart::ToolResult { call_id: result.call_id, output: result.output, is_error: result.is_error }], provider_round_id: None });
                 }
-                crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)?;
+                crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)?;
                 control_rejections.reset();
                 state.execution_plan.needs_replan = true;
                 state.completion.invalidate();
@@ -919,12 +1120,17 @@ pub(crate) async fn run_turn(
 
             append_assistant_step(&mut model_request, &step)?;
             let dispatch = crate::tool_dispatch::ToolDispatchBatch::new(tools.as_ref(), &step.call_order);
+            let plan_revision_before = state.execution_plan.revision;
+            let had_current_report = state.completion.current(
+                &state.execution_plan, &state.work_status, retained_inputs.len(),
+            ).is_some();
             let results = match invoke_tool_calls(
                 &agent_session_id,
                 &request.principal,
                 &model_request,
                 &request.active_set_generation,
                 &request.tool_plan,
+                &mut state.tool_arguments,
                 &dispatch,
                 event_sink.as_ref(),
                 &step,
@@ -973,7 +1179,12 @@ pub(crate) async fn run_turn(
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
-                    if let Some(reason) = control_rejections.observe(&call.name, &result) {
+                    let made_progress = match call.name.as_str() {
+                        crate::planning::TOOL_NAME => state.execution_plan.revision != plan_revision_before,
+                        crate::completion::TOOL_NAME => !had_current_report,
+                        _ => true,
+                    };
+                    if let Some(reason) = control_rejections.observe(&call.name, &result, made_progress) {
                         repeated_control_rejection = Some(reason);
                     }
                 }
@@ -987,6 +1198,7 @@ pub(crate) async fn run_turn(
                             && !result.is_error
                             && crate::execution_policy::completes_turn_on_success(binding);
                         if attempted {
+                            if let Some(segments) = segments.as_mut() { segments.observe(call, &result)?; }
                             state.work_status.observe(
                                 binding,
                                 call,
@@ -1038,9 +1250,25 @@ pub(crate) async fn run_turn(
                         // New observations require a fresh completion account;
                         // the model-step bound limits repeated work/review.
                         completion_review_used = false;
-                        if (result.is_error && !failed_process)
-                            || (failed_process && state.execution_plan.revision == 0) {
+                        if crate::execution_policy::requires_replanning_after_result(
+                            binding, &result, attempted, state.execution_plan.revision,
+                        ) {
                             state.execution_plan.needs_replan = true;
+                            // Expose the recovery control before asking the
+                            // model for another expensive proposed effect.
+                            if crate::execution_policy::requires_task_ledger(binding) {
+                                adaptive.activate(crate::adaptive::LEDGER_MODULES,
+                                    crate::AgentRuntimeActivationReason::EffectfulToolCall,
+                                    event_sink.as_ref()).await?;
+                            }
+                        }
+                    } else if matches!(call.name.as_str(), crate::planning::TOOL_NAME | crate::task_continuation::TOOL_NAME) {
+                        // Idempotent/rejected proposals are not state changes.
+                        // Only a committed plan transition invalidates the
+                        // current report; do not create a plan/report loop.
+                        if state.execution_plan.revision != plan_revision_before {
+                            state.completion.invalidate();
+                            completion_review_used = false;
                         }
                     } else if call.name != crate::completion::TOOL_NAME {
                         // Planning/resource control can change the
@@ -1088,7 +1316,7 @@ pub(crate) async fn run_turn(
             }
             if let Some(reason) = repeated_control_rejection {
                 return fail_turn(&event_sink, model_steps,
-                    format!("engine control repeatedly rejected; {reason}")).await;
+                    format!("engine control made no progress; {reason}")).await;
             }
             if terminal_collaboration_accepted
                 && !adaptive.task_ledger()
@@ -1129,6 +1357,7 @@ pub(crate) async fn run_turn(
                     &mut model_request,
                     &mut retained_inputs,
                     &mut steering_receipts,
+                    &mut steering_receipt_order,
                 )?;
                 control_rejections.reset();
                 completion_review_used = false;
@@ -1170,7 +1399,7 @@ pub(crate) async fn run_turn(
                 )
                 .is_none()
                 && !completion_review_used
-                && model_steps < request.max_model_steps
+                && model_steps < total_model_limit
             {
                 completion_review_used = true;
                 event_sink.emit(AgentEngineEvent::CompletionReview {
@@ -1221,7 +1450,7 @@ pub(crate) async fn run_turn(
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
         if let Some(port) = &request.input_port {
             let inputs = port.take(&model_request.causality, true).await?;
-            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts, &mut steering_receipt_order)? {
                 completion_review_used = false;
                 control_rejections.reset();
                 adaptive
@@ -1270,19 +1499,35 @@ pub(crate) async fn run_turn(
         return Ok(result);
     }
 
-    fail_turn(
-        &event_sink,
-        model_steps,
-        format!(
-            "model step limit of {} exceeded",
-            request.max_model_steps
-        ),
-    )
-    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_execution_checkpoint(
+    sink: &dyn AgentEventSink, binding: &EngineBinding, operation: &OperationId,
+    generation: u64, model_steps: u16, tool_call_count: u32, input_count: usize,
+    steering_receipts: &[String], state: Option<&LongHorizonState>,
+    patch_recovery: &crate::patch_recovery::PatchRecovery,
+    segments: Option<&crate::AgentExecutionSegmentState>,
+    control_rejections: &AgentControlRejectionState,
+) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+    if !sink.supports_checkpoints() { return Ok(None); }
+    let work = state.map(|state| state.work_status.clone()).unwrap_or_default();
+    if !work.running_processes.is_empty() { return Ok(None); }
+    let checkpoint = crate::AgentExecutionCheckpoint {
+        version: 1, binding: binding.clone(), turn_operation_id: operation.clone(),
+        active_set_generation: generation, model_steps, tool_call_count, accepted_input_count: input_count,
+        applied_steering_receipts: steering_receipts.iter().map(|id| OperationId::from(id.clone())).collect(),
+        plan: state.map(|state| state.execution_plan.clone()).unwrap_or_default(),
+        work, patch_recovery: patch_recovery.snapshot(), segments: segments.cloned(),
+        control_rejections: control_rejections.clone(),
+    };
+    checkpoint.validate()?;
+    sink.save_checkpoint(checkpoint).await
 }
 
 #[derive(Default)]
 struct LongHorizonState {
+    tool_arguments: crate::tool_validation::ToolArgumentValidators,
     execution_plan: crate::AgentPlan,
     work_status: crate::AgentWorkStatus,
     completion: crate::completion::CompletionTracker,
@@ -1292,21 +1537,34 @@ struct LongHorizonState {
 /// A weak tool-calling model can keep resubmitting malformed plan/completion
 /// controls. Bound that retry loop before it consumes the context window; the
 /// fourth failure still has its durable result before the turn stops.
-#[derive(Default)]
-struct ControlRejections {
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentControlRejectionState {
     name: String,
     consecutive: u8,
     total: u8,
+    no_progress: u8,
 }
 
-impl ControlRejections {
-    fn reset(&mut self) {
+type ControlRejections = AgentControlRejectionState;
+
+impl AgentControlRejectionState {
+    pub(crate) fn validate(&self) -> Result<(), AgentEngineError> {
+        if !matches!(self.name.as_str(), "" | crate::planning::TOOL_NAME | crate::completion::TOOL_NAME)
+            || self.consecutive > 4 || self.total > 8 || self.no_progress > 4 {
+            return Err(AgentEngineError::InvalidContract("invalid persisted control correction budget".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reset(&mut self) {
         self.name.clear();
         self.consecutive = 0;
         self.total = 0;
+        self.no_progress = 0;
     }
 
-    fn observe(&mut self, name: &str, result: &AgentToolResult) -> Option<String> {
+    pub(crate) fn observe(&mut self, name: &str, result: &AgentToolResult, made_progress: bool) -> Option<String> {
         if result.is_error && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
             self.consecutive = if self.name == name { self.consecutive.saturating_add(1) } else { 1 };
             self.total = self.total.saturating_add(1);
@@ -1324,6 +1582,15 @@ impl ControlRejections {
             self.consecutive = 0;
             return None;
         }
+        if !made_progress && matches!(name, crate::planning::TOOL_NAME | crate::completion::TOOL_NAME) {
+            self.name.clear();
+            self.consecutive = 0;
+            self.no_progress = self.no_progress.saturating_add(1);
+            if self.no_progress >= 4 {
+                return Some("plan/completion controls succeeded idempotently four times without changing task state; no progress was made".into());
+            }
+            return None;
+        }
         self.reset();
         None
     }
@@ -1337,6 +1604,7 @@ struct AdaptiveContextSlots {
     tool_history: Option<usize>,
     task_plan: Option<usize>,
     completion: Option<usize>,
+    discovery_catalog: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1377,10 +1645,30 @@ fn synchronize_adaptive_context(
     } else {
         requested_tool_choice.clone()
     };
+    if tool_discovery {
+        if let Some(catalog) = crate::tool_discovery::catalog(plan, discovered_tools) {
+            upsert_instruction(&mut request.input.instructions, &mut slots.discovery_catalog, catalog);
+        } else if let Some(slot) = slots.discovery_catalog {
+            request.input.instructions[slot] = "All previously deferred tool schemas are now visible.".into();
+        }
+    }
     if adaptive.task_ledger() {
         let state = long_horizon.ok_or_else(|| {
             AgentEngineError::InvalidContract("active task ledger has no turn-local state".into())
         })?;
+        if state.execution_plan.effect_gate().is_some()
+            && !matches!(requested_tool_choice, ChatToolChoice::Specific { .. })
+        {
+            // These tools would be rejected by the existing admission gate.
+            // Keep their frozen bindings, but avoid inviting generation of a
+            // whole file/command payload until the required plan is ready.
+            request.input.tools.retain(|definition| plan.binding(&definition.name).is_none_or(|binding| {
+                matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+                    || !crate::execution_policy::requires_task_ledger(binding)
+                    || matches!(binding.action_id.as_ref(),
+                        "workspace.process/poll" | "workspace.process/cancel" | "workspace.process/close_stdin")
+            }));
+        }
         upsert_instruction(
             &mut request.input.instructions,
             &mut slots.long_horizon_policy,
@@ -1524,6 +1812,7 @@ async fn invoke_tool_calls(
     model_request: &ChatModelRequest,
     active_set_generation: &u64,
     plan: &AgentToolPlan,
+    argument_validators: &mut crate::tool_validation::ToolArgumentValidators,
     invoker: &dyn AgentToolInvoker,
     event_sink: &dyn AgentEventSink,
     step: &StepState,
@@ -1556,13 +1845,19 @@ async fn invoke_tool_calls(
         // admission. No internal control or workspace effect ran.
         // The ordinary result path records all call/result pairs and feeds the
         // error back on the next bounded model step, without transport replay.
-        execution_plan.needs_replan = true;
         completion.invalidate();
         for call in &completed {
             if plan.binding(&call.name).is_none() {
                 work_status.observe_deferred();
             }
         }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if let Some(results) = argument_validators.reject_invalid_batch(&completed, plan, &model_request.input.tools)? {
+        // This precedes instruction discovery, Kernel admission and controls.
+        // All calls receive paired, non-executed results; no successful prefix
+        // can be accidentally repeated when the model repairs the batch.
+        if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
     if completed
@@ -1907,7 +2202,7 @@ async fn invoke_tool_calls(
             crate::execution_policy::failed_process_observation(binding, &recorded.1)
         ) {
             if let Some(call) = patch_call { patch_recovery.failed(&call); }
-            defer_remaining = Some("Not executed: an earlier serial call or command failed. Inspect its result and update_plan before retrying remaining effects.".into());
+            defer_remaining = Some("Not executed: an earlier serial call or command failed. Inspect its result and correct the call before proposing remaining effects again. Replan if scope changed or an attempted effect has an uncertain outcome; read/argument errors alone do not require a new plan.".into());
         } else if patch_call.is_some() {
             patch_recovery.published_successfully();
             patch_recovery.persist(event_sink).await?;
@@ -2327,16 +2622,16 @@ mod tests {
         let failed = AgentToolResult::text("control".into(), "rejected", true);
         for index in 0..7 {
             let name = if index % 2 == 0 { crate::planning::TOOL_NAME } else { crate::completion::TOOL_NAME };
-            assert!(rejections.observe(name, &failed).is_none());
+            assert!(rejections.observe(name, &failed, false).is_none());
             if index == 3 {
-                assert!(rejections.observe("exec_command", &failed).is_none());
+                assert!(rejections.observe("exec_command", &failed, false).is_none());
                 assert_eq!(rejections.total, 4);
             }
         }
-        assert!(rejections.observe(crate::completion::TOOL_NAME, &failed)
+        assert!(rejections.observe(crate::completion::TOOL_NAME, &failed, false)
             .is_some_and(|reason| reason.contains("eight times")));
         let accepted = AgentToolResult::text("control".into(), "accepted", false);
-        assert!(rejections.observe(crate::planning::TOOL_NAME, &accepted).is_none());
+        assert!(rejections.observe(crate::planning::TOOL_NAME, &accepted, true).is_none());
         assert_eq!(rejections.total, 0);
     }
 
@@ -2935,6 +3230,52 @@ mod tests {
         assert!(matches!(&requests[1].input.messages[0].content[0], ChatContentPart::Text { text }
             if text.contains("Derived summary") && text.contains("history-0 through history-7")));
         assert!(serde_json::to_vec(&requests[1].input).unwrap().len() <= budget.max_context_bytes);
+    }
+
+    #[tokio::test]
+    async fn compaction_summarizes_large_older_prefix_once_and_keeps_headroom() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step("Earlier work summarized; current file receipt remains in the retained exchange.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["Stable workspace instructions. ".repeat(650)];
+        let original = request.input.messages[0].clone();
+        let fresh_code = "RECENT_FILE_BYTES".repeat(300);
+        let call = ChatContentPart::ToolCall {
+            call_id: "recent-file".into(), name: "write_file".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"gomoku.html","content":fresh_code})),
+            provider_metadata: None,
+        };
+        request.input.messages.extend([
+            crate::context_lifecycle::text_message(ChatRole::Assistant, "OLDER_HISTORY ".repeat(3300)),
+            ChatMessage { role: ChatRole::Assistant, content: vec![call.clone()], provider_round_id: None },
+            ChatMessage { role: ChatRole::Tool, content: vec![ChatContentPart::ToolResult {
+                call_id: "recent-file".into(), is_error: false,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text { text: "written:true".into() }],
+            }], provider_round_id: None },
+        ]);
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget { max_context_bytes: 256 * 1024, max_history_messages: 256 },
+        ).unwrap();
+        lifecycle.prepare(&mut request, &[original.clone()], &binding(), model.clone(), &NoopAgentEventSink,
+            CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < before * 3 / 4, "compaction must leave useful headroom: {before} -> {after}");
+        assert!(request.input.messages.iter().any(|message| message == &original));
+        assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part| part == &call));
+        let captured = model.requests.lock().unwrap();
+        assert_eq!(captured.len(), 1, "a 4k output envelope must not force tiny serial summary fragments");
+        let source = serde_json::to_string(&captured[0].input.messages).unwrap();
+        assert!(source.contains("OLDER_HISTORY"));
+        assert!(!source.contains("RECENT_FILE_BYTES"), "do not summarize the suffix retained verbatim");
+        drop(captured);
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "small follow-up".repeat(100)));
+        lifecycle.prepare(&mut request, &[original], &binding(), model.clone(), &NoopAgentEventSink,
+            CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1, "no repeat compaction after a small observation");
     }
 
     #[tokio::test]
@@ -3787,6 +4128,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotent_or_rejected_plan_proposals_do_not_invalidate_a_current_completion_report() {
+        for invalid in [false, true] {
+            let mut steps = vec![
+                control_step("inspect-one", "read_file", json!({"path":"a"})),
+                control_step("inspect-two", "read_file", json!({"path":"b"})),
+            ];
+            let mut closing = completion_steps("inspect", &["inspect-two"], true);
+            steps.extend(closing.drain(..2));
+            let mut update = json!({
+                "explanation":"A repeated status update", "plan":[{"step":"requested operations","status":"completed"}]
+            });
+            if invalid {
+                update["plan"] = json!([
+                    {"step":"one","status":"in_progress"},
+                    {"step":"two","status":"in_progress"},
+                ]);
+            }
+            steps.push(control_step("repeated-plan", crate::planning::TOOL_NAME, update));
+            steps.push(text_step("done"));
+            let model = Arc::new(ObservingModel {
+                steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+            });
+            let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+                AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+            ).await.unwrap();
+            assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+            assert_eq!(result.model_steps, 6);
+            assert!(model.requests.lock().unwrap().last().unwrap().input.messages.iter()
+                .flat_map(|message| &message.content).any(|part| matches!(part,
+                    ChatContentPart::ToolResult { call_id, is_error, .. }
+                        if call_id.as_ref() == "repeated-plan" && *is_error == invalid)));
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_plan_success_is_not_counted_as_task_progress_forever() {
+        let mut steps = vec![
+            control_step("inspect-one", "read_file", json!({"path":"a"})),
+            control_step("inspect-two", "read_file", json!({"path":"b"})),
+            plan_step("in_progress", "inspect"),
+        ];
+        for index in 0..4 {
+            steps.push(control_step(&format!("noop-{index}"), crate::planning::TOOL_NAME, json!({
+                "explanation":"No change", "plan":[{"step":"requested operations","status":"in_progress"}]
+            })));
+        }
+        steps.push(text_step("must not be requested"));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let error = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+        ).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::TurnFailed(message) if message.contains("succeeded idempotently")));
+        assert_eq!(model.requests.lock().unwrap().len(), 7);
+        assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    struct RecoverableReadTool { writes: AtomicUsize }
+
+    #[async_trait]
+    impl AgentToolInvoker for RecoverableReadTool {
+        async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+            if invocation.call.call_id.as_ref() == "recoverable-read" {
+                return Ok(AgentToolResult::text(invocation.call.call_id, "The optional file was not found", true));
+            }
+            if invocation.binding.action_id.as_ref() == "workspace.files/write" {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(instruction_result(&invocation).unwrap_or_else(|| workspace_result(invocation)))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_can_be_corrected_inside_the_existing_plan() {
+        let mut steps = vec![
+            control_step("inspect-one", "read_file", json!({"path":"a"})),
+            control_step("inspect-two", "read_file", json!({"path":"b"})),
+            plan_step("in_progress", "inspect"),
+            control_step("recoverable-read", "read_file", json!({"path":"a"})),
+            control_step("write", "write_file", json!({"path":"a", "content":"fixed"})),
+            control_step("verify", "read_file", json!({"path":"a"})),
+        ];
+        steps.extend(completion_steps("inspect", &["verify"], true));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+        ).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(result.model_steps, 9);
+    }
+
+    #[tokio::test]
+    async fn invalid_arguments_hold_the_whole_effect_batch_until_the_model_repairs_it() {
+        let batch = |first: &str, second: &str, second_path: serde_json::Value| vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: first.into(), name: "write_file".into(), provider_metadata: None,
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a","content":"fixed"})),
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: second.into(), name: "write_file".into(), provider_metadata: None,
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":second_path,"content":"fixed"})),
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ];
+        let mut steps = vec![
+            control_step("inspect-one", "read_file", json!({"path":"a"})),
+            control_step("inspect-two", "read_file", json!({"path":"b"})),
+            plan_step("in_progress", "inspect"),
+            batch("held-valid", "held-invalid", json!(42)),
+            batch("corrected-one", "corrected-two", json!("b")),
+            control_step("verify", "read_file", json!({"path":"a"})),
+        ];
+        steps.extend(completion_steps("inspect", &["verify"], true));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+        ).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 2, "the valid prefix of the rejected batch must not execute");
+        let requests = model.requests.lock().unwrap();
+        for id in ["held-valid", "held-invalid"] {
+            assert!(requests[4].input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolResult { call_id, is_error: true, .. } if call_id.as_ref() == id)));
+        }
+        assert_eq!(result.model_steps, 9, "argument repair must not require a spurious plan exchange");
+    }
+
+    #[tokio::test]
     async fn repeated_invalid_completion_reports_stop_before_compaction() {
         let quote = "inspect";
         let reads = vec![
@@ -3820,9 +4297,302 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, AgentEngineError::TurnFailed(message)
-            if message.starts_with("engine control repeatedly rejected; report_completion")));
+            if message.starts_with("engine control made no progress; report_completion")));
         assert_eq!(model.requests.lock().unwrap().len(), 6);
         assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn recovered_turn_does_not_repeat_a_completed_write_or_execute_the_abandoned_model_batch() {
+        #[derive(Default)]
+        struct Journal {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            checkpoints: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, state: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                let mut checkpoints = self.checkpoints.lock().unwrap();
+                checkpoints.push(state.clone());
+                let revision = checkpoints.len() as u64;
+                let digest = nomifun_agent_contracts::digest_payload(&state).unwrap();
+                let mut events = self.events.lock().unwrap();
+                events.push(AgentEngineEvent::ExecutionCheckpointSaved { step: state.model_steps, revision, digest: digest.clone() });
+                Ok(Some(crate::AgentCheckpointReceipt { revision, through_seq: events.len() as u64, digest }))
+            }
+        }
+        struct CrashModel { calls: AtomicUsize, pending: Arc<Notify> }
+        #[async_trait]
+        impl AgentModelPort for CrashModel {
+            async fn open_stream(&self, _: ChatModelRequest, _: CancellationToken) -> Result<AgentModelStream, ChatModelError> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Ok(Box::pin(stream::iter(control_step("completed-write", "write_file", json!({"path":"a","content":"preserve"})))));
+                }
+                let mut partial = control_step("abandoned-write", "write_file", json!({"path":"b","content":"NEVER_EXECUTE"}));
+                partial.pop();
+                partial.push(Ok(ChatModelEvent::OutputTextDelta { text: "ABANDONED_MODEL_OUTPUT".into() }));
+                let pending = self.pending.clone();
+                Ok(Box::pin(stream::iter(partial).chain(stream::once(async move {
+                    pending.notify_one(); std::future::pending::<Result<ChatModelEvent, ChatModelError>>().await
+                }))))
+            }
+        }
+        let pending = Arc::new(Notify::new());
+        let journal = Arc::new(Journal::default());
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let mut initial = request();
+        let original = initial.input.messages[0].clone();
+        initial.input.max_output_tokens = Some(100);
+        let request = AgentTurnRequest::new(initial, two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0);
+        let original_request = request.clone();
+        let task = tokio::spawn(run_turn(binding(), Arc::new(CrashModel { calls: AtomicUsize::new(0), pending: pending.clone() }),
+            tools.clone(), journal.clone(), request, AgentContextBudget::default(), CancellationToken::new()));
+        tokio::time::timeout(Duration::from_secs(2), pending.notified()).await.unwrap();
+        task.abort(); assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        let snapshot = journal.checkpoints.lock().unwrap().last().cloned().unwrap();
+        let snapshot: crate::AgentExecutionCheckpoint = serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
+        let recorded = journal.events.lock().unwrap().clone();
+        let through = recorded.iter().rposition(|event| matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. })).unwrap() + 1;
+        let revision = match &recorded[through - 1] { AgentEngineEvent::ExecutionCheckpointSaved { revision, .. } => *revision, _ => unreachable!() };
+        let recovery = crate::AgentTurnRecovery::new(snapshot, revision, 1, recorded[..through].to_vec(), recorded[through..].to_vec(), vec![]).unwrap();
+        let mut steps = vec![plan_step("in_progress", "inspect"), control_step("fresh-check", "read_file", json!({"path":"a"}))];
+        steps.extend(completion_steps("inspect", &["fresh-check"], true));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(steps), requests: Default::default() });
+        let result = run_turn(binding(), model.clone(), tools.clone(), journal.clone(), original_request.with_recovery(recovery),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.model_steps, 7);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        assert!(model.requests.lock().unwrap()[0].input.messages.iter().any(|message| message == &original));
+        assert!(!serde_json::to_string(&model.requests.lock().unwrap()[0].input).unwrap().contains("ABANDONED_MODEL_OUTPUT"));
+        let mut history = Vec::new();
+        crate::replay_closed_turn(&mut history, original, &journal.events.lock().unwrap()).unwrap();
+        let history = serde_json::to_string(&history).unwrap();
+        assert!(!history.contains("ABANDONED_MODEL_OUTPUT") && !history.contains("NEVER_EXECUTE"));
+        assert!(history.contains("preserve"));
+    }
+
+    #[tokio::test]
+    async fn execution_segments_cross_model_windows_only_after_checkpoint_acknowledgement() {
+        #[derive(Default)]
+        struct Journal {
+            events: std::sync::Mutex<Vec<AgentEngineEvent>>,
+            states: std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>,
+        }
+        #[async_trait]
+        impl AgentEventSink for Journal {
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.events.lock().unwrap().push(event); Ok(())
+            }
+            async fn save_checkpoint(&self, state: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                state.validate()?;
+                let mut states = self.states.lock().unwrap();
+                let revision = states.len() as u64 + 1;
+                let digest = nomifun_agent_contracts::digest_payload(&serde_json::to_value(&state).unwrap()).unwrap();
+                let mut events = self.events.lock().unwrap();
+                events.push(AgentEngineEvent::ExecutionCheckpointSaved { step: state.model_steps, revision, digest: digest.clone() });
+                states.push(state);
+                Ok(Some(crate::AgentCheckpointReceipt { revision, digest, through_seq: events.len() as u64 }))
+            }
+        }
+        let mut steps = vec![control_step("write-once", "write_file", json!({"path":"a","content":"preserve"})),
+            plan_step("in_progress", "inspect"), control_step("fresh-read", "read_file", json!({"path":"a"}))];
+        steps.extend(completion_steps("inspect", &["fresh-read"], true));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(steps), requests: Default::default() });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let journal = Arc::new(Journal::default());
+        let result = run_turn(binding(), model.clone(), tools.clone(), journal.clone(),
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0)
+                .with_max_model_steps(2).with_execution_segments(crate::AgentSegmentPolicy { max_segments: 4, max_no_progress_segments: 2 }),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(result.model_steps, 6);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        let events = journal.events.lock().unwrap();
+        let renewals = events.iter().enumerate().filter_map(|(index, event)| match event {
+            AgentEngineEvent::ExecutionSegmentRenewed { segment, checkpoint_revision, model_steps, .. } => Some((index, *segment, *checkpoint_revision, *model_steps)), _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(renewals.iter().map(|(_, segment, _, step)| (*segment, *step)).collect::<Vec<_>>(), vec![(2, 2), (3, 4)]);
+        for (index, _, revision, step) in renewals {
+            assert!(matches!(&events[index - 1], AgentEngineEvent::ExecutionCheckpointSaved { revision: saved, step: saved_step, .. } if *saved == revision && *saved_step == step));
+        }
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.iter().map(|request| request.causality.operation_id.as_ref()).collect::<std::collections::BTreeSet<_>>().len(), 6);
+        assert!(journal.states.lock().unwrap().iter().all(|state| state.accepted_input_count == 1));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_input_indices_keep_the_actual_steering_application_order() {
+        let mut request = request();
+        let mut retained = request.input.messages.clone();
+        let mut seen = BTreeSet::new();
+        let mut applied = Vec::new();
+        let steer = |id: &str, text: &str| crate::AgentSteeringInput {
+            receipt_operation_id: id.into(), message_id: format!("message-{id}"), text: text.into(),
+            files: vec![], inject_skills: vec![], image_count: 0, prepared_images: vec![],
+        };
+        crate::steering::incorporate(vec![steer("z", "Run the check"), steer("a", "Do not run the check")],
+            &mut request, &mut retained, &mut seen, &mut applied).unwrap();
+        assert_eq!(applied, vec!["z", "a"]);
+        assert!(matches!(&retained[2].content[0], ChatContentPart::Text { text } if text == "Do not run the check"));
+        assert!(crate::steering::incorporate(vec![steer("z", "must not replace prior input")],
+            &mut request, &mut retained, &mut seen, &mut applied).is_err());
+        assert_eq!(applied, vec!["z", "a"]);
+        assert_eq!(retained.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_captures_quiescent_progress_without_tool_bodies_or_reasoning() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<crate::AgentExecutionCheckpoint>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, _: AgentEngineEvent) -> Result<(), AgentEngineError> { Ok(()) }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, checkpoint: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                self.0.lock().unwrap().push(checkpoint);
+                Ok(None)
+            }
+        }
+        let mut write = control_step("write", "write_file", json!({"path":"a","content":"PRIVATE_FILE_BODY"}));
+        write.insert(0, Ok(ChatModelEvent::ReasoningDelta { text: "PRIVATE_MODEL_THOUGHT".into() }));
+        let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(vec![write, text_step("done")]), requests: Default::default() });
+        let sink = Arc::new(Sink::default());
+        let result = run_turn(binding(), model, Arc::new(EchoTool), sink.clone(),
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        let checkpoints = sink.0.lock().unwrap();
+        assert_eq!(checkpoints.iter().map(|state| state.model_steps).collect::<Vec<_>>(), vec![0, 0, 1]);
+        let latest = checkpoints.last().unwrap();
+        assert_eq!(latest.tool_call_count, 1);
+        assert_eq!(latest.work.successful_workspace_mutations, 1);
+        let encoded = serde_json::to_string(&*checkpoints).unwrap();
+        assert!(!encoded.contains("PRIVATE_FILE_BODY"));
+        assert!(!encoded.contains("PRIVATE_MODEL_THOUGHT"));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_failure_and_cancellation_cannot_open_a_model_request() {
+        struct Sink { cancellation: CancellationToken, fail: bool }
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, _: AgentEngineEvent) -> Result<(), AgentEngineError> { Ok(()) }
+            fn supports_checkpoints(&self) -> bool { true }
+            async fn save_checkpoint(&self, _: crate::AgentExecutionCheckpoint) -> Result<Option<crate::AgentCheckpointReceipt>, AgentEngineError> {
+                if self.fail { return Err(AgentEngineError::EventSink("checkpoint failed".into())); }
+                self.cancellation.cancel();
+                Ok(None)
+            }
+        }
+        for fail in [false, true] {
+            let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+            let cancellation = CancellationToken::new();
+            let result = run_turn(binding(), model.clone(), Arc::new(EchoTool),
+                Arc::new(Sink { cancellation: cancellation.clone(), fail }),
+                AgentTurnRequest::new(request(), tool_plan(), principal(), 0),
+                AgentContextBudget::default(), cancellation).await;
+            if fail { assert!(matches!(result, Err(AgentEngineError::EventSink(_)))); }
+            else { assert!(matches!(result.unwrap().terminal, AgentTurnTerminal::Cancelled)); }
+            assert!(model.requests.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn pseudo_tool_output_is_corrected_without_executing_the_discarded_native_prefix() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let mut rejected = control_step("must-not-execute", "write_file", json!({"path":"a","content":"wrong"}));
+        rejected.pop();
+        rejected.push(Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>SECRET_REJECTED_BODY".into() }));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![rejected,
+                control_step("corrected", "write_file", json!({"path":"a","content":"right"})),
+                text_step("done")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let sink = Arc::new(Sink::default());
+        let request = AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0);
+        let requirement = request.model_request.input.messages[0].clone();
+        let result = run_turn(binding(), model.clone(), tools.clone(), sink.clone(), request,
+            AgentContextBudget::default(), CancellationToken::new()).await.unwrap();
+        assert_eq!(result.model_steps, 3);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(result.output_text, "done");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests[0].input.tool_choice, ChatToolChoice::Auto);
+        assert_eq!(requests[1].input.tool_choice, ChatToolChoice::Required);
+        assert_eq!(requests[2].input.tool_choice, ChatToolChoice::Auto);
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "write_file"));
+        drop(requests);
+        let events = sink.0.lock().unwrap().clone();
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::ModelResponseRejected {
+            step: 1, discarded_tool_call_ids, continuation: true,
+        } if discarded_tool_call_ids == &[ToolCallId::from("must-not-execute")])));
+        assert!(!events.iter().any(|event| matches!(event, AgentEngineEvent::ToolStarted { call_id, .. } if call_id.as_ref() == "must-not-execute")));
+        let mut replayed = Vec::new();
+        crate::replay_closed_turn(&mut replayed, requirement.clone(), &events).unwrap();
+        assert!(!serde_json::to_string(&replayed).unwrap().contains("SECRET_REJECTED_BODY"));
+        assert!(!replayed.iter().flat_map(|message| &message.content).any(|part| matches!(part,
+            ChatContentPart::ToolCall { call_id, .. } if call_id.as_ref() == "must-not-execute")));
+        let mut forged = events;
+        let at = forged.iter().position(|event| matches!(event, AgentEngineEvent::ModelResponseRejected { .. })).unwrap();
+        forged.insert(at, AgentEngineEvent::ToolStarted { step: 1, call_id: "must-not-execute".into(),
+            capability_id: "workspace.files".into(), action_id: "workspace.files/write".into() });
+        assert!(crate::replay_closed_turn(&mut Vec::new(), requirement, &forged).is_err(), "discard cannot conceal an admitted effect");
+    }
+
+    #[tokio::test]
+    async fn repeated_pseudo_tools_exhaust_correction_budget_without_invocation() {
+        let bad = || vec![Ok(ChatModelEvent::OutputTextDelta { text: "<tool_call><function=write_file>".into() })];
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![bad(), bad(), bad(), text_step("must not run")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
+        ).await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(message)) if message.contains("protocol-correction budget")));
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(tools.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_protocol_rejection_persistence_cannot_start_a_retry() {
+        struct FailedSink;
+        impl FailedSink { fn model() -> Arc<ObservingModel> { Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![vec![Ok(ChatModelEvent::OutputTextDelta { text:"<tool_call><function=write_file>".into() })], text_step("must not run")]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        }) } }
+        #[async_trait]
+        impl AgentEventSink for FailedSink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                if matches!(event, AgentEngineEvent::ModelResponseRejected { .. }) {
+                    return Err(AgentEngineError::EventSink("injected failure".into()));
+                }
+                Ok(())
+            }
+        }
+        let model = FailedSink::model();
+        let result = run_turn(binding(), model.clone(), Arc::new(EchoTool), Arc::new(FailedSink),
+            AgentTurnRequest::new(request(), tool_plan(), principal(), 0), AgentContextBudget::default(), CancellationToken::new()).await;
+        assert!(matches!(result, Err(AgentEngineError::EventSink(_))));
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -3842,7 +4612,7 @@ mod tests {
         });
         let result = open_session(model, tools.clone()).run_turn(AgentTurnRequest::new(
             request(), tool_plan(), principal(), 1,
-        )).await;
+        ).with_max_model_steps(1)).await;
         assert!(matches!(result, Err(AgentEngineError::TurnFailed(message))
             if message.contains("tool-call markup as text")));
         assert!(tools.order.lock().unwrap().is_empty());
@@ -3888,7 +4658,8 @@ mod tests {
         assert!(requests[0].input.instructions.iter().any(|instruction|
             instruction.contains("Do not emit chain-of-thought")
                 && instruction.contains("give brief public progress updates")
-                && instruction.contains("never XML-shaped <tool_call> text")
+                && instruction.contains("Use the provided function interface for tool actions")
+                && !instruction.contains("<tool_call>")
                 && instruction.contains("reserve the final response for the outcome")));
         assert!(!requests[0].input.tools.iter().any(|tool| matches!(tool.name.as_str(),
             crate::planning::TOOL_NAME | crate::completion::TOOL_NAME | crate::tool_archive::SEARCH)));

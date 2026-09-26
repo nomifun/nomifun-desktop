@@ -778,6 +778,7 @@ impl SpokenReplyReducer {
                     Some(TurnStopReason::MaxTurnRequests) => "maximum tool requests reached",
                     Some(TurnStopReason::Refusal) => "the model refused the request",
                     Some(TurnStopReason::Cancelled) => "the turn was cancelled",
+                    Some(TurnStopReason::Paused) => "execution is paused pending owner authorization",
                     Some(TurnStopReason::EndTurn) | None => {
                         unreachable!("normal finish was handled above")
                     }
@@ -971,6 +972,7 @@ mod tests {
             TurnStopReason::MaxTurnRequests,
             TurnStopReason::Refusal,
             TurnStopReason::Cancelled,
+            TurnStopReason::Paused,
         ] {
             let mut reducer = SpokenReplyReducer::default();
             assert!(

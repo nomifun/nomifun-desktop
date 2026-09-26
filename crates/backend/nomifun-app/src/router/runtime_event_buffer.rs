@@ -41,6 +41,12 @@ impl AgentEventBuffer {
                 self.flush(&mut records);
                 records.push(event.clone());
             }
+            AgentEngineEvent::ModelOutputTruncated { discarded_tool_call_ids, .. }
+            | AgentEngineEvent::ModelResponseRejected { discarded_tool_call_ids, .. } => {
+                for id in discarded_tool_call_ids { self.instruction_reads.remove(id); }
+                self.flush(&mut records);
+                records.push(event.clone());
+            }
             AgentEngineEvent::ToolCallDelta {
                 step,
                 call_id,

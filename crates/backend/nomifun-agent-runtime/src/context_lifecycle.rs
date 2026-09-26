@@ -20,8 +20,9 @@ const MAX_AUTOMATIC_OUTPUT_TOKENS: u32 = 16_384;
 const DEFAULT_COMPACTION_THRESHOLD_PCT: u8 = 75;
 const SUMMARY_PROMPT_HEADROOM_DIVISOR: usize = 4;
 const MAX_SUMMARY_PROMPT_HEADROOM_BYTES: usize = 512;
-const MAX_COMPACTIONS_PER_TURN: u16 = 64;
-const MAX_COMPACTIONS_PER_PREPARE: u16 = 16;
+const MAX_COMPACTIONS_PER_SEGMENT: u32 = 64;
+const MAX_COMPACTIONS_PER_PREPARE: u32 = 16;
+const MAX_TOTAL_COMPACTIONS: u32 = 2048;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AgentModelBudget {
@@ -112,7 +113,8 @@ impl AgentModelBudget {
 pub(crate) struct ContextLifecycle {
     budget: AgentModelBudget,
     resource: AgentContextBudget,
-    compactions: u16,
+    compactions: u32,
+    segment_start_compactions: u32,
     observed_tokens: usize,
     observed_estimate: usize,
     last_request_estimate: usize,
@@ -132,6 +134,7 @@ impl ContextLifecycle {
             budget,
             resource,
             compactions: 0,
+            segment_start_compactions: 0,
             observed_tokens: 0,
             observed_estimate: 0,
             last_request_estimate: 0,
@@ -146,6 +149,36 @@ impl ContextLifecycle {
             usize::try_from(usage.input_tokens.saturating_add(usage.output_tokens))
                 .unwrap_or(usize::MAX);
         self.observed_estimate = self.last_request_estimate;
+    }
+
+    pub(crate) fn begin_segment(&mut self) {
+        self.segment_start_compactions = self.compactions;
+        // Prompt-too-long correction remains a once-per-Turn allowance.
+        // Neither cumulative IDs nor that safety allowance is reset here.
+    }
+
+    pub(crate) fn restore_accounting<'a>(&mut self, events: impl Iterator<Item = &'a AgentEngineEvent>) -> Result<(), AgentEngineError> {
+        for event in events {
+            match event {
+                AgentEngineEvent::CompactionStarted { operation_id, .. } => {
+                    let sequence = operation_id.as_ref().rsplit_once(":compact:")
+                        .and_then(|(_, suffix)| suffix.parse::<u32>().ok())
+                        .ok_or_else(|| AgentEngineError::ReplayContract("invalid recovered compaction identity".into()))?;
+                    if sequence != self.compactions + 1 || sequence > MAX_TOTAL_COMPACTIONS {
+                        return Err(AgentEngineError::ReplayContract("recovered compaction sequence is not contiguous".into()));
+                    }
+                    self.compactions = sequence;
+                }
+                AgentEngineEvent::ExecutionSegmentRenewed { .. } => self.begin_segment(),
+                AgentEngineEvent::ExecutionTailReconciled { retry_stall_guards, .. } => {
+                    self.begin_segment();
+                    if *retry_stall_guards { self.overflow_recovery_used = false; }
+                }
+                AgentEngineEvent::ContextLimitRecoveryStarted { .. } => self.overflow_recovery_used = true,
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// A changed-context continuation, not a transport retry. At most once
@@ -217,7 +250,7 @@ impl ContextLifecycle {
         // instructions or live tool calls. Keep the original input untouched
         // until every chunk succeeds and the replacement fits.
         let recent = crate::context_tail::latest(&request.input.messages)?;
-        let mandatory_messages = match &recent {
+        let mut mandatory_messages = match &recent {
             Some(exchange) if exchange.requires_original_images() => {
                 exchange.with_required_inputs(requirements)?
             }
@@ -235,34 +268,65 @@ impl ContextLifecycle {
                 return Err(AgentEngineError::Compaction("Mandatory instructions/task state/accepted inputs and pending images exceed the token, byte or message-count budget (including the summary slot); no summary requests sent and no mandatory state discarded".into()));
             }
         }
-        let source = crate::media_context::summary_source(&request.input.messages)?;
-        let chunk_bytes = self
-            .budget
-            .input_tokens()
-            .min(input_limit)
-            .min(self.resource.max_context_bytes / 4)
-            .min(48 * 1024)
-            // A model with a small output envelope cannot reliably condense
-            // a 48 KiB fragment, especially when reasoning uses that same
-            // envelope. Scale source size with the frozen route budget.
-            .min((self.budget.max_output_tokens as usize)
-                .saturating_mul(3).div_ceil(2).max(4096));
+        let summary_limit = (input_limit / 2).min(8192)
+            .min((self.budget.max_output_tokens as usize / 2).max(512));
+        let summary_hard_limit = summary_limit.max((input_limit / 2).min(8 * 1024));
+        let mut source_messages = request.input.messages.as_slice();
+        let mut retained_tool_call_ids = Vec::new();
+        if let Some(mut exchange) = recent {
+            if exchange.requires_original_images() {
+                source_messages = exchange.prefix();
+                retained_tool_call_ids = exchange.call_ids.clone();
+            } else {
+                // Select the exact suffix BEFORE summarizing, reserving room
+                // for even a verbose valid summary. Leave a low-water margin
+                // so a small next observation cannot trigger another summary.
+                loop {
+                    if !exchange.fits_text_bound(requirements)? { break; }
+                    let messages = exchange.with_required_inputs(requirements)?;
+                    let mut candidate = request.input.clone();
+                    candidate.provider_round_parent = None;
+                    candidate.messages = vec![summary_message(&"s".repeat(summary_hard_limit))];
+                    candidate.messages.extend(messages.clone());
+                    let candidate_bytes = encoded_size(&candidate)?;
+                    if candidate_bytes >= bytes
+                        || candidate_bytes > self.resource.max_context_bytes
+                        || candidate.messages.len() > self.resource.max_history_messages
+                        || crate::media_context::estimate_tokens(&candidate, candidate_bytes) >= input_limit * 4 / 5
+                    { break; }
+                    mandatory_messages = messages;
+                    source_messages = exchange.prefix();
+                    retained_tool_call_ids = exchange.call_ids.clone();
+                    let Some(earlier) = exchange.earlier()? else { break; };
+                    exchange = earlier;
+                }
+            }
+        }
+        let source = crate::media_context::summary_source(source_messages)?;
+        // A short summary can cover a much larger source. Size fragments by
+        // INPUT capacity, including the rolling note and prompt overhead,
+        // instead of coupling a 4k output ceiling to 6k-byte source fragments.
+        let chunk_bytes = input_limit.saturating_mul(3)
+            .saturating_sub(summary_hard_limit + 2048)
+            .min(self.resource.max_context_bytes.saturating_sub(summary_hard_limit + 2048))
+            .min(48 * 1024);
         if chunk_bytes < 256 {
             return Err(AgentEngineError::Compaction(
                 "context budget is too small to compact safely".into(),
             ));
         }
-        let summary_limit = (chunk_bytes / 2).min(8192)
-            .min((self.budget.max_output_tokens as usize / 2).max(512));
         // Ask for a compact summary, but tolerate a more verbose provider
         // response. A hard cap near the prompt target caused repeated paid
         // retries for useful 3-6 KiB summaries on reasoning models. The
         // replacement below still must shrink and fit the entire context.
-        let summary_hard_limit = summary_limit.max((input_limit / 2).min(8 * 1024));
         // Record boundaries can change the number of fragments. Plan exact
         // contiguous coverage before issuing any paid summary request.
-        let remaining_calls = usize::from(MAX_COMPACTIONS_PER_TURN.saturating_sub(self.compactions));
-        let chunks = if remaining_calls == 0 {
+        let remaining_calls = MAX_COMPACTIONS_PER_SEGMENT
+            .saturating_sub(self.compactions.saturating_sub(self.segment_start_compactions))
+            .min(MAX_TOTAL_COMPACTIONS.saturating_sub(self.compactions)) as usize;
+        let chunks = if source.len() == 0 {
+            Some(Vec::new())
+        } else if remaining_calls == 0 {
             None
         } else {
             match source.chunks(chunk_bytes, remaining_calls) {
@@ -283,7 +347,8 @@ impl ContextLifecycle {
             );
             let mut retried_summary = false;
             loop {
-                if self.compactions >= MAX_COMPACTIONS_PER_TURN
+                if self.compactions.saturating_sub(self.segment_start_compactions) >= MAX_COMPACTIONS_PER_SEGMENT
+                    || self.compactions >= MAX_TOTAL_COMPACTIONS
                     || self.compactions.saturating_sub(compactions_before_prepare)
                         >= MAX_COMPACTIONS_PER_PREPARE
                 {
@@ -291,11 +356,10 @@ impl ContextLifecycle {
                     break 'chunks;
                 }
                 let mut compact = request.clone();
-                self.compactions += 1;
                 let operation_id = format!(
                     "{}:compact:{}",
                     request.causality.turn_operation_id.as_ref(),
-                    self.compactions
+                    self.compactions + 1
                 )
                 .into();
                 compact.causality.operation_id = operation_id;
@@ -328,10 +392,18 @@ impl ContextLifecycle {
                 if compact_bytes > self.resource.max_context_bytes
                     || compact_bytes.div_ceil(3) >= input_limit
                 {
+                    // JSON escaping can expand a fragment. Split it before
+                    // spending a request, keeping contiguous source coverage.
+                    if let Some((first, second)) = source.split_range(chunk.start, chunk.end) {
+                        pending.push_front(second);
+                        pending.push_front(first);
+                        break;
+                    }
                     return Err(AgentEngineError::Compaction(
                         "summary request exceeds its input budget".into(),
                     ));
                 }
+                self.compactions += 1;
                 sink.emit(AgentEngineEvent::CompactionStarted {
                     operation_id: compact.causality.operation_id.clone(),
                     input_bytes: compact_bytes,
@@ -397,43 +469,6 @@ impl ContextLifecycle {
         replacement.provider_round_parent = None;
         replacement.messages = vec![summary_message(&previous)];
         replacement.messages.extend(mandatory_messages);
-        let mut retained_tool_call_ids = recent
-            .as_ref()
-            .filter(|exchange| exchange.requires_original_images())
-            .map(|exchange| exchange.call_ids.clone())
-            .unwrap_or_default();
-        // The full transcript remains in the summary source. Optional text
-        // retention can therefore fall back to that summary without losing
-        // an unsummarized source segment or issuing another model request.
-        if let Some(mut exchange) = recent
-            && !exchange.requires_original_images()
-        {
-            loop {
-                if !exchange.fits_text_bound(requirements)? {
-                    break;
-                }
-                let mut candidate = replacement.clone();
-                candidate.messages.truncate(1);
-                candidate
-                    .messages
-                    .extend(exchange.with_required_inputs(requirements)?);
-                let candidate_bytes = encoded_size(&candidate)?;
-                if candidate_bytes >= bytes
-                    || candidate_bytes > self.resource.max_context_bytes
-                    || candidate.messages.len() > self.resource.max_history_messages
-                    || crate::media_context::estimate_tokens(&candidate, candidate_bytes)
-                        >= input_limit
-                {
-                    break;
-                }
-                replacement = candidate;
-                retained_tool_call_ids = exchange.call_ids.clone();
-                let Some(earlier) = exchange.earlier()? else {
-                    break;
-                };
-                exchange = earlier;
-            }
-        }
         let after = encoded_size(&replacement)?;
         if after >= bytes
             || after > self.resource.max_context_bytes
@@ -472,7 +507,57 @@ fn encoded_size(input: &ChatModelInput) -> Result<usize, AgentEngineError> {
 
 #[cfg(test)]
 mod context_threshold_tests {
-    use super::AgentModelBudget;
+    use super::*;
+
+    #[test]
+    fn constructed_many_compactions_preserve_ids_and_guards_across_segments_and_restore() {
+        let mut events=vec![AgentEngineEvent::ContextLimitRecoveryStarted { rejected_step:1 }];
+        for sequence in 1..=1024 {
+            events.push(AgentEngineEvent::CompactionStarted { operation_id:format!("turn:compact:{sequence}").into(),input_bytes:6000 });
+            if sequence % 128 == 0 {
+                events.push(AgentEngineEvent::ExecutionSegmentRenewed { segment:(sequence/128+1) as u16,
+                    model_steps:(sequence/4) as u16,checkpoint_revision:(sequence/128) as u64,
+                    reason:crate::AgentSegmentReason::JournalWindow });
+            }
+        }
+        let budget=AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+        let mut restored=ContextLifecycle::new(budget,AgentContextBudget::default()).unwrap();
+        restored.restore_accounting(events.iter()).unwrap();
+        assert_eq!(restored.compactions,1024);
+        assert_eq!(restored.segment_start_compactions,1024);
+        assert!(restored.overflow_recovery_used);
+        let next=AgentEngineEvent::CompactionStarted { operation_id:"turn:compact:1025".into(),input_bytes:6000 };
+        restored.restore_accounting(std::iter::once(&next)).unwrap();
+        restored.begin_segment();
+        assert_eq!(restored.compactions,1025);
+        assert!(restored.overflow_recovery_used,"a new window cannot buy another prompt-overflow retry");
+        let marker=|retry_stall_guards| AgentEngineEvent::ExecutionTailReconciled { model_steps:256,source_checkpoint_revision:8,
+            discarded_tool_call_ids:vec![],retained_tool_call_ids:vec![],discard_last_model_step:false,retry_stall_guards };
+        restored.restore_accounting(std::iter::once(&marker(false))).unwrap();
+        assert!(restored.overflow_recovery_used);
+        restored.restore_accounting(std::iter::once(&marker(true))).unwrap();
+        assert!(!restored.overflow_recovery_used);
+        assert_eq!(restored.compactions,1025,"explicit guard retry is not a counter reset");
+    }
+
+    #[test]
+    fn constructed_compaction_history_rejects_gaps_duplicates_and_total_overflow() {
+        let budget=AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+        for sequences in [vec![1,3],vec![1,1],vec![0],vec![MAX_TOTAL_COMPACTIONS+1]] {
+            let events:Vec<_>=sequences.into_iter().map(|sequence|AgentEngineEvent::CompactionStarted {
+                operation_id:format!("turn:compact:{sequence}").into(),input_bytes:6000 }).collect();
+            let mut restored=ContextLifecycle::new(budget,AgentContextBudget::default()).unwrap();
+            assert!(restored.restore_accounting(events.iter()).is_err());
+        }
+        let events:Vec<_>=(1..=MAX_TOTAL_COMPACTIONS).map(|sequence|AgentEngineEvent::CompactionStarted {
+            operation_id:format!("turn:compact:{sequence}").into(),input_bytes:6000 }).collect();
+        let mut restored=ContextLifecycle::new(budget,AgentContextBudget::default()).unwrap();
+        restored.restore_accounting(events.iter()).unwrap();
+        restored.begin_segment();
+        assert_eq!(restored.compactions,MAX_TOTAL_COMPACTIONS);
+        let next=AgentEngineEvent::CompactionStarted { operation_id:format!("turn:compact:{}",MAX_TOTAL_COMPACTIONS+1).into(),input_bytes:6000 };
+        assert!(restored.restore_accounting(std::iter::once(&next)).is_err());
+    }
 
     #[test]
     fn configured_threshold_changes_the_presend_trigger_without_changing_model_limits() {

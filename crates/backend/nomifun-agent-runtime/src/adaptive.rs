@@ -29,6 +29,7 @@ pub enum AgentRuntimeActivationReason {
     ExplicitPlan,
     Steering,
     ExplicitTaskContinuation,
+    CheckpointRecovery,
 }
 
 #[derive(Default)]
@@ -38,6 +39,19 @@ pub(crate) struct AdaptiveExecution {
 }
 
 impl AdaptiveExecution {
+    pub(crate) fn restore(events: &[AgentEngineEvent], plan: &crate::AgentToolPlan) -> Self {
+        let mut restored = Self::default();
+        let mut batches = BTreeSet::new();
+        for event in events {
+            match event {
+                AgentEngineEvent::RuntimeModulesActivated { modules, .. } => restored.active.extend(modules.iter().copied()),
+                AgentEngineEvent::ToolCallCompleted { step, call } if plan.binding(&call.name).is_some_and(crate::execution_policy::requires_task_ledger) => { batches.insert(*step); }
+                _ => {}
+            }
+        }
+        restored.external_tool_batches = batches.len().min(u16::MAX as usize) as u16;
+        restored
+    }
     pub(crate) async fn activate(
         &mut self,
         modules: impl IntoIterator<Item = AgentRuntimeModule>,

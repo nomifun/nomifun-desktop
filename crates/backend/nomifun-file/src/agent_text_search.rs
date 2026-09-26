@@ -67,7 +67,10 @@ impl FileService {
         {
             return Err(AppError::BadRequest("Search requires a nonempty single-line literal query (at most 1024 characters / 4096 bytes), a relative path and limit 1..200".into()));
         }
-        let target = scope.resolve_relative_path(request.path.as_deref().unwrap_or(""))?;
+        // Directory search accepts the conventional workspace-root spelling.
+        // Do not broaden the shared file/mutation resolver (e.g. delete '.').
+        let relative = match request.path.as_deref() { None | Some(".") => "", Some(path) => path };
+        let target = scope.resolve_relative_path(relative)?;
         let authority = scope.authority();
         let root = scope.workspace_root().to_owned();
         tokio::task::spawn_blocking(move || {

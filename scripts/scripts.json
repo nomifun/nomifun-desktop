@@ -73,6 +73,8 @@
     "test:ui":       { "group": "test",  "desc": "运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx）" },
     "test:plugin-sdk": { "group": "test", "desc": "验证 Unified Plugin SDK 的 KV/DB/Files/Cache/Action/Host/Config 合同" },
     "test:nomi-core-live-provider": { "group": "test", "desc": "Run the credential-isolated canonical AgentSession selected-model smoke against StepFun Coding Plan." },
+    "test:agent-reliability-report": { "group": "test", "desc": "验证 Agent 可靠性统计门禁：精确置信区间、样本去重、独立验收与缺失场景检查" },
+    "check:agent-reliability": { "group": "check", "desc": "读取独立评测 evidence.json 验证三项 99% 统计下界（--input 路径）；样本不足不会通过" },
     "check":         { "group": "check", "desc": "聚合静态检查：typecheck + 桌面 UI 边界 + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器/Unified Plugin 边界 + Agent 词汇 + 脚本登记" },
     "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
     "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },

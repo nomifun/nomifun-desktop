@@ -58,6 +58,26 @@ pub(crate) fn failed_process_observation(
         == Some(false)
 }
 
+/// A read failure or a proposal held before dispatch is not a change of task
+/// scope. Let the model correct the call within its existing plan. An
+/// attempted effect may have partially happened and still requires recovery.
+pub(crate) fn requires_replanning_after_result(
+    binding: &AgentToolBinding,
+    result: &AgentToolResult,
+    attempted: bool,
+    plan_revision: u32,
+) -> bool {
+    if !attempted {
+        return false;
+    }
+    if failed_process_observation(binding, result) {
+        // Some owners mark a nonzero command exit as is_error, others expose
+        // it as an ordinary observation. Both use the same recovery policy.
+        return plan_revision == 0;
+    }
+    result.is_error && !matches!(binding.effect_class, nomifun_engine_core::EngineEffectClass::ReadOnly)
+}
+
 /// A successful collaboration handoff transfers completion ownership to the
 /// durable AgentExecution. The parent turn must stop after the accepted
 /// single-call batch so it cannot poll, create sibling Executions, or publish
@@ -150,6 +170,16 @@ mod tests {
         let fork = binding("agent.collaboration", "agent/fork");
         assert!(completes_turn_on_success(&fork));
         assert!(!completes_turn_on_success(&workspace));
+    }
+
+    #[test]
+    fn recoverable_reads_and_unexecuted_proposals_do_not_reopen_the_task_plan() {
+        let read = binding_with_effect("workspace.files", "workspace.files/read", EngineEffectClass::ReadOnly);
+        let write = binding("workspace.files", "workspace.files/write");
+        let failed = crate::AgentToolResult::text("call".into(), "failed", true);
+        assert!(!requires_replanning_after_result(&read, &failed, true, 1));
+        assert!(!requires_replanning_after_result(&write, &failed, false, 1));
+        assert!(requires_replanning_after_result(&write, &failed, true, 1));
     }
 
     #[test]

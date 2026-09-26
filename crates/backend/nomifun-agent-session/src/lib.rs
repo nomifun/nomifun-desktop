@@ -19,6 +19,11 @@ pub use error::SessionStoreError;
 pub use store::{
     AgentSessionStore, MAX_EVENT_PAGE_SIZE, MAX_INLINE_JSON_BYTES, MAX_SESSION_PAYLOAD_BYTES,
     MAX_SINGLE_PAYLOAD_BYTES,
+    NativeCheckpoint, NativeCheckpointWrite, MAX_NATIVE_CHECKPOINT_BYTES,
+    NativeExecutionClaim, NativeExecutionLease, NATIVE_EXECUTION_LEASE_MS,
+    NativeExecutionInspection, NATIVE_RECOVERY_BLOCKED,
+    NativePauseState, NativeResumeRequest, NativeOwnerEvidence, NativeResumeReceipt, NativeResumePreparation,
+    NativeVerifiedOutcome, NativeEffectReconciliationRequest, NativeEffectReconciliationCandidate, NativeEffectReconciliationCandidates,
 };
 pub use types::*;
 

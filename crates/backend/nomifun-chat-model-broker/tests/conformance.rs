@@ -1245,6 +1245,164 @@ async fn broker_owns_bounded_same_route_retry() {
     );
 }
 
+fn single_route_retry_broker(
+    scripts: impl IntoIterator<Item = TransportScript>,
+) -> (Arc<ChatModelBroker>, ChatModelRequest, Arc<ScriptedTransport>) {
+    let primary_route = route(ChatProtocol::Anthropic, "retry-fixture", 1);
+    let request = basic_request(&primary_route);
+    let transport = ScriptedTransport::new(scripts);
+    let transports = transport_map([(
+        ChatProtocol::Anthropic,
+        provider_transport(&transport),
+    )]);
+    let broker = broker(
+        StaticCausalityGate::allow(),
+        ResolvedChatRouteSet { primary: primary_route, failovers: Vec::new() },
+        Arc::new(StaticCredentialStore { mismatch: false }),
+        &transports,
+        BrokerRetryPolicy::default(),
+    );
+    (broker, request, transport)
+}
+
+async fn wait_for_attempt(transport: &ScriptedTransport, count: usize) {
+    // Runnable yields do not advance Tokio's paused clock. Waiting for a
+    // transport attempt must not accidentally elapse the retry deadline.
+    for _ in 0..100 {
+        if transport.calls() >= count { return; }
+        tokio::task::yield_now().await;
+    }
+    panic!("provider attempt did not start");
+}
+
+#[tokio::test(start_paused = true)]
+async fn single_route_recovers_two_transient_provider_errors_without_exposing_failed_attempts() {
+    let (broker, request, transport) = single_route_retry_broker([
+        TransportScript::Frames(vec![frame("error", serde_json::json!({
+            "error":{"type":"rate_limit_error"}
+        }))]),
+        TransportScript::Frames(vec![frame("error", serde_json::json!({
+            "error":{"type":"overloaded_error"}
+        }))]),
+        TransportScript::Frames(successful_frames("third-attempt", "recovered")),
+    ]);
+    let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), 3);
+    assert!(events.iter().all(Result::is_ok));
+    assert!(events.last().unwrap().as_ref().unwrap().event.is_terminal());
+    assert!(events.iter().all(|item| item.as_ref().is_ok_and(|event|
+        event.total_attempt == 3 && event.route_attempt == 3)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn single_route_retry_waits_for_retry_after_before_opening_provider_again() {
+    let mut error = ChatModelError::new(
+        ChatModelErrorCode::RateLimited, "cooldown", ChatRetryDirective::RetrySameRoute,
+    );
+    error.retry_after_ms = Some(7_000);
+    let (broker, request, transport) = single_route_retry_broker([
+        TransportScript::OpenError(error),
+        TransportScript::Frames(successful_frames("after-cooldown", "recovered")),
+    ]);
+    let stream = broker.open_stream(request).await.unwrap();
+    wait_for_attempt(&transport, 1).await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    assert_eq!(transport.calls(), 1);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let events = stream.collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), 2);
+    assert!(events.iter().all(Result::is_ok));
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelling_during_retry_after_never_opens_a_second_attempt() {
+    let mut error = ChatModelError::new(
+        ChatModelErrorCode::RateLimited, "cooldown", ChatRetryDirective::RetrySameRoute,
+    );
+    error.retry_after_ms = Some(60_000);
+    let (broker, request, transport) = single_route_retry_broker([
+        TransportScript::OpenError(error),
+        TransportScript::Frames(successful_frames("must-not-open", "duplicate")),
+    ]);
+    let cancellation = CancellationToken::new();
+    let stream = broker.open_chat_stream_cancellable(request, cancellation.clone()).await.unwrap();
+    wait_for_attempt(&transport, 1).await;
+    cancellation.cancel();
+    let _ = stream.collect::<Vec<_>>().await;
+    tokio::time::advance(Duration::from_secs(120)).await;
+    assert_eq!(transport.calls(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn excessive_retry_after_is_returned_without_shortening_the_server_cooldown() {
+    let mut error = ChatModelError::new(
+        ChatModelErrorCode::RateLimited, "cooldown", ChatRetryDirective::RetrySameRoute,
+    );
+    error.retry_after_ms = Some(120_001);
+    let (broker, request, transport) = single_route_retry_broker([
+        TransportScript::OpenError(error),
+        TransportScript::Frames(successful_frames("must-not-open", "duplicate")),
+    ]);
+    let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), 1);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].as_ref().unwrap_err().retry_after_ms, Some(120_001));
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_transient_failure_exhausts_bounded_attempts_not_the_task_forever() {
+    let (broker, request, transport) = single_route_retry_broker((0..10).map(|_| {
+        TransportScript::OpenError(ChatModelError::new(
+            ChatModelErrorCode::ProviderUnavailable, "503", ChatRetryDirective::RetrySameRoute,
+        ))
+    }));
+    let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), usize::from(BrokerRetryPolicy::default().max_attempts_per_route));
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].as_ref().unwrap_err().code, ChatModelErrorCode::ProviderUnavailable);
+}
+
+#[tokio::test(start_paused = true)]
+async fn authentication_quota_and_invalid_parameters_never_retry_same_route() {
+    for code in ["authentication_error", "insufficient_quota", "invalid_request_error"] {
+        let (broker, request, transport) = single_route_retry_broker([
+            TransportScript::Frames(vec![frame("error", serde_json::json!({
+                "error":{"type":code}
+            }))]),
+            TransportScript::Frames(successful_frames("must-not-open", "duplicate")),
+        ]);
+        let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+        assert_eq!(transport.calls(), 1, "{code}");
+        assert_eq!(events.len(), 1, "{code}");
+        assert_eq!(events[0].as_ref().unwrap_err().retry, ChatRetryDirective::Never);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn empty_disconnected_stream_retries_but_committed_text_does_not() {
+    let (broker, request, transport) = single_route_retry_broker([
+        TransportScript::Frames(vec![]),
+        TransportScript::Frames(successful_frames("after-disconnect", "recovered")),
+    ]);
+    assert!(broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await.iter().all(Result::is_ok));
+    assert_eq!(transport.calls(), 2);
+
+    let (broker, request, transport) = single_route_retry_broker([
+        TransportScript::Frames(vec![
+            frame("text.delta", serde_json::json!({"text":"already delivered"})),
+            Err(ChatModelError::new(
+                ChatModelErrorCode::ProviderUnavailable, "503", ChatRetryDirective::RetrySameRoute,
+            )),
+        ]),
+        TransportScript::Frames(successful_frames("must-not-open", "duplicate")),
+    ]);
+    let events = broker.open_stream(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(transport.calls(), 1);
+    let error = events.last().unwrap().as_ref().unwrap_err();
+    assert!(error.semantic_output_committed);
+    assert_eq!(error.retry, ChatRetryDirective::Never);
+}
+
 #[tokio::test]
 async fn unsupported_features_do_not_claim_the_operation() {
     for route_advertises_audio in [false, true] {

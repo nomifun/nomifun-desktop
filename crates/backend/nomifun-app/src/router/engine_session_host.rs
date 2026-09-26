@@ -18,6 +18,9 @@ use nomifun_db::{SqlitePool, sqlx};
 use super::nomi_core_session::{NomiCoreSessionOwner, session_metadata};
 use super::official_runtime::{OfficialRuntimeHost, binding_from_extra};
 
+#[path = "engine_recovery.rs"]
+mod recovery;
+
 /// Constructed by application assembly only. The sole official Driver receives
 /// this typed port owner from the composition root; there is no runtime
 /// registration or direct Domain-handler access path.
@@ -29,11 +32,12 @@ pub struct EngineSessionHost {
     broker: super::chat_broker_host::ChatBrokerHostComposition,
     http: reqwest::Client,
     source: Arc<()>,
+    execution_instance_id: String,
     resources: super::engine_kernel_session::EngineKernelAssembly,
     kernel_sessions: std::sync::Mutex<
         std::collections::BTreeMap<String, Weak<super::engine_kernel_session::EngineKernelSession>>,
     >,
-    journals: std::sync::Mutex<
+    journals: tokio::sync::Mutex<
         std::collections::BTreeMap<(String, String), Weak<super::engine_journal::Journal>>,
     >,
 }
@@ -365,7 +369,7 @@ impl EngineSessionHost {
     /// Actual product Broker bound to this accepted turn's journal gate.
     /// The engine must record each model operation before opening its stream.
     /// Routes, credentials and retries stay behind the platform Broker.
-    pub fn open_model_port(
+    pub async fn open_model_port(
         &self,
         receipt: &EngineTurnReceipt,
         cancellation: tokio_util::sync::CancellationToken,
@@ -387,7 +391,7 @@ impl EngineSessionHost {
                 "Engine Session has no exact chat route".into(),
             ));
         }
-        let journal = self.open_journal(receipt, cancellation)?;
+        let journal = self.open_journal(receipt, cancellation).await?;
         let model = self.compose_model_port(Arc::new(journal.clone()))?;
         let model = self
             .open_kernel_session(receipt.session())?
@@ -526,6 +530,7 @@ impl EngineSessionHost {
             http: reqwest::Client::new(),
             pool,
             source: Arc::new(()),
+            execution_instance_id: uuid::Uuid::now_v7().to_string(),
             resources,
             kernel_sessions: Default::default(),
             journals: Default::default(),
@@ -535,7 +540,7 @@ impl EngineSessionHost {
     /// Reuses the same live writer for one exact receipt. This is a journal
     /// handle cache, not a second Session coordinator or an interrupted-turn
     /// recovery path. A released writer never resumes a durable prefix.
-    pub fn open_journal(
+    pub async fn open_journal(
         &self,
         receipt: &EngineTurnReceipt,
         cancellation: tokio_util::sync::CancellationToken,
@@ -546,17 +551,17 @@ impl EngineSessionHost {
                 "Receipt belongs to another Session host".into(),
             ));
         }
-        let mut journals = self
-            .journals
-            .lock()
-            .map_err(|_| AppError::Internal("Engine journal handles poisoned".into()))?;
+        let mut journals = self.journals.lock().await;
         journals.retain(|_, journal| journal.strong_count() > 0);
         let key = (
             receipt.session().session().conversation_id.clone(),
             receipt.operation_id().to_owned(),
         );
-        if let Some(journal) = journals.get(&key).and_then(Weak::upgrade) {
-            return EngineTurnJournal::from_existing(journal, receipt);
+        if let Some(journal) = journals.get(&key).and_then(Weak::upgrade)
+            .filter(|journal| EngineTurnJournal::cached_generation(journal) == receipt.admission_epoch() as u64) {
+            let journal = EngineTurnJournal::from_existing(journal, receipt)?;
+            journal.verify_execution_lease().await?;
+            return Ok(journal);
         }
         if journals.len() >= 4096 {
             return Err(AppError::Conflict(
@@ -567,11 +572,27 @@ impl EngineSessionHost {
             .owner
             .upgrade()
             .ok_or_else(|| AppError::Conflict("Session owner has shut down".into()))?;
-        let journal = EngineTurnJournal::new(
-            owner.canonical().store().clone(),
-            receipt,
-            cancellation,
-        )?;
+        let store = owner.canonical().store().clone();
+        let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
+            owner: receipt.session().principal().clone(),
+            agent_session_id: receipt.session().session().conversation_id.clone().into(),
+            operation_id: receipt.operation_id().into(), snapshot: receipt.session().snapshot().snapshot_ref.clone(),
+            active_set_generation: receipt.session().active_set_generation(),
+            holder: self.execution_instance_id.clone(), expected_fence: 0, checkpoint: None,
+        }).await;
+        let journal = match lease {
+            Ok(lease) => match EngineTurnJournal::new(store.clone(), receipt, cancellation, lease.clone()) {
+                Ok(journal) => journal,
+                Err(error) => { let _ = store.release_unattached_native_claim(&lease).await; return Err(error); }
+            },
+            Err(nomifun_agent_session::SessionStoreError::ExecutionLeaseActive
+                | nomifun_agent_session::SessionStoreError::ExecutionFenced
+                | nomifun_agent_session::SessionStoreError::RecoveryRequiresReconciliation) => {
+                self.open_recovered_journal(store, receipt, cancellation).await?
+            }
+            Err(error) => return Err(AppError::Conflict(format!("Engine execution lease: {error}"))),
+        };
+        journal.refresh_budget().await?;
         journals.insert(key, journal.downgrade());
         Ok(journal)
     }
@@ -668,7 +689,7 @@ impl EngineSessionHost {
             root_message_id: source_message_id.to_owned(),
             turn_started_event_id: started.event_id.as_ref().to_owned(),
             operation_id,
-            admission_epoch: i64::try_from(started.seq)
+            admission_epoch: i64::try_from(if facts.execution_generation > 0 { facts.execution_generation } else { started.seq })
                 .map_err(|_| conflict("turn sequence exceeds runtime generation range"))?,
             request_payload: source_payload.clone(),
         })

@@ -94,6 +94,7 @@ impl AgentHistoryPort for HistoryPort {
             }
             events.push(serde_json::from_value::<AgentEngineEvent>(value).map_err(|_| invalid())?);
         }
+        super::super::unified_runtime_history::project_interrupted_terminal(&mut events, &turn.receipt_status);
         Ok(AgentHistoryPage {
             has_older: window.has_older,
             turn: Some(AgentRecordedTurn {

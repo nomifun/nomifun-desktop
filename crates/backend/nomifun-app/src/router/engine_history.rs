@@ -288,6 +288,10 @@ pub(super) async fn load_before(
         turns: Vec::new(),
     };
     let mut total = 0usize;
+    // Ordinary turns keep the previous small candidate window. A larger
+    // approved turn may be read without increasing every normal Session's
+    // history/compaction work to the absolute recovery ceiling.
+    let mut window_budget = 32 * 1024 * 1024usize;
     for turn in turns.into_iter().take(limit) {
         let operation_id = turn.correlation_id.as_ref().to_owned();
         let (root, root_payload) = source_message(&facts, turn)?;
@@ -346,9 +350,16 @@ pub(super) async fn load_before(
                 model_claimed,
             });
         }
-        if records.len() > 4096
-            || serialized_bytes > 8 * 1024 * 1024
-            || total.saturating_add(serialized_bytes) > 16 * 1024 * 1024
+        if window.turns.is_empty() && serialized_bytes > window_budget {
+            let authorized = facts.events.iter().filter(|event| event.kind.0 == "turn/resume-authorized" && event.correlation_id == turn.correlation_id)
+                .filter_map(|event| facts.event_payloads.get(event.event_id.as_ref()))
+                .filter_map(|value| value.pointer("/budget/journal_bytes").and_then(Value::as_u64)).max().unwrap_or(16 * 1024 * 1024);
+            if serialized_bytes as u64 > authorized.saturating_add(8 * 1024 * 1024) { return Err(failure("large historical turn has no matching storage allowance")); }
+            window_budget = serialized_bytes.saturating_add(8 * 1024 * 1024).min(nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES);
+        }
+        if records.len() as u64 > nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_RECORDS + 4000
+            || serialized_bytes > nomifun_agent_contracts::MAX_NATIVE_APPROVED_REPLAY_BYTES
+            || total.saturating_add(serialized_bytes) > window_budget
         {
             if window.turns.is_empty() {
                 return Err(failure("latest turn exceeds the history budget"));

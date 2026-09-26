@@ -905,6 +905,154 @@
         "replay_rule": "cache_metadata_only"
       },
       {
+        "kind": "runtime/execution-claimed",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/runtime-execution-claimed/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/started"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "cache_metadata_only"
+      },
+      {
+        "kind": "runtime/execution-recovery-blocked",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/runtime-execution-recovery-blocked/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/started"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "cache_metadata_only"
+      },
+      {
+        "kind": "runtime/effect-reconciliation-attested",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/runtime-effect-reconciliation-attested/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/paused",
+            "turn/failed",
+            "turn/cancelled"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "cache_metadata_only"
+      },
+      {
+        "kind": "turn/pause-requested",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/turn-pause-requested/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/started"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": false
+        },
+        "replay_rule": "rebuild_projection"
+      },
+      {
+        "kind": "turn/paused",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/turn-paused/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/started"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": true,
+          "reducers": [
+            "session-head",
+            "message-projection"
+          ]
+        },
+        "replay_rule": "rebuild_projection"
+      },
+      {
+        "kind": "turn/resume-authorized",
+        "version": 1,
+        "persistence": "persistent",
+        "payload_schema": "events/turn-resume-authorized/v1",
+        "producer": {
+          "allowed": [
+            "runtime_supervisor"
+          ]
+        },
+        "predecessor": {
+          "mode": "any_of",
+          "kinds": [
+            "turn/paused"
+          ]
+        },
+        "correlation": "turn",
+        "idempotency": "operation_scoped_required",
+        "projector": {
+          "required": true,
+          "reducers": [
+            "session-head",
+            "message-projection"
+          ]
+        },
+        "replay_rule": "rebuild_projection"
+      },
+      {
         "kind": "runtime/progress-recorded",
         "version": 1,
         "persistence": "persistent",
@@ -1036,5 +1184,5 @@
       }
     ]
   },
-  "payload_digest": "d895ce3c25ec8e14807a11d6b661dcba0b7c42649ac1e1a919032fa87ba75df4"
+  "payload_digest": "5b2ff8d966d0b30b7d9a83d13435423e785a5b69fd051aaaad7c6fe14833ba22"
 }

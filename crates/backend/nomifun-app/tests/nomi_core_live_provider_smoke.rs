@@ -729,6 +729,10 @@ fn coding_resource_selections() -> Value {
 }
 
 fn verify_resource_selections(binding: &Value, selections: &Value) -> Result<(), SmokeFailure> {
+    verify_resource_selections_in_workspace(binding, selections, None)
+}
+
+fn verify_resource_selections_in_workspace(binding: &Value, selections: &Value, workspace: Option<&Path>) -> Result<(), SmokeFailure> {
     let selections = selections.as_array().ok_or_else(|| {
         SmokeFailure::new("session.resources", "FIXTURE_RESOURCE_SELECTION_INVALID", 500)
     })?;
@@ -737,8 +741,24 @@ fn verify_resource_selections(binding: &Value, selections: &Value) -> Result<(),
     })?;
     if resources.len() != selections.len() || selections.iter().any(|selection| {
         resources.iter().filter(|resource| {
-            resource.get("resource_kind") == selection.get("resource_kind")
-                && resource.get("resource_id") == selection.get("resource_id")
+            if resource.get("resource_kind") != selection.get("resource_kind") { return false; }
+            let kind = resource.get("resource_kind").and_then(Value::as_str);
+            if let Some(expected) = workspace.filter(|_| matches!(kind, Some("workspace" | "process_session"))) {
+                let Some(root) = resource.pointer("/typed_parameters/workspace_root").and_then(Value::as_str) else { return false; };
+                if std::fs::canonicalize(root).ok().is_none_or(|actual|
+                    std::fs::canonicalize(expected).ok().as_ref() != Some(&actual)) {
+                    return false;
+                }
+                if kind == Some("workspace") {
+                    // This is the public API's opaque identity for an explicitly
+                    // selected root, not the managed default-workspace selector.
+                    use sha2::{Digest, Sha256};
+                    let id = format!("selected-workspace-{:x}", Sha256::digest(root.as_bytes()));
+                    return resource.get("resource_id").and_then(Value::as_str) == Some(id.as_str())
+                        && resource.get("binding_id").and_then(Value::as_str) == Some(format!("workspace:{id}").as_str());
+                }
+            }
+            resource.get("resource_id") == selection.get("resource_id")
         }).count() != 1
     }) {
         return Err(SmokeFailure::new("session.resources", "SESSION_RESOURCE_SELECTION_MISMATCH", 409));
@@ -753,20 +773,35 @@ async fn create_session(
     model: &str,
     resource_selections: Value,
 ) -> Result<(String, Value), SmokeFailure> {
+    create_session_in_workspace(router, preset_id, provider_id, model, resource_selections, None).await
+}
+
+async fn create_session_in_workspace(
+    router: &Router,
+    preset_id: &str,
+    provider_id: &str,
+    model: &str,
+    resource_selections: Value,
+    workspace: Option<&Path>,
+) -> Result<(String, Value), SmokeFailure> {
+    let mut body = json!({
+        "preset_id": preset_id,
+        "title": "Live Step Plan session",
+        "resource_selections": resource_selections,
+        "model": {"provider_id": provider_id, "model": model},
+    });
+    if let Some(workspace) = workspace {
+        if !workspace.is_absolute() || !workspace.is_dir() {
+            return Err(SmokeFailure::new("session.workspace", "LIVE_WORKSPACE_INVALID", 400));
+        }
+        body["workspace"] = json!(workspace.to_string_lossy());
+    }
     let created = successful_json(
         router,
         "session.create",
         Method::POST,
         "/api/agent-sessions",
-        Some(json!({
-            "preset_id": preset_id,
-            "title": "Live Step Plan session",
-            "resource_selections": resource_selections,
-            "model": {
-                "provider_id": provider_id,
-                "model": model
-            }
-        })),
+        Some(body),
         LOCAL_API_DEADLINE,
         &[StatusCode::OK],
     )
@@ -805,8 +840,28 @@ async fn create_session(
             StatusCode::CONFLICT.as_u16(),
         ));
     }
-    verify_resource_selections(&binding, &resource_selections)?;
+    verify_resource_selections_in_workspace(&binding, &resource_selections, workspace)?;
+    if let Some(workspace) = workspace {
+        let projection = successful_json(router, "session.workspace", Method::GET,
+            format!("/api/agent-sessions/{session_id}/projection"), None,
+            LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+        let projection = envelope_data("session.workspace", projection)?;
+        verify_fixture_workspace(&projection, workspace)?;
+    }
     Ok((session_id, binding))
+}
+
+fn verify_fixture_workspace(projection: &Value, expected: &Path) -> Result<(), SmokeFailure> {
+    let actual = projection.pointer("/extra/workspace").and_then(Value::as_str)
+        .ok_or_else(|| SmokeFailure::new("session.workspace", "LIVE_WORKSPACE_PROJECTION_MISSING", 502))?;
+    let expected = std::fs::canonicalize(expected)
+        .map_err(|_| SmokeFailure::new("session.workspace", "LIVE_WORKSPACE_INVALID", 400))?;
+    let actual = std::fs::canonicalize(actual)
+        .map_err(|_| SmokeFailure::new("session.workspace", "LIVE_WORKSPACE_PROJECTION_INVALID", 502))?;
+    if expected != actual || projection.pointer("/extra/custom_workspace") != Some(&json!(true)) {
+        return Err(SmokeFailure::new("session.workspace", "LIVE_WORKSPACE_BINDING_MISMATCH", 409));
+    }
+    Ok(())
 }
 
 async fn start_session_turn(
@@ -1222,6 +1277,18 @@ async fn emit_live_turn_failure_trace(root: &Path) {
     pool.close().await;
 }
 
+fn collaboration_argument_shape(arguments: &Value) -> String {
+    let kind = |value: Option<&Value>| match value {
+        None => "missing", Some(Value::Null) => "null", Some(Value::Bool(_)) => "boolean",
+        Some(Value::String(_)) => "string", Some(Value::Array(_)) => "array",
+        Some(Value::Object(_)) => "object", Some(Value::Number(_)) => "number",
+    };
+    let strategy = match arguments.get("strategy").and_then(Value::as_str) {
+        Some("parallel") => "parallel", Some("planned") => "planned", _ => "other",
+    };
+    format!("{strategy}:{}:{}", kind(arguments.get("tasks")), kind(arguments.get("synthesize")))
+}
+
 async fn emit_live_runtime_progress_trace(root: &Path) {
     let db_path = root.join("data").join("nomifun-backend.db");
     let Ok(pool) = nomifun_db::sqlx::SqlitePool::connect(&format!("sqlite://{}", db_path.display())).await else {
@@ -1239,8 +1306,15 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
         let mut execs = 0_u32;
         let mut writes = 0_u32;
         let mut reports = 0_u32;
+        let mut invalid_arguments = 0_u32;
+        let mut unavailable_names = 0_u32;
+        let mut kernel_rejections = 0_u32;
+        let mut delegations = 0_u32;
+        let mut text_events = 0_u32;
         let mut control_calls = std::collections::BTreeMap::<String, &'static str>::new();
         let mut control_errors = Vec::<String>::new();
+        let mut proposed_shapes = std::collections::BTreeMap::<String, String>::new();
+        let mut rejected_shapes = Vec::new();
         for row in rows {
             let Some(value) = row.and_then(|row| serde_json::from_str::<Value>(&row).ok()) else { continue };
             let event = value.pointer("/event/event").and_then(Value::as_str).unwrap_or_default();
@@ -1255,15 +1329,30 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
                     }
                 }
                 "completion_reported" => reports += 1,
+                "output_text_delta" => text_events += 1,
                 "tool_call_completed" => {
                     let name = value.pointer("/event/call/name").and_then(Value::as_str);
                     let call_id = value.pointer("/event/call/call_id").and_then(Value::as_str);
                     if let (Some(name @ ("update_plan" | "report_completion")), Some(call_id)) = (name, call_id) {
                         control_calls.insert(call_id.to_owned(), if name == "update_plan" { "PLAN" } else { "REPORT" });
                     }
+                    if let (Some(name), Some(call_id)) = (name, call_id)
+                        && name.contains("agent_collaboration") {
+                        proposed_shapes.insert(call_id.to_owned(), collaboration_argument_shape(&value["event"]["call"]["arguments"]));
+                    }
                 }
                 "tool_completed" => {
                     let call_id = value.pointer("/event/result/call_id").and_then(Value::as_str);
+                    if value.pointer("/event/result/is_error").and_then(Value::as_bool) == Some(true) {
+                        let response = value.pointer("/event/result/output/0/text").and_then(Value::as_str).unwrap_or_default();
+                        if response.contains("INVALID_TOOL_ARGUMENTS") {
+                            invalid_arguments += 1;
+                            if let Some(shape) = call_id.and_then(|id| proposed_shapes.get(id))
+                                && rejected_shapes.len() < 6 { rejected_shapes.push(shape.clone()); }
+                        }
+                        if response.contains("not exposed in the current model tool definitions") { unavailable_names += 1; }
+                        if response.contains("Capability Kernel rejected") { kernel_rejections += 1; }
+                    }
                     if let Some(name) = call_id.and_then(|id| control_calls.get(id))
                         && value.pointer("/event/result/is_error").and_then(Value::as_bool) == Some(true) {
                         let response = value.pointer("/event/result/output/0/text").and_then(Value::as_str).unwrap_or_default();
@@ -1275,6 +1364,7 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
                     Some("workspace.files/read") => reads += 1,
                     Some("workspace.process/exec") => execs += 1,
                     Some("workspace.files/write" | "workspace.files/patch") => writes += 1,
+                    Some("agent/delegate" | "agent/fork") => delegations += 1,
                     _ => {}
                 },
                 _ => {}
@@ -1283,12 +1373,15 @@ async fn emit_live_runtime_progress_trace(root: &Path) {
         eprintln!("NOMIFUN_LIVE_SMOKE_RUNTIME_PROGRESS steps={steps} compact_calls={compact_calls} compacted={compacted} degraded={degraded} reads={reads} execs={execs} writes={writes} reports={reports}");
         eprintln!("NOMIFUN_LIVE_SMOKE_CONTROL_ERRORS sequence={}",
             if control_errors.is_empty() { "NONE".to_owned() } else { control_errors.join(",") });
+        eprintln!("NOMIFUN_LIVE_SMOKE_TOOL_REJECTIONS invalid_arguments={invalid_arguments} unavailable_names={unavailable_names} kernel_rejections={kernel_rejections} delegations={delegations} text_events={text_events}");
+        eprintln!("NOMIFUN_LIVE_SMOKE_COLLAB_ARGUMENT_SHAPES sequence={}",
+            if rejected_shapes.is_empty() { "NONE".into() } else { rejected_shapes.join(",") });
     }
     pool.close().await;
 }
 
 fn control_error_code(response: &str) -> &'static str {
-    if response.starts_with("Invalid plan:") { "PLAN_SCHEMA" }
+    if response.contains("Invalid plan:") { "PLAN_SCHEMA" }
     else if response.contains("Requirement source input") { "REQUIREMENT_INPUT_INDEX" }
     else if response.contains("Source quote does not occur") { "REQUIREMENT_QUOTE_MISMATCH" }
     else if response.contains("accepted input sources") { "REQUIREMENT_SOURCE" }
@@ -1552,6 +1645,28 @@ async fn wait_for_session_marker(
     marker: &'static str,
     duration: Duration,
 ) -> Result<(), SmokeFailure> {
+    wait_for_session_marker_with_tools(router,phase,session_id,after_seq,marker,duration,None).await
+}
+
+fn session_marker_tools_match(messages: &[Value], expected_action: Option<&str>) -> bool {
+    let tools: Vec<_> = messages.iter().filter(|message|
+        message.get("presentation_intent").and_then(Value::as_str) == Some("tool")).collect();
+    match expected_action {
+        None => tools.is_empty(),
+        Some(action) => tools.len() == 1
+            && tools[0].pointer("/projection/state").and_then(Value::as_str) == Some("recorded")
+            && tools[0].pointer("/projection/tool_summary/action_id").and_then(Value::as_str) == Some(action)
+            && tools[0].pointer("/projection/tool_summary/result_state").and_then(Value::as_str) == Some("recorded")
+            && tools[0].pointer("/projection/tool_summary/result_digest").and_then(Value::as_str)
+                .is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte|byte.is_ascii_hexdigit()))
+            && tools[0].pointer("/projection/tool_summary/error").is_none_or(Value::is_null),
+    }
+}
+
+async fn wait_for_session_marker_with_tools(
+    router: &Router, phase: &'static str, session_id: &str, after_seq: u64,
+    marker: &'static str, duration: Duration, expected_action: Option<&str>,
+) -> Result<(), SmokeFailure> {
     let deadline = tokio::time::Instant::now() + duration;
     loop {
         let (messages, _) =
@@ -1563,9 +1678,7 @@ async fn wait_for_session_marker(
                 StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
             ));
         }
-        let unexpected_tools = messages.iter().any(|message| {
-            message.get("presentation_intent").and_then(Value::as_str) == Some("tool")
-        });
+        let unexpected_tools = !session_marker_tools_match(&messages,expected_action);
         let assistant_text = messages
             .iter()
             .filter_map(assistant_text_projection)
@@ -1756,11 +1869,46 @@ async fn wait_for_execution_marker(
     }
 }
 
+async fn collaboration_projection(router: &Router, session_id: &str, timeout: Duration) -> Result<Value, SmokeFailure> {
+    let response = successful_json(
+        router, "cluster.link", Method::GET,
+        format!("/api/agent-sessions/{session_id}/projection"), None,
+        timeout, &[StatusCode::OK],
+    ).await?;
+    envelope_data("cluster.link", response)
+}
+
+async fn wait_for_collaboration_link(
+    router: &Router,
+    session_id: &str,
+    previous: Option<&str>,
+    timeout: Duration,
+) -> Result<String, SmokeFailure> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(SmokeFailure::new("cluster.link", "CLUSTER_LEAD_LINK_DEADLINE_EXCEEDED", 408));
+        }
+        let projection = collaboration_projection(router, session_id, LOCAL_API_DEADLINE.min(remaining)).await?;
+        if let Some(id) = projection.get("linked_execution_id").and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty() && Some(*id) != previous)
+        {
+            return Ok(id.to_owned());
+        }
+        tokio::time::sleep(POLL_INTERVAL.min(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )).await;
+    }
+}
+
 async fn run_live_agent_collaboration(
     router: &Router,
     session_id: &str,
 ) -> Result<(), SmokeFailure> {
     let cursor = session_message_cursor(router, "cluster.cursor_before", session_id).await?;
+    let before = collaboration_projection(router, session_id, LOCAL_API_DEADLINE).await?;
+    let previous = before.get("linked_execution_id").and_then(Value::as_str);
     start_session_turn(
         router,
         "cluster.trigger_turn",
@@ -1771,23 +1919,12 @@ async fn run_live_agent_collaboration(
         ),
     )
     .await?;
-    let projection = successful_json(
-        router,
-        "cluster.link",
-        Method::GET,
-        format!("/api/agent-sessions/{session_id}/projection"),
-        None,
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let projection = envelope_data("cluster.link", projection)?;
-    let execution_id = required_string(
-        "cluster.link",
-        &projection,
-        "/linked_execution_id",
-        "CLUSTER_LEAD_LINK_MISSING",
-    )?;
+    // /turns acknowledges admission, not model/tool completion. Waiting for
+    // a new durable link avoids a deterministic race without weakening the
+    // subsequent execution/marker assertions or delegating a second time.
+    let execution_id = wait_for_collaboration_link(
+        router, session_id, previous, TURN_RESULT_DEADLINE,
+    ).await?;
     wait_for_execution_marker(
         router,
         &execution_id,
@@ -1795,13 +1932,17 @@ async fn run_live_agent_collaboration(
         TURN_RESULT_DEADLINE,
     )
     .await?;
-    wait_for_session_marker(
+    // The parent was explicitly required to delegate once. Keep the child
+    // execution and exact parent reply assertions, and require exactly that
+    // settled Action instead of applying the no-tools marker policy here.
+    wait_for_session_marker_with_tools(
         router,
         "cluster.lead_reply",
         session_id,
         cursor,
         COLLABORATION_MODEL_MARKER,
         TURN_RESULT_DEADLINE,
+        Some("agent/delegate"),
     )
     .await?;
     Ok(())
@@ -2158,12 +2299,13 @@ async fn run_live_workspace_file_chain(
     } else {
         json!([{"resource_kind":"workspace","resource_id":"default-workspace"}])
     };
-    let (session_id, _) = create_session(
+    let (session_id, _) = create_session_in_workspace(
         router,
         &preset_id,
         &provider_id,
         model,
         selections,
+        Some(work_dir),
     ).await?;
     let file_name = if snake_game { "snake_game.html" } else { "session-smoke.txt" };
     let prompt = if snake_game {
@@ -2217,6 +2359,9 @@ async fn run_live_workspace_file_chain(
             if !valid_file {
                 return Err(SmokeFailure::new("file.result", "WORKSPACE_FILE_MISSING_OR_WRONG", 422));
             }
+            if snake_game {
+                verify_game_script_syntax(content.as_deref().expect("validated game content"))?;
+            }
             let root_listing = successful_json(
                 router,
                 "file.workspace_listing",
@@ -2240,11 +2385,18 @@ async fn run_live_workspace_file_chain(
             if !write_recorded {
                 return Err(SmokeFailure::new("file.messages", "WORKSPACE_WRITE_RECEIPT_MISSING", 422));
             }
+            if !snake_game && !messages.iter().any(|message|
+                message.get("presentation_intent").and_then(Value::as_str) == Some("tool")
+                    && message.pointer("/projection/tool_summary/name").and_then(Value::as_str) == Some("read_file")
+                    && message.pointer("/projection/state").and_then(Value::as_str) == Some("recorded")) {
+                return Err(SmokeFailure::new("file.messages", "WORKSPACE_READBACK_RECEIPT_MISSING", 422));
+            }
             // Tool-using models may add a short explanation around the final
             // answer. The selected-model smoke checks exact text separately;
             // here we require a real terminal reply and verified file effect.
             if !messages.iter().filter_map(assistant_text_projection).any(|text|
-                text.get("content").and_then(Value::as_str).is_some_and(|content| !content.trim().is_empty())
+                text.get("content").and_then(Value::as_str).is_some_and(|content|
+                    !content.trim().is_empty() && (snake_game || content.trim().ends_with(WORKSPACE_FILE_MARKER)))
             ) {
                 return Err(SmokeFailure::new("file.messages", "WORKSPACE_FINAL_REPLY_MISSING", 422));
             }
@@ -2255,6 +2407,63 @@ async fn run_live_workspace_file_chain(
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// Independent parsing, not model self-assessment or execution of generated
+/// code. The verifier sees only HTML on stdin and inherits the runner's
+/// credential-free environment. No browser/gameplay acceptance is implied.
+fn verify_game_script_syntax(html: &str) -> Result<(), SmokeFailure> {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+    const CHECK: &str = r#"
+const vm = require('node:vm');
+let html = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { html += chunk; if (Buffer.byteLength(html) > 8388608) process.exit(2); });
+process.stdin.on('end', () => {
+  try {
+    let count = 0;
+    for (const match of html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi)) {
+      if (/\bsrc\s*=/i.test(match[1])) throw new Error('external script');
+      if (!match[2].trim()) continue;
+      const type = match[1].match(/\btype\s*=\s*['"]?([^'"\s>]+)/i)?.[1]?.toLowerCase();
+      if (type && !['module','text/javascript','application/javascript'].includes(type)) continue;
+      if (++count > 32) throw new Error('script count');
+      if (type === 'module') new vm.SourceTextModule(match[2]);
+      else new vm.Script(match[2]);
+    }
+    if (count === 0) throw new Error('no script');
+  } catch { process.exitCode = 1; }
+});
+"#;
+    let mut command = Command::new("node");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW for the verifier.
+    }
+    let mut child = command.args(["--no-warnings", "--experimental-vm-modules", "-e", CHECK])
+        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|_| SmokeFailure::new("game.syntax", "NODE_VERIFIER_UNAVAILABLE", 500))?;
+    let written = child.stdin.take().expect("piped stdin").write_all(html.as_bytes());
+    if written.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(SmokeFailure::new("game.syntax", "SCRIPT_VERIFIER_INPUT_FAILED", 500));
+    }
+    let status = child.wait().map_err(|_| SmokeFailure::new("game.syntax", "SCRIPT_VERIFIER_FAILED", 500))?;
+    if !status.success() {
+        return Err(SmokeFailure::new("game.syntax", "GAME_SCRIPT_SYNTAX_INVALID", 422));
+    }
+    Ok(())
+}
+
+#[test]
+fn game_syntax_verifier_checks_code_without_executing_it() {
+    assert!(verify_game_script_syntax("<script>throw new Error('must not execute');</script>").is_ok());
+    assert!(verify_game_script_syntax("<script>function broken( {</script>").is_err());
+    assert!(verify_game_script_syntax("<script src='https://example.invalid/game.js'></script>").is_err());
+    assert!(verify_game_script_syntax("<script type='module'>export const size = 20;</script>").is_ok());
 }
 
 async fn wait_for_live_coding_turn(
@@ -2402,8 +2611,8 @@ test('limit zero and invalid limits', () => {
     let preset = envelope_data("long_coding.preset", created)?;
     let preset_id = required_string("long_coding.preset", &preset, "/preset/preset_id",
         "LONG_CODING_PRESET_ID_MISSING")?;
-    let (session_id, _) = create_session(router, &preset_id, &provider_id, model,
-        coding_resource_selections()).await?;
+    let (session_id, _) = create_session_in_workspace(router, &preset_id, &provider_id, model,
+        coding_resource_selections(), Some(work_dir)).await?;
 
     let cursor = session_message_cursor(router, "long_coding.first.cursor", &session_id).await?;
     start_session_turn(router, "long_coding.first.turn", &session_id,
@@ -2643,6 +2852,7 @@ async fn official_runtime_build(
             409,
         ));
     }
+    eprintln!("NOMIFUN_LIVE_SMOKE_BUILD digest={}",descriptor.build_digest);
     Ok(descriptor)
 }
 
@@ -2687,7 +2897,9 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     })?;
     let fixture = build_fixture(&root).await?;
     let router = fixture.application.router();
-    let result = AssertUnwindSafe(async { match case {
+    let result = AssertUnwindSafe(async {
+        official_runtime_build(&router).await?;
+        match case {
         LiveCase::WorkspaceFile | LiveCase::CodingPreset | LiveCase::SnakeGame => run_live_workspace_file_chain(
             &router,
             api_key.as_str(),
@@ -2727,7 +2939,7 @@ async fn run_live_provider_smoke(case: LiveCase) -> Result<(), SmokeFailure> {
     // credential audit so no buffered log write can occur after a clean scan.
     drop(environment);
     close_result?;
-    if matches!(case, LiveCase::LongCoding) {
+    if result.is_err() || matches!(case, LiveCase::LongCoding) {
         emit_live_runtime_progress_trace(root.path()).await;
         emit_live_turn_failure_trace(root.path()).await;
     }
@@ -2821,6 +3033,23 @@ mod evidence_tests {
     use super::*;
 
     #[test]
+    fn marker_tool_policy_requires_the_exact_requested_settled_delegation() {
+        let delegation = json!({"presentation_intent":"tool","projection":{"state":"recorded",
+            "tool_summary":{"action_id":"agent/delegate","result_state":"recorded","result_digest":"a".repeat(64)}}});
+        assert!(session_marker_tools_match(&[],None));
+        assert!(!session_marker_tools_match(&[delegation.clone()],None));
+        assert!(session_marker_tools_match(&[delegation.clone()],Some("agent/delegate")));
+        assert!(!session_marker_tools_match(&[],Some("agent/delegate")));
+        assert!(!session_marker_tools_match(&[delegation.clone(),delegation.clone()],Some("agent/delegate")));
+        let mut wrong=delegation.clone(); wrong["projection"]["tool_summary"]["action_id"]=json!("agent/fork");
+        assert!(!session_marker_tools_match(&[wrong],Some("agent/delegate")));
+        let mut unsettled=delegation.clone(); unsettled["projection"]["state"]=json!("started");
+        assert!(!session_marker_tools_match(&[unsettled],Some("agent/delegate")));
+        let mut failed=delegation; failed["projection"]["tool_summary"]["error"]=json!("failure");
+        assert!(!session_marker_tools_match(&[failed],Some("agent/delegate")));
+    }
+
+    #[test]
     fn admission_diagnostics_emit_only_static_codes_and_preserve_failure() {
         let projected_tool_failure = json!({"projection":{"state":"recorded",
             "tool_summary":{"name":"read_file","error":"RESOURCE_NOT_FOUND: omitted path"}}});
@@ -2877,6 +3106,50 @@ mod evidence_tests {
     }
 
     #[test]
+    fn collaboration_diagnostics_expose_only_fixed_shape_categories() {
+        let shape = collaboration_argument_shape(&json!({
+            "strategy":"SENSITIVE_VALUE", "tasks":"SENSITIVE_VALUE", "synthesize":false,
+            "extra":"SENSITIVE_VALUE"
+        }));
+        assert_eq!(shape, "other:string:boolean");
+        assert_eq!(collaboration_argument_shape(&json!({"strategy":"parallel","tasks":[]})), "parallel:array:missing");
+    }
+
+    #[test]
+    fn selected_workspace_resources_freeze_both_file_and_process_roots() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().to_string_lossy().into_owned();
+        let id = format!("selected-workspace-{:x}", Sha256::digest(path.as_bytes()));
+        let mut binding = json!({"typed_resource_bindings":[
+            {"binding_id":format!("workspace:{id}"),"resource_kind":"workspace","resource_id":id,"typed_parameters":{"workspace_root":path}},
+            {"resource_kind":"process_session","resource_id":"managed-process-session","typed_parameters":{"workspace_root":path}},
+            {"resource_kind":"project_memory","resource_id":"default-project-memory"}
+        ]});
+        let selections = coding_resource_selections();
+        assert!(verify_resource_selections(&binding, &selections).is_err(), "a selected root is not the managed default identity");
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_ok());
+        binding["typed_resource_bindings"][1]["typed_parameters"]["workspace_root"] = json!("missing-root");
+        assert!(verify_resource_selections_in_workspace(&binding, &selections, Some(root.path())).is_err());
+    }
+
+    #[test]
+    fn coding_fixture_must_bind_the_project_not_an_empty_managed_session_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let managed = root.path().join("managed-session");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&managed).unwrap();
+        let correct = json!({"extra":{"workspace":project,"custom_workspace":true}});
+        assert!(verify_fixture_workspace(&correct, &project).is_ok());
+        let wrong = json!({"extra":{"workspace":managed,"custom_workspace":true}});
+        assert_eq!(verify_fixture_workspace(&wrong, &project).unwrap_err().code, "LIVE_WORKSPACE_BINDING_MISMATCH");
+        let wrong_kind = json!({"extra":{"workspace":project,"custom_workspace":false}});
+        assert!(verify_fixture_workspace(&wrong_kind, &project).is_err());
+        assert!(verify_fixture_workspace(&json!({}), &project).is_err());
+    }
+
+    #[test]
     fn live_route_rejects_fallback_and_wrong_exact_model() {
         let mut document = json!({"chat_route_records":{"agent_chat":{
             "primary":{"provider_id":"provider","model":"step-3.77-flash"},"failovers":[]}}});
@@ -2898,6 +3171,36 @@ mod evidence_tests {
             format!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}"),
             "NOMIFUN_LIVE_SMOKE_FAILURE phase=coding.exec code=COMMAND_FAILED status=422"
         );
+    }
+
+    #[tokio::test]
+    async fn collaboration_link_waits_for_admitted_work_and_rejects_a_stale_link() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let router = Router::new().route("/api/agent-sessions/{session_id}/projection",
+            axum::routing::get(move || {
+                let calls = calls.clone();
+                async move {
+                    let link = match calls.fetch_add(1, Ordering::SeqCst) {
+                        0 => None,
+                        1 => Some("previous-execution"),
+                        _ => Some("new-execution"),
+                    };
+                    axum::Json(json!({"success":true,"data":{"linked_execution_id":link}}))
+                }
+            }));
+        let link = wait_for_collaboration_link(&router, "session", Some("previous-execution"), Duration::from_secs(2)).await.unwrap();
+        assert_eq!(link, "new-execution");
+        assert_eq!(observed.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn missing_collaboration_link_remains_a_failure_at_the_deadline() {
+        let router = Router::new().route("/api/agent-sessions/{session_id}/projection",
+            axum::routing::get(|| async { axum::Json(json!({"success":true,"data":{"linked_execution_id":null}})) }));
+        let failure = wait_for_collaboration_link(&router, "session", None, Duration::from_millis(10)).await.unwrap_err();
+        assert_eq!(failure.code, "CLUSTER_LEAD_LINK_DEADLINE_EXCEEDED");
     }
 
     #[tokio::test]

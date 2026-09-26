@@ -431,6 +431,10 @@ impl ScopedInstructions {
         !self.layers.is_empty()
     }
 
+    pub(crate) fn restore_sequence(&self, next: u32) {
+        self.sequence.store(next.max(100), Ordering::Relaxed);
+    }
+
     pub(crate) fn context(&self) -> String {
         Self::render_layers(&self.layers)
     }

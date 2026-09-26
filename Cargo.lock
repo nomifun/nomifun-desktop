@@ -5999,6 +5999,7 @@ version = "0.7.6"
 dependencies = [
  "async-trait",
  "futures",
+ "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave2",
  "nomifun-agent-kernel",
@@ -6598,6 +6599,7 @@ name = "nomifun-engine-core"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "jsonschema",
  "nomi-process-runtime",
  "nomifun-agent-contracts",
  "nomifun-agent-domain-wave2",
@@ -6802,6 +6804,7 @@ dependencies = [
  "base64 0.22.1",
  "crc32fast",
  "futures-util",
+ "httpdate",
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",

@@ -953,7 +953,7 @@ impl ChatModelError {
         Self::new(
             ChatModelErrorCode::StreamInterrupted,
             message,
-            ChatRetryDirective::Failover,
+            ChatRetryDirective::RetrySameRoute,
         )
     }
 
