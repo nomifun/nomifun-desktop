@@ -487,7 +487,11 @@
           "kind": "tool"
         }
       ],
-      "skills": [],
+      "skills": [
+        { "id": "creative-studio-canvas", "version": "1.0.0" },
+        { "id": "creative-studio-organize", "version": "1.0.0" },
+        { "id": "creative-studio-template", "version": "1.0.0" }
+      ],
       "mcp_tools": []
     },
     {

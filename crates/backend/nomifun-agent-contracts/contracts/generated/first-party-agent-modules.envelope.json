@@ -489,7 +489,20 @@
             "kind": "tool"
           }
         ],
-        "skills": [],
+        "skills": [
+          {
+            "id": "creative-studio-canvas",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creative-studio-organize",
+            "version": "1.0.0"
+          },
+          {
+            "id": "creative-studio-template",
+            "version": "1.0.0"
+          }
+        ],
         "mcp_tools": []
       },
       {
@@ -560,5 +573,5 @@
       }
     ]
   },
-  "payload_digest": "7d0190dbf04ca9001393ddff6ee47a2318388874d6acf1b9a9a71a5030d34547"
+  "payload_digest": "e60788f69124a4bd867ef6f48d5cf574a5989d9f5dbd2aff4fd9cb686180c384"
 }

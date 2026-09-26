@@ -99,6 +99,7 @@ pub use plugin_tools::{
     NomiHostDynamicToolInvocation,
     NomiHostDynamicToolInvoker,
     NomiInitialContextContribution,
+    NomiTurnContextContributor,
     NomiPlatformBuiltinContextAdmission, NomiPluginToolAction,
     NomiPluginToolError, NomiPluginToolInvocation, NomiPluginToolInvoker,
     NomiPluginToolSchemaResolver,

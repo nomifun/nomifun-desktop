@@ -939,6 +939,53 @@ async fn windows_powershell_preserves_final_native_and_pipeline_status() {
 }
 
 #[cfg(windows)]
+#[tokio::test]
+async fn windows_program_powershell_initializes_under_managed_owner() {
+    let workspace = tempfile::tempdir().expect("isolated PowerShell workspace");
+    fs::write(workspace.path().join("normal.txt"), b"fixture")
+        .expect("create a bounded workspace entry");
+    let powershell = std::path::PathBuf::from(
+        std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows")),
+    )
+    .join("System32")
+    .join("WindowsPowerShell")
+    .join("v1.0")
+    .join("powershell.exe");
+    let resolved = std::env::var_os("PATH").into_iter()
+        .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join("powershell.exe"))
+        .find(|candidate| candidate.is_file())
+        .expect("PowerShell should be present on PATH");
+    assert_eq!(fs::canonicalize(resolved).unwrap(), fs::canonicalize(&powershell).unwrap());
+    for program in [OsString::from("powershell.exe"), powershell.into_os_string()] {
+        let mut process = request(
+            program,
+            [
+                "-NoProfile",
+                "-Command",
+                "Get-ChildItem -Force | Select-Object Mode, Name, Attributes, LinkType | Format-Table -AutoSize",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        process.cwd = workspace.path().to_path_buf();
+        process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor
+            .start(process)
+            .await
+            .expect("managed PowerShell program should start");
+        let outcome = wait_for_terminal(&supervisor, &handle).await;
+        let ProcessOutcome::Exited { code, output, .. } = outcome else {
+            panic!("managed PowerShell program should exit, got {outcome:?}");
+        };
+        assert_eq!(code, Some(0), "PowerShell startup/output: {}", output.text());
+        assert!(output.text().contains("normal.txt"));
+    }
+}
+
+#[cfg(windows)]
 async fn wait_for_windows_pid_marker(path: &Path) -> u32 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

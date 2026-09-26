@@ -330,6 +330,15 @@ pub(crate) async fn run_turn(
         .insert(0, crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.into());
     model_request.input.max_output_tokens = Some(request.model_budget.max_output_tokens);
     model_request.input.instructions.push(request.model_budget.execution_context(total_model_limit));
+    if let Some(recovery) = &recovery {
+        // The journal retains only selected Skill IDs. The host rehydrates
+        // exact frozen bodies for applied steering receipts before recovery
+        // admission; restore each once as system context, not user wording.
+        for input in recovery.prepared_inputs() {
+            input.validate_prepared_live()?;
+            model_request.input.instructions.extend(input.prepared_skill_instructions.iter().cloned());
+        }
+    }
     let segment_context_slot = segments.as_ref().map(|state| {
         let slot = model_request.input.instructions.len();
         model_request.input.instructions.push(state.context(recovery.as_ref().map_or(0, |state| state.last_model_step)));
@@ -2961,7 +2970,10 @@ mod tests {
         }
     }
 
-    struct FailedProcessTool;
+    #[derive(Default)]
+    struct FailedProcessTool {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
 
     struct ProcessThenWriteTool {
         writes: AtomicUsize,
@@ -2999,6 +3011,7 @@ mod tests {
                 return Ok(result);
             }
             assert_eq!(invocation.binding.action_id.as_ref(), "workspace.process/exec");
+            self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
             Ok(AgentToolResult::text(
                 invocation.call.call_id,
                 json!({"process_id":"failed-process","state":"exited",
@@ -3716,7 +3729,7 @@ mod tests {
             tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
             tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
         ]).unwrap();
-        let result = open_session(model.clone(), Arc::new(FailedProcessTool))
+        let result = open_session(model.clone(), Arc::new(FailedProcessTool::default()))
             .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0))
             .await;
         assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
@@ -3724,6 +3737,58 @@ mod tests {
         assert_eq!(requests.len(), 3, "the first attempted final reply must receive a completion review");
         assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
+    }
+
+    #[tokio::test]
+    async fn failed_process_keeps_its_name_visible_while_plan_gate_blocks_retry() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("first-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("bad-args", "exec_command", json!({"command":"cmd.exe","args":"[\"/c\",\"dir\",\"/a\"]"})),
+                control_step("held-exec", "exec_command", json!({"command":"bun","args":["test"]})),
+                plan_step("in_progress", "inspect"),
+                control_step("after-plan", "exec_command", json!({"command":"bun","args":["test"]})),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut exec = tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false);
+        exec.definition.input_schema = nomifun_agent_contracts::StrictJsonValue(json!({
+            "type":"object", "additionalProperties":false,
+            "required":["command","args"],
+            "properties":{"command":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}}
+        }));
+        exec.schema_digest = crate::tool::input_schema_digest(&exec.definition.input_schema).unwrap();
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            exec,
+        ]).unwrap();
+        let tools = Arc::new(FailedProcessTool::default());
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0).with_max_model_steps(5))
+            .await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(*tools.calls.lock().unwrap(), ["first-exec", "after-plan"],
+            "neither the malformed nor plan-held retry may cross the owner tool port");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "exec_command"),
+            "ledger activation must not revoke an advertised frozen tool name");
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, output, is_error }
+                if call_id.as_ref() == "bad-args" && *is_error
+                    && !format!("{output:?}").contains("not exposed"))));
+        assert!(requests[3].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, output, is_error }
+                if call_id.as_ref() == "held-exec" && *is_error
+                    && format!("{output:?}").contains("Call update_plan alone now"))));
+        assert!(requests[4].input.tools.iter().any(|tool| tool.name == "exec_command"));
+        let unknown = ChatToolCall {
+            call_id: "invented".into(), name: "unknown_exec".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({})), provider_metadata: None,
+        };
+        assert!(crate::tool::reject_unexposed_batch(&[unknown], &requests[1].input.tools)
+            .is_some(), "an unknown tool stays rejected after ledger activation");
     }
 
     #[tokio::test]
@@ -3838,6 +3903,7 @@ mod tests {
                 inject_skills: Vec::new(),
                 image_count: 0,
                 prepared_images: Vec::new(),
+                prepared_skill_instructions: Vec::new(),
             })),
         });
         let result = open_session(model.clone(), Arc::new(EchoTool))
@@ -3903,6 +3969,7 @@ mod tests {
                 inject_skills: Vec::new(),
                 image_count: 0,
                 prepared_images: Vec::new(),
+                prepared_skill_instructions: Vec::new(),
             })),
         });
         let result = open_session(model.clone(), Arc::new(EchoTool))
@@ -4401,6 +4468,7 @@ mod tests {
         let port = Arc::new(TerminalFenceSteer { input: std::sync::Mutex::new(Some(crate::AgentSteeringInput {
             receipt_operation_id: "completion-steer".into(), message_id: "completion-steer-message".into(),
             text: "also explain".into(), files: vec![], inject_skills: vec![], image_count: 0, prepared_images: vec![],
+            prepared_skill_instructions: vec![],
         })) });
         let result = open_session(model.clone(), Arc::new(EchoTool)).run_turn(
             AgentTurnRequest::new(request(), tool_plan(), principal(), 0).with_input_port(port),
@@ -4705,6 +4773,7 @@ mod tests {
         let steer = |id: &str, text: &str| crate::AgentSteeringInput {
             receipt_operation_id: id.into(), message_id: format!("message-{id}"), text: text.into(),
             files: vec![], inject_skills: vec![], image_count: 0, prepared_images: vec![],
+            prepared_skill_instructions: vec![],
         };
         crate::steering::incorporate(vec![steer("z", "Run the check"), steer("a", "Do not run the check")],
             &mut request, &mut retained, &mut seen, &mut applied).unwrap();
@@ -4714,6 +4783,40 @@ mod tests {
             &mut request, &mut retained, &mut seen, &mut applied).is_err());
         assert_eq!(applied, vec!["z", "a"]);
         assert_eq!(retained.len(), 3);
+    }
+
+    #[test]
+    fn steering_skill_body_is_system_context_not_accepted_user_wording() {
+        let mut request = request();
+        let mut retained = request.input.messages.clone();
+        let mut seen = BTreeSet::new();
+        let mut applied = Vec::new();
+        let skill_body = "Verified selected Skill body: BOUNDED_SKILL_INSTRUCTION";
+        let input = crate::AgentSteeringInput {
+            receipt_operation_id: "skill-receipt".into(),
+            message_id: "skill-message".into(),
+            text: "Use the selected Skill for this task".into(),
+            files: vec![], inject_skills: vec!["selected-skill".into()],
+            image_count: 0, prepared_images: vec![],
+            prepared_skill_instructions: vec![skill_body.into()],
+        };
+        let recorded = input.journal_record();
+        assert!(recorded.same_delivery(&input));
+        assert!(!serde_json::to_string(&recorded).unwrap().contains("BOUNDED_SKILL_INSTRUCTION"));
+        crate::steering::incorporate(vec![input.clone()], &mut request, &mut retained,
+            &mut seen, &mut applied).unwrap();
+        assert_eq!(applied, ["skill-receipt"]);
+        assert_eq!(request.input.instructions.last().map(String::as_str), Some(skill_body));
+        assert!(!serde_json::to_string(&retained).unwrap().contains("BOUNDED_SKILL_INSTRUCTION"),
+            "completion/source citations must see accepted steering text, not Skill instructions");
+        assert!(!serde_json::to_string(&request.input.messages).unwrap().contains("BOUNDED_SKILL_INSTRUCTION"));
+        let instruction_count = request.input.instructions.len();
+        assert!(crate::steering::incorporate(vec![input], &mut request, &mut retained,
+            &mut seen, &mut applied).is_err());
+        assert_eq!(request.input.instructions.len(), instruction_count,
+            "repeated receipt must not append Skill instructions twice");
+        assert!(crate::steering::incorporate(vec![recorded], &mut request, &mut retained,
+            &mut seen, &mut applied).is_err(), "a journal-only ID cannot become live Skill context");
     }
 
     #[tokio::test]
@@ -4971,6 +5074,7 @@ mod tests {
                 inject_skills: Vec::new(),
                 image_count: 0,
                 prepared_images: Vec::new(),
+                prepared_skill_instructions: Vec::new(),
             })),
         });
         let result = open_session(model.clone(), Arc::new(EchoTool))

@@ -38,8 +38,12 @@ impl ToolArgumentValidators {
                 AgentEngineError::InvalidContract("argument preflight requires an exposed tool".into())
             })?;
             let digest = input_schema_digest(&definition.input_schema)?;
-            if plan.binding(&call.name).is_some_and(|binding| digest != binding.schema_digest) {
-                return Err(AgentEngineError::InvalidContract("model tool schema differs from the frozen binding".into()));
+            if let Some(binding) = plan.binding(&call.name).filter(|binding| digest != binding.schema_digest) {
+                return Err(AgentEngineError::ToolSchemaDigestMismatch {
+                    tool_name: binding.model_name.clone(),
+                    expected: binding.schema_digest.as_ref().to_owned(),
+                    actual: digest.as_ref().to_owned(),
+                });
             }
             if !self.validators.contains_key(&digest) {
                 let validator = jsonschema::options().with_retriever(NoExternalSchemaReads)
@@ -227,7 +231,46 @@ mod tests {
     #[test]
     fn schema_drift_is_a_host_error_not_a_model_correction_or_new_authority() {
         let (plan, mut exposed) = fixture(json!({"type":"object"}));
+        let expected = plan.binding("write_file").unwrap().schema_digest.as_ref().to_owned();
         exposed[0].input_schema = StrictJsonValue(json!({"type":"string"}));
-        assert!(ToolArgumentValidators::default().reject_invalid_batch(&[call("call", json!({}))], &plan, &exposed).is_err());
+        let actual = input_schema_digest(&exposed[0].input_schema).unwrap().as_ref().to_owned();
+        let error = ToolArgumentValidators::default()
+            .reject_invalid_batch(&[call("call", json!({}))], &plan, &exposed).unwrap_err();
+        assert!(matches!(error, AgentEngineError::ToolSchemaDigestMismatch {
+            tool_name, expected: frozen, actual: presented,
+        } if tool_name == "write_file" && frozen == expected && presented == actual));
+    }
+
+    #[test]
+    fn current_control_schemas_preflight_the_whole_platform_batch() {
+        let (plan, mut exposed) = fixture(json!({"type":"object","additionalProperties":false,
+            "required":["path"],"properties":{"path":{"type":"string"}}}));
+        exposed.push(crate::planning::definition());
+        exposed.push(crate::completion::definition());
+        let control = |id: &str, name: &str, arguments| ChatToolCall {
+            call_id: id.into(), name: name.into(),
+            arguments: StrictJsonValue(arguments), provider_metadata: None,
+        };
+        assert!(ToolArgumentValidators::default().reject_invalid_batch(&[
+            control("valid-plan", "update_plan", json!({"plan":[{"step":"inspect","status":"in_progress"}]})),
+        ], &plan, &exposed).unwrap().is_none(), "first update_plan may omit explanation");
+        for arguments in [
+            json!({"explanation":"inspect"}),
+            json!({"explanation":true,"plan":[{"step":"inspect","status":"in_progress"}]}),
+            json!({"explanation":"inspect","plan":[{"step":"inspect","status":"in_progress"}],"unknown":true}),
+        ] {
+            let calls = [call("valid-write", json!({"path":"a"})), control("invalid-plan", "update_plan", arguments)];
+            let results = ToolArgumentValidators::default().reject_invalid_batch(&calls, &plan, &exposed)
+                .unwrap().expect("a malformed current control must hold the entire batch");
+            assert_eq!(results.len(), 2);
+            assert!(results.iter().all(|(_, result)| result.as_ref().unwrap().is_error));
+            assert!(results[0].1.as_ref().unwrap().output_text().contains("BATCH_ARGUMENTS_REJECTED"));
+            assert!(results[1].1.as_ref().unwrap().output_text().contains("INVALID_TOOL_ARGUMENTS"));
+        }
+        let calls = [call("valid-write", json!({"path":"a"})),
+            control("invalid-report", "report_completion", json!({"summary":"done","criteria":[],"unknown":true}))];
+        let results = ToolArgumentValidators::default().reject_invalid_batch(&calls, &plan, &exposed)
+            .unwrap().expect("a malformed completion report must hold the entire batch");
+        assert!(results.iter().all(|(_, result)| result.as_ref().unwrap().is_error));
     }
 }

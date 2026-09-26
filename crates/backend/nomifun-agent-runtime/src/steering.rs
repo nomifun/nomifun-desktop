@@ -23,6 +23,10 @@ pub struct AgentSteeringInput {
     /// history retains references and delivery facts, never serialized pixels.
     #[serde(skip)]
     pub prepared_images: Vec<ChatContentPart>,
+    /// Exact Snapshot-selected Skill bodies, prepared by the host for this
+    /// accepted steering input. Receipts and journals retain IDs only.
+    #[serde(skip)]
+    pub prepared_skill_instructions: Vec<String>,
 }
 
 impl AgentSteeringInput {
@@ -54,6 +58,9 @@ impl AgentSteeringInput {
                     if matches!(media_type.as_str(), "image/png" | "image/jpeg" | "image/webp")
                         && !data_base64.is_empty() && data_base64.len() <= 2 * 1024 * 1024)
             })
+            || self.prepared_skill_instructions.len() > self.inject_skills.len()
+            || self.prepared_skill_instructions.iter().any(|body| body.is_empty())
+            || self.prepared_skill_instructions.iter().map(String::len).sum::<usize>() > 24 * 1024
             || serde_json::to_vec(self)
                 .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?
                 .len()
@@ -61,6 +68,18 @@ impl AgentSteeringInput {
         {
             return Err(AgentEngineError::InvalidContract(
                 "invalid or oversized steering input".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_prepared_live(&self) -> Result<(), AgentEngineError> {
+        self.validate()?;
+        if self.prepared_images.len() != self.image_count
+            || self.prepared_skill_instructions.len() != self.inject_skills.len()
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "live steering attachments or selected Skill bodies are missing".into(),
             ));
         }
         Ok(())
@@ -88,6 +107,7 @@ impl AgentSteeringInput {
             inject_skills: self.inject_skills.clone(),
             image_count: self.image_count,
             prepared_images: Vec::new(),
+            prepared_skill_instructions: Vec::new(),
         }
     }
 
@@ -154,26 +174,25 @@ pub(crate) fn incorporate(
     }
     let mut next_seen = seen.clone();
     let mut messages = Vec::with_capacity(inputs.len());
+    let mut skill_instructions = Vec::new();
     let mut next_order = Vec::with_capacity(inputs.len());
     for input in inputs {
-        input.validate()?;
-        if input.prepared_images.len() != input.image_count {
-            return Err(AgentEngineError::InvalidContract(
-                "live steering image payload is missing; historical input must not be re-enqueued"
-                    .into(),
-            ));
-        }
+        input.validate_prepared_live()?;
         if !next_seen.insert(input.receipt_operation_id.clone()) {
             return Err(AgentEngineError::InvalidContract(
                 "duplicate steering receipt at model boundary".into(),
             ));
         }
         next_order.push(input.receipt_operation_id.clone());
+        skill_instructions.extend(input.prepared_skill_instructions.iter().cloned());
         messages.push(input.project_message(true));
     }
     // A malformed batch cannot partially mutate the accepted-input ledger.
     retained.extend(messages.iter().cloned());
     request.input.messages.extend(messages);
+    // Verified Skill text is host-prepared system context, not accepted user
+    // wording. Keep it out of the requirement/source-quote ledger.
+    request.input.instructions.extend(skill_instructions);
     *seen = next_seen;
     applied_order.extend(next_order);
     request.input.provider_round_parent = None;

@@ -247,7 +247,7 @@ pub fn normalize_request(
     })
 }
 
-fn canonicalize_compatible(path: &Path) -> std::io::Result<PathBuf> {
+pub(crate) fn canonicalize_compatible(path: &Path) -> std::io::Result<PathBuf> {
     let canonical = fs::canonicalize(path)?;
 
     #[cfg(windows)]

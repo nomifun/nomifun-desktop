@@ -15,6 +15,7 @@ use nomifun_agent_kernel::{
     SessionCapabilityState,
 };
 use nomifun_ai_agent::engine_effect_scope::guard_effect_settlement;
+use nomifun_ai_agent::context_contributor::ContextContributor;
 use nomifun_api_types::{ExecutionConstraints, RuntimeBuildBinding};
 use nomifun_common::{AgentToolPolicy, AppError};
 use nomifun_engine_core::{EngineToolExposure, EngineToolPlan, KernelEngineToolInvoker};
@@ -24,6 +25,12 @@ use super::engine_session_host::{AdmittedEngineSession, EngineTurnReceipt};
 use super::engine_tool_host::{EngineToolHost, EngineToolObservationPolicy};
 
 type Completion = Shared<BoxFuture<'static, Result<(), String>>>;
+
+#[derive(Default)]
+struct CapabilityContext {
+    initial: Option<String>,
+    before_turn: Option<Arc<dyn ContextContributor>>,
+}
 
 struct ConstrainedTools {
     inner: Arc<dyn nomifun_engine_core::EngineToolInvoker>,
@@ -149,7 +156,7 @@ pub struct EngineKernelSession {
     #[cfg(feature = "browser-use")]
     browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
-    initial_capability_context: tokio::sync::OnceCell<Option<String>>,
+    initial_capability_context: tokio::sync::OnceCell<CapabilityContext>,
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
     plugin_bindings: Arc<super::engine_plugin_bindings::FrozenAgentPluginBindings>,
@@ -413,15 +420,19 @@ impl EngineKernelSession {
     /// Kernel authority as tools. Engines consume this canonical projection;
     /// they never hard-code Knowledge, Companion, or Plugin context sources.
     pub async fn initial_capability_context(&self) -> Result<Option<String>, AppError> {
-        let context = self
+        Ok(self.capability_context().await?.initial.clone())
+    }
+
+    async fn capability_context(&self) -> Result<&CapabilityContext, AppError> {
+        self
             .initial_capability_context
             .get_or_try_init(|| async {
                 if self.constraints.restricted() {
-                    return Ok(None);
+                    return Ok(CapabilityContext::default());
                 }
                 let active = self.active.snapshot().map_err(failure)?;
                 let registry = self.registry_snapshot()?;
-                let (contributions, _turn_context_ids) =
+                let (contributions, turn_context_ids) =
                     nomifun_ai_agent::assemble_initial_capability_context(
                         &self.kernel,
                         &self.compiled,
@@ -434,11 +445,19 @@ impl EngineKernelSession {
                     )
                     .await
                     .map_err(failure)?;
-                nomifun_ai_agent::render_initial_capability_context_section(&contributions)
-                    .map_err(failure)
+                let initial = nomifun_ai_agent::render_initial_capability_context_section(&contributions)
+                    .map_err(failure)?;
+                let before_turn = (!turn_context_ids.is_empty()).then(|| {
+                    Arc::new(nomifun_ai_agent::NomiTurnContextContributor::new(
+                        self.kernel.clone(), self.compiled.clone(), self.active.clone(),
+                        self.principal.clone(), self.session_id.clone(),
+                        ScopeKey::from(format!("session:{}", self.session_id.as_ref())),
+                        turn_context_ids,
+                    )) as Arc<dyn ContextContributor>
+                });
+                Ok(CapabilityContext { initial, before_turn })
             })
-            .await?;
-        Ok(context.clone())
+            .await
     }
 
     fn knowledge_binding(
@@ -649,9 +668,22 @@ impl EngineKernelSession {
         turn: &nomifun_ai_agent::context_contributor::TurnContext,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>, AppError> {
-        self.plugin_bindings
+        let mut contributions = Vec::new();
+        if let Some(contributor) = &self.capability_context().await?.before_turn {
+            // BeforeTurn capability context uses the same frozen Kernel policy
+            // as tools, but must be refreshed for this accepted user input.
+            let context = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(failure("capability context was canceled")),
+                result = contributor.pre_turn_context_for_turn_result(turn) => result.map_err(failure)?,
+            };
+            contributions.extend(context);
+        }
+        let plugin_context = self.plugin_bindings
             .context_for_turn(turn, cancellation)
-            .await
+            .await?;
+        contributions.extend(plugin_context);
+        Ok((!contributions.is_empty()).then(|| contributions.join("\n\n")))
     }
 
     pub fn retain_active_tools(

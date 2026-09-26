@@ -2759,6 +2759,266 @@ async fn creative_studio_entry_uses_its_official_agent() {
     .unwrap();
     assert_eq!(legacy_rows, 0, "Creative Studio must bind only a canonical AgentSession");
     assert!(upstream.received_requests().await.unwrap().is_empty());
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path_regex(".*/chat/completions$"))
+        .respond_with(wiremock::ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string("data: {\"id\":\"creative\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"CREATIVE_SKILL_OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"creative\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        .mount(&upstream).await;
+    for (skill, expected_state) in [("creative-studio-canvas", "completed"), ("not-selected", "failed")] {
+        let (status, turn) = call(router.clone(), "POST",
+            &format!("/api/agent-sessions/{conversation_id}/turns"), json!({
+                "idempotency_key": uuid::Uuid::now_v7().to_string(),
+                "input": { "content": "Discuss the current canvas without changing it.", "inject_skills": [skill] }
+            })).await;
+        assert_eq!(status, StatusCode::OK, "{turn}");
+        let operation = turn["data"]["operation_id"].as_str().unwrap();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let row: (String, Option<String>) = sqlx::query_as(
+                    "SELECT state, error_json FROM agent_turns WHERE session_id = ? AND operation_id = ?",
+                ).bind(conversation_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
+                if matches!(row.0.as_str(), "completed" | "failed" | "cancelled") { break row; }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.expect("Creative Studio Skill turn must settle");
+        assert_eq!(terminal.0, expected_state, "{terminal:?}");
+        if expected_state == "failed" {
+            let error: Value = serde_json::from_str(terminal.1.as_deref().unwrap()).unwrap();
+            assert_eq!(error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
+            assert_eq!(error["error"]["ownership"], "nomifun");
+            assert_eq!(error["error"]["retryable"], false);
+        }
+    }
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1, "unselected Skill must fail before provider invocation");
+    let request = requests[0].body_json::<Value>().unwrap();
+    let instructions = request["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(instructions.contains("# Creative Studio Canvas Planning"));
+    assert!(!instructions.contains("# Creative Studio Layout Organizer"));
+    assert!(!instructions.contains("# Creative Studio Template Designer"));
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn creative_canvas_new_session_rebinds_exact_target_after_stale_product_selection() {
+    const TRUST: &str = "creative-canvas-stale-target-binding";
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Canvas target fixture",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["fixture-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": [],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, other) = call(router.clone(), "POST", "/api/creative-studio/canvases",
+        json!({ "title": "Other owned Canvas" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{other}");
+    let other_id = other["data"]["canvas"]["canvasId"].as_str().unwrap();
+
+    for selected_canvas in [Some(other_id), None] {
+        let (status, canvas) = call(router.clone(), "POST", "/api/creative-studio/canvases",
+            json!({
+                "title": "Target Canvas",
+                "agentKickoff": { "prompt": "plan", "model": {
+                    "providerId": provider_id, "model": "step-3.7-flash"
+                } }
+            })).await;
+        assert_eq!(status, StatusCode::CREATED, "{canvas}");
+        let canvas_id = canvas["data"]["canvas"]["canvasId"].as_str().unwrap();
+        let document_json: String = sqlx::query_scalar(
+            "SELECT document_json FROM creative_studio_projects WHERE project_id = ?")
+            .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+        let document: Value = serde_json::from_str(&document_json).unwrap();
+        let session_id = document["chatSessions"][0]["id"].as_str().unwrap();
+        let pending_key = document["chatSessions"][0]["pendingTurn"]["idempotencyKey"]
+            .as_str().unwrap();
+
+        let mut selections = vec![
+            json!({"resource_kind":"asset_library", "resource_id":"creative-studio-assets"}),
+            json!({"resource_kind":"process_session", "resource_id":"managed-process-session"}),
+            json!({"resource_kind":"project_memory", "resource_id":"default-project-memory"}),
+            json!({"resource_kind":"workspace", "resource_id":"default-workspace"}),
+        ];
+        if let Some(id) = selected_canvas {
+            selections.push(json!({"resource_kind":"canvas", "resource_id":id}));
+        }
+        let (status, saved) = call(router.clone(), "PUT",
+            &format!("/api/product-agent-bindings/creative_studio_canvas/{canvas_id}"),
+            json!({
+                "selection": {"kind":"template", "template_key":"creative-studio.default"},
+                "model": {"provider_id":provider_id, "model":"step-3.7-flash"},
+                "resource_selections": selections
+            })).await;
+        assert_eq!(status, StatusCode::OK, "formal product selection fixture: {saved}");
+
+        let (status, resolved) = call(router.clone(), "POST",
+            "/api/creative-studio/canvas-agent-sessions/resolve", json!({
+                "canvas_id": canvas_id, "session_id": session_id,
+                "model": {"provider_id": provider_id, "model": "step-3.7-flash"},
+                "pending_turn_idempotency_key": pending_key
+            })).await;
+        assert_eq!(status, StatusCode::CREATED, "{resolved}");
+        let conversation_id = resolved["data"]["binding"]["conversation_id"].as_str().unwrap();
+        let raw: String = sqlx::query_scalar(
+            "SELECT agent_binding_json FROM agent_sessions WHERE agent_session_id = ?")
+            .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+        let binding: Value = serde_json::from_str(&raw).unwrap();
+        let resources = binding["typed_resource_bindings"].as_array().unwrap();
+        let resource = |kind: &str| resources.iter().find(|value| value["resource_kind"] == kind)
+            .and_then(|value| value["resource_id"].as_str());
+        assert_eq!(resource("canvas"), Some(canvas_id), "new Session must bind its own Canvas");
+        assert_eq!(resource("asset_library"), Some("creative-studio-assets"));
+        assert_eq!(resource("workspace"), Some("default-workspace"));
+        assert_eq!(resource("process_session"), Some("managed-process-session"));
+        assert_eq!(resource("project_memory"), Some("default-project-memory"));
+    }
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn companion_implicit_entry_binds_its_exact_owner_resources() {
+    const TRUST: &str = "companion-implicit-resource-binding";
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path_regex(".*/chat/completions$"))
+        .respond_with(wiremock::ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string("data: {\"id\":\"companion\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"companion\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+        .mount(&upstream).await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Companion binding fixture",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["fixture-no-network"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": [],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
+        json!({ "name": "Implicit binding companion", "character": "ink" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{companion}");
+    let companion_id = companion["data"]["companion_id"].as_str().unwrap();
+    let (status, patched) = call(router.clone(), "PATCH",
+        &format!("/api/companion/companions/{companion_id}"),
+        json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, thread) = call(router.clone(), "POST",
+        &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let session_id = thread["data"]["conversation_id"].as_str().unwrap();
+    let raw: String = sqlx::query_scalar(
+        "SELECT agent_binding_json FROM agent_sessions WHERE agent_session_id = ?",
+    )
+    .bind(session_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    let binding: Value = serde_json::from_str(&raw).unwrap();
+    let resources = binding["typed_resource_bindings"].as_array().unwrap();
+    let resource = |kind: &str| {
+        resources.iter().find(|value| value["resource_kind"] == kind)
+            .map(|value| value["resource_id"].as_str().unwrap())
+    };
+    assert_eq!(resource("companion"), Some(companion_id));
+    assert_eq!(resource("companion_memory"), Some(companion_id));
+    assert_eq!(resource("scheduler"), Some("installation-scheduler"));
+    for absent in ["channel", "robot", "knowledge_base"] {
+        assert_eq!(resource(absent), None, "optional {absent} must not be invented");
+    }
+    let (status, unrelated) = call(router.clone(), "POST", "/api/companion/companions",
+        json!({ "name": "Unrelated companion must stay private", "character": "ink" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{unrelated}");
+    let (status, turn) = call(router.clone(), "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"), json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "Tell me your name." }
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    let terminal = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let kind: Option<String> = sqlx::query_scalar(
+                "SELECT kind FROM agent_events WHERE session_id = ? AND kind IN ('turn/completed', 'turn/failed', 'turn/cancelled') ORDER BY seq DESC LIMIT 1",
+            ).bind(session_id).fetch_optional(services.database.pool()).await.unwrap();
+            if let Some(kind) = kind { break kind; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("Companion turn must reach a durable terminal");
+    assert_eq!(terminal, "turn/completed");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let model_request = requests[0].body_json::<Value>().unwrap();
+    let instructions = model_request["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(instructions.contains("Implicit binding companion"), "selected persona must reach the model");
+    assert!(!instructions.contains("Unrelated companion must stay private"));
+    let (status, patched) = call(router.clone(), "PATCH",
+        &format!("/api/companion/companions/{companion_id}"),
+        json!({ "name": "Renamed bound companion" })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, turn) = call(router.clone(), "POST",
+        &format!("/api/agent-sessions/{session_id}/turns"), json!({
+            "idempotency_key": uuid::Uuid::now_v7().to_string(),
+            "input": { "content": "Tell me your current name." }
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let completed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'turn/completed'",
+            ).bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+            if completed == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("second Companion turn must complete");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let second = requests[1].body_json::<Value>().unwrap();
+    let instructions = second["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .map(|message| message["content"].to_string()).collect::<Vec<_>>().join("\n");
+    assert!(instructions.contains("Renamed bound companion"), "BeforeTurn persona must refresh");
+    assert!(!instructions.contains("Implicit binding companion"));
+    assert!(!instructions.contains("Unrelated companion must stay private"));
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }

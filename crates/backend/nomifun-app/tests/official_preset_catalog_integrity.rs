@@ -115,8 +115,8 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("automation.schedule", &["automation.schedule/list"]),
             ("browser", &["browser/navigate", "browser/observe", "browser/render_content"]),
             ("computer", &["computer/a11y.observe", "computer/observe"]),
-            ("workspace.artifacts", &["workspace.artifacts/read"]),
-            ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
+            ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
+            ("workspace.files", &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
             ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
             ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
             ("agent.collaboration", &["agent/delegate", "agent/fork", "agent/request_user_decision"]),
@@ -125,7 +125,7 @@ fn official_preset_action_safety_matrix_is_exact() {
             ("agent.tool-discovery", &["tool.discovery.rank"]),
         ])),
         (OfficialPresetKey::CodingCodex, actions(&[
-            ("workspace.files", &["workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
+            ("workspace.files", &["workspace.files/delete", "workspace.files/patch", "workspace.files/read", "workspace.files/search", "workspace.files/write"]),
             ("workspace.vcs", &["workspace.vcs/commit", "workspace.vcs/diff", "workspace.vcs/stage", "workspace.vcs/status"]),
             ("workspace.process", &["workspace.process/cancel", "workspace.process/close_stdin", "workspace.process/exec", "workspace.process/input", "workspace.process/poll", "workspace.process/resize", "workspace.process/start"]),
             ("workspace.artifacts", &["workspace.artifacts/publish", "workspace.artifacts/read"]),
@@ -171,6 +171,19 @@ fn official_preset_action_safety_matrix_is_exact() {
             ))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(actual, expected[&key], "{} default Action matrix changed", key.as_str());
+        let skill_ids = manifest.templates[&key].skill_bindings.iter()
+            .map(|skill| (skill.id.as_ref().to_owned(), skill.version.as_ref().to_owned()))
+            .collect::<BTreeSet<_>>();
+        let expected_skills = if key == OfficialPresetKey::CreativeStudioDefault {
+            BTreeSet::from([
+                ("creative-studio-canvas".to_owned(), "1.0.0".to_owned()),
+                ("creative-studio-organize".to_owned(), "1.0.0".to_owned()),
+                ("creative-studio-template".to_owned(), "1.0.0".to_owned()),
+            ])
+        } else {
+            BTreeSet::new()
+        };
+        assert_eq!(skill_ids, expected_skills, "{} default Skill selection changed", key.as_str());
     }
 }
 

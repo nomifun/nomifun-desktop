@@ -47,7 +47,7 @@ struct UpdatePlan {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Maintain a concise execution plan. At most one step in_progress. requirements is optional: the engine captures each otherwise-unaccounted accepted input as a full-scope requirement, while preserving the complete original input and constraints. For optional finer-grained requirements provide stable IDs and short exact accepted-input citations (input 0=original, later indices=corrections). On status updates omit requirements unless adding new IDs; old obligations cannot be rewritten or dropped. The response lists the ledger IDs that report_completion must cover. Repeated unchanged plans succeed idempotently but are not progress. Replan after uncertain effects or changed scope. This never authorizes verification or widens user scope.".into(),
+        description: "Maintain a concise execution plan. At most one step in_progress. A short explanation is optional. Usually omit requirements: the engine records every otherwise-unaccounted accepted input as one full-scope obligation without losing its original text or constraints. Add finer-grained IDs only when you can copy a short, exact contiguous quote from that indexed accepted user input (input 0=original, later indices=corrections); never paraphrase or cite a tool result. On status updates omit existing requirements; old obligations cannot be rewritten or dropped. The response lists the ledger IDs that report_completion must cover. Repeated unchanged plans succeed idempotently but are not progress. Replan after uncertain effects or changed scope. This never authorizes verification or widens user scope.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false,
@@ -366,11 +366,16 @@ mod tests {
     async fn optional_explanation_does_not_block_revisions_or_drop_accepted_requirements() {
         let mut plan = AgentPlan::default();
         let mut status = update_call("completed");
+        let schema = definition().input_schema.0;
+        let validator = jsonschema::options().build(&schema).unwrap();
+        assert!(validator.is_valid(&status.arguments.0));
         status.arguments.0.as_object_mut().unwrap().remove("explanation");
+        assert!(validator.is_valid(&status.arguments.0));
         assert!(!plan.update(&status, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
         plan.update(&update_call("in_progress"), &inputs(), &NoopAgentEventSink).await.unwrap();
         let requirements = plan.requirements.clone();
         let explanation = plan.explanation.clone();
+        // Preserve compatibility for already-recorded status-only calls.
         let result = plan.update(&status, &inputs(), &NoopAgentEventSink).await.unwrap();
         assert!(!result.is_error, "{}", result.output_text());
         assert_eq!(plan.requirements, requirements);

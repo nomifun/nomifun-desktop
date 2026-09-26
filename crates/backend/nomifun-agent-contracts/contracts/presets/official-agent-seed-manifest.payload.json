@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "7d0190dbf04ca9001393ddff6ee47a2318388874d6acf1b9a9a71a5030d34547",
+  "target_first_party_contribution_digest": "e60788f69124a4bd867ef6f48d5cf574a5989d9f5dbd2aff4fd9cb686180c384",
   "target_runtime_feature_inventory_digest": "93fe9b9c73be79cd2e593a9f0af84499009d4c14f381c8e86daa1e9b03c709f6",
   "templates": {
     "chat.minimal": {
@@ -82,6 +82,7 @@
             "id": "workspace.artifacts"
           },
           "action_allowlist": [
+            "workspace.artifacts/publish",
             "workspace.artifacts/read"
           ]
         },
@@ -90,6 +91,7 @@
             "id": "workspace.files"
           },
           "action_allowlist": [
+            "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
             "workspace.files/search",
@@ -182,6 +184,7 @@
             "id": "workspace.files"
           },
           "action_allowlist": [
+            "workspace.files/delete",
             "workspace.files/patch",
             "workspace.files/read",
             "workspace.files/search",
@@ -502,7 +505,20 @@
           ]
         }
       ],
-      "skill_bindings": [],
+      "skill_bindings": [
+        {
+          "id": "creative-studio-canvas",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creative-studio-organize",
+          "version": "1.0.0"
+        },
+        {
+          "id": "creative-studio-template",
+          "version": "1.0.0"
+        }
+      ],
       "required_resource_kinds": [
         "asset_library",
         "canvas",

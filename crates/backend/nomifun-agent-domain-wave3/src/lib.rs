@@ -14,21 +14,21 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    ActionId, AgentSessionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
-    CapabilityActionDescriptor, CapabilityAuthoringPolicy, CapabilityConsumer,
+    ActionId, AgentSessionId, ArtifactEnvelope, ArtifactId, CancellationDescriptor, CanonicalSchemaRef,
+    CapabilityActionDescriptor, CapabilityAuthoringPolicy, CapabilityConsumer, CapabilityRef,
     CapabilityContributions, CapabilityId, CapabilityKind, CapabilityManifest, CorrelationId,
     EffectClass,
     HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
-    InProcessEntrypointMetadata, LocalizedMetadata,
+    InProcessEntrypointMetadata, LocalizedMetadata, LogicalArtifactRef,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
     PlatformConstraint, PluginBootCriticality, PluginBootState, PluginContextDescriptor,
     PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor, AgentModuleId,
     PluginRegistrarDescriptor, PluginRegistrarOperation, PluginRegistrationMetadata,
     PluginSourceKind, PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod,
     PrincipalRef, ResolvedSnapshotRef, ResourceBindingId, ResourceId, ResourceKind, ScopeKey,
-    SkillId, StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
+    SkillDefinition, SkillId, StrictJsonValue, ToolPresentationKind, TypedResourceBinding, TypedResourceBindings,
     ValidatedPluginConfig, VersionString, capability_module_surface_declarations,
-    digest_payload,
+    digest_bytes, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
@@ -72,6 +72,57 @@ pub const OFFICE_ACTION_IDS: &[&str] = &[
 pub const CANVAS_RESOURCE_KIND: &str = "canvas";
 pub const ASSET_LIBRARY_RESOURCE_KIND: &str = "asset_library";
 pub const CREATIVE_ASSET_LIBRARY_RESOURCE_ID: &str = "creative-studio-assets";
+
+/// The actual bundled Skill Library bodies are the single source of truth for
+/// Creative Studio planning. A Snapshot freezes their exact byte digests.
+const CANVAS_SKILL_BODY: &str = include_str!("../../nomifun-skill-library/assets/builtin-skills/creative-studio-canvas/SKILL.md");
+const ORGANIZE_SKILL_BODY: &str = include_str!("../../nomifun-skill-library/assets/builtin-skills/creative-studio-organize/SKILL.md");
+const TEMPLATE_SKILL_BODY: &str = include_str!("../../nomifun-skill-library/assets/builtin-skills/creative-studio-template/SKILL.md");
+
+pub const CREATIVE_STUDIO_PLANNING_SKILL_IDS: [&str; 3] = [
+    "creative-studio-canvas",
+    "creative-studio-organize",
+    "creative-studio-template",
+];
+
+pub fn creative_studio_planning_skill_body(id: &str) -> Option<&'static str> {
+    match id {
+        "creative-studio-canvas" => Some(CANVAS_SKILL_BODY),
+        "creative-studio-organize" => Some(ORGANIZE_SKILL_BODY),
+        "creative-studio-template" => Some(TEMPLATE_SKILL_BODY),
+        _ => None,
+    }
+}
+
+fn creative_studio_planning_skills(package: &PackageRef) -> Vec<SkillDefinition> {
+    CREATIVE_STUDIO_PLANNING_SKILL_IDS
+        .into_iter()
+        .map(|id| {
+            let body = creative_studio_planning_skill_body(id).expect("known bundled planning Skill");
+            SkillDefinition {
+                id: SkillId::from(id),
+                version: VersionString::from(VERSION),
+                package: package.clone(),
+                display: LocalizedMetadata {
+                    name: id.to_owned(),
+                    description: format!("Bundled Creative Studio planning Skill: {id}"),
+                    localized_names: BTreeMap::new(),
+                    localized_descriptions: BTreeMap::new(),
+                },
+                body_ref: LogicalArtifactRef {
+                    artifact_id: ArtifactId::from(format!("nomifun.workshop.skill.{id}.body")),
+                    normalized_relative_path: format!("skills/{id}/SKILL.md"),
+                    digest: digest_bytes(body.as_bytes()),
+                },
+                resources: Vec::new(),
+                requires_capabilities: vec![CapabilityRef {
+                    id: CapabilityId::from(CREATIVE_WORKSHOP_MODULE_ID),
+                }],
+                supported_surfaces: AGENT_SURFACES.iter().map(|surface| (*surface).to_owned()).collect(),
+            }
+        })
+        .collect()
+}
 
 pub const TARGET_PACKAGE_IDS: [&str; 3] = [
     CREATION_PACKAGE_ID,
@@ -1102,6 +1153,19 @@ fn registration_for(
     let package = package_ref(spec.id);
     let config_schema = empty_config_schema();
     let capabilities = vec![capability_manifest(&package, spec)?];
+    let skills = if spec.id == WORKSHOP_PACKAGE_ID {
+        creative_studio_planning_skills(&package)
+    } else {
+        Vec::new()
+    };
+    let declared_skill_ids = skills.iter().map(|skill| skill.id.clone()).collect::<BTreeSet<_>>();
+    let mut registrar_operations = BTreeSet::from([
+        PluginRegistrarOperation::BindHostPort,
+        PluginRegistrarOperation::ContributeCapability,
+    ]);
+    if !declared_skill_ids.is_empty() {
+        registrar_operations.insert(PluginRegistrarOperation::ContributeSkill);
+    }
     let source = PluginSourceMetadata {
         source_kind: PluginSourceKind::Bundled,
         source_identity: spec.id.to_owned(),
@@ -1163,7 +1227,7 @@ fn registration_for(
         .into(),
         contributions: PackageContributions {
             capabilities,
-            skills: Vec::new(),
+            skills,
             mcp_tools: Vec::new(),
             role_contracts: Vec::new(),
             role_providers: Vec::new(),
@@ -1181,12 +1245,9 @@ fn registration_for(
         },
         registrar: PluginRegistrarDescriptor {
             identity: identity.clone(),
-            allowed_operations: BTreeSet::from([
-                PluginRegistrarOperation::BindHostPort,
-                PluginRegistrarOperation::ContributeCapability,
-            ]),
+            allowed_operations: registrar_operations,
             declared_capability_ids: BTreeSet::from([CapabilityId::from(spec.module_id)]),
-            declared_skill_ids: BTreeSet::<SkillId>::new(),
+            declared_skill_ids,
             declared_mcp_tool_keys: BTreeSet::new(),
             declared_role_ids: BTreeSet::new(),
             declared_service_keys: BTreeSet::new(),
@@ -2475,6 +2536,19 @@ mod tests {
             .expect("Wave 3 metadata must materialize");
         assert_eq!(materialized.packages.len(), 3);
         assert_eq!(materialized.capabilities.len(), ALL_CAPABILITY_IDS.len());
+        assert_eq!(materialized.skills.len(), CREATIVE_STUDIO_PLANNING_SKILL_IDS.len());
+        for id in CREATIVE_STUDIO_PLANNING_SKILL_IDS {
+            let skill = materialized.skill(&SkillId::from(id)).expect("bundled planning Skill");
+            assert_eq!(skill.definition.package.id.as_ref(), WORKSHOP_PACKAGE_ID);
+            assert_eq!(
+                skill.definition.body_ref.digest,
+                digest_bytes(creative_studio_planning_skill_body(id).unwrap().as_bytes()),
+            );
+            assert_eq!(
+                skill.definition.requires_capabilities,
+                vec![CapabilityRef { id: CapabilityId::from(CREATIVE_WORKSHOP_MODULE_ID) }],
+            );
+        }
         assert_eq!(materialized.generation, 1);
     }
 
