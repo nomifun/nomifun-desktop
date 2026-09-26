@@ -55,10 +55,10 @@ describe('turn process continuous work journal layout', () => {
     expect(disclosureSource.includes("item.running && 'turn-process-disclosure--live'")).toBe(true);
   });
 
-  test('keeps the work journal open by default while allowing manual collapse', () => {
+  test('uses the turn lifecycle to set the default work journal expansion', () => {
     expect(disclosureSource.includes('hasProcessItems && !defaultCollapsed')).toBe(true);
     expect(modelSource.includes('defaultCollapsed: false')).toBe(true);
-    expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(false);
+    expect(modelSource.includes("defaultCollapsed: state !== 'running'")).toBe(true);
     expect(disclosureSource.includes('shouldResetTurnProcessDisclosureExpansion')).toBe(true);
   });
 
