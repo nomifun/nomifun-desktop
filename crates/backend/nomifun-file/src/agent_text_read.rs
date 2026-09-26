@@ -36,6 +36,11 @@ pub struct AgentTextReadRequest {
     pub limit: usize,
     #[serde(default)]
     pub expected_sha256: Option<String>,
+    /// Independent source inspection by lines; byte continuation is separate.
+    #[serde(default)]
+    pub start_line: Option<usize>,
+    #[serde(default)]
+    pub line_count: Option<usize>,
 }
 
 fn default_limit() -> usize {
@@ -55,6 +60,9 @@ pub struct AgentTextPage {
     /// newline-normalized, so offsets remain exact source-byte positions.
     pub start_line: usize,
     pub start_column_bytes: usize,
+    /// False means an independent read of the current file version. The hash
+    /// still identifies the entire source; callers can pin later reads to it.
+    pub source_version_pinned: bool,
 }
 
 impl FileService {
@@ -90,15 +98,18 @@ impl FileService {
     pub async fn read_text_page_for_agent_session(
         &self,
         scope: &AgentSessionWorkspaceBinding,
-        request: AgentTextReadRequest,
+        mut request: AgentTextReadRequest,
     ) -> Result<Option<AgentTextPage>, AppError> {
         scope.require_operation(WORKSPACE_READ_OPERATION)?;
+        let by_lines = request.start_line.is_some() || request.line_count.is_some();
         if request.path.trim().is_empty()
             || request.path.len() > 4096
             || request.path.chars().any(char::is_control)
             || !(4..=MAX_PAGE_BYTES).contains(&request.limit)
             || request.offset > MAX_FILE_BYTES
-            || (request.offset > 0 && request.expected_sha256.is_none())
+            || request.start_line.is_some_and(|line| line == 0 || line > MAX_FILE_BYTES + 1)
+            || request.line_count.is_some_and(|lines| !(1..=2000).contains(&lines))
+            || (by_lines && (request.offset != 0 || request.limit != MAX_PAGE_BYTES))
             || request.expected_sha256.as_ref().is_some_and(|hash| {
                 hash.len() != 64
                     || !hash
@@ -106,7 +117,7 @@ impl FileService {
                         .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             })
         {
-            return Err(AppError::BadRequest("Invalid text page: use a relative path, byte offset, limit 4..16384, and the prior lowercase sha256 for continuation".into()));
+            return Err(AppError::BadRequest("Invalid text read: use a relative path and either byte offset/limit 4..16384 or start_line/line_count. expected_sha256 optionally pins the current source version.".into()));
         }
         let path = scope.resolve_relative_path(&request.path)?;
         let authority = scope.authority();
@@ -117,6 +128,16 @@ impl FileService {
             };
             if request.expected_sha256.as_ref().is_some_and(|expected| expected != &digest) {
                 return Err(AppError::Conflict("FILE_CONTENT_CHANGED: discard prior pages and restart at offset 0 without expected_sha256".into()));
+            }
+            if by_lines {
+                let line = request.start_line.unwrap_or(1);
+                let start = if line == 1 { 0 } else {
+                    text.match_indices('\n').nth(line - 2).map_or(text.len(), |(index, _)| index + 1)
+                };
+                let end = text[start..].match_indices('\n').nth(request.line_count.unwrap_or(200) - 1)
+                    .map_or(text.len(), |(index, _)| start + index + 1);
+                request.offset = start;
+                request.limit = (end - start).min(MAX_PAGE_BYTES);
             }
             page(request, text, digest).map(Some)
         }).await.map_err(|error| AppError::Internal(format!("text page task failed: {error}")))?
@@ -251,6 +272,7 @@ fn page(
         eof: false,
         start_line,
         start_column_bytes,
+        source_version_pinned: request.expected_sha256.is_some(),
     };
     loop {
         result.content = text[start..end].to_owned();
@@ -275,5 +297,48 @@ fn page(
                 "Text page cannot fit one UTF-8 character".into(),
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct NoEvents;
+    impl nomifun_realtime::UserEventSink for NoEvents {
+        fn send_to_user(&self, _: &str, _: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    }
+
+    #[tokio::test]
+    async fn line_and_random_byte_reads_are_independent_but_explicit_version_pins_still_hold() {
+        let root=tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("source.js"),"first\r\n第二行\r\nlast\n").unwrap();
+        let scope=crate::resource::workspace_binding(nomifun_common::generate_id(),"binding","workspace","owner",
+            [WORKSPACE_READ_OPERATION],root.path()).unwrap();
+        let service=FileService::new(std::sync::Arc::new(NoEvents),vec![root.path().to_path_buf()]);
+        let request=|value| serde_json::from_value::<AgentTextReadRequest>(value).unwrap();
+        let line=service.read_text_page_for_agent_session(&scope,request(serde_json::json!({
+            "path":"source.js","start_line":2,"line_count":1
+        }))).await.unwrap().unwrap();
+        assert_eq!(line.content,"第二行\r\n");
+        assert_eq!(line.offset,7);
+        assert!(!line.source_version_pinned);
+        let bytes=service.read_text_page_for_agent_session(&scope,request(serde_json::json!({
+            "path":"source.js","offset":7,"limit":6
+        }))).await.unwrap().unwrap();
+        assert_eq!(bytes.content,"第二");
+        assert_eq!(bytes.sha256,line.sha256);
+        std::fs::write(root.path().join("source.js"),"first\r\n变化\n").unwrap();
+        let stale=service.read_text_page_for_agent_session(&scope,request(serde_json::json!({
+            "path":"source.js","offset":7,"limit":6,"expected_sha256":line.sha256
+        }))).await.unwrap_err();
+        assert!(stale.to_string().contains("FILE_CONTENT_CHANGED"));
+        let fresh=service.read_text_page_for_agent_session(&scope,request(serde_json::json!({
+            "path":"source.js","offset":7,"limit":6
+        }))).await.unwrap().unwrap();
+        assert_eq!(fresh.content,"变化");
+        assert_ne!(fresh.sha256,bytes.sha256);
+        assert!(service.read_text_page_for_agent_session(&scope,request(serde_json::json!({
+            "path":"../escape","offset":7,"limit":6
+        }))).await.is_err());
     }
 }

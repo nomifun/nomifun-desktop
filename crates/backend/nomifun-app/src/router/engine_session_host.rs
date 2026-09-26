@@ -515,8 +515,8 @@ impl EngineSessionHost {
         pool: SqlitePool,
         encryption_key: [u8; 32],
         resources: super::engine_kernel_session::EngineKernelAssembly,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, reqwest::Error> {
+        Ok(Self {
             owner: Arc::downgrade(owner),
             control_plane,
             engines: Arc::downgrade(engines),
@@ -525,16 +525,17 @@ impl EngineSessionHost {
                 encryption_key,
             ),
             // No total response-body deadline: the model executor bounds
-            // setup and complete-frame idle waits separately. Keep reqwest's
-            // default system proxy/TLS policy for this shared engine port.
-            http: reqwest::Client::new(),
+            // setup and complete-frame idle waits separately. Use the shared
+            // platform proxy policy (including local exclusions on macOS) and
+            // disable redirects so one broker attempt stays one HTTP send.
+            http: nomifun_net::http_client_no_redirect()?,
             pool,
             source: Arc::new(()),
             execution_instance_id: uuid::Uuid::now_v7().to_string(),
             resources,
             kernel_sessions: Default::default(),
             journals: Default::default(),
-        }
+        })
     }
 
     /// Reuses the same live writer for one exact receipt. This is a journal

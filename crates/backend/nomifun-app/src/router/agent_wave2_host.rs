@@ -792,7 +792,10 @@ impl Wave2ApplicationHost {
                                 let output = StrictJsonValue(json!({
                                     "path": params.path,
                                     "written": true,
-                                    "created": created
+                                    "created": created,
+                                    "bytes": params.content.len(),
+                                    "line_count": params.content.lines().count(),
+                                    "sha256": nomifun_agent_contracts::digest_bytes(params.content.as_bytes()),
                                 }));
                                 finish_wave2_effect(
                                     &reservation,
@@ -1256,7 +1259,10 @@ impl Wave2ApplicationHost {
         let capability_id = capability_id.to_owned();
         let worker_capability_id = capability_id.clone();
         let status = tokio::task::spawn_blocking(move || {
-            let (repository, workspace_prefix) = scoped_repository(&workspace)?;
+            let Some((repository, workspace_prefix)) = scoped_repository_if_present(&workspace)? else {
+                return Ok(StrictJsonValue(json!({"is_repository":false,"repository":null,"entries":[],
+                    "message":"This workspace has no Git repository. File tools remain available; this status check did not initialize a repository."})));
+            };
             let mut options = git2::StatusOptions::new();
             options
                 .include_untracked(true)
@@ -1287,6 +1293,7 @@ impl Wave2ApplicationHost {
                 }));
             }
             Ok::<_, Wave2HostPortError>(StrictJsonValue(json!({
+                "is_repository": true,
                 "repository": "workspace",
                 "entries": entries
             })))
@@ -1733,12 +1740,20 @@ fn path_relative_to_workspace(path: &str, prefix: &str) -> Option<String> {
 fn scoped_repository(
     workspace: &Path,
 ) -> Result<(git2::Repository, String), Wave2HostPortError> {
-    let repository = git2::Repository::discover(workspace).map_err(|error| {
-        Wave2HostPortError::new(
-            "RESOURCE_NOT_FOUND",
-            format!("workspace is not a Git repository: {error}"),
-        )
-    })?;
+    scoped_repository_if_present(workspace)?.ok_or_else(||
+        Wave2HostPortError::new("RESOURCE_NOT_FOUND","workspace is not a Git repository"))
+}
+
+fn scoped_repository_if_present(workspace: &Path)
+    -> Result<Option<(git2::Repository, String)>, Wave2HostPortError> {
+    let repository = match git2::Repository::discover(workspace) {
+        Ok(repository) => repository,
+        Err(cause) if cause.code() == git2::ErrorCode::NotFound && workspace.is_dir()
+            && workspace.ancestors().all(|ancestor| std::fs::symlink_metadata(ancestor.join(".git"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)) => return Ok(None),
+        Err(cause) => return Err(Wave2HostPortError::new("RESOURCE_NOT_FOUND",
+            format!("Git repository could not be opened: {cause}"))),
+    };
     let repository_root = repository.workdir().ok_or_else(|| {
         Wave2HostPortError::new(
             "RESOURCE_NOT_FOUND",
@@ -1766,7 +1781,7 @@ fn scoped_repository(
     let prefix = git_path_to_string(workspace_relative)?
         .trim_matches('/')
         .to_owned();
-    Ok((repository, prefix))
+    Ok(Some((repository, prefix)))
 }
 
 fn git_path_to_string(path: &Path) -> Result<String, Wave2HostPortError> {
@@ -3372,6 +3387,15 @@ mod tests {
             .unwrap();
         drop(tree);
         repository
+    }
+
+    #[test]
+    fn repository_absence_is_distinct_from_corrupt_metadata() {
+        let root=tempfile::tempdir().unwrap();
+        assert!(scoped_repository_if_present(root.path()).unwrap().is_none());
+        assert!(!root.path().join(".git").exists());
+        std::fs::write(root.path().join(".git"),"not a valid gitdir file").unwrap();
+        assert!(scoped_repository_if_present(root.path()).is_err(),"corruption is not normal repository absence");
     }
 
     #[tokio::test]

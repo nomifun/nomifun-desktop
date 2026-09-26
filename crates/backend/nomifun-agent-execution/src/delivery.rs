@@ -12,6 +12,9 @@ pub struct AgentExecutionDelivery {
     /// are absorbing replays and must not be awaited as newly-started work.
     pub replayed: bool,
     pub completed: bool,
+    /// Exact operation's canonical nonterminal pause. A pause is not a
+    /// delivery receipt or permission to retry the task in a new Session.
+    pub paused_reason: Option<String>,
     pub result_ok: Option<bool>,
     pub result_text: Option<String>,
     pub result_error: Option<String>,

@@ -4074,8 +4074,8 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
             .await?
         {
             PublicTurnDeliveryState::Missing => None,
-            PublicTurnDeliveryState::Accepted { message_id } => Some(
-                agent_execution_delivery_from_conversation(IdempotentMessageDelivery {
+            PublicTurnDeliveryState::Accepted { message_id } => {
+                let mut delivery = agent_execution_delivery_from_conversation(IdempotentMessageDelivery {
                     message_id,
                     replayed: true,
                     completed: false,
@@ -4084,8 +4084,15 @@ impl nomifun_agent_execution::AgentExecutionSessionPort for NomiCoreSessionOwner
                     result_error: None,
                     result_error_code: None,
                     result_error_retryable: None,
-                }),
-            ),
+                });
+                // Authorization and exact operation lookup above must precede
+                // reading suspension. Runtime idleness is not a receipt.
+                delivery.paused_reason = self.canonical.store().native_pause_state(
+                    &AgentSessionId::from(conversation_id.to_owned()),
+                    &Self::turn_operation_id(owner_id, conversation_id, operation_id),
+                ).await.map_err(agent_session_store_error)?.map(|pause| pause.reason);
+                Some(delivery)
+            },
             PublicTurnDeliveryState::Completed(delivery) => {
                 Some(agent_execution_delivery_from_conversation(delivery))
             }
@@ -4297,6 +4304,7 @@ fn agent_execution_delivery_from_conversation(
         message_id: delivery.message_id,
         replayed: delivery.replayed,
         completed: delivery.completed,
+        paused_reason: None,
         result_ok: delivery.result_ok,
         result_text: delivery.result_text,
         result_error: delivery.result_error,

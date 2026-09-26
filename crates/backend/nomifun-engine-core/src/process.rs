@@ -15,7 +15,7 @@ use nomi_process_runtime::{
     CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata, NormalizedProcessRequest,
     OutputCursor, OutputSnapshot, PollResult, ProcessError, ProcessOutcome, ProcessOwner,
     ProcessPolicy, ProcessRequest, ProcessSupervisor, SandboxPolicy, SessionId, SupervisorConfig,
-    Transport, normalize_request,
+    Transport, ShellKind, normalize_request,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -43,7 +43,10 @@ pub enum EngineProcessTransport {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineProcessRequest {
+    #[serde(default)]
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_script: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
@@ -61,6 +64,7 @@ impl EngineProcessRequest {
     pub fn pipe(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
+            shell_script: None,
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
@@ -70,8 +74,17 @@ impl EngineProcessRequest {
         }
     }
 
+    pub fn shell(script: impl Into<String>) -> Self {
+        Self { shell_script: Some(script.into()), ..Self::pipe("") }
+    }
+
     pub fn validate(&self) -> Result<(), EngineProcessError> {
-        if self.command.trim().is_empty()
+        if let Some(script) = &self.shell_script {
+            if !self.command.is_empty() || !self.args.is_empty() || script.trim().is_empty()
+                || script.contains('\0') || script.chars().count() > MAX_COMMAND_CHARS {
+                return Err(EngineProcessError::Process("shell script must be bounded and cannot include program/argv fields".into()));
+            }
+        } else if self.command.trim().is_empty()
             || self.command.trim() != self.command
             || self.command.contains('\0')
             || self.command.chars().count() > MAX_COMMAND_CHARS
@@ -226,6 +239,8 @@ pub struct EngineProcessStartError {
     #[source]
     pub error: EngineProcessError,
     pub no_live_process_proven: bool,
+    /// Stronger than cleanup: the requested program never began execution.
+    pub user_code_not_started: bool,
 }
 
 impl ManagedEngineProcessOwner {
@@ -267,7 +282,7 @@ impl ManagedEngineProcessOwner {
         request: EngineProcessRequest,
         cancellation: CancellationToken,
     ) -> Result<EngineProcessSession, EngineProcessStartError> {
-        let before_spawn = |error| EngineProcessStartError { error, no_live_process_proven: true };
+        let before_spawn = |error| EngineProcessStartError { error, no_live_process_proven: true, user_code_not_started: true };
         request.validate().map_err(before_spawn)?;
         if cancellation.is_cancelled() {
             return Err(before_spawn(EngineProcessError::Cancelled));
@@ -285,7 +300,9 @@ impl ManagedEngineProcessOwner {
                     ProcessError::StartLost { cleanup, .. } => cleanup.reaped,
                     _ => false,
                 };
-                EngineProcessStartError { error: process_error(cause), no_live_process_proven }
+                let user_code_not_started = matches!(&cause,
+                    ProcessError::SpawnFailed { .. } | ProcessError::CapacityExhausted { .. });
+                EngineProcessStartError { error: process_error(cause), no_live_process_proven, user_code_not_started }
             })?;
         let session = EngineProcessSession {
             owner: handle.owner,
@@ -427,9 +444,14 @@ impl ManagedEngineProcessOwner {
         policy.deadline = Some(Instant::now() + timeout);
         let request = ProcessRequest {
             owner: ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7()),
-            command: CommandSpec::Program {
-                program: OsString::from(request.command),
-                args: request.args.into_iter().map(OsString::from).collect(),
+            command: match request.shell_script {
+                Some(script) => CommandSpec::Shell {
+                    shell: if cfg!(windows) { ShellKind::PowerShell } else { ShellKind::Posix }, script,
+                },
+                None => CommandSpec::Program {
+                    program: OsString::from(request.command),
+                    args: request.args.into_iter().map(OsString::from).collect(),
+                },
             },
             cwd: request
                 .cwd
@@ -601,6 +623,7 @@ mod tests {
         );
         EngineProcessRequest {
             command,
+            shell_script: None,
             args,
             cwd: None,
             env: BTreeMap::new(),
@@ -631,6 +654,7 @@ mod tests {
         );
         EngineProcessRequest {
             command,
+            shell_script: None,
             args,
             cwd: None,
             env: BTreeMap::new(),
@@ -657,6 +681,7 @@ mod tests {
         );
         EngineProcessRequest {
             command,
+            shell_script: None,
             args,
             cwd: None,
             env: BTreeMap::new(),
@@ -686,6 +711,7 @@ mod tests {
         );
         EngineProcessRequest {
             command,
+            shell_script: None,
             args,
             cwd: None,
             env: BTreeMap::new(),

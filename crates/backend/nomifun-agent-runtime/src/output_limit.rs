@@ -83,7 +83,7 @@ pub(crate) fn notice(continuation: bool) -> ChatMessage {
         format!(
             "Engine execution observation (not a new user instruction): the preceding model output reached its configured output-token ceiling and is incomplete. No tool call proposed in that model step was executed; that entire proposed batch was discarded, including syntactically complete calls. Earlier steps and their actual effects are unchanged. {}",
             if continuation {
-                "Continue from confirmed history, honor the original task and constraints, and keep the next response within the existing output ceiling. Do not replay earlier effects. Regenerate any needed tool call as a smaller complete call with a fresh ID; never append to a discarded partial JSON argument. Do not treat a partial answer or an unfinished plan as completed work."
+                "Continue from confirmed history and honor the entire original task and constraints. Do not regenerate the same oversized payload. For code, generate one smaller complete file/call at a time; split HTML, CSS and JavaScript when the task allows it. For a required single file, write a small initial structure and finish it with bounded patches using the published sha256. Leave room for reasoning and JSON escaping. Do not replay earlier effects or append to discarded partial arguments; use fresh call IDs. This changes generation size, not the task's required functionality."
             } else {
                 "No further automatic continuation was admitted. This is not task completion or permission to retry effects."
             }

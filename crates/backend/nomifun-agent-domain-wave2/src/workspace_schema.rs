@@ -23,18 +23,20 @@ pub(super) fn input(action: &str) -> Option<StrictJsonValue> {
                 "missing_ok":{"type":"boolean", "default":false,
                     "description":"Use true when checking an optional file such as AGENTS.md so absence is reported as a normal observation."},
                 "path":path(),
+                "start_line":{"type":"integer", "minimum":1, "maximum":8388609},
+                "line_count":{"type":"integer", "minimum":1, "maximum":2000, "default":200},
                 "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0},
                 "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384},
                 "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$"}
             },
-            "allOf":[
-                {"if":{"properties":{"offset":{"minimum":1}},"required":["offset"]},
-                 "then":{"required":["expected_sha256"]}},
+            "allOf":[{"if":{"properties":{"format":{"enum":["image","instruction_scope"]}},"required":["format"]},"then":{"properties":{"missing_ok":{"const":false}}}},
+                {"if":{"anyOf":[{"required":["start_line"]},{"required":["line_count"]}]},
+                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]}]}}},
                 {"if":{"properties":{"format":{"const":"image"}},"required":["format"]},
-                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["missing_ok"]}]}}},
+                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["start_line"]},{"required":["line_count"]}]}}},
                 {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
-                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["missing_ok"]}]}},
-                 "else":{"not":{"required":["recursive"]}}}
+                 "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["start_line"]},{"required":["line_count"]}]}},
+                 "else":{"properties":{"recursive":{"const":false}}}}
             ]
         }),
         "workspace.files/search" => object(

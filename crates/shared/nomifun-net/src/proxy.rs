@@ -1505,6 +1505,15 @@ mod tests {
         assert!(no_proxy.contains("192.168.0.0/16"));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_managed_proxy_probe_reads_system_configuration() {
+        let output = command_stdout_with_timeout(
+            proxy_cli("/usr/sbin/scutil", &["--proxy"]), SYSTEM_PROXY_COMMAND_TIMEOUT,
+        ).expect("macOS system proxy probe must return the complete scutil result");
+        assert!(output.contains("<dictionary>"));
+    }
+
     #[test]
     fn parse_scutil_proxy_uses_socks_when_http_is_absent() {
         let input = r#"<dictionary> {

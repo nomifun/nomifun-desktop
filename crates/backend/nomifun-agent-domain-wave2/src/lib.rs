@@ -3281,7 +3281,8 @@ mod tests {
             let schema = resolve_action_schema(capability_id, &action.input_schema)
                 .expect("manifest input ref resolves from its canonical source");
             assert_eq!(schema.0["additionalProperties"], serde_json::json!(false));
-            assert!(schema.0["required"].as_array().is_some_and(|fields| !fields.is_empty()));
+            assert!(!jsonschema::validator_for(&schema.0).unwrap().is_valid(&serde_json::json!({})),
+                "required inputs may be expressed by exclusive launch variants, but an empty payload must fail");
             assert!(schema.0["properties"].get("owner").is_none());
             assert!(schema.0["properties"].get("session_id").is_none());
             assert!(schema.0["properties"].get("workspace_root").is_none());

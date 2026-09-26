@@ -46,6 +46,7 @@ struct Params {
     #[serde(default)]
     operation: Operation,
     command: Option<String>,
+    cmd: Option<String>,
     #[serde(default)]
     args: Vec<String>,
     cwd: Option<String>,
@@ -209,12 +210,17 @@ impl EngineProcessScope {
                     "launch cannot address an existing process or write stdin",
                 ));
             }
-            let mut request = EngineProcessRequest::pipe(
-                params
-                    .command
-                    .ok_or_else(|| error("launch requires command"))?,
-            );
-            request.args = params.args;
+            let mut request = match (params.cmd, params.command) {
+                (Some(script), None) if params.args.is_empty() => {
+                    EngineProcessRequest::shell(script)
+                },
+                (None, Some(command)) => {
+                    let mut request=EngineProcessRequest::pipe(command);
+                    request.args=params.args;
+                    request
+                },
+                _ => return Err(error("launch requires cmd OR command plus args; do not mix them")),
+            };
             request.cwd = params.cwd;
             request.env = params.env;
             request.timeout_ms = params.timeout_ms.unwrap_or(30_000);
@@ -239,6 +245,14 @@ impl EngineProcessScope {
                 Ok(session) => session,
                 Err(failure) => {
                     state.unregistered_start = !failure.no_live_process_proven;
+                    if failure.user_code_not_started {
+                        return Ok(StrictJsonValue(serde_json::json!({
+                            "schema":"nomifun.process-start-observation.v1", "state":"not_started",
+                            "success":false, "user_code_started":false,
+                            "code":"PROCESS_NOT_STARTED",
+                            "message":"The requested executable did not start. Use cmd for a shell command, or command for the executable only with a separate args array. Check the executable and cwd, then correct this request. Process capability remains available; this failed launch did not invalidate earlier file/check observations."
+                        })));
+                    }
                     return Err(if failure.no_live_process_proven {
                         error(failure.error)
                     } else {
@@ -258,7 +272,7 @@ impl EngineProcessScope {
             state.unregistered_start = false;
             id
         } else {
-            if params.command.is_some()
+            if params.command.is_some() || params.cmd.is_some()
                 || !params.args.is_empty()
                 || params.cwd.is_some()
                 || !params.env.is_empty()

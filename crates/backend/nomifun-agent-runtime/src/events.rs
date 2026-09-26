@@ -85,6 +85,10 @@ pub enum AgentEngineEvent {
         step: u16,
         discarded_tool_call_ids: Vec<ToolCallId>,
         continuation: bool,
+        /// Advisory repair constraint, validated against the exposed surface.
+        /// It never represents a parsed or executed text tool call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_hint: Option<String>,
     },
     ContextCompacted {
         input_bytes_before: usize,
@@ -136,6 +140,12 @@ pub enum AgentEngineEvent {
     },
     CompletionReported {
         report: crate::AgentCompletionReport,
+    },
+    /// Engine publication of the accepted report after the terminal input
+    /// fence. This is not another provider/model stream event.
+    CompletionDelivered {
+        step: u16,
+        text: String,
     },
     OutputTextDelta {
         step: u16,

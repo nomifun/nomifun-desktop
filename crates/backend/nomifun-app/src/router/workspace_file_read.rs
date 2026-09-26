@@ -40,6 +40,15 @@ pub(super) async fn read(
         .as_object_mut()
         .ok_or_else(|| AppError::BadRequest("workspace.files/read requires an object".into()))?;
     let format = object.remove("format");
+    let kind=format.as_ref().and_then(|value| value.as_str());
+    // Explicit neutral defaults are equivalent to omission, even when a
+    // generic tool caller includes them for another read format.
+    if kind != Some("instruction_scope") && object.get("recursive") == Some(&serde_json::Value::Bool(false)) {
+        object.remove("recursive");
+    }
+    if matches!(kind,Some("image"|"instruction_scope")) && object.get("missing_ok") == Some(&serde_json::Value::Bool(false)) {
+        object.remove("missing_ok");
+    }
     match format.as_ref().and_then(|value| value.as_str()) {
         None if format.is_none() => {}
         Some("text") => {}

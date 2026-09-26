@@ -640,6 +640,10 @@ impl EngineKernelSession {
         Ok(self.plugin_bindings.wrap_model(inner))
     }
 
+    pub fn has_unscoped_tool_hooks(&self) -> bool {
+        self.plugin_bindings.has_unscoped_tool_hooks()
+    }
+
     pub async fn plugin_context_for_turn(
         &self,
         turn: &nomifun_ai_agent::context_contributor::TurnContext,
