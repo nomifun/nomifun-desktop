@@ -1,0 +1,57 @@
+# 跨平台共享 Case 处理进度
+
+更新：2026-09-27。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+本表管理 675 个 Both Case 的公共根因；Windows/macOS 产品验收分别记在各自文档。
+本轮 S-P0-01～05 已完成共享子断言的走查、修复与回归；不等于 675 条完整 Case 全部通过。
+
+## 当前 P0 批次
+
+| 任务 | 对应 Case / 本批子断言 | 排查与修复 | 状态 / 验证 |
+| --- | --- | --- | --- |
+| S-P0-01 清单与固定合同 | REG-001/008/011/017；G0-027；AUTH-001/002 | 官方 seed、Action/effect/resource、Schema/digest 唯一；保留精确 GEN/COD 补项，不扩大条件权限 | 已验证：合同 check、官方 catalog 3/3 |
+| S-P0-02 控制协议与整批预检 | G0-003～005/010；CTRL-001/002/006/007 | 采用上游已修复的可选 explanation 与一致执行、顺序控制批次、共享要求证据语义；补整批非法参数反例 | 已验证：Runtime 136/136，保留零 dispatch、幂等与正确完成状态 |
+| S-P0-03 exact 产品资源 | AUTH-004/005；APAL-001；AMUL-001 | 新 Canvas Session 复用旧 product binding 时先检查精确目标与资源唯一性；修复创建入口绕过 resolver，保留合法其他资源及旧 Session | 已验证：修复前反例失败；完整 route 36/36 含最终反例通过 |
+| S-P0-04 Skill 与动态上下文 | AUTH-008；EXT-006/010/012；CTRL-018/019 | 真实 Skill 正文/digest/来源/依赖/active set；steering 正文与用户账本隔离，恢复不能只用 ID | 已验证：合并后 route 正负向及 Runtime Skill 隔离/恢复测试通过 |
+| S-P0-05 owner 边界与错误 | REG-014/015；G0-008/027；OBS-005/016 | 三项 owner 边界检查；Schema 漂移返回既有类型化错误和 expected/actual digest，不再只报泛化字符串 | 已验证：三项检查、digest/未知工具反例通过；不代替 UI 全验收 |
+
+P0 验收命令：`cargo run -p nomifun-agent-contracts --bin agent-v2-contract -- check`、
+`bun run check:process-runtime-boundary`、`bun run check:agent-vocabulary`、
+`bun run check:unified-plugin-boundary`。新增缺陷再运行直接关联的确定性测试。
+全部日志放在外部 `phase-2-3/2026-09-27/shared-p0/`。
+
+本批结果：Runtime 136、App route 36、official catalog 3 项通过；合同 check、三项边界检查、
+desktop-ui-boundary、相关 Rust 格式检查及 diff 检查通过。没有新增付费模型调用。
+Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败；补齐实际入口后才通过，
+上述中间失败保留在 `canvas-pre-fix-regression.log`、`canvas-post-fix-single-rebuild.log`，
+最终证据为 `app-route-and-catalog-final.log` 与 `runtime-merged-final.log`。
+合并时上游新增的 steering 测试夹具漏了本地新增字段，已补空值并完整重跑 Runtime。
+
+## 全领域公共队列
+
+下表 Case 集合 = 实施计划对应领域中平台为 Both 的所有 ID；675 条各有且只有一个主领域。
+
+| 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
+| --- | ---: | --- | --- |
+| S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
+| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | P0 本轮；P1/P2 待走查 |
+| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | 部分模板补项已有回归；其余待走查 |
+| S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
+| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | 条件资源准备后走查，禁止共享生产 remote |
+| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
+| S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 本轮；其余待走查 |
+| S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
+| S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
+| S-D10 | 15 | PORT-001～015 内部端口、outbox、generation 与外部 grant 隔离 | P0 映射后逐端口确定性回归 |
+| S-D11 | 15 | 权限/资源/旧快照/撤权/secret 负向，验证拒绝前无副作用 | 本轮只验关联静态与资源断言；竞态仍待走查 |
+| **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
+
+## 历史修复与未关闭项
+
+- 2026-09-26：PAL 身份与绑定、MM Skill 首发、进程启动、工具可见性、模板 Action 已有针对性修复；
+  Windows 真实路径及其构建身份见 Windows 文档；旧失败证据仍在仓库外。
+- 2026-09-27：远端 `8228b61c3` 已提供控制预检、首次计划说明、完成直接收尾、工具参数与模型截断修复。
+  [已有公共合同报告](../../reviews/2026-09-26-agent-tool-contract-reliability.zh.md)作为历史证据导入，
+  新增修复先检查是否已被该实现覆盖，避免重复或倒退。
+- MM 旧失败会话的重试 spinner 仍是待复现症状；首发链路通过不能单独关闭它，后续放 W04/M04。
+- 11 个条件能力候选等待对应产品/资源/授权前提，不为完成列表扩权。
+- 本批共享 P0 门槛已满足，与修复和精简计划一起提交/推送；随后进入 Windows W01。

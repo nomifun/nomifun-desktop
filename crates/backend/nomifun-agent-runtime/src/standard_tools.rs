@@ -36,7 +36,13 @@ impl StandardTool {
             } else {
                 "cmd uses /bin/sh -c on this host. Example: cmd=ls -la. command plus args remains literal program invocation."
             };
-            format!("Workspace process host OS: {}. {} {shell}", std::env::consts::OS, self.description)
+            let host_guidance = match std::env::consts::OS {
+                "windows" => "For a top-level listing including Hidden/System entries, use powershell.exe with args [\"-NoProfile\",\"-Command\",\"Get-ChildItem -LiteralPath . -Force | Select-Object Name,Attributes,LinkType\"]. Do not recurse or follow links unless requested. A leading dot does not imply the Windows Hidden attribute; report flags and entry types only from metadata. For Windows Command Prompt syntax, invoke cmd.exe with /d /c; dir /a /b returns names only and cannot prove attributes.",
+                "macos" => "For a top-level listing including dot entries, use command=/bin/ls and args=[\"-a\"]. Do not put the entire command line in command. Omit . and .. from business entry counts.",
+                "linux" => "For a top-level listing including dot entries, use command=/usr/bin/ls and args=[\"-a\"]. Do not put the entire command line in command. Omit . and .. from business entry counts.",
+                _ => "Select native commands for this process host; the UI client's OS does not determine command syntax.",
+            };
+            format!("Workspace process host OS: {}. {} {shell} {host_guidance}", std::env::consts::OS, self.description)
         } else {
             self.description.to_owned()
         };
@@ -114,7 +120,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run a shell command using cmd (for example cmd=ls -la or cmd=node --check game.js). For exact executable/argv invocation instead use command with args; command alone never gets silently split or evaluated as shell text. Do not combine these two forms. Prefer read_file/search_files for workspace inspection. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a shell command using cmd (for example cmd=ls -la or cmd=node --check game.js). For exact executable/argv invocation instead use command with args; command alone never gets silently split or evaluated as shell text. Do not combine these two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {

@@ -382,18 +382,43 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
         let binding = if let Some(selection) = selection {
             let model = requested_model.map(|model| AgentChatModelSelectionDto { provider_id: model.provider_id.clone(), model: model.model.clone() });
             let mut binding = self.materialize(&owner, &selection, model.as_ref()).await?;
-            if existing.as_ref().is_some_and(|record| record.agent_binding.preset_revision_ref == binding.preset_revision_ref
+            let (_, _, next_snapshot) = self.control_plane
+                .saved_binding_artifacts(&owner, &binding)
+                .await
+                .map_err(control_plane_error_to_app)?;
+            // Product identity resources belong to the target, never to an
+            // older saved choice for that target. Other resource choices are
+            // inherited only if the next Snapshot still requires their kind.
+            let exact_target_resources = match target.target_kind.as_str() {
+                "companion" => vec![
+                    ("companion", target.target_id.as_str()),
+                    ("companion_memory", target.target_id.as_str()),
+                    ("scheduler", super::nomi_core_resource_bindings::INSTALLATION_SCHEDULER_RESOURCE_ID),
+                ],
+                "creative_studio_canvas" => vec![
+                    ("canvas", target.target_id.as_str()),
+                    ("asset_library", super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID),
+                ],
+                _ => Vec::new(),
+            }.into_iter().filter(|(kind, _)| next_snapshot.content.required_resource_kinds.iter()
+                .any(|required| required.as_ref() == *kind)).collect::<Vec<_>>();
+            let target_resources_ready = existing.as_ref().is_some_and(|record| {
+                exact_target_resources.iter().all(|(kind, id)| {
+                    let mut bindings = record.agent_binding.typed_resource_bindings.iter()
+                        .filter(|resource| resource.resource_kind == *kind);
+                    matches!(bindings.next(), Some(resource) if resource.resource_id == *id)
+                        && bindings.next().is_none()
+                })
+            });
+            if target_resources_ready && existing.as_ref().is_some_and(|record|
+                record.agent_binding.preset_revision_ref == binding.preset_revision_ref
                 && record.agent_binding.resolved_snapshot_ref == binding.resolved_snapshot_ref) {
                 existing.unwrap().agent_binding
             } else {
-                if let Some(previous) = existing.as_ref()
-                    && !previous.agent_binding.typed_resource_bindings.is_empty()
-                {
-                    let (_, _, next_snapshot) = self.control_plane
-                        .saved_binding_artifacts(&owner, &binding)
-                        .await
-                        .map_err(control_plane_error_to_app)?;
-                    let selections = previous.agent_binding.typed_resource_bindings.iter()
+                if !exact_target_resources.is_empty() || existing.as_ref().is_some_and(|previous|
+                    !previous.agent_binding.typed_resource_bindings.is_empty()) {
+                    let mut selections = existing.as_ref().into_iter()
+                        .flat_map(|previous| previous.agent_binding.typed_resource_bindings.iter())
                         .filter(|resource| next_snapshot.content.required_resource_kinds.iter()
                             .any(|kind| kind.as_ref() == resource.resource_kind))
                         .map(|resource| AgentResourceSelectionDto {
@@ -401,6 +426,37 @@ impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
                             resource_id: resource.resource_id.clone(),
                         })
                         .collect::<Vec<_>>();
+                    for (kind, id) in &exact_target_resources {
+                        selections.retain(|resource| resource.resource_kind != *kind);
+                        selections.push(AgentResourceSelectionDto {
+                            resource_kind: (*kind).to_owned(),
+                            resource_id: (*id).to_owned(),
+                        });
+                    }
+                    if target.target_kind == "creative_studio_canvas"
+                        && matches!(&selection, ProductAgentSelection::Template { template_key }
+                            if template_key == "creative-studio.default")
+                        && existing.as_ref().is_none_or(|record|
+                            record.agent_binding.typed_resource_bindings.is_empty())
+                    {
+                        // A model-first Canvas selection may have no prior
+                        // binding. Supply only the same deterministic owner
+                        // infrastructure used by the implicit product entry.
+                        for (kind, id) in [
+                            ("workspace", super::nomi_core_resource_bindings::DEFAULT_WORKSPACE_RESOURCE_ID),
+                            ("process_session", super::nomi_core_resource_bindings::MANAGED_PROCESS_SESSION_RESOURCE_ID),
+                            ("project_memory", super::nomi_core_resource_bindings::DEFAULT_PROJECT_MEMORY_RESOURCE_ID),
+                        ] {
+                            if next_snapshot.content.required_resource_kinds.iter()
+                                .any(|required| required.as_ref() == kind)
+                                && !selections.iter().any(|resource| resource.resource_kind == kind) {
+                                selections.push(AgentResourceSelectionDto {
+                                    resource_kind: kind.to_owned(),
+                                    resource_id: id.to_owned(),
+                                });
+                            }
+                        }
+                    }
                     binding = self.resource_bindings
                         .resolve_for_saved_binding(
                             &self.control_plane,
@@ -870,42 +926,75 @@ impl NomiCoreSessionOwner {
                 .await
                 .map_err(control_plane_error_to_app)?;
             if let Some(existing) = existing {
-                let (binding, revision, resolved) = control_plane
-                    .saved_binding_artifacts(&owner, &existing.agent_binding)
-                    .await
-                    .map_err(control_plane_error_to_app)?;
-                let editor = control_plane
-                    .editor(
-                        &owner,
-                        binding.preset_revision_ref.preset_id.as_ref(),
-                        Some(binding.preset_revision_ref.revision),
+                // A saved Canvas selection can point at another Canvas (or omit
+                // its target resource). Resolve that choice before freezing a
+                // new Session; existing Sessions keep their immutable binding.
+                let needs_canvas_rebind = target.target_kind == "creative_studio_canvas"
+                    && [
+                        ("canvas", target.target_id.as_str()),
+                        (
+                            "asset_library",
+                            super::nomi_core_resource_bindings::CREATIVE_ASSET_LIBRARY_RESOURCE_ID,
+                        ),
+                    ]
+                    .into_iter()
+                    .any(|(kind, id)| {
+                        let mut bindings = existing
+                            .agent_binding
+                            .typed_resource_bindings
+                            .iter()
+                            .filter(|resource| resource.resource_kind == kind);
+                        !matches!(bindings.next(), Some(resource) if resource.resource_id == id)
+                            || bindings.next().is_some()
+                    });
+                let resolution = if needs_canvas_rebind {
+                    let resolver = self
+                        .product_agent_resolver
+                        .get()
+                        .and_then(std::sync::Weak::upgrade)
+                        .ok_or_else(|| AppError::Conflict(
+                            "Session product Agent resolver is unavailable".to_owned(),
+                        ))?;
+                    resolver.resolve(owner_id, &target, request.model.as_ref()).await?
+                } else {
+                    let (binding, revision, resolved) = control_plane
+                        .saved_binding_artifacts(&owner, &existing.agent_binding)
+                        .await
+                        .map_err(control_plane_error_to_app)?;
+                    let editor = control_plane
+                        .editor(
+                            &owner,
+                            binding.preset_revision_ref.preset_id.as_ref(),
+                            Some(binding.preset_revision_ref.revision),
+                        )
+                        .await
+                        .map_err(control_plane_error_to_app)?;
+                    let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+                        .map_err(|error| AppError::Forbidden(error.to_string()))?;
+                    let projected = super::agent_binding_projection::project_saved_artifacts(
+                        &common_owner,
+                        binding,
+                        revision,
+                        resolved,
+                        Some(&editor.preset.display_name),
+                    )?;
+                    attach_session_metadata(
+                        &mut request.extra,
+                        &projected.binding,
+                        None,
                     )
-                    .await
-                    .map_err(control_plane_error_to_app)?;
-                let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
-                    .map_err(|error| AppError::Forbidden(error.to_string()))?;
-                let projected = super::agent_binding_projection::project_saved_artifacts(
-                    &common_owner,
-                    binding,
-                    revision,
-                    resolved,
-                    Some(&editor.preset.display_name),
-                )?;
-                attach_session_metadata(
-                    &mut request.extra,
-                    &projected.binding,
-                    None,
-                )
-                .map_err(|error| AppError::Conflict(error.message))?;
+                    .map_err(|error| AppError::Conflict(error.message))?;
+                    ProductAgentResolution {
+                        snapshot: projected.projection.snapshot,
+                        runtime_extra: projected.projection.request.extra,
+                    }
+                };
                 merge_product_agent_resolution(
                     &mut request.extra,
                     &target,
-                    &ProductAgentResolution {
-                        snapshot: projected.projection.snapshot.clone(),
-                        runtime_extra: projected.projection.request.extra,
-                    },
+                    &resolution,
                 )?;
-                snapshot = Some(projected.projection.snapshot);
+                snapshot = Some(resolution.snapshot);
             }
         }
         if request.extra.get(NOMI_CORE_SESSION_METADATA_KEY).is_none() {
@@ -2705,7 +2794,11 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 "Nomi Plugin Tool session materialization failed: {error}"
             ))
         })?;
-        let plugin_session = if skills.ids.is_empty() { plugin_session } else {
+        // Bundled planning Skills are admitted by their frozen locks, then
+        // supplied only for the turn's exact inject_skills selection. They have
+        // no resource index or global instruction; installing an empty Skill
+        // resource prompt would advertise a tool that cannot read anything.
+        let plugin_session = if skills.instructions.is_empty() && skills.resources.is_empty() { plugin_session } else {
             plugin_session.with_selected_skills(nomifun_ai_agent::nomi_skills::NomiSelectedSkills::new(
                 skills.instructions, skills.resources, resource_image_model,
             ).map_err(|error| AppError::Conflict(error.to_string()))?)

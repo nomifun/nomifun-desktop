@@ -3816,7 +3816,12 @@ fn resolve_program_on_path(
         };
         for candidate in candidates {
             if candidate.is_file() {
-                if let Ok(canonical) = std::fs::canonicalize(&candidate) {
+                // `canonicalize` alone returns a \\?\ disk path on Windows.
+                // Windows PowerShell 5.1 can fail during .NET initialization
+                // when CreateProcessW receives that spelling as its explicit
+                // application path. Keep the verified final file identity but
+                // use the ordinary Win32 spelling when it round-trips.
+                if let Ok(canonical) = crate::request::canonicalize_compatible(&candidate) {
                     return canonical.into_os_string();
                 }
             }
@@ -5210,7 +5215,8 @@ mod tests {
         let overrides = BTreeMap::from([(
             OsString::from("Path"), directory.path().as_os_str().to_os_string(),
         )]);
-        let expected = std::fs::canonicalize(&executable).unwrap().into_os_string();
+        let expected = crate::request::canonicalize_compatible(&executable)
+            .unwrap().into_os_string();
         assert_eq!(resolve_program_on_path(OsStr::new("fixture"), &overrides), expected);
         assert_eq!(resolve_program_on_path(OsStr::new("fixture.exe"), &overrides), expected);
         assert_eq!(resolve_program_on_path(OsStr::new("missing"), &overrides), OsString::from("missing"));

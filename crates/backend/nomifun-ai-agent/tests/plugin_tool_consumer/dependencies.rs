@@ -1,7 +1,8 @@
 //! Actual Nomi ToolRegistry consumption of the Kernel subcall seam. These
 //! in-process handlers are not evidence that the JS SDK can issue subcalls.
 use super::*;
-use nomifun_agent_kernel::{CapabilityDependencyCall, CapabilityDependencyCaller};
+use nomifun_agent_kernel::{CapabilityDependencyCall, CapabilityDependencyCaller, SessionCapabilityState};
+use nomifun_ai_agent::{NomiTurnContextContributor, context_contributor::ContextContributor};
 
 const CHILD: &str = "example.dynamic.dependency";
 
@@ -100,7 +101,7 @@ async fn initial_context_rejects_tool_dependencies_and_turn_contexts_use_distinc
         let compiled = compile(&registry);
         // Rebuild the same Session twice; a restarted in-memory sequence must
         // not alias two evaluations to the same dependency effect identity.
-        for _ in 0..2 {
+        for rebuild in 0..2 {
             if phase == nomifun_agent_contracts::ContextContributionPhase::SessionStart {
                 let error = match try_session(kernel.clone(), compiled.clone(), schemas.clone()).await {
                     Ok(_) => panic!("SessionStart Context must not invoke a Tool dependency"),
@@ -119,12 +120,39 @@ async fn initial_context_rejects_tool_dependencies_and_turn_contexts_use_distinc
                     .iter()
                     .any(|action| action.capability_id().as_ref() == CHILD)
             );
+            let inactive = Arc::new(SessionCapabilityState::from_committed(
+                &compiled,
+                1,
+                compiled.content().capability_allowlist.iter()
+                    .filter(|id| id.as_ref() != CONTEXT_CAPABILITY)
+                    .cloned(),
+            ).unwrap());
+            let inactive_context = NomiTurnContextContributor::new(
+                kernel.clone(), Arc::new(compiled.clone()), inactive,
+                owner(), AgentSessionId::from(SESSION),
+                ScopeKey::from(format!("session:{SESSION}")),
+                vec![CapabilityId::from(CONTEXT_CAPABILITY)],
+            );
+            let before = calls.load(Ordering::SeqCst);
+            assert!(inactive_context.pre_turn_context_for_turn_result(
+                &nomifun_ai_agent::context_contributor::TurnContext {
+                    turn_id: "turn-inactive".into(),
+                    source_message_id: "same-source".into(),
+                    text: "inactive persona".into(),
+                    image_media_types: Vec::new(),
+                    cs_dialogue_id: None,
+                },
+            ).await.unwrap().is_none());
+            assert_eq!(calls.load(Ordering::SeqCst), before,
+                "inactive Context must not dispatch its dependency");
+            assert!(retained.lock().unwrap().is_none());
+            let refreshed = format!("turn-{rebuild}");
             let value = loaded.context_contributors()[0]
                 .pre_turn_context_for_turn_result(
                     &nomifun_ai_agent::context_contributor::TurnContext {
                         turn_id: "turn-same-source".into(),
                         source_message_id: "same-source".into(),
-                        text: "turn".into(),
+                        text: refreshed.clone(),
                         image_media_types: Vec::new(),
                         cs_dialogue_id: None,
                     },
@@ -132,7 +160,8 @@ async fn initial_context_rejects_tool_dependencies_and_turn_contexts_use_distinc
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(value.contains("context-dependency:turn"));
+            assert!(value.contains(&format!("context-dependency:{refreshed}")),
+                "a fresh active context must use this turn's persona text");
             let caller = retained.lock().unwrap().take().unwrap();
             assert_eq!(
                 caller

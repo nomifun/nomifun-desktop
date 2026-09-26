@@ -43,6 +43,7 @@ use crate::plugin_tool_error_projection::model_safe_tool_error;
 
 #[path = "plugin_context.rs"]
 mod context;
+pub use context::NomiTurnContextContributor;
 
 const PROVIDER_NAME_PREFIX: &str = "plugin__";
 const PROVIDER_NAME_SEPARATOR: &str = "__";

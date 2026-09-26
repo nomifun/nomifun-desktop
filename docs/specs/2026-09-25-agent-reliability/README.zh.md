@@ -137,6 +137,11 @@ Bonferroni `alpha=0.05/3`，零失败至少需 **408 个有效独立样本/项**
 
 ## 实施与验证追踪
 
+2026-09-27 起按 [共享与平台实施计划](IMPLEMENTATION-PLAN.zh.md) 合并阶段二、三执行。
+当前进度分别维护在 [共享](PROGRESS-SHARED.zh.md)、[Windows](PROGRESS-WINDOWS.zh.md)、
+[macOS](PROGRESS-MACOS.zh.md) 三份文档；先共享 P0、commit + push，再继续 Windows。
+下面各日期段及清单保留历史口径；完整运行证据放仓库外，不复制大型索引/日志进 Git。
+
 - [x] 当前工作树/主链路检查、第一方方案调研、初始单元基线。
 - [ ] 模型同路由瞬态重试、退避/Retry-After、取消与禁止重复语义输出测试。
 - [ ] 幂等计划更新、修订生命周期、控制状态精确失效与无进展检测。

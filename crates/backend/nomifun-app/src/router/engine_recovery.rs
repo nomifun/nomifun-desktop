@@ -40,11 +40,32 @@ impl EngineSessionHost {
         let (prefix, tail, _, _) = recovery_records(&store, &saved).await?;
         let image_input = receipt.session().revision().payload.chat_route_records.values().any(|record|
             std::iter::once(&record.primary).chain(record.failovers.iter()).any(|model| model.features.contains(&ChatRouteFeature::ImageInput)));
+        let selected_skills = if prefix.iter().any(|event| matches!(event,
+            AgentEngineEvent::SteeringInputs { inputs } if inputs.iter().any(|input| !input.inject_skills.is_empty()))) {
+            let skills = self.read_selected_skills(receipt.session()).await?;
+            let resources = self.open_kernel_session(receipt.session())?;
+            let active = resources.active_state().snapshot().map_err(error)?;
+            if active.generation != receipt.session().active_set_generation() {
+                return Err(error("recovery Skill active set differs from admitted generation"));
+            }
+            Some((skills, active))
+        } else { None };
         let mut prepared = Vec::new();
+        let mut prepared_skill_bytes = 0usize;
         for event in &prefix {
             if let AgentEngineEvent::SteeringInputs { inputs } = event {
                 for recorded in inputs {
                     let mut input: AgentSteeringInput = recorded.clone();
+                    if !input.inject_skills.is_empty() {
+                        let (skills, active) = selected_skills.as_ref().ok_or_else(|| error("recovery selected Skill context is missing"))?;
+                        skills.validate_active(&input.inject_skills, &active.active)?;
+                        input.prepared_skill_instructions = skills.turn_instructions(&input.inject_skills)?;
+                    }
+                    prepared_skill_bytes = prepared_skill_bytes.saturating_add(
+                        input.prepared_skill_instructions.iter().map(String::len).sum::<usize>());
+                    if prepared_skill_bytes > 24 * 1024 {
+                        return Err(error("recovery selected Skill context exceeds its 24 KiB budget"));
+                    }
                     input.prepared_images = super::super::runtime_attachments::prepare_images(
                         &input.files, &receipt.session().session().extra, image_input).await?;
                     if input.prepared_images.len() != input.image_count { return Err(error("accepted steering images cannot be rehydrated")); }

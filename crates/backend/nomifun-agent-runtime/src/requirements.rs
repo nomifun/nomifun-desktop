@@ -35,11 +35,13 @@ pub struct AgentRequirementOrigin {
 
 pub(crate) fn citation_schema() -> serde_json::Value {
     serde_json::json!({"type":"object","additionalProperties":false,"required":["input","quote"],
-        "properties":{"input":{"type":"integer","minimum":0},"quote":{"type":"string","maxLength":512}}})
+        "properties":{"input":{"type":"integer","minimum":0},"quote":{"type":"string","maxLength":512,
+            "description":"Copy an exact contiguous substring of this indexed accepted user input. Do not paraphrase or cite tool output, a summary, or prior history."}}})
 }
 
 pub(crate) fn schema() -> serde_json::Value {
-    serde_json::json!({"type":"array","maxItems":32,"items":{
+    serde_json::json!({"type":"array","maxItems":32,
+        "description":"Optional for update_plan: omit to let the engine preserve each complete accepted input as a full-scope requirement. Add only new unique IDs with exact accepted-input quotes.","items":{
         "type":"object","additionalProperties":false,"required":["id","description","source"],
         "properties":{"id":{"type":"string","minLength":1,"maxLength":64},
             "description":{"type":"string","minLength":1,"maxLength":512},"source":citation_schema()}

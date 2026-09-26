@@ -83,7 +83,7 @@ fn completed_results_are_not_replaced_by_late_attestations_or_counted_twice() {
 #[test]
 fn applied_steering_keeps_receipt_order_and_deferred_inputs_remain_unapplied() {
     let input = |id:&str| crate::AgentSteeringInput { receipt_operation_id:id.into(),message_id:format!("message-{id}"),
-        text:format!("instruction-{id}"),files:vec![format!("{id}.png")],inject_skills:vec!["selected-skill".into()],image_count:1,prepared_images:vec![] };
+        text:format!("instruction-{id}"),files:vec![format!("{id}.png")],inject_skills:vec!["selected-skill".into()],image_count:1,prepared_images:vec![],prepared_skill_instructions:vec![] };
     let inputs = vec![input("z-first"),input("a-second")];
     let tail = vec![AgentEngineEvent::SteeringInputs { inputs:inputs.clone() },
         AgentEngineEvent::SteeringDeferred { inputs:vec![input("pending")],reason:"paused".into() }];

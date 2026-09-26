@@ -3,7 +3,7 @@
 use super::*;
 use nomifun_agent_contracts::{ContextContributionInput, ContextTurnInput};
 
-pub(super) struct NomiTurnContextContributor {
+pub struct NomiTurnContextContributor {
     kernel: Arc<KernelRegistry>,
     compiled: Arc<CompiledSnapshot>,
     active: Arc<SessionCapabilityState>,
@@ -15,7 +15,7 @@ pub(super) struct NomiTurnContextContributor {
 
 impl NomiTurnContextContributor {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
+    pub fn new(
         kernel: Arc<KernelRegistry>,
         compiled: Arc<CompiledSnapshot>,
         active: Arc<SessionCapabilityState>,
@@ -66,6 +66,12 @@ impl ContextContributor for NomiTurnContextContributor {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut contributions = Vec::new();
         for capability_id in &self.capabilities {
+            if !active.active.contains(capability_id) {
+                // A committed active set may narrow the frozen Snapshot. Do
+                // not invoke or expose Context from an inactive capability;
+                // active entries still pass through the Kernel below.
+                continue;
+            }
             let policy = self.compiled.policy(capability_id).ok_or_else(|| {
                 format!("Context {} has no frozen policy", capability_id.as_ref())
             })?;

@@ -313,6 +313,9 @@ impl AgentSendError {
                 resolution(AgentErrorResolutionKind::Retry, None),
             ),
             AppError::BadGateway(_) => classify_upstream_detail(&detail),
+            AppError::Conflict(message) if message.starts_with("Agent Skills:") => {
+                classify_upstream_detail(&err.to_string())
+            }
             // Registry admission refusals (build-failure cooldown, crash-loop
             // pause, conversation-busy) surface as Conflict. Route them
             // through the text classifier so the card carries an honest
@@ -845,6 +848,17 @@ fn classify_provider_api(lower: &str) -> Option<ClassifiedError> {
 }
 
 fn classify_nomifun_state(lower: &str) -> Option<ClassifiedError> {
+    if lower.starts_with("conflict: agent skills:") {
+        return Some(ClassifiedError {
+            message: "The selected Skill does not match this Agent session",
+            code: AgentErrorCode::NomifunStateInconsistent,
+            ownership: AgentErrorOwnership::Nomifun,
+            retryable: false,
+            feedback_recommended: false,
+            resolution_kind: AgentErrorResolutionKind::StartNewSession,
+            resolution_target: Some(AgentErrorResolutionTarget::NewConversation),
+        });
+    }
     if lower.contains("conversation is already processing") {
         return Some(ClassifiedError {
             message: "The current response is still running",
@@ -1249,6 +1263,24 @@ mod tests {
         let denied = AgentSendError::from_engine_turn_failure("Forbidden: workspace binding cannot write");
         assert_eq!(denied.code(), Some(AgentErrorCode::NomifunPermissionError));
         assert_eq!(denied.ownership(), Some(AgentErrorOwnership::Nomifun));
+    }
+
+    #[test]
+    fn skill_lock_conflict_is_a_local_session_error_not_an_upstream_retry() {
+        let detail = "Agent Skills: requested Skill is not in the Agent's immutable selected Skill locks";
+        for error in [
+            AgentSendError::from_app_error(AppError::Conflict(detail.to_owned())),
+            AgentSendError::from_engine_turn_failure(format!("Conflict: {detail}")),
+        ] {
+            assert_eq!(error.code(), Some(AgentErrorCode::NomifunStateInconsistent));
+            assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
+            assert_eq!(error.stream_error().retryable, Some(false));
+            assert_eq!(error.stream_error().resolution.as_ref().unwrap().kind,
+                AgentErrorResolutionKind::StartNewSession);
+            assert!(error.stream_error().message.contains("selected Skill"));
+        }
+        let upstream = AgentSendError::from_engine_turn_failure("provider reported a skill service failure");
+        assert_ne!(upstream.ownership(), Some(AgentErrorOwnership::Nomifun));
     }
 
     #[test]

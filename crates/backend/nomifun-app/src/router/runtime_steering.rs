@@ -20,6 +20,7 @@ pub(super) struct Inbox {
     pending: Vec<AgentSteeringInput>,
     prepared_image_bytes: usize,
     prepared_image_count: usize,
+    prepared_skill_bytes: usize,
 }
 impl Default for Inbox {
     fn default() -> Self {
@@ -30,6 +31,7 @@ impl Default for Inbox {
             pending: Vec::new(),
             prepared_image_bytes: 0,
             prepared_image_count: 0,
+            prepared_skill_bytes: 0,
         }
     }
 }
@@ -79,12 +81,22 @@ impl ConversationRuntimeHost {
         if facts.head.status != "running" || facts.execution_generation != turn.epoch as u64 {
             return Err(error("recovery input ownership changed"));
         }
+        let capabilities = self.capability_state.snapshot().map_err(error)?;
         for input in recovery.as_ref().map(|recovery| recovery.prepared_inputs()).unwrap_or_default() {
+            self.skills.validate_active(&input.inject_skills, &capabilities.active)?;
+            let selected = self.skills.turn_instructions(&input.inject_skills)?;
+            if input.prepared_skill_instructions != selected {
+                return Err(error("recovery Skill body differs from frozen selected Skill"));
+            }
             turn.steering.seen.insert(input.receipt_operation_id.clone(), input.journal_record());
             turn.steering.prepared_image_count += input.image_count;
             turn.steering.prepared_image_bytes += input.prepared_images.iter().map(|part| match part {
                 nomifun_chat_model_broker::ChatContentPart::Image { data_base64, .. } => data_base64.len(), _ => 0,
             }).sum::<usize>();
+            turn.steering.prepared_skill_bytes += selected.iter().map(String::len).sum::<usize>();
+        }
+        if turn.steering.prepared_skill_bytes > 24 * 1024 {
+            return Err(error("recovery steering selected Skill context exceeds its 24 KiB budget"));
         }
         for event in facts.events.iter().filter(|event| event.kind.0 == "turn/steer-accepted" && event.correlation_id.as_ref() == turn.operation) {
             if turn.steering.seen.contains_key(event.event_id.as_ref()) { continue; }
@@ -93,16 +105,21 @@ impl ConversationRuntimeHost {
             let text = value.get("content").and_then(serde_json::Value::as_str).ok_or_else(|| error("recovery steering text is missing"))?;
             let files = super::super::runtime_attachments::references(value)?;
             let inject_skills = super::super::runtime_attachments::selected_skills(value)?;
-            self.skills.validate_ids(&inject_skills)?;
+            self.skills.validate_active(&inject_skills, &capabilities.active)?;
+            let prepared_skill_instructions = self.skills.turn_instructions(&inject_skills)?;
             let images = super::super::runtime_attachments::prepare_images(&files, &self.options.extra, self.route_image_input).await?;
             let input = AgentSteeringInput { receipt_operation_id: event.event_id.as_ref().to_owned(), message_id: event.event_id.as_ref().to_owned(),
-                text: text.to_owned(), files, inject_skills, image_count: images.len(), prepared_images: images };
+                text: text.to_owned(), files, inject_skills, image_count: images.len(), prepared_images: images,
+                prepared_skill_instructions };
             input.validate().map_err(error)?;
             turn.steering.prepared_image_count += input.image_count;
             turn.steering.prepared_image_bytes += input.prepared_images.iter().map(|part| match part {
                 nomifun_chat_model_broker::ChatContentPart::Image { data_base64, .. } => data_base64.len(), _ => 0,
             }).sum::<usize>();
-            if turn.steering.seen.len() >= 16 || turn.steering.prepared_image_count > 4 || turn.steering.prepared_image_bytes > 4 * 1024 * 1024 {
+            turn.steering.prepared_skill_bytes += input.prepared_skill_instructions.iter().map(String::len).sum::<usize>();
+            if turn.steering.seen.len() >= 16 || turn.steering.prepared_image_count > 4
+                || turn.steering.prepared_image_bytes > 4 * 1024 * 1024
+                || turn.steering.prepared_skill_bytes > 24 * 1024 {
                 return Err(error("recovery steering exceeds its admitted budget"));
             }
             turn.steering.seen.insert(input.receipt_operation_id.clone(), input.journal_record());
@@ -260,7 +277,9 @@ impl ConversationRuntimeHost {
         if files != delivery.files || inject_skills != delivery.inject_skills {
             return Err(error("steering context differs from its committed receipt"));
         }
-        self.skills.validate_ids(&inject_skills)?;
+        let capabilities = self.capability_state.snapshot().map_err(error)?;
+        self.skills.validate_active(&inject_skills, &capabilities.active)?;
+        let prepared_skill_instructions = self.skills.turn_instructions(&inject_skills)?;
         let mut input = AgentSteeringInput {
             receipt_operation_id: delivery.receipt_operation_id,
             message_id,
@@ -269,6 +288,7 @@ impl ConversationRuntimeHost {
             inject_skills,
             image_count: 0,
             prepared_images: Vec::new(),
+            prepared_skill_instructions,
         };
         input.validate().map_err(error)?;
         if let Some(previous) = turn.steering.seen.get(&input.receipt_operation_id) {
@@ -312,9 +332,11 @@ impl ConversationRuntimeHost {
             .steering
             .prepared_image_count
             .saturating_add(input.image_count);
-        if next_image_bytes > 4 * 1024 * 1024 || next_image_count > 4 {
+        let next_skill_bytes = turn.steering.prepared_skill_bytes.saturating_add(
+            input.prepared_skill_instructions.iter().map(String::len).sum::<usize>());
+        if next_image_bytes > 4 * 1024 * 1024 || next_image_count > 4 || next_skill_bytes > 24 * 1024 {
             return Err(error(
-                "turn steering image budget exceeded (4 images / 4 MiB prepared payloads); input was not queued",
+                "turn steering attachment or selected Skill context budget exceeded; input was not queued",
             ));
         }
         // Attachment reads may outlive a database-side stop. Recheck the
@@ -337,6 +359,7 @@ impl ConversationRuntimeHost {
         turn.steering.generation = Some(delivery.turn_generation);
         turn.steering.prepared_image_bytes = next_image_bytes;
         turn.steering.prepared_image_count = next_image_count;
+        turn.steering.prepared_skill_bytes = next_skill_bytes;
         let recorded = input.journal_record();
         turn.steering
             .seen
@@ -405,6 +428,13 @@ impl AgentInputPort for HostPort {
                 turn.steering.open = false;
             }
             return Ok(Vec::new());
+        }
+        let capabilities = host.capability_state.snapshot().map_err(engine_error)?;
+        for input in &turn.steering.pending {
+            host.skills.validate_active(&input.inject_skills, &capabilities.active).map_err(engine_error)?;
+            if input.prepared_skill_instructions != host.skills.turn_instructions(&input.inject_skills).map_err(engine_error)? {
+                return Err(engine_error("queued Skill body differs from frozen active selection"));
+            }
         }
         turn.steering.open = false; // remains closed if a journal write fails
         host.flush_steering_buffer(turn)

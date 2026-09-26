@@ -71,9 +71,12 @@ impl AgentTurnRecovery {
         let mut replacements = BTreeMap::new();
         let mut applied_inputs = Vec::new();
         if prepared_inputs.len() != recorded_inputs.len() { return Err(fail()); }
+        if prepared_inputs.iter().flat_map(|input| &input.prepared_skill_instructions).map(String::len).sum::<usize>() > 24 * 1024 {
+            return Err(fail());
+        }
         for (recorded, prepared) in recorded_inputs.iter().zip(&prepared_inputs) {
-            prepared.validate()?;
-            if !prepared.same_delivery(recorded) || prepared.image_count != prepared.prepared_images.len() {
+            prepared.validate_prepared_live()?;
+            if !prepared.same_delivery(recorded) {
                 return Err(fail());
             }
             let message = prepared.project_message(true);
@@ -187,5 +190,33 @@ mod tests {
         let mut unsafe_tail = tail;
         unsafe_tail.push(AgentEngineEvent::ToolStarted { step: 2, call_id: "effect".into(), capability_id: "workspace.files".into(), action_id: "workspace.files/write".into() });
         assert!(AgentTurnRecovery::new(checkpoint, 1, 2, prefix, unsafe_tail, vec![]).is_err());
+    }
+
+    #[test]
+    fn applied_steering_recovery_requires_rehydrated_skill_body_without_journaling_it() {
+        let mut checkpoint = checkpoint();
+        checkpoint.accepted_input_count = 2;
+        checkpoint.applied_steering_receipts = vec!["skill-receipt".into()];
+        let recorded = AgentSteeringInput {
+            receipt_operation_id: "skill-receipt".into(), message_id: "skill-message".into(),
+            text: "Use the selected Skill".into(), files: vec![],
+            inject_skills: vec!["selected-skill".into()], image_count: 0,
+            prepared_images: vec![], prepared_skill_instructions: vec![],
+        };
+        let mut prepared = recorded.clone();
+        prepared.prepared_skill_instructions = vec!["EXACT_FROZEN_SKILL_BODY".into()];
+        let prefix = vec![
+            AgentEngineEvent::TurnStarted { binding: checkpoint.binding.clone(), turn_operation_id: "turn".into() },
+            AgentEngineEvent::SteeringInputs { inputs: vec![recorded] },
+            AgentEngineEvent::ExecutionCheckpointSaved { step: 0, revision: 1, digest: "c".repeat(64).into() },
+        ];
+        let recovery = AgentTurnRecovery::new(checkpoint.clone(), 1, 2, prefix.clone(), vec![], vec![prepared.clone()]).unwrap();
+        assert_eq!(recovery.prepared_inputs()[0].prepared_skill_instructions,
+            ["EXACT_FROZEN_SKILL_BODY"]);
+        assert!(!serde_json::to_string(&prefix).unwrap().contains("EXACT_FROZEN_SKILL_BODY"));
+        assert!(!serde_json::to_string(&recovery.applied_inputs).unwrap().contains("EXACT_FROZEN_SKILL_BODY"));
+        prepared.prepared_skill_instructions.clear();
+        assert!(AgentTurnRecovery::new(checkpoint, 1, 2, prefix, vec![], vec![prepared]).is_err(),
+            "an old ID-only journal must be rehydrated from the exact frozen Skill before resume");
     }
 }
