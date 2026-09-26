@@ -837,6 +837,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
             .with_input_port(self.input_port.clone());
+        request.unscoped_tool_hooks = self.resources.has_unscoped_tool_hooks();
         if self.resources.mcp_resources_selected() {
             request = request.with_resource_port(self.capability_port.clone());
         }
@@ -887,7 +888,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         let writeback_input = {
             let mut active = self.active.lock().await;
             active.as_mut().and_then(|turn| {
-                if let AgentEngineEvent::OutputTextDelta { step, text } = event {
+                if let AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } = event {
                     turn.assistant_text_by_step
                         .entry(*step)
                         .or_default()

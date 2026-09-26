@@ -31,7 +31,12 @@ struct StandardTool {
 impl StandardTool {
     fn exposure(&self) -> AgentToolExposure {
         let description = if self.action_id == "workspace.process/exec" {
-            format!("Workspace process host OS: {}. {}", std::env::consts::OS, self.description)
+            let shell = if cfg!(target_os = "windows") {
+                "cmd uses PowerShell on this host; command plus args remains literal program invocation."
+            } else {
+                "cmd uses /bin/sh -c on this host. Example: cmd=ls -la. command plus args remains literal program invocation."
+            };
+            format!("Workspace process host OS: {}. {} {shell}", std::env::consts::OS, self.description)
         } else {
             self.description.to_owned()
         };
@@ -53,7 +58,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "read_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/read",
-        description: "Read a workspace file or inspect instruction scope. Default format=text: bounded UTF-8 pages, source at most 8 MiB; start at byte offset 0, follow next_offset with prior expected_sha256 until eof. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
+        description: "Read a workspace file or inspect instruction scope. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
         schema: read_schema,
     },
     StandardTool {
@@ -67,7 +72,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "git_status",
         capability_id: "workspace.vcs",
         action_id: "workspace.vcs/status",
-        description: "Return repository status for the bound workspace.",
+        description: "Inspect Git status for the bound workspace. A new directory without Git returns is_repository=false as a normal observation; this does not initialize Git.",
         schema: empty_schema,
     },
     StandardTool {
@@ -81,7 +86,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "write_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/write",
-        description: "Write a complete UTF-8 text file (at most 8 MiB) through the workspace owner. Missing parent directories inside the workspace are created automatically; no shell mkdir is needed. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
+        description: "Write a complete UTF-8 text file (at most 8 MiB) through the workspace owner. Missing parent directories are created automatically; no shell mkdir is needed. The receipt includes published bytes, line_count and sha256, so a command solely to count the file is unnecessary. These facts are not functional-test results. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
         schema: write_schema,
     },
     StandardTool {
@@ -109,7 +114,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run an executable with a separate args array, not a shell command line. command must contain only the executable name/path; use args for flags and parameters. For shell syntax invoke the platform shell explicitly (Windows: powershell.exe with args [\"-NoProfile\",\"-Command\",\"...\"]). Prefer read_file/search_files for workspace inspection. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a shell command using cmd (for example cmd=ls -la or cmd=node --check game.js). For exact executable/argv invocation instead use command with args; command alone never gets silently split or evaluated as shell text. Do not combine these two forms. Prefer read_file/search_files for workspace inspection. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -215,17 +220,19 @@ fn read_schema() -> Value {
             "recursive":{"type":"boolean", "default":false},
             "missing_ok":{"type":"boolean", "default":false},
             "path":{"type":"string", "minLength":1, "maxLength":4096},
-            "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0},
-            "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384},
+            "start_line":{"type":"integer", "minimum":1, "maximum":8388609, "description":"One-based source line. Use this with line_count to inspect code; omit byte offset/limit."},
+            "line_count":{"type":"integer", "minimum":1, "maximum":2000, "default":200,"description":"Number of source lines to inspect, still bounded by the response byte budget."},
+            "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0,"description":"Byte offset, NOT a line number. For pagination use the exact prior next_offset and expected_sha256."},
+            "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384,"description":"Byte budget, NOT a number of lines. Omit for normal reads; use line_count for source lines."},
             "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$"}
         },
-        "allOf":[{"if":{"properties":{"offset":{"minimum":1}},"required":["offset"]},
-                  "then":{"required":["expected_sha256"]}},
+        "allOf":[{"if":{"properties":{"format":{"enum":["image","instruction_scope"]}},"required":["format"]},"then":{"properties":{"missing_ok":{"const":false}}}},{"if":{"anyOf":[{"required":["start_line"]},{"required":["line_count"]}]},
+                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]}]}}},
                  {"if":{"properties":{"format":{"const":"image"}},"required":["format"]},
-                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["missing_ok"]}]}}},
+                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["start_line"]},{"required":["line_count"]}]}}},
                  {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
-                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["missing_ok"]}]}},
-                  "else":{"not":{"required":["recursive"]}}}]
+                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["start_line"]},{"required":["line_count"]}]}},
+                  "else":{"properties":{"recursive":{"const":false}}}}]
     })
 }
 
@@ -383,6 +390,7 @@ fn patch_schema() -> Value {
 
 fn process_launch(include_wait: bool) -> Value {
     let mut properties = json!({
+        "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":"Preferred: shell command or script, for example node --check game.js. Runs through the host shell. Do not combine with command or nonempty args."},
         "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable name or path only, for example git, bun, or powershell.exe. Never include arguments such as ls -la in this field."},
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Separate argument tokens, for example [\"status\",\"--short\"] for git."},
         "cwd":{"type":"string","maxLength":4096},
@@ -395,7 +403,9 @@ fn process_launch(include_wait: bool) -> Value {
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
     }
-    json!({"type":"object","additionalProperties":false,"properties":properties,"required":["command"]})
+    json!({"type":"object","additionalProperties":false,"properties":properties,
+        "oneOf":[{"required":["cmd"],"not":{"required":["command"]},"properties":{"args":{"maxItems":0}}},
+                 {"required":["command"],"not":{"required":["cmd"]}}]})
 }
 
 fn process_launch_schema() -> Value {
@@ -495,6 +505,23 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn read_formats_accept_neutral_defaults_but_reject_incompatible_options() {
+        let schema = read_schema();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        for input in [
+            json!({"path":".","format":"instruction_scope","recursive":false,"missing_ok":false}),
+            json!({"path":"file.txt","recursive":false,"start_line":2,"line_count":10}),
+            json!({"path":"image.png","format":"image","recursive":false,"missing_ok":false}),
+        ] { assert!(validator.is_valid(&input), "{input}"); }
+        for input in [
+            json!({"path":".","format":"instruction_scope","missing_ok":true}),
+            json!({"path":"file.txt","recursive":true}),
+            json!({"path":"image.png","format":"image","start_line":1}),
+            json!({"path":"file.txt","start_line":1,"offset":0}),
+        ] { assert!(!validator.is_valid(&input), "{input}"); }
+    }
 
     #[test]
     fn tool_names_are_unique_before_exact_snapshot_filtering() {

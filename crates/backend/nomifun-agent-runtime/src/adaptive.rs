@@ -30,6 +30,7 @@ pub enum AgentRuntimeActivationReason {
     Steering,
     ExplicitTaskContinuation,
     CheckpointRecovery,
+    OutputLimitRecovery,
 }
 
 #[derive(Default)]

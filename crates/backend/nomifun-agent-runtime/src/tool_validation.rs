@@ -34,15 +34,11 @@ impl ToolArgumentValidators {
     ) -> Result<Option<Vec<(ToolCallId, Result<AgentToolResult, AgentEngineError>)>>, AgentEngineError> {
         let mut failures = BTreeMap::new();
         for call in calls {
-            // Engine controls have their own transactional state validation.
-            // In particular a rejected completion replacement must still reach
-            // its owner, which deliberately invalidates the prior report.
-            let Some(binding) = plan.binding(&call.name) else { continue; };
             let definition = exposed.iter().find(|item| item.name == call.name).ok_or_else(|| {
                 AgentEngineError::InvalidContract("argument preflight requires an exposed tool".into())
             })?;
             let digest = input_schema_digest(&definition.input_schema)?;
-            if digest != binding.schema_digest {
+            if plan.binding(&call.name).is_some_and(|binding| digest != binding.schema_digest) {
                 return Err(AgentEngineError::InvalidContract("model tool schema differs from the frozen binding".into()));
             }
             if !self.validators.contains_key(&digest) {
@@ -113,6 +109,13 @@ fn collect_issues(error: &ValidationError<'_>, schema: &Value, depth: usize, iss
     let path = error.schema_path().to_string();
     let expected = schema.pointer(&path).and_then(bounded_schema_value);
     let mut issue = json!({"schema_path":path.chars().take(1024).collect::<String>(), "expected":expected});
+    let segments=path.split('/').collect::<Vec<_>>();
+    let mut location=Vec::new();
+    for (index,segment) in segments.iter().enumerate() {
+        if *segment=="properties" && let Some(name)=segments.get(index+1) { location.push((*name).to_owned()); }
+        else if *segment=="items" { location.push("*".to_owned()); }
+    }
+    issue["parameter_path_template"]=json!(format!("/{}",location.join("/")));
     if let ValidationErrorKind::Required { property } = error.kind() {
         issue["missing_property"] = bounded_schema_value(property).unwrap_or(Value::Null);
     }
@@ -205,6 +208,20 @@ mod tests {
         assert!(validators.reject_invalid_batch(&[call("fixed", json!({
             "strategy":"parallel","tasks":[],"synthesize":false
         }))], &plan, &exposed).unwrap().is_none());
+    }
+
+    #[test]
+    fn control_tools_receive_nested_schema_feedback_without_private_argument_values() {
+        let mut call = call("report", json!({"summary":"Ready","criteria":[{
+            "disposition":"supported","rationale":42,"PRIVATE_FIELD":"PRIVATE_VALUE"
+        }]}));
+        call.name = crate::completion::TOOL_NAME.into();
+        let results = ToolArgumentValidators::default().reject_invalid_batch(&[call],
+            &AgentToolPlan::default(), &[crate::completion::definition()]).unwrap().unwrap();
+        let text = results[0].1.as_ref().unwrap().output_text();
+        assert!(text.contains("/criteria/*/rationale"));
+        assert!(text.contains("allowed_properties"));
+        assert!(!text.contains("PRIVATE_FIELD") && !text.contains("PRIVATE_VALUE"));
     }
 
     #[test]

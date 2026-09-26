@@ -70,7 +70,6 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
                 2 => stream_body(Some(("verify-current","read_file",json!({"path":"answer.txt"}))),""),
                 3 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh read confirms file","plan":[{"step":"Verify saved file","status":"completed"}]}))),""),
                 4 => stream_body(Some(("report","report_completion",json!({"summary":"Verified current file","criteria":[{"step":"Verify saved file","disposition":"supported","evidence_call_ids":["verify-current"],"requirement_ids":["input_0"],"rationale":"Fresh read confirms all requested content"}]}))),""),
-                5 => stream_body(None,"PAUSE_RESUME_COMPLETE"),
                 _ => panic!("unexpected resumed model request {round}"),
             };
             ([(axum::http::header::CONTENT_TYPE,"text/event-stream")], data)
@@ -145,7 +144,7 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     let writes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_started' AND json_extract(inline_json,'$.event.action_id')='workspace.files/write'")
         .bind(id).fetch_one(app.database.pool()).await.unwrap();
     assert_eq!(writes,1);
-    assert_eq!(requests.load(Ordering::SeqCst),6);
+    assert_eq!(requests.load(Ordering::SeqCst),5);
     assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(),"PAUSE_RESUME_OK");
     drop(router);
     app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
@@ -192,7 +191,6 @@ async fn startup_recovery_scenario(reconciliation_required: bool) {
                 1 => stream(Some(("verify-restored", "read_file", json!({"path":"answer.txt"}))), ""),
                 2 => stream(Some(("close-plan", "update_plan", json!({"explanation":"Current file verified","plan":[{"step":"Verify saved file","status":"completed"}]}))), ""),
                 3 => stream(Some(("report", "report_completion", json!({"summary":"Verified restored file","criteria":[{"step":"Verify saved file","disposition":"supported","evidence_call_ids":["verify-restored"],"requirement_ids":["input_0"],"rationale":"Fresh read confirms the saved content"}]}))), ""),
-                4 => stream(None, "RECOVERED_TASK_OK"),
                 _ => panic!("unexpected model round after recovery: {round}"),
             }
         }).mount(&upstream).await;
@@ -268,7 +266,7 @@ async fn startup_recovery_scenario(reconciliation_required: bool) {
         .bind(&id).fetch_one(second.database.pool()).await.unwrap();
     let resumes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='execution_resumed'")
         .bind(&id).fetch_one(second.database.pool()).await.unwrap();
-    assert_eq!(writes, 1); assert_eq!(resumes, 1); assert_eq!(resumed.load(Ordering::SeqCst), 5);
+    assert_eq!(writes, 1); assert_eq!(resumes, 1); assert_eq!(resumed.load(Ordering::SeqCst), 4);
     assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(), "CHECKPOINT_RECOVERY_OK");
     let inspection = call(&restored_router, "GET", &format!("/api/agent-sessions/{id}/execution"), Value::Null).await;
     assert_eq!(inspection["state"], "completed");

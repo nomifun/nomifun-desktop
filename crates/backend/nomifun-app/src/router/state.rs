@@ -670,7 +670,7 @@ async fn build_nomi_core_agent_api_state(
             robot: robot_owner.clone(),
             agent_plugins,
         },
-    ));
+    )?);
     services
         .official_runtime
         .install(super::unified_runtime_host::factory(

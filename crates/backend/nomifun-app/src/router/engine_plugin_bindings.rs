@@ -99,6 +99,10 @@ pub(crate) struct FrozenAgentPluginBindings {
 }
 
 impl FrozenAgentPluginBindings {
+    pub(crate) fn has_unscoped_tool_hooks(&self) -> bool {
+        self.before_tool.iter().any(|action| action.effect != PluginActionEffect::Read)
+    }
+
     pub(crate) fn freeze(
         bindings: AgentPluginBindings,
         restricted: bool,

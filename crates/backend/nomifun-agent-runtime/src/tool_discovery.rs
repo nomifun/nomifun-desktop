@@ -42,7 +42,7 @@ pub trait AgentToolDiscoveryPort: Send + Sync + std::fmt::Debug {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.to_owned(),
-        description: "Search the frozen deferred tool catalog and reveal up to five already-authorized schemas for later model steps. This cannot install, select, or grant capabilities.".to_owned(),
+        description: "Search the frozen deferred tool catalog and reveal up to five already-authorized schemas per query for later model steps. Multiple ToolSearch calls may share a batch; do not mix searches with execution or other control calls. This cannot install, select, or grant capabilities.".to_owned(),
         input_schema: nomifun_agent_contracts::StrictJsonValue(serde_json::json!({
             "type": "object",
             "additionalProperties": false,

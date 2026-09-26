@@ -13,6 +13,8 @@ fn object(properties: serde_json::Value, required: &[&str]) -> StrictJsonValue {
 
 fn launch(include_wait: bool) -> StrictJsonValue {
     let mut properties = json!({
+        "cmd":{"type":"string","minLength":1,"maxLength":32768,
+            "description":"Explicit shell command/script. Alternative to command plus args; never inferred from their contents."},
         "command":{"type":"string","minLength":1,"maxLength":32768,
             "description":"Executable name or path only, such as bun or git. Do not put arguments, pipes or a whole shell command here; use args for each argument."},
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},
@@ -29,7 +31,9 @@ fn launch(include_wait: bool) -> StrictJsonValue {
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
     }
-    object(properties, &["command"])
+    StrictJsonValue(json!({"type":"object","additionalProperties":false,"properties":properties,
+        "oneOf":[{"required":["cmd"],"not":{"required":["command"]},"properties":{"args":{"maxItems":0}}},
+                 {"required":["command"],"not":{"required":["cmd"]}}]}))
 }
 
 /// Exact schema for one `workspace.process` Action. The Action ID, rather
@@ -111,6 +115,17 @@ mod tests {
             assert!(validator.is_valid(&valid), "valid {action}: {valid}");
             assert!(!validator.is_valid(&invalid), "invalid {action}: {invalid}");
             assert!(schema["properties"].get("operation").is_none());
+        }
+    }
+
+    #[test]
+    fn shell_scripts_are_explicit_and_cannot_be_mixed_with_literal_launch_arguments() {
+        let schema=process_action_input_schema("workspace.process/exec").unwrap();
+        let validator=jsonschema::validator_for(&schema.0).unwrap();
+        for valid in [json!({"cmd":"printf '%s' ok"}),json!({"cmd":"ls -la","args":[]}),
+            json!({"command":"program with spaces","args":["literal"]})] { assert!(validator.is_valid(&valid),"{valid}"); }
+        for invalid in [json!({"cmd":"ls","command":"ls"}),json!({"cmd":"ls","args":["-la"]}),json!({})] {
+            assert!(!validator.is_valid(&invalid),"{invalid}");
         }
     }
 }

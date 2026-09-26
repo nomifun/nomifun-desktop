@@ -296,7 +296,7 @@ impl AgentSessionAttemptRunner {
                 .session
                 .delivery_result(owner_id, conversation_id, operation_id)
                 .await?
-                .filter(|receipt| receipt.completed)
+                .filter(|receipt| receipt.completed || receipt.paused_reason.is_some())
             {
                 return Ok(Some(receipt));
             }
@@ -314,7 +314,7 @@ impl AgentSessionAttemptRunner {
                 .session
                 .delivery_result(owner_id, conversation_id, operation_id)
                 .await?
-                .filter(|receipt| receipt.completed)
+                .filter(|receipt| receipt.completed || receipt.paused_reason.is_some())
             {
                 return Ok(Some(receipt));
             }
@@ -356,13 +356,18 @@ impl AgentSessionAttemptRunner {
             )
             .await?;
         let boundary_message_id = delivery.message_id.clone();
-        let receipt = if delivery.completed {
+        let receipt = if delivery.completed || delivery.paused_reason.is_some() {
             Some(delivery)
         } else {
             self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
                 .await?
         };
         if let Some(receipt) = receipt {
+            if !receipt.completed && let Some(reason) = receipt.paused_reason {
+                return Ok(paused_delivery_outcome(
+                    conversation_id, &reason, self.session.take_turn_tokens(conversation_id),
+                ));
+            }
             let projection = self
                 .output_files_from_projection(
                     owner_id, conversation_id,
@@ -808,6 +813,15 @@ fn latest_assistant_text(value: &Value) -> Option<String> {
 /// Runtime idleness and transcript contents are observational only. The
 /// operation-scoped durable receipt is the sole authority which may mark an
 /// Agent turn successful, so its absence always produces a failed outcome.
+fn paused_delivery_outcome(conversation_id: &str, reason: &str, tokens: Option<i64>) -> AttemptOutcome {
+    AttemptOutcome {
+        conversation_id: conversation_id.to_owned(), text: None, output_files: Vec::new(),
+        ok: false, tokens,
+        error: Some(format!("agent_execution_paused: Agent turn paused ({reason}); no completed delivery exists. Automatic task replay is blocked.")),
+        error_code: Some("agent_execution_paused".into()), error_retryable: Some(false),
+    }
+}
+
 fn missing_delivery_receipt_outcome(
     conversation_id: &str,
     tokens: Option<i64>,
@@ -1124,6 +1138,7 @@ mod tests {
         conversation: ConversationResponse,
         create_calls: AtomicUsize,
         delivered: Mutex<Option<(String, SendMessageRequest)>>,
+        receipt: Option<AgentExecutionDelivery>,
     }
 
     #[async_trait]
@@ -1175,7 +1190,7 @@ mod tests {
             _conversation_id: &str,
             _operation_id: &str,
         ) -> Result<Option<AgentExecutionDelivery>, AppError> {
-            Ok(None)
+            Ok(self.receipt.clone())
         }
 
         async fn list_messages(
@@ -1353,8 +1368,7 @@ mod tests {
         assert!(!hidden);
     }
 
-    #[tokio::test]
-    async fn autowork_reuses_the_bound_session_without_calling_session_creation() {
+    fn recording_session(receipt: Option<AgentExecutionDelivery>) -> Arc<RecordingSessionPort> {
         let conversation = ConversationResponse {
             conversation_id: CONVERSATION_ID.to_owned(),
             name: "main Agent".to_owned(),
@@ -1381,11 +1395,38 @@ mod tests {
             modified_at: TimestampMs::from(1),
             extra: json!({}),
         };
-        let session = Arc::new(RecordingSessionPort {
+        Arc::new(RecordingSessionPort {
             conversation,
             create_calls: AtomicUsize::new(0),
             delivered: Mutex::new(None),
-        });
+            receipt,
+        })
+    }
+
+    #[tokio::test]
+    async fn canonical_pause_stops_receipt_wait_without_claiming_completion_or_retry() {
+        let receipt = AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.into(), replayed: true, completed: false,
+            paused_reason: Some("EXECUTION_MODEL_INVALID_REQUEST".into()),
+            result_ok: None, result_text: None, result_error: None,
+            result_error_code: None, result_error_retryable: None,
+        };
+        let runner = AgentSessionAttemptRunner::new(recording_session(Some(receipt.clone())));
+        let observed = tokio::time::timeout(Duration::from_secs(1), runner.await_delivery_receipt(
+            "owner", CONVERSATION_ID, "operation", Duration::from_secs(30 * 60),
+        )).await.expect("a canonical pause must not wait for the full attempt deadline").unwrap().unwrap();
+        assert_eq!(observed, receipt);
+        let outcome = paused_delivery_outcome(CONVERSATION_ID, observed.paused_reason.as_deref().unwrap(), Some(7));
+        assert!(!outcome.ok);
+        assert_eq!(outcome.error_retryable, Some(false));
+        assert_eq!(outcome.error_code.as_deref(), Some("agent_execution_paused"));
+        assert!(outcome.output_files.is_empty());
+        assert!(outcome.text.is_none());
+    }
+
+    #[tokio::test]
+    async fn autowork_reuses_the_bound_session_without_calling_session_creation() {
+        let session = recording_session(None);
         let runner = AgentSessionAttemptRunner::new(session.clone());
         let participant = ExecutionParticipant {
             participant_id: generate_id(),
@@ -1552,6 +1593,7 @@ mod tests {
     fn completed_receipt_with_invalid_artifacts_is_not_a_retryable_timeout() {
         let mut receipt = AgentExecutionDelivery {
             message_id: CURRENT_USER_TURN_ID.to_owned(), replayed: false, completed: true,
+            paused_reason: None,
             result_ok: Some(true), result_text: Some("done".to_owned()), result_error: None,
             result_error_code: None, result_error_retryable: None,
         };

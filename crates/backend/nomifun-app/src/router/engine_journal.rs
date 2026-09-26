@@ -1111,7 +1111,7 @@ impl EngineTurnJournal {
             cursor.uncertain = true;
             Self::append_progress(&journal, &cursor, &event_value, kind).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
-            if let Some(AgentEngineEvent::OutputTextDelta { step, text }) = &runtime_event {
+            if let Some(AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text }) = &runtime_event {
                 Self::append_assistant_part(&journal, &mut cursor, *step, text).await?;
             }
             if let Some(AgentEngineEvent::ReasoningDelta { step, text }) = &runtime_event {

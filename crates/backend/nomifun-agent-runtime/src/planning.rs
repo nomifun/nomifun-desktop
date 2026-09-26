@@ -54,7 +54,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
             "required":["plan"],
             "properties":{
                 "explanation":{"type":"string","minLength":1,"maxLength":2048,
-                    "description":"Required for a new/revised plan or recovery. Optional for status-only updates to the same steps and requirements."},
+                    "description":"Optional short explanation of the plan or its revision. The engine preserves accepted requirements independently of this text."},
                 "requirements":crate::requirements::schema(),
                 "plan":{"type":"array","minItems":1,"maxItems":16,"items":{
                     "type":"object","additionalProperties":false,"required":["step","status"],
@@ -83,14 +83,10 @@ impl AgentPlan {
                 return Ok(self.feedback(call, "rejected", &format!("Invalid plan: {error}")));
             }
         };
-        let status_only = self.revision > 0 && !self.needs_replan
-            && update.plan.iter().map(|step| &step.step).eq(self.steps.iter().map(|step| &step.step))
-            && update.requirements.iter().all(|requirement| self.requirements.contains(requirement));
-        let explanation = match update.explanation {
-            Some(explanation) => explanation,
-            None if status_only => self.explanation.clone(),
-            None => return Ok(self.feedback(call, "rejected", "A new or changed plan and recovery require explanation; status-only updates may omit it.")),
-        };
+        let explanation = update.explanation.unwrap_or_else(|| {
+            if self.explanation.is_empty() { "Execution plan for the accepted task.".to_owned() }
+            else { self.explanation.clone() }
+        });
         let mut names = std::collections::BTreeSet::new();
         if explanation.trim().is_empty()
             || explanation.chars().count() > 2048
@@ -163,6 +159,12 @@ impl AgentPlan {
             Some(
                 "The plan needs reconsideration after an uncertain effect, newly accepted user input, or changed repository instructions. This proposed effect was not executed. Call update_plan alone now: explain the recovery and put one step in_progress. Preserve existing requirements; add exact accepted-input citations only for genuinely new requirements or inputs.",
             )
+        } else if self.revision == 0 && self.steps.is_empty() {
+            // Adaptive accounting may start after the model has already
+            // proposed a valid batch. An absent optional plan is not a closed
+            // plan and must not retroactively block that batch or hide tools.
+            // Completion still requires accounting for every accepted input.
+            None
         } else if !self
             .steps
             .iter()
@@ -361,11 +363,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explanation_is_optional_only_for_status_updates_with_unchanged_scope() {
+    async fn optional_explanation_does_not_block_revisions_or_drop_accepted_requirements() {
         let mut plan = AgentPlan::default();
         let mut status = update_call("completed");
         status.arguments.0.as_object_mut().unwrap().remove("explanation");
-        assert!(plan.update(&status, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!plan.update(&status, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
         plan.update(&update_call("in_progress"), &inputs(), &NoopAgentEventSink).await.unwrap();
         let requirements = plan.requirements.clone();
         let explanation = plan.explanation.clone();
@@ -374,14 +376,28 @@ mod tests {
         assert_eq!(plan.requirements, requirements);
         assert_eq!(plan.explanation, explanation);
         assert_eq!(plan.steps[0].status, AgentPlanStatus::Completed);
-        let before = plan.clone();
         status.arguments.0["plan"][0]["step"] = serde_json::json!("Different work");
-        assert!(plan.update(&status, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
-        assert_eq!(plan, before);
+        assert!(!plan.update(&status, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
+        assert_eq!(plan.requirements, requirements);
         plan.needs_replan = true;
         let mut recovery = update_call("in_progress");
         recovery.arguments.0.as_object_mut().unwrap().remove("explanation");
-        assert!(plan.update(&recovery, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
-        assert!(plan.needs_replan);
+        assert!(!plan.update(&recovery, &inputs(), &NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!plan.needs_replan);
+        assert_eq!(plan.requirements, requirements);
+    }
+
+    #[test]
+    fn absent_plan_allows_work_but_recovery_and_explicit_closure_still_gate_effects() {
+        let mut plan = AgentPlan::default();
+        assert!(plan.effect_gate().is_none());
+        plan.needs_replan = true;
+        assert!(plan.effect_gate().is_some());
+        plan.needs_replan = false;
+        plan.revision = 1;
+        plan.steps.push(AgentPlanStep { step: "Create files".into(), status: AgentPlanStatus::Completed });
+        assert!(plan.effect_gate().is_some());
+        plan.steps[0].status = AgentPlanStatus::InProgress;
+        assert!(plan.effect_gate().is_none());
     }
 }

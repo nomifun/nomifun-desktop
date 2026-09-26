@@ -198,7 +198,7 @@ impl TurnProjection {
     fn project(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
         let projected = match event {
             AgentEngineEvent::TurnStarted { .. } | AgentEngineEvent::ExecutionResumed { .. } => Some(EngineProgress::Started),
-            AgentEngineEvent::OutputTextDelta { step, text } => {
+            AgentEngineEvent::OutputTextDelta { step, text } | AgentEngineEvent::CompletionDelivered { step, text } => {
                 Some(EngineProgress::Text(TextEventData { content: text, step: Some(step) }))
             }
             AgentEngineEvent::ReasoningDelta { text, .. } => {
@@ -335,12 +335,12 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 };
                 Ok(EngineTurnOutcome { model_steps, terminal: EngineTurnTerminal::Failed { message } })
             }
-            Err(AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_)) => {
+            Err(error @ (AgentEngineError::Model { .. } | AgentEngineError::ModelStreamEndedWithoutTerminal | AgentEngineError::InvalidModelEvent(_))) => {
                 // No proposed tool batch is executed before a valid model
                 // terminal. Preserve progress for an explicit owner retry;
                 // the SDK must still prove cleanup before publishing pause.
                 Ok(EngineTurnOutcome { model_steps:projection.last_model_step.load(std::sync::atomic::Ordering::Acquire),
-                    terminal:EngineTurnTerminal::Paused { reason:"EXECUTION_MODEL_FAILURE".into() } })
+                    terminal:EngineTurnTerminal::Paused { reason:model_pause_reason(&error) } })
             }
             Err(error) => Err(contract_error(error)),
         }
@@ -363,6 +363,20 @@ impl EngineSessionDriver for UnifiedSessionDriver {
         self.host.record_event(message, &runtime_terminal(outcome)).await
     }
     async fn cleanup_session(&self) -> Result<(), AppError> { self.host.cleanup_session().await }
+}
+
+fn model_pause_reason(error: &AgentEngineError) -> String {
+    // Persist a bounded typed cause, never provider prose, credentials, or
+    // model output. The old catch-all erased the only diagnostic on pause.
+    let code = match error {
+        AgentEngineError::Model { code, .. } => serde_json::to_value(code).ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "failure".into()),
+        AgentEngineError::ModelStreamEndedWithoutTerminal => "stream_ended_without_terminal".into(),
+        AgentEngineError::InvalidModelEvent(_) => "invalid_event".into(),
+        _ => "failure".into(),
+    };
+    format!("EXECUTION_MODEL_{}", code.to_ascii_uppercase())
 }
 
 fn runtime_terminal(outcome: &EngineTurnOutcome) -> AgentEngineEvent {
@@ -434,6 +448,19 @@ mod tests {
 
     const OWNER: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const SESSION: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+
+    #[test]
+    fn model_pause_preserves_typed_cause_without_provider_text() {
+        use nomifun_chat_model_broker::ChatModelErrorCode;
+        assert_eq!(model_pause_reason(&AgentEngineError::Model {
+            code: ChatModelErrorCode::AuthenticationFailed, message: "private provider body".into(),
+        }), "EXECUTION_MODEL_AUTHENTICATION_FAILED");
+        assert_eq!(model_pause_reason(&AgentEngineError::Model {
+            code: ChatModelErrorCode::InvalidRequest, message: "private request".into(),
+        }), "EXECUTION_MODEL_INVALID_REQUEST");
+        assert_eq!(model_pause_reason(&AgentEngineError::InvalidModelEvent("raw output".into())),
+            "EXECUTION_MODEL_INVALID_EVENT");
+    }
 
     #[test]
     fn nomi_context_overflow_is_not_misclassified_as_an_unknown_upstream_conflict() {
@@ -747,6 +774,7 @@ mod tests {
             output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
             terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let mut events = state.subscribe();
         let call_id = ToolCallId::from("tool-call");
@@ -814,6 +842,7 @@ mod tests {
             output: EngineTurnOutput::new(state.clone(), turn),
             calls: Mutex::new(BTreeMap::new()),
             terminal: Mutex::new(None),
+            last_model_step: std::sync::atomic::AtomicU16::new(0),
         };
         let mut events = state.subscribe();
         let call_id = ToolCallId::from("agent-instructions:100");

@@ -49,13 +49,24 @@ pub(crate) fn failed_process_observation(
     binding: &AgentToolBinding,
     result: &AgentToolResult,
 ) -> bool {
-    if binding.capability_id.as_ref() != "workspace.process" {
+    if binding.capability_id.as_ref() != "workspace.process" || process_did_not_start(binding, result) {
         return false;
     }
     serde_json::from_str::<serde_json::Value>(&result.output_text())
         .ok()
         .and_then(|value| value.get("success").and_then(serde_json::Value::as_bool))
         == Some(false)
+}
+
+/// A typed owner fact, never parsed from error prose. Cleanup alone cannot
+/// establish this: a reaped process may already have modified the workspace.
+pub(crate) fn process_did_not_start(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
+    binding.capability_id.as_ref() == "workspace.process"
+        && matches!(binding.action_id.as_ref(), "workspace.process/exec" | "workspace.process/start")
+        && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+            value["schema"] == "nomifun.process-start-observation.v1"
+                && value["state"] == "not_started" && value["user_code_started"] == false
+                && value["success"] == false && value.get("process_id").is_none())
 }
 
 /// A read failure or a proposal held before dispatch is not a change of task
@@ -67,7 +78,7 @@ pub(crate) fn requires_replanning_after_result(
     attempted: bool,
     plan_revision: u32,
 ) -> bool {
-    if !attempted {
+    if !attempted || process_did_not_start(binding, result) {
         return false;
     }
     if failed_process_observation(binding, result) {
@@ -202,5 +213,29 @@ mod tests {
         assert!(!failed_process_observation(&process, &successful));
         assert!(!failed_process_observation(&process, &invalid_arguments));
         assert!(!failed_process_observation(&binding("workspace.files", "workspace.files/read"), &failed));
+    }
+
+    #[test]
+    fn proven_nonstart_preserves_workspace_evidence_but_cleanup_does_not_prove_nonstart() {
+        let process = binding("workspace.process", "workspace.process/exec");
+        let mut work = crate::AgentWorkStatus { workspace_observation_epoch:7,
+            successful_commands:1, command_observed_after_latest_mutation:true, ..Default::default() };
+        let mut commands = crate::workflow::CommandTracker::default();
+        let call = nomifun_chat_model_broker::ChatToolCall { call_id:"failed-spawn".into(), name:"exec_command".into(),
+            arguments:StrictJsonValue(serde_json::json!({"command":"node --check game.js"})),provider_metadata:None };
+        let result = crate::AgentToolResult::text(call.call_id.clone(),serde_json::json!({
+            "schema":"nomifun.process-start-observation.v1","state":"not_started","user_code_started":false,"success":false
+        }).to_string(),true);
+        assert!(process_did_not_start(&process,&result));
+        assert!(!requires_replanning_after_result(&process,&result,true,0));
+        work.observe(&process,&call,&result,&mut commands);
+        assert_eq!(work.workspace_observation_epoch,7);
+        assert!(work.command_observed_after_latest_mutation);
+        let uncertain = crate::AgentToolResult::text(call.call_id.clone(),
+            serde_json::json!({"state":"lost","success":false,"cleanup":{"reaped":true}}).to_string(),true);
+        assert!(!process_did_not_start(&process,&uncertain));
+        work.observe(&process,&call,&uncertain,&mut commands);
+        assert_eq!(work.workspace_observation_epoch,8);
+        assert!(!work.command_observed_after_latest_mutation);
     }
 }

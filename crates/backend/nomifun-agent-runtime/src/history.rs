@@ -102,6 +102,20 @@ fn replay_into(
             }
         }
         match event {
+            AgentEngineEvent::CompletionDelivered { step, text } => {
+                let report = batch.completion_report.as_ref().ok_or_else(|| invalid("completion delivery has no accepted report"))?;
+                let expected = format!("{}{}", report.summary, report.unverified_disclosure().unwrap_or_default());
+                if batch.step != Some(*step) || batch.calls.len() != batch.results.len()
+                    || !batch.calls.values().any(|call| call.name == crate::completion::TOOL_NAME
+                        && batch.results.get(&call.call_id).is_some_and(|result| !result.is_error))
+                    || (text != &expected && text != &format!("\n\n{expected}"))
+                    || !matches!(events.get(index + 1), Some(AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. }))
+                {
+                    return Err(invalid("completion delivery differs from its accepted terminal report"));
+                }
+                batch.flush(history, false)?;
+                history.push(crate::context_lifecycle::text_message(ChatRole::Assistant, text.clone()));
+            }
             AgentEngineEvent::ExecutionCheckpointSaved { step, revision, .. } => {
                 if *step != model_steps { return Err(invalid("checkpoint model step differs from replay")); }
                 if rewind_revisions.contains(revision) {
@@ -251,7 +265,7 @@ fn replay_into(
                 discarded_tool_call_ids,
                 continuation,
             } | AgentEngineEvent::ModelResponseRejected {
-                step, discarded_tool_call_ids, continuation,
+                step, discarded_tool_call_ids, continuation, ..
             } => {
                 crate::output_limit::validate_discarded(*step, discarded_tool_call_ids)?;
                 if batch.step != Some(*step)
@@ -453,6 +467,7 @@ fn replay_into(
                 ));
             }
             AgentEngineEvent::CompletionReported { report } => {
+                batch.completion_report = Some(report.clone());
                 batch.notices.push(crate::context_lifecycle::text_message(ChatRole::User,
                     format!("Historical completion account (model assessment with observation references, not fresh proof for this turn): {}",
                         serde_json::to_string(report).map_err(|error| AgentEngineError::ReplayContract(error.to_string()))?)));
@@ -490,6 +505,7 @@ pub(crate) fn validate_archive_turn(
 
 #[derive(Default)]
 struct ReplayBatch {
+    completion_report: Option<crate::AgentCompletionReport>,
     proposed: std::collections::BTreeSet<ToolCallId>,
     proposal_order: Vec<ToolCallId>,
     model_order: Option<Vec<ToolCallId>>,
@@ -629,6 +645,7 @@ impl ReplayBatch {
         self.step = None;
         self.started.clear();
         self.discarded = false;
+        self.completion_report = None;
         Ok(())
     }
 }

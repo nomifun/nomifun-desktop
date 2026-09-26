@@ -93,7 +93,7 @@ impl AgentModelBudget {
 
     pub(crate) fn execution_context(self, max_model_steps: u16) -> String {
         format!(
-            "Nomi execution budget (runtime limits, not new user authority): context_window_tokens={}, max_output_tokens_per_model_step={}, max_model_steps_this_turn={}. These are ceilings, not targets or a reason to invent completion. Keep each tool argument object complete within the output ceiling. Budget exhaustion is not task success and does not authorize extra effects, verification, or replay. Unknown/smaller failover models may further constrain execution through the platform.",
+            "Nomi execution budget (runtime limits, not new user authority): context_window_tokens={}, max_output_tokens_per_model_step={}, max_model_steps_this_turn={}. These are ceilings, not targets or a reason to invent completion. Keep each tool argument object complete within the output ceiling, including reasoning and JSON escaping. For code generation, prefer several small complete files/calls (for example separate HTML, CSS and JavaScript) over a large single-file payload; make focused patches after reading existing files. Budget exhaustion is not task success and does not authorize extra effects, verification, or replay. Unknown/smaller failover models may further constrain execution through the platform.",
             self.context_window_tokens, self.max_output_tokens, max_model_steps,
         )
     }
@@ -145,9 +145,10 @@ impl ContextLifecycle {
     }
 
     pub fn observe_usage(&mut self, usage: &nomifun_chat_model_broker::ChatUsage) {
-        self.observed_tokens =
-            usize::try_from(usage.input_tokens.saturating_add(usage.output_tokens))
-                .unwrap_or(usize::MAX);
+        // Compare input usage with the estimate of that SAME input. The next
+        // request already contains retained output/tool results; adding output
+        // usage here charges it twice (including reasoning not retained at all).
+        self.observed_tokens = usize::try_from(usage.input_tokens).unwrap_or(usize::MAX);
         self.observed_estimate = self.last_request_estimate;
     }
 
@@ -232,9 +233,8 @@ impl ContextLifecycle {
         let input_limit = self
             .recovered_input_limit
             .unwrap_or(self.budget.compaction_trigger_tokens());
-        let estimated_tokens = estimate.max(
-            self.observed_tokens
-                .saturating_add(estimate.saturating_sub(self.observed_estimate)),
+        let estimated_tokens = estimate.saturating_add(
+            self.observed_tokens.saturating_sub(self.observed_estimate),
         );
         let token_pressure = estimated_tokens >= input_limit;
         if !self.force_compaction
