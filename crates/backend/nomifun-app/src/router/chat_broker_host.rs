@@ -230,6 +230,24 @@ impl ProductionProviderRepository {
 
 #[async_trait]
 impl ProductionProviderRepositoryPort for ProductionProviderRepository {
+    async fn find_provider_for_route(
+        &self,
+        route: &ResolvedChatRoute,
+    ) -> Result<Option<ProviderRepositoryRecord>, ProductionRepositoryError> {
+        let digest = provider_model_config_digest(&self.pool, &route.provider_id, &route.model).await?;
+        if digest != route.config_revision_digest {
+            // Old persisted route records used the entire provider graph. Keep
+            // accepting those only when that exact legacy graph still matches.
+            return self.find_provider(&route.provider_id).await;
+        }
+        let enabled: Option<bool> = sqlx::query_scalar("SELECT enabled FROM providers WHERE provider_id = ?")
+            .bind(route.provider_id.as_ref()).fetch_optional(&self.pool).await
+            .map_err(|_| ProductionRepositoryError::Unavailable)?;
+        Ok(enabled.map(|enabled| ProviderRepositoryRecord {
+            provider_id: route.provider_id.clone(), enabled, config_revision_digest: digest,
+        }))
+    }
+
     async fn find_provider(
         &self,
         provider_id: &ProviderIdRef,
@@ -276,6 +294,31 @@ pub(crate) async fn provider_config_digest(
     pool: &SqlitePool,
     provider_id: &ProviderIdRef,
 ) -> Result<DigestHex, ProductionRepositoryError> {
+    provider_config_digest_inner(pool, provider_id, None).await
+}
+
+/// A new route freezes its selected model, provider authentication and named
+/// connections. Other model rows are not authority for this invocation.
+pub(crate) async fn provider_model_config_digest(
+    pool: &SqlitePool,
+    provider_id: &ProviderIdRef,
+    model: &str,
+) -> Result<DigestHex, ProductionRepositoryError> {
+    provider_config_digest_inner(pool, provider_id, Some(model)).await
+}
+
+async fn route_config_matches(pool: &SqlitePool, route: &ResolvedChatRoute) -> Result<bool, ProductionRepositoryError> {
+    if provider_model_config_digest(pool, &route.provider_id, &route.model).await? == route.config_revision_digest {
+        return Ok(true);
+    }
+    Ok(provider_config_digest(pool, &route.provider_id).await? == route.config_revision_digest)
+}
+
+async fn provider_config_digest_inner(
+    pool: &SqlitePool,
+    provider_id: &ProviderIdRef,
+    model: Option<&str>,
+) -> Result<DigestHex, ProductionRepositoryError> {
     let provider = sqlx::query_as::<_, nomifun_db::models::Provider>(
         "SELECT * FROM providers WHERE provider_id = ?",
     )
@@ -286,9 +329,11 @@ pub(crate) async fn provider_config_digest(
     .ok_or(ProductionRepositoryError::Missing)?;
 
     let mut models = sqlx::query_as::<_, nomifun_db::models::ProviderModelRow>(
-        "SELECT * FROM provider_models WHERE provider_id = ? ORDER BY model ASC",
+        "SELECT * FROM provider_models WHERE provider_id = ? AND (? IS NULL OR model = ?) ORDER BY model ASC",
     )
     .bind(provider_id.as_ref())
+    .bind(model)
+    .bind(model)
     .fetch_all(pool)
     .await
     .map_err(|_| ProductionRepositoryError::Unavailable)?;
@@ -296,9 +341,11 @@ pub(crate) async fn provider_config_digest(
     let mut capabilities =
         sqlx::query_as::<_, nomifun_db::models::ProviderModelCapabilityRow>(
             "SELECT * FROM provider_model_capabilities \
-             WHERE provider_id = ? ORDER BY model ASC, task ASC",
+             WHERE provider_id = ? AND (? IS NULL OR model = ?) ORDER BY model ASC, task ASC",
         )
         .bind(provider_id.as_ref())
+        .bind(model)
+        .bind(model)
         .fetch_all(pool)
         .await
         .map_err(|_| ProductionRepositoryError::Unavailable)?;
@@ -386,7 +433,7 @@ pub(crate) async fn provider_config_digest(
     }
 
     let input = DigestInput {
-        schema: "nomifun.provider-invocation-graph.v1",
+        schema: if model.is_some() { "nomifun.provider-model-invocation-graph.v1" } else { "nomifun.provider-invocation-graph.v1" },
         provider: ProviderDigestProvider {
             provider_id: provider.provider_id,
             platform: provider.platform,
@@ -795,8 +842,7 @@ impl ProductionModelRepository {
         let bedrock_config: Option<String> = provider
             .try_get("bedrock_config")
             .map_err(|_| ProductionRepositoryError::InvalidData)?;
-        let current_digest = provider_config_digest(&self.pool, &route.provider_id).await?;
-        if current_digest != route.config_revision_digest {
+        if !route_config_matches(&self.pool, &route).await? {
             return Err(ProductionRepositoryError::InvalidData);
         }
 
@@ -1000,8 +1046,8 @@ impl ChatCapabilityObserver for ProductionChatCapabilityObserver {
                 return;
             }
         };
-        let current_digest = match provider_config_digest(&self.pool, &route.provider_id).await {
-            Ok(digest) => digest,
+        let matches = match route_config_matches(&self.pool, route).await {
+            Ok(matches) => matches,
             Err(error) => {
                 tracing::warn!(
                     provider_id = route.provider_id.as_ref(),
@@ -1013,7 +1059,7 @@ impl ChatCapabilityObserver for ProductionChatCapabilityObserver {
                 return;
             }
         };
-        if current_digest != route.config_revision_digest {
+        if !matches {
             return;
         }
         let repository = SqliteProviderModelCapabilityRepository::new(self.pool.clone());
@@ -2461,6 +2507,47 @@ mod tests {
             ChatBrokerHostError::RouteRecordMissing { .. }
         ));
         pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn model_management_route_revision_ignores_only_other_models() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let pool = database.pool();
+        let id = "0190f5fe-7c00-7a00-8000-000000000099";
+        sqlx::query("INSERT INTO providers (provider_id,platform,name,base_url,auth_scheme,credentials_encrypted,enabled,config_revision,created_at,updated_at) VALUES (?,'custom','Test','https://models.example/v1','bearer','ciphertext',1,0,0,0)")
+            .bind(id).execute(pool).await.unwrap();
+        async fn add(pool: &SqlitePool, id: &str, model: &str) {
+            sqlx::query("INSERT INTO provider_models (provider_id,model,enabled,sort_order,created_at,updated_at) VALUES (?,?,1,0,0,0)")
+                .bind(id).bind(model).execute(pool).await.unwrap();
+            sqlx::query("INSERT INTO provider_model_capabilities (provider_id,model,task,traits,protocol,connection_role,provider_params,created_at,updated_at) VALUES (?,?,'chat','[]','openai.chat_text','default','{}',0,0)")
+                .bind(id).bind(model).execute(pool).await.unwrap();
+        }
+        add(pool, id, "current").await;
+        let provider = ProviderIdRef::from(id);
+        let legacy = provider_config_digest(pool, &provider).await.unwrap();
+        let scoped = provider_model_config_digest(pool, &provider, "current").await.unwrap();
+        let mut route = convert_chat_route_candidate(&candidate()).unwrap();
+        route.provider_id = provider.clone();
+        route.model = "current".into();
+        route.config_revision_digest = legacy.clone();
+        assert!(route_config_matches(pool, &route).await.unwrap(), "unchanged legacy snapshots remain valid");
+        route.config_revision_digest = scoped.clone();
+        assert!(route_config_matches(pool, &route).await.unwrap());
+        add(pool, id, "new-model").await;
+        assert_ne!(provider_config_digest(pool, &provider).await.unwrap(), legacy);
+        assert_eq!(provider_model_config_digest(pool, &provider, "current").await.unwrap(), scoped);
+        assert!(route_config_matches(pool, &route).await.unwrap());
+        let record = ProductionProviderRepository::new(pool.clone()).find_provider_for_route(&route).await.unwrap().unwrap();
+        assert_eq!(record.config_revision_digest, scoped);
+        sqlx::query("UPDATE provider_model_capabilities SET endpoint = '/different' WHERE provider_id = ? AND model = 'current'")
+            .bind(id).execute(pool).await.unwrap();
+        assert!(!route_config_matches(pool, &route).await.unwrap(), "current endpoint changes must fail closed");
+        sqlx::query("UPDATE provider_model_capabilities SET endpoint = NULL WHERE provider_id = ? AND model = 'current'")
+            .bind(id).execute(pool).await.unwrap();
+        assert!(route_config_matches(pool, &route).await.unwrap());
+        sqlx::query("UPDATE providers SET credentials_encrypted = 'replacement' WHERE provider_id = ?")
+            .bind(id).execute(pool).await.unwrap();
+        assert!(!route_config_matches(pool, &route).await.unwrap(), "credential changes must fail closed");
     }
 
     #[tokio::test]

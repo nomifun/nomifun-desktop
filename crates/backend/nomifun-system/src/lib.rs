@@ -2,6 +2,7 @@
 pub mod bedrock_probe;
 pub mod client_pref;
 pub mod model_fetcher;
+pub mod model_management;
 pub mod provider;
 pub mod provider_connection;
 pub mod provider_deletion;

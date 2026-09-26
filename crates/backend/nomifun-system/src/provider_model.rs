@@ -116,6 +116,24 @@ impl ProviderModelService {
         &self,
         req: SaveProviderModelRequest,
     ) -> Result<ProviderModelResponse, AppError> {
+        self.save_inner(req, false).await
+    }
+
+    /// Conversation imports may add a model, but must never replace an existing
+    /// capability graph. The parent revision fences concurrent graph writes.
+    pub async fn create(
+        &self,
+        req: SaveProviderModelRequest,
+    ) -> Result<ProviderModelResponse, AppError> {
+        self.save_inner(req, true).await
+    }
+
+    async fn save_inner(
+        &self,
+        mut req: SaveProviderModelRequest,
+        create_only: bool,
+    ) -> Result<ProviderModelResponse, AppError> {
+        req.model.model = req.model.model.trim().to_owned();
         validate_provider_id(&req.provider_id)?;
         let provider = self
             .provider_repo
@@ -134,6 +152,11 @@ impl ProviderModelService {
             .model_repo
             .get(&req.provider_id, &req.model.model)
             .await?;
+        if create_only && existing.is_some() {
+            return Err(AppError::Conflict(
+                "Model already exists; inspect it in Model Management instead of overwriting it".into(),
+            ));
+        }
         let sort_order = match req.model.sort_order {
             Some(value) => {
                 validate_sort_order(value)?;

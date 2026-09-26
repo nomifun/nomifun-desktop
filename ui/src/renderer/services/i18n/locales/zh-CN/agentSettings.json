@@ -155,6 +155,7 @@
     }
   },
   "modules": {
+    "modelManagement": { "name": "模型管理", "description": "根据会话中提供的配置添加提供商和模型，查询协议要求与已有配置。不会覆盖已有模型或切换默认模型。" },
     "agentCollaboration": { "name": "Agent 协作", "description": "委派有边界的工作、派生已授权的 Agent 任务，或请求用户决策。" },
     "automationSchedule": { "name": "定时任务", "description": "创建和管理持久计划，不暴露调度器内部机制。" },
     "browser": { "name": "浏览器", "description": "观察和操作已绑定的内置浏览器或已授权 Chrome；Provider 不会扩大权限。" },
@@ -179,6 +180,7 @@
     "workspaceVcs": { "name": "版本控制", "description": "检查并明确修改所选工作区的版本控制状态。" }
   },
   "actionLabels": {
+    "inspect": "查询配置与协议", "create_provider": "添加提供商", "add_model": "添加模型",
     "search": "搜索", "fetch": "读取网页", "read": "读取", "write": "写入", "autogen": "生成知识",
     "recall": "回忆", "delegate": "委派", "fork": "派生", "request_user_decision": "询问用户", "list": "查看列表", "create": "创建", "update": "更新", "delete": "删除", "edit": "编辑", "launch": "启动应用",
     "observe": "观察", "navigate": "导航", "act": "交互", "render_content": "读取页面内容", "download": "下载", "upload": "上传", "evaluate": "执行脚本",

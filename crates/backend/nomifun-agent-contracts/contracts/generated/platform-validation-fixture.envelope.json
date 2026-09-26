@@ -3,9 +3,9 @@
   "payload": {
     "manifest_version": "1.0.0",
     "confirmed_decision_contract_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848",
-    "canonical_schema_manifest_digest": "6f36e20ea3c5356777ba2d112759766d8f4b9c351e438840b07e107ca16362c6",
+    "canonical_schema_manifest_digest": "158a1883eab863b9402db6131041d854f9f30ca4a6c1ff288069428e2405cfea",
     "cargo_lock_digest": "2187db37243951f9c5a420a956301a5d8220b50c4a9d0ab15799f7d468d145d9",
-    "official_preset_seed_manifest_digest": "ba59a95420466040585ac27ed17f2eb714d8e810424eb1711e0ee2d1ce7532d0",
+    "official_preset_seed_manifest_digest": "ce0e92be84d11774ebb6d3cb3c8f7d3cbf57418fd8626ee8e3668cd9a8faa7b9",
     "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
     "coding_codex_native_contract_digest": "361913c8b085e0a3af7c8331f36044ae794f40f8310a1ef470ae3c7fc381be50",
     "platform_matrix": {
@@ -160,5 +160,5 @@
       }
     }
   },
-  "payload_digest": "0b9e8bcd79856adae93be420185d41cd3a7eb1128425b443dcdd0b1229f81705"
+  "payload_digest": "ce76bc428ba31c76641567818e46ab8d7c5ccbb323b3f776a8766b5800d8399a"
 }

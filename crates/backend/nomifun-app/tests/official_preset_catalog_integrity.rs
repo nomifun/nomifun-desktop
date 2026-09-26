@@ -108,6 +108,7 @@ fn official_preset_action_safety_matrix_is_exact() {
     let expected = BTreeMap::from([
         (OfficialPresetKey::ChatMinimal, actions(&[])),
         (OfficialPresetKey::AssistantGeneral, actions(&[
+            ("model.management", &["model.management/add_model", "model.management/create_provider", "model.management/inspect"]),
             ("knowledge", &["knowledge/autogen", "knowledge/read", "knowledge/search", "knowledge/write"]),
             ("project.memory", &["project.memory/read", "project.memory/write"]),
             ("web.research", &["web.research/fetch", "web.research/search"]),

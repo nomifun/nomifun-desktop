@@ -1327,6 +1327,11 @@
     "voiceFreeTextHint": "部分供应商由所选模型决定音色；其他供应商可直接输入音色 ID。"
   },
   "modelHub": {
+    "importChatAction": "在会话中添加 · 通用 Agent",
+    "importChatTitle": "添加模型配置",
+    "importChatHint": "粘贴配置即可录入；聊天内容会发送给当前会话模型。",
+    "importChatNeedsModel": "先手动配置一个可用的对话模型，再让通用 Agent 帮你录入其他模型。",
+    "importChatPrompt": "请帮我把下面的模型配置录入模型管理。先检查已有提供商和支持的协议，复用已有提供商时不要修改密钥，也不要覆盖已有模型。缺少必要信息请问我，保存完成后告诉我录入了哪些模型。\n\n提供商或服务地址：\n模型名称 / ID：\n用途（如对话、图片、语音）：\n其他配置（已有提供商无需再提供 API Key）：\n",
     "title": "模型管理",
     "subtitle": "按能力挑模型：对话、实时语音、语音、视觉、图像、视频、嵌入与检索。",
     "railTitle": "模型管理",

@@ -155,6 +155,7 @@
     }
   },
   "modules": {
+    "modelManagement": { "name": "Model management", "description": "Add providers and models from configuration supplied in chat, and inspect protocols and saved models. Does not overwrite models or change defaults." },
     "agentCollaboration": { "name": "Agent collaboration", "description": "Delegate bounded work, fork an authorized Agent task, or request a user decision." },
     "automationSchedule": { "name": "Schedules", "description": "Create and manage durable schedules without exposing scheduler internals." },
     "browser": { "name": "Browser", "description": "Observe and interact with a bound managed browser or authorized Chrome. The provider never adds permissions." },
@@ -179,6 +180,7 @@
     "workspaceVcs": { "name": "Version control", "description": "Inspect and explicitly change version-control state in the selected workspace." }
   },
   "actionLabels": {
+    "inspect": "Inspect configuration and protocols", "create_provider": "Add provider", "add_model": "Add model",
     "search": "Search", "fetch": "Read pages", "read": "Read", "write": "Write", "autogen": "Generate knowledge",
     "recall": "Recall", "delegate": "Delegate", "fork": "Fork", "request_user_decision": "Ask the user", "list": "List", "create": "Create", "update": "Update", "delete": "Delete", "edit": "Edit", "launch": "Launch",
     "observe": "Observe", "navigate": "Navigate", "act": "Interact", "render_content": "Read page content", "download": "Download", "upload": "Upload", "evaluate": "Evaluate scripts",

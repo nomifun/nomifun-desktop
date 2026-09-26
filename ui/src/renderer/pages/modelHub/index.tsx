@@ -37,6 +37,7 @@ import VideoModelsContent from './VideoModelsContent';
 import MusicModelsContent from './MusicModelsContent';
 import EmbeddingModelsContent from './EmbeddingModelsContent';
 import RerankModelsContent from './RerankModelsContent';
+import ModelImportChat from './ModelImportChat';
 
 type Section =
   | 'models'
@@ -257,6 +258,7 @@ const ModelHubPage: React.FC = () => {
 
   const content = (
     <>
+      {section !== 'failover' && <ModelImportChat />}
       {section === 'models' && <ModelModalContent />}
       {section === 'chat' && <ChatModelsContent />}
       {section === 'realtime' && <RealtimeModelsContent />}
