@@ -91,7 +91,7 @@ impl AgentSteeringInput {
         }
     }
 
-    fn project_message(&self, live: bool) -> ChatMessage {
+    pub(crate) fn project_message(&self, live: bool) -> ChatMessage {
         let mut content = Vec::new();
         if !self.text.is_empty() {
             content.push(ChatContentPart::Text {
@@ -142,6 +142,7 @@ pub(crate) fn incorporate(
     request: &mut ChatModelRequest,
     retained: &mut Vec<ChatMessage>,
     seen: &mut std::collections::BTreeSet<String>,
+    applied_order: &mut Vec<String>,
 ) -> Result<bool, AgentEngineError> {
     if inputs.is_empty() {
         return Ok(false);
@@ -153,6 +154,7 @@ pub(crate) fn incorporate(
     }
     let mut next_seen = seen.clone();
     let mut messages = Vec::with_capacity(inputs.len());
+    let mut next_order = Vec::with_capacity(inputs.len());
     for input in inputs {
         input.validate()?;
         if input.prepared_images.len() != input.image_count {
@@ -166,12 +168,14 @@ pub(crate) fn incorporate(
                 "duplicate steering receipt at model boundary".into(),
             ));
         }
+        next_order.push(input.receipt_operation_id.clone());
         messages.push(input.project_message(true));
     }
     // A malformed batch cannot partially mutate the accepted-input ledger.
     retained.extend(messages.iter().cloned());
     request.input.messages.extend(messages);
     *seen = next_seen;
+    applied_order.extend(next_order);
     request.input.provider_round_parent = None;
     Ok(true)
 }

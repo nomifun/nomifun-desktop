@@ -158,6 +158,10 @@ pub(crate) fn selected<'a>(
 }
 
 impl<'a> RecentToolExchange<'a> {
+    /// The suffix is retained verbatim, so only this older prefix needs an
+    /// inferred summary. Keep the boundary at complete message/batch records.
+    pub fn prefix(&self) -> &'a [ChatMessage] { &self.source[..self.start] }
+
     /// Expand by one whole preceding batch, retaining intervening messages.
     /// Bound both batch count and total IDs under the existing event envelope.
     /// Repeated IDs across historical turns make expansion ambiguous; retain

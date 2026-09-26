@@ -72,13 +72,27 @@ pub(crate) fn reduce_head(
             head.status = "running".to_owned();
             head.active_turn_id = Some(event.correlation_id.0.clone());
         }
+        "turn/paused" => {
+            head.status = "paused".to_owned();
+            head.active_turn_id = Some(event.correlation_id.0.clone());
+        }
+        "turn/resume-authorized" => {
+            head.status = "running".to_owned();
+            head.active_turn_id = Some(event.correlation_id.0.clone());
+        }
         "turn/completed" | "turn/failed" | "turn/cancelled" => {
             head.status = "ready".to_owned();
             head.active_turn_id = None;
         }
         "effect/uncertain" => {
-            head.status = "failed".to_owned();
-            head.active_turn_id = None;
+            if payload.get("recovery").and_then(Value::as_str) == Some("native_owner_verified_reconciliation") {
+                // This uncertainty is immediately reconciled in the same
+                // owner-authorized transaction; it grants no execution.
+            } else if head.status != "paused" && head.active_turn_id.as_deref() == payload.get("turn_id").and_then(Value::as_str) {
+                head.status = "reconciliation".to_owned();
+            } else if head.active_turn_id.is_none() {
+                head.status = "failed".to_owned();
+            }
         }
         "message/completed" => {
             head.unread_count = head.unread_count.saturating_add(1);
@@ -224,6 +238,8 @@ fn apply_projection_semantics(
             document.reference = Some(payload.clone());
         }
         "turn/started" => document.state = Some("running".to_owned()),
+        "turn/paused" => { document.state = Some("paused".to_owned()); document.reference = Some(payload.clone()); }
+        "turn/resume-authorized" => { document.state = Some("running".to_owned()); document.reference = Some(payload.clone()); }
         "turn/completed" => document.state = Some("completed".to_owned()),
         "turn/failed" => document.state = Some("failed".to_owned()),
         "turn/cancelled" => document.state = Some("cancelled".to_owned()),

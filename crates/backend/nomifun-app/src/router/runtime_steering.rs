@@ -69,6 +69,50 @@ fn admitted(
 }
 
 impl ConversationRuntimeHost {
+    pub(super) async fn restore_recovery_steering(&self) -> Result<(), AppError> {
+        let mut active = self.active.lock().await;
+        let turn = active.as_mut().ok_or_else(|| error("recovery has no active Turn"))?;
+        if !turn.journal.recovered() { return Ok(()); }
+        let recovery = turn.journal.recovery();
+        let store = self.session_host.canonical_store()?;
+        let facts = store.native_recovery_facts(&self.options.conversation_id.clone().into(), &turn.operation.clone().into()).await.map_err(error)?;
+        if facts.head.status != "running" || facts.execution_generation != turn.epoch as u64 {
+            return Err(error("recovery input ownership changed"));
+        }
+        for input in recovery.as_ref().map(|recovery| recovery.prepared_inputs()).unwrap_or_default() {
+            turn.steering.seen.insert(input.receipt_operation_id.clone(), input.journal_record());
+            turn.steering.prepared_image_count += input.image_count;
+            turn.steering.prepared_image_bytes += input.prepared_images.iter().map(|part| match part {
+                nomifun_chat_model_broker::ChatContentPart::Image { data_base64, .. } => data_base64.len(), _ => 0,
+            }).sum::<usize>();
+        }
+        for event in facts.events.iter().filter(|event| event.kind.0 == "turn/steer-accepted" && event.correlation_id.as_ref() == turn.operation) {
+            if turn.steering.seen.contains_key(event.event_id.as_ref()) { continue; }
+            let value = facts.event_payloads.get(event.event_id.as_ref()).and_then(|value| value.get("input"))
+                .ok_or_else(|| error("recovery steering receipt has no input"))?;
+            let text = value.get("content").and_then(serde_json::Value::as_str).ok_or_else(|| error("recovery steering text is missing"))?;
+            let files = super::super::runtime_attachments::references(value)?;
+            let inject_skills = super::super::runtime_attachments::selected_skills(value)?;
+            self.skills.validate_ids(&inject_skills)?;
+            let images = super::super::runtime_attachments::prepare_images(&files, &self.options.extra, self.route_image_input).await?;
+            let input = AgentSteeringInput { receipt_operation_id: event.event_id.as_ref().to_owned(), message_id: event.event_id.as_ref().to_owned(),
+                text: text.to_owned(), files, inject_skills, image_count: images.len(), prepared_images: images };
+            input.validate().map_err(error)?;
+            turn.steering.prepared_image_count += input.image_count;
+            turn.steering.prepared_image_bytes += input.prepared_images.iter().map(|part| match part {
+                nomifun_chat_model_broker::ChatContentPart::Image { data_base64, .. } => data_base64.len(), _ => 0,
+            }).sum::<usize>();
+            if turn.steering.seen.len() >= 16 || turn.steering.prepared_image_count > 4 || turn.steering.prepared_image_bytes > 4 * 1024 * 1024 {
+                return Err(error("recovery steering exceeds its admitted budget"));
+            }
+            turn.steering.seen.insert(input.receipt_operation_id.clone(), input.journal_record());
+            turn.steering.pending.push(input);
+        }
+        turn.steering.generation = Some(turn.epoch as u64);
+        turn.steering.open = recovery.is_some();
+        Ok(())
+    }
+
     pub(super) async fn admit_steerable_tool(
         &self,
         message: &nomifun_ai_agent::types::SendMessageData,

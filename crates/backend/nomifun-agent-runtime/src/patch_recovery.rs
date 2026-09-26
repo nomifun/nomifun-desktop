@@ -73,7 +73,7 @@ impl PatchRecovery {
         })
     }
 
-    fn snapshot(&self) -> AgentPatchRecoveryState {
+    pub(crate) fn snapshot(&self) -> AgentPatchRecoveryState {
         AgentPatchRecoveryState {
             // A new turn must freshly observe ALL targets if even one was left
             // pending. Partial historical reads do not become current evidence.

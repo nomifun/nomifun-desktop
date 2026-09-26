@@ -43,6 +43,14 @@ pub enum SessionStoreError {
     },
     #[error("session conflict: {0}")]
     Conflict(String),
+    #[error("native checkpoint deferred until current effects are settled")]
+    CheckpointNotQuiescent,
+    #[error("native execution producer no longer owns this Turn")]
+    ExecutionFenced,
+    #[error("native execution is owned by a live producer")]
+    ExecutionLeaseActive,
+    #[error("native recovery requires reconciliation of activity after the checkpoint")]
+    RecoveryRequiresReconciliation,
     #[error("event registry error: {0}")]
     Registry(String),
 }

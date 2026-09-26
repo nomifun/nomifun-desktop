@@ -152,6 +152,8 @@ pub enum TurnStopReason {
     Refusal,
     /// Turn was cancelled / aborted (server or transport, not a clean finish).
     Cancelled,
+    /// Execution is durably suspended, not completed; owner authorization is required to continue.
+    Paused,
 }
 
 #[cfg(test)]

@@ -51,12 +51,12 @@ fn classify(code: &str) -> Option<(ChatModelErrorCode, ChatRetryDirective, &'sta
         ),
         "rate_limit_exceeded" | "rate_limit_error" => (
             Code::RateLimited,
-            Retry::Failover,
+            Retry::RetrySameRoute,
             "provider rate limit rejected the attempt",
         ),
         "overloaded_error" | "server_error" | "internal_server_error" => (
             Code::ProviderUnavailable,
-            Retry::Failover,
+            Retry::RetrySameRoute,
             "provider is temporarily unavailable",
         ),
         "invalid_api_key" | "authentication_error" | "permission_error" => (
@@ -112,7 +112,7 @@ pub(crate) fn decode(protocol: ChatProtocol, event: &str, data: &Value) -> Optio
         let (code, retry, message) = match code {
             "throttlingException" | "ThrottlingException" => (
                 Code::RateLimited,
-                Retry::Failover,
+                Retry::RetrySameRoute,
                 "Bedrock rate limit rejected the attempt",
             ),
             "internalServerException"
@@ -120,7 +120,7 @@ pub(crate) fn decode(protocol: ChatProtocol, event: &str, data: &Value) -> Optio
             | "serviceUnavailableException"
             | "ServiceUnavailableException" => (
                 Code::ProviderUnavailable,
-                Retry::Failover,
+                Retry::RetrySameRoute,
                 "Bedrock is temporarily unavailable",
             ),
             "accessDeniedException"

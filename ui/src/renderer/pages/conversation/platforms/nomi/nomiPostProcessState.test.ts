@@ -232,6 +232,18 @@ describe('Nomi post-process state associations', () => {
     ).toBe(true);
   });
 
+  test('paused finish never creates a completed post-process job', () => {
+    for (const finalTextAuthoritative of [true, false, undefined]) {
+      expect(shouldHandleNomiTerminalPostProcess({
+        type: 'finish', data: { stop_reason: 'paused' }, msgId: terminalId,
+        turnId, finalTextAuthoritative, finalTextMsgId: targetMessageId,
+      }, {
+        rootTurnId: turnId, lastSettledTurnId: null,
+        hasBuffer: () => true, isAssociated: () => true,
+      })).toBe(false);
+    }
+  });
+
   test('an explicit false marker never makes an error a completed post-process job', () => {
     expect(
       shouldHandleNomiTerminalPostProcess(

@@ -67,6 +67,10 @@ pub trait AgentRuntimeSessions: Send + Sync {
     /// Get an existing runtime by conversation ID.
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle>;
 
+    /// Exact local admission still held by a driver/relay. A finished stream
+    /// alone does not prove that the reusable slot has released this owner.
+    fn active_turn_generation(&self, _conversation_id: &str) -> Option<u64> { None }
+
     /// Query commands without creating a runtime or acquiring turn authority.
     /// Callers authenticate conversation ownership before entering this seam.
     async fn get_slash_commands(
@@ -1433,6 +1437,10 @@ impl InMemoryAgentRuntimeSessions {
 
 #[async_trait]
 impl AgentRuntimeSessions for InMemoryAgentRuntimeSessions {
+    fn active_turn_generation(&self, conversation_id: &str) -> Option<u64> {
+        self.turn_admissions.get(conversation_id).map(|admission| admission.generation)
+    }
+
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         if self.shutdown.closed.is_cancelled() { return None; }
         self.initialized_runtime(conversation_id)

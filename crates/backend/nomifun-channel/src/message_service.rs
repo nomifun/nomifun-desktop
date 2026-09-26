@@ -984,6 +984,8 @@ impl ChannelMessageService {
                         "the model refused the request",
                     Some(nomifun_ai_agent::protocol::events::TurnStopReason::Cancelled) =>
                         "the turn was cancelled",
+                    Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused) =>
+                        "execution is paused and requires Session-owner authorization to continue",
                     Some(nomifun_ai_agent::protocol::events::TurnStopReason::EndTurn) | None =>
                         unreachable!("normal finish was handled above"),
                 }
@@ -1597,6 +1599,7 @@ mod tests {
             TurnStopReason::MaxTurnRequests,
             TurnStopReason::Refusal,
             TurnStopReason::Cancelled,
+            TurnStopReason::Paused,
         ] {
             let event = AgentStreamEvent::Finish(FinishEventData {
                 session_id: None,

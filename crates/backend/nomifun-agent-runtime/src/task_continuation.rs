@@ -63,8 +63,9 @@ impl AgentPriorTask {
             Some(AgentEngineEvent::TurnFailed { .. }) => "failed",
             _ => return Err(fail("task continuation needs a durable closed turn")),
         };
-        if events[..events.len() - 1].iter().any(|event| {
-            matches!(
+        let reconciled = events.iter().rposition(|event| matches!(event,AgentEngineEvent::ExecutionTailReconciled { .. }));
+        if events[..events.len() - 1].iter().enumerate().any(|(index,event)| {
+            reconciled.is_none_or(|boundary| index > boundary) && matches!(
                 event,
                 AgentEngineEvent::TurnCompleted { .. }
                     | AgentEngineEvent::TurnCancelled { .. }
@@ -91,23 +92,22 @@ impl AgentPriorTask {
             if !valid_id(&requirement.id)
                 || !ids.insert(&requirement.id)
                 || requirement.description.trim().is_empty()
-                || requirement.description.len() > 512
-                || requirement.source.quote.len() > 512
+                || requirement.description.chars().count() > 512
+                || requirement.source.quote.chars().count() > 512
                 || requirement.origin.as_ref().is_some_and(|origin| {
                     origin.turn_operation_id.is_empty()
                         || origin.turn_operation_id.len() > 1024
                         || !valid_id(&origin.requirement_id)
-                        || origin.source.quote.len() > 512
+                        || origin.source.quote.chars().count() > 512
                 })
             {
                 return Err(fail("invalid historical requirement ledger"));
             }
         }
         if plan.revision == 0
-            || plan.revision > 64
             || plan.steps.len() > 16
-            || plan.explanation.len() > 2048
-            || plan.steps.iter().any(|step| step.step.len() > 512)
+            || plan.explanation.chars().count() > 2048
+            || plan.steps.iter().any(|step| step.step.chars().count() > 512)
         {
             return Err(fail("historical plan exceeds continuation limits"));
         }

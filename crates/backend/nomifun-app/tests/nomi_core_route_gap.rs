@@ -153,10 +153,17 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
 fn startup_reconciles_orphaned_running_turns_before_publishing_routes() {
     let state = repo_file("src/router/state.rs");
     let sessions = repo_file("src/router/nomi_core_session.rs");
+    let recovery = repo_file("src/router/native_turn_recovery.rs");
 
-    assert!(state.contains("reconcile_orphaned_active_turns().await?"));
-    assert!(sessions.contains("Runtime owner was not recoverable after restart"));
-    assert!(sessions.contains("head.status = 'running'"));
+    // V2 schedules fenced recovery instead of converting every orphan into
+    // failed. Behavioral crash/pause/quarantine acceptance lives in the
+    // native_execution_recovery product fixture.
+    let installed = state.find("conversation_owner.install_official_runtime(").unwrap();
+    let scheduled = state.find("reconcile_orphaned_active_turns(engine_sessions).await?").unwrap();
+    assert!(installed < scheduled, "the actual Runtime must be installed before recovery is scheduled");
+    assert!(sessions.contains("self.schedule_native_recovery(engine_sessions).await"));
+    assert!(recovery.contains("h.status IN ('running','reconciliation') AND t.state='running'"));
+    assert!(recovery.contains("quarantine_native_recovery"));
 }
 
 #[test]
@@ -333,6 +340,20 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
     .await
     .unwrap();
     let session_key = nomifun_agent_contracts::AgentSessionId::from(session_id.to_owned());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while canonical_store.head(&session_key).await.unwrap().status == "running" {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("Turn terminal did not settle");
+    let checkpoints: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_events WHERE session_id = ? AND kind = 'runtime/progress-recorded' \
+         AND json_extract(inline_json, '$.event.event') = 'execution_checkpoint_saved'",
+    ).bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+    assert!(checkpoints >= 1, "the real Runtime/Host path must commit a checkpoint before model execution");
+    let retained: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_turns WHERE session_id = ? AND native_checkpoint_json IS NOT NULL",
+    ).bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(retained, 0, "completed turns must release their active checkpoint payload");
     let before_rebuild = canonical_store.head(&session_key).await.unwrap();
     let rebuilt = canonical_store.rebuild_projections(&session_key).await.unwrap();
     assert_eq!(rebuilt, before_rebuild, "projection rebuild must be deterministic");

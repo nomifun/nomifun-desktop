@@ -138,13 +138,16 @@ impl AgentSendError {
             );
         }
         let guarded = detail.starts_with("model step limit of ")
+            || detail.starts_with("EXECUTION_")
+            || detail.starts_with("NATIVE_RECOVERY_")
             || detail.starts_with("model output remained truncated after the bounded continuation budget;")
             || detail.starts_with("execution plan remains unresolved;")
             || detail.starts_with("failed patch targets have not been re-observed;")
             || detail.starts_with("processes remain running;")
             || detail.starts_with("completion account is missing or stale;")
             || detail.starts_with("completion account contains blocked work;")
-            || detail.starts_with("engine control repeatedly rejected;");
+            || detail.starts_with("engine control repeatedly rejected;")
+            || detail.starts_with("engine control made no progress;");
         if guarded {
             Self::new(
                 "The Agent stopped before completing the task",

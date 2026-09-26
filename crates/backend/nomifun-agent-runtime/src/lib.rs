@@ -8,6 +8,14 @@
 
 mod agents_md;
 mod adaptive;
+mod checkpoint;
+mod segments;
+pub use segments::{AgentExecutionPressure, AgentExecutionSegmentState, AgentExecutionStopReason, AgentSegmentPolicy, AgentSegmentReason};
+mod recovery;
+mod reconciliation;
+pub use reconciliation::{AgentReconciledOutcome, AgentReconciledResume, AgentReconciliationSource, reconcile_execution_tail};
+pub use recovery::AgentTurnRecovery;
+pub use checkpoint::{AgentCheckpointReceipt, AgentExecutionCheckpoint};
 pub use adaptive::{AgentRuntimeActivationReason, AgentRuntimeModule};
 mod compaction;
 mod compaction_source;
@@ -36,6 +44,7 @@ pub use history::replay_closed_turn;
 mod model;
 mod output_limit;
 mod public_output;
+mod protocol_recovery;
 mod planning;
 mod patch_recovery;
 pub use patch_recovery::AgentPatchRecoveryState;
@@ -50,6 +59,7 @@ mod steering;
 pub use steering::{AgentInputPort, AgentSteeringInput};
 mod tool;
 mod tool_dispatch;
+mod tool_validation;
 mod tool_discovery;
 mod tool_archive;
 mod tool_context;
@@ -86,4 +96,4 @@ pub use tool_discovery::{
     AgentToolDiscoveryCandidate, AgentToolDiscoveryPort,
     MAX_MATCHES as MAX_TOOL_DISCOVERY_MATCHES,
 };
-pub use turn::{AgentTurnRequest, AgentTurnResult, AgentTurnTerminal};
+pub use turn::{AgentControlRejectionState, AgentTurnRequest, AgentTurnResult, AgentTurnTerminal};

@@ -113,6 +113,7 @@ pub(crate) use mcp_resources::validate_owner_result as validate_resource_owner_r
 
 struct Turn {
     operation: String,
+    generation: u64,
     root: String,
     cleanup: Option<Completion>,
     resource_operations: std::collections::BTreeSet<String>,
@@ -1040,7 +1041,7 @@ impl EngineKernelSession {
             .map_err(|_| failure("resource state poisoned"))?;
         if state.release.is_some()
             || state.turn.as_ref().is_some_and(|turn| {
-                turn.operation == receipt.operation_id()
+                (turn.operation == receipt.operation_id() && turn.generation == journal.generation())
                     || !matches!(
                         turn.cleanup.as_ref().and_then(|done| done.peek()),
                         Some(Ok(()))
@@ -1059,6 +1060,7 @@ impl EngineKernelSession {
         // covered by cleanup, including errors before engine TurnStarted.
         state.turn = Some(Turn {
             operation: receipt.operation_id().into(),
+            generation: journal.generation(),
             root: receipt.root_message_id().into(),
             cleanup: None,
             resource_operations: Default::default(),
@@ -1094,6 +1096,12 @@ impl EngineKernelSession {
         self.wave2
             .runtime_processes_quiescent(&self.principal.principal_id, self.session_id.as_ref())
             .await
+    }
+
+    pub(super) fn execution_window_near_limit(&self) -> Result<bool, AppError> {
+        let state = self.state.lock().map_err(|_| failure("resource state poisoned"))?;
+        Ok(state.turn.as_ref().is_some_and(|turn| turn.resource_operations.len() >= 56)
+            || state.tools.as_ref().map(|tools| tools.execution_window_near_limit()).transpose()?.unwrap_or(false))
     }
 
     async fn settle_owned(&self, tools: &EngineToolHost) -> Result<(), AppError> {

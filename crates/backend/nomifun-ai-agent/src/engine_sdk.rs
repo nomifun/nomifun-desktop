@@ -103,6 +103,7 @@ pub struct EngineTurnOutcome {
 pub enum EngineTurnTerminal {
     Completed { finish_reason: ChatFinishReason },
     Cancelled,
+    Paused { reason: String },
     Failed { message: String },
 }
 
@@ -141,6 +142,10 @@ pub trait EngineSessionDriver: Send + Sync {
     /// Required after every exit, including failed/partially cancelled prepare.
     /// Must join owned effects and prove resources quiescent, not just send kill.
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError>;
+
+    /// Optional nonterminal quarantine after failed cleanup. True must mean
+    /// the host persisted a fenced pause with cleanup explicitly UNPROVEN.
+    async fn suspend_after_cleanup_failure(&self, _message: &SendMessageData) -> Result<bool,AppError> { Ok(false) }
 
     /// Called only after cleanup proof. Store this exact outcome in the
     /// existing Session owner's journal; never start an independent Session DB.
@@ -302,6 +307,12 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 .await
                 .unwrap_or_else(|_| Err(AppError::Internal("Engine turn cleanup panicked".into())));
             if let Err(error) = cleanup {
+                let suspended = AssertUnwindSafe(shared.driver.suspend_after_cleanup_failure(&message)).catch_unwind().await;
+                if matches!(suspended,Ok(Ok(true))) {
+                    shared.state.mark_transport_broken();
+                    shared.state.emit_finish_for_turn(turn,Some(shared.state.conversation_id().to_owned()),Some(TurnStopReason::Paused));
+                    return;
+                }
                 break_transport(&shared, turn, error.to_string());
                 return;
             }
@@ -330,6 +341,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                     ChatFinishReason::ToolCalls => TurnStopReason::MaxTurnRequests,
                 },
                 EngineTurnTerminal::Cancelled => TurnStopReason::Cancelled,
+                EngineTurnTerminal::Paused { .. } => TurnStopReason::Paused,
                 EngineTurnTerminal::Failed { message } => {
                     shared.state.emit_error_data_for_turn(
                         turn,

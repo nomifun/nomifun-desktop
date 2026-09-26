@@ -34,8 +34,8 @@ pub struct BrokerRetryPolicy {
 impl Default for BrokerRetryPolicy {
     fn default() -> Self {
         Self {
-            max_total_attempts: 3,
-            max_attempts_per_route: 2,
+            max_total_attempts: 4,
+            max_attempts_per_route: 3,
         }
     }
 }
@@ -372,24 +372,29 @@ async fn run_broker(
                     capability_observer.record_unsupported(route, feature).await;
                 }
                 let retry = error.retry;
+                let delay = crate::retry::delay(&error, total_attempt);
                 last_error = Some(error);
                 let total_capacity =
                     total_attempt < retry_policy.max_total_attempts;
+                let Some(delay) = delay.filter(|_| total_capacity) else { break; };
                 if retry == ChatRetryDirective::RetrySameRoute
                     && route_attempt < retry_policy.max_attempts_per_route
-                    && total_capacity
                 {
-                    continue;
-                }
-                if retry != ChatRetryDirective::Never
+                    // Keep this exact admitted route and lease fresh credentials
+                    // for its next attempt only after the cooldown has elapsed.
+                } else if retry != ChatRetryDirective::Never
                     && route_index + 1 < routes.len()
-                    && total_capacity
                 {
                     route_index += 1;
                     route_attempt = 0;
-                    continue;
+                } else {
+                    break;
                 }
-                break;
+                tokio::select! {
+                    biased;
+                    _ = sender.closed() => return,
+                    _ = tokio::time::sleep(delay) => {}
+                }
             }
         }
     }

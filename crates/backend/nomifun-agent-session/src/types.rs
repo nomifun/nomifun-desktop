@@ -252,6 +252,8 @@ pub struct ChatCausalityFacts {
     pub event_payloads: BTreeMap<String, serde_json::Value>,
     pub operation_ids: BTreeSet<String>,
     pub turn_route_identities: BTreeSet<ChatRouteIdentity>,
+    pub execution_generation: u64,
+    pub execution_fence: u64,
 }
 
 /// Atomic model-operation admission input. The store validates the active

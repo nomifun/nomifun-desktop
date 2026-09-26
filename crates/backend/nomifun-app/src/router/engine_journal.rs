@@ -8,7 +8,7 @@ use std::{
     collections::BTreeMap,
     sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
     },
 };
 
@@ -21,7 +21,7 @@ use nomifun_agent_contracts::{
     StrictJsonValue, canonical_json_bytes, digest_bytes,
 };
 use nomifun_agent_session::{
-    AgentSessionStore, ChatOperationClaimRequest, TurnReceiptStatus,
+    AgentSessionStore, ChatOperationClaimRequest, NativeExecutionLease, TurnReceiptStatus,
 };
 use nomifun_chat_model_broker::{
     ChatCausality, ChatCausalityGate, ChatModelError, ChatModelErrorCode,
@@ -47,6 +47,12 @@ pub enum EngineJournalWrite {
 #[derive(Default)]
 struct Cursor {
     sequence: u64,
+    window_start_sequence: u64,
+    segment: u16,
+    total_bytes: usize,
+    budget: nomifun_agent_contracts::NativeExecutionBudget,
+    empty_response_step: Option<u16>,
+    checkpoint_revision: u64,
     bytes: usize,
     draining: bool,
     terminal: bool,
@@ -68,6 +74,14 @@ struct AssistantStepCursor {
 
 pub(super) struct Journal {
     store: AgentSessionStore,
+    lease: NativeExecutionLease,
+    heartbeat: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cancellation_link: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 0 preclaimed, 1 attached, 2 abandoned. Attachment and pre-driver
+    /// failure must not both win ownership of cleanup.
+    attachment: AtomicU8,
+    attached_notify: tokio::sync::Notify,
+    recovery: Option<Arc<nomifun_agent_runtime::AgentTurnRecovery>>,
     user: String,
     session: AgentSessionId,
     operation: OperationId,
@@ -87,6 +101,23 @@ pub(super) struct Journal {
 
 #[derive(Clone)]
 pub struct EngineTurnJournal(Arc<Journal>);
+
+impl Drop for Journal {
+    fn drop(&mut self) {
+        if let Some(task) = self.heartbeat.get_mut().unwrap_or_else(|error| error.into_inner()).take() { task.abort(); }
+        if let Some(task) = self.cancellation_link.get_mut().unwrap_or_else(|error| error.into_inner()).take() { task.abort(); }
+    }
+}
+
+impl Journal {
+    async fn append_projection(&self, append: &SessionEventAppend) -> Result<nomifun_agent_session::SessionEventAppendResult, nomifun_agent_session::SessionStoreError> {
+        if append.semantic_event.kind.0 == "tool/call-started" {
+            self.store.append_native_event(&self.lease, append, None).await
+        } else {
+            self.store.append_native_observation(&self.lease, append, None).await
+        }
+    }
+}
 
 fn failure(message: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Engine journal: {message}"))
@@ -180,23 +211,11 @@ impl EngineTurnJournal {
             return Err(failure("resource request differs from the live model turn"));
         }
         drop(cursor);
-        let facts = journal
-            .store
-            .chat_causality_facts(&journal.session, &journal.operation)
-            .await
-            .map_err(failure)?;
-        if facts.head.status != "running"
-            || facts.head.active_turn_id.as_deref() != Some(journal.operation.as_ref())
-            || !facts.operation_ids.contains(causality.operation_id.as_ref())
-            || journal
-                .store
-                .has_unsettled_effects(&journal.session)
-                .await
-                .map_err(failure)?
-        {
-            return Err(failure("resource request has no claimed model operation"));
-        }
-        Ok(())
+        journal.store.verify_native_chat_operation(&journal.lease, &ChatOperationClaimRequest {
+            agent_session_id: causality.agent_session_id.clone(), operation_id: causality.operation_id.clone(),
+            turn_operation_id: causality.turn_operation_id.clone(), causation_event_id: causality.causation_event_id.clone(),
+            route_identity: causality.route_identity.clone(), resolved_snapshot_ref: causality.resolved_snapshot_ref.clone(),
+        }).await.map_err(failure)
     }
 
     pub(super) fn validate_receipt(&self, receipt: &EngineTurnReceipt) -> Result<(), AppError> {
@@ -223,6 +242,8 @@ impl EngineTurnJournal {
         Arc::downgrade(&self.0)
     }
 
+    pub(super) fn cached_generation(journal: &Arc<Journal>) -> u64 { journal.lease.generation() }
+
     pub(super) fn from_existing(
         journal: Arc<Journal>,
         receipt: &EngineTurnReceipt,
@@ -242,10 +263,22 @@ impl EngineTurnJournal {
         store: AgentSessionStore,
         receipt: &EngineTurnReceipt,
         cancellation: CancellationToken,
+        lease: NativeExecutionLease,
     ) -> Result<Self, AppError> {
-        let assistant_message_id = canonical_assistant_message_id(receipt.root_message_id())?;
-        Ok(Self(Arc::new(Journal {
-            store,
+        Self::new_with_recovery(store, receipt, cancellation, lease, None, 0, 0)
+    }
+
+    pub(super) fn new_with_recovery(store: AgentSessionStore, receipt: &EngineTurnReceipt, cancellation: CancellationToken,
+        lease: NativeExecutionLease, recovery: Option<nomifun_agent_runtime::AgentTurnRecovery>, sequence: u64, total_bytes: usize) -> Result<Self, AppError> {
+        let response_step = recovery.as_ref().map(|state| state.last_model_step().checked_add(1)
+            .ok_or_else(|| failure("recovered model step counter exhausted"))).transpose()?.unwrap_or(1);
+        let checkpoint_revision = recovery.as_ref().map_or(0, |state| state.checkpoint_revision());
+        let segment = recovery.as_ref().and_then(|state| state.checkpoint().segments.as_ref()).map_or(0, |state| state.segment);
+        let generation = i64::try_from(lease.generation()).map_err(failure)?;
+        let assistant_message_id = canonical_assistant_step_message_id(receipt.root_message_id(), response_step)?;
+        let journal = Self(Arc::new(Journal {
+            store, lease, heartbeat: Default::default(), cancellation_link: Default::default(),
+            attachment: AtomicU8::new(0), attached_notify: Default::default(), recovery: recovery.map(Arc::new),
             user: receipt.session().principal().principal_id.clone(),
             session: AgentSessionId::from(
                 receipt.session().session().conversation_id.clone(),
@@ -253,7 +286,7 @@ impl EngineTurnJournal {
             operation: OperationId::from(receipt.operation_id().to_owned()),
             root: EventId::from(receipt.root_message_id().to_owned()),
             turn_started: EventId::from(receipt.turn_started_event_id().to_owned()),
-            generation: receipt.admission_epoch(),
+            generation,
             snapshot: receipt.session().snapshot().snapshot_ref.clone(),
             route: receipt
                 .session()
@@ -264,22 +297,261 @@ impl EngineTurnJournal {
             cancellation,
             cursor: Mutex::new(Cursor {
                 assistant_message_id: Some(assistant_message_id),
+                sequence, window_start_sequence: sequence, segment, total_bytes, checkpoint_revision, empty_response_step: Some(response_step),
                 ..Cursor::default()
             }),
-            sequence: AtomicU64::new(0),
+            sequence: AtomicU64::new(sequence),
             pending: Arc::new(Semaphore::new(64)),
             pending_bytes: Arc::new(Semaphore::new(8 * 1024 * 1024)),
-        })))
+        }));
+        journal.start_heartbeat();
+        Ok(journal)
+    }
+
+    pub(super) fn recovery(&self) -> Option<Arc<nomifun_agent_runtime::AgentTurnRecovery>> { self.0.recovery.clone() }
+    pub(super) fn generation(&self) -> u64 { self.0.lease.generation() }
+    pub(super) async fn pause_with_unproven_cleanup(&self) -> Result<(),AppError> {
+        self.0.store.pause_native_execution(&self.0.lease,"EXECUTION_CLEANUP_UNPROVEN",false).await.map_err(failure)?;
+        Ok(())
+    }
+
+    pub(super) async fn response_message_id(&self) -> Result<String,AppError> {
+        self.0.cursor.lock().await.assistant_message_id.clone().ok_or_else(||failure("response message identity missing"))
+    }
+    pub(super) fn recovered(&self) -> bool { self.0.lease.fence() > 0 }
+
+    /// Finish an interrupted assistant display segment without changing its
+    /// text or pretending the task finished. New output has a fresh step ID.
+    /// The model replay independently discards the unexecuted model tail.
+    pub(super) async fn restore_public_projection(&self) -> Result<(), AppError> {
+        let journal = &self.0;
+        let Some(recovery) = &journal.recovery else { return Ok(()); };
+        let facts = journal.store.native_recovery_facts(&journal.session, &journal.operation).await.map_err(failure)?;
+        let identities = (1..=recovery.last_model_step()).map(|step| {
+            canonical_assistant_step_message_id(journal.root.as_ref(), step).map(|id| (id, step))
+        }).collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut open = BTreeMap::<String, AssistantStepCursor>::new();
+        let mut last_event = None;
+        let mut bytes = 0usize;
+        for event in &facts.events {
+            let Some(step) = identities.get(event.correlation_id.as_ref()) else { continue; };
+            match event.kind.0.as_str() {
+                "message/content-part" => {
+                    let payload = facts.event_payloads.get(event.event_id.as_ref()).ok_or_else(|| failure("recovered display payload missing"))?;
+                    if payload.get("turn_id").and_then(Value::as_str) != Some(journal.root.as_ref()) { continue; }
+                    let text = payload.get("content").and_then(Value::as_str).ok_or_else(|| failure("recovered display text missing"))?;
+                    bytes = bytes.saturating_add(text.len());
+                    if bytes > nomifun_agent_contracts::MAX_NATIVE_APPROVED_JOURNAL_BYTES as usize { return Err(failure("recovered display exceeds its bounded reader")); }
+                    let current = open.entry(event.correlation_id.as_ref().to_owned()).or_insert_with(|| AssistantStepCursor {
+                        step: *step, message_id: event.correlation_id.as_ref().to_owned(), parts: 0, text: Vec::new(), last_event_id: None,
+                    });
+                    current.parts += 1;
+                    current.text.extend_from_slice(text.as_bytes());
+                    current.last_event_id = Some(event.event_id.clone());
+                    last_event = Some(event.event_id.clone());
+                }
+                "message/completed" => { open.remove(event.correlation_id.as_ref()); last_event = Some(event.event_id.clone()); }
+                _ => {}
+            }
+        }
+        if open.len() > 1 { return Err(failure("recovered display has multiple unfinished assistant segments")); }
+        if let Some((_, step)) = open.into_iter().next() {
+            let completed = Self::assistant_completion_event(journal, &step);
+            journal.append_projection(&completed).await.map_err(failure)?;
+            last_event = Some(completed.event_id);
+        }
+        journal.cursor.lock().await.last_assistant_event_id = last_event;
+        Ok(())
+    }
+
+    pub(super) fn is_attached(&self) -> bool { self.0.attachment.load(Ordering::Acquire) == 1 }
+
+    pub(super) fn attach_runtime(&self, cancellation: CancellationToken) -> Result<(), AppError> {
+        match self.0.attachment.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {}
+            Err(1) => return Ok(()),
+            Err(_) => return Err(failure("recovery attachment was abandoned")),
+        }
+        let journal_token = self.0.cancellation.clone();
+        let task = tokio::spawn(async move {
+            tokio::select! { _ = cancellation.cancelled() => journal_token.cancel(), _ = journal_token.cancelled() => cancellation.cancel() }
+        });
+        *self.0.cancellation_link.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
+        self.0.attached_notify.notify_waiters();
+        Ok(())
+    }
+
+    pub(super) async fn wait_attached(&self) {
+        loop {
+            let notified = self.0.attached_notify.notified();
+            if self.is_attached() { return; }
+            notified.await;
+        }
+    }
+
+    pub(super) async fn fail_unattached_recovery(&self) -> Result<(), AppError> {
+        if self.0.attachment.compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return Err(failure("runtime attachment or abandonment already owns cleanup"));
+        }
+        self.append(json!({"event":"host_cleanup_proven","reason":"turn_resources_not_opened"}).to_string(), None, EngineJournalWrite::Cleanup).await?;
+        let event = if let Some(recovery) = &self.0.recovery {
+            AgentEngineEvent::TurnPaused { model_steps: recovery.last_model_step(), reason: "EXECUTION_ATTACH_FAILED".into() }
+        } else {
+            AgentEngineEvent::TurnFailed { model_steps: 0, message: "Recovery could not attach an uninitialized runtime".into() }
+        };
+        self.append(serde_json::to_string(&event).map_err(failure)?, None, EngineJournalWrite::Terminal).await
+    }
+
+    pub(super) async fn verify_execution_lease(&self) -> Result<(), AppError> {
+        self.0.store.verify_native_execution(&self.0.lease).await.map_err(failure)
+    }
+
+    fn start_heartbeat(&self) {
+        let weak = Arc::downgrade(&self.0);
+        let cancellation = self.0.cancellation.clone();
+        let task = tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! { biased; _ = cancellation.cancelled() => break, _ = ticks.tick() => {} }
+                let Some(journal) = weak.upgrade() else { break; };
+                if journal.cursor.lock().await.terminal { break; }
+                match journal.store.heartbeat_native_execution(&journal.lease).await {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(nomifun_agent_session::SessionStoreError::ExecutionFenced) => { cancellation.cancel(); break; }
+                    Err(_) => tracing::warn!("native execution heartbeat could not be committed"),
+                }
+            }
+        });
+        *self.0.heartbeat.lock().unwrap_or_else(|error| error.into_inner()) = Some(task);
     }
 
     pub fn sequence(&self) -> u64 {
         self.0.sequence.load(Ordering::Acquire)
     }
 
+    pub(super) fn matches_generation(&self, generation: u64) -> bool { self.generation() == generation }
+
+    pub(super) async fn refresh_budget(&self) -> Result<(), AppError> {
+        let budget = self.0.store.native_execution_budget(&self.0.lease).await.map_err(failure)?;
+        self.0.cursor.lock().await.budget = budget;
+        Ok(())
+    }
+
+    pub async fn execution_pressure(&self) -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
+        use nomifun_agent_runtime::{AgentExecutionPressure, AgentExecutionStopReason};
+        let journal = &self.0;
+        let payload_bytes = journal.store.native_payload_bytes(&journal.lease).await.map_err(failure)?;
+        let pause_requested = journal.store.native_pause_requested(&journal.lease).await.map_err(failure)?;
+        let cursor = journal.cursor.lock().await;
+        if cursor.uncertain || cursor.terminal || cursor.draining { return Err(failure("execution budget requested on closed journal")); }
+        Ok(AgentExecutionPressure {
+            // Leave room for the next bounded model/tool batch and its
+            // checkpoint; settlement/cleanup also have a separate reserve.
+            renew_window: cursor.sequence.saturating_sub(cursor.window_start_sequence) >= 2400 || cursor.bytes >= nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES / 2,
+            stop: if pause_requested {
+                Some(AgentExecutionStopReason::UserRequested)
+            } else if cursor.total_bytes as u64 >= cursor.budget.journal_bytes.saturating_sub(4 * 1024 * 1024)
+                || cursor.sequence >= cursor.budget.journal_records.saturating_sub(12_000) {
+                Some(AgentExecutionStopReason::TurnJournalBudget)
+            } else if payload_bytes >= cursor.budget.session_payload_bytes.saturating_sub(4 * 1024 * 1024) {
+                Some(AgentExecutionStopReason::SessionPayloadBudget)
+            } else { None },
+        })
+    }
+
+    pub async fn save_execution_checkpoint(
+        &self, checkpoint: nomifun_agent_runtime::AgentExecutionCheckpoint,
+        owner: nomifun_agent_contracts::PrincipalRef,
+    ) -> Result<Option<nomifun_agent_runtime::AgentCheckpointReceipt>, AppError> {
+        checkpoint.validate().map_err(failure)?;
+        let journal = self.0.clone();
+        if checkpoint.binding.agent_session_id() != &journal.session
+            || checkpoint.turn_operation_id != journal.operation
+            || checkpoint.binding.resolved_snapshot_ref() != &journal.snapshot
+            || owner.principal_id != journal.user
+        { return Err(failure("checkpoint differs from admitted journal authority")); }
+        let state = serde_json::to_value(&checkpoint).map_err(failure)?;
+        let state_bytes = canonical_json_bytes(&state).map_err(failure)?;
+        let digest = digest_bytes(&state_bytes);
+        let permit = journal.pending.clone().try_acquire_owned().map_err(|_| failure("pending checkpoint bound reached"))?;
+        let byte_permit = journal.pending_bytes.clone().try_acquire_many_owned(state_bytes.len() as u32)
+            .map_err(|_| failure("pending checkpoint byte bound reached"))?;
+        let task = tokio::spawn(async move {
+            let _permit = permit;
+            let _byte_permit = byte_permit;
+            let mut cursor = journal.cursor.lock().await;
+            if cursor.uncertain || cursor.terminal || cursor.draining || journal.cancellation.is_cancelled() {
+                return Err(failure("journal no longer admits a checkpoint"));
+            }
+            let next = cursor.sequence.checked_add(1).ok_or_else(|| failure("journal sequence exhausted"))?;
+            let revision = cursor.checkpoint_revision.checked_add(1).ok_or_else(|| failure("checkpoint revision exhausted"))?;
+            let metadata = serde_json::to_value(AgentEngineEvent::ExecutionCheckpointSaved {
+                step: checkpoint.model_steps, revision, digest,
+            }).map_err(failure)?;
+            let payload = json!({"runtime_binding_id":format!("nomi:{}",journal.session.as_ref()),
+                "producer_seq":next,"event":metadata});
+            let metadata_bytes = canonical_json_bytes(&payload).map_err(failure)?.len();
+            let segment = checkpoint.segments.as_ref().map_or(0, |state| state.segment);
+            if segment != cursor.segment && segment != cursor.segment.saturating_add(1) {
+                return Err(failure("checkpoint cannot skip or rewind execution windows"));
+            }
+            let renew_window = cursor.segment > 0 && segment == cursor.segment + 1;
+            if renew_window && checkpoint.segments.as_ref().is_none_or(|state| state.segment_start_step != checkpoint.model_steps) {
+                return Err(failure("execution window renewal needs this exact checkpoint boundary"));
+            }
+            if next.saturating_sub(cursor.window_start_sequence) > 3200 || cursor.bytes.saturating_add(metadata_bytes) > nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES
+                || cursor.total_bytes.saturating_add(metadata_bytes) as u64 > cursor.budget.journal_bytes || next > cursor.budget.journal_records {
+                return Err(failure("bounded evidence journal exhausted before checkpoint"));
+            }
+            let identity = format!("runtime-progress:{}:{}:{next}",journal.session.as_ref(),journal.operation.as_ref());
+            let append = SessionEventAppend {
+                agent_session_id: journal.session.clone(), event_id: EventId::from(identity.clone()),
+                producer_id: EventProducerId::from("runtime_supervisor"), idempotency_key: IdempotencyKey::from(identity),
+                runtime_binding_id: None, runtime_producer_seq: None,
+                semantic_event: SemanticSessionEventDraft {
+                    kind: SessionEventKind("runtime/progress-recorded".into()), kind_version: 1,
+                    correlation_id: CorrelationId::from(journal.operation.as_ref()), causation_event_id: Some(journal.root.clone()),
+                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(payload)),
+                },
+            };
+            cursor.uncertain = true;
+            let saved = journal.store.save_native_checkpoint(&append, nomifun_agent_session::NativeCheckpointWrite {
+                owner, operation_id: journal.operation.clone(), snapshot: journal.snapshot.clone(),
+                active_set_generation: checkpoint.active_set_generation,
+                expected_revision: cursor.checkpoint_revision, execution_fence: journal.lease.fence(),
+                lease: Some(journal.lease.clone()), state: StrictJsonValue(state),
+            }).await;
+            let saved = match saved {
+                Ok(saved) => saved,
+                Err(nomifun_agent_session::SessionStoreError::CheckpointNotQuiescent) => {
+                    cursor.uncertain = false;
+                    return Ok(None);
+                }
+                Err(error) => return Err(failure(error)),
+            };
+            cursor.sequence = next;
+            cursor.checkpoint_revision = saved.revision;
+            cursor.segment = segment;
+            cursor.total_bytes += metadata_bytes;
+            if renew_window {
+                cursor.window_start_sequence = next;
+                cursor.bytes = 0;
+            } else { cursor.bytes += metadata_bytes; }
+            cursor.uncertain = false;
+            journal.sequence.store(next, Ordering::Release);
+            Ok(Some(nomifun_agent_runtime::AgentCheckpointReceipt {
+                revision: saved.revision, through_seq: saved.through_seq, digest: saved.digest,
+            }))
+        });
+        task.await.map_err(failure)?
+    }
+
     async fn append_progress(
         journal: &Journal,
         cursor: &Cursor,
         event: &Value,
+        kind: EngineJournalWrite,
     ) -> Result<(), AppError> {
         let next = cursor.sequence.saturating_add(1);
         let value = json!({
@@ -308,11 +580,11 @@ impl EngineTurnJournal {
                 payload: payload_ref,
             },
         };
-        journal
-            .store
-            .append_event_with_payload(&append, payload.as_ref())
-            .await
-            .map_err(failure)?;
+        if kind == EngineJournalWrite::Progress {
+            journal.store.append_native_event(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?;
+        } else {
+            journal.store.append_native_observation(&journal.lease, &append, payload.as_ref()).await.map_err(failure)?;
+        }
         Ok(())
     }
 
@@ -332,7 +604,7 @@ impl EngineTurnJournal {
             }
             let completed = Self::assistant_completion_event(journal, &previous);
             let completed_id = completed.event_id.clone();
-            journal.store.append_event(&completed).await.map_err(failure)?;
+            journal.append_projection(&completed).await.map_err(failure)?;
             cursor.last_assistant_event_id = Some(completed_id);
         }
         if cursor.assistant_step.is_none() {
@@ -377,7 +649,7 @@ impl EngineTurnJournal {
                 }))),
             },
         };
-        journal.store.append_event(&append).await.map_err(failure)?;
+        journal.append_projection(&append).await.map_err(failure)?;
         current.parts = part;
         current.text.extend_from_slice(text.as_bytes());
         current.last_event_id = Some(event_id.clone());
@@ -459,7 +731,7 @@ impl EngineTurnJournal {
         };
         journal
             .store
-            .append_event_with_payload(&append, payload.as_ref())
+            .append_native_observation(&journal.lease, &append, payload.as_ref())
             .await
             .map_err(failure)?;
         *previous_parts = part;
@@ -505,8 +777,7 @@ impl EngineTurnJournal {
                     .or_insert_with(|| Uuid::now_v7().to_string())
                     .clone();
                 journal
-                    .store
-                    .append_event(&SessionEventAppend {
+                    .append_projection(&SessionEventAppend {
                         agent_session_id: journal.session.clone(),
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
@@ -552,8 +823,7 @@ impl EngineTurnJournal {
                     .cloned()
                     .ok_or_else(|| failure("host tool settlement has no admitted projection"))?;
                 journal
-                    .store
-                    .append_event(&SessionEventAppend {
+                    .append_projection(&SessionEventAppend {
                         agent_session_id: journal.session.clone(),
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
@@ -598,8 +868,7 @@ impl EngineTurnJournal {
                     .or_insert_with(|| Uuid::now_v7().to_string())
                     .clone();
                 journal
-                    .store
-                    .append_event(&SessionEventAppend {
+                    .append_projection(&SessionEventAppend {
                         agent_session_id: journal.session.clone(),
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
@@ -638,8 +907,7 @@ impl EngineTurnJournal {
                     .cloned()
                     .ok_or_else(|| failure("host resource settlement has no admitted projection"))?;
                 journal
-                    .store
-                    .append_event(&SessionEventAppend {
+                    .append_projection(&SessionEventAppend {
                         agent_session_id: journal.session.clone(),
                         event_id: EventId::from(identity.clone()),
                         producer_id: EventProducerId::from("runtime_supervisor"),
@@ -674,6 +942,13 @@ impl EngineTurnJournal {
         event: &AgentEngineEvent,
     ) -> Result<(), AppError> {
         match event {
+            AgentEngineEvent::TurnPaused { reason, .. } => {
+                if let Some(step) = cursor.assistant_step.as_ref() {
+                    journal.append_projection(&Self::assistant_completion_event(journal, step)).await.map_err(failure)?;
+                }
+                journal.store.pause_native_execution(&journal.lease, reason, true).await.map_err(failure)?;
+                Ok(())
+            }
             AgentEngineEvent::TurnCancelled { .. } => {
                 let receipt = journal
                     .store
@@ -681,25 +956,23 @@ impl EngineTurnJournal {
                     .await
                     .map_err(failure)?;
                 if receipt.status != TurnReceiptStatus::Cancelled {
-                    journal
-                        .store
-                        .cancel_active_turn(
-                            &journal.session,
-                            IdempotencyKey::from(format!(
-                                "runtime-cancel:{}:{}",
-                                journal.session.as_ref(),
-                                journal.operation.as_ref(),
-                            )),
-                            EventProducerId::from("runtime_supervisor"),
-                        )
-                        .await
-                        .map_err(failure)?;
+                    let identity = format!("runtime-cancel:{}:{}", journal.session.as_ref(), journal.operation.as_ref());
+                    journal.store.append_native_event(&journal.lease, &SessionEventAppend {
+                        agent_session_id: journal.session.clone(), event_id: identity.clone().into(),
+                        producer_id: "runtime_supervisor".into(), idempotency_key: identity.into(),
+                        runtime_binding_id: None, runtime_producer_seq: None,
+                        semantic_event: SemanticSessionEventDraft {
+                            kind: SessionEventKind("turn/cancelled".into()), kind_version: 1,
+                            correlation_id: journal.operation.as_ref().into(), causation_event_id: Some(journal.turn_started.clone()),
+                            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"operation_id":journal.operation}))),
+                        },
+                    }, None).await.map_err(failure)?;
                 }
                 Ok(())
             }
             AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. } => {
                 let empty_step = AssistantStepCursor {
-                    step: 1,
+                    step: cursor.empty_response_step.unwrap_or(1),
                     message_id: cursor
                         .assistant_message_id
                         .clone()
@@ -761,7 +1034,7 @@ impl EngineTurnJournal {
                 };
                 journal
                     .store
-                    .append_chat_completion(&message, &turn, &journal.operation)
+                    .append_native_chat_completion(&journal.lease, &message, &turn)
                     .await
                     .map_err(failure)?;
                 Ok(())
@@ -825,14 +1098,18 @@ impl EngineTurnJournal {
             let (records, bytes) = if reserved {
                 (4095_u64, 8 * 1024 * 1024)
             } else {
-                (3200_u64, 4 * 1024 * 1024)
+                (3200_u64, nomifun_agent_contracts::MAX_NATIVE_JOURNAL_WINDOW_BYTES)
             };
-            let next_bytes = cursor.bytes.saturating_add(payload.len());
-            if cursor.sequence >= records || next_bytes > bytes {
+            let accounted_bytes = payload.len().saturating_add(256);
+            let next_bytes = cursor.bytes.saturating_add(accounted_bytes);
+            let next_total_bytes = cursor.total_bytes.saturating_add(accounted_bytes);
+            let total_limit = cursor.budget.journal_bytes.saturating_add(if reserved { 4 * 1024 * 1024 } else { 0 });
+            if cursor.sequence.saturating_sub(cursor.window_start_sequence) >= records || next_bytes > bytes
+                || next_total_bytes as u64 > total_limit || cursor.sequence >= cursor.budget.journal_records.saturating_add(if reserved { 4000 } else { 0 }) {
                 return Err(failure("bounded evidence journal exhausted"));
             }
             cursor.uncertain = true;
-            Self::append_progress(&journal, &cursor, &event_value).await?;
+            Self::append_progress(&journal, &cursor, &event_value, kind).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
             if let Some(AgentEngineEvent::OutputTextDelta { step, text }) = &runtime_event {
                 Self::append_assistant_part(&journal, &mut cursor, *step, text).await?;
@@ -850,6 +1127,7 @@ impl EngineTurnJournal {
             }
             cursor.sequence = cursor.sequence.saturating_add(1);
             cursor.bytes = next_bytes;
+            cursor.total_bytes = next_total_bytes;
             cursor.draining |= matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal);
             cursor.terminal = kind == EngineJournalWrite::Terminal;
             cursor.uncertain = false;
@@ -895,7 +1173,7 @@ impl ChatCausalityGate for EngineTurnJournal {
         }
         journal
             .store
-            .claim_chat_operation(ChatOperationClaimRequest {
+            .claim_native_chat_operation(&journal.lease, ChatOperationClaimRequest {
                 agent_session_id: journal.session.clone(),
                 operation_id: causality.operation_id.clone(),
                 turn_operation_id: journal.operation.clone(),
@@ -1005,8 +1283,14 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
         .unwrap();
     let root = message.record.unwrap().event_id;
     let turn_started = turn.record.as_ref().unwrap().event_id.clone();
+    let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
+        owner: owner.clone(), agent_session_id: session_id.clone(), operation_id: "turn".into(),
+        snapshot: binding.resolved_snapshot_ref.clone(), active_set_generation: 0,
+        holder: Uuid::now_v7().to_string(), expected_fence: 0, checkpoint: None,
+    }).await.unwrap();
     let journal = EngineTurnJournal(Arc::new(Journal {
-        store,
+        store, lease, heartbeat: Default::default(), cancellation_link: Default::default(),
+        attachment: AtomicU8::new(0), attached_notify: Default::default(), recovery: None,
         user: owner.principal_id,
         session: session_id,
         operation: OperationId::from("turn"),
@@ -1025,9 +1309,42 @@ pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool
 }
 
 #[cfg(test)]
+#[path = "engine_journal_reliability_tests.rs"]
+mod reliability_tests;
+
+#[cfg(test)]
 mod history_display_tests {
     use super::*;
     use super::super::runtime_event_buffer::AgentEventBuffer;
+
+    #[tokio::test]
+    async fn checkpoint_uses_the_production_journal_and_disappears_on_completion() {
+        use nomifun_agent_runtime::{AgentExecutionCheckpoint, EngineBinding};
+        let (journal, pool) = test_fixture().await;
+        let owner = nomifun_agent_contracts::PrincipalRef { principal_kind: "user".into(), principal_id: journal.0.user.clone() };
+        let checkpoint = AgentExecutionCheckpoint {
+            version: 1,
+            binding: EngineBinding::new(journal.0.session.clone(), "native-binding".into(), "test".into(), "a".repeat(64).into(), journal.0.snapshot.clone()).unwrap(),
+            turn_operation_id: journal.0.operation.clone(), active_set_generation: 0,
+            model_steps: 0, tool_call_count: 0, accepted_input_count: 1, applied_steering_receipts: vec![],
+            plan: Default::default(), work: Default::default(), patch_recovery: Default::default(),
+            segments: None, control_rejections: Default::default(),
+        };
+        let receipt = journal.save_execution_checkpoint(checkpoint.clone(), owner.clone()).await.unwrap().unwrap();
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(journal.sequence(), 1);
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let saved = store.load_native_checkpoint(&owner, &journal.0.session, &journal.0.operation).await.unwrap().unwrap();
+        let restored: AgentExecutionCheckpoint = serde_json::from_value(saved.state.0).unwrap();
+        assert_eq!(restored, checkpoint);
+        assert_eq!(receipt.through_seq, saved.through_seq);
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup).await.unwrap();
+        assert!(journal.save_execution_checkpoint(checkpoint, owner.clone()).await.is_err());
+        journal.append(serde_json::to_string(&AgentEngineEvent::TurnCompleted {
+            model_steps: 0, finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+        }).unwrap(), None, EngineJournalWrite::Terminal).await.unwrap();
+        assert!(store.load_native_checkpoint(&owner, &journal.0.session, &journal.0.operation).await.unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn public_progress_keeps_model_steps_separate_across_tool_history() {
@@ -1061,7 +1378,7 @@ mod history_display_tests {
             journal.append(event.to_string(), None, EngineJournalWrite::Progress)
                 .await.unwrap();
         }
-        journal.append(json!({"phase":"cleanup"}).to_string(), None, EngineJournalWrite::Cleanup)
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup)
             .await.unwrap();
         journal.append(
             serde_json::to_string(&AgentEngineEvent::TurnCompleted {
@@ -1095,7 +1412,7 @@ mod history_display_tests {
     #[tokio::test]
     async fn engine_step_limit_projects_a_local_incomplete_turn_error() {
         let (journal, pool) = test_fixture().await;
-        journal.append(json!({"phase":"cleanup"}).to_string(), None, EngineJournalWrite::Cleanup)
+        journal.append(json!({"event":"host_cleanup_proven"}).to_string(), None, EngineJournalWrite::Cleanup)
             .await.unwrap();
         let terminal = AgentEngineEvent::TurnFailed {
             model_steps: 32,

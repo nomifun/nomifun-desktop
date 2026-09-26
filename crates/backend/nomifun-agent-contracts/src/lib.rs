@@ -53,5 +53,7 @@ pub use schema::{
     agent_store_schema_manifest_payload,
 };
 pub use session::*;
+mod native_execution;
+pub use native_execution::*;
 pub use supervision::*;
 pub use validation::*;

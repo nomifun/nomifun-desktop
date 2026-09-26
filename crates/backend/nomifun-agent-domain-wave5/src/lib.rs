@@ -2444,6 +2444,11 @@ mod tests {
         })));
         assert!(validator.is_valid(&serde_json::json!({
             "strategy": "parallel",
+            "tasks": [{"name":"marker","prompt":"Reply with the exact marker"}],
+            "synthesize": false
+        })), "the live single-child/no-synthesis contract must be accepted exactly");
+        assert!(validator.is_valid(&serde_json::json!({
+            "strategy": "parallel",
             "tasks": [
                 {"name": "upstream-a", "prompt": "produce A"},
                 {

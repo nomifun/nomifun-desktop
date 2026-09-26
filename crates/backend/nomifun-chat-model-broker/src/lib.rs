@@ -17,6 +17,7 @@ pub mod production;
 mod provider_errors;
 mod provider_reasoning;
 mod responses_decoder;
+mod retry;
 mod wire_budget;
 pub mod recorded;
 pub mod responses_bridge;

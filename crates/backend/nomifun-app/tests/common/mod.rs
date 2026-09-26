@@ -1,6 +1,8 @@
 //! Shared test helpers for nomifun-app E2E tests.
 #![allow(dead_code)]
 
+pub mod native_reliability_capture;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;

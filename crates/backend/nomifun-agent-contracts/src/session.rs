@@ -1,5 +1,15 @@
 use std::collections::BTreeSet;
 
+pub const MAX_NATIVE_EXECUTION_CHECKPOINT_BYTES: usize = 256 * 1024;
+// Writer, recovery and closed-history readers share these ceilings. A
+// segment rollover never makes a Turn too large for its own recovery codec.
+pub const MAX_NATIVE_JOURNAL_WINDOW_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_NATIVE_JOURNAL_PROGRESS_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_NATIVE_JOURNAL_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+pub const MAX_NATIVE_JOURNAL_RECORDS: u64 = 64_000;
+pub const MAX_NATIVE_REPLAY_BYTES: usize = 24 * 1024 * 1024;
+pub const MAX_NATIVE_HISTORY_WINDOW_BYTES: usize = 160 * 1024 * 1024;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +87,7 @@ pub struct AgentHandoffPlanStepV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentHandoffPlanV1 {
-    pub revision: u16,
+    pub revision: u32,
     pub explanation: String,
     pub steps: Vec<AgentHandoffPlanStepV1>,
     pub needs_replan: bool,
@@ -98,7 +108,7 @@ pub struct AgentHandoffCompletionCriterionV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentHandoffCompletionAccountV1 {
-    pub plan_revision: u16,
+    pub plan_revision: u32,
     pub observation_revision: u32,
     pub workspace_epoch: u32,
     pub summary: String,
@@ -177,24 +187,27 @@ impl AgentHandoffEnvelopeV1 {
         let bounded = |value: &str, maximum: usize| {
             !value.trim().is_empty() && value.len() <= maximum && value == value.trim()
         };
+        let bounded_text = |value: &str, maximum: usize| {
+            !value.trim().is_empty() && value.chars().count() <= maximum && value == value.trim()
+        };
         let mut requirement_ids = BTreeSet::new();
         let mut artifact_ids = BTreeSet::new();
         if self.requirements.iter().any(|item| {
             !bounded(&item.id, 64)
                 || !requirement_ids.insert(item.id.as_str())
-                || !bounded(&item.description, 512)
-                || item.source.quote.len() > 512
+                || !bounded_text(&item.description, 512)
+                || item.source.quote.chars().count() > 512
                 || item.origin.as_ref().is_some_and(|origin| {
                     !bounded(&origin.turn_operation_id, 1024)
                         || !bounded(&origin.requirement_id, 64)
-                        || origin.source.quote.len() > 512
+                        || origin.source.quote.chars().count() > 512
                 })
             })
             || self.last_plan.as_ref().is_some_and(|plan| {
                 plan.revision == 0
-                    || plan.explanation.len() > 2048
+                    || plan.explanation.chars().count() > 2048
                     || plan.steps.iter().any(|step| {
-                        !bounded(&step.step, 512)
+                        !bounded_text(&step.step, 512)
                             || !matches!(
                                 step.status.as_str(),
                                 "pending" | "in_progress" | "completed" | "blocked"
@@ -205,14 +218,14 @@ impl AgentHandoffEnvelopeV1 {
                 .historical_completion_account
                 .as_ref()
                 .is_some_and(|account| {
-                    account.summary.len() > 2048
+                    account.summary.chars().count() > 2048
                         || account.criteria.iter().any(|criterion| {
-                            !bounded(&criterion.step, 512)
+                            !bounded_text(&criterion.step, 512)
                                 || !matches!(
                                     criterion.disposition.as_str(),
                                     "supported" | "unverified" | "blocked" | "scope_changed"
                                 )
-                                || !bounded(&criterion.rationale, 1024)
+                                || !bounded_text(&criterion.rationale, 1024)
                                 || criterion.evidence_call_ids.len() > 8
                                 || criterion.requirement_ids.len() > 32
                         })
@@ -570,6 +583,34 @@ mod agent_handoff_tests {
             .unwrap()
             .insert("old_system_prompt".to_owned(), serde_json::json!("forbidden"));
         assert!(serde_json::from_value::<AgentHandoffEnvelopeV1>(wire).is_err());
+    }
+
+    #[test]
+    fn long_task_revisions_and_unicode_fields_survive_handoff_serialization() {
+        let mut value = envelope();
+        value.requirements[0].description = "需求".repeat(256);
+        value.requirements[0].source.quote = "来源".repeat(256);
+        value.last_plan = Some(AgentHandoffPlanV1 {
+            revision: 65_536,
+            explanation: "解释".repeat(1024),
+            steps: vec![AgentHandoffPlanStepV1 { step: "步骤".repeat(256), status: "completed".into() }],
+            needs_replan: false,
+        });
+        value.historical_completion_account = Some(AgentHandoffCompletionAccountV1 {
+            plan_revision: 65_536, observation_revision: 1, workspace_epoch: 0,
+            summary: "总结".repeat(1024),
+            criteria: vec![AgentHandoffCompletionCriterionV1 {
+                step: "步骤".repeat(256), disposition: "unverified".into(),
+                rationale: "原因".repeat(512), evidence_call_ids: vec![],
+                requirement_ids: vec!["req-1".into()], scope_change: None,
+            }],
+        });
+        value.validate().unwrap();
+        let restored: AgentHandoffEnvelopeV1 = serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+        restored.validate().unwrap();
+        assert_eq!(restored, value);
+        value.requirements[0].source.quote.push('超');
+        assert!(value.validate().is_err());
     }
 
     #[test]

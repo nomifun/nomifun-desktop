@@ -229,6 +229,7 @@ impl FileService {
     ) -> Result<bool, AppError> {
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         let path = scope.resolve_relative_path(relative_path)?;
+        let path = crate::workspace_write::prepare_parent(&path, scope.workspace_root())?;
         let workspace = scope.workspace_root().to_string_lossy();
         self.write_file_impl(
             scope.owner_id(),
@@ -616,7 +617,10 @@ impl FileService {
                 path
             )).into());
         }
-        let canonical = validate_path_for_write_authority(&path, authority)?;
+        let canonical = match authority {
+            PathAuthority::Workspace(root) => crate::workspace_write::prepare_parent(&file.path, root)?,
+            _ => validate_path_for_write_authority(&path, authority)?,
+        };
         if canonical != file.path {
             return Err(AppError::Conflict(format!(
                 "patch target '{}' changed identity before publication",
@@ -1051,7 +1055,7 @@ fn validate_agent_patch_target(
 ) -> Result<(PathBuf, bool), AppError> {
     let candidate = scope.resolve_relative_path(relative_path)?;
     let candidate_string = candidate.to_string_lossy();
-    let write_candidate = validate_path_for_write_authority(&candidate_string, authority)?;
+    let write_candidate = crate::workspace_write::validate_target(&candidate, scope.workspace_root())?;
 
     // A final symlink is rejected instead of being followed. The parent was
     // canonicalized by the write validator, but following a final symlink
@@ -3493,6 +3497,119 @@ mod tests {
 
         let parent = std::path::Path::new(&a).parent().unwrap().to_path_buf();
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[tokio::test]
+    async fn agent_write_creates_nested_project_without_a_shell_mkdir() {
+        let root = tempfile::tempdir().unwrap();
+        let svc = make_service();
+        let scope = patch_scope(root.path());
+        for (path, content) in [
+            ("gomoku/index.html", "<!DOCTYPE html>\n<title>五子棋</title>\n"),
+            ("gomoku/assets/game.js", "const size = 15;\n"),
+            ("gomoku/index.html", "<!DOCTYPE html>\n<title>Gomoku</title>\n"),
+        ] {
+            svc.write_file_for_agent_session(&scope, path, content.as_bytes()).await.unwrap();
+            assert_eq!(fs::read_to_string(root.path().join(path)).unwrap(), content);
+            assert_eq!(svc.read_file_for_agent_session(&scope, path).await.unwrap().as_deref(), Some(content));
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_search_accepts_root_spellings_without_broadening_mutation_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("game.html"), "五子棋 needle").unwrap();
+        let svc = make_service();
+        let scope = patch_scope(root.path());
+        for path in [None, Some(""), Some(".")] {
+            let result = svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
+                query: "五子棋".into(), path: path.map(str::to_owned), limit: Some(50),
+            }).await.unwrap();
+            assert_eq!(result.matches.len(), 1);
+            assert_eq!(result.matches[0].path, "game.html");
+        }
+        for path in ["..", "../outside", "./game.html", ".nomifun"] {
+            assert!(svc.search_text_for_agent_session(&scope, crate::AgentTextSearchRequest {
+                query: "needle".into(), path: Some(path.into()), limit: None,
+            }).await.is_err());
+        }
+        assert!(scope.resolve_relative_path(".").is_err());
+    }
+
+    fn nested_creation_patch(path: &str) -> AgentSessionFilePatch {
+        AgentSessionFilePatch {
+            path: path.into(),
+            expected_source: crate::AgentSessionPatchSource::Absent,
+            hunks: vec![replace_hunk(0, 0, 1, 1, vec![
+                AgentSessionPatchLine::Add { text: "<!DOCTYPE html>".into() },
+            ])],
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_patch_creates_nested_parents_only_after_whole_batch_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let svc = make_service();
+        let scope = patch_scope(root.path());
+        let first = nested_creation_patch("gomoku/index.html");
+        let mut bad = nested_creation_patch("other/nested/index.html");
+        bad.hunks[0].new_lines = 0; // The rejected hunk in the original dev trace.
+        let failure = svc.apply_patch_with_observation_for_agent_session(&scope,
+            AgentSessionPatchRequest { files: vec![first.clone(), bad] }).await.unwrap_err();
+        assert!(failure.observation.published.is_empty());
+        assert!(!root.path().join("gomoku").exists());
+        assert!(!root.path().join("other").exists());
+
+        let result = svc.apply_patch_for_agent_session(&scope,
+            AgentSessionPatchRequest { files: vec![first, nested_creation_patch("other/nested/index.html")] })
+            .await.unwrap();
+        assert_eq!(result.file_count, 2);
+        for path in ["gomoku/index.html", "other/nested/index.html"] {
+            assert_eq!(fs::read_to_string(root.path().join(path)).unwrap(), "<!DOCTYPE html>");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_nested_creation_preserves_invalid_parents_and_workspace_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let svc = make_service();
+        let scope = patch_scope(root.path());
+        fs::write(root.path().join("existing"), "keep").unwrap();
+        for path in ["existing/nested/index.html", ".nomifun/new/index.html", "../escape/index.html"] {
+            assert!(svc.write_file_for_agent_session(&scope, path, b"wrong").await.is_err());
+            assert!(svc.apply_patch_for_agent_session(&scope,
+                AgentSessionPatchRequest { files: vec![nested_creation_patch(path)] }).await.is_err());
+        }
+        assert_eq!(fs::read_to_string(root.path().join("existing")).unwrap(), "keep");
+        assert!(!root.path().join(".nomifun").exists());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn agent_nested_creation_rejects_outside_and_owner_aliases() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join(".nomifun")).unwrap();
+        fs::create_dir(root.path().join("inside")).unwrap();
+        let svc = make_service();
+        let scope = patch_scope(root.path());
+        for (alias, destination, allowed) in [
+            ("outside-alias", outside.path().to_path_buf(), false),
+            ("owner-alias", root.path().join(".nomifun"), false),
+            ("inside-alias", root.path().join("inside"), true),
+        ] {
+            #[cfg(windows)]
+            junction::create(&destination, root.path().join(alias)).unwrap();
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&destination, root.path().join(alias)).unwrap();
+            let written = svc.write_file_for_agent_session(&scope, &format!("{alias}/new/write.html"), b"ok").await;
+            let patched = svc.apply_patch_for_agent_session(&scope, AgentSessionPatchRequest {
+                files: vec![nested_creation_patch(&format!("{alias}/new/patch.html"))],
+            }).await;
+            assert_eq!(written.is_ok(), allowed, "{alias}: {written:?}");
+            assert_eq!(patched.is_ok(), allowed, "{alias}: {patched:?}");
+            assert_eq!(destination.join("new").exists(), allowed);
+        }
     }
 
     fn patch_scope(root: &std::path::Path) -> AgentSessionWorkspaceBinding {

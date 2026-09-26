@@ -43,6 +43,9 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-control-plane/src/kernel_catalog.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/engine_features.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/runtime.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/session.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/native_execution.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/schema.rs"),
                     include_str!("../../../nomifun-agent-contracts/src/package.rs"),
                     include_str!("../../../nomifun-agent-contracts/contracts/engine/platform-feature-inventory.payload.json"),
                     include_str!("agent_wave1_host.rs"),
@@ -53,7 +56,12 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("remote_runtime.rs"),
                     include_str!("../../../nomifun-public/src/canonical.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/engine.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/checkpoint.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/recovery.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/reconciliation.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/segments.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/adaptive.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/execution_policy.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/error.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/turn.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/kernel.rs"),
@@ -69,6 +77,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-runtime/src/context.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/context_lifecycle.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/output_limit.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/protocol_recovery.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/live_context.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/compaction.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/compaction_source.rs"),
@@ -82,11 +91,13 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-agent-runtime/src/task_continuation.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/completion.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/lib.rs"),
+                    include_str!("../../../nomifun-agent-domain-wave5/src/lib.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/process_schema.rs"),
                     include_str!("../../../nomifun-agent-domain-wave2/src/workspace_schema.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/history.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/tool.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/tool_dispatch.rs"),
+                    include_str!("../../../nomifun-agent-runtime/src/tool_validation.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/tool_archive.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/history_port.rs"),
                     include_str!("runtime_history_port.rs"),
@@ -100,6 +111,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-engine-core/src/lib.rs"),
                     include_str!("../../../nomifun-engine-core/src/error.rs"),
                     include_str!("../../../nomifun-engine-core/src/tool.rs"),
+                    include_str!("../../../nomifun-engine-core/src/tool_schema.rs"),
                     include_str!("../../../nomifun-engine-core/src/kernel.rs"),
                     include_str!("../../../nomifun-engine-core/src/process.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/engine_port.rs"),
@@ -112,6 +124,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-model-invoke/src/chat_deadline.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/adapter.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/broker.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/retry.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/provider_errors.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/responses_decoder.rs"),
                     include_str!("../../../nomifun-chat-model-broker/src/anthropic_decoder.rs"),
@@ -129,6 +142,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_process_recovery.rs"),
                     include_str!("runtime_event_buffer.rs"),
                     include_str!("agent_tool_surface.rs"),
+                    include_str!("agent_tool_presentation.rs"),
                     include_str!("runtime_capabilities.rs"),
                     include_str!("runtime_steering.rs"),
                     include_str!("../../../nomifun-agent-runtime/src/steering.rs"),
@@ -214,10 +228,14 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("../../../nomifun-file/src/agent_text_search.rs"),
                     include_str!("../../../nomifun-file/src/resource.rs"),
                     include_str!("../../../nomifun-file/src/path_safety.rs"),
+                    include_str!("../../../nomifun-file/src/workspace_write.rs"),
                     include_str!("../../../nomifun-file/src/snapshot_service/mod.rs"),
                     include_str!("../../../nomifun-file/src/snapshot_service/helpers.rs"),
                     include_str!("unified_runtime_host.rs"),
                     include_str!("engine_session_host.rs"),
+                    include_str!("engine_recovery.rs"),
+                    include_str!("native_turn_recovery.rs"),
+                    include_str!("native_execution_control.rs"),
                     include_str!("engine_journal.rs"),
                     include_str!("engine_model_facts.rs"),
                     include_str!("engine_tool_host.rs"),
@@ -225,6 +243,15 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_plugin_bindings.rs"),
                     include_str!("../../../nomifun-ai-agent/src/engine_effect_scope.rs"),
                     include_str!("../../../nomifun-agent-session/src/store.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_checkpoint.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_execution.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_pause.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_effect_reconciliation.rs"),
+                    include_str!("../../../nomifun-agent-session/src/native_recovery.rs"),
+                    include_str!("../../../nomifun-agent-session/src/projector.rs"),
+                    include_str!("../../../nomifun-db/migrations/005_native_execution_checkpoints.sql"),
+                    include_str!("../../../nomifun-db/migrations/006_native_execution_leases.sql"),
+                    include_str!("../../../nomifun-db/migrations/007_native_pause_resume.sql"),
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
@@ -296,6 +323,9 @@ pub(crate) fn factory(
             let full_plan = full_plan.merged(&resources.plugin_action_tool_plan().await?).map_err(error)?;
             let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
             if full_plan.len() > 128 { return Err(error("Nomi tool surface exceeds 128 actions")); }
+            let full_plan = super::agent_tool_presentation::project(
+                full_plan, resources.tool_discovery_port()?.is_some(),
+            )?;
             let skills = session_host.read_selected_skills(&admitted).await?;
             let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone(), Arc::new(RuntimeToolObservation))?));
             let build = AgentEngineBuild {
@@ -407,15 +437,19 @@ impl ConversationRuntimeHost {
         cancellation: CancellationToken,
     ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
         let root = self.root(message);
-        let admitted = self.session_host.read_turn_receipt(
+        let mut admitted = self.session_host.read_turn_receipt(
             &self.options,
             &self.binding,
             &self.snapshot_ref,
             message,
         ).await?;
         let operation = admitted.operation_id().to_owned();
+        let journal = self.session_host.open_journal(&admitted, cancellation.clone()).await?;
+        if journal.generation() != admitted.admission_epoch() as u64 {
+            admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
+            journal.validate_receipt(&admitted)?;
+        }
         let epoch = admitted.admission_epoch();
-        let journal = self.session_host.open_journal(&admitted, cancellation.clone())?;
         let mut active = self.active.lock().await;
         if active.is_some() {
             return Err(error("previous turn has not reached its recorded terminal"));
@@ -433,10 +467,13 @@ impl ConversationRuntimeHost {
             event_buffer: Default::default(),
             assistant_text_by_step: BTreeMap::new(),
         });
+        journal.attach_runtime(active.as_ref().expect("published above").cancellation.clone())?;
+        *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
         drop(active);
         // EngineKernelSession retains its own partial-open state before any
         // owner can fail, so leaving ActiveTurn installed is intentional.
         self.resources.open_turn(&admitted, journal)?;
+        self.restore_recovery_steering().await?;
         Ok(admitted)
     }
 
@@ -476,6 +513,56 @@ impl ConversationRuntimeHost {
 
 #[async_trait]
 impl UnifiedRuntimeHost for ConversationRuntimeHost {
+    async fn recoverable_preparation_step(&self, message:&SendMessageData) -> Result<Option<u16>,AppError> {
+        let active = self.active.lock().await;
+        Ok(active.as_ref().filter(|turn| turn.root == self.root(message))
+            .and_then(|turn| turn.journal.recovery()).map(|recovery|recovery.last_model_step()))
+    }
+
+    async fn suspend_after_cleanup_failure(&self, message:&SendMessageData) -> Result<bool,AppError> {
+        let mut active = self.active.lock().await;
+        let Some(turn) = active.as_ref() else { return Ok(false); };
+        if turn.root != self.root(message) { return Err(error("cleanup suspension targets another Turn")); }
+        turn.journal.pause_with_unproven_cleanup().await?;
+        *self.last_terminal_root.lock().map_err(|_|error("terminal root state poisoned"))? = Some(turn.root.clone());
+        *active = None;
+        Ok(true)
+    }
+
+    fn supports_execution_checkpoints(&self) -> bool { true }
+
+    async fn execution_pressure(&self, message: &SendMessageData) -> Result<nomifun_agent_runtime::AgentExecutionPressure, AppError> {
+        let active = self.active.lock().await;
+        let turn = active.as_ref().ok_or_else(|| error("execution budget has no admitted Turn"))?;
+        if turn.root != self.root(message) || turn.cleanup_started { return Err(error("execution budget differs from the active Turn")); }
+        let mut pressure = turn.journal.execution_pressure().await?;
+        if pressure.stop.is_none() && self.resources.execution_window_near_limit()? {
+            pressure.stop = Some(nomifun_agent_runtime::AgentExecutionStopReason::DispatchWindow);
+        }
+        Ok(pressure)
+    }
+
+    async fn save_execution_checkpoint(&self, message: &SendMessageData, checkpoint: &AgentExecutionCheckpoint)
+        -> Result<Option<AgentCheckpointReceipt>, AppError> {
+        checkpoint.validate().map_err(error)?;
+        if checkpoint.binding != self.engine_binding || checkpoint.active_set_generation != self.capability_state.snapshot().map_err(error)?.generation {
+            return Err(error("checkpoint differs from the frozen runtime binding or live generation"));
+        }
+        let mut active = self.active.lock().await;
+        let turn = active.as_mut().ok_or_else(|| error("checkpoint has no admitted Turn"))?;
+        if turn.root != self.root(message) || turn.operation != checkpoint.turn_operation_id.as_ref()
+            || turn.cleanup_started || turn.cancellation.is_cancelled() {
+            return Err(error("checkpoint no longer belongs to the active Turn"));
+        }
+        if self.tools.has_unobserved()? { return Ok(None); }
+        let mut records = Vec::new();
+        turn.event_buffer.flush(&mut records);
+        for event in records {
+            self.append_locked_record(turn, serde_json::to_string(&event).map_err(error)?, None, false).await?;
+        }
+        turn.journal.save_execution_checkpoint(checkpoint.clone(), self.principal.clone()).await
+    }
+
     async fn admit_tool(&self, message: &SendMessageData, event: &AgentEngineEvent) -> Result<bool, AppError> {
         let admitted = self.admit_steerable_tool(message, event).await?;
         if admitted {
@@ -741,6 +828,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             self.principal.clone(),
             capabilities.generation,
         ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
+            .with_execution_segments(nomifun_agent_runtime::AgentSegmentPolicy::default())
             .with_context_image_input(context_image_input)
             .with_prior_task(prior_task)
             .with_patch_recovery(patch_recovery)
@@ -764,6 +852,12 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         request = request.with_history_port(Arc::new(history_port::HistoryPort {
             host: self.session_host.clone(), receipt: admitted, cancellation,
         }));
+        if let Some(recovery) = self.active.lock().await.as_ref().and_then(|turn| turn.journal.recovery()) {
+            if let Some(segments) = &recovery.checkpoint().segments {
+                request = request.with_max_model_steps(segments.model_steps_per_segment).with_execution_segments(segments.policy);
+            }
+            request = request.with_recovery((*recovery).clone());
+        }
         Ok(request)
     }
 
@@ -776,6 +870,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             event,
             AgentEngineEvent::TurnCompleted { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
+                | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
         );
         let root = self.root(message);
@@ -857,6 +952,9 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if matches!(event, AgentEngineEvent::TurnInputScope { .. } | AgentEngineEvent::SteeringInputs { .. } | AgentEngineEvent::SteeringDeferred { .. }) {
             return Err(error("control records must be committed by the platform owner"));
         }
+        if matches!(event, AgentEngineEvent::ExecutionCheckpointSaved { .. }) {
+            return Err(error("checkpoint metadata must commit atomically with its state"));
+        }
         if matches!(event, AgentEngineEvent::ToolStarted { step, .. } if *step > 0) {
             return Err(error("model ToolStarted must use atomic tool admission"));
         }
@@ -894,6 +992,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             event,
             AgentEngineEvent::TurnCompleted { .. }
                 | AgentEngineEvent::TurnCancelled { .. }
+                | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
         );
         self.append_record(
@@ -920,6 +1019,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
             }
             AgentEngineEvent::TurnCompleted { .. }
             | AgentEngineEvent::TurnCancelled { .. }
+            | AgentEngineEvent::TurnPaused { .. }
             | AgentEngineEvent::TurnFailed { .. } => nomifun_idmm::IdmmProgressPhase::Terminal,
             AgentEngineEvent::ModelStepStarted { .. }
             | AgentEngineEvent::OutputTextDelta { .. }
@@ -1089,8 +1189,26 @@ mod build_identity_tests {
             "../../../nomifun-agent-runtime/src/tool_discovery.rs",
             "../../../nomifun-mcp/src/identity.rs",
             "../../../nomifun-file/src/artifact_store.rs",
+            "../../../nomifun-file/src/workspace_write.rs",
             "../../../nomifun-file/src/vcs_stage.rs",
             "../../../nomifun-agent-session/src/store.rs",
+            "../../../nomifun-agent-contracts/src/native_execution.rs",
+            "../../../nomifun-agent-runtime/src/checkpoint.rs",
+            "../../../nomifun-agent-runtime/src/recovery.rs",
+            "../../../nomifun-agent-runtime/src/reconciliation.rs",
+            "../../../nomifun-agent-runtime/src/segments.rs",
+            "../../../nomifun-agent-domain-wave5/src/lib.rs",
+            "engine_recovery.rs",
+            "native_turn_recovery.rs",
+            "native_execution_control.rs",
+            "../../../nomifun-agent-session/src/native_execution.rs",
+            "../../../nomifun-agent-session/src/native_pause.rs",
+            "../../../nomifun-agent-session/src/native_effect_reconciliation.rs",
+            "../../../nomifun-agent-session/src/native_recovery.rs",
+            "../../../nomifun-agent-session/src/projector.rs",
+            "../../../nomifun-db/migrations/005_native_execution_checkpoints.sql",
+            "../../../nomifun-db/migrations/006_native_execution_leases.sql",
+            "../../../nomifun-db/migrations/007_native_pause_resume.sql",
         ] {
             assert!(
                 source.contains(&format!("include_str!(\"{required}\")")),

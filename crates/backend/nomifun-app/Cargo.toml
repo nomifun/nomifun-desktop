@@ -130,6 +130,14 @@ name = "nomi_core_live_provider_smoke"
 path = "tests/nomi_core_live_provider_smoke.rs"
 
 [[test]]
+name = "native_execution_recovery"
+path = "tests/native_execution_recovery.rs"
+
+[[test]]
+name = "native_coding_reliability"
+path = "tests/native_coding_reliability.rs"
+
+[[test]]
 name = "live_agnes_preset_creation"
 path = "tests/live_agnes_preset_creation.rs"
 required-features = ["browser-use", "computer-use"]

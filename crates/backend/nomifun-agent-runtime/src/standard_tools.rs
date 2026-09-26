@@ -30,10 +30,15 @@ struct StandardTool {
 
 impl StandardTool {
     fn exposure(&self) -> AgentToolExposure {
+        let description = if self.action_id == "workspace.process/exec" {
+            format!("Workspace process host OS: {}. {}", std::env::consts::OS, self.description)
+        } else {
+            self.description.to_owned()
+        };
         AgentToolExposure {
             definition: ChatToolDefinition {
                 name: self.model_name.to_owned(),
-                description: self.description.to_owned(),
+                description,
                 input_schema: StrictJsonValue((self.schema)()),
                 deferred: false,
             },
@@ -76,14 +81,14 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "write_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/write",
-        description: "Write a complete UTF-8 text file (at most 8 MiB) through the workspace owner. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
+        description: "Write a complete UTF-8 text file (at most 8 MiB) through the workspace owner. Missing parent directories inside the workspace are created automatically; no shell mkdir is needed. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
         schema: write_schema,
     },
     StandardTool {
         model_name: "apply_patch",
         capability_id: "workspace.files",
         action_id: "workspace.files/patch",
-        description: "Apply bounded, ordered, exact line hunks through the workspace owner. Prefer each file's expected_source={kind:existing,sha256:<full read_file digest>} or {kind:absent} after observing absence; this detects changes outside the hunk too. Omission/any preserves legacy line-only matching, not a source-version check. Never remove a rejected guard just to retry; re-read and replan. Supply logical text without CR/LF or a file-leading UTF-8 BOM; source BOM, unchanged line endings and EOF-newline policy are preserved, added lines use the first source ending (LF if none). Nonempty ranges are 1-based; old_lines=0 inserts after old_start source lines (0=BOF), new_lines=0 names the surviving output prefix. Context/remove text must match exactly; re-read on mismatch. All targets and source guards are prepared before writes, with per-file atomic publication and best-effort restoration of existing files, not a multi-file transaction. Failed patches may retain newly created files; inspect zero-based request.files indices in the failure observation and re-read every target before replanning/retrying. A restored result is historical, not a current-state lock. Concurrent native edits remain possible. Each file's written_sha256 identifies published bytes for a later guarded read_file or patch, not task completion.",
+        description: "Apply bounded, ordered, exact line hunks through the workspace owner. Missing parent directories are created after the entire patch is validated. Prefer each file's expected_source={kind:existing,sha256:<full read_file digest>} or {kind:absent} after observing absence; this detects changes outside the hunk too. Omission/any preserves legacy line-only matching, not a source-version check. Never remove a rejected guard just to retry; re-read and replan. Supply logical text without CR/LF or a file-leading UTF-8 BOM; source BOM, unchanged line endings and EOF-newline policy are preserved, added lines use the first source ending (LF if none). Nonempty ranges are 1-based; old_lines=0 inserts after old_start source lines (0=BOF), new_lines=0 names the surviving output prefix. Context/remove text must match exactly; re-read on mismatch. All targets and source guards are prepared before writes, with per-file atomic publication and best-effort restoration of existing files, not a multi-file transaction. Failed patches may retain newly created files; inspect zero-based request.files indices in the failure observation and re-read every target before replanning/retrying. A restored result is historical, not a current-state lock. Concurrent native edits remain possible. Each file's written_sha256 identifies published bytes for a later guarded read_file or patch, not task completion.",
         schema: patch_schema,
     },
     StandardTool {

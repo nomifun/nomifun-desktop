@@ -4,6 +4,24 @@ use std::collections::BTreeMap;
 use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
 use nomifun_agent_runtime::{AgentEngineEvent, AgentPriorTask, replay_closed_turn};
 use nomifun_common::AppError;
+use nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES;
+
+/// The canonical terminal can outlive a crashed Runtime that never wrote its
+/// private terminal record. Reconstruct only interruption, NEVER success or
+/// cleanup proof. The durable canonical receipt remains the authority.
+pub(super) fn project_interrupted_terminal(events: &mut Vec<AgentEngineEvent>, receipt_status: &str) {
+    if matches!(events.last(), Some(AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. } | AgentEngineEvent::TurnCancelled { .. })) {
+        return;
+    }
+    match receipt_status {
+        "failed" | "interrupted" => events.push(AgentEngineEvent::TurnFailed {
+            model_steps: 0,
+            message: "Canonical owner ended interrupted execution. Saved tool observations are historical data; uncertain outcomes require reconciliation, not replay.".into(),
+        }),
+        "cancelled" => events.push(AgentEngineEvent::TurnCancelled { model_steps: 0 }),
+        _ => {}
+    }
+}
 
 pub(super) struct AgentHistory {
     pub messages: Vec<ChatMessage>,
@@ -22,6 +40,8 @@ pub(super) async fn load(
     if window.turns.is_empty() {
         return Ok(None);
     }
+    let replay_budget = window.turns.first().map_or(0,|turn|turn.serialized_bytes.saturating_add(8 * 1024 * 1024))
+        .max(32 * 1024 * 1024).min(MAX_NATIVE_HISTORY_WINDOW_BYTES);
     let mut closed_turns = Vec::new();
     let mut bytes = 0usize;
     let mut prior_task = None;
@@ -40,7 +60,7 @@ pub(super) async fn load(
         if turn.records.is_empty() {
             return Ok(None);
         }
-        if bytes.saturating_add(turn.serialized_bytes) > 16 * 1024 * 1024 {
+        if bytes.saturating_add(turn.serialized_bytes) > replay_budget {
             if closed_turns.is_empty() {
                 return Err(fail("latest turn exceeds replay byte budget".into()));
             }
@@ -73,6 +93,7 @@ pub(super) async fn load(
                     .map_err(|error| fail(error.to_string()))?,
             );
         }
+        project_interrupted_terminal(&mut events, &turn.receipt_status);
         let Some(AgentEngineEvent::TurnStarted {
             binding: recorded,
             turn_operation_id: recorded_operation,
@@ -123,7 +144,7 @@ pub(super) async fn load(
             .map_err(|error| fail(error.to_string()))?
             .into_iter()
             .sum::<usize>();
-        if bytes.saturating_add(extra_bytes) > 16 * 1024 * 1024 {
+        if bytes.saturating_add(extra_bytes) > replay_budget {
             if closed_turns.is_empty() {
                 return Err(fail("latest turn steering exceeds replay budget".into()));
             }
@@ -153,7 +174,7 @@ pub(super) async fn load(
     // on every reconstruction, not disappear after the first native turn.
     // Seed BEFORE replay so a later ContextCompacted event can replace them.
     // Never jump across native turns omitted by the bounded history window.
-    let prefix_budget = (16 * 1024 * 1024usize)
+    let prefix_budget = replay_budget
         .saturating_sub(bytes)
         .min(8 * 1024 * 1024);
     if complete_window

@@ -6,7 +6,7 @@
 //! [`send_with_rotation`]) that gives every adapter multi-key rotation on
 //! 401/403/429 for free.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -145,8 +145,6 @@ pub(crate) async fn get_request(
     send_with_rotation(auth, || Ok(http.get(url).timeout(timeout))).await
 }
 
-/// Longest Retry-After we are willing to honor (seconds).
-const MAX_RETRY_AFTER_SECS: u64 = 120;
 /// Error bodies are diagnostics, never artifacts. Bound their transport read
 /// separately so non-2xx submit/download responses cannot allocate an
 /// arbitrarily large String before the existing 500-character presentation
@@ -154,19 +152,30 @@ const MAX_RETRY_AFTER_SECS: u64 = 120;
 const MAX_ERROR_RESPONSE_BODY_BYTES: usize = 64 * 1024;
 const MAX_ERROR_RESPONSE_SNIPPET_CHARS: usize = 500;
 
-/// Parse a `Retry-After` header value in the delta-seconds form, clamped to
-/// [`MAX_RETRY_AFTER_SECS`], as milliseconds. The HTTP-date form yields `None`.
+/// RFC 9110 permits either delay-seconds or HTTP-date. Preserve the server's
+/// minimum wait; the retry owner decides whether it fits the request budget.
+/// Shortening it here would cause an early retry even when the broker obeys it.
 fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
-    let secs: u64 = value?.to_str().ok()?.trim().parse().ok()?;
-    Some(secs.min(MAX_RETRY_AFTER_SECS) * 1000)
+    parse_retry_after_at(value, SystemTime::now())
+}
+
+fn parse_retry_after_at(value: Option<&reqwest::header::HeaderValue>, now: SystemTime) -> Option<u64> {
+    let text = value?.to_str().ok()?.trim();
+    if !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Some(text.parse::<u64>().unwrap_or(u64::MAX).saturating_mul(1000));
+    }
+    let deadline = httpdate::parse_http_date(text).ok()?;
+    let remaining = deadline.duration_since(now).unwrap_or_default();
+    // Round up fractional milliseconds, never retry just before the date.
+    Some(u64::try_from(remaining.as_nanos().div_ceil(1_000_000)).unwrap_or(u64::MAX))
 }
 
 /// Classify a non-2xx response into a typed [`InvokeError`], folding the
 /// status + a 500-char body snippet into the message:
-/// 429 → [`InvokeErrorKind::RateLimited`] (+ `Retry-After` seconds, clamped
-/// to 120 s, as `retry_after_ms`); 401/403 → [`InvokeErrorKind::Auth`];
+/// 429 → [`InvokeErrorKind::RateLimited`]; 401/403 → [`InvokeErrorKind::Auth`];
 /// 400/422 → [`InvokeErrorKind::InvalidParams`]; 5xx and everything else →
-/// [`InvokeErrorKind::ProviderError`]. `http_status` is always set.
+/// [`InvokeErrorKind::ProviderError`]. `http_status` is always set and any
+/// valid `Retry-After` (including on 503) is retained as `retry_after_ms`.
 pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
     error_from_response_with_body_deadline(resp, None).await
 }
@@ -195,9 +204,7 @@ async fn error_from_response_with_body_deadline(
         _ => InvokeErrorKind::ProviderError, // 5xx and everything unclassified
     };
     // Read the header before the bounded body reader consumes the response.
-    let retry_after_ms = (code == 429)
-        .then(|| parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER)))
-        .flatten();
+    let retry_after_ms = parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER));
     let (snippet, context_length_rejected, unsupported_technical_capability) = match timeout {
         Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp))
             .await
@@ -1096,7 +1103,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_from_response_429_parses_and_clamps_retry_after() {
+    async fn error_from_response_preserves_retry_after_without_shortening_it() {
         // Plain seconds.
         let resp =
             respond(ResponseTemplate::new(429).insert_header("Retry-After", "7").set_body_string("slow")).await;
@@ -1105,18 +1112,38 @@ mod tests {
         assert_eq!(err.http_status, Some(429));
         assert_eq!(err.retry_after_ms, Some(7_000));
 
-        // Clamped to 120 s.
+        // Preserve a delay outside the broker budget, so it can decline the
+        // retry instead of retrying before the provider permits it.
         let resp = respond(ResponseTemplate::new(429).insert_header("Retry-After", "9999")).await;
-        assert_eq!(error_from_response(resp).await.retry_after_ms, Some(120_000));
+        assert_eq!(error_from_response(resp).await.retry_after_ms, Some(9_999_000));
 
-        // Missing / unparseable (HTTP-date) header → None, still RateLimited.
+        let resp = respond(ResponseTemplate::new(503).insert_header("Retry-After", "7")).await;
+        let error = error_from_response(resp).await;
+        assert_eq!(error.kind, InvokeErrorKind::ProviderError);
+        assert_eq!(error.retry_after_ms, Some(7_000));
+
+        // Missing or invalid headers remain absent, not fabricated delays.
         let resp = respond(ResponseTemplate::new(429)).await;
         let err = error_from_response(resp).await;
         assert_eq!(err.kind, InvokeErrorKind::RateLimited);
         assert_eq!(err.retry_after_ms, None);
-        let resp =
-            respond(ResponseTemplate::new(429).insert_header("Retry-After", "Wed, 21 Oct 2026 07:28:00 GMT")).await;
+        let resp = respond(ResponseTemplate::new(429).insert_header("Retry-After", "invalid-date")).await;
         assert_eq!(error_from_response(resp).await.retry_after_ms, None);
+    }
+
+    #[test]
+    fn retry_after_http_dates_use_a_fixed_clock_and_round_up() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let date = reqwest::header::HeaderValue::from_str(&httpdate::fmt_http_date(now + Duration::from_secs(7))).unwrap();
+        assert_eq!(parse_retry_after_at(Some(&date), now), Some(7_000));
+        assert_eq!(parse_retry_after_at(Some(&date), now + Duration::from_nanos(1)), Some(7_000));
+        assert_eq!(parse_retry_after_at(Some(&date), now + Duration::from_secs(8)), Some(0));
+        let huge = reqwest::header::HeaderValue::from_static("18446744073709551616");
+        assert_eq!(parse_retry_after_at(Some(&huge), now), Some(u64::MAX));
+        for text in ["-1", "+1", "1.5", "invalid"] {
+            let header = reqwest::header::HeaderValue::from_str(text).unwrap();
+            assert_eq!(parse_retry_after_at(Some(&header), now), None);
+        }
     }
 
     #[tokio::test]

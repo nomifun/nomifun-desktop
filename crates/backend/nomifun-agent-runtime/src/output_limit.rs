@@ -15,6 +15,21 @@ pub(crate) struct OutputLimitRecovery {
 }
 
 impl OutputLimitRecovery {
+    pub(crate) fn restore<'a>(&mut self, events: impl Iterator<Item = &'a crate::AgentEngineEvent>) {
+        let mut previous = None;
+        for event in events {
+            match event {
+                crate::AgentEngineEvent::ExecutionTailReconciled { retry_stall_guards: true, .. } => { self.continued = 0; previous = None; }
+                crate::AgentEngineEvent::ModelOutputTruncated { step, continuation: true, .. } => {
+                    self.continued = if previous == step.checked_sub(1) { self.continued.saturating_add(1).min(MAX_CONTINUATIONS) } else { 1 };
+                    previous = Some(*step);
+                }
+                crate::AgentEngineEvent::ToolResultsOrdered { .. } => { self.continued = 0; previous = None; }
+                _ => {}
+            }
+        }
+    }
+
     pub(crate) fn admit(&mut self, has_model_step: bool) -> bool {
         if !has_model_step || self.continued >= MAX_CONTINUATIONS {
             return false;
