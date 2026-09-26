@@ -1099,6 +1099,13 @@ const CreativeCanvasProductRoute: React.FC = () => {
     enabled: Boolean(projectId),
     query: assetQuery,
   });
+  const timelineLibrary = useCreativeAssets({
+    enabled: Boolean(projectId),
+    query: {
+      inLibrary: true,
+      sort: 'updated_desc',
+    },
+  });
   const imageMaskModelOptions = useMemo(
     () => exactGenerationModelOptions(modelCatalog, 'image_edit'),
     [modelCatalog]
@@ -1127,10 +1134,32 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const knownAssetsById = useMemo(() => {
     const merged = new Map(knownAssetsRef.current);
     for (const asset of assets.assets) merged.set(asset.id, asset);
+    for (const asset of timelineLibrary.assets) merged.set(asset.id, asset);
     for (const asset of canvasReferenceAssets.values()) merged.set(asset.id, asset);
     knownAssetsRef.current = merged;
     return merged;
-  }, [assets.assets, canvasReferenceAssets]);
+  }, [assets.assets, canvasReferenceAssets, timelineLibrary.assets]);
+
+  const timelineLibraryPresentations = useMemo(
+    () => timelineLibrary.assets.flatMap((asset): CreativeTimelineAssetPresentation[] => {
+      if (
+        !asset.inLibrary ||
+        isCreativeAssetDeleted(asset) ||
+        (asset.kind !== 'image' && asset.kind !== 'video')
+      ) return [];
+      return [{
+        assetId: asset.id,
+        kind: asset.kind,
+        title: asset.title,
+        src: asset.originalUrl,
+        thumbnailSrc: asset.thumbnailUrl,
+        width: asset.width,
+        height: asset.height,
+        mimeType: asset.mimeType,
+      }];
+    }),
+    [timelineLibrary.assets]
+  );
 
   const selectedCanvasImageReferenceAssetIds = useMemo(() => {
     if (!canvasState || canvasState.selection.nodeIds.length !== 1) return [];
@@ -4555,6 +4584,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         if (activeProjectIdRef.current !== projectId) return;
         appendAssetsToTimeline(nodeId, uploaded);
         void assets.reload();
+        void timelineLibrary.reload();
       } catch (error) {
         if (activeProjectIdRef.current === projectId) {
           setNotice(error instanceof Error ? error.message : String(error));
@@ -4564,7 +4594,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
         setAssetImportBusy(false);
       }
     },
-    [appendAssetsToTimeline, assets, projectId, t]
+    [appendAssetsToTimeline, assets, projectId, t, timelineLibrary]
   );
 
   const handleInsertAssets = useCallback(
@@ -4934,6 +4964,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
                           : undefined
                       }
                       timelineAssets={timelineAssets}
+                      timelineLibraryAssets={
+                        node.type === 'timeline'
+                          ? timelineLibraryPresentations
+                          : undefined
+                      }
+                      timelineLibraryLoading={
+                        node.type === 'timeline' ? timelineLibrary.loading : undefined
+                      }
                       onTimelineChange={
                         node.type === 'timeline'
                           ? (data, mergeKey) => {
@@ -4960,6 +4998,14 @@ const CreativeCanvasProductRoute: React.FC = () => {
                               dispatch(
                                 canvasCommands.deleteSelection({ nodeIds: [node.id] })
                               )
+                          : undefined
+                      }
+                      onTimelineAddAsset={
+                        node.type === 'timeline'
+                          ? (assetId) => {
+                              const asset = knownAssetsById.get(assetId);
+                              if (asset) appendAssetsToTimeline(node.id, [asset]);
+                            }
                           : undefined
                       }
                       onTimelineRequestAssets={
