@@ -352,11 +352,14 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
   onTextChange?: (text: string) => void;
   onTextEditingComplete?: () => void;
   timelineAssets?: ReadonlyMap<string, CreativeTimelineAssetPresentation>;
+  timelineLibraryAssets?: readonly CreativeTimelineAssetPresentation[];
+  timelineLibraryLoading?: boolean;
   onTimelineChange?: (
     data: CreativeNodeOfKind<'timeline'>['data'],
     mergeKey?: string
   ) => void;
   onTimelineDelete?: () => void;
+  onTimelineAddAsset?: (assetId: string) => void;
   onTimelineRequestAssets?: (popupContainer: HTMLElement | null) => void;
   onTimelineUploadFiles?: (files: readonly File[]) => void | Promise<void>;
 };
@@ -387,8 +390,11 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
           {...props}
           node={node}
           assets={props.timelineAssets ?? new Map()}
+          libraryAssets={props.timelineLibraryAssets}
+          libraryLoading={props.timelineLibraryLoading}
           onChange={props.onTimelineChange}
           onDelete={props.onTimelineDelete}
+          onAddAsset={props.onTimelineAddAsset}
           onRequestAssets={props.onTimelineRequestAssets}
           onUploadFiles={props.onTimelineUploadFiles}
         />

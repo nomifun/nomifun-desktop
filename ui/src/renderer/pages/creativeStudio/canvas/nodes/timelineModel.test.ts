@@ -56,9 +56,10 @@ describe('timeline model', () => {
       },
     ]);
     expect(timelineDurationMs(data.clips)).toBe(10_000);
-    expect(timelineScaleDurationMs(data.clips)).toBe(30_000);
-    expect(timelineTickValues(30_000)).toEqual([
+    expect(timelineScaleDurationMs(data.clips)).toBe(60_000);
+    expect(timelineTickValues(60_000)).toEqual([
       0, 5_000, 10_000, 15_000, 20_000, 25_000, 30_000,
+      35_000, 40_000, 45_000, 50_000, 55_000, 60_000,
     ]);
   });
 

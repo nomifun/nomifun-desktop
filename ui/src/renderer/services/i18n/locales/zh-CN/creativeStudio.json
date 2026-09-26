@@ -905,14 +905,21 @@
       }
     },
     "timeline": {
+      "addFromLibrary": "从资产库添加",
+      "addLibraryAsset": "添加素材 {{title}} 到时间线",
       "addAssets": "添加素材到时间线",
+      "assetLibrary": "资产库",
+      "assetLibraryEmpty": "资产库暂无图片或视频",
+      "assetLibraryLoading": "正在读取资产库…",
       "assetUnavailable": "素材不可用",
       "assetsAdded": "已向时间线添加 {{count}} 项素材。",
       "cancelExport": "取消导出",
       "close": "删除时间线节点",
       "clipLabel": "{{title}}，时长 {{duration}}",
+      "collapseAssets": "收起素材区",
       "defaultTitle": "时间线{{ordinal}}",
       "exitFullscreen": "退出全屏编辑",
+      "expandAssets": "展开素材区",
       "export": "导出合成视频",
       "exportErrors": {
         "assetUnavailable": "时间线包含不可用素材，无法导出。",
@@ -927,11 +934,13 @@
       "noCompatibleAssets": "时间线只支持图片和视频素材。",
       "pause": "暂停",
       "play": "播放",
+      "playhead": "播放头",
       "previewEmpty": "移动时间指针以预览素材",
       "removeClip": "移除片段",
       "trimEnd": "裁切片段终点",
       "trimStart": "裁切片段起点",
       "unmute": "开启声音",
+      "uploadLocal": "从本地添加",
       "uploading": "正在上传 {{count}} 项时间线素材…"
     },
     "notices": {

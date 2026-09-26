@@ -905,14 +905,21 @@
       }
     },
     "timeline": {
+      "addFromLibrary": "Add from asset library",
+      "addLibraryAsset": "Add {{title}} to the timeline",
       "addAssets": "Add media to timeline",
+      "assetLibrary": "Asset library",
+      "assetLibraryEmpty": "No images or videos in the asset library",
+      "assetLibraryLoading": "Loading asset library…",
       "assetUnavailable": "Asset unavailable",
       "assetsAdded": "Added {{count}} asset(s) to the timeline.",
       "cancelExport": "Cancel export",
       "close": "Delete timeline node",
       "clipLabel": "{{title}}, duration {{duration}}",
+      "collapseAssets": "Collapse asset panel",
       "defaultTitle": "Timeline {{ordinal}}",
       "exitFullscreen": "Exit fullscreen editor",
+      "expandAssets": "Expand asset panel",
       "export": "Export composed video",
       "exportErrors": {
         "assetUnavailable": "The timeline contains unavailable media and cannot be exported.",
@@ -927,11 +934,13 @@
       "noCompatibleAssets": "Timelines support image and video assets only.",
       "pause": "Pause",
       "play": "Play",
+      "playhead": "Playhead",
       "previewEmpty": "Move the playhead to preview media",
       "removeClip": "Remove clip",
       "trimEnd": "Trim clip end",
       "trimStart": "Trim clip start",
       "unmute": "Enable audio",
+      "uploadLocal": "Add from this computer",
       "uploading": "Uploading {{count}} timeline asset(s)…"
     },
     "notices": {

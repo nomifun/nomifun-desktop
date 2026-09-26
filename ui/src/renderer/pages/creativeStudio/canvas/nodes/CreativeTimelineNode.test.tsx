@@ -46,6 +46,8 @@ const assets = new Map<string, CreativeTimelineAssetPresentation>([[
     title: '城市航拍',
     src: '/assets/city.png',
     thumbnailSrc: '/assets/city-thumb.png',
+    width: 1_200,
+    height: 800,
   },
 ]]);
 
@@ -61,7 +63,13 @@ describe('CreativeTimelineNode interactions', () => {
     expect(view.container.querySelector('[data-timeline-clip-id="clip-1"]')).not.toBeNull();
     expect(view.container.querySelector('img[src="/assets/city-thumb.png"]')).not.toBeNull();
     expect((view.getByRole('button', { name: '播放' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(view.getByRole('slider', { name: '播放头' })).not.toBeNull();
+    expect(
+      view.container.querySelector<HTMLElement>('[data-project-canvas]')?.style
+        .getPropertyValue('--timeline-project-aspect')
+    ).toBe('1.5');
     expect(view.getAllByText('00:05').length).toBeGreaterThan(0);
+    expect(view.getByText('01:00')).not.toBeNull();
   });
 
   test('persists mute changes and pointer-based clip arrangement', () => {
@@ -103,8 +111,30 @@ describe('CreativeTimelineNode interactions', () => {
     fireEvent.pointerMove(clip, { pointerId: 4, clientX: 160 });
     fireEvent.pointerUp(clip, { pointerId: 4, clientX: 160 });
 
-    expect(changes.at(-1)?.startMs).toBe(3_000);
+    expect(changes.at(-1)?.startMs).toBe(6_000);
     expect(changes.at(-1)?.mergeKey).toContain('timeline:timeline-1:clip-1:move');
+  });
+
+  test('seeks the playhead anywhere across the visible 60-second track', () => {
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode node={timelineNode()} assets={assets} placement='contained' />
+    ));
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    if (!track) throw new Error('timeline track fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 0,
+      y: 0,
+      top: 0,
+      right: 600,
+      bottom: 60,
+      left: 0,
+      width: 600,
+      height: 60,
+      toJSON: () => ({}),
+    });
+    fireEvent.pointerDown(track, { button: 0, pointerId: 9, clientX: 300 });
+    expect(view.getByRole('slider', { name: '播放头' }).getAttribute('aria-valuenow')).toBe('30');
+    expect(view.getAllByText('00:30').length).toBeGreaterThan(1);
   });
 
   test('opens the real asset picker callback and accepts dropped image/video files', () => {
@@ -121,6 +151,7 @@ describe('CreativeTimelineNode interactions', () => {
     ));
 
     fireEvent.click(view.getByRole('button', { name: '添加素材到时间线' }));
+    fireEvent.click(view.getByRole('menuitem', { name: '从资产库添加' }));
     expect(requested).toBe(1);
 
     const root = view.container.querySelector<HTMLElement>('[data-timeline-node]');
@@ -155,11 +186,44 @@ describe('CreativeTimelineNode interactions', () => {
     });
     try {
       fireEvent.click(view.getByRole('button', { name: '添加素材到时间线' }));
+      fireEvent.click(view.getByRole('menuitem', { name: '从资产库添加' }));
       expect(popupContainer).toBe(root);
     } finally {
       if (descriptor) Object.defineProperty(document, 'fullscreenElement', descriptor);
       else delete (document as unknown as Record<string, unknown>).fullscreenElement;
     }
+  });
+
+  test('adds an asset-library item by click and accepts it by drag payload', () => {
+    const added: string[] = [];
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={timelineNode()}
+        assets={assets}
+        libraryAssets={[...assets.values()]}
+        placement='contained'
+        onAddAsset={(assetId) => added.push(assetId)}
+        onRequestAssets={() => undefined}
+      />
+    ));
+
+    fireEvent.click(view.getByRole('button', { name: '添加素材 城市航拍 到时间线' }));
+    expect(added).toEqual(['asset-image']);
+
+    const root = view.container.querySelector<HTMLElement>('[data-timeline-node]');
+    if (!root) throw new Error('timeline root fixture missing');
+    fireEvent.drop(root, {
+      dataTransfer: {
+        types: ['application/x-nomifun-timeline-asset'],
+        getData: () => 'asset-image',
+      },
+    });
+    expect(added).toEqual(['asset-image', 'asset-image']);
+
+    const addButton = view.getByRole('button', { name: '添加素材到时间线' });
+    fireEvent.pointerDown(addButton, { button: 0, pointerId: 12, clientX: 80 });
+    fireEvent.click(addButton);
+    expect(view.getByRole('menuitem', { name: '从资产库添加' })).not.toBeNull();
   });
 
   test('downloads a composed video result with the timeline title', () => {
