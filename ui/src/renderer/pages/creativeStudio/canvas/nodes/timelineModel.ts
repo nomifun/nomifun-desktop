@@ -81,17 +81,97 @@ export const moveTimelineClip = (
   data: CreativeTimelineNodeData,
   clipId: string,
   startMs: number
-): CreativeTimelineNodeData => ({
-  ...data,
-  clips: data.clips.map((clip) =>
-    clip.id === clipId
-      ? {
-          ...clip,
-          startMs: clamp(startMs, 0, TIMELINE_MAX_DURATION_MS - clip.durationMs),
-        }
-      : clip
-  ),
-});
+): CreativeTimelineNodeData => {
+  const clip = data.clips.find((item) => item.id === clipId);
+  if (!clip) return data;
+
+  const requestedStart = clamp(startMs, 0, TIMELINE_MAX_DURATION_MS - clip.durationMs);
+  const neighbors = data.clips
+    .filter((item) => item.id !== clipId)
+    .sort((left, right) => left.startMs - right.startMs);
+  let resolvedStart = clip.startMs;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  const considerGap = (start: number, end: number) => {
+    if (end - start < clip.durationMs) return;
+    const candidate = clamp(requestedStart, start, end - clip.durationMs);
+    const distance = Math.abs(candidate - requestedStart);
+    // Prefer the original side of a collision when both edges are equally close.
+    if (
+      distance < nearestDistance ||
+      (distance === nearestDistance &&
+        Math.abs(candidate - clip.startMs) < Math.abs(resolvedStart - clip.startMs))
+    ) {
+      resolvedStart = candidate;
+      nearestDistance = distance;
+    }
+  };
+
+  // Only place the whole clip in free time; other clips keep their authored positions.
+  let gapStart = 0;
+  for (const neighbor of neighbors) {
+    considerGap(gapStart, neighbor.startMs);
+    gapStart = Math.max(gapStart, neighbor.startMs + neighbor.durationMs);
+  }
+  considerGap(gapStart, TIMELINE_MAX_DURATION_MS);
+
+  if (resolvedStart === clip.startMs) return data;
+  return {
+    ...data,
+    clips: data.clips.map((item) =>
+      item.id === clipId ? { ...item, startMs: resolvedStart } : item
+    ),
+  };
+};
+
+export const reorderTimelineClip = (
+  data: CreativeTimelineNodeData,
+  clipId: string,
+  startMs: number,
+  insertionTimeMs: number
+): CreativeTimelineNodeData => {
+  const ordered = [...data.clips].sort((left, right) => left.startMs - right.startMs);
+  const originalIndex = ordered.findIndex((clip) => clip.id === clipId);
+  const clip = ordered[originalIndex];
+  if (!clip) return data;
+
+  const requestedStart = clamp(startMs, 0, TIMELINE_MAX_DURATION_MS - clip.durationMs);
+  const neighbors = ordered.filter((item) => item.id !== clipId);
+  const overlaps = neighbors.some((item) =>
+    requestedStart < item.startMs + item.durationMs &&
+    requestedStart + clip.durationMs > item.startMs
+  );
+  if (!overlaps) return moveTimelineClip(data, clipId, requestedStart);
+
+  // The pointer chooses the insertion boundary, regardless of where the clip was grabbed.
+  const targetTime = finite(insertionTimeMs, requestedStart);
+  const nextIndex = neighbors.filter((item) =>
+    targetTime >= item.startMs + item.durationMs / 2
+  ).length;
+  if (nextIndex === originalIndex) return moveTimelineClip(data, clipId, requestedStart);
+
+  const gaps = ordered.map((item, index) => {
+    const previous = ordered[index - 1];
+    return Math.max(0, item.startMs - (previous ? previous.startMs + previous.durationMs : 0));
+  });
+  neighbors.splice(nextIndex, 0, clip);
+  const starts = new Map<string, number>();
+  let cursor = 0;
+  for (const [index, item] of neighbors.entries()) {
+    // Preserve the existing gaps and shift only the clips between the old and new slots.
+    const nextStart = cursor + gaps[index]!;
+    starts.set(item.id, nextStart);
+    cursor = nextStart + item.durationMs;
+  }
+  if (cursor > TIMELINE_MAX_DURATION_MS) return moveTimelineClip(data, clipId, requestedStart);
+
+  return {
+    ...data,
+    clips: data.clips.map((item) => {
+      const nextStart = starts.get(item.id)!;
+      return nextStart === item.startMs ? item : { ...item, startMs: nextStart };
+    }),
+  };
+};
 
 export const trimTimelineClip = (
   data: CreativeTimelineNodeData,

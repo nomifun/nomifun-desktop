@@ -44,6 +44,7 @@ import type { CreativeNodePresentationProps } from './types';
 import {
   moveTimelineClip,
   removeTimelineClip,
+  reorderTimelineClip,
   resolveTimelineClipDuration,
   timelineClipAtTime,
   timelineDurationMs,
@@ -79,6 +80,8 @@ type ClipGesture = {
   clipId: string;
   mode: 'move' | 'trim-start' | 'trim-end';
   clientX: number;
+  trackLeft: number;
+  millisecondsPerPixel: number;
   data: CreativeTimelineNodeData;
 };
 
@@ -327,11 +330,16 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     event.preventDefault();
     event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
+    const trackRect = trackRef.current?.getBoundingClientRect();
     gestureRef.current = {
       pointerId: event.pointerId,
       clipId,
       mode,
       clientX: event.clientX,
+      trackLeft: trackRect?.left ?? 0,
+      millisecondsPerPixel: trackRect && trackRect.width > 0
+        ? scaleDurationMs / trackRect.width
+        : 0,
       data: structuredClone(node.data),
     };
     setSelectedClipId(clipId);
@@ -340,17 +348,21 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
   const updateGesture = (event: React.PointerEvent<HTMLElement>) => {
     const gesture = gestureRef.current;
     if (!gesture || gesture.pointerId !== event.pointerId) return;
-    const width = trackRef.current?.getBoundingClientRect().width ?? 0;
-    if (width <= 0) return;
+    if (gesture.millisecondsPerPixel <= 0) return;
     event.preventDefault();
     event.stopPropagation();
     const deltaMs = Math.round(
-      (((event.clientX - gesture.clientX) / width) * scaleDurationMs) / 50
+      ((event.clientX - gesture.clientX) * gesture.millisecondsPerPixel) / 50
     ) * 50;
     const original = gesture.data.clips.find((clip) => clip.id === gesture.clipId);
     if (!original) return;
     const next = gesture.mode === 'move'
-      ? moveTimelineClip(gesture.data, gesture.clipId, original.startMs + deltaMs)
+      ? reorderTimelineClip(
+          gesture.data,
+          gesture.clipId,
+          original.startMs + deltaMs,
+          (event.clientX - gesture.trackLeft) * gesture.millisecondsPerPixel
+        )
       : trimTimelineClip(
           gesture.data,
           gesture.clipId,
@@ -365,6 +377,7 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     if (!gesture || gesture.pointerId !== event.pointerId) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.type === 'pointerup') updateGesture(event);
     gestureRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
