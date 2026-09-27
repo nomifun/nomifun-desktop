@@ -79,6 +79,23 @@ const fixture = (): CreativeProjectDocument => {
 };
 
 describe('Creative Canvas Agent context', () => {
+  test('carries the bound canvas title into the model input without changing scope', () => {
+    const document = fixture();
+    const context = buildCreativeCanvasAgentContext({
+      document, canvasRevision: '7', canvasTitle: 'Windows 验收画布',
+      selectedNodeIds: [nodeId(1)],
+    });
+    const narrowed = selectCreativeCanvasAgentContextNodes(context, []);
+    const input = JSON.parse(serializeCreativeCanvasAgentModelInput({
+      prompt: '只读报告当前画布名称', context: narrowed, skillIds: ['creative-studio-canvas'],
+    }));
+    expect(input.canvasContext.canvasTitle).toBe('Windows 验收画布');
+    expect(input.canvasContext.canvasId).toBe(PROJECT_ID);
+    expect(input.canvasContext.canvasRevision).toBe('7');
+    expect(input.canvasContext.nodes).toEqual([]);
+    expect(input.canvasContext.totalNodeCount).toBe(4);
+  });
+
   test('orders selected nodes before one-hop neighbors and excludes unrelated nodes', () => {
     const context = buildCreativeCanvasAgentContext({
       document: fixture(),

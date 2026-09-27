@@ -78,6 +78,7 @@ const TERMINAL_FAILURE_MESSAGE = '模型请求过于频繁，请稍后重试';
 const BACKEND_FAILURE_MESSAGE = '模型服务暂时不可用';
 
 const planningContext: CreativeCanvasAgentContextSnapshot = {
+  canvasTitle: 'Test canvas',
   kind: 'nomifun.creative-studio.canvas-context',
   version: 1,
   canvasId: CANVAS_ID,

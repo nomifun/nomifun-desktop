@@ -4718,12 +4718,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
         connections: agentContextDocument.connections,
       },
       canvasRevision: save.revision,
+      canvasTitle: project.detail?.project.projectId === projectId
+        ? project.detail.project.title
+        : null,
       selectedNodeIds: agentContextSelectedNodeIds,
     });
   }, [
     agentContextDocument,
     agentContextSelectedNodeIds,
     projectId,
+    project.detail?.project.projectId,
+    project.detail?.project.title,
     save.revision,
   ]);
   const productDisabled =

@@ -52,6 +52,7 @@ export interface CreativeCanvasAgentContextSnapshot {
   version: typeof CREATIVE_CANVAS_AGENT_CONTEXT_VERSION;
   canvasId: string;
   canvasRevision: string;
+  canvasTitle: string | null;
   selectedNodeIds: string[];
   nodes: CreativeCanvasAgentContextNode[];
   connections: CreativeCanvasAgentContextConnection[];
@@ -260,8 +261,10 @@ const contextConnection = (
 export function buildCreativeCanvasAgentContext(input: {
   document: CreativeCanvasAgentContextDocument;
   canvasRevision: string;
+  canvasTitle?: string | null;
   selectedNodeIds: readonly string[];
 }): CreativeCanvasAgentContextSnapshot {
+  const title = input.canvasTitle == null ? null : boundedText(input.canvasTitle);
   const nodeIndex = new Map(input.document.nodes.map((node, index) => [node.id, index]));
   const selected = orderedKnownIds(input.selectedNodeIds, nodeIndex);
   const neighbors = orderedKnownIds(referencedNodeIds(input.document, selected), nodeIndex);
@@ -269,7 +272,7 @@ export function buildCreativeCanvasAgentContext(input: {
   const includedIds = candidates.slice(0, MAX_CREATIVE_CANVAS_AGENT_CONTEXT_NODES);
   const included = new Set(includedIds);
   const selectedSet = new Set(selected);
-  let truncated = candidates.length > includedIds.length;
+  let truncated = candidates.length > includedIds.length || Boolean(title?.truncated);
   const nodes = includedIds.map((id) => {
     const summarized = summarizeNode(input.document.nodes[nodeIndex.get(id)!]!, selectedSet.has(id));
     truncated = summarized.truncated || truncated;
@@ -286,6 +289,7 @@ export function buildCreativeCanvasAgentContext(input: {
     version: CREATIVE_CANVAS_AGENT_CONTEXT_VERSION,
     canvasId: input.document.projectId,
     canvasRevision: input.canvasRevision,
+    canvasTitle: title?.value || null,
     selectedNodeIds: selected.filter((id) => included.has(id)),
     nodes,
     connections: relevantConnections

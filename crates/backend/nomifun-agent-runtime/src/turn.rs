@@ -1732,6 +1732,10 @@ fn synchronize_adaptive_context(
         let state = long_horizon.ok_or_else(|| {
             AgentEngineError::InvalidContract("active task ledger has no turn-local state".into())
         })?;
+        let completion_tool = request.input.tools.iter_mut()
+            .find(|tool| tool.name == crate::completion::TOOL_NAME)
+            .ok_or_else(|| AgentEngineError::InvalidContract("active task ledger has no completion tool".into()))?;
+        *completion_tool = state.completion.definition_with_evidence(&state.work_status);
         // Temporary workflow gates do not revoke tools from the frozen
         // capability surface. Removing schemas made repairable command errors
         // look like lost shell permission and forced needless tool discovery.
@@ -4323,6 +4327,12 @@ mod tests {
         assert_eq!(result.model_steps,3);
         assert_eq!(result.output_text,"Inspected file");
         assert_eq!(model.requests.lock().unwrap().len(),3);
+        let requests = model.requests.lock().unwrap();
+        let completion = requests[2].input.tools.iter().find(|tool| tool.name == crate::completion::TOOL_NAME).unwrap();
+        let criteria = &completion.input_schema.0["properties"]["criteria"]["items"]["properties"];
+        assert_eq!(criteria["evidence_paths"]["items"]["enum"], json!(["a", "b"]));
+        assert_eq!(criteria["evidence_call_ids"]["items"]["enum"], json!(["read-a", "read-b"]));
+        drop(requests);
         assert_eq!(model.steps.lock().unwrap().len(),1);
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
         let events = sink.0.lock().unwrap();
