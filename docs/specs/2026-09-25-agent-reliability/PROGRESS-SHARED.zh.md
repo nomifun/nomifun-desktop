@@ -34,7 +34,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | P0 本轮；P1/P2 待走查 |
-| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | 部分模板补项已有回归；其余待走查 |
+| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | S-D03-01 原子 write 在 Windows 修复/定向回归；macOS 和正式入口待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | 条件资源准备后走查，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
@@ -46,6 +46,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D03-01（FILE-019～021/038/039；WIN-006/014）：W01-B 的真实 handle 反例确认 Agent
+  `write_file` 仍经 `std::fs::write` 原地截断，deny-delete 下错误返回成功；覆盖既有文件还误报
+  `created=true`。改为与 patch 共用完整临时文件发布，明确创建/覆盖意图，保留字节上限与失败清理。
+  发布或清理结果不确定时保留 durable pending fence，换 key/重启不能盲重放。
+  Windows 用保留 ACL 的原生替换并先验证 write/delete 访问；旧文件备份只在成功后清理，部分
+  原生失败仅向不存在的目标恢复，出现并发目标则保留原件并要求核对。原始及中间失败见
+  `phase-2-3/2026-09-27/windows/w01b-atomic/`；本轮证据仅支持 Windows 组件子断言。
 
 - 2026-09-26：PAL 身份与绑定、MM Skill 首发、进程启动、工具可见性、模板 Action 已有针对性修复；
   Windows 真实路径及其构建身份见 Windows 文档；旧失败证据仍在仓库外。

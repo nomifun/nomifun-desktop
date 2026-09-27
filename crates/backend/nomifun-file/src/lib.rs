@@ -39,7 +39,7 @@ pub use routes::{FileRouterState, file_routes};
 pub use service::{
     AgentSessionFilePatch, AgentSessionPatchHunk, AgentSessionPatchLine,
     AgentSessionPatchRequest, AgentSessionPatchResult, AgentSessionPatchFileResult,
-    FileService,
+    FileService, file_write_outcome_unknown,
 };
 pub use snapshot_service::SnapshotService;
 pub use traits::{

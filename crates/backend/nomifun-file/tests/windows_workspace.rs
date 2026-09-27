@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_api_types::WebSocketMessage;
 use nomifun_file::{
+    AgentSessionFilePatch, AgentSessionPatchHunk, AgentSessionPatchLine,
+    AgentSessionPatchRequest, AgentSessionPatchSource,
     AgentSessionWorkspaceBinding, FileService, WORKSPACE_DELETE_OPERATION,
     WORKSPACE_READ_OPERATION, WORKSPACE_WRITE_OPERATION, workspace_binding,
 };
@@ -19,6 +21,133 @@ impl UserEventSink for Events {
     fn send_to_user(&self, _owner: &str, event: WebSocketMessage<serde_json::Value>) {
         self.0.lock().unwrap().push(event);
     }
+}
+
+fn replacement(path: &str, before: &str, after: &str) -> AgentSessionPatchRequest {
+    use sha2::{Digest, Sha256};
+    AgentSessionPatchRequest { files: vec![AgentSessionFilePatch {
+        path: path.into(),
+        expected_source: AgentSessionPatchSource::Existing {
+            sha256: format!("{:x}", Sha256::digest(before.as_bytes())),
+        },
+        hunks: vec![AgentSessionPatchHunk {
+            old_start: 1, old_lines: 1, new_start: 1, new_lines: 1,
+            lines: vec![
+                AgentSessionPatchLine::Remove { text: before.into() },
+                AgentSessionPatchLine::Add { text: after.into() },
+            ],
+        }],
+    }] }
+}
+
+fn lock(path: &Path, sharing: u32) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    fs::OpenOptions::new().read(true).share_mode(sharing).open(path).unwrap()
+}
+
+#[tokio::test]
+async fn write_rejects_deny_delete_lock_and_preserves_original_until_explicit_retry() {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("locked.txt");
+    fs::write(&target, b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let locker = lock(&target, FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let result = service.write_file_for_agent_session(&scope, "locked.txt", b"replacement").await;
+    assert!(result.is_err(), "deny-delete write unexpectedly succeeded: {result:?}");
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "temporary file leaked");
+    assert!(events.0.lock().unwrap().is_empty());
+    drop(locker);
+    let created = service.write_file_for_agent_session(&scope, "locked.txt", b"replacement").await.unwrap();
+    assert!(!created, "replacing an existing file must not report creation");
+    assert_eq!(fs::read(&target).unwrap(), b"replacement");
+    assert_eq!(events.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn patch_and_delete_reject_deny_delete_lock_without_events_or_residue() {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("locked.txt");
+    fs::write(&target, b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let locker = lock(&target, FILE_SHARE_READ | FILE_SHARE_WRITE);
+    let failure = service.apply_patch_with_observation_for_agent_session(&scope,
+        replacement("locked.txt", "original", "replacement")).await.unwrap_err();
+    assert_eq!(failure.observation.failed_file, Some(0));
+    assert!(failure.observation.published.is_empty());
+    assert!(failure.observation.temporary_cleanup_unconfirmed.is_empty());
+    assert!(service.remove_entry_for_agent_session(&scope, "locked.txt").await.is_err());
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
+    drop(locker);
+    service.apply_patch_for_agent_session(&scope, replacement("locked.txt", "original", "replacement")).await.unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"replacement");
+    service.remove_entry_for_agent_session(&scope, "locked.txt").await.unwrap();
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    assert_eq!(events.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn write_and_patch_respect_deny_write_even_when_delete_sharing_is_allowed() {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("locked.txt");
+    fs::write(&target, b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let _locker = lock(&target, FILE_SHARE_READ | FILE_SHARE_DELETE);
+    assert!(service.write_file_for_agent_session(&scope, "locked.txt", b"replacement").await.is_err());
+    let result = service.apply_patch_with_observation_for_agent_session(&scope,
+        replacement("locked.txt", "original", "replacement")).await;
+    assert!(result.is_err(), "deny-write patch unexpectedly succeeded: {result:?}");
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn successful_write_replaces_file_instead_of_truncating_the_open_original() {
+    use std::io::Read;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("output.txt");
+    let (service, scope, events) = owner(root.path());
+    assert!(service.write_file_for_agent_session(&scope, "output.txt", b"original").await.unwrap());
+    let mut original = lock(&target, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    let created = service.write_file_for_agent_session(&scope, "output.txt", b"new").await.unwrap();
+    let mut old_bytes = Vec::new();
+    original.read_to_end(&mut old_bytes).unwrap();
+    assert_eq!(old_bytes, b"original", "write truncated the original file identity");
+    assert!(!created);
+    assert_eq!(fs::read(&target).unwrap(), b"new");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert_eq!(events.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn readonly_target_rejects_write_and_patch_without_temporary_files() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("readonly.txt");
+    fs::write(&target, b"original").unwrap();
+    let original_permissions = fs::metadata(&target).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&target, readonly).unwrap();
+    let (service, scope, events) = owner(root.path());
+    let written = service.write_file_for_agent_session(&scope, "readonly.txt", b"wrong").await;
+    let patched = service.apply_patch_with_observation_for_agent_session(&scope,
+        replacement("readonly.txt", "original", "wrong")).await;
+    // Restore the fixture's original attributes before an assertion can panic.
+    fs::set_permissions(&target, original_permissions).unwrap();
+    assert!(written.is_err());
+    let failure = patched.unwrap_err();
+    assert!(failure.observation.published.is_empty());
+    assert!(failure.observation.temporary_cleanup_unconfirmed.is_empty());
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
 }
 
 fn owner(root: &Path) -> (FileService, AgentSessionWorkspaceBinding, Arc<Events>) {
