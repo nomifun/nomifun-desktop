@@ -73,7 +73,8 @@ pub(crate) fn normalized_workspace_relative(raw: &str, allow_empty: bool) -> Res
 }
 
 pub fn artifact_publication_outcome_unknown(error: &AppError) -> bool {
-    error.to_string().contains(PUBLICATION_OUTCOME_UNKNOWN)
+    matches!(error, AppError::Conflict(message) if message.strip_prefix(PUBLICATION_OUTCOME_UNKNOWN)
+        .is_some_and(|suffix| suffix.starts_with(": ")))
 }
 
 /// Content-addressed artifacts owned through pinned, handle-relative paths.
@@ -701,6 +702,21 @@ fn read_verified_page(namespace: &ArtifactNamespace, id: &str, verified: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outcome_marker_inside_error_details_is_not_publication_uncertainty() {
+        for error in [
+            AppError::BadRequest(format!("patch target '{PUBLICATION_OUTCOME_UNKNOWN}' is not a regular file")),
+            AppError::Internal(format!("cannot create temporary file under '{PUBLICATION_OUTCOME_UNKNOWN}'")),
+            AppError::Conflict(format!("source '{PUBLICATION_OUTCOME_UNKNOWN}' changed before publication")),
+            AppError::Conflict(format!("{PUBLICATION_OUTCOME_UNKNOWN}ish is a literal source name")),
+        ] {
+            assert!(!artifact_publication_outcome_unknown(&error),"path/detail text must not create an unknown outcome: {error}");
+        }
+        assert!(artifact_publication_outcome_unknown(&AppError::Conflict(format!(
+            "{PUBLICATION_OUTCOME_UNKNOWN}: post-link verification and rollback failed"
+        ))));
+    }
 
     struct ShortReader {
         bytes: std::io::Cursor<Vec<u8>>,

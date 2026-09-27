@@ -2563,21 +2563,24 @@ mod tests {
 
     #[test]
     fn patch_temp_collision_preserves_unowned_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let named_directory = dir.path().join(FILE_WRITE_OUTCOME_UNKNOWN);
-        fs::create_dir(&named_directory).unwrap();
-        let target = named_directory.join("target.txt");
-        let temporary = named_directory.join("collision.tmp");
-        fs::write(&target, "original").unwrap();
-        fs::write(&temporary, "belongs to another operation").unwrap();
+        for marker in [FILE_WRITE_OUTCOME_UNKNOWN, "artifact publication outcome is unknown"] {
+            let dir = tempfile::tempdir().unwrap();
+            let named_directory = dir.path().join(marker);
+            fs::create_dir(&named_directory).unwrap();
+            let target = named_directory.join("target.txt");
+            let temporary = named_directory.join("collision.tmp");
+            fs::write(&target, "original").unwrap();
+            fs::write(&temporary, "belongs to another operation").unwrap();
 
-        let failure = publish_patch_file(&target, b"patched", &temporary, PublicationSource::Absent).unwrap_err();
-        assert!(!failure.published);
-        assert!(!failure.temporary_cleanup_unconfirmed);
-        let error = file_write_publication_error(failure);
-        assert!(!file_write_outcome_unknown(&error), "a path in an ordinary IO error is not an outcome marker: {error}");
-        assert_eq!(fs::read(&temporary).unwrap(), b"belongs to another operation");
-        assert_eq!(fs::read(&target).unwrap(), b"original");
+            let failure = publish_patch_file(&target, b"patched", &temporary, PublicationSource::Absent).unwrap_err();
+            assert!(!failure.published);
+            assert!(!failure.temporary_cleanup_unconfirmed);
+            let error = file_write_publication_error(failure);
+            assert!(!file_write_outcome_unknown(&error), "a path in an ordinary IO error is not an outcome marker: {error}");
+            assert!(!crate::artifact_publication_outcome_unknown(&error), "an artifact marker in a file path is not publication uncertainty: {error}");
+            assert_eq!(fs::read(&temporary).unwrap(), b"belongs to another operation");
+            assert_eq!(fs::read(&target).unwrap(), b"original");
+        }
     }
 
     #[cfg(windows)]

@@ -47,6 +47,12 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-06（FILE-032/039、OBS-016、LIFE-006/007 子断言）：Artifact 未知结果判断扫描完整错误
+  文本，普通目录名/临时文件冲突中的相同字样也触发 unknown，补丁错误因此无法正常结算。
+  改为只识别 Artifact owner 的 Conflict 错误及明确前缀；原始文件和不属于本次操作的临时文件
+  保留，已知失败结算 rejected，重开 host 后新操作可执行；真实 post-link 置换/回滚不确定仍
+  为 unknown。Windows 50 项定向检查通过，首次失败见 W10；无模型调用、无完整 UI/macOS 结论。
+
 - S-D01-01（REG-005/008、整批预检）：Windows W07 后两次真实 GEN 中，一次 8 步零错误，
   另一次在第 2/5 步将 ToolSearch 与 write/delete 混批，产生 4 个拒绝结果，随后恢复。
   实际工具说明已有互斥规则。W09 补可选的并行调用偏好，仅 ToolSearch 与其他工具同时暴露时
