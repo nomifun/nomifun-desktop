@@ -46,7 +46,10 @@ fn event_kind_to_str(kind: &EventKind) -> Option<&'static str> {
 /// Returns `true` if enough time has elapsed since the last event for `key`.
 /// Updates the timestamp when returning `true`.
 fn should_emit(debounce: &DashMap<String, Instant>, key: &str) -> bool {
-    let now = Instant::now();
+    should_emit_at(debounce, key, Instant::now())
+}
+
+fn should_emit_at(debounce: &DashMap<String, Instant>, key: &str, now: Instant) -> bool {
     if let Some(last) = debounce.get(key)
         && now.duration_since(*last) < DEBOUNCE_DURATION
     {
@@ -77,13 +80,30 @@ pub struct FileWatchService {
     watched_files: Arc<DashMap<String, HashSet<String>>>,
     /// Per-workspace Office watchers, keyed by canonical workspace path.
     office_watchers: Mutex<OfficeWatchState>,
-    /// Debounce timestamps shared with watcher callbacks.
+    /// Debounce timestamps for the shared single-file watcher.
     debounce: Arc<DashMap<String, Instant>>,
 }
 
 struct OfficeWatchRegistration {
     watcher: RecommendedWatcher,
     owners: Arc<DashMap<String, ()>>,
+    debounce: Arc<DashMap<String, Instant>>,
+}
+
+fn emit_office_event(event: &notify::Event, workspace: &str, owners: &DashMap<String, ()>,
+    debounce: &DashMap<String, Instant>, events: &dyn UserEventSink, now: Instant) {
+    if !matches!(event.kind, EventKind::Create(_)) { return; }
+    for path in &event.paths {
+        if !is_office_file(path) { continue; }
+        let path_str = path.to_string_lossy().into_owned();
+        if !should_emit_at(debounce, &format!("office:{path_str}"), now) { continue; }
+        let payload = OfficeFileAddedEvent { file_path: path_str, workspace: workspace.to_owned() };
+        let json = serde_json::to_value(&payload).unwrap_or_default();
+        let owner_ids: Vec<String> = owners.iter().map(|entry| entry.key().clone()).collect();
+        for owner_id in owner_ids {
+            events.send_to_user(&owner_id, WebSocketMessage::new("workspaceOfficeWatch.fileAdded", json.clone()));
+        }
+    }
 }
 
 type WatchAliases = HashMap<(String, PathBuf), String>;
@@ -271,7 +291,10 @@ impl crate::traits::IFileWatchService for FileWatchService {
         }
 
         let events = self.user_events.clone();
-        let db = self.debounce.clone();
+        // Different workspace registrations may overlap, and a restarted
+        // registration must never inherit suppression from its predecessor.
+        let db = Arc::new(DashMap::new());
+        let registration_debounce = db.clone();
         let ws = key.clone();
         let owners = Arc::new(DashMap::new());
         owners.insert(owner_id.to_owned(), ());
@@ -286,32 +309,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
                 }
             };
 
-            if !matches!(event.kind, EventKind::Create(_)) {
-                return;
-            }
-
-            for path in &event.paths {
-                if !is_office_file(path) {
-                    continue;
-                }
-                let path_str = path.to_string_lossy().into_owned();
-                let debounce_key = format!("office:{path_str}");
-                if !should_emit(&db, &debounce_key) {
-                    continue;
-                }
-                let payload = OfficeFileAddedEvent {
-                    file_path: path_str,
-                    workspace: ws.clone(),
-                };
-                let json = serde_json::to_value(&payload).unwrap_or_default();
-                let owner_ids: Vec<String> = callback_owners.iter().map(|entry| entry.key().clone()).collect();
-                for owner_id in owner_ids {
-                    events.send_to_user(
-                        &owner_id,
-                        WebSocketMessage::new("workspaceOfficeWatch.fileAdded", json.clone()),
-                    );
-                }
-            }
+            emit_office_event(&event, &ws, &callback_owners, &db, events.as_ref(), Instant::now());
         })
         .map_err(|e| AppError::Internal(format!("failed to create office watcher: {e}")))?;
 
@@ -324,6 +322,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
             OfficeWatchRegistration {
                 watcher,
                 owners,
+                debounce: registration_debounce,
             },
         );
         watchers.aliases.insert((owner_id.to_owned(), alias), key);
@@ -343,6 +342,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
         if last_owner { confirm_unwatch(&mut registration.watcher, Path::new(&key))?; }
         registration.owners.remove(owner_id);
         if last_owner {
+            registration.debounce.clear();
             watchers.registrations.remove(&key);
         }
         forget_watch_aliases(&mut watchers.aliases, owner_id, &key);
@@ -530,6 +530,115 @@ mod tests {
         assert!(service.file_watcher.lock().unwrap().aliases.is_empty());
         let office = service.office_watchers.lock().unwrap();
         assert!(office.registrations.is_empty() && office.aliases.is_empty());
+    }
+
+    #[derive(Default)]
+    struct OfficeDeliveryEvents(Mutex<Vec<(String, String)>>);
+    impl UserEventSink for OfficeDeliveryEvents {
+        fn send_to_user(&self, owner: &str, event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {
+            if event.name == "workspaceOfficeWatch.fileAdded" {
+                self.0.lock().unwrap().push((owner.to_owned(), event.data["workspace"].as_str().unwrap().to_owned()));
+            }
+        }
+    }
+
+    fn inject_office_event(service: &FileWatchService, root: &str, file: &Path, now: Instant, events: &OfficeDeliveryEvents) {
+        let registrations = service.office_watchers.lock().unwrap();
+        let registration = registrations.registrations.get(root).unwrap();
+        let event = notify::Event::new(EventKind::Create(CreateKind::File)).add_path(file.to_path_buf());
+        emit_office_event(&event, root, &registration.owners, &registration.debounce, events, now);
+    }
+
+    #[tokio::test]
+    async fn overlapping_office_roots_each_deliver_the_same_native_event() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let file = nested.join("shared.docx");
+        std::fs::write(&file, b"fixture").unwrap();
+        let parent_owner = nomifun_common::generate_id();
+        let child_owner = nomifun_common::generate_id();
+        let events = Arc::new(OfficeDeliveryEvents::default());
+        let service = FileWatchService::new(events.clone()).unwrap();
+        service.start_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
+        service.start_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
+        let now = Instant::now();
+        inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
+        inject_office_event(&service, nested.to_str().unwrap(), &file, now, &events);
+        let observed = events.0.lock().unwrap().clone();
+        if observed != [(parent_owner.clone(), root.to_string_lossy().into_owned()), (child_owner.clone(), nested.to_string_lossy().into_owned())] {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+            panic!("one workspace suppressed another's event; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn office_restarts_do_not_inherit_the_prior_subscription_debounce() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let file = root.join("recreated.docx");
+        std::fs::write(&file, b"fixture").unwrap();
+        let old_owner = nomifun_common::generate_id();
+        let new_owner = nomifun_common::generate_id();
+        let events = Arc::new(OfficeDeliveryEvents::default());
+        let service = FileWatchService::new(events.clone()).unwrap();
+        service.start_office_watch(&old_owner, root.to_str().unwrap()).await.unwrap();
+        let now = Instant::now();
+        inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
+        service.stop_office_watch(&old_owner, root.to_str().unwrap()).await.unwrap();
+        service.start_office_watch(&new_owner, root.to_str().unwrap()).await.unwrap();
+        inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
+        let observed = events.0.lock().unwrap().clone();
+        if observed.iter().map(|item| &item.0).collect::<Vec<_>>() != [&old_owner, &new_owner] {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+            panic!("new subscription inherited old suppression; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_office_subscriptions_receive_real_events_independently() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let nested = root.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let parent_owner = nomifun_common::generate_id();
+        let child_owner = nomifun_common::generate_id();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let service = FileWatchService::new(Arc::new(ChannelEvents(sender))).unwrap();
+        service.start_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
+        service.start_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
+        std::fs::write(nested.join("shared.docx"), b"first fixture").unwrap();
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            let mut observed = HashSet::new();
+            while observed.len() < 2 {
+                let (owner, event) = receiver.recv().await.unwrap();
+                if event.name == "workspaceOfficeWatch.fileAdded" && event.data["file_path"].as_str().is_some_and(|path| path.ends_with("shared.docx")) {
+                    observed.insert((owner, event.data["workspace"].as_str().unwrap().to_owned()));
+                }
+            }
+            observed
+        }).await.expect("both native workspace subscriptions must receive the event");
+        assert_eq!(observed, HashSet::from([(parent_owner.clone(), root.to_string_lossy().into_owned()),
+            (child_owner.clone(), nested.to_string_lossy().into_owned())]));
+        service.stop_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
+        std::fs::write(nested.join("second.docx"), b"second fixture").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (owner, event) = receiver.recv().await.unwrap();
+                if event.name == "workspaceOfficeWatch.fileAdded" && event.data["file_path"].as_str().is_some_and(|path| path.ends_with("second.docx")) {
+                    assert_eq!(owner, child_owner);
+                    assert_eq!(event.data["workspace"], nested.to_string_lossy().as_ref());
+                    break;
+                }
+            }
+        }).await.expect("remaining native subscriber must keep receiving events");
+        service.stop_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
+        assert!(service.office_watchers.lock().unwrap().registrations.is_empty());
+        assert!(service.debounce.is_empty(), "Office paths must not accumulate in the shared file-watcher debounce map");
     }
 
     // -- is_office_file --

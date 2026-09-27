@@ -545,6 +545,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   无模型/UI；未知 native unwatch 故障注入、迟到回调、多窗口引用语义、debounce 隔离/容量、缓存
   接线、事件丢批/落后 UI、其他平台和全量统计仍待验，未声明共享阶段完成。
 
+### 共享 FILE Office watcher 事件隔离（W24，基线 `9288686b8`）
+
+- S-D03-20 / FILE-040 watcher 支撑、AUTH-005：父/子工作区监听同一个 Office 文件时，全局
+  debounce 抑制其中一个工作区的通知；停止重订后新 owner 也继承旧抑制。两项首次 FAIL 及
+  回调观察保留于 `phase-2-3/2026-09-28/windows/w24-watch-debounce/01-before/`。
+- 保留 200ms 规则，将 Office debounce 放进各 workspace 注册生命周期；共享该注册的 owners
+  仍一起接收，最后 owner 停止时清理，不再积存在单文件 watcher 的全局表。
+- watcher owner **27**、原生接口 **14**，共 **41 项通过**；新增 3 项各重复 **20/20**。
+  固定时间的确定性回调反例及真实父/子 watcher 都通过；双方收到正确 owner/workspace，停止父
+  监听后子监听继续收到新文件事件，最后登记与全局 Office 痕迹为空。
+- 最终证据 `02-after/`、`03-regression/`、`04-repeat/`，diff 通过，无模型/UI。活动注册内大量
+  路径的容量/TTL、尾事件补发、迟到回调、缓存接线、workspace.files/changed 队列/落后 UI、其他
+  平台及完整 N3/LONG/99% 仍待验，不计完整 FILE-040 或共享阶段完成。
+
 下一步优先共享：FILE 既有文件发布、扁平遍历/侧栏、watcher 接线与队列，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
