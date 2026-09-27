@@ -4,7 +4,7 @@
     "manifest_version": "1.0.0",
     "confirmed_decision_contract_digest": "d1cff555fcb33de6ffc654be651e60610d63be54fd41ab29a3df15355d594848",
     "canonical_schema_manifest_digest": "bf4be67800f2c1d90ab78a19b06385436f04149a10a3d0246d43bd7bdc4644a2",
-    "cargo_lock_digest": "2187db37243951f9c5a420a956301a5d8220b50c4a9d0ab15799f7d468d145d9",
+    "cargo_lock_digest": "b5b6211e7c3177f0982e4658d541ae03a9e01dc7b0f878bd19ff79f95f051e71",
     "official_preset_seed_manifest_digest": "5a75dfd27297c91f1c27dc94014f83cd67bac504bc002db978befbf4bfc64e4b",
     "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
     "coding_codex_native_contract_digest": "19411e27d38cfd07f6c4375f9258dc0ba677e951ad4e76da36ea78bae9ff7faa",
@@ -160,5 +160,5 @@
       }
     }
   },
-  "payload_digest": "3a040c45800849c2bd2717f564aa3ea7ac18e06dddfe250249c01dac070fd950"
+  "payload_digest": "5d2072c6534466980dbeb872d96d7713b4810d3066f6241d02490ece37a61295"
 }

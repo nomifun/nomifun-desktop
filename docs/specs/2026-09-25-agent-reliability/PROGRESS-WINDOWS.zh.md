@@ -575,6 +575,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   无模型/UI；native rescan 标记、更多不可表示名称、整体传输预算、取消/恢复中批次消费、客户端
   全量对账、其他平台及 N3/LONG/99% 仍待验，不计完整 FILE-040/PORT-012 或共享阶段完成。
 
+### 共享 FILE 原生事件缺口（W26，基线 `69c234a92`）
+
+- S-D03-22 / FILE-040、PORT-012：native rescan 无路径通知完全消失；监听错误被误记为丢失
+  一个事件。两项首次 FAIL/观察保留于
+  `phase-2-3/2026-09-28/windows/w26-native-rescan/01-before/`。
+- 可选 rescan_required 表示原生流存在未知缺口；dropped 只统计确知的本地丢弃。空批次也交付
+  缺口，附重新读取工作区的提示，交付后清零；Access 的 rescan 标记及根变更同样保留。
+  按分量严格编码相对路径，不可表示名称计 dropped，不再有损转换成其他名称；私有/根外路径仍过滤。
+- 队列/原生监听 **12**、事件 Schema/发布合同 **4**，共 **16 项通过**；新增 6 项同构建各
+  重复 **20/20**。验证 Unicode、Windows 非法 UTF-16 回调名称、已知/未知损失共存和旧四字段
+  编码兼容；不可表示名称为回调注入，未声称原生文件系统创建该名称或 Unix 原生验证通过。
+- `02-after/generated-contract-check.log` 保留 Cargo.lock 摘要漂移；实际锁文件最后更新于
+  `ad468c2c2`，manifest 尚为 `85a079fc0`。正式 generator write 仅刷新三个文件中的六处摘要，
+  随后 check 通过；未改验收记录或手填 digest。最终证据 `03-adjacent/`、`04-contract-refresh/`、
+  `05-repeat/`，diff 通过；无模型/UI。native 重订、批次传输/取消恢复、完整 UI 全量对账、其他平台
+  及 N3/LONG/99% 仍待验，不计完整 Case 或共享阶段完成。
+
 下一步优先共享：FILE 既有文件发布、扁平遍历/侧栏、watcher 接线与消费者恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
