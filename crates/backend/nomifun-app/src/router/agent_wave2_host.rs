@@ -2731,6 +2731,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn artifact_marker_in_patch_target_is_known_failure_without_pending_fence() {
+        assert_eq!(operation_error("workspace.artifacts/publish",AppError::Conflict(
+            "artifact publication outcome is unknown: post-link rollback could not be proven".into()
+        )).code,"EFFECT_OUTCOME_UNKNOWN");
+        let directory = tempfile::tempdir().unwrap();
+        let marker = "artifact publication outcome is unknown";
+        std::fs::create_dir(directory.path().join(marker)).unwrap();
+        let retained = directory.path().join(marker).join("keep.txt");
+        std::fs::write(&retained,b"original").unwrap();
+        let host = test_host(directory.path()).await;
+        let store = host.effect_store().unwrap().clone();
+        let mut call = context(directory.path());
+        call.action_id = ActionId::from("workspace.files/patch");
+        call.operation_id = OperationId::from("marker-patch");
+        call.idempotency_key = IdempotencyKey::from("marker-patch");
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let error = invoke(&host,call.clone(),"workspace.files/patch",json!({"files":[{
+            "path":marker,"hunks":[{"old_start":0,"old_lines":0,"new_start":1,"new_lines":1,
+                "lines":[{"kind":"add","text":"must not replace a directory"}]}]
+        }]})).await.unwrap_err();
+        assert_eq!(std::fs::read(&retained).unwrap(),b"original");
+        assert!(directory.path().join(marker).is_dir());
+        assert_eq!(error.code,"INVALID_PAYLOAD","{error:?}");
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Rejected);
+        drop(host);
+        let restarted=Wave2ApplicationHost::for_workspace_root(directory.path()).with_effect_store(store);
+        call.operation_id=OperationId::from("write-after-known-failure");
+        call.idempotency_key=IdempotencyKey::from("write-after-known-failure");
+        invoke(&restarted,call,"workspace.files/write",json!({"path":"allowed.txt","content":"allowed"})).await.unwrap();
+        assert_eq!(std::fs::read(directory.path().join("allowed.txt")).unwrap(),b"allowed");
+        assert_eq!(std::fs::read(&retained).unwrap(),b"original");
+    }
+
+    #[tokio::test]
     async fn workspace_artifact_owner_directory_is_absent_from_vcs_status() {
         let directory = tempfile::tempdir().unwrap();
         let _repository = initialize_git_repository(directory.path());
