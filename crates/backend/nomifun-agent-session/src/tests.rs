@@ -2013,6 +2013,16 @@ async fn turn_history_projects_wall_clock_timing_and_structured_failure() {
         "USER_LLM_PROVIDER_GATEWAY_ERROR"
     );
     assert_eq!(summary.projection["error"]["retryable"], true);
+    let source = summary.projection["source_message_id"].as_str().unwrap().to_owned();
+    let selected = store.turn_history_for_sources(&session.agent_session_id, &[source.clone()])
+        .await.unwrap();
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].projection, summary.projection);
+    let (other, _) = create_ready(&store, "turn-history-other-session").await;
+    assert!(store.turn_history_for_sources(&other.agent_session_id, &[source]).await.unwrap().is_empty());
+    assert!(store.turn_history_for_sources(&session.agent_session_id, &[]).await.unwrap().is_empty());
+    assert!(store.turn_history_for_sources(&session.agent_session_id, &vec!["source".to_owned(); 501])
+        .await.is_err());
 }
 
 #[tokio::test]

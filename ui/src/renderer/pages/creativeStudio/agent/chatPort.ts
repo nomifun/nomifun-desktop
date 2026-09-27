@@ -27,6 +27,7 @@ export type CreativeStudioAgentTurnEvent =
   | { type: 'assistant-delta'; delta: string }
   | { type: 'history-reconciled'; history: readonly CreativeStudioAgentMessage[] }
   | { type: 'completed'; assistantMessageId?: string }
+  | { type: 'stopped' }
   | { type: 'failed'; message: string; code?: string; retryable?: boolean };
 
 /**
@@ -123,6 +124,11 @@ export class CreativeStudioAgentChatController {
         }
         observer.onEvent?.(event);
         if (event.type === 'failed') throw new CreativeStudioAgentRemoteError(event);
+        if (event.type === 'stopped') {
+          const outcome = { state: 'stopped' } as const;
+          observer.onStatusChange?.(outcome);
+          return outcome;
+        }
         if (event.type === 'completed') completed = true;
       }
 

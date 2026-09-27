@@ -10014,15 +10014,52 @@ async fn canonical_creative_studio_history(
         .await
         .map_err(agent_session_store_error)?;
     projections.reverse();
+    let mut message_sources = HashMap::new();
+    for projection in &projections {
+        if projection.presentation_intent != "message" { continue; }
+        let document = &projection.projection;
+        let Some(id) = document.get("correlation_id").and_then(Value::as_str) else { continue; };
+        let source = if document.get("state").and_then(Value::as_str) == Some("accepted") {
+            id.to_owned()
+        } else if let Some(source) = document.get("turn_id").and_then(Value::as_str) {
+            source.to_owned()
+        } else {
+            // Older empty assistant projections have no content part carrying
+            // turn_id. The first assistant ID uses the reversible XOR-1 mapping.
+            super::engine_journal::canonical_assistant_message_id(id)?
+        };
+        message_sources.insert(id.to_owned(), source);
+    }
+    let sources = message_sources.values().cloned().collect::<BTreeSet<_>>()
+        .into_iter().collect::<Vec<_>>();
+    let summaries = state.session_owner.canonical().store()
+        .turn_history_for_sources(session_id, &sources).await
+        .map_err(agent_session_store_error)?;
+    let mut outcomes = HashMap::new();
+    for summary in summaries {
+        let source = summary.projection["source_message_id"].as_str().unwrap().to_owned();
+        let turn_state = summary.projection["state"].as_str().unwrap().to_owned();
+        let error_message = if matches!(turn_state.as_str(), "failed" | "interrupted") {
+            canonical_message_response(session_id, created_at, summary)?
+                .and_then(|message| message.content.get("content").and_then(Value::as_str).map(str::to_owned))
+        } else { None };
+        outcomes.insert(source, (turn_state, error_message));
+    }
     let mut history = Vec::new();
+    let mut last_assistants = HashMap::new();
     for projection in projections {
         let Some(message) = canonical_message_response(session_id, created_at, projection)? else {
             continue;
         };
-        if message.r#type != MessageType::Text
-            || message.status != Some(MessageStatus::Finish)
-            || message.hidden
-        {
+        if message.r#type != MessageType::Text || message.hidden {
+            continue;
+        }
+        let source = message_sources.get(&message.message_id);
+        let outcome = source.and_then(|source| outcomes.get(source));
+        // Only terminal Turns belong to durable Canvas history. In particular,
+        // assistant-complete can be journaled before the Turn itself settles.
+        if outcome.is_some_and(|(state, _)| state == "running")
+            || (outcome.is_none() && message.status != Some(MessageStatus::Finish)) {
             continue;
         }
         let Some(position) = message.position else { continue };
@@ -10042,6 +10079,11 @@ async fn canonical_creative_studio_history(
             ),
             _ => continue,
         };
+        if matches!(role, CreativeStudioAgentHistoryRole::Assistant) {
+            if let Some(source) = source {
+                last_assistants.insert(source.clone(), history.len());
+            }
+        }
         history.push(CreativeStudioAgentHistoryMessage {
             id: message.message_id,
             role,
@@ -10050,6 +10092,17 @@ async fn canonical_creative_studio_history(
             activity_label: None,
             error_message: None,
         });
+    }
+    for (source, index) in last_assistants {
+        let Some((state, error)) = outcomes.get(&source) else { continue; };
+        match state.as_str() {
+            "failed" | "interrupted" => {
+                history[index].status = CreativeStudioAgentHistoryStatus::Failed;
+                history[index].error_message = error.clone();
+            }
+            "cancelled" => history[index].status = CreativeStudioAgentHistoryStatus::Stopped,
+            _ => {}
+        }
     }
     Ok(history)
 }
@@ -10253,7 +10306,8 @@ async fn resolve_canonical_creative_studio_canvas_agent_session(
     }
     let assistant_ids = history
         .iter()
-        .filter(|message| message.role == CreativeStudioAgentHistoryRole::Assistant)
+        .filter(|message| message.role == CreativeStudioAgentHistoryRole::Assistant
+            && message.status == CreativeStudioAgentHistoryStatus::Complete)
         .map(|message| message.id.as_str())
         .collect::<HashSet<_>>();
     let applied_proposal_message_ids = sqlx::query_scalar::<_, String>(

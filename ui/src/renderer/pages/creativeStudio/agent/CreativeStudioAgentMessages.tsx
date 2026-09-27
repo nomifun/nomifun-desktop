@@ -146,7 +146,7 @@ const CreativeStudioAgentMessages: React.FC<CreativeStudioAgentMessagesProps> = 
               </section>
             ) : null}
 
-            {isAssistant && message.status !== 'running' && onRetryMessage && (
+            {isAssistant && message.status === 'failed' && message.id === messages.at(-1)?.id && onRetryMessage && (
               <Button
                 className={styles.retryMessageButton}
                 type='text'

@@ -13,11 +13,12 @@ import type {
 } from '../../../domain';
 import type { CreativeModelSelectionRef } from '../../../models';
 import type { CreativeStudioAgentMessage } from '../../../agent';
+import { isDurableCreativeStudioAgentMessage } from '../../../agent/adapters';
 
 export type CreativeCanvasAgentHistoryAuthority =
   | 'current'
-  | 'completed-pending-turn'
-  | 'completed-unreferenced-turns';
+  | 'settled-pending-turn'
+  | 'settled-unreferenced-turns';
 
 const translatedNewConversationTitle = (): string =>
   getI18n()?.t('creativeStudio.agent.newConversation', {
@@ -149,10 +150,7 @@ export function classifyCreativeCanvasAgentHistory(
   history: readonly CreativeStudioAgentMessage[]
 ): CreativeCanvasAgentHistoryAuthority {
   const ids = history.map((message) => {
-    if (
-      message.status !== 'complete' ||
-      (message.role !== 'user' && message.role !== 'assistant')
-    ) {
+    if (!isDurableCreativeStudioAgentMessage(message)) {
       throw new Error('Creative Studio Agent authority returned a non-durable message');
     }
     return message.id;
@@ -169,7 +167,7 @@ export function classifyCreativeCanvasAgentHistory(
   const recoveredCount = ids.length - session.messageIds.length;
   if (recoveredCount === 0) return 'current';
   const recovered = history.slice(session.messageIds.length);
-  const recoveredIsCompletePairs =
+  const recoveredIsSettledPairs =
     recovered.length % 2 === 0 &&
     recovered.every(
       (message, index) =>
@@ -178,12 +176,12 @@ export function classifyCreativeCanvasAgentHistory(
   if (
     recoveredCount === 2 &&
     session.pendingTurn &&
-    recoveredIsCompletePairs
+    recoveredIsSettledPairs
   ) {
-    return 'completed-pending-turn';
+    return 'settled-pending-turn';
   }
-  if (!session.pendingTurn && recoveredCount > 0 && recoveredIsCompletePairs) {
-    return 'completed-unreferenced-turns';
+  if (!session.pendingTurn && recoveredCount > 0 && recoveredIsSettledPairs) {
+    return 'settled-unreferenced-turns';
   }
   throw new Error('Creative Studio Agent authority returned an invalid pending-turn projection');
 }

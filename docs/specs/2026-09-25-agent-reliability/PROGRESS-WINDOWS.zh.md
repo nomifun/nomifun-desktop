@@ -44,7 +44,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | 首批 8 回合已验；MM 名称已修；GEN 完成报告仍 FAIL_VISIBLE_UX，不能计 PASS |
 | W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、隔离 local/file remote；其余文件/SSH 逐簇推进 | 文件首批 32 项、Git push owner 9 项通过；大小写新建碰撞、ACL、SSH 与产品完整路径待验 |
-| W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 先复现旧失败会话按钮/状态/Promise 与 canonical Turn，定位 spinner，保留首次失败 | 待走查，不重写旧 Snapshot |
+| W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧失败历史丢失与无效重试入口已复现并修复；不重写旧 Snapshot | 原旧会话 Tauri 冷加载/刷新复验通过；其他恢复/停止/扩展 Case 待验 |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
 | W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | 待走查 |
 
@@ -155,6 +155,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   （Temp 同盘），无真实跨卷夹具；PATH 未发现 sshd，尚未配置隔离原生 SSH 测试主机。
   这些仅阻断相关跨卷/SSH Case，其他任务继续。
 
-下一步：W04 旧 MM retry 独立复现；W03 的新建 alias、跨盘/ACL/并发与剩余 VCS/SSH 保留队列；
-GEN 完成报告继续保持开放问题；
-旧 MM retry 在 W04 保持待复现，不因本批通过关闭。不要重建 2,374 行日志/状态文件到 Git。
+### W04 旧 MM 失败历史与重试（GUI 基线 `829db4dd9` + 本批源码补丁）
+
+- AMUL-001、OBS-008/014、MGMT-013 的历史恢复子断言：从原 `WIN-MM-PROVISION-01` 失败现场，
+  经正式 `nomicore backup/restore` 安装隔离 data/work/profile；保留 Session/消息/Turn ID、Snapshot
+  与绑定。首次直接复制 DB 的启动被 root identity 门禁拒绝，保留 `01`，随后改用正式恢复入口。
+- 旧现象在正式 Tauri 重现：错误卡片变空白，只剩静态 Refresh 重试图标。点击后 55 秒无新
+  request/event/Turn，原 Turn 仍 failed；未观察到真正运行中的 spinner。根因是历史仅取文本并
+  硬编码 complete，加上无 pendingTurn 时仍显示重试按钮、handler 直接返回。
+- 修复：从 canonical Turn 补终态，不占用原消息分页；保留消息身份与公开错误。前端严格接受
+  failed/stopped，恢复不得报告 completed，失败/停止不能作为可应用提案。仅未确认 pending
+  的最后失败消息保留重试入口，仍复用原 key；已结算旧失败不再显示无效入口。
+- 首次后端反例 1 FAIL、前端 28 PASS / 4 FAIL 保留；最终 UI 57、Store 1、App route 1，合计
+  **59 项定向测试通过**，typecheck、desktop-ui-boundary、Tauri 构建通过。同步远端独立的伙伴
+  UI 提交 `2d4dac3f6`，未覆盖他人改动；集成后的类型、边界及 Canvas 交互另验。
+- 同一旧会话 Tauri 冷启动及刷新：失败卡片可见，无无效重试/运行状态；独立 SQLite 对账确认
+  原 1 个 failed Turn、12 events、0 effects，原 Turn/event/message/effect 行完全不变，Snapshot
+  content/envelope、绑定和画布 nodes/connections 哈希不变。实际点击重试 1 次、模型步 0、媒体 0。
+- 证据：`windows/w04-mm-retry/{01,02,03-before,04-after,05-final,06-merged}/`；截图、原备份、
+  构建 hash/patch、只读对账脚本均在仓库外。原 Skill 失败及旧错误分类仍按历史保留；本批关闭
+  失真显示/无效按钮缺陷，不把旧任务改记成功，也不代表完整 AMUL/恢复矩阵或 macOS 通过。
+
+下一步：W03 新建 alias、跨盘/ACL/并发与剩余 VCS/SSH；W04 其余真实停止/恢复与扩展；
+W05/W06 按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。
