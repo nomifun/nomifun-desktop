@@ -181,7 +181,9 @@ pub fn is_unsafe_path_segment(name: &str) -> bool {
     if !cfg!(windows) {
         return false;
     }
-    if name.contains(':') || name.ends_with('.') || name.ends_with(' ') {
+    if name.chars().any(|c| c <= '\u{1f}' || matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        || name.ends_with('.') || name.ends_with(' ')
+    {
         return true;
     }
     is_windows_reserved_device_name(name)
@@ -198,7 +200,12 @@ fn is_windows_reserved_device_name(name: &str) -> bool {
     lower
         .strip_prefix("com")
         .or_else(|| lower.strip_prefix("lpt"))
-        .is_some_and(|suffix| suffix.len() == 1 && matches!(suffix.as_bytes()[0], b'1'..=b'9'))
+        .is_some_and(|suffix| {
+            // Win32 also recognizes these ISO-8859-1 superscript digits in
+            // DOS device names, including when followed by an extension.
+            let mut chars = suffix.chars();
+            matches!(chars.next(), Some('1'..='9' | '¹' | '²' | '³')) && chars.next().is_none()
+        })
 }
 
 /// The filesystem authority a single file operation runs under, resolved

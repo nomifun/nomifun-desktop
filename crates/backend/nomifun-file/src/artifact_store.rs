@@ -50,6 +50,11 @@ pub(crate) fn normalized_workspace_relative(raw: &str, allow_empty: bool) -> Res
         match component {
             Component::Normal(value) => {
                 let value = value.to_str().ok_or_else(|| AppError::BadRequest("workspace path must be UTF-8".into()))?;
+                // Validate raw segments before Win32 can normalize an alias
+                // or open an alternate data stream during canonicalization.
+                if crate::path_safety::is_unsafe_path_segment(value) {
+                    return Err(AppError::BadRequest("workspace path has an invalid component".into()));
+                }
                 if portable.is_empty() && is_workspace_owner_component(component.as_os_str()) {
                     return Err(AppError::NotFound("workspace path was not found".into()));
                 }

@@ -40,7 +40,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | 任务 | 对应 Case / 断言 | 测试与修复安排 | 状态 |
 | --- | --- | --- | --- |
 | W01-A 命令形状与启动 | G0-003/004/010；PROC-001～004；WIN-008/009；CMD-131/133/147 | 验字面 argv、显式脚本、混合形式拒绝、PowerShell 初始化及退出状态；PATH 上 Bun 也通过 owner 实际启动 | 组件子断言已验证；持久/脱离命令 policy 和新构建 Tauri CMD 仍待验收 |
-| W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | 新增 Windows junction cwd 越界拒绝、合法 alias root 两项回归；中文/空格 argv/cwd/env 已实测 | cwd 子断言已验证；文件 owner、保留名、UNC/ADS、锁、跨盘/ACL/长路径仍待走查 |
+| W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 补原始分段检查，拒绝 Win32 尾点/尾空格别名、ADS、完整保留名和非法字符 | 路径首批 80 项定向回归通过；共享锁、删除 junction、跨盘/ACL/长路径及正式 UI 待验 |
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照，复测资源/Skill 合同与已修首发；工具副作用由磁盘/DB 只读 oracle 判定 | 共享合入后排程 |
 | W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 先根内读写负向，再隔离 remote/SSH 与外部效果；逐簇修复 | 待走查 |
@@ -66,5 +66,19 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | `cargo test -p nomifun-engine-core --lib process::tests::managed_owner_launches_bun_from_path -- --exact --ignored` | 本机有 Bun，显式运行该项并通过；本批不再留为 skipped | `engine-bun-path.log` |
 | `cargo test -p nomifun-agent-domain-wave2 --lib process_schema::tests` | 2 通过，覆盖两种入口与互斥 Schema | `process-schema.log` |
 
-下一步：继续 W01-B 文件 owner 的保留名/UNC/ADS/共享锁，再进入 W02 的新构建正式入口；
+### W01-B1 文件路径（基线 `bd9fea1fb`）
+
+- 子断言：AUTH-009、WIN-002～005；GEN/COD/MM 共享文件 owner，不折算为角色或完整 Case PASS。
+- 首次结果：新增 5 项测试中 3 FAIL、2 PASS。真实 ADS 内容可读，`nested./report.txt` 读取了
+  `nested/report.txt`；名称检查漏过 `COM¹`/`LPT³`、通配符及控制字符。首次日志保留。
+- 修复：在 workspace/Artifact 共用的相对路径规范化中，先验证每个原始分段，再访问文件系统；
+  补全 Windows 名称规则。UNC/device/绝对/盘符相对路径在根解析前拒绝；合法中文/空格/emoji 和
+  既有文件大小写 alias 仍解析到同一 canonical 文件。
+- 验证：`cargo test -p nomifun-file --test windows_workspace` 5/5；同 crate 的
+  `--lib path_safety::tests` 19、`resource::tests` 3、`artifact_store::tests` 14，
+  `--test file_read_write --test file_management` 39，共 80 项通过；`git diff --check` 通过。
+- 证据：`windows/w01b-paths/01-before/windows-workspace.log` 与 `02-after/*.log`，日期根同上；
+  未调用模型。仅验证普通 workspace 拒绝 UNC，未准备授权 UNC share；macOS/正式 UI 未验。
+
+下一步：继续 W01-B 共享锁、删除 junction 和长路径，再进入 W02 的新构建正式入口；
 旧 MM retry 在 W04 保持待复现，不因本批通过关闭。不要重建 2,374 行日志/状态文件到 Git。
