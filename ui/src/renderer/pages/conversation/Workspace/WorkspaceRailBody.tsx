@@ -33,6 +33,7 @@ import { useWorkspaceModals } from './hooks/useWorkspaceModals';
 import { useWorkspacePaste } from './hooks/useWorkspacePaste';
 import { useWorkspaceSearch } from './hooks/useWorkspaceSearch';
 import { useWorkspaceTree } from './hooks/useWorkspaceTree';
+import { WorkspaceReadFailure } from './components/WorkspaceReadFailure';
 import type { MessageApi, WorkspaceSource, WorkspaceTab } from './types';
 import {
   computeContextMenuPosition,
@@ -372,6 +373,14 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
               handleUploadDeviceFiles={pasteHook.handleUploadDeviceFiles}
               setShowHostFileSelector={searchHook.setShowHostFileSelector}
             />
+            {treeHook.hasLoadError && (
+              <WorkspaceReadFailure
+                t={t}
+                hasSnapshot={hasOriginalFiles}
+                retrying={treeHook.loading}
+                onRetry={() => { void treeHook.retryWorkspace(); }}
+              />
+            )}
           </>
         )}
 
@@ -395,7 +404,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
             />
 
             {/* Empty state or Tree */}
-            {!hasOriginalFiles ? (
+            {!hasOriginalFiles && !treeHook.hasLoadError && (
               <div className=' flex-1 size-full flex items-center justify-center px-12px box-border'>
                 <Empty
                   description={
@@ -412,7 +421,8 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
                   }
                 />
               </div>
-            ) : (
+            )}
+            {hasOriginalFiles && (
               <Tree
                 className='!pl-32px !pr-16px workspace-tree'
                 showLine

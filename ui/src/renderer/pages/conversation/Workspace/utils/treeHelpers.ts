@@ -64,9 +64,10 @@ export async function reconcileLoadedChildren(
   newRes: IDirOrFile[],
   oldFiles: IDirOrFile[],
   readChildren: (node: IDirOrFile) => Promise<IDirOrFile[]>,
-  isCurrent: () => boolean
+  isCurrent: () => boolean,
+  retryPaths: Iterable<string> = []
 ): Promise<IDirOrFile[]> {
-  const loadedPaths = new Set<string>();
+  const loadedPaths = new Set<string>(retryPaths);
   const indexNode = (n: IDirOrFile) => {
     if (!n.isFile && n.children !== undefined) loadedPaths.add(n.relativePath);
     n.children?.forEach(indexNode);
