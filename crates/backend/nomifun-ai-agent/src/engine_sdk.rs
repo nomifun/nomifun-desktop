@@ -53,7 +53,12 @@ pub enum EngineProgress {
 pub struct EngineTurnOutput {
     state: AgentRuntimeState,
     turn: AgentRuntimeTurn,
-    open: Arc<Mutex<bool>>,
+    progress: Arc<Mutex<TurnOutputProgress>>,
+}
+
+struct TurnOutputProgress {
+    open: bool,
+    model_steps: u16,
 }
 
 impl EngineTurnOutput {
@@ -61,15 +66,15 @@ impl EngineTurnOutput {
         Self {
             state,
             turn,
-            open: Arc::new(Mutex::new(true)),
+            progress: Arc::new(Mutex::new(TurnOutputProgress { open: true, model_steps: 0 })),
         }
     }
 
     /// False means this turn no longer accepts progress. It never retargets a
     /// late event to the next turn, including while cleanup is still pending.
     pub fn publish(&self, progress: EngineProgress) -> bool {
-        let open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-        if !*open {
+        let progress_state = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if !progress_state.open {
             return false;
         }
         let event = match progress {
@@ -87,8 +92,19 @@ impl EngineTurnOutput {
         published
     }
 
-    fn close(&self) {
-        *self.open.lock().unwrap_or_else(|e| e.into_inner()) = false;
+    /// Retain host-recorded model progress even if cancellation drops the
+    /// driver future. Late observations cannot update a closed turn.
+    pub fn record_model_steps(&self, model_steps: u16) -> bool {
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        if !progress.open { return false; }
+        progress.model_steps = progress.model_steps.max(model_steps);
+        true
+    }
+
+    fn close(&self) -> u16 {
+        let mut progress = self.progress.lock().unwrap_or_else(|e| e.into_inner());
+        progress.open = false;
+        progress.model_steps
     }
 }
 
@@ -300,7 +316,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                     result = shared.driver.run_turn(&message, task_cancellation.clone(), output.clone()) => result,
                 }
             }).catch_unwind().await.unwrap_or_else(|_| Err(AppError::Internal("Engine turn panicked".into())));
-            output.close();
+            let recorded_model_steps = output.close();
             task_cancellation.cancel();
             let cleanup = AssertUnwindSafe(shared.driver.cleanup_turn(&message))
                 .catch_unwind()
@@ -318,6 +334,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             }
             let mut outcome =
                 execution.unwrap_or_else(|error| EngineTurnOutcome::failed(error.to_string()));
+            outcome.model_steps = outcome.model_steps.max(recorded_model_steps);
             if requested_cancellation.is_cancelled() {
                 outcome.terminal = EngineTurnTerminal::Cancelled;
             }
@@ -514,4 +531,23 @@ pub fn hosted_engine_factory(factory: EngineDriverFactory) -> OfficialRuntimeFac
                 as Arc<dyn OfficialAgentRuntime>)
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_progress_survives_close_without_leaking_to_a_later_turn() {
+        let state = AgentRuntimeState::new("0190f5fe-7c00-7a00-8000-000000000002", "fixture", 16);
+        let first = EngineTurnOutput::new(state.clone(), state.reset_for_new_turn(ConversationStatus::Running));
+        let late_writer = first.clone();
+        assert!(first.record_model_steps(2));
+        assert!(first.record_model_steps(1));
+        assert_eq!(first.close(), 2);
+        let next = EngineTurnOutput::new(state.clone(), state.reset_for_new_turn(ConversationStatus::Running));
+        assert!(!late_writer.record_model_steps(9));
+        assert_eq!(first.close(), 2);
+        assert_eq!(next.close(), 0, "a cancelled old turn must not charge the next turn");
+    }
 }

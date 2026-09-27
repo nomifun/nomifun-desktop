@@ -183,6 +183,11 @@ impl AgentEventSink for TurnProjection {
             .record_event(&self.message, &event)
             .await
             .map_err(|error| AgentEngineError::InvalidContract(error.to_string()))?;
+        match &event {
+            AgentEngineEvent::ModelStepStarted { step, .. } => { self.output.record_model_steps(*step); }
+            AgentEngineEvent::ExecutionResumed { model_steps, .. } => { self.output.record_model_steps(*model_steps); }
+            _ => {}
+        }
         self.project(event)
     }
 
@@ -327,7 +332,8 @@ impl EngineSessionDriver for UnifiedSessionDriver {
                 Ok(outcome)
             }
             Err(AgentEngineError::Cancelled) => Ok(EngineTurnOutcome::cancelled(
-                match pending { Some(AgentEngineEvent::TurnCancelled { model_steps }) => model_steps, _ => 0 })),
+                match pending { Some(AgentEngineEvent::TurnCancelled { model_steps }) => model_steps,
+                    _ => projection.last_model_step.load(std::sync::atomic::Ordering::Acquire) })),
             Err(AgentEngineError::TurnFailed(message)) => {
                 let model_steps = match pending {
                     Some(AgentEngineEvent::TurnFailed { model_steps, message: recorded }) if recorded == message => model_steps,
@@ -931,8 +937,51 @@ mod tests {
                 matches!(terminal(&mut events).await, AgentStreamEvent::Finish(data) if data.stop_reason == Some(TurnStopReason::Cancelled))
             );
             assert!(runtime.is_transport_healthy());
+            let recorded = host.events.lock().unwrap();
+            let expected = if preparation { 0 } else { 1 };
+            assert_eq!(recorded.iter().filter_map(|event| match event {
+                AgentEngineEvent::TurnCancelled { model_steps } => Some(*model_steps), _ => None,
+            }).collect::<Vec<_>>(), vec![expected], "cancellation must retain admitted model progress");
+            drop(recorded);
             runtime.kill_and_wait(None).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_model_continuation_retains_both_recorded_steps() {
+        struct ContinueThenWait { opened: AtomicUsize, waiting: tokio::sync::Notify }
+        #[async_trait]
+        impl AgentModelPort for ContinueThenWait {
+            async fn open_stream(&self, _request: ChatModelRequest, _cancellation: CancellationToken)
+                -> Result<AgentModelStream, ChatModelError> {
+                if self.opened.fetch_add(1, Ordering::AcqRel) == 0 {
+                    return Ok(Box::pin(futures_util::stream::iter(vec![
+                        Ok(ChatModelEvent::OutputTextDelta { text:"partial reply".into() }),
+                        Ok(ChatModelEvent::Completed { finish_reason:ChatFinishReason::MaxOutputTokens }),
+                    ])));
+                }
+                self.waiting.notify_one();
+                std::future::pending().await
+            }
+        }
+        let host = Host::new();
+        let model = Arc::new(ContinueThenWait { opened:AtomicUsize::new(0),waiting:tokio::sync::Notify::new() });
+        let runtime = UnifiedAgentRuntime::new(&options(), engine(), binding(), model.clone(), Arc::new(NoTools), host.clone()).unwrap();
+        let mut stream = runtime.subscribe();
+        runtime.send_message(message()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), model.waiting.notified()).await.unwrap();
+        runtime.cancel().await.unwrap();
+        assert!(matches!(terminal(&mut stream).await, AgentStreamEvent::Finish(data)
+            if data.stop_reason == Some(TurnStopReason::Cancelled)));
+        let recorded = host.events.lock().unwrap();
+        assert_eq!(recorded.iter().filter_map(|event| match event {
+            AgentEngineEvent::ModelStepStarted { step,.. } => Some(*step), _ => None,
+        }).collect::<Vec<_>>(), vec![1,2]);
+        assert_eq!(recorded.iter().filter_map(|event| match event {
+            AgentEngineEvent::TurnCancelled { model_steps } => Some(*model_steps), _ => None,
+        }).collect::<Vec<_>>(), vec![2]);
+        drop(recorded);
+        runtime.kill_and_wait(None).await.unwrap();
     }
 
     #[tokio::test]
