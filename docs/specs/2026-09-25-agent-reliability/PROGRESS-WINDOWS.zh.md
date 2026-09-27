@@ -30,7 +30,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | D06 | 247 | W04/W05 | WebView2 profile、Computer A11y、MCP/Plugin/Skill | Skill 首发已回归；其余待走查 |
 | D07 | 124 | W02/W04 | 精确产品目标、Knowledge/Companion/Canvas/Customer owner | PAL/MM 新 Tauri 入口已走查；修复画布名称上下文遗漏 |
 | D08 | 103 | W02/W04/W05 | GEN/COD/PAL/MM/CS 分角色的正式任务 | W02 四角色有新证据；GEN 仍 FAIL，完整集合与 CS 待走查 |
-| D09 | 375 | W06 | Job 子孙进程、崩溃、恢复、撤权、并发与 LONG | checkpoint/执行 lease 组件 19 项已验；宿主故障、正式 UI 与 soak 仍待 |
+| D09 | 375 | W06 | Job 子孙进程、崩溃、恢复、撤权、并发与 LONG | checkpoint/lease 19、取消计数 14 项组件已验；其他宿主故障与 soak 仍待 |
 | D10 | 33 | W01/W06 | WIN-001～018 与 PORT，盘符/路径/共享锁/宿主终态 | WIN-002/007/008/010/011 的部分组件断言通过；其余待走查 |
 | D11 | 75 | W01/W03 | 越界路径/junction、旧授权、无资源与跨 owner 拒绝 | AUTH-009/010 的 cwd 子断言通过；其余 owner 与竞态待走查 |
 | **合计** | **2374** | W01～W06 | 结果按 Case × Agent × Windows 独立判定 | 未跑不算通过 |
@@ -241,5 +241,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   未覆盖复杂子孙树、强杀/重启、其他角色、全体恢复矩阵与 macOS。统计残余：两次 Runtime
   `turn_cancelled.model_steps` 都是 0，而事件链各有 2 个 model step；本页按事件链计数，W06 继续核对。
 
-下一步：取消统计字段、W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；W05 条件资源和
-W06 原生故障按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。
+### W06 取消模型步数（基线 `cdd02dea3`）
+
+- LIFE-018/019、取消统计子断言：W04 两个真实样本各启动 2 个模型步，SDK 外层取消分支却
+  固定返回 0，驱动 Future 被丢弃后已记录进度也丢失。补模型 open 后取消反例，首次 `[0] != [1]`。
+- SDK 按 Turn 保留驱动经 host 记录的模型进度，在关闭输出时冻结，并用于清理后的真实终态；
+  迟到记录不能改已关闭 Turn，也不能计入下一 Turn。驱动内部取消 fallback 同样保留已知步数。
+- `nomifun-ai-agent --lib unified_runtime::tests` **13/13**、`engine_sdk::tests` **1/1**：
+  准备阶段 0、模型已开始 1、连续两步后取消 2；原 cleanup-before-terminal、异常/会话释放与
+  迟到写入边界保留。diff 检查通过，证据 `windows/w06-cancel-metrics/{01-before,02-after,03-final}/`。
+- 本批使用确定性模型端口，无新增真实模型调用。历史两个 0 不回写；修复后的真实 StepFun
+  计数、强杀时私有 terminal 缺失、完整跨重启统计与 N3/LONG 仍未验证。
+
+下一步：W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；W05 条件资源和 W06 原生故障、
+真实取消计数按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。
