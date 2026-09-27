@@ -109,6 +109,104 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
     }
 }
 
+/// Compare already validated, canonical-root-relative patch targets before
+/// creating directories or publishing any file. Windows case sensitivity is a
+/// property of each parent directory, including newly inherited directories.
+pub(crate) fn patch_targets_overlap(
+    root: &Path,
+    left: &Path,
+    right: &Path,
+) -> Result<bool, AppError> {
+    #[cfg(not(windows))]
+    {
+        let _ = root;
+        Ok(left.starts_with(right) || right.starts_with(left))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+
+        let relative = |path: &Path| {
+            path.strip_prefix(root).map(Path::to_path_buf).map_err(|_| {
+                AppError::Forbidden("patch target is outside the bound workspace".to_owned())
+            })
+        };
+        let left = relative(left)?;
+        let right = relative(right)?;
+        let mut parent = root.to_path_buf();
+        for (a, b) in left.components().zip(right.components()) {
+            if a != b {
+                let left_name: Vec<u16> = a.as_os_str().encode_wide().collect();
+                let right_name: Vec<u16> = b.as_os_str().encode_wide().collect();
+                let count = |len| i32::try_from(len).map_err(|_| {
+                    AppError::BadRequest("patch path component is too long".to_owned())
+                });
+                let left_len = count(left_name.len())?;
+                let right_len = count(right_name.len())?;
+                // Ordinal comparison does not expand characters or use the
+                // process locale. Keep exact names on case-sensitive parents.
+                // SAFETY: both UTF-16 buffers remain live for their checked lengths.
+                let compared = unsafe {
+                    CompareStringOrdinal(left_name.as_ptr(), left_len, right_name.as_ptr(), right_len, 1)
+                };
+                if compared == 0 {
+                    return Err(AppError::Internal(format!(
+                        "cannot compare patch target names: {}", std::io::Error::last_os_error()
+                    )));
+                }
+                if compared != CSTR_EQUAL || windows_directory_case_sensitive(&parent, root)? {
+                    return Ok(false);
+                }
+            }
+            parent.push(a.as_os_str());
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(windows)]
+fn windows_directory_case_sensitive(path: &Path, workspace_root: &Path) -> Result<bool, AppError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FileCaseSensitiveInfo, GetFileInformationByHandleEx,
+    };
+    use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+
+    // Native Windows directory creation inherits this flag. Walk only absent
+    // parents; denied or unsupported queries cannot prove distinct resources.
+    for parent in path.ancestors().take_while(|parent| parent.starts_with(workspace_root)) {
+        let opened = std::fs::OpenOptions::new().read(true)
+            .access_mode(FILE_READ_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(parent);
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(AppError::Conflict(format!(
+                "cannot inspect patch parent '{}': {error}", parent.display()
+            ))),
+        };
+        let mut info = FILE_CASE_SENSITIVE_INFO::default();
+        // SAFETY: File owns the live handle and info is a correctly sized output buffer.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(), FileCaseSensitiveInfo,
+                (&mut info as *mut FILE_CASE_SENSITIVE_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        };
+        if ok == 0 {
+            return Err(AppError::Conflict(format!(
+                "cannot determine case sensitivity of patch parent '{}': {}",
+                parent.display(), std::io::Error::last_os_error()
+            )));
+        }
+        return Ok(info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0);
+    }
+    Err(AppError::Conflict("patch parent disappeared during preparation".to_owned()))
+}
+
 /// Reject a file-name component that `Path::join` would not treat as a plain
 /// child of its parent. Shared by both [`PathAuthority`] arms: containment is
 /// what `Unrestricted` drops, and this is path *hygiene*, which it keeps.
@@ -342,6 +440,16 @@ pub fn validate_path_for_write_authority(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn missing_patch_root_does_not_inherit_case_rules_from_outside_the_workspace() {
+        let fixture = tempfile::tempdir().unwrap();
+        let missing_root = fixture.path().join("missing-workspace");
+        assert!(super::patch_targets_overlap(
+            &missing_root, &missing_root.join("Report.txt"), &missing_root.join("report.txt"),
+        ).is_err());
+    }
+
     use super::*;
     use std::fs;
 

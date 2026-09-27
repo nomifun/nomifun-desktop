@@ -355,19 +355,19 @@ impl FileService {
             ))
         })?;
         let mut prepared = Vec::with_capacity(request.files.len());
-        let mut seen_paths = HashSet::with_capacity(request.files.len());
+        let mut seen_paths: HashSet<PathBuf> = HashSet::with_capacity(request.files.len());
         let mut total_before = 0_u64;
         let mut total_after = 0_u64;
 
         for (index, file_patch) in request.files.iter().enumerate() {
             let (path, existed) = validate_agent_patch_target(scope, &file_patch.path, &authority)?;
-            if seen_paths.iter().any(|previous: &PathBuf|
-                path.starts_with(previous) || previous.starts_with(&path))
-            {
-                return Err(AppError::BadRequest(format!(
-                    "agent patch contains duplicate or nested file target '{}'",
-                    file_patch.path
-                )).into());
+            for previous in &seen_paths {
+                if crate::path_safety::patch_targets_overlap(&workspace_root, previous, &path)? {
+                    return Err(AppError::BadRequest(format!(
+                        "agent patch contains duplicate or nested file target '{}'",
+                        file_patch.path
+                    )).into());
+                }
             }
             seen_paths.insert(path.clone());
 
