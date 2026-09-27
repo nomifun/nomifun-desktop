@@ -89,10 +89,36 @@ pub(crate) struct CompletionTracker {
     observations: Vec<AgentCompletionObservation>,
     omitted: u32,
     report: Option<AgentCompletionReport>,
-    /// Derived validity through known, disjoint file effects. Historical
+    /// Derived validity through known, scoped owner effects. Historical
     /// observations keep their original epoch; commands never inherit this.
-    file_valid_through: BTreeMap<String, u32>,
+    valid_through: BTreeMap<String, u32>,
     owner_paths: BTreeMap<String, WorkspacePathObservation>,
+    artifacts: BTreeMap<String, ArtifactObservation>,
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ArtifactObservation {
+    root_sha256: String,
+    artifact_id: String,
+}
+
+impl ArtifactObservation {
+    fn from_owner(binding: &AgentToolBinding, call: &ChatToolCall, value: &serde_json::Value) -> Option<Self> {
+        if binding.capability_id.as_ref() != "workspace.artifacts" { return None; }
+        let root = value.get("workspace_root_sha256")?.as_str()?;
+        let id = value.get("artifact_id")?.as_str()?;
+        if !valid_sha256(root) || !valid_sha256(id) || value.get("sha256")?.as_str()? != id { return None; }
+        match binding.action_id.as_ref() {
+            "workspace.artifacts/publish" if value.get("relative_path")?.as_str()? == format!(".nomifun/artifacts/{id}") => {}
+            "workspace.artifacts/read" if call.arguments.0.get("artifact_id")?.as_str()? == id => {}
+            _ => return None,
+        }
+        Some(Self {root_sha256:root.to_owned(),artifact_id:id.to_owned()})
+    }
 }
 
 /// Data from the scoped workspace owner result, never from model arguments.
@@ -107,8 +133,7 @@ struct WorkspacePathObservation {
 impl WorkspacePathObservation {
     fn parse(value: &serde_json::Value) -> Option<Self> {
         let value: Self = serde_json::from_value(value.clone()).ok()?;
-        if value.root_sha256.len() != 64
-            || !value.root_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        if !valid_sha256(&value.root_sha256)
             || value.path.is_empty() || value.path.len() > 4096 || value.path.chars().any(char::is_control)
             || crate::agents_md::normalize_workspace_directory(&value.path).ok().as_deref() != Some(value.path.as_str())
         { return None; }
@@ -141,7 +166,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
             "properties":{
-                "summary":{"type":"string","minLength":1,"maxLength":2048},
+                "summary":{"type":"string","minLength":1,"maxLength":2048,"description":"The complete final answer delivered verbatim to the user. This is the ONLY final reply: criteria rationales are internal and are not shown. Include every requested delivery detail, such as paths, artifact IDs, readback contents and deletion results, while following the user's requested language and output format. There is no later assistant reply after an accepted report."},
                 "criteria":{"type":"array","minItems":1,"maxItems":16,"items":{
                     "type":"object","additionalProperties":false,"required":["disposition","rationale"],
                     "properties":{
@@ -211,13 +236,17 @@ impl CompletionTracker {
         effects_are_scoped: bool,
     ) -> AgentCompletionObservation {
         self.invalidate();
-        let owner_result = (binding.capability_id.as_ref() == "workspace.files"
+        let owner_result = (matches!(binding.capability_id.as_ref(), "workspace.files" | "workspace.artifacts")
             && invocation_attempted && !result.is_error)
             .then(|| serde_json::from_str::<serde_json::Value>(&result.output_text()).ok()).flatten();
-        let owner_path = owner_result.as_ref().and_then(|value| value.get("workspace_path"))
+        let owner_path = owner_result.as_ref().filter(|_| binding.capability_id.as_ref() == "workspace.files"
+            && matches!(binding.action_id.as_ref(), "workspace.files/read" | "workspace.files/write" | "workspace.files/delete")
+            && call.arguments.0.get("format").and_then(serde_json::Value::as_str) != Some("instruction_scope"))
+            .and_then(|value| value.get("workspace_path"))
             .and_then(WorkspacePathObservation::parse);
+        let artifact = owner_result.as_ref().and_then(|value| ArtifactObservation::from_owner(binding, call, value));
         // Writing style.css does not erase the observed index.html content.
-        // Advance only file evidence unaffected by this exact confined file
+        // Advance only owner evidence unaffected by this exact confined file
         // action. Opaque commands, VCS and resources remain global barriers.
         if effects_are_scoped && invocation_attempted && !result.is_error && work.running_processes.is_empty()
             && binding.capability_id.as_ref() == "workspace.files"
@@ -233,12 +262,31 @@ impl CompletionTracker {
             };
             if let Some(targets) = targets.filter(|targets| !targets.is_empty()) {
                 for observation in &self.observations {
-                    if self.owner_paths.get(&observation.call_id).is_some_and(|path|
+                    if (self.owner_paths.get(&observation.call_id).is_some_and(|path|
                         !targets.iter().any(|target| path.may_overlap(target)))
+                        || self.artifacts.get(&observation.call_id).is_some_and(|artifact|
+                            targets.iter().all(|target| target.root_sha256 == artifact.root_sha256)))
                         && self.is_usable(observation, previous_epoch)
                     {
-                        self.file_valid_through.insert(observation.call_id.clone(), work.workspace_observation_epoch);
+                        self.valid_through.insert(observation.call_id.clone(), work.workspace_observation_epoch);
                     }
+                }
+            }
+        }
+        if effects_are_scoped && invocation_attempted && !result.is_error && work.running_processes.is_empty()
+            && binding.action_id.as_ref() == "workspace.artifacts/publish"
+            && let Some(artifact) = &artifact
+            && let Some(previous_epoch) = work.workspace_observation_epoch.checked_sub(1)
+        {
+            // Publication writes only into this owner's protected artifact
+            // namespace. It cannot change user files or prior addressed blobs.
+            for observation in &self.observations {
+                let same_root = self.owner_paths.get(&observation.call_id)
+                    .is_some_and(|path| path.root_sha256 == artifact.root_sha256)
+                    || self.artifacts.get(&observation.call_id)
+                        .is_some_and(|prior| prior.root_sha256 == artifact.root_sha256);
+                if same_root && self.is_usable(observation, previous_epoch) {
+                    self.valid_through.insert(observation.call_id.clone(), work.workspace_observation_epoch);
                 }
             }
         }
@@ -274,6 +322,7 @@ impl CompletionTracker {
         if let Some(path) = owner_path {
             self.owner_paths.insert(observation.call_id.clone(), path);
         }
+        if let Some(artifact) = artifact { self.artifacts.insert(observation.call_id.clone(), artifact); }
         self.observations.push(observation.clone());
         // Interactive provenance can carry several call IDs per observation.
         // Bound the serialized window too, not just its number of records.
@@ -283,13 +332,16 @@ impl CompletionTracker {
                 .iter()
                 .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |value| value.len())
                     .saturating_add(self.owner_paths.get(&item.call_id)
-                        .map_or(0, |path| serde_json::to_vec(path).map_or(usize::MAX, |value| value.len()))))
+                        .map_or(0, |path| serde_json::to_vec(path).map_or(usize::MAX, |value| value.len())))
+                    .saturating_add(self.artifacts.get(&item.call_id)
+                        .map_or(0, |artifact| serde_json::to_vec(artifact).map_or(usize::MAX, |value| value.len()))))
                 .fold(0usize, usize::saturating_add)
                 > 32 * 1024
         {
             let removed = self.observations.remove(0);
-            self.file_valid_through.remove(&removed.call_id);
+            self.valid_through.remove(&removed.call_id);
             self.owner_paths.remove(&removed.call_id);
+            self.artifacts.remove(&removed.call_id);
             self.omitted = self.omitted.saturating_add(1);
         }
         observation
@@ -337,6 +389,7 @@ impl CompletionTracker {
             "input_revision":input_revision,"workspace_epoch":work.workspace_observation_epoch,
             "available_evidence":self.observations.iter().filter(|item| self.is_usable(item, work.workspace_observation_epoch))
                 .map(|item| serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
+                    "artifact_id":self.artifacts.get(&item.call_id).map(|artifact| &artifact.artifact_id),
                     "command_exit_code":item.command_exit_code,"command":item.command})).collect::<Vec<_>>(),
             "stale_file_paths":stale_file_paths,
             "unusable_observation_count":self.observations.iter().filter(|item| !self.is_usable(item, work.workspace_observation_epoch)).count(),
@@ -544,8 +597,8 @@ impl CompletionTracker {
     fn is_usable(&self, observation: &AgentCompletionObservation, epoch: u32) -> bool {
         observation.invocation_attempted && observation.successful && observation.usable_at_observation
             && (observation.workspace_epoch == epoch
-                || (self.owner_paths.contains_key(&observation.call_id)
-                    && self.file_valid_through.get(&observation.call_id) == Some(&epoch)))
+                || ((self.owner_paths.contains_key(&observation.call_id) || self.artifacts.contains_key(&observation.call_id))
+                    && self.valid_through.get(&observation.call_id) == Some(&epoch)))
     }
 
 fn stale_evidence_guidance(&self, epoch: u32) -> String {
@@ -689,6 +742,72 @@ mod tests {
         tracker.observe_with_effect_scope(&AgentWorkStatus { workspace_observation_epoch: 1, ..Default::default() },
             &file_binding("workspace.files/write"), &call, &AgentToolResult::text(call.call_id.clone(), "ok", false), true, false);
         assert!(!tracker.is_usable(&tracker.observations[0], 1), "mutating tool middleware prevents path-scoped evidence reuse");
+    }
+
+    #[test]
+    fn artifact_store_effects_preserve_file_and_artifact_observations_but_not_across_commands() {
+        let root = "a".repeat(64);
+        let artifact = "b".repeat(64);
+        let file_result = |path| serde_json::json!({"workspace_path":{
+            "root_sha256":root,"path":path,"case_resolved":true
+        }}).to_string();
+        let call = |id: &str, args| ChatToolCall {call_id:id.into(),name:id.into(),arguments:StrictJsonValue(args),provider_metadata:None};
+        let mut tracker = CompletionTracker::default();
+        let read = call("read-main",serde_json::json!({"path":"验收/回执.txt"}));
+        let mut read_binding = file_binding("workspace.files/read");
+        read_binding.effect_class = crate::AgentEffectClass::ReadOnly;
+        tracker.observe(&AgentWorkStatus::default(),&read_binding,&read,
+            &AgentToolResult::text(read.call_id.clone(),file_result("验收/回执.txt"),false),true);
+        let published = call("published",serde_json::json!({"path":"验收/回执.txt"}));
+        let mut publish_binding = file_binding("workspace.artifacts/publish");
+        publish_binding.capability_id = "workspace.artifacts".into();
+        let artifact_result = serde_json::json!({"artifact_id":artifact,"sha256":artifact,
+            "workspace_root_sha256":root,"relative_path":format!(".nomifun/artifacts/{artifact}")}).to_string();
+        tracker.observe(&AgentWorkStatus {workspace_observation_epoch:1,..Default::default()},&publish_binding,&published,
+            &AgentToolResult::text(published.call_id.clone(),artifact_result.clone(),false),true);
+        assert!(tracker.is_usable(&tracker.observations[0],1),"publishing into the protected store does not modify its source");
+        let mut artifact_read_binding = publish_binding.clone();
+        artifact_read_binding.action_id = "workspace.artifacts/read".into();
+        artifact_read_binding.effect_class = crate::AgentEffectClass::ReadOnly;
+        let artifact_read = call("artifact-read",serde_json::json!({"artifact_id":artifact}));
+        tracker.observe(&AgentWorkStatus {workspace_observation_epoch:1,..Default::default()},&artifact_read_binding,&artifact_read,
+            &AgentToolResult::text(artifact_read.call_id.clone(),artifact_result,false),true);
+        for (epoch,path) in [(2,"验收/临时.txt"),(3,"验收/回执.txt")] {
+            let write = call(&format!("write-{epoch}"),serde_json::json!({"path":path}));
+            tracker.observe(&AgentWorkStatus {workspace_observation_epoch:epoch,..Default::default()},&file_binding("workspace.files/write"),&write,
+                &AgentToolResult::text(write.call_id.clone(),file_result(path),false),true);
+            assert_eq!(tracker.is_usable(&tracker.observations[0],epoch),epoch==2);
+            assert!(tracker.is_usable(&tracker.observations[1],epoch));
+            assert!(tracker.is_usable(&tracker.observations[2],epoch));
+        }
+        assert!(!tracker.is_usable(&tracker.observations[2],4),"an unaccounted command epoch still invalidates artifact evidence");
+        let later = call("later-write",serde_json::json!({"path":"later.txt"}));
+        tracker.observe(&AgentWorkStatus {workspace_observation_epoch:5,..Default::default()},&file_binding("workspace.files/write"),&later,
+            &AgentToolResult::text(later.call_id.clone(),file_result("later.txt"),false),true);
+        assert!(!tracker.is_usable(&tracker.observations[2],5),"a later file edit cannot rehabilitate stale artifact evidence");
+    }
+
+    #[test]
+    fn only_same_root_successful_protected_artifact_publication_preserves_file_evidence() {
+        for (root, relative, sha, error, scoped) in [
+            (Some("b".repeat(64)), format!(".nomifun/artifacts/{}","c".repeat(64)), "c".repeat(64), false, true),
+            (None, format!(".nomifun/artifacts/{}","c".repeat(64)), "c".repeat(64), false, true),
+            (Some("a".repeat(64)), "user/output.txt".into(), "c".repeat(64), false, true),
+            (Some("a".repeat(64)), format!(".nomifun/artifacts/{}","c".repeat(64)), "d".repeat(64), false, true),
+            (Some("a".repeat(64)), format!(".nomifun/artifacts/{}","c".repeat(64)), "c".repeat(64), true, true),
+            (Some("a".repeat(64)), format!(".nomifun/artifacts/{}","c".repeat(64)), "c".repeat(64), false, false),
+        ] {
+            let mut tracker = CompletionTracker {observations:vec![file_observation("file","result.txt",0)],..Default::default()};
+            tracker.owner_paths.insert("file".into(),WorkspacePathObservation {root_sha256:"a".repeat(64),path:"result.txt".into(),case_resolved:true});
+            let mut binding=file_binding("workspace.artifacts/publish");
+            binding.capability_id="workspace.artifacts".into();
+            let call=ChatToolCall {call_id:"publish".into(),name:"publish_artifact".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":"result.txt"})),provider_metadata:None};
+            tracker.observe_with_effect_scope(&AgentWorkStatus {workspace_observation_epoch:1,..Default::default()},&binding,&call,
+                &AgentToolResult::text(call.call_id.clone(),serde_json::json!({"artifact_id":"c".repeat(64),"sha256":sha,
+                    "workspace_root_sha256":root,"relative_path":relative}).to_string(),error),true,scoped);
+            assert!(!tracker.is_usable(&tracker.observations[0],1));
+        }
     }
 
     #[test]

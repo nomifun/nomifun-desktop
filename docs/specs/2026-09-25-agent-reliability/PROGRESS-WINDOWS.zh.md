@@ -267,5 +267,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖：并发原生重命名/替换、全部文件系统与 macOS；Artifact 观察有效期、最终答复遗漏及
   provider 实际传输仍继续核对，原三个 GEN FAIL 不改记 PASS。
 
-下一步：GEN Artifact 证据与最终交付；W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；
+### GEN Artifact 证据与发送边界（基线 `fb96eac26`）
+
+- CTRL-007、AGEN-014/017 子断言：首次反例确认 Artifact 发布也会误使源文件证据失效。
+  产物 owner 现在返回绑定根摘要；Runtime 只延续同根受保护产物及确定未修改的文件观察，
+  跨根/畸形/失败/不透明效果仍失效。最终答复字段明确要求包含用户所需细节，仍原样交付 summary。
+- Runtime **142**、Artifact **14**、App host **33**、Broker Schema **1**、诊断脱敏 **1**，
+  共 **191 项通过**；前端及 Tauri 构建通过。首次证据失败、测试夹具缺 tool choice 和诊断依赖
+  缺失的中间失败均保留在 `windows/w07-gen-completion/05-artifact-before/` 至 `10-tauri-build/`。
+- 正式 Tauri 新 GEN 使用原提示、加密 StepFun Plan / step-3.7-flash，**6 个模型步骤**；
+  4 项效果 returned，独立字节/产物 hash/临时文件不存在均正确，0 owner/工具预检错误。
+  仅显式开启的 debug 发送记录确认有效路径及最终答复说明进入实际请求；不记录消息或凭据。
+- **本次仍 FAIL**：第 6 步发生 `EXECUTION_MODEL_PROVIDER_UNAVAILABLE`，native pause 已持久化且
+  cleanup 已确认，UI 却持续显示运行；刷新后也没有暂停原因。未产生最终答复，不能计正向 PASS。
+  旧 canonical 行及 Snapshot content/envelope 未变；后台 updater HTTP 错误另有记录，与 Agent
+  暂停原因分开。证据 `11-live-01/`；`12-live-02/` 只准备了夹具，尚无新模型调用。
+- 原三个 GEN FAIL 保留；最终答复完整性、N=3、其他角色和 macOS 尚未通过。新暂停显示问题
+  转 W04 优先复现/修复，不把这次暂停改成完成或自动重放已有副作用。
+
+下一步：W04 暂停显示与 GEN 最终交付；W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；
 W05 条件资源和 W06 原生故障、真实取消计数按夹具推进。不重建 2,374 行日志/状态文件到 Git。

@@ -24,6 +24,7 @@ futures-util.workspace = true
 base64.workspace = true
 crc32fast.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
