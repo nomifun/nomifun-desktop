@@ -61,9 +61,9 @@ const assets = new Map<string, CreativeTimelineAssetPresentation>([
 ]);
 
 describe('timeline composition export model', () => {
-  test('builds a real ten-second composition plan with its authored gap and trims', () => {
+  test('builds a gapless composition plan while preserving durations and source trims', () => {
     const plan = buildTimelineExportPlan(timeline(), assets);
-    expect(plan.durationMs).toBe(10_000);
+    expect(plan.durationMs).toBe(8_000);
     expect(plan.clips.map(({ clip }) => ({
       id: clip.id,
       startMs: clip.startMs,
@@ -71,7 +71,7 @@ describe('timeline composition export model', () => {
       sourceStartMs: clip.sourceStartMs,
     }))).toEqual([
       { id: 'clip-image', startMs: 0, durationMs: 5_000, sourceStartMs: 0 },
-      { id: 'clip-video', startMs: 7_000, durationMs: 3_000, sourceStartMs: 2_000 },
+      { id: 'clip-video', startMs: 5_000, durationMs: 3_000, sourceStartMs: 2_000 },
     ]);
   });
 

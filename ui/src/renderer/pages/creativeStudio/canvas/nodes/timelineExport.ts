@@ -8,7 +8,7 @@ import type {
   CreativeTimelineClip,
   CreativeTimelineNodeData,
 } from '../../domain';
-import { timelineDurationMs } from './timelineModel';
+import { compactTimelineClips, timelineDurationMs } from './timelineModel';
 
 const DEFAULT_EXPORT_FPS = 30;
 const MAX_EXPORT_EDGE = 1_920;
@@ -149,12 +149,13 @@ export function buildTimelineExportPlan(
   data: CreativeTimelineNodeData,
   assets: ReadonlyMap<string, CreativeTimelineAssetPresentation>
 ): TimelineExportPlan {
-  const durationMs = timelineDurationMs(data.clips);
-  if (data.clips.length === 0 || durationMs <= 0) {
+  const compacted = compactTimelineClips(data);
+  const durationMs = timelineDurationMs(compacted.clips);
+  if (compacted.clips.length === 0 || durationMs <= 0) {
     throw new TimelineExportError('empty', 'Timeline has no clips to export');
   }
 
-  const clips = data.clips.map((clip): TimelineExportPlanClip => {
+  const clips = compacted.clips.map((clip): TimelineExportPlanClip => {
     const asset = assets.get(clip.assetId);
     if (
       !asset ||
@@ -174,8 +175,8 @@ export function buildTimelineExportPlan(
     clips: clips.sort(
       (left, right) =>
         left.clip.startMs - right.clip.startMs ||
-        data.clips.findIndex((clip) => clip.id === left.clip.id) -
-          data.clips.findIndex((clip) => clip.id === right.clip.id)
+        compacted.clips.findIndex((clip) => clip.id === left.clip.id) -
+          compacted.clips.findIndex((clip) => clip.id === right.clip.id)
     ),
     durationMs,
   };

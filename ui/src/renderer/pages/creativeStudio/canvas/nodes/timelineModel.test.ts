@@ -9,7 +9,9 @@ import { describe, expect, test } from 'bun:test';
 import type { CreativeTimelineNodeData } from '../../domain';
 import {
   appendTimelineClips,
+  compactTimelineClips,
   moveTimelineClip,
+  removeTimelineClip,
   reorderTimelineClip,
   resolveTimelineClipDuration,
   timelineClipAtTime,
@@ -41,6 +43,24 @@ const withClips = (
 });
 
 describe('timeline model', () => {
+  test('compacts gapped clips from zero without changing duration or media', () => {
+    const data = withClips([[20_000, 3_000], [0, 5_000], [10_000, 4_000]]);
+    data.clips[0] = {
+      ...data.clips[0]!,
+      kind: 'video',
+      sourceStartMs: 1_000,
+      sourceDurationMs: 8_000,
+    };
+    const media = data.clips.map(({ startMs: _startMs, ...clip }) => clip);
+
+    const compacted = compactTimelineClips(data);
+
+    expect(compacted.clips.map((clip) => clip.startMs)).toEqual([9_000, 0, 5_000]);
+    expect(compacted.clips.map(({ startMs: _startMs, ...clip }) => clip)).toEqual(media);
+    expect(timelineDurationMs(compacted.clips)).toBe(12_000);
+    expect(compactTimelineClips(compacted)).toBe(compacted);
+  });
+
   test('appends image and video assets in track order with stable clip identity', () => {
     let index = 0;
     const data = appendTimelineClips(
@@ -95,52 +115,65 @@ describe('timeline model', () => {
       id: 'clip-video',
       assetId: 'asset-video',
       kind: 'video',
-      startMs: 3_000,
+      startMs: 0,
       durationMs: 7_000,
       sourceStartMs: 1_000,
       sourceDurationMs: 8_000,
     });
-    expect(timelineClipAtTime(data.clips, 2_999)).toBeNull();
-    expect(timelineClipAtTime(data.clips, 3_000)?.id).toBe('clip-video');
-    expect(timelineClipAtTime(data.clips, 10_000)).toBeNull();
+    expect(timelineClipAtTime(data.clips, 0)?.id).toBe('clip-video');
+    expect(timelineClipAtTime(data.clips, 7_000)).toBeNull();
   });
 
-  test('snaps a moved clip to either neighbor without changing media or other clips', () => {
+  test('compacts before moving and preserves clip media while reordering', () => {
     const data = withClips([[0, 5_000], [10_000, 5_000], [20_000, 5_000]]);
     data.clips[1] = {
       ...data.clips[1]!, kind: 'video', sourceStartMs: 2_000, sourceDurationMs: 8_000,
     };
-    for (const [requested, expected] of [[2_000, 5_000], [17_000, 15_000]] as const) {
-      const moved = moveTimelineClip(data, 'clip-1', requested);
-      expect(moved.clips).toEqual([
-        data.clips[0]!,
-        { ...data.clips[1]!, startMs: expected },
-        data.clips[2]!,
-      ]);
-    }
+    const media = data.clips.map(({ startMs: _startMs, ...clip }) => clip);
+    expect(moveTimelineClip(data, 'clip-1', 2_000).clips.map((clip) => clip.startMs))
+      .toEqual([0, 5_000, 10_000]);
+    expect(moveTimelineClip(data, 'clip-1', 17_000).clips.map((clip) => clip.startMs))
+      .toEqual([0, 10_000, 5_000]);
+    expect(moveTimelineClip(data, 'clip-1', 17_000).clips.map(
+      ({ startMs: _startMs, ...clip }) => clip
+    )).toEqual(media);
     expect(data.clips[1]?.startMs).toBe(10_000);
   });
 
-  test('allows free placement and crossing clips into a new gap', () => {
+  test('does not leave blank time when moving clips', () => {
     const data = withClips([[0, 5_000], [10_000, 5_000], [20_000, 5_000]]);
-    expect(moveTimelineClip(data, 'clip-1', 7_000).clips[1]?.startMs).toBe(7_000);
-    expect(moveTimelineClip(data, 'clip-1', 26_000).clips[1]?.startMs).toBe(26_000);
-    expect(moveTimelineClip(data, 'clip-0', 12_000).clips[0]?.startMs).toBe(15_000);
+    expect(moveTimelineClip(data, 'clip-1', 7_000).clips.map((clip) => clip.startMs))
+      .toEqual([0, 5_000, 10_000]);
+    expect(moveTimelineClip(data, 'clip-1', 26_000).clips.map((clip) => clip.startMs))
+      .toEqual([0, 10_000, 5_000]);
+    expect(moveTimelineClip(data, 'clip-0', 12_000).clips.map((clip) => clip.startMs))
+      .toEqual([10_000, 0, 5_000]);
   });
 
-  test('keeps touching clips in place during small moves and skips gaps that are too short', () => {
+  test('keeps the timeline packed during small and large moves', () => {
     const touching = withClips([[0, 5_000], [5_000, 5_000], [10_000, 5_000]]);
     expect(moveTimelineClip(touching, 'clip-1', 5_100).clips[1]?.startMs).toBe(5_000);
     expect(moveTimelineClip(touching, 'clip-1', 10_000).clips[1]?.startMs).toBe(5_000);
-    expect(moveTimelineClip(touching, 'clip-1', 14_000).clips[1]?.startMs).toBe(15_000);
+    expect(moveTimelineClip(touching, 'clip-1', 14_000).clips[1]?.startMs).toBe(10_000);
 
     const shortGaps = withClips([[30_000, 5_000], [14_000, 5_000], [0, 5_000], [7_000, 5_000]]);
-    expect(moveTimelineClip(shortGaps, 'clip-0', 6_000).clips[0]?.startMs).toBe(19_000);
+    expect(moveTimelineClip(shortGaps, 'clip-0', 6_000).clips[0]?.startMs).toBe(15_000);
   });
 
-  test('moves an already overlapping clip out of occupied time', () => {
+  test('repairs an already overlapping timeline before moving', () => {
     const data = withClips([[7_500, 5_000], [0, 10_000], [12_000, 5_000]]);
-    expect(moveTimelineClip(data, 'clip-0', 8_000).clips[0]?.startMs).toBe(17_000);
+    expect(moveTimelineClip(data, 'clip-0', 8_000).clips.map((clip) => clip.startMs))
+      .toEqual([10_000, 0, 15_000]);
+  });
+
+  test('closes the remaining timeline after removing a clip', () => {
+    const data = withClips([[0, 5_000], [10_000, 4_000], [20_000, 3_000]]);
+    const removed = removeTimelineClip(data, 'clip-1');
+    expect(removed.clips.map(({ id, startMs, durationMs }) => ({ id, startMs, durationMs })))
+      .toEqual([
+        { id: 'clip-0', startMs: 0, durationMs: 5_000 },
+        { id: 'clip-2', startMs: 5_000, durationMs: 3_000 },
+      ]);
   });
 
   test('never overlaps any neighbor while moving across an unsorted timeline', () => {
@@ -159,13 +192,14 @@ describe('timeline model', () => {
     }
   });
 
-  test('respects timeline bounds and leaves clips unchanged when there is no available space', () => {
+  test('respects timeline bounds while compacting every valid result', () => {
     const data = withClips([[10_000, 5_000], [86_390_000, 10_000]]);
     expect(moveTimelineClip(data, 'clip-0', -1_000).clips[0]?.startMs).toBe(0);
-    expect(moveTimelineClip(data, 'clip-0', 86_400_000).clips[0]?.startMs).toBe(86_385_000);
+    expect(moveTimelineClip(data, 'clip-0', 86_400_000).clips.map((clip) => clip.startMs))
+      .toEqual([10_000, 0]);
     const full = withClips([[10_000, 5_000], [0, 86_400_000]]);
     expect(moveTimelineClip(full, 'clip-0', 20_000)).toEqual(full);
-    expect(moveTimelineClip(data, 'missing', 20_000)).toEqual(data);
+    expect(moveTimelineClip(data, 'missing', 20_000)).toEqual(compactTimelineClips(data));
   });
 
   test('inserts the last clip between touching clips with different durations', () => {
@@ -201,18 +235,18 @@ describe('timeline model', () => {
     }
   });
 
-  test('preserves existing gaps during insertion and allows free placement in empty time', () => {
+  test('removes existing gaps during insertion and disallows free blank time', () => {
     const data = withClips([[2_000, 5_000], [10_000, 5_000], [20_000, 7_000]]);
     expect(reorderTimelineClip(data, 'clip-2', 6_500, 10_000).clips.map((clip) => clip.startMs))
-      .toEqual([2_000, 22_000, 10_000]);
+      .toEqual([0, 5_000, 10_000]);
     expect(reorderTimelineClip(data, 'clip-2', 30_000, 33_500).clips.map((clip) => clip.startMs))
-      .toEqual([2_000, 10_000, 30_000]);
+      .toEqual([0, 5_000, 10_000]);
     const gap = withClips([[0, 5_000], [10_000, 5_000], [25_000, 7_000]]);
     expect(reorderTimelineClip(gap, 'clip-2', 16_000, 19_500).clips.map((clip) => clip.startMs))
-      .toEqual([0, 10_000, 16_000]);
+      .toEqual([0, 5_000, 10_000]);
   });
 
-  test('keeps all clips separate and preserves media through repeated reordering', () => {
+  test('keeps all clips touching and preserves media through repeated reordering', () => {
     let data = withClips([[0, 4_000], [4_000, 5_000], [9_000, 5_000], [14_000, 7_000]]);
     const media = data.clips.map(({ startMs: _startMs, ...clip }) => clip);
     for (const id of ['clip-3', 'clip-0', 'clip-1', 'clip-2']) {
@@ -220,10 +254,10 @@ describe('timeline model', () => {
         const clip = data.clips.find((item) => item.id === id)!;
         data = reorderTimelineClip(data, id, pointerTime - clip.durationMs / 2, pointerTime);
         const ordered = [...data.clips].sort((a, b) => a.startMs - b.startMs);
-        expect(ordered[0]!.startMs).toBeGreaterThanOrEqual(0);
+        expect(ordered[0]!.startMs).toBe(0);
         for (let index = 1; index < ordered.length; index += 1) {
           expect(ordered[index]!.startMs)
-            .toBeGreaterThanOrEqual(ordered[index - 1]!.startMs + ordered[index - 1]!.durationMs);
+            .toBe(ordered[index - 1]!.startMs + ordered[index - 1]!.durationMs);
         }
         expect(data.clips.map(({ startMs: _startMs, ...item }) => item)).toEqual(media);
       }
@@ -247,7 +281,52 @@ describe('timeline model', () => {
       () => 'clip-image'
     );
     const trimmed = trimTimelineClip(data, 'clip-image', 'start', 10_000);
-    expect(trimmed.clips[0]?.startMs).toBe(4_500);
+    expect(trimmed.clips[0]?.startMs).toBe(0);
     expect(trimmed.clips[0]?.durationMs).toBe(500);
+  });
+
+  test('ripples later clips when an end trim grows or shrinks', () => {
+    const data = withClips([[0, 5_000], [5_000, 4_000], [9_000, 6_000]]);
+    const grown = trimTimelineClip(data, 'clip-0', 'end', 2_000);
+    expect(grown.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 7_000], [7_000, 4_000], [11_000, 6_000]]);
+
+    const shrunk = trimTimelineClip(grown, 'clip-0', 'end', -3_000);
+    expect(shrunk.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 4_000], [4_000, 4_000], [8_000, 6_000]]);
+
+    const unsorted = withClips([[10_000, 5_000], [0, 5_000], [5_000, 5_000]]);
+    expect(trimTimelineClip(unsorted, 'clip-2', 'end', 2_000).clips)
+      .toEqual([
+        { ...unsorted.clips[0]!, startMs: 12_000 },
+        unsorted.clips[1]!,
+        { ...unsorted.clips[2]!, durationMs: 7_000 },
+      ]);
+  });
+
+  test('ripples only the actual duration change allowed by media and timeline bounds', () => {
+    const sourceBound = withClips([[0, 5_000], [5_000, 5_000]]);
+    sourceBound.clips[0] = {
+      ...sourceBound.clips[0]!,
+      kind: 'video',
+      sourceDurationMs: 6_000,
+    };
+    expect(trimTimelineClip(sourceBound, 'clip-0', 'end', 8_000).clips)
+      .toEqual([
+        { ...sourceBound.clips[0]!, durationMs: 6_000 },
+        { ...sourceBound.clips[1]!, startMs: 6_000 },
+      ]);
+
+    const full = withClips([[0, 5_000], [5_000, 86_395_000]]);
+    expect(trimTimelineClip(full, 'clip-0', 'end', 1_000)).toEqual(full);
+  });
+
+  test('closes the tail when video metadata shortens a clip', () => {
+    const data = withClips([[0, 5_000], [5_000, 5_000], [10_000, 5_000]]);
+    data.clips[0] = { ...data.clips[0]!, kind: 'video' };
+    const resolved = resolveTimelineClipDuration(data, 'clip-0', 3_000);
+    expect(resolved.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 3_000], [3_000, 5_000], [8_000, 5_000]]);
+    expect(resolved.clips[0]?.sourceDurationMs).toBe(3_000);
   });
 });
