@@ -945,6 +945,36 @@ fn gemini_tool_result_without_matching_call_fails_closed() {
 }
 
 #[test]
+fn completion_schema_changes_reach_openai_wire_without_caching_or_sanitizing() {
+    let route = route(ChatProtocol::OpenaiChat, "completion-schema", 1);
+    let lease = CredentialLease::new(route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle");
+    let adapter = OpenAiChatAdapter::new(ScriptedTransport::new([]));
+    let mut request = basic_request(&route);
+    let schema = serde_json::json!({"type":"object","additionalProperties":false,"properties":{
+        "summary":{"type":"string","description":"The only final answer delivered to the user"},
+        "criteria":{"type":"array","items":{"type":"object","properties":{
+            "evidence_paths":{"type":"array","maxItems":8,"items":{"type":"string","enum":["验收/回执.txt"]}}
+        }}}
+    }});
+    request.input.tools = vec![nomifun_chat_model_broker::ChatToolDefinition {
+        name:"report_completion".into(),description:"Finish and deliver the exact final answer".into(),
+        input_schema:nomifun_agent_contracts::StrictJsonValue(schema.clone()),deferred:false,
+    }];
+    request.input.tool_choice = ChatToolChoice::Auto;
+    let before = adapter.encode_request(&request, &route, &lease).unwrap();
+    assert_eq!(before.body["tools"][0]["function"]["parameters"], schema);
+    let path_schema=&mut request.input.tools[0].input_schema.0["properties"]["criteria"]["items"]["properties"]["evidence_paths"];
+    path_schema["maxItems"]=serde_json::json!(0);
+    path_schema["items"].as_object_mut().unwrap().remove("enum");
+    let after = adapter.encode_request(&request, &route, &lease).unwrap();
+    assert_eq!(after.body["tools"][0]["function"]["parameters"],request.input.tools[0].input_schema.0);
+    assert_ne!(before.body["tools"],after.body["tools"]);
+    let bytes=serde_json::to_vec(&after.body).unwrap();
+    let decoded:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(decoded["tools"],after.body["tools"]);
+}
+
+#[test]
 fn adapters_are_single_attempt_and_request_bodies_contain_no_credentials() {
     let transports =
         transport_map(std::iter::empty::<(ChatProtocol, Arc<dyn ProviderTransport>)>());

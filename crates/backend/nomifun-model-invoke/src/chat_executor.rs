@@ -383,6 +383,14 @@ impl SingleAttemptHttpExecutor {
     ) -> Result<reqwest::Response, InvokeError> {
         let body = serde_json::to_vec(&request.body)
             .map_err(|_| InvokeError::parse("provider request body is not serializable"))?;
+        // Opt-in debug evidence at the actual HTTP send boundary. Never log
+        // message content, headers, URLs, or opaque credential handles.
+        #[cfg(debug_assertions)]
+        if tracing::enabled!(target: "nomifun_model_wire", tracing::Level::TRACE) {
+            tracing::trace!(target: "nomifun_model_wire",
+                tool_surface = %redacted_tool_surface(&request.body, &material.secret_redactor()),
+                "provider tool surface");
+        }
         let builder = self
             .http
             .post(request.url.trim())
@@ -394,6 +402,15 @@ impl SingleAttemptHttpExecutor {
             .await
             .map_err(|error| net_err(error).redacted(&material.secret_redactor()))
     }
+}
+
+#[cfg(any(debug_assertions, test))]
+fn redacted_tool_surface(body: &Value, redactor: &nomifun_net::secret_redaction::SecretRedactor) -> String {
+    redactor.redact(&serde_json::json!({
+        "model":body.get("model"),
+        "tools":body.get("tools"),
+        "tool_choice":body.get("tool_choice"),
+    }).to_string())
 }
 
 fn stream_response<S>(
@@ -700,6 +717,24 @@ fn decode_bedrock_payload(payload: &[u8]) -> Result<SingleAttemptFrame, InvokeEr
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opt_in_tool_surface_trace_excludes_messages_and_redacts_runtime_secrets() {
+        let secret = "fixture-provider-secret-012345";
+        let body=serde_json::json!({"model":"fixture-model","messages":[{"role":"user","content":"private message body"}],
+            "headers":{"Authorization":format!("Bearer {secret}")},"credential":"opaque-fixture-handle",
+            "tools":[{"type":"function","function":{"name":"report_completion","description":secret,
+                "parameters":{"type":"object","properties":{"evidence_paths":{"type":"array","maxItems":0}}}}}],
+            "tool_choice":"auto"});
+        let rendered=super::redacted_tool_surface(&body,&nomifun_net::secret_redaction::SecretRedactor::new([secret]));
+        for forbidden in [secret,"private message body","Authorization","opaque-fixture-handle"] {
+            assert!(!rendered.contains(forbidden));
+        }
+        let value:serde_json::Value=serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["tools"][0]["function"]["parameters"]["properties"]["evidence_paths"]["maxItems"],0);
+        assert_eq!(value["tool_choice"],"auto");
+        assert_eq!(value["tools"][0]["function"]["name"],"report_completion");
+    }
+
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use futures_util::stream;

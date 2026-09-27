@@ -158,6 +158,8 @@ struct ArtifactIoCounters { full_scan_bytes: AtomicU64, page_read_bytes: AtomicU
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishedWorkspaceArtifact {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root_sha256: Option<String>,
     pub artifact_id: String,
     pub source_path: String,
     pub relative_path: String,
@@ -168,6 +170,8 @@ pub struct PublishedWorkspaceArtifact {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceArtifactRead {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root_sha256: Option<String>,
     pub artifact_id: String,
     pub offset: u64,
     pub next_offset: u64,
@@ -276,6 +280,7 @@ impl WorkspaceArtifactStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(digest.clone(), Arc::new(Mutex::new(verified)));
         Ok(PublishedWorkspaceArtifact {
+            workspace_root_sha256: crate::workspace_observation::canonical_root_sha256(&self.workspace_path),
             artifact_id: digest.clone(), source_path: source.into(), relative_path: format!("{ARTIFACT_RELATIVE_ROOT}/{digest}"),
             mime_type: mime_guess::from_path(source).first_or_octet_stream().essence_str().into(), size_bytes: staged.size_bytes, sha256: digest,
         })
@@ -296,7 +301,8 @@ impl WorkspaceArtifactStore {
         let bytes = read_verified_page(&namespace, artifact_id, &mut verified, offset, limit, &self.io_counters)?;
         verify_namespace(&self.workspace, &namespace)?;
         let next_offset = offset + bytes.len() as u64;
-        Ok(WorkspaceArtifactRead { artifact_id: artifact_id.into(), offset, next_offset, size_bytes: verified.size_bytes, complete: next_offset == verified.size_bytes, sha256: verified.sha256.clone(), data_base64: base64::engine::general_purpose::STANDARD.encode(bytes) })
+        Ok(WorkspaceArtifactRead { workspace_root_sha256: crate::workspace_observation::canonical_root_sha256(&self.workspace_path),
+            artifact_id: artifact_id.into(), offset, next_offset, size_bytes: verified.size_bytes, complete: next_offset == verified.size_bytes, sha256: verified.sha256.clone(), data_base64: base64::engine::general_purpose::STANDARD.encode(bytes) })
     }
 
     fn verified_artifact(&self, namespace: &ArtifactNamespace, id: &str) -> Result<Arc<Mutex<VerifiedArtifact>>, AppError> {
@@ -846,7 +852,18 @@ mod tests {
         );
     }
 
-    #[test] fn publish_and_read_round_trip() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"artifact payload").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let published=store.publish("result.txt",None).unwrap(); let first=store.read(&published.artifact_id,0,8).unwrap(); let second=store.read(&published.artifact_id,first.next_offset,MAX_ARTIFACT_READ_BYTES).unwrap(); let bytes=[first.data_base64,second.data_base64].into_iter().flat_map(|v|base64::engine::general_purpose::STANDARD.decode(v).unwrap()).collect::<Vec<_>>(); assert_eq!(bytes,b"artifact payload"); }
+    #[test] fn publish_and_read_round_trip() {
+        let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"artifact payload").unwrap();
+        let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let published=store.publish("result.txt",None).unwrap();
+        let first=store.read(&published.artifact_id,0,8).unwrap();
+        let second=store.read(&published.artifact_id,first.next_offset,MAX_ARTIFACT_READ_BYTES).unwrap();
+        let source=crate::WorkspacePathObservation::from_canonical(workspace.path(),&fs::canonicalize(workspace.path().join("result.txt")).unwrap()).unwrap();
+        assert_eq!(published.workspace_root_sha256.as_ref(),Some(&source.root_sha256));
+        assert_eq!(first.workspace_root_sha256,published.workspace_root_sha256);
+        assert_eq!(second.workspace_root_sha256,published.workspace_root_sha256);
+        let bytes=[first.data_base64,second.data_base64].into_iter().flat_map(|v|base64::engine::general_purpose::STANDARD.decode(v).unwrap()).collect::<Vec<_>>();
+        assert_eq!(bytes,b"artifact payload");
+    }
     #[test] fn rejects_noncanonical_owner_paths() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"x").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); for path in ["../x","./result.txt",".nomifun/artifacts/x","nested//x"] { assert!(store.publish(path,None).is_err(),"{path}"); } #[cfg(windows)] assert!(store.publish(".NOMIFUN/artifacts/x",None).is_err()); }
     #[test] fn tampered_chunk_is_rejected() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"original").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let artifact=store.publish("result.txt",None).unwrap(); fs::write(workspace.path().join(&artifact.relative_path),"tampered").unwrap(); assert!(store.read(&artifact.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err()); }
     #[test] fn pages_reuse_verified_index() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("large.bin"),vec![b'x';ARTIFACT_CHUNK_BYTES*8]).unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let artifact=store.publish("large.bin",None).unwrap(); let before=store.io_counts(); for offset in [0,17_000,131_000,260_000] { store.read(&artifact.artifact_id,offset,16_384).unwrap(); } let after=store.io_counts(); assert_eq!(after.0,before.0); assert!(after.1-before.1<=4*2*ARTIFACT_CHUNK_BYTES as u64); }
