@@ -54,7 +54,7 @@ import { allSupportedExts } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import { Message, Tooltip } from '@arco-design/web-react';
+import { Button, Message, Tooltip } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -201,6 +201,7 @@ const NomiSendBox: React.FC<{
   const {
     running,
     hasHydratedRunningState,
+    pauseNotice,
     tokenUsage,
     setActiveMsgId,
     markTurnAccepted,
@@ -212,8 +213,8 @@ const NomiSendBox: React.FC<{
     getTurnStartGeneration,
     getTurnCompletionGeneration,
   } = turnActivity;
-  const modelPickerDisabled = Boolean(modelSelectionDisabled || running);
-  const modelPickerHint = running
+  const modelPickerDisabled = Boolean(modelSelectionDisabled || running || pauseNotice);
+  const modelPickerHint = pauseNotice ? t('conversation.executionPause.title') : running
     ? t('conversation.chat.modelSwitchAfterTurn')
     : modelSelectionHint;
   const hasContextUsage =
@@ -449,7 +450,7 @@ const NomiSendBox: React.FC<{
   } = useConversationCommandQueue({
     conversation_id: conversation_id,
     enabled: true,
-    isBusy,
+    isBusy: isBusy || pauseNotice !== null,
     isHydrated: hasHydratedRunningState,
     onExecute: executeCommand,
   });
@@ -820,6 +821,13 @@ const NomiSendBox: React.FC<{
 
   return (
     <div className={`${contentStyles.column} ${contentStyles.composer} flex flex-col mt-auto ${compactProductComposer ? 'mb-12px' : 'mb-16px'}`}>
+      {pauseNotice && (
+        <div className='mb-8px flex justify-end'>
+          <Button size='small' loading={isStopping} onClick={() => { void handleStop(); }}>
+            {t('conversation.executionPause.stop')}
+          </Button>
+        </div>
+      )}
       <CommandQueuePanel
         items={queuedCommands}
         paused={isQueuePaused}
@@ -847,7 +855,7 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isCreating ? creationSubmitting : isBusy}
-        disabled={isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing}
+        disabled={Boolean(pauseNotice) || (isCreating ? !generation.ready || creation?.preparing : !current_model?.use_model || modelSelectionDisabled || creation?.preparing)}
         preserveDraftUntilAccepted={Boolean(creation)}
         skipChatWarmup={isCreating}
         placeholder={

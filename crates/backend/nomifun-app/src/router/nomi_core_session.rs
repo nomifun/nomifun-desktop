@@ -4977,6 +4977,64 @@ fn visible_conversation_execution(
     )
 }
 
+fn canonical_pause_notice(status: &str, operation: Option<&str>, events: &[nomifun_agent_contracts::SessionEventRecord]) -> Option<Value> {
+    if status != "paused" { return None; }
+    let operation = operation?;
+    let event = events.iter().rev().find(|event| event.kind.0 == "turn/paused" && event.correlation_id.as_ref() == operation)?;
+    let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload) = &event.payload else { return None; };
+    let pause: nomifun_agent_session::NativePauseState = serde_json::from_value(payload.0.get("pause")?.clone()).ok()?;
+    // Only bounded public reason codes belong in the conversation projection.
+    // Arbitrary owner/provider prose remains in its original private record.
+    let public_reason = pause.reason.len() <= 128 && (
+        pause.reason.strip_prefix("EXECUTION_MODEL_").is_some_and(|code|
+            serde_json::from_value::<nomifun_chat_model_broker::ChatModelErrorCode>(json!(code)).is_ok())
+        || matches!(pause.reason.as_str(), "EXECUTION_USER_REQUESTED" | "EXECUTION_ATTACH_FAILED"
+            | "EXECUTION_PREPARATION_BLOCKED" | "EXECUTION_SESSION_PAYLOAD_BUDGET"
+            | "EXECUTION_MODEL_STREAM_ENDED_WITHOUT_TERMINAL" | "EXECUTION_MODEL_INVALID_EVENT")
+    );
+    let reason = if public_reason { pause.reason.as_str() } else { "EXECUTION_PAUSED" };
+    Some(json!({"reason":reason,"cleanup_proven":pause.cleanup_proven,"paused_at_ms":pause.paused_at_ms}))
+}
+
+#[cfg(test)]
+mod paused_projection_tests {
+    use super::*;
+
+    fn paused_event(operation: &str, reason: &str) -> nomifun_agent_contracts::SessionEventRecord {
+        nomifun_agent_contracts::SessionEventRecord {
+            agent_session_id:"pause-session".into(),seq:10,event_id:"pause-event".into(),
+            producer_id:"runtime_supervisor".into(),idempotency_key:"pause-key".into(),
+            runtime_binding_id:None,runtime_producer_seq:None,kind:nomifun_agent_contracts::SessionEventKind("turn/paused".into()),
+            kind_version:1,correlation_id:operation.into(),causation_event_id:None,
+            payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({"pause":{
+                "revision":1,"reason":reason,"checkpoint_revision":7,"checkpoint_digest":"a".repeat(64),
+                "execution_fence":1,"cleanup_proven":true,"paused_at_ms":123,
+            }}))),
+        }
+    }
+
+    #[test]
+    fn pause_notice_keeps_the_exact_active_turn_and_public_reason() {
+        let events=vec![paused_event("active","EXECUTION_MODEL_PROVIDER_UNAVAILABLE"),paused_event("foreign","OWNER_REQUESTED")];
+        let notice=canonical_pause_notice("paused",Some("active"),&events).unwrap();
+        assert_eq!(notice,json!({"reason":"EXECUTION_MODEL_PROVIDER_UNAVAILABLE","cleanup_proven":true,"paused_at_ms":123}));
+        assert!(canonical_pause_notice("running",Some("active"),&events).is_none());
+        assert!(canonical_pause_notice("paused",Some("missing"),&events).is_none());
+        assert!(canonical_pause_notice("paused",None,&events).is_none());
+    }
+
+    #[test]
+    fn pause_notice_does_not_publish_arbitrary_prose_or_invent_cleanup() {
+        for reason in ["sensitive provider or owner prose","FIXTURE_PROVIDER_SECRET","EXECUTION_MODEL_FIXTURE_SECRET"] {
+            let mut event=paused_event("active",reason);
+            let nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(payload)=&mut event.payload else { unreachable!() };
+            payload.0["pause"]["cleanup_proven"]=json!(false);
+            let notice=canonical_pause_notice("paused",Some("active"),&[event]).unwrap();
+            assert_eq!(notice,json!({"reason":"EXECUTION_PAUSED","cleanup_proven":false,"paused_at_ms":123}));
+        }
+    }
+}
+
 fn canonical_conversation_response(
     observed: SessionObservation,
     projected: super::agent_binding_projection::SavedAgentBindingProjection,
@@ -5010,6 +5068,10 @@ fn canonical_conversation_response(
     );
     extra.remove("temp_workspace_id");
     extra.insert("execution_phase".to_owned(),Value::String(head.status.clone()));
+    extra.remove("execution_pause");
+    if let Some(pause) = canonical_pause_notice(&head.status,head.active_turn_id.as_deref(),&events) {
+        extra.insert("execution_pause".to_owned(),pause);
+    }
     if is_temporary_workspace {
         extra.insert(
             "temp_workspace_id".to_owned(),

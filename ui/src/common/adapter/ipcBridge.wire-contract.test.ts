@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
-import { fromApiFileMetadata, fromApiTurnCompletedEvent } from './ipcBridge';
+import { fromApiFileMetadata, fromApiTurnCompletedEvent, fromApiTurnPausedEvent } from './ipcBridge';
 import { isAuthoritativeCompletionRuntimeIdle } from '@/renderer/pages/conversation/platforms/authoritativeTurnLifecyclePolicy';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
@@ -14,6 +14,14 @@ const CONVERSATION_ID = '0190f5fe-7c00-7a00-8000-000000000001';
 const MESSAGE_ID = '0190f5fe-7c00-7a00-8000-000000000002';
 
 describe('ipc bridge wire ID contracts', () => {
+  test('pause notifications retain exact identities and carry no completion authority', () => {
+    expect(fromApiTurnPausedEvent({ conversation_id: CONVERSATION_ID, turn_id: MESSAGE_ID,
+      status: 'paused', runtime: { can_send_message: false } })).toEqual({ conversation_id: CONVERSATION_ID, turn_id: MESSAGE_ID });
+    for (const raw of [{ conversation_id: CONVERSATION_ID }, { conversation_id: 'invalid', turn_id: MESSAGE_ID }]) {
+      expect(() => fromApiTurnPausedEvent(raw)).toThrow();
+    }
+  });
+
   test('maps filesystem metadata snake-case fields before directory validation', () => {
     expect(fromApiFileMetadata({
       name: 'project',

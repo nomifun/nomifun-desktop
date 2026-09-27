@@ -4,11 +4,33 @@ import { parseMessageId } from '@/common/types/ids';
 import {
   getConversationRuntimeAuthority,
   isConversationProcessing,
+  getConversationPauseNotice,
 } from './conversationRuntime';
 
 const activeTurnId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000081');
 
 describe('conversation runtime authority', () => {
+  test('pause presentation requires the exact nonprocessing owner and never grants idle authority', () => {
+    const snapshot = {
+      status: 'running', extra: { workspace: '/fixture', execution_phase: 'paused', execution_pause: {
+        reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanup_proven: true, paused_at_ms: 123,
+      } },
+      runtime: { state: 'idle', has_runtime: false, is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } as TChatConversation;
+    expect(getConversationPauseNotice(snapshot)).toEqual({ turnId: activeTurnId,
+      reason: 'EXECUTION_MODEL_PROVIDER_UNAVAILABLE', cleanupProven: true, pausedAt: 123 });
+    expect(getConversationRuntimeAuthority(snapshot)).toBe('unknown');
+    for (const change of [
+      { status: 'finished' },
+      { extra: { ...snapshot.extra, execution_phase: 'running' } },
+      ...[{ is_processing: true }, { active_turn_id: undefined }, { can_send_message: true }, { state: 'running' }]
+        .map(runtime => ({ runtime: { ...snapshot.runtime, ...runtime } })),
+    ]) expect(getConversationPauseNotice({ ...snapshot, ...change } as TChatConversation)).toBeNull();
+    expect(getConversationPauseNotice({ ...snapshot, extra: { ...snapshot.extra,
+      execution_pause: { reason: 'untrusted detail', cleanup_proven: false, paused_at_ms: Number.NaN },
+    } })).toEqual({ turnId: activeTurnId, reason: undefined, cleanupProven: false, pausedAt: undefined });
+  });
+
   test('Finished cannot be promoted by a stale processing bit', () => {
     const snapshot = {
       status: 'finished',

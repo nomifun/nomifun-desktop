@@ -1,4 +1,12 @@
 {
+  "executionPause": {
+    "title": "Execution paused",
+    "stop": "End this turn",
+    "providerUnavailable": "The model service is temporarily unavailable. The task is incomplete; completed operations are retained.",
+    "incomplete": "The task is incomplete. Completed operations are retained.",
+    "cleanupRequired": "Resource cleanup is unconfirmed. Review the execution state before continuing.",
+    "sendBlocked": "Continuation requires a recovery check. This conversation cannot accept new messages yet."
+  },
   "welcome": {
     "title": "New conversation",
     "placeholder": "Send a message, upload files, open a folder, or create a scheduled task...",

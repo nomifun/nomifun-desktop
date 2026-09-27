@@ -37,6 +37,7 @@ async function mountTranscript(readOnly: boolean) {
   for (const event of [
     'turnStarted',
     'turnCompleted',
+    'turnPaused',
     'userCreated',
     'messageAnnotated',
     'reconnected',

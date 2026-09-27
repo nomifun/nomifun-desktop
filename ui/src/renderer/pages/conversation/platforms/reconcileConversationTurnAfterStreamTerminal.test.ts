@@ -29,6 +29,37 @@ const unknownConversation = {
 } as TChatConversation;
 
 describe('terminal stream runtime reconciliation', () => {
+  test('a durable pause stops activity without settling or opening the queue', async () => {
+    const paused = {
+      status: 'running',
+      extra: { execution_phase: 'paused' },
+      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } as TChatConversation;
+    let pauseCalls = 0;
+    let idleCalls = 0;
+    let unknownCalls = 0;
+    const settled: ConversationId[] = [];
+    const onSettled = (id: ConversationId) => { settled.push(id); };
+    emitter.on('conversation.turn.settled', onSettled);
+    try {
+      const options = {
+        isCurrent: () => true,
+        onIdle: () => { idleCalls += 1; },
+        onUnknown: () => { unknownCalls += 1; },
+        onPaused: (conversation: TChatConversation) => {
+          pauseCalls += 1;
+          expect(conversation.runtime?.active_turn_id).toBe(activeTurnId);
+        },
+        delaysMs: [0], getConversation: async () => paused, retryForever: false,
+      };
+      expect(await reconcileConversationAuthoritativeRuntime(conversationId, options)).toBe(false);
+      expect(pauseCalls).toBe(1);
+      expect(idleCalls).toBe(0);
+      expect(unknownCalls).toBe(0);
+      expect(settled).toEqual([]);
+    } finally { emitter.off('conversation.turn.settled', onSettled); }
+  });
+
   test('reconnect settles a turn whose terminal events were lost after turn.started', async () => {
     let running = true;
     let correlatedTurnId: typeof activeTurnId | undefined = activeTurnId;
