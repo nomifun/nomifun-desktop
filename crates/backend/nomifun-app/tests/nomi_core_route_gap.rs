@@ -2788,6 +2788,29 @@ async fn creative_studio_entry_uses_its_official_agent() {
             assert_eq!(error["error"]["code"], "NOMIFUN_STATE_INCONSISTENT");
             assert_eq!(error["error"]["ownership"], "nomifun");
             assert_eq!(error["error"]["retryable"], false);
+            let (status, restored) = call(router.clone(), "POST",
+                "/api/creative-studio/canvas-agent-sessions/resolve", json!({
+                    "canvas_id": canvas_id,
+                    "session_id": session_id,
+                    "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
+                    "pending_turn_idempotency_key": pending_key
+                })).await;
+            assert_eq!(status, StatusCode::OK, "{restored}");
+            let history = restored["data"]["history"].as_array().unwrap();
+            assert_eq!(history.len(), 4, "both terminal turns must survive reload");
+            assert_eq!(history[1]["status"], "complete");
+            assert_eq!(history[3]["status"], "failed", "failed Skill admission must not become a blank completed reply");
+            assert_eq!(history[3]["errorMessage"], error["error"]["message"]);
+            let source: String = sqlx::query_scalar(
+                "SELECT source_message_id FROM agent_turns WHERE session_id = ? AND operation_id = ?")
+                .bind(conversation_id).bind(operation).fetch_one(services.database.pool()).await.unwrap();
+            assert_eq!(history[2]["id"], source);
+            let assistant: String = sqlx::query_scalar(
+                "SELECT json_extract(projection_json, '$.correlation_id') FROM agent_messages \
+                 WHERE session_id = ? AND presentation_intent = 'message' \
+                   AND json_extract(projection_json, '$.state') = 'completed' ORDER BY first_seq DESC LIMIT 1")
+                .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+            assert_eq!(history[3]["id"], assistant, "reload must preserve the original assistant identity");
         }
     }
     let requests = upstream.received_requests().await.unwrap();

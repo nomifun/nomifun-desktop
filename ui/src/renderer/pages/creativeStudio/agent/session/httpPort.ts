@@ -91,7 +91,9 @@ const parseHistory = (
   }
   return value.map((item, index) => {
     const source = record(item, `history[${index}]`);
-    exactKeys(source, ["id", "role", "status", "text"], `history[${index}]`);
+    exactKeys(source, source.status === 'failed'
+      ? ["id", "role", "status", "text", "errorMessage"]
+      : ["id", "role", "status", "text"], `history[${index}]`);
     const id = string(source.id, `history[${index}].id`);
     if (!CANONICAL_UUID_V7.test(id)) {
       throw new CreativeStudioAgentSessionResolutionError(
@@ -102,6 +104,16 @@ const parseHistory = (
     const role = string(source.role, `history[${index}].role`);
     const status = string(source.status, `history[${index}].status`);
     const text = string(source.text, `history[${index}].text`);
+    if (role === 'assistant' && status === 'failed') {
+      const errorMessage = string(source.errorMessage, `history[${index}].errorMessage`);
+      if (!errorMessage.trim()) {
+        throw new CreativeStudioAgentSessionResolutionError(
+          'PORT_CONTRACT_VIOLATION', 'Failed history must include its public error message',
+        );
+      }
+      return { id, role, status, text, errorMessage };
+    }
+    if (role === 'assistant' && status === 'stopped') return { id, role, status, text };
     if (status !== "complete" || (role !== "user" && role !== "assistant")) {
       throw new CreativeStudioAgentSessionResolutionError(
         "PORT_CONTRACT_VIOLATION",
@@ -124,7 +136,7 @@ const parseAppliedProposalMessageIds = (
   }
   const assistantIds = new Set(
     history
-      .filter((message) => message.role === "assistant")
+      .filter((message) => message.role === "assistant" && message.status === 'complete')
       .map((message) => message.id),
   );
   const seen = new Set<string>();

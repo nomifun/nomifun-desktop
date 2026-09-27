@@ -8,7 +8,7 @@ export {
   createNomiCreativeStudioAgentChatPort,
 
 } from './NomiCreativeStudioAgentChatPort';
-export { serializeCreativeStudioAgentHistory } from './history';
+export { isDurableCreativeStudioAgentMessage, serializeCreativeStudioAgentHistory } from './history';
 export type {
 
   NomiCreativeStudioAgentSessionBinding,

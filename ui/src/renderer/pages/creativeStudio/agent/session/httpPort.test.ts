@@ -42,6 +42,42 @@ const request: CreativeStudioAgentSessionPersistenceRequest = {
 };
 
 describe("Nomi Creative Studio Agent session HTTP port", () => {
+  test("restores terminal failures and stops without authorizing their proposals", async () => {
+    for (const status of ['failed', 'stopped'] as const) {
+      const restored: readonly CreativeStudioAgentMessage[] = [history[0]!, {
+        id: priorAssistantMessageId, role: 'assistant', status, text: '',
+        ...(status === 'failed' ? { errorMessage: 'Skill is not selected' } : {}),
+      } as CreativeStudioAgentMessage];
+      let applied: string[] = [];
+      let wireHistory: unknown = restored;
+      const port = createNomiCreativeStudioAgentSessionHttpPort({ async resolve() {
+        return {
+          binding: { ownership: 'creative-studio-exclusive', canvas_id: canvasId,
+            session_id: sessionId, conversation_id: conversationId,
+            model: { provider_id: providerId, model: 'nomi-chat' },
+            history_key: serializeCreativeStudioAgentHistory(restored) },
+          history: wireHistory, applied_proposal_message_ids: applied, created: false,
+        };
+      } });
+      expect((await port.resolveOrCreateExclusive(request)).history).toEqual(restored);
+      applied = [priorAssistantMessageId];
+      await expect(port.resolveOrCreateExclusive(request)).rejects.toThrow('completed assistant');
+      applied = [];
+      for (const invalid of [
+        { ...restored[1], status: 'running' },
+        { ...restored[1], role: 'user' },
+        { ...restored[1], status: 'failed', errorMessage: '' },
+        { ...restored[1], status: 'failed', errorMessage: undefined },
+        { ...restored[1], internalDetail: 'not a public message field' },
+      ]) {
+        wireHistory = [history[0], invalid];
+        await expect(port.resolveOrCreateExclusive(request)).rejects.toBeInstanceOf(
+          CreativeStudioAgentSessionResolutionError,
+        );
+      }
+    }
+  });
+
   test("bounds the idempotent resolve request instead of leaving the panel loading forever", () => {
     const source = readFileSync(new URL("./httpPort.ts", import.meta.url), "utf8");
     expect(CREATIVE_STUDIO_AGENT_SESSION_RESOLVE_TIMEOUT_MS).toBe(30_000);

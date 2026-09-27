@@ -164,19 +164,23 @@ const validateBinding = (
   }
 };
 
-const completedEvents = (
+const settledEvents = (
   resolution: NomiCreativeStudioAgentSessionResolution
 ): readonly CreativeStudioAgentTurnEvent[] => {
   const last = resolution.history.at(-1);
-  if (!last || last.role !== 'assistant' || last.status !== 'complete') {
+  if (!last || last.role !== 'assistant' || last.status === 'running') {
     throw new NomiCreativeStudioAgentRuntimeError(
       'AUTHORITATIVE_HISTORY_INCOMPLETE',
-      'NomiFun did not return a completed assistant message for the recovered turn'
+      'NomiFun did not return a terminal assistant message for the recovered turn'
     );
   }
   return [
     { type: 'history-reconciled', history: resolution.history },
-    { type: 'completed', assistantMessageId: last.id },
+    last.status === 'failed'
+      ? { type: 'failed', message: last.errorMessage, retryable: false }
+      : last.status === 'stopped'
+        ? { type: 'stopped' }
+        : { type: 'completed', assistantMessageId: last.id },
   ];
 };
 
@@ -420,7 +424,7 @@ export function createNomiCreativeStudioAgentChatPort(
 
       const initialResolution = await resolveAuthoritative();
       if (initialResolution.history.length === request.history.length + 2) {
-        for (const event of completedEvents(initialResolution)) yield event;
+        for (const event of settledEvents(initialResolution)) yield event;
         return;
       }
       const binding = initialResolution.binding;
@@ -484,7 +488,7 @@ export function createNomiCreativeStudioAgentChatPort(
             return;
           }
           const resolution = await reconcileCompleted();
-          for (const event of completedEvents(resolution)) yield event;
+          for (const event of settledEvents(resolution)) yield event;
           return;
         }
         admittedNonTerminalTurn = true;
@@ -513,7 +517,7 @@ export function createNomiCreativeStudioAgentChatPort(
             activeTurnId = afterSend.activeTurnId;
           } else if (afterSend.authority === 'idle') {
             const resolution = await reconcileCompleted();
-            for (const event of completedEvents(resolution)) yield event;
+            for (const event of settledEvents(resolution)) yield event;
             return;
           } else {
             throw new NomiCreativeStudioAgentRuntimeError(
@@ -553,7 +557,7 @@ export function createNomiCreativeStudioAgentChatPort(
               }
               if (snapshot.authority === 'idle') {
                 const resolution = await reconcileCompleted();
-                for (const event of completedEvents(resolution)) yield event;
+                for (const event of settledEvents(resolution)) yield event;
                 return;
               }
               throw new NomiCreativeStudioAgentRuntimeError(
@@ -588,7 +592,7 @@ export function createNomiCreativeStudioAgentChatPort(
             if (snapshot.authority === 'idle') {
               const resolution = await resolveAuthoritative();
               if (resolution.history.length === request.history.length + 2) {
-                for (const event of completedEvents(resolution)) yield event;
+                for (const event of settledEvents(resolution)) yield event;
                 return;
               }
             }
@@ -619,7 +623,7 @@ export function createNomiCreativeStudioAgentChatPort(
             }
             if (snapshot.authority === 'idle' && activeTurnId) {
               const resolution = await reconcileCompleted();
-              for (const event of completedEvents(resolution)) yield event;
+              for (const event of settledEvents(resolution)) yield event;
               return;
             }
             throw new NomiCreativeStudioAgentRuntimeError(
@@ -730,7 +734,7 @@ export function createNomiCreativeStudioAgentChatPort(
             }
           }
           const resolution = await reconcileCompleted();
-          for (const completedEvent of completedEvents(resolution)) yield completedEvent;
+          for (const completedEvent of settledEvents(resolution)) yield completedEvent;
           return;
         }
       } catch (error) {

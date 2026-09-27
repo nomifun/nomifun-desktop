@@ -5,6 +5,7 @@
  */
 
 import {
+  isDurableCreativeStudioAgentMessage,
   serializeCreativeStudioAgentHistory,
   type NomiCreativeStudioAgentSessionResolution,
   type NomiCreativeStudioAgentSessionResolutionInput,
@@ -84,8 +85,7 @@ const assertResolution = (
   if (
     history.some(
       (message) =>
-        message.status !== 'complete' ||
-        (message.role !== 'user' && message.role !== 'assistant')
+        !isDurableCreativeStudioAgentMessage(message)
     )
   ) {
     throw new CreativeStudioAgentSessionResolutionError(
@@ -95,7 +95,7 @@ const assertResolution = (
   }
   const assistantIds = new Set(
     history
-      .filter((message) => message.role === 'assistant')
+      .filter((message) => message.role === 'assistant' && message.status === 'complete')
       .map((message) => message.id)
   );
   if (

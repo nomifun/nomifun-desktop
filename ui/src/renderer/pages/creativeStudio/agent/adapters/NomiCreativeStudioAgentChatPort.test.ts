@@ -271,6 +271,28 @@ const collect = async <T>(
 };
 
 describe('NomiCreativeStudioAgentChatPort', () => {
+  test('recovers failed and stopped turns without resubmission or false completion', async () => {
+    for (const status of ['failed', 'stopped'] as const) {
+      const restored: CreativeStudioAgentMessage[] = [...recoveredHistory.slice(0, -1), {
+        id: assistantMessageId, role: 'assistant', status, text: '',
+        ...(status === 'failed' ? { errorMessage: 'Skill is not selected' } : {}),
+      } as CreativeStudioAgentMessage];
+      const transport = new FakeTransport();
+      const port = createNomiCreativeStudioAgentChatPort({
+        resolveSession: matchingResolver({ history: restored }), transport,
+      });
+      const events = await collect(port.runTurn(request(new AbortController().signal)));
+      expect(events).toEqual([
+        { type: 'history-reconciled', history: restored },
+        status === 'failed'
+          ? { type: 'failed', message: 'Skill is not selected', retryable: false }
+          : { type: 'stopped' },
+      ]);
+      expect(transport.sendCalls).toEqual([]);
+      expect(transport.inspectCalls).toEqual([]);
+    }
+  });
+
   test('maps real REST admission plus exact WS turn lifecycle into port events', async () => {
     const transport = new FakeTransport();
     const mutableSkillIds = [...planningSkillIds];

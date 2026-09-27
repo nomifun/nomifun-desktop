@@ -2723,6 +2723,44 @@ impl AgentSessionStore {
         Ok((messages, has_more, as_u64(total, "message projection total")?))
     }
 
+    /// Read lifecycle facts for an existing message page without consuming its
+    /// pagination slots or rewriting projections from older Sessions.
+    pub async fn turn_history_for_sources(
+        &self,
+        session_id: &AgentSessionId,
+        source_message_ids: &[String],
+    ) -> Result<Vec<MessageProjection>, SessionStoreError> {
+        if source_message_ids.len() > MAX_EVENT_PAGE_SIZE as usize {
+            return Err(SessionStoreError::InvalidEvent("too many Turn history sources".to_owned()));
+        }
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        if source_message_ids.is_empty() {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+        let mut query = sqlx::QueryBuilder::<Sqlite>::new(
+            "SELECT session_id, turn_id, source_message_id, state, result_json, error_json, \
+                    started_event_id, accepted_at, started_at, finished_at \
+             FROM agent_turns WHERE session_id = ",
+        );
+        query.push_bind(session_id.as_ref()).push(" AND source_message_id IN (");
+        let mut sources = query.separated(", ");
+        for source in source_message_ids {
+            sources.push_bind(source);
+        }
+        sources.push_unseparated(")");
+        let rows = query.build_query_as::<StoredTurnHistoryRow>().fetch_all(&mut *tx).await?;
+        let mut history = Vec::new();
+        for row in rows {
+            if let Some(summary) = turn_history_projection_from_row(row)? {
+                history.push(summary);
+            }
+        }
+        tx.commit().await?;
+        Ok(history)
+    }
+
     /// Read the renderer-facing conversation history. In addition to canonical
     /// message/tool/thinking projections, expose one derived lifecycle summary for every
     /// durable Turn. The summary is reconstructed from `agent_turns`, so older

@@ -6,6 +6,15 @@
 
 import type { CreativeStudioAgentMessage } from '../types';
 
+export function isDurableCreativeStudioAgentMessage(message: CreativeStudioAgentMessage): boolean {
+  return (message.role === 'user' && message.status === 'complete') ||
+    (message.role === 'assistant' && (
+      message.status === 'complete' || message.status === 'stopped' ||
+      (message.status === 'failed' && typeof message.errorMessage === 'string' &&
+        message.errorMessage.trim().length > 0)
+    ));
+}
+
 /**
  * Lossless, deterministic projection used at the resolver boundary. It is a
  * comparison key, not a cryptographic digest: the adapter compares the entire

@@ -333,6 +333,30 @@ describe('Creative Studio Agent model and chat boundaries', () => {
     }
   });
 
+  test('a recovered stopped event remains stopped without a completion event', async () => {
+    const controller = new CreativeStudioAgentChatController({
+      async *runTurn() { yield { type: 'stopped' }; },
+    });
+    expect(await controller.runTurn({
+      canvasId: 'canvas-1', sessionId: 'session-1',
+      idempotencyKey: '0190f5fe-7c00-7a00-8000-000000000303',
+      prompt: '创建节点', modelInput: '创建节点', skillIds: [], model, history: [],
+    })).toEqual({ state: 'stopped' });
+    expect(controller.isRunning).toBe(false);
+  });
+
+  test('offers retry only for the latest failed message when the owner enables it', () => {
+    const html = renderPanel({
+      messages: [
+        { id: 'old', role: 'assistant', status: 'failed', text: '', errorMessage: 'old failure' },
+        { id: 'ok', role: 'assistant', status: 'complete', text: 'prior reply' },
+        { id: 'new', role: 'assistant', status: 'failed', text: '', errorMessage: 'unconfirmed' },
+      ],
+      onRetryMessage: noop,
+    });
+    expect(html.match(/aria-label="Retry this message"/g)?.length).toBe(1);
+  });
+
   test('stop aborts the injected adapter and never reports completion', async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {

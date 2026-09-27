@@ -458,7 +458,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
             return;
           }
           if (outcome.state === 'stopped') {
-            await persistSession(creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
+            await persistSession(reconciledHistory
+              ? creativeCanvasAgentSessionWithAuthoritativeHistory(session, reconciledHistory, now())
+              : creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
             if (mountedRef.current) {
               replaceRunningAssistant(transientAssistantId, (message) => ({
                 id: message.id,
@@ -472,7 +474,9 @@ const CreativeCanvasAgentPanel = React.forwardRef<
 
           const outcomeErrorMessage = errorMessage(outcome.error);
           if (terminalFailureObserved) {
-            await persistSession(creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
+            await persistSession(reconciledHistory
+              ? creativeCanvasAgentSessionWithAuthoritativeHistory(session, reconciledHistory, now())
+              : creativeCanvasAgentSessionWithoutPendingTurn(session, now()));
           } else if (mountedRef.current) {
             replaceRunningAssistant(transientAssistantId, (message) => ({
               id: message.id,
@@ -972,7 +976,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       onStop={handleStop}
       onCollapse={props.onCollapse}
       onRetryLoad={handleRetryLoad}
-      onRetryMessage={handleRetryMessage}
+      onRetryMessage={activeSession?.pendingTurn && !isRunning ? handleRetryMessage : undefined}
       onOpenModelSettings={props.onOpenModelSettings}
     />
   );
