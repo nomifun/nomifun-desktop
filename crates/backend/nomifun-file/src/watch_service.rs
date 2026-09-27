@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -72,18 +72,56 @@ fn should_emit(debounce: &DashMap<String, Instant>, key: &str) -> bool {
 pub struct FileWatchService {
     user_events: Arc<dyn UserEventSink>,
     /// Shared watcher for all single-file watches.
-    file_watcher: Mutex<RecommendedWatcher>,
+    file_watcher: Mutex<FileWatchState>,
     /// Set of canonical paths being watched (shared with the event handler).
     watched_files: Arc<DashMap<String, HashSet<String>>>,
     /// Per-workspace Office watchers, keyed by canonical workspace path.
-    office_watchers: Mutex<HashMap<String, OfficeWatchRegistration>>,
+    office_watchers: Mutex<OfficeWatchState>,
     /// Debounce timestamps shared with watcher callbacks.
     debounce: Arc<DashMap<String, Instant>>,
 }
 
 struct OfficeWatchRegistration {
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
     owners: Arc<DashMap<String, ()>>,
+}
+
+type WatchAliases = HashMap<(String, PathBuf), String>;
+
+struct FileWatchState { watcher: RecommendedWatcher, aliases: WatchAliases }
+
+#[derive(Default)]
+struct OfficeWatchState { registrations: HashMap<String, OfficeWatchRegistration>, aliases: WatchAliases }
+
+fn watch_alias(path: &str) -> Result<PathBuf, AppError> {
+    std::path::absolute(path).map_err(|error| AppError::BadRequest(format!("invalid watch path: {error}")))
+}
+
+fn watch_key(aliases: &WatchAliases, owner: &str, path: &str, registered: impl Fn(&str) -> bool) -> Result<String, AppError> {
+    // A recorded request wins over a new filesystem resolution. The entry may
+    // have disappeared, or a link may now point at a different registered file.
+    if let Some(key) = aliases.get(&(owner.to_owned(), watch_alias(path)?)) { return Ok(key.clone()); }
+    if registered(path) { return Ok(path.to_owned()); }
+    Ok(std::fs::canonicalize(path).unwrap_or_else(|_| path.into()).to_string_lossy().into_owned())
+}
+
+fn validate_watch_alias(aliases: &WatchAliases, owner: &str, alias: &Path, canonical: &str) -> Result<(), AppError> {
+    if aliases.get(&(owner.to_owned(), alias.to_path_buf())).is_some_and(|prior| prior != canonical) {
+        return Err(AppError::Conflict("watch path changed target; stop the original subscription before restarting".into()));
+    }
+    Ok(())
+}
+
+fn forget_watch_aliases(aliases: &mut WatchAliases, owner: &str, canonical: &str) {
+    aliases.retain(|(registered_owner, _), target| registered_owner != owner || target != canonical);
+}
+
+fn confirm_unwatch(watcher: &mut RecommendedWatcher, path: &Path) -> Result<(), AppError> {
+    match watcher.unwatch(path) {
+        Ok(()) => Ok(()),
+        Err(error) if matches!(error.kind, notify::ErrorKind::WatchNotFound) => Ok(()),
+        Err(error) => Err(AppError::Internal(format!("file watch cleanup is unconfirmed: {error}"))),
+    }
 }
 
 impl FileWatchService {
@@ -135,9 +173,9 @@ impl FileWatchService {
 
         Ok(Self {
             user_events,
-            file_watcher: Mutex::new(file_watcher),
+            file_watcher: Mutex::new(FileWatchState { watcher: file_watcher, aliases: HashMap::new() }),
             watched_files,
-            office_watchers: Mutex::new(HashMap::new()),
+            office_watchers: Mutex::new(OfficeWatchState::default()),
             debounce,
         })
     }
@@ -150,51 +188,50 @@ impl crate::traits::IFileWatchService for FileWatchService {
         let canonical = std::fs::canonicalize(file_path)
             .map_err(|e| AppError::NotFound(format!("cannot resolve path {file_path}: {e}")))?;
         let key = canonical.to_string_lossy().into_owned();
+        let alias = watch_alias(file_path)?;
 
         let mut watcher = self
             .file_watcher
             .lock()
             .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
+        validate_watch_alias(&watcher.aliases, owner_id, &alias, &key)?;
         // The watcher lock serializes check/register/insert, so concurrent
         // owners cannot install duplicate OS watches for the same path.
         if let Some(mut owners) = self.watched_files.get_mut(&key) {
             owners.insert(owner_id.to_owned());
+            watcher.aliases.insert((owner_id.to_owned(), alias), key);
             return Ok(());
         }
         self.watched_files
             .insert(key.clone(), HashSet::from([owner_id.to_owned()]));
-        if let Err(error) = watcher.watch(&canonical, RecursiveMode::NonRecursive) {
+        if let Err(error) = watcher.watcher.watch(&canonical, RecursiveMode::NonRecursive) {
             self.watched_files.remove(&key);
             return Err(AppError::Internal(format!("failed to watch {file_path}: {error}")));
         }
+        watcher.aliases.insert((owner_id.to_owned(), alias), key);
         Ok(())
     }
 
     async fn stop_watch(&self, owner_id: &str, file_path: &str) -> Result<(), AppError> {
         require_owner(owner_id)?;
-        let canonical = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.into());
-        let key = canonical.to_string_lossy().into_owned();
-
         // Serialize owner removal and OS unregistration with start_watch.
         let mut watcher = self
             .file_watcher
             .lock()
             .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
-        let remove_os_watch = match self.watched_files.get_mut(&key) {
-            Some(mut owners) => {
-                owners.remove(owner_id);
-                owners.is_empty()
+        let key = watch_key(&watcher.aliases, owner_id, file_path,
+            |key| self.watched_files.get(key).is_some_and(|owners| owners.contains(owner_id)))?;
+        let count = self.watched_files.get(&key).filter(|owners| owners.contains(owner_id)).map(|owners| owners.len());
+        match count {
+            None => return Ok(()),
+            Some(1) => {
+                confirm_unwatch(&mut watcher.watcher, Path::new(&key))?;
+                self.watched_files.remove(&key);
+                self.debounce.remove(&key);
             }
-            None => false,
-        };
-        if !remove_os_watch {
-            return Ok(());
+            Some(_) => { if let Some(mut owners) = self.watched_files.get_mut(&key) { owners.remove(owner_id); } }
         }
-        self.watched_files.remove(&key);
-
-        // Ignore unwatch errors — the file may have been deleted.
-        let _ = watcher.unwatch(&canonical);
-        self.debounce.remove(&key);
+        forget_watch_aliases(&mut watcher.aliases, owner_id, &key);
         Ok(())
     }
 
@@ -217,6 +254,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
         let canonical = std::fs::canonicalize(workspace)
             .map_err(|e| AppError::NotFound(format!("cannot resolve workspace {workspace}: {e}")))?;
         let key = canonical.to_string_lossy().into_owned();
+        let alias = watch_alias(workspace)?;
 
         // Keep the registration lock through watcher construction and insert.
         // Otherwise two concurrent callers can replace each other's watcher
@@ -225,8 +263,10 @@ impl crate::traits::IFileWatchService for FileWatchService {
             .office_watchers
             .lock()
             .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-        if let Some(registration) = watchers.get(&key) {
+        validate_watch_alias(&watchers.aliases, owner_id, &alias, &key)?;
+        if let Some(registration) = watchers.registrations.get(&key) {
             registration.owners.insert(owner_id.to_owned(), ());
+            watchers.aliases.insert((owner_id.to_owned(), alias), key);
             return Ok(());
         }
 
@@ -279,36 +319,33 @@ impl crate::traits::IFileWatchService for FileWatchService {
             .watch(&canonical, RecursiveMode::Recursive)
             .map_err(|e| AppError::Internal(format!("failed to watch workspace {workspace}: {e}")))?;
 
-        watchers.insert(
-            key,
+        watchers.registrations.insert(
+            key.clone(),
             OfficeWatchRegistration {
-                _watcher: watcher,
+                watcher,
                 owners,
             },
         );
+        watchers.aliases.insert((owner_id.to_owned(), alias), key);
         Ok(())
     }
 
     async fn stop_office_watch(&self, owner_id: &str, workspace: &str) -> Result<(), AppError> {
         require_owner(owner_id)?;
-        let canonical = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.into());
-        let key = canonical.to_string_lossy().into_owned();
-
         let mut watchers = self
             .office_watchers
             .lock()
             .map_err(|e| AppError::Internal(format!("office watcher lock poisoned: {e}")))?;
-        let remove_registration = watchers
-            .get(&key)
-            .map(|registration| {
-                registration.owners.remove(owner_id);
-                registration.owners.is_empty()
-            })
-            .unwrap_or(false);
-        if remove_registration {
-            // Dropping the last owner's registration stops the OS watcher.
-            watchers.remove(&key);
+        let key = watch_key(&watchers.aliases, owner_id, workspace,
+            |key| watchers.registrations.get(key).is_some_and(|registration| registration.owners.contains_key(owner_id)))?;
+        let Some(registration) = watchers.registrations.get_mut(&key).filter(|registration| registration.owners.contains_key(owner_id)) else { return Ok(()); };
+        let last_owner = registration.owners.len() == 1;
+        if last_owner { confirm_unwatch(&mut registration.watcher, Path::new(&key))?; }
+        registration.owners.remove(owner_id);
+        if last_owner {
+            watchers.registrations.remove(&key);
         }
+        forget_watch_aliases(&mut watchers.aliases, owner_id, &key);
         Ok(())
     }
 }
@@ -328,6 +365,172 @@ mod tests {
     use super::*;
     use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
     use std::path::PathBuf;
+
+    struct NoEvents;
+    impl UserEventSink for NoEvents {
+        fn send_to_user(&self, _: &str, _: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    }
+
+    fn lifecycle_fixture() -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("watch-lifecycle-");
+        match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => builder.tempdir_in(parent).unwrap(),
+            None => builder.tempdir().unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn deleted_file_watch_can_be_stopped_through_its_original_alias() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        std::fs::create_dir(fixture.path().join("parent")).unwrap();
+        let file = fixture.path().join("watched.txt");
+        let alias = fixture.path().join("parent/../watched.txt");
+        std::fs::write(&file, b"initial").unwrap();
+        let owner = nomifun_common::generate_id();
+        let service = FileWatchService::new(Arc::new(NoEvents)).unwrap();
+        service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_file(&file).unwrap();
+        service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        if !service.watched_files.is_empty() {
+            let registrations = service.watched_files.iter().map(|entry| entry.key().clone()).collect::<Vec<_>>();
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&registrations).unwrap()).unwrap();
+            panic!("deleted file subscription survived stop; retained fixture: {}", fixture.keep().display());
+        }
+        std::fs::write(&file, b"new file").unwrap();
+        service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        assert!(service.watched_files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleted_office_workspace_can_be_stopped_through_its_original_alias() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        std::fs::create_dir(fixture.path().join("parent")).unwrap();
+        let workspace = fixture.path().join("workspace");
+        let alias = fixture.path().join("parent/../workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let owner = nomifun_common::generate_id();
+        let service = FileWatchService::new(Arc::new(NoEvents)).unwrap();
+        service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        if !service.office_watchers.lock().unwrap().registrations.is_empty() {
+            let registrations = service.office_watchers.lock().unwrap().registrations.keys().cloned().collect::<Vec<_>>();
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&registrations).unwrap()).unwrap();
+            panic!("deleted workspace subscription survived stop; retained fixture: {}", fixture.keep().display());
+        }
+        std::fs::create_dir(&workspace).unwrap();
+        service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        assert!(service.office_watchers.lock().unwrap().registrations.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn retargeted_alias_stops_its_original_subscription_without_affecting_another() {
+        use crate::IFileWatchService;
+        for office in [false, true] {
+            let fixture = lifecycle_fixture();
+            let first = fixture.path().join("first");
+            let second = fixture.path().join("second");
+            let alias = fixture.path().join("alias");
+            std::fs::create_dir(&first).unwrap();
+            std::fs::create_dir(&second).unwrap();
+            std::fs::write(first.join("watched.txt"), b"first").unwrap();
+            std::fs::write(second.join("watched.txt"), b"second").unwrap();
+            junction::create(&first, &alias).unwrap();
+            let original = if office { alias.clone() } else { alias.join("watched.txt") };
+            let other = if office { second.clone() } else { second.join("watched.txt") };
+            let other_key = std::fs::canonicalize(&other).unwrap().to_string_lossy().into_owned();
+            let owner = nomifun_common::generate_id();
+            let service = FileWatchService::new(Arc::new(NoEvents)).unwrap();
+            if office {
+                service.start_office_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                service.start_office_watch(&owner, other.to_str().unwrap()).await.unwrap();
+            } else {
+                service.start_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                service.start_watch(&owner, other.to_str().unwrap()).await.unwrap();
+            }
+            junction::delete(&alias).unwrap();
+            std::fs::remove_dir(&alias).unwrap();
+            junction::create(&second, &alias).unwrap();
+            if office {
+                assert!(matches!(service.start_office_watch(&owner, original.to_str().unwrap()).await, Err(AppError::Conflict(_))));
+                service.stop_office_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                assert_eq!(service.office_watchers.lock().unwrap().registrations.len(), 1);
+                assert!(service.office_watchers.lock().unwrap().registrations.contains_key(&other_key));
+                service.stop_office_watch(&owner, other.to_str().unwrap()).await.unwrap();
+                let state = service.office_watchers.lock().unwrap();
+                assert!(state.registrations.is_empty() && state.aliases.is_empty());
+            } else {
+                assert!(matches!(service.start_watch(&owner, original.to_str().unwrap()).await, Err(AppError::Conflict(_))));
+                service.stop_watch(&owner, original.to_str().unwrap()).await.unwrap();
+                assert_eq!(service.watched_files.len(), 1);
+                assert!(service.watched_files.contains_key(&other_key));
+                service.stop_all_watches(&owner).await.unwrap();
+                assert!(service.watched_files.is_empty());
+                assert!(service.file_watcher.lock().unwrap().aliases.is_empty());
+            }
+            junction::delete(&alias).unwrap();
+        }
+    }
+
+    struct ChannelEvents(tokio::sync::mpsc::UnboundedSender<(String, nomifun_api_types::WebSocketMessage<serde_json::Value>)>);
+    impl UserEventSink for ChannelEvents {
+        fn send_to_user(&self, owner: &str, event: nomifun_api_types::WebSocketMessage<serde_json::Value>) {
+            let _ = self.0.send((owner.to_owned(), event));
+        }
+    }
+
+    #[tokio::test]
+    async fn recreated_watches_deliver_real_events_to_the_new_owner() {
+        use crate::IFileWatchService;
+        let fixture = lifecycle_fixture();
+        std::fs::create_dir(fixture.path().join("parent")).unwrap();
+        let owner = nomifun_common::generate_id();
+        let next_owner = nomifun_common::generate_id();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let service = FileWatchService::new(Arc::new(ChannelEvents(sender))).unwrap();
+        let file = fixture.path().join("file.txt");
+        let alias = fixture.path().join("parent/../file.txt");
+        std::fs::write(&file, b"old").unwrap();
+        service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_file(&file).unwrap();
+        service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::write(&file, b"new").unwrap();
+        service.start_watch(&next_owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::write(&file, b"modified").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (recipient, event) = receiver.recv().await.unwrap();
+                if recipient == next_owner && event.name == "fileWatch.fileChanged" { break; }
+            }
+        }).await.expect("recreated file watch did not receive a native event");
+        service.stop_all_watches(&next_owner).await.unwrap();
+        let workspace = fixture.path().join("workspace");
+        let alias = fixture.path().join("parent/../workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::remove_dir(&workspace).unwrap();
+        service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        service.start_office_watch(&next_owner, alias.to_str().unwrap()).await.unwrap();
+        std::fs::write(workspace.join("new.docx"), b"new office fixture").unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let (recipient, event) = receiver.recv().await.unwrap();
+                if recipient == next_owner && event.name == "workspaceOfficeWatch.fileAdded" { break; }
+            }
+        }).await.expect("recreated workspace watch did not receive a native event");
+        service.stop_office_watch(&next_owner, alias.to_str().unwrap()).await.unwrap();
+        assert!(service.watched_files.is_empty());
+        assert!(service.file_watcher.lock().unwrap().aliases.is_empty());
+        let office = service.office_watchers.lock().unwrap();
+        assert!(office.registrations.is_empty() && office.aliases.is_empty());
+    }
 
     // -- is_office_file --
 
