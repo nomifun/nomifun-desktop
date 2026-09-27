@@ -60,7 +60,7 @@ pub const MAX_AGENT_PATCH_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
 
 const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
-const FILE_DELETE_OUTCOME_UNKNOWN: &str = "workspace entry deletion outcome is unknown";
+pub(crate) const FILE_DELETE_OUTCOME_UNKNOWN: &str = "workspace entry deletion outcome is unknown";
 
 pub fn file_write_outcome_unknown(error: &AppError) -> bool {
     matches!(error, AppError::Internal(message) if message.starts_with(FILE_WRITE_OUTCOME_UNKNOWN))
@@ -955,7 +955,10 @@ impl FileService {
         let canonical = validate_path_authority(path, authority)?;
 
         let path_owned = canonical.clone();
-        let removed = tokio::task::spawn_blocking(move || remove_entry_sync(&path_owned))
+        let delete_authority = authority.clone();
+        let removed = tokio::task::spawn_blocking(move || remove_entry_scoped_sync_with_hooks(
+            &path_owned, &delete_authority, || {}, || {},
+        ))
             .await
             .map_err(|e| AppError::Internal(format!(
                 "{FILE_DELETE_OUTCOME_UNKNOWN}; removal task stopped: {e}; inspect the remaining tree before retry"
@@ -1926,45 +1929,45 @@ fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, AppError> {
 }
 
 /// Remove a file or directory synchronously. Directories are removed recursively.
+#[cfg(test)]
 fn remove_entry_sync(path: &Path) -> Result<(), AppError> {
     remove_entry_sync_with_hook(path, || {})
 }
 
-fn remove_entry_sync_with_hook(path: &Path, after_open: impl FnOnce()) -> Result<(), AppError> {
-    let metadata =
-        std::fs::metadata(path).map_err(|e| AppError::NotFound(format!("cannot remove '{}': {e}", path.display())))?;
-
+fn remove_entry_scoped_sync_with_hooks(
+    path: &Path, authority: &PathAuthority,
+    before_open: impl FnOnce(), after_open: impl FnOnce(),
+) -> Result<(), AppError> {
     #[cfg(windows)]
-    if metadata.is_file() {
-        return crate::windows_delete::remove_regular_file(path, after_open);
+    let root = crate::windows_read::ReadRoot::for_target(path, authority)?;
+    #[cfg(not(windows))]
+    let _ = authority;
+    before_open();
+    #[cfg(windows)]
+    if let Some(root) = root {
+        return crate::windows_delete::remove_entry(path, Some(&root), after_open);
     }
+    remove_entry_sync_with_hook(path, after_open)
+}
 
+fn remove_entry_sync_with_hook(path: &Path, after_open: impl FnOnce()) -> Result<(), AppError> {
     #[cfg(windows)]
-    let _delete_access = {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        };
-        // Check the root's native delete permission before recursive traversal
-        // can remove any child. Child failures and later races remain uncertain.
-        std::fs::OpenOptions::new().access_mode(DELETE)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)
-            .map_err(|error| AppError::Internal(format!(
-                "cannot open workspace entry '{}' for deletion: {error}", path.display()
-            )))?
-    };
-
-    after_open();
-    if metadata.is_dir() {
-        std::fs::remove_dir_all(path)
-            .map_err(|e| AppError::Internal(format!(
-                "{FILE_DELETE_OUTCOME_UNKNOWN}; recursive removal of '{}' failed: {e}; inspect the remaining tree before retry",
-                path.display()
-            )))
-    } else {
-        std::fs::remove_file(path)
-            .map_err(|e| AppError::Internal(format!("cannot remove file '{}': {e}", path.display())))
+    { crate::windows_delete::remove_entry(path, None, after_open) }
+    #[cfg(not(windows))]
+    {
+        let metadata =
+            std::fs::metadata(path).map_err(|e| AppError::NotFound(format!("cannot remove '{}': {e}", path.display())))?;
+        after_open();
+        if metadata.is_dir() {
+            std::fs::remove_dir_all(path)
+                .map_err(|e| AppError::Internal(format!(
+                    "{FILE_DELETE_OUTCOME_UNKNOWN}; recursive removal of '{}' failed: {e}; inspect the remaining tree before retry",
+                    path.display()
+                )))
+        } else {
+            std::fs::remove_file(path)
+                .map_err(|e| AppError::Internal(format!("cannot remove file '{}': {e}", path.display())))
+        }
     }
 }
 
@@ -3512,6 +3515,126 @@ mod tests {
     }
 
     // -- remove_entry_sync tests (task 7.5) --
+
+    #[cfg(windows)]
+    fn scoped_delete_parent_race(directory: bool) {
+        let fixture = cleanup_race_fixture();
+        let root = fixture.path().join("workspace");
+        let parent = root.join("parent");
+        let retained = root.join("retained");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        for base in [&parent, &outside] {
+            if directory { fs::create_dir(base.join("target")).unwrap(); }
+            fs::write(base.join(if directory { "target/keep.txt" } else { "target" }), b"keep").unwrap();
+        }
+        let canonical = fs::canonicalize(parent.join("target")).unwrap();
+        let result = remove_entry_scoped_sync_with_hooks(&canonical, &PathAuthority::Workspace(root.clone()), || {
+            fs::rename(&parent, &retained).unwrap();
+            junction::create(&outside, &parent).unwrap();
+        }, || {});
+        junction::delete(&parent).unwrap();
+        fs::rename(&retained, &parent).unwrap();
+        let relative = if directory { "target/keep.txt" } else { "target" };
+        if fs::read(outside.join(relative)).ok().as_deref() != Some(b"keep") {
+            fs::write(fixture.path().join("observation.txt"), format!("directory={directory}; result={result:?}")).unwrap();
+            panic!("scoped deletion escaped through a replaced parent; retained fixture: {}", fixture.keep().display());
+        }
+        assert!(result.is_err());
+        assert_eq!(fs::read(parent.join(relative)).unwrap(), b"keep");
+        remove_entry_scoped_sync_with_hooks(&canonical, &PathAuthority::Workspace(root), || {}, || {}).unwrap();
+        assert!(!parent.join("target").exists());
+        assert_eq!(fs::read(outside.join(relative)).unwrap(), b"keep");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_delete_rejects_file_parent_escape() { scoped_delete_parent_race(false); }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_delete_rejects_directory_parent_escape() { scoped_delete_parent_race(true); }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_delete_keeps_opened_entries_inside_their_root() {
+        for directory in [false, true] {
+            for posix in [false, true] {
+                let fixture = cleanup_race_fixture();
+                let root = fixture.path().join("workspace");
+                let parent = root.join("parent");
+                let outside = fixture.path().join("outside");
+                let moved = outside.join("moved");
+                fs::create_dir_all(&parent).unwrap();
+                fs::create_dir(&outside).unwrap();
+                fs::write(outside.join("sentinel"), b"outside").unwrap();
+                if directory { fs::create_dir(parent.join("target")).unwrap(); }
+                let relative = if directory { "target/value.txt" } else { "target" };
+                fs::write(parent.join(relative), b"original").unwrap();
+                let canonical = fs::canonicalize(parent.join("target")).unwrap();
+                let mut relocated = false;
+                let result = remove_entry_scoped_sync_with_hooks(&canonical, &PathAuthority::Workspace(root), || {}, || {
+                    let rename = if posix { crate::windows_test_support::rename_with_posix_semantics(&parent, &moved, false) }
+                        else { fs::rename(&parent, &moved) };
+                    match rename {
+                        Ok(()) => relocated = true,
+                        Err(error) => assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}")
+                    }
+                });
+                if relocated && fs::read(moved.join(relative)).ok().as_deref() != Some(b"original") {
+                    fs::write(fixture.path().join("observation.txt"), format!("directory={directory}; posix={posix}; result={result:?}")).unwrap();
+                    panic!("delete followed an opened ancestor outside; retained fixture: {}", fixture.keep().display());
+                }
+                assert!(!relocated, "the deletion handle must keep its ancestor inside the bound root");
+                result.unwrap();
+                assert!(!parent.join("target").exists());
+                assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+                crate::windows_test_support::rename_with_posix_semantics(&parent, &moved, false).unwrap();
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn directory_delete_name_race(posix: bool) {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target");
+        let retained = fixture.path().join("retained");
+        let foreign = fixture.path().join("foreign");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&foreign).unwrap();
+        fs::write(target.join("old.txt"), b"original").unwrap();
+        fs::write(foreign.join("keep.txt"), b"foreign").unwrap();
+        let mut swapped = false;
+        let result = remove_entry_sync_with_hook(&target, || {
+            let rename = if posix {
+                crate::windows_test_support::rename_with_posix_semantics(&target, &retained, false)
+            } else { fs::rename(&target, &retained) };
+            match rename {
+                Ok(()) => { fs::rename(&foreign, &target).unwrap(); swapped = true; }
+                Err(error) => assert!(matches!(error.raw_os_error(), Some(5 | 32)), "{error}")
+            }
+        });
+        let foreign_name = if swapped { &target } else { &foreign };
+        if fs::read(foreign_name.join("keep.txt")).ok().as_deref() != Some(b"foreign") {
+            fs::write(fixture.path().join("observation.txt"), format!("posix={posix}; swapped={swapped}; result={result:?}")).unwrap();
+            panic!("recursive deletion removed a concurrent directory; retained fixture: {}", fixture.keep().display());
+        }
+        result.unwrap();
+        assert!(!swapped);
+        assert!(!target.exists());
+        assert!(!retained.exists());
+        fs::rename(&foreign, &target).unwrap();
+        assert_eq!(fs::read(target.join("keep.txt")).unwrap(), b"foreign");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_delete_preserves_a_replacement_after_access_check() { directory_delete_name_race(false); }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_delete_preserves_a_posix_replacement_after_access_check() { directory_delete_name_race(true); }
 
     #[cfg(windows)]
     fn file_delete_name_race(posix: bool) {

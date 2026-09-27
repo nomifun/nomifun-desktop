@@ -82,7 +82,24 @@ impl ReadRoot {
         self.open_with_parent_hook(canonical, || {})
     }
 
-    fn open_with_parent_hook(&self, canonical: &Path, mut after_parent: impl FnMut()) -> Result<File, AppError> {
+    pub(crate) fn open_for_delete(&self, canonical: &Path) -> Result<File, AppError> {
+        self.open_entry(canonical, || {}, |directory, name| {
+            crate::windows_directory::open_delete(Some(directory),Path::new(name)).map_err(io_error)
+        })
+    }
+
+    fn open_with_parent_hook(&self, canonical: &Path, after_parent: impl FnMut()) -> Result<File, AppError> {
+        self.open_entry(canonical, after_parent, |directory, name| {
+            let mut options = CapOpenOptions::new();
+            options.read(true).follow(FollowSymlinks::No);
+            directory.open_with(name,&options).map_err(io_error).map(|file|file.into_std())
+        })
+    }
+
+    fn open_entry(
+        &self, canonical: &Path, mut after_parent: impl FnMut(),
+        open_final: impl Fn(&Dir, &std::ffi::OsStr) -> Result<File, AppError>,
+    ) -> Result<File, AppError> {
         self.verify()?;
         let relative = canonical.strip_prefix(&self.canonical)
             .map_err(|_| AppError::Forbidden("workspace read escaped its pinned root".into()))?;
@@ -90,12 +107,10 @@ impl ReadRoot {
         let mut directory = self.directory.try_clone().map_err(io_error)?;
         while let Some(component) = components.next() {
             let Component::Normal(name) = component else { return Err(changed()); };
-            let mut options = CapOpenOptions::new();
-            options.read(true).follow(FollowSymlinks::No);
             let file = if components.peek().is_some() {
                 crate::windows_directory::open(Some(&directory),Path::new(name)).map_err(io_error)?
             } else {
-                directory.open_with(name,&options).map_err(io_error)?.into_std()
+                open_final(&directory,name)?
             };
             if components.peek().is_none() {
                 if final_path(&file)? != canonical { return Err(changed()); }
