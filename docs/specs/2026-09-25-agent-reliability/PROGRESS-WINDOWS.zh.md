@@ -631,6 +631,25 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   未覆盖 dropped/rescan/重连自动触发 UI 对账、读取失败的可见状态、100 seed、完整角色及
   N3/LONG/99% 和其他平台；不计完整 FILE-040/PORT-012 或共享阶段完成。
 
+### 共享 FILE WebSocket 重连对账（W29，基线 `b4e5a0958`）
+
+- S-D03-25 / FILE-040、PORT-012：恢复信号未触发任何重读，首次组件 FAIL 见
+  `phase-2-3/2026-09-28/windows/w29-reconnect-reconcile/01-before/`。正式 Tauri 中断该隔离
+  profile 唯一的网络子进程，期间移出 before.txt 并创建 after.txt；WebSocket 已从 conn-1
+  恢复到 conn-2，主应用/浏览器/renderer 的 PID 与启动身份保持，文件树仍显示 before.txt、
+  且无新的 workspace 请求。首次 UI FAIL、完整进程归属/时间线/磁盘/截图见 `02-before-ui/`。
+- 会话工作区接入既有 conversation.reconnected；断线及传输层 resync 信号复用同一重读入口，
+  保持 2 秒合并、末次补读和卸载隔离。未新增传输权限或改写会话资源。
+- 工作区 **15**、WebSocket 恢复 **7**，共 **22 项通过**，新增 3 项各 **20/20**；包含
+  服务端 resync 帧的组件校验。typecheck、desktop-ui-boundary 与正式 Tauri 构建通过。
+- 新隔离 `06-after-ui/` 重复相同故障：仅网络 PID 更换，约 1 秒后 conn-2 建立，随后自动
+  workspace 200 响应，文件树更新为 after.txt，磁盘/hash 独立核对通过；没有手动刷新或重进。
+  修复版二进制 `b5bfd64306a5…`，构建及完整 hash 见 `05-fixed-build/`。
+  前后各一个正式 GEN 准备回合，既有加密 StepFun Plan / step-3.7-flash，共 **2 模型步、
+  0 effects**；两个主应用均已结束并正式备份终态数据。
+- 未覆盖真实服务端队列积压/丢弃计数、连接未断时的 native rescan 通知、重复/乱序完整矩阵、
+  终端及其他角色入口、100 seed、其他平台和 N3/LONG/99%；不计完整 Case 或共享阶段完成。
+
 下一步优先共享：FILE 既有文件发布、扁平遍历/侧栏、watcher 消费者恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
