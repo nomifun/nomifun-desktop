@@ -245,3 +245,98 @@ async fn unicode_paths_and_case_aliases_resolve_to_one_existing_file() {
         "内容\r\n".as_bytes());
     assert_eq!(fs::read_dir(root.path().join("空 格 🐱")).unwrap().count(), 1);
 }
+
+#[tokio::test]
+async fn deleting_a_junction_never_recurses_into_its_in_root_target() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    fs::create_dir(&real).unwrap();
+    fs::write(real.join("keep.txt"), b"keep").unwrap();
+    junction::create(&real, root.path().join("alias")).unwrap();
+    let (service, scope, events) = owner(root.path());
+    let result = service.remove_entry_for_agent_session(&scope, "alias").await;
+    assert!(result.is_err(), "junction deletion must explicitly reject: {result:?}");
+    assert_eq!(fs::read(real.join("keep.txt")).unwrap(), b"keep");
+    assert!(junction::exists(root.path().join("alias")).unwrap());
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn deleting_workspace_root_is_rejected_even_with_delete_authority() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("keep.txt"), b"keep").unwrap();
+    let (service, scope, events) = owner(root.path());
+    assert!(service.remove_entry_for_agent_session(&scope, "").await.is_err());
+    assert_eq!(fs::read(root.path().join("keep.txt")).unwrap(), b"keep");
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn outside_junction_rejects_file_actions_and_parent_deletion_only_removes_the_link() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("keep.txt"), b"keep").unwrap();
+    fs::create_dir(root.path().join("parent")).unwrap();
+    junction::create(outside.path(), root.path().join("parent/escape")).unwrap();
+    let (service, scope, events) = owner(root.path());
+    assert!(service.read_bytes_for_agent_session(&scope, "parent/escape/keep.txt", 1024).await.is_err());
+    assert!(service.write_file_for_agent_session(&scope, "parent/escape/keep.txt", b"wrong").await.is_err());
+    assert!(service.apply_patch_for_agent_session(&scope,
+        replacement("parent/escape/keep.txt", "keep", "wrong")).await.is_err());
+    assert!(service.remove_entry_for_agent_session(&scope, "parent/escape").await.is_err());
+    assert!(events.0.lock().unwrap().is_empty());
+    service.remove_entry_for_agent_session(&scope, "parent").await.unwrap();
+    assert!(!root.path().join("parent").exists());
+    assert_eq!(fs::read(outside.path().join("keep.txt")).unwrap(), b"keep");
+    assert_eq!(events.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn existing_case_aliases_in_one_patch_reject_before_any_publication() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("Report.txt"), b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let mut request = replacement("Report.txt", "original", "first");
+    request.files.extend(replacement("REPORT.TXT", "original", "second").files);
+    let failure = service.apply_patch_with_observation_for_agent_session(&scope, request).await.unwrap_err();
+    assert!(failure.observation.published.is_empty());
+    assert_eq!(fs::read(root.path().join("Report.txt")).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn long_native_paths_and_maximum_ntfs_component_round_trip_without_shortening() {
+    let root = tempfile::tempdir().unwrap();
+    let name = format!("{}.txt", "x".repeat(251));
+    let relative = format!("{}/{}", vec!["nested-space-中文"; 24].join("/"), name);
+    assert!(root.path().join(&relative).as_os_str().len() > 260);
+    let (service, scope, events) = owner(root.path());
+    assert!(service.write_file_for_agent_session(&scope, &relative, b"original").await.unwrap());
+    assert!(!service.write_file_for_agent_session(&scope, &relative, b"replacement").await.unwrap());
+    let receipt = service.apply_patch_for_agent_session(&scope,
+        replacement(&relative, "replacement", "patched")).await.unwrap();
+    assert_eq!(receipt.files[0].path, relative);
+    assert_eq!(service.read_bytes_for_agent_session(&scope, &relative, 1024).await.unwrap().unwrap().0, b"patched");
+    let target = fs::canonicalize(root.path().join(&relative)).unwrap();
+    assert_eq!(target.file_name().unwrap().to_str().unwrap(), name);
+    assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+    service.remove_entry_for_agent_session(&scope, &relative).await.unwrap();
+    assert!(!target.exists());
+    assert_eq!(events.0.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn overlong_component_is_a_stable_error_without_truncated_sibling_effects() {
+    let root = tempfile::tempdir().unwrap();
+    let maximum = "x".repeat(255);
+    let overlong = "x".repeat(256);
+    fs::write(root.path().join(&maximum), b"keep").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let first = service.write_file_for_agent_session(&scope, &overlong, b"wrong").await.unwrap_err();
+    let second = service.write_file_for_agent_session(&scope, &overlong, b"wrong").await.unwrap_err();
+    assert_eq!(first.to_string(), second.to_string());
+    assert_eq!(fs::read(root.path().join(&maximum)).unwrap(), b"keep");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
+}
