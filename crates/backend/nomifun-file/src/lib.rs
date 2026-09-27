@@ -16,6 +16,7 @@ pub use agent_instruction_scope::{AgentInstructionScope, AgentInstructionScopeRe
 mod agent_text_read;
 pub use agent_text_read::{AgentTextReadRequest, AgentTextPage};
 mod agent_text_search;
+mod workspace_search_walk;
 pub use agent_text_search::{AgentTextMatch, AgentTextSearchRequest, AgentTextSearchResult};
 pub mod path_safety;
 pub mod resource;

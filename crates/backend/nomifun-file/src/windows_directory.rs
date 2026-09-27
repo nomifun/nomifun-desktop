@@ -23,6 +23,10 @@ pub(crate) fn open_delete(parent: Option<&Dir>, path: &Path) -> io::Result<File>
     open_with(parent, path, DELETE | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, 0)
 }
 
+pub(crate) fn open_metadata(parent: Option<&Dir>, path: &Path) -> io::Result<File> {
+    open_with(parent, path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0)
+}
+
 /// An empty native relative name reopens the retained directory itself. It
 /// does not resolve the directory's possibly changed name in its parent.
 pub(crate) fn open_cursor(directory: &File) -> io::Result<File> {

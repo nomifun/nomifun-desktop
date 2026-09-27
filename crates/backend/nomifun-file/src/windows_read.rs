@@ -98,6 +98,16 @@ impl ReadRoot {
         })
     }
 
+    pub(crate) fn open_metadata(&self, canonical: &Path) -> Result<File, AppError> {
+        if canonical == self.canonical { return self.open_directory(canonical); }
+        self.open_entry_checked(canonical, || {}, |directory, name| {
+            crate::windows_directory::open_metadata(Some(directory),Path::new(name)).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound { AppError::NotFound("workspace entry is absent".into()) }
+                else { io_error(error) }
+            })
+        }, true)
+    }
+
     fn open_with_parent_hook(&self, canonical: &Path, after_parent: impl FnMut()) -> Result<File, AppError> {
         self.open_entry(canonical, after_parent, |directory, name| {
             let mut options = CapOpenOptions::new();
@@ -107,8 +117,16 @@ impl ReadRoot {
     }
 
     fn open_entry(
+        &self, canonical: &Path, after_parent: impl FnMut(),
+        open_final: impl Fn(&Dir, &std::ffi::OsStr) -> Result<File, AppError>,
+    ) -> Result<File, AppError> {
+        self.open_entry_checked(canonical, after_parent, open_final, false)
+    }
+
+    fn open_entry_checked(
         &self, canonical: &Path, mut after_parent: impl FnMut(),
         open_final: impl Fn(&Dir, &std::ffi::OsStr) -> Result<File, AppError>,
+        case_alias: bool,
     ) -> Result<File, AppError> {
         self.verify()?;
         let relative = canonical.strip_prefix(&self.canonical)
@@ -123,7 +141,8 @@ impl ReadRoot {
                 open_final(&directory,name)?
             };
             if components.peek().is_none() {
-                if final_path(&file)? != canonical { return Err(changed()); }
+                let actual = final_path(&file)?;
+                if actual != canonical && (!case_alias || !metadata_name_matches(canonical, &actual)?) { return Err(changed()); }
                 return Ok(file);
             }
             let metadata = file.metadata().map_err(io_error)?;
@@ -133,6 +152,31 @@ impl ReadRoot {
         }
         Err(AppError::BadRequest("Text source must be a regular file".into()))
     }
+}
+
+pub(crate) fn metadata_name_matches(expected: &Path, actual: &Path) -> Result<bool, AppError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{Globalization::{CompareStringOrdinal, CSTR_EQUAL},
+        Storage::FileSystem::{FILE_CASE_SENSITIVE_INFO, FileCaseSensitiveInfo, GetFileInformationByHandleEx},
+        System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR};
+    if expected == actual { return Ok(true); }
+    let Some(parent) = expected.parent() else { return Ok(expected == actual); };
+    if actual.parent() != Some(parent) { return Ok(false); }
+    let directory = open_root(parent)?;
+    let mut info = FILE_CASE_SENSITIVE_INFO::default();
+    // SAFETY: the metadata-only directory handle and the sized buffer remain
+    // live. A name comparison must not add listing or SYNCHRONIZE access.
+    let ok = unsafe { GetFileInformationByHandleEx(directory.as_raw_handle(), FileCaseSensitiveInfo,
+        (&mut info as *mut FILE_CASE_SENSITIVE_INFO).cast(), std::mem::size_of_val(&info) as u32) };
+    if ok == 0 { return Err(io_error(std::io::Error::last_os_error())); }
+    if info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR != 0 { return Ok(false); }
+    let Some(expected_name) = expected.file_name() else { return Ok(false); };
+    let Some(actual_name) = actual.file_name() else { return Ok(false); };
+    let left: Vec<u16> = expected_name.encode_wide().collect();
+    let right: Vec<u16> = actual_name.encode_wide().collect();
+    let compared = unsafe { CompareStringOrdinal(left.as_ptr(), left.len() as i32, right.as_ptr(), right.len() as i32, 1) };
+    if compared == 0 { return Err(io_error(std::io::Error::last_os_error())); }
+    Ok(compared == CSTR_EQUAL)
 }
 
 #[cfg(test)]

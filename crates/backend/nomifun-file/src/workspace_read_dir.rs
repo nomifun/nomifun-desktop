@@ -9,13 +9,61 @@ impl EntryKind {
     pub(crate) fn is_dir(self) -> bool { self.directory }
     pub(crate) fn is_file(self) -> bool { self.file }
     pub(crate) fn is_symlink(self) -> bool { self.link }
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        let kind = metadata.file_type();
+        Self { directory: kind.is_dir(), file: kind.is_file(), link: kind.is_symlink() }
+    }
 }
 
-pub(crate) struct Entry { path: PathBuf, name: OsString, kind: Result<EntryKind, io::Error> }
+pub(crate) struct Entry { path: PathBuf, name: OsString, kind: Result<EntryKind, io::Error>, hidden: bool }
 impl Entry {
     pub(crate) fn path(&self) -> PathBuf { self.path.clone() }
     pub(crate) fn file_name(&self) -> OsString { self.name.clone() }
     pub(crate) fn file_type(&self) -> Result<EntryKind, &io::Error> { self.kind.as_ref().copied() }
+    pub(crate) fn is_hidden(&self) -> bool { self.hidden }
+}
+
+/// Inspect one entry without following its final link or reading its bytes.
+pub(crate) struct MetadataObservation { pub(crate) metadata: std::fs::Metadata, pub(crate) canonical: PathBuf }
+
+pub(crate) fn metadata(path: &Path, authority: &PathAuthority) -> Result<Option<MetadataObservation>, AppError> {
+    let io_error = |error| AppError::BadRequest(format!("cannot inspect workspace entry: {error}"));
+    #[cfg(windows)]
+    {
+        let root = crate::windows_read::ReadRoot::for_target(path, authority)?;
+        let opened = match root {
+            Some(root) => root.open_metadata(path),
+            None => crate::windows_directory::open_metadata(None, path).map_err(|error| {
+                if error.kind() == io::ErrorKind::NotFound { AppError::NotFound("workspace entry is absent".into()) }
+                else { io_error(error) }
+            }),
+        };
+        match opened {
+            Ok(file) => {
+                let metadata = file.metadata().map_err(io_error)?;
+                let canonical = crate::windows_read::final_path(&file)?;
+                if !crate::windows_read::metadata_name_matches(path, &canonical)? {
+                    return Err(AppError::Conflict("workspace metadata entry changed name".into()));
+                }
+                Ok(Some(MetadataObservation { metadata, canonical }))
+            }
+            Err(AppError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = authority;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                let canonical = if metadata.file_type().is_symlink() { path.to_path_buf() }
+                    else { crate::path_safety::validate_path_authority(&path.to_string_lossy(), authority)? };
+                Ok(Some(MetadataObservation { metadata, canonical }))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(io_error(error)),
+        }
+    }
 }
 
 pub(crate) struct Entries {
@@ -72,18 +120,19 @@ impl Iterator for Entries {
     fn next(&mut self) -> Option<Self::Item> {
         #[cfg(windows)]
         {
-            use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT};
+            use windows_sys::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_HIDDEN};
             self.inner.next().map(|entry| entry.map(|entry| {
                 let link = entry.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
                 let directory = entry.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
-                Entry { path: self.path.join(&entry.name), name: entry.name,
+                let hidden = entry.attributes & FILE_ATTRIBUTE_HIDDEN != 0 || entry.name.as_encoded_bytes().starts_with(b".");
+                Entry { path: self.path.join(&entry.name), name: entry.name, hidden,
                     kind: Ok(EntryKind { directory: directory && !link, file: !directory && !link, link }) }
             }))
         }
         #[cfg(not(windows))]
         {
             self.inner.next().map(|entry| entry.map(|entry| Entry {
-                path: entry.path(), name: entry.file_name(), kind: entry.file_type().map(|kind|
+                path: entry.path(), name: entry.file_name(), hidden: entry.file_name().as_encoded_bytes().starts_with(b"."), kind: entry.file_type().map(|kind|
                     EntryKind { directory: kind.is_dir(), file: kind.is_file(), link: kind.is_symlink() }),
             }))
         }
