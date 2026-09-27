@@ -22,14 +22,14 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 
 | 领域 | 槽数 | 批次 | 平台测试、排查和修复重点 | 状态 |
 | --- | ---: | --- | --- | --- |
-| D01 | 425 | W02 | 正式 Session/模型/工具面，中文参数、必填拒绝、版本冻结 | 待走查 |
-| D02 | 302 | W02/W04 | 计划/完成、日志与 UI 终态；用户纠正/停止；零红色正向任务 | W02 GEN 完成报告仍有可见失败；当前证据 Schema 预检已补，问题未关闭 |
+| D01 | 425 | W02 | 正式 Session/模型/工具面，中文参数、必填拒绝、版本冻结 | REG-005/008 发现混批已修；完整模型/注册矩阵待走查 |
+| D02 | 302 | W02/W04 | 计划/完成、日志与 UI 终态；用户纠正/停止；零红色正向任务 | GEN 文件/产物/删除场景 N3 通过，历史失败保留；完整控制/观测矩阵待验 |
 | D03 | 145 | W01/W03 | Win 路径、共享锁、原子 write/patch/delete、Artifact | W01-B1/B2 路径及原子写子断言已验；剩余待走查 |
 | D04 | 476 | W01 | executable/args/cmd、PowerShell/cmd、编码、Job/ConPTY、退出与清理 | 新基线首批组件验证通过；完整 CMD/终端矩阵待走查 |
 | D05 | 69 | W03 | 本地隔离 Git remote、SSH 夹具；取消/未知副作用 | local/file push owner 9 项通过；SSH 及完整产品路径待准备 |
 | D06 | 247 | W04/W05 | WebView2 profile、Computer A11y、MCP/Plugin/Skill | Skill 首发已回归；其余待走查 |
 | D07 | 124 | W02/W04 | 精确产品目标、Knowledge/Companion/Canvas/Customer owner | PAL/MM 新 Tauri 入口已走查；修复画布名称上下文遗漏 |
-| D08 | 103 | W02/W04/W05 | GEN/COD/PAL/MM/CS 分角色的正式任务 | W02 四角色有新证据；GEN 仍 FAIL，完整集合与 CS 待走查 |
+| D08 | 103 | W02/W04/W05 | GEN/COD/PAL/MM/CS 分角色的正式任务 | GEN 单场景 N3 通过，四角色历史证据保留；完整集合与 CS 待走查 |
 | D09 | 375 | W06 | Job 子孙进程、崩溃、恢复、撤权、并发与 LONG | checkpoint/lease 19、取消计数 14 项组件已验；其他宿主故障与 soak 仍待 |
 | D10 | 33 | W01/W06 | WIN-001～018 与 PORT，盘符/路径/共享锁/宿主终态 | WIN-002/007/008/010/011 的部分组件断言通过；其余待走查 |
 | D11 | 75 | W01/W03 | 越界路径/junction、旧授权、无资源与跨 owner 拒绝 | AUTH-009/010 的 cwd 子断言通过；其余 owner 与竞态待走查 |
@@ -42,9 +42,9 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W01-A 命令形状与启动 | G0-003/004/010；PROC-001～004；WIN-008/009；CMD-131/133/147 | 验字面 argv、显式脚本、混合形式拒绝、PowerShell 初始化及退出状态；PATH 上 Bun 也通过 owner 实际启动 | 组件子断言已验证；持久/脱离命令 policy 和新构建 Tauri CMD 仍待验收 |
 | W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 原始分段、原子 write/共享锁、删除链接及长路径回归 | B1/B2/B3 分别 80/57/37 项定向回归通过（重叠不累加）；跨盘/ACL/并发置换及正式 UI 待验 |
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
-| W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | 首批 8 回合已验；MM 名称已修；GEN 完成报告仍 FAIL_VISIBLE_UX，不能计 PASS |
+| W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | GEN 文件/产物/删除场景 N3 通过（8/9/8 步）；MM 名称已修，其余组合待验 |
 | W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、大小写、ACL/部分删除、隔离 local/file remote；其余逐簇推进 | 文件首批 32、大小写 50、ACL 60 项（重叠不累加）、Git push owner 9 项通过；并发/跨盘、SSH 与完整 UI 待验 |
-| W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧 MM 历史/重试及命令取消历史已修复；不重写旧 Snapshot | 旧会话冷加载、COD 实时停止与输出保留已复验；其他恢复/扩展待验 |
+| W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧 MM 历史/重试、命令取消及原生暂停显示已修复；不重写旧 Snapshot | 旧会话冷读、COD 停止、GEN 暂停/结束回合已复验；其他恢复/扩展待验 |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
 | W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | Store checkpoint/lease 首批 19 项通过；真实宿主故障与长稳待验 |
 
@@ -314,5 +314,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   失败、首轮暂停以及本次混批均保留；原有 Session/快照未改写。N=3 仍未通过，不计完整角色集合。
   S-D02 的完成引用/最终答复修复已有真实正向证据；当前新根因为 S-D01-01 工具发现混批。
 
-下一步：W02 ToolSearch 混批（S-D01-01）；W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；
+### W02 ToolSearch 请求控制与 GEN N3（基线 `50586dcc7`）
+
+- REG-005/008、CTRL-007、AGEN-001/014/017 子断言：互斥说明已经送达，但请求缺少调用数量
+  控制。首个确定性反例为请求字段 null，期望 false。原批次零 dispatch 拒绝断言保持通过。
+- 原生模型输入增加可选并行偏好；仅 ToolSearch 与其他工具同在当前工具面时请求单调用。
+  OpenAI/Responses 与 Anthropic 系协议携带相应字段；普通只读并行、调用方原偏好和旧输入
+  默认行为保留。Gemini 适配器无对应字段，所有协议仍执行现有整批预检，不依赖供应商守约授权。
+- Runtime **142**、Broker **35**、HTTP executor **9**、SDK **13**，共 **199 项通过**，Tauri
+  构建通过。首个反例及回归测试缺命名空间的中间编译失败分别保留在 `01-before/`、`02-after/`。
+- 同构建 `2c9c4197d030…`、原提示、加密 StepFun Plan / step-3.7-flash，三个新隔离 Tauri
+  Session 为 **8/9/8 步，共 25 步**（上限 3 回合/36 步）。25 个实际请求均携带 false，均 HTTP
+  200，每模型步一个调用；0 预检/owner 错误，12 项效果 returned，三个 Turn 均 completed。
+- 独立核对产物工具回读的完整字节、源文件/产物 hash、临时文件不存在及最终答复四项细节；
+  UI 过程、文件侧栏和原生文本打开（UTF-8/LF）一致。原 Session/events/effects/Snapshot 未改写。
+  该 GEN 场景 **N3 通过**，W02/W07 的所有历史失败保留。
+- 证据 `windows/w09-discovery-batch/`。模型计数按 model_step_started 对账，宿主 step 0
+  指令读取另记；初次统计误含 step 0 的派生结果保留。其他角色/供应商、完整 Case 组合、macOS
+  与 LONG/99% 统计尚未覆盖，不能把该场景外推为 2,374 槽全部通过。
+
+下一步：W03 Artifact 未知结果归因、跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；
 W05 条件资源和 W06 原生故障、真实取消计数按夹具推进。不重建 2,374 行日志/状态文件到 Git。

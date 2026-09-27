@@ -143,6 +143,7 @@ impl ResponsesBridgeRequest {
                 messages,
                 tools: self.tools,
                 tool_choice: self.tool_choice,
+                parallel_tool_calls: None,
                 max_output_tokens: self.max_output_tokens,
                 reasoning: self.reasoning,
                 prompt_cache: self.prompt_cache,

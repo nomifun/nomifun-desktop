@@ -288,6 +288,7 @@ fn basic_request(route: &ResolvedChatRoute) -> ChatModelRequest {
             }],
             tools: Vec::new(),
             tool_choice: ChatToolChoice::None,
+            parallel_tool_calls: None,
             max_output_tokens: Some(128),
             reasoning: None,
             prompt_cache: PromptCachePolicy::Disabled,
@@ -942,6 +943,54 @@ fn gemini_tool_result_without_matching_call_fails_closed() {
         error.message,
         "Gemini function response has no matching function call"
     );
+}
+
+#[test]
+fn parallel_tool_delivery_preference_is_optional_and_uses_each_protocol_control() {
+    for adapter in adapters(&transport_map([])) {
+        let protocol = adapter.protocol();
+        let route = route(protocol, "parallel-preference", 1);
+        let lease = CredentialLease::new(route.credential_ref.clone(), CredentialTarget::for_route(&route), "fixture-handle");
+        let mut request = basic_request(&route);
+        request.input.tools = vec![nomifun_chat_model_broker::ChatToolDefinition {
+            name:"fixture_read".into(),description:"Read the fixture".into(),
+            input_schema:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"type":"object","properties":{},"additionalProperties":false})),deferred:false,
+        }];
+        request.input.tool_choice = ChatToolChoice::Auto;
+        for preference in [None,Some(false),Some(true)] {
+            request.input.parallel_tool_calls = preference;
+            let body = adapter.encode_request(&request,&route,&lease).unwrap().body;
+            match protocol {
+                ChatProtocol::OpenaiChat | ChatProtocol::OpenaiResponses => {
+                    assert_eq!(body.get("parallel_tool_calls").and_then(serde_json::Value::as_bool),preference);
+                    assert_eq!(body["tool_choice"],"auto");
+                }
+                ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => {
+                    assert_eq!(body["tool_choice"].get("disable_parallel_tool_use").and_then(serde_json::Value::as_bool),preference.map(|value|!value));
+                    assert_eq!(body["tool_choice"]["type"],"auto");
+                    assert!(body.get("parallel_tool_calls").is_none());
+                }
+                ChatProtocol::Gemini => {
+                    // This adapter has no corresponding wire control. The
+                    // preference never substitutes for Runtime batch checks.
+                    assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"],"AUTO");
+                    assert!(body.get("parallel_tool_calls").is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn historical_model_inputs_default_to_no_parallel_preference_and_reject_non_booleans() {
+    let input = basic_request(&route(ChatProtocol::OpenaiChat,"history",1)).input;
+    let mut value = serde_json::to_value(&input).unwrap();
+    assert!(value.get("parallel_tool_calls").is_none());
+    assert_eq!(serde_json::from_value::<ChatModelInput>(value.clone()).unwrap(),input);
+    value["parallel_tool_calls"]=serde_json::json!(false);
+    assert_eq!(serde_json::from_value::<ChatModelInput>(value.clone()).unwrap().parallel_tool_calls,Some(false));
+    value["parallel_tool_calls"]=serde_json::json!("false");
+    assert!(serde_json::from_value::<ChatModelInput>(value).is_err());
 }
 
 #[test]
