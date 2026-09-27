@@ -108,6 +108,64 @@ fn saved_dacl(path: &Path) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn file_delete_respects_readonly_and_keeps_old_readers_after_success() {
+    use std::io::Read;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE};
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target.txt");
+    fs::write(&target, b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    let permissions = fs::metadata(&target).unwrap().permissions();
+    let mut readonly = permissions.clone();
+    readonly.set_readonly(true);
+    fs::set_permissions(&target, readonly).unwrap();
+    let rejected = service.remove_entry_for_agent_session(&scope, "target.txt").await;
+    fs::set_permissions(&target, permissions).unwrap();
+    assert!(rejected.is_err());
+    assert!(!nomifun_file::file_delete_outcome_unknown(&rejected.unwrap_err()));
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+    assert!(events.0.lock().unwrap().is_empty());
+    let mut reader = lock(&target, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    service.remove_entry_for_agent_session(&scope, "target.txt").await.unwrap();
+    assert!(!target.exists());
+    assert_eq!(events.0.lock().unwrap().len(), 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"original");
+    fs::write(&target, b"new owner").unwrap();
+    drop(reader);
+    assert_eq!(fs::read(&target).unwrap(), b"new owner");
+}
+
+#[tokio::test]
+async fn file_delete_needs_neither_parent_listing_nor_file_data_read() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let target = parent.join("target.txt");
+    let control = parent.join("native.txt");
+    fs::write(&target, b"target").unwrap();
+    fs::write(&control, b"control").unwrap();
+    let (service, scope, events) = owner(root.path());
+    for path in [&parent, &target, &control] {
+        icacls(path, &["/deny".as_ref(), "*S-1-1-0:(RD)".as_ref()]);
+    }
+    let read = fs::read(&target);
+    let listing = fs::read_dir(&parent);
+    let native = fs::remove_file(&control);
+    let deleted = service.remove_entry_for_agent_session(&scope, "parent/target.txt").await;
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    if target.exists() { icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]); }
+    if control.exists() { icacls(&control, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]); }
+    assert!(read.is_err());
+    assert!(listing.is_err());
+    native.unwrap();
+    deleted.unwrap();
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
+    assert_eq!(events.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn reading_a_known_file_does_not_require_directory_listing_or_lock_out_other_readers() {
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
     let root = tempfile::tempdir().unwrap();

@@ -1927,8 +1927,17 @@ fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, AppError> {
 
 /// Remove a file or directory synchronously. Directories are removed recursively.
 fn remove_entry_sync(path: &Path) -> Result<(), AppError> {
+    remove_entry_sync_with_hook(path, || {})
+}
+
+fn remove_entry_sync_with_hook(path: &Path, after_open: impl FnOnce()) -> Result<(), AppError> {
     let metadata =
         std::fs::metadata(path).map_err(|e| AppError::NotFound(format!("cannot remove '{}': {e}", path.display())))?;
+
+    #[cfg(windows)]
+    if metadata.is_file() {
+        return crate::windows_delete::remove_regular_file(path, after_open);
+    }
 
     #[cfg(windows)]
     let _delete_access = {
@@ -1946,6 +1955,7 @@ fn remove_entry_sync(path: &Path) -> Result<(), AppError> {
             )))?
     };
 
+    after_open();
     if metadata.is_dir() {
         std::fs::remove_dir_all(path)
             .map_err(|e| AppError::Internal(format!(
@@ -3502,6 +3512,52 @@ mod tests {
     }
 
     // -- remove_entry_sync tests (task 7.5) --
+
+    #[cfg(windows)]
+    fn file_delete_name_race(posix: bool) {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let original = fixture.path().join("original.txt");
+        let foreign = fixture.path().join("foreign.txt");
+        fs::write(&target, b"delete me").unwrap();
+        fs::write(&foreign, b"keep me").unwrap();
+        let mut swapped = false;
+        let result = remove_entry_sync_with_hook(&target, || {
+            let rename = if posix {
+                crate::windows_test_support::rename_with_posix_semantics(&target, &original, false)
+            } else {
+                fs::rename(&target, &original)
+            };
+            match rename {
+                Ok(()) => { fs::rename(&foreign, &target).unwrap(); swapped = true; }
+                Err(error) => assert_eq!(error.raw_os_error(), Some(32)),
+            }
+        });
+        let foreign_preserved = if swapped { fs::read(&target) } else { fs::read(&foreign) };
+        if foreign_preserved.ok().as_deref() != Some(b"keep me") {
+            fs::write(fixture.path().join("observation.txt"), format!("posix={posix}; swapped={swapped}; result={result:?}")).unwrap();
+            panic!("delete removed the concurrent file; retained fixture: {}", fixture.keep().display());
+        }
+        result.unwrap();
+        assert!(!swapped, "the original must be held until deletion finishes");
+        assert!(!target.exists());
+        assert!(!original.exists());
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 1);
+        fs::rename(&foreign, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"keep me");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_delete_preserves_a_replacement_after_access_check() {
+        file_delete_name_race(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_delete_preserves_a_posix_replacement_after_access_check() {
+        file_delete_name_race(true);
+    }
 
     #[test]
     fn remove_entry_sync_file() {
