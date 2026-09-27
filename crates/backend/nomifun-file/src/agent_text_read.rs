@@ -1,6 +1,7 @@
 //! Bounded, version-checked text pages through the existing workspace owner.
 //! A digest identifies bytes observed by this read, not a filesystem snapshot
-//! or a write lease. Concurrent native renames remain a path-owner limitation.
+//! or a write lease. Windows reads pin the authorized directory and verify
+//! the opened file identity before returning a page.
 use std::io::Read;
 
 use nomifun_common::AppError;
@@ -184,6 +185,17 @@ fn read_source_bytes(
     max_bytes: usize,
     charged_bytes: &mut usize,
 ) -> Result<Option<(Vec<u8>, String, std::path::PathBuf)>, AppError> {
+    read_source_bytes_with_hooks(path, authority, max_bytes, charged_bytes, || {}, || {})
+}
+
+fn read_source_bytes_with_hooks(
+    path: &std::path::Path,
+    authority: &crate::PathAuthority,
+    max_bytes: usize,
+    charged_bytes: &mut usize,
+    before_open: impl FnOnce(),
+    after_read: impl FnOnce(),
+) -> Result<Option<(Vec<u8>, String, std::path::PathBuf)>, AppError> {
     if max_bytes > MAX_FILE_BYTES {
         return Err(AppError::BadRequest(
             "Source byte budget exceeds the owner limit".into(),
@@ -203,29 +215,42 @@ fn read_source_bytes(
             return Err(error);
         }
     };
-    let before = std::fs::symlink_metadata(&canonical).map_err(io_error)?;
-    if !before.is_file() || before.len() > max_bytes as u64 {
-        return Err(AppError::BadRequest(
-            "Source is not a regular file within the read budget (at most 8 MiB)".into(),
-        ));
-    }
-    let file = std::fs::File::open(&canonical).map_err(io_error)?;
+    #[cfg(windows)]
+    let root = crate::windows_read::ReadRoot::for_target(&canonical,authority)?;
+    let open = || {
+        #[cfg(windows)]
+        if let Some(root) = &root { return root.open(&canonical); }
+        // Keep ambient special-file rejection on the existing fallback path;
+        // opening a FIFO before checking its type could block indefinitely.
+        let before = std::fs::symlink_metadata(&canonical).map_err(io_error)?;
+        if !before.is_file() || before.len() > max_bytes as u64 {
+            return Err(AppError::BadRequest("Source is not a bounded regular file".into()));
+        }
+        std::fs::File::open(&canonical).map_err(io_error)
+    };
+    before_open();
+    let file = open()?;
     let opened = file.metadata().map_err(io_error)?;
     if !opened.is_file() || opened.len() > max_bytes as u64 {
         return Err(AppError::BadRequest(
             "Source is not a bounded regular file".into(),
         ));
     }
+    let identity = same_file::Handle::from_file(file.try_clone().map_err(io_error)?).map_err(io_error)?;
     let mut bytes = Vec::with_capacity((opened.len() as usize).min(max_bytes));
     let mut bounded = file.take((max_bytes + 1) as u64);
     let read_result = bounded.read_to_end(&mut bytes);
     *charged_bytes = charged_bytes.saturating_add(bytes.len());
     read_result.map_err(io_error)?;
+    after_read();
     let after = bounded.get_ref().metadata().map_err(io_error)?;
+    let current = open().map_err(|_| AppError::Conflict("FILE_CHANGED_DURING_READ: named source can no longer be verified".into()))?;
+    let current_identity = same_file::Handle::from_file(current).map_err(io_error)?;
     if bytes.len() > max_bytes
         || bytes.len() as u64 != opened.len()
         || opened.len() != after.len()
         || opened.modified().ok() != after.modified().ok()
+        || identity != current_identity
         || validate_path_authority(&path.to_string_lossy(), authority)? != canonical
     {
         return Err(AppError::Conflict(
@@ -319,9 +344,170 @@ fn page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn race_fixture() -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("read-race-");
+        match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => builder.tempdir_in(parent).unwrap(),
+            None => builder.tempdir().unwrap(),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_parent_junction_never_reads_outside_bytes() {
+        use std::{cell::Cell, fs};
+        let fixture = race_fixture();
+        let root = fixture.path().join("workspace");
+        let inside = root.join("inside");
+        let saved = root.join("saved");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(inside.join("value.txt"),b"inside").unwrap();
+        fs::write(outside.join("value.txt"),b"secret").unwrap();
+        let redirected = Cell::new(false);
+        let restore = || {
+            if redirected.replace(false) {
+                junction::delete(&inside).unwrap();
+                fs::rename(&saved,&inside).unwrap();
+            }
+        };
+        let mut charged = 0;
+        let result = read_source_bytes_with_hooks(&inside.join("value.txt"),
+            &crate::PathAuthority::Workspace(root),64,&mut charged,
+            || {
+                fs::rename(&inside,&saved).unwrap();
+                junction::create(&outside,&inside).unwrap();
+                redirected.set(true);
+            }, restore);
+        restore();
+        assert_eq!(fs::read(inside.join("value.txt")).unwrap(),b"inside");
+        assert_eq!(fs::read(outside.join("value.txt")).unwrap(),b"secret");
+        if result.is_ok() || charged != 0 {
+            let observation = serde_json::json!({"charged_bytes":charged,"result":format!("{result:?}")});
+            fs::write(fixture.path().join("observation.json"),observation.to_string()).unwrap();
+            let retained = fixture.keep();
+            panic!("outside read was not prevented; retained fixture: {}",retained.display());
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_at_the_same_name_during_read_is_a_conflict() {
+        use std::fs;
+        let fixture = race_fixture();
+        let path = fixture.path().join("value.txt");
+        let retained = fixture.path().join("original.txt");
+        fs::write(&path,b"inside").unwrap();
+        let mut charged = 0;
+        let authority = crate::PathAuthority::Workspace(fixture.path().to_path_buf());
+        let result = read_source_bytes_with_hooks(&path,&authority,64,&mut charged,|| {},|| {
+            fs::rename(&path,&retained).unwrap();
+            fs::write(&path,b"newest").unwrap();
+        });
+        assert_eq!(fs::read(&path).unwrap(),b"newest");
+        assert_eq!(fs::read(&retained).unwrap(),b"inside");
+        if !matches!(&result,Err(AppError::Conflict(message)) if message.contains("FILE_CHANGED_DURING_READ")) {
+            fs::write(fixture.path().join("observation.json"),format!("{result:?}")).unwrap();
+            let location = fixture.keep();
+            panic!("same-name replacement was not rejected; retained fixture: {}",location.display());
+        }
+        assert_eq!(charged,6);
+        assert_eq!(read_source_bytes(&path,&authority,64,&mut 0).unwrap().unwrap().0,b"newest");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_workspace_root_junction_is_rejected_before_reading() {
+        use std::{cell::Cell, fs};
+        let fixture = race_fixture();
+        let root = fixture.path().join("workspace");
+        let saved = fixture.path().join("saved");
+        let outside = fixture.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(root.join("value.txt"),b"inside").unwrap();
+        fs::write(outside.join("value.txt"),b"secret").unwrap();
+        let redirected = Cell::new(false);
+        let restore = || {
+            if redirected.replace(false) {
+                junction::delete(&root).unwrap();
+                fs::rename(&saved,&root).unwrap();
+            }
+        };
+        let mut charged = 0;
+        let result = read_source_bytes_with_hooks(&root.join("value.txt"),
+            &crate::PathAuthority::Workspace(root.clone()),64,&mut charged,
+            || {
+                fs::rename(&root,&saved).unwrap();
+                junction::create(&outside,&root).unwrap();
+                redirected.set(true);
+            },restore);
+        restore();
+        assert!(result.is_err(),"{result:?}");
+        assert_eq!(charged,0);
+        assert_eq!(fs::read(root.join("value.txt")).unwrap(),b"inside");
+        assert_eq!(fs::read(outside.join("value.txt")).unwrap(),b"secret");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn transient_alias_into_owner_namespace_never_reads_its_bytes() {
+        use std::{cell::Cell, fs};
+        let fixture = race_fixture();
+        let inside = fixture.path().join("inside");
+        let saved = fixture.path().join("saved");
+        let protected = fixture.path().join(".nomifun");
+        fs::create_dir(&inside).unwrap();
+        fs::create_dir(&protected).unwrap();
+        fs::write(inside.join("value.txt"),b"inside").unwrap();
+        fs::write(protected.join("value.txt"),b"secret").unwrap();
+        let redirected = Cell::new(false);
+        let restore = || {
+            if redirected.replace(false) {
+                junction::delete(&inside).unwrap();
+                fs::rename(&saved,&inside).unwrap();
+            }
+        };
+        let mut charged = 0;
+        let result = read_source_bytes_with_hooks(&inside.join("value.txt"),
+            &crate::PathAuthority::Workspace(fixture.path().to_path_buf()),64,&mut charged,
+            || {
+                fs::rename(&inside,&saved).unwrap();
+                junction::create(&protected,&inside).unwrap();
+                redirected.set(true);
+            },restore);
+        restore();
+        assert!(result.is_err(),"{result:?}");
+        assert_eq!(charged,0);
+        assert_eq!(fs::read(inside.join("value.txt")).unwrap(),b"inside");
+        assert_eq!(fs::read(protected.join("value.txt")).unwrap(),b"secret");
+    }
     struct NoEvents;
     impl nomifun_realtime::UserEventSink for NoEvents {
         fn send_to_user(&self, _: &str, _: nomifun_api_types::WebSocketMessage<serde_json::Value>) {}
+    }
+
+    #[tokio::test]
+    async fn whole_text_agent_entry_preserves_content_and_uses_the_agent_read_budget() {
+        let root=tempfile::tempdir().unwrap();
+        let scope=crate::resource::workspace_binding(nomifun_common::generate_id(),"binding","workspace","owner",
+            [WORKSPACE_READ_OPERATION],root.path()).unwrap();
+        let service=FileService::new(std::sync::Arc::new(NoEvents),vec![]);
+        let text="\u{feff}first\r\n中文\nlast";
+        std::fs::write(root.path().join("text.txt"),text).unwrap();
+        assert_eq!(service.read_file_for_agent_session(&scope,"text.txt").await.unwrap().as_deref(),Some(text));
+        std::fs::write(root.path().join("large.txt"),vec![b'x';MAX_FILE_BYTES]).unwrap();
+        assert_eq!(service.read_file_for_agent_session(&scope,"large.txt").await.unwrap().unwrap().len(),MAX_FILE_BYTES);
+        std::fs::write(root.path().join("large.txt"),vec![b'x';MAX_FILE_BYTES+1]).unwrap();
+        assert!(service.read_file_for_agent_session(&scope,"large.txt").await.is_err());
+        std::fs::write(root.path().join("binary.bin"),[0xff,0xfe]).unwrap();
+        assert!(service.read_file_for_agent_session(&scope,"binary.bin").await.is_err());
+        assert!(service.read_file_for_agent_session(&scope,"missing.txt").await.unwrap().is_none());
+        assert!(service.read_file_for_agent_session(&scope,"../outside.txt").await.is_err());
     }
 
     #[tokio::test]
