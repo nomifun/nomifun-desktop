@@ -43,7 +43,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 原始分段、原子 write/共享锁、删除链接及长路径回归 | B1/B2/B3 分别 80/57/37 项定向回归通过（重叠不累加）；跨盘/ACL/并发置换及正式 UI 待验 |
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | 首批 8 回合已验；MM 名称已修；GEN 完成报告仍 FAIL_VISIBLE_UX，不能计 PASS |
-| W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 先根内读写负向，再隔离 remote/SSH 与外部效果；逐簇修复 | 待走查 |
+| W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期拒绝父子目标冲突，普通 IO 与不确定发布准确归因；其余文件/remote/SSH 逐簇推进 | 文件首批 32 项定向回归通过；大小写新建碰撞、ACL、Git/SSH 等待走查 |
 | W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 先复现旧失败会话按钮/状态/Promise 与 canonical Turn，定位 spinner，保留首次失败 | 待走查，不重写旧 Snapshot |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
 | W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | 待走查 |
@@ -110,7 +110,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 - 证据：`windows/w01b-links-length/01-before/windows-workspace.log`、`02-after/`、`03-final/`。
   未覆盖新建文件大小写碰撞、并发链接置换、宿主总路径长度极限、跨盘/ACL、macOS 和正式 UI。
 
-### W02 核心入口首批（基线 `13da6ca3f`）
+### W02 核心入口首批（基线 `13da6ca3f`；提交 `ca37bb27f`）
 
 正式 Tauri `cargo build -p nomifun-desktop --features tauri/custom-protocol`，使用 dev 配置及独立
 data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80 步预算，未调用媒体生成。
@@ -133,5 +133,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖：N=3/统计验收、完整角色矩阵、CS 条件资源、macOS、GEN 交付失败的最终关闭及旧 MM retry。
   上表只记录本批子断言和具体运行，不将组件数或 recovered 计入完整 Case PASS。
 
-下一步：W03 定向文件/Git/SSH；W01-B 剩余跨盘/ACL/并发与新建 alias 继续保留在该队列；
+### W03 文件准备期与错误归因（基线 `ca37bb27f`）
+
+- FILE-032/039、OBS-005/016 子断言，公共根因 S-D03-03。首次各保留一个 FAIL：包含结果未知
+  标识文本的目录名使普通临时文件重名错误被误判为 unknown；同批文件目标 `new`/`new/child.txt`
+  在第二项失败前已发布第一项并留下新文件。
+- 修复：只识别 owner 生成的错误前缀；准备期拒绝重复或互为祖先的文件目标，两种顺序均零文件
+  写入、零父目录创建。真正发布/清理不确定的处理规则保留。
+- 验证：`nomifun-file --lib patch_temp_collision` 1、`service::tests::atomic_` 4、
+  `service::tests::agent_` 11、`--test windows_workspace` 16，共 32 项通过；diff 检查通过。
+- 证据：`windows/w03-file-errors/{01-before,02-after,03-ancestor-before,04-final}/`；无模型调用。
+  未覆盖 Windows 新建大小写别名、跨盘/ACL、并发置换、Git/SSH、macOS 与正式 UI 完整 Case。
+
+下一步：W03 的新建 alias、跨盘/ACL/并发及隔离 Git/SSH；GEN 完成报告继续保持开放问题；
 旧 MM retry 在 W04 保持待复现，不因本批通过关闭。不要重建 2,374 行日志/状态文件到 Git。
