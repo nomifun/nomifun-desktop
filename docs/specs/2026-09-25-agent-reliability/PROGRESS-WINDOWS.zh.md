@@ -30,7 +30,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | D06 | 247 | W04/W05 | WebView2 profile、Computer A11y、MCP/Plugin/Skill | Skill 首发已回归；其余待走查 |
 | D07 | 124 | W02/W04 | 精确产品目标、Knowledge/Companion/Canvas/Customer owner | PAL/MM 新 Tauri 入口已走查；修复画布名称上下文遗漏 |
 | D08 | 103 | W02/W04/W05 | GEN/COD/PAL/MM/CS 分角色的正式任务 | W02 四角色有新证据；GEN 仍 FAIL，完整集合与 CS 待走查 |
-| D09 | 375 | W06 | Job 子孙进程、崩溃、恢复、撤权、并发与 LONG | 先故障注入，后 soak；待走查 |
+| D09 | 375 | W06 | Job 子孙进程、崩溃、恢复、撤权、并发与 LONG | checkpoint/执行 lease 组件 19 项已验；宿主故障、正式 UI 与 soak 仍待 |
 | D10 | 33 | W01/W06 | WIN-001～018 与 PORT，盘符/路径/共享锁/宿主终态 | WIN-002/007/008/010/011 的部分组件断言通过；其余待走查 |
 | D11 | 75 | W01/W03 | 越界路径/junction、旧授权、无资源与跨 owner 拒绝 | AUTH-009/010 的 cwd 子断言通过；其余 owner 与竞态待走查 |
 | **合计** | **2374** | W01～W06 | 结果按 Case × Agent × Windows 独立判定 | 未跑不算通过 |
@@ -46,7 +46,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、大小写、ACL/部分删除、隔离 local/file remote；其余逐簇推进 | 文件首批 32、大小写 50、ACL 60 项（重叠不累加）、Git push owner 9 项通过；并发/跨盘、SSH 与完整 UI 待验 |
 | W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧失败历史丢失与无效重试入口已复现并修复；不重写旧 Snapshot | 原旧会话 Tauri 冷加载/刷新复验通过；其他恢复/停止/扩展 Case 待验 |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
-| W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | 待走查 |
+| W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | Store checkpoint/lease 首批 19 项通过；真实宿主故障与长稳待验 |
 
 ## 已有结果与本批记录
 
@@ -206,5 +206,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   的首次目录失败原样保留，owner/host 首次分类失败另记。夹具目录清理后无残留，权限仅改临时对象。
   未覆盖权限/路径并发置换、进程强杀/磁盘 IO fault、完整 UI、跨卷及 macOS；不计完整 Case PASS。
 
+### W06 checkpoint / 执行 lease（基线 `ea8e6a14f`）
+
+- LIFE-009/010/011/013/014/020 的 Store 子断言：事务注入失败回滚、损坏拒绝、checkpoint 重开、
+  取消/失败不复活、旧模型/工具/观察/checkpoint writer 拒绝、未决效果禁止自动恢复。
+- 补上磁盘 SQLite 的两个独立 Store 连接竞争恢复夹具：只有一个获准；另一个收到明确 fence/lease
+  拒绝。原 Store 的旧模型/工具写入不推进 cursor；关闭全部连接再重开，winner、旧 writer 拒绝、
+  checkpoint digest 与 cursor 保持一致。本批未发现新生产缺陷。
+- `native_execution_tests:: -- --skip native_pause_tests` **11/11**（含新磁盘项），
+  `native_checkpoint_tests::` **8/8**，共 **19**；磁盘项另单跑通过，不重复计数，diff 检查通过。
+  证据 `windows/w06-checkpoint-lease/{01-baseline,02-disk}/`；`01-baseline` 构建已包含新增测试。
+- lease 过期是隔离 DB 的明确故障注入，两个 Store 在同一测试进程；未模拟真实经过时间。
+  未覆盖两个 OS 进程竞争、正式 Tauri 强杀/恢复、完整 pause/resume、Job/浏览器清理与 N3/LONG；
+  无真实模型调用，不计完整 Case 或 macOS PASS。
+
 下一步：W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余真实停止/恢复与扩展；
-W05/W06 按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。
+W05 条件资源和 W06 原生故障按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。

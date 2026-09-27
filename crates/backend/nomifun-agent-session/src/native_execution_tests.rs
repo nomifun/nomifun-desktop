@@ -122,6 +122,51 @@ async fn native_recovery_race_has_exactly_one_winner() {
     assert_eq!(a.ok().or_else(||b.ok()).unwrap().fence(), 1);
 }
 
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn independent_disk_stores_share_one_recovery_winner_and_fence_old_writers() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("recovery.db");
+    let database = nomifun_db::init_database(&path).await.unwrap();
+    let original = AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+    let f = fixture(&original, "disk-recovery-race").await;
+    let old = original.claim_native_execution(claim(&f, "old", 0, None)).await.unwrap();
+    let cp = checkpoint(&original, &f, &old).await;
+    // Explicit clock fault injection; no real crash or elapsed-time claim.
+    expire(&original, &f).await;
+    let first = AgentSessionStore::connect_existing(&path).await.unwrap();
+    let second = AgentSessionStore::connect_existing(&path).await.unwrap();
+    let (left, right) = tokio::join!(
+        first.claim_native_execution(claim(&f, "first-recovery", 0, Some(&cp))),
+        second.claim_native_execution(claim(&f, "second-recovery", 0, Some(&cp))),
+    );
+    let (winner, loser) = match (left, right) {
+        (Ok(winner), Err(loser)) | (Err(loser), Ok(winner)) => (winner, loser),
+        result => panic!("disk-backed recovery must have exactly one winner: {result:?}"),
+    };
+    assert!(matches!(loser, SessionStoreError::ExecutionFenced | SessionStoreError::ExecutionLeaseActive));
+    assert_eq!(winner.fence(), 1);
+    let before = original.current_cursor(&f.session.agent_session_id).await.unwrap();
+    assert!(matches!(original.claim_native_chat_operation(&old, model(&f, "stale-disk-model")).await,
+        Err(SessionStoreError::ExecutionFenced)));
+    let stale = progress(&f, "stale-disk-tool", json!({"event":"tool_started","call_id":"stale"}));
+    assert!(matches!(original.append_native_event(&old, &stale, None).await, Err(SessionStoreError::ExecutionFenced)));
+    assert_eq!(original.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
+    first.verify_native_execution(&winner).await.unwrap();
+    second.verify_native_execution(&winner).await.unwrap();
+    original.test_pool().close().await;
+    first.test_pool().close().await;
+    second.test_pool().close().await;
+    database.close().await;
+    let reopened = AgentSessionStore::connect_existing(&path).await.unwrap();
+    reopened.verify_native_execution(&winner).await.unwrap();
+    assert!(matches!(reopened.verify_native_execution(&old).await, Err(SessionStoreError::ExecutionFenced)));
+    let saved = reopened.load_native_checkpoint(&owner(), &f.session.agent_session_id, &"lease-turn".into())
+        .await.unwrap().unwrap();
+    assert_eq!(saved.digest, cp.digest);
+    assert_eq!(reopened.current_cursor(&f.session.agent_session_id).await.unwrap(), before);
+    reopened.test_pool().close().await;
+}
+
 #[tokio::test]
 async fn unleased_supervisor_cannot_terminate_a_live_native_producer() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
