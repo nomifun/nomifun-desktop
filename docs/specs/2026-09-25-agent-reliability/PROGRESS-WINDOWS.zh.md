@@ -26,7 +26,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | D02 | 302 | W02/W04 | 计划/完成、日志与 UI 终态；用户纠正/停止；零红色正向任务 | W02 GEN 完成报告仍有可见失败；当前证据 Schema 预检已补，问题未关闭 |
 | D03 | 145 | W01/W03 | Win 路径、共享锁、原子 write/patch/delete、Artifact | W01-B1/B2 路径及原子写子断言已验；剩余待走查 |
 | D04 | 476 | W01 | executable/args/cmd、PowerShell/cmd、编码、Job/ConPTY、退出与清理 | 新基线首批组件验证通过；完整 CMD/终端矩阵待走查 |
-| D05 | 69 | W03 | 本地隔离 Git remote、SSH 夹具；取消/未知副作用 | 条件资源待准备 |
+| D05 | 69 | W03 | 本地隔离 Git remote、SSH 夹具；取消/未知副作用 | local/file push owner 9 项通过；SSH 及完整产品路径待准备 |
 | D06 | 247 | W04/W05 | WebView2 profile、Computer A11y、MCP/Plugin/Skill | Skill 首发已回归；其余待走查 |
 | D07 | 124 | W02/W04 | 精确产品目标、Knowledge/Companion/Canvas/Customer owner | PAL/MM 新 Tauri 入口已走查；修复画布名称上下文遗漏 |
 | D08 | 103 | W02/W04/W05 | GEN/COD/PAL/MM/CS 分角色的正式任务 | W02 四角色有新证据；GEN 仍 FAIL，完整集合与 CS 待走查 |
@@ -43,7 +43,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 原始分段、原子 write/共享锁、删除链接及长路径回归 | B1/B2/B3 分别 80/57/37 项定向回归通过（重叠不累加）；跨盘/ACL/并发置换及正式 UI 待验 |
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | 首批 8 回合已验；MM 名称已修；GEN 完成报告仍 FAIL_VISIBLE_UX，不能计 PASS |
-| W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期拒绝父子目标冲突，普通 IO 与不确定发布准确归因；其余文件/remote/SSH 逐簇推进 | 文件首批 32 项定向回归通过；大小写新建碰撞、ACL、Git/SSH 等待走查 |
+| W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、隔离 local/file remote；其余文件/SSH 逐簇推进 | 文件首批 32 项、Git push owner 9 项通过；大小写新建碰撞、ACL、SSH 与产品完整路径待验 |
 | W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 先复现旧失败会话按钮/状态/Promise 与 canonical Turn，定位 spinner，保留首次失败 | 待走查，不重写旧 Snapshot |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
 | W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | 待走查 |
@@ -133,7 +133,7 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖：N=3/统计验收、完整角色矩阵、CS 条件资源、macOS、GEN 交付失败的最终关闭及旧 MM retry。
   上表只记录本批子断言和具体运行，不将组件数或 recovered 计入完整 Case PASS。
 
-### W03 文件准备期与错误归因（基线 `ca37bb27f`）
+### W03 文件准备期与错误归因（基线 `ca37bb27f`；提交 `e15e8515e`）
 
 - FILE-032/039、OBS-005/016 子断言，公共根因 S-D03-03。首次各保留一个 FAIL：包含结果未知
   标识文本的目录名使普通临时文件重名错误被误判为 unknown；同批文件目标 `new`/`new/child.txt`
@@ -145,5 +145,16 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 证据：`windows/w03-file-errors/{01-before,02-after,03-ancestor-before,04-final}/`；无模型调用。
   未覆盖 Windows 新建大小写别名、跨盘/ACL、并发置换、Git/SSH、macOS 与正式 UI 完整 Case。
 
-下一步：W03 的新建 alias、跨盘/ACL/并发及隔离 Git/SSH；GEN 完成报告继续保持开放问题；
+### W03 local/file Git owner（基线 `e15e8515e`）
+
+- VCS-010/011/012、AUTH-004 子断言：实际临时 bare remote 的 ref 与回执一致；non-fast-forward、
+  force、跨仓库绑定、缺失 remote、未挂载凭据和 secret 参数均保留拒绝边界。未发现新生产缺陷。
+- `cargo test -p nomifun-app --lib router::agent_wave2_vcs_push::tests` **9/9**；证据
+  `windows/w03-vcs/01/`，临时仓库均在该运行目录，无生产 remote/凭据、无模型调用。
+- 未覆盖 receipt 丢失、取消/并发、hook、完整 VCS 矩阵与真实会话 UI。当前可用盘符只有 C:
+  （Temp 同盘），无真实跨卷夹具；PATH 未发现 sshd，尚未配置隔离原生 SSH 测试主机。
+  这些仅阻断相关跨卷/SSH Case，其他任务继续。
+
+下一步：W04 旧 MM retry 独立复现；W03 的新建 alias、跨盘/ACL/并发与剩余 VCS/SSH 保留队列；
+GEN 完成报告继续保持开放问题；
 旧 MM retry 在 W04 保持待复现，不因本批通过关闭。不要重建 2,374 行日志/状态文件到 Git。
