@@ -491,6 +491,7 @@ export function buildTurnDisclosureItems(
   const finalAssistantByTurn = new Map<MessageId, TurnDisclosureInputItem>();
   const turnStartedAtByTurn = new Map<MessageId, number>();
   const turnEndedAtByTurn = new Map<MessageId, number>();
+  const terminalStateByTurn = new Map<MessageId, TurnDisclosureProcessState>();
   const authoritativeStartedTurns = new Set<MessageId>();
   const processObservedAtByItemId = new Map<string, number>();
 
@@ -501,6 +502,9 @@ export function buildTurnDisclosureItems(
     }
     if (item.turnId && item.turnEndedAt !== undefined) {
       turnEndedAtByTurn.set(item.turnId, item.turnEndedAt);
+      if (item.role === 'metadata' && item.processState && item.processState !== 'running') {
+        terminalStateByTurn.set(item.turnId, item.processState);
+      }
     }
     if (item.turnId && item.role === 'user') {
       if (!requestByTurn.has(item.turnId)) requestByTurn.set(item.turnId, item);
@@ -573,5 +577,12 @@ export function buildTurnDisclosureItems(
   // newest text.
   const coalesced = coalesceTurnDisclosures(output, processObservedAtByItemId);
   const placed = placeTurnDisclosuresAtTurnBoundary(coalesced, requestByTurn, finalAssistantByTurn);
-  return applyStopNotice(placed, options.stopNotice);
+  // Durable terminal metadata wins over partial text and stale live tool rows,
+  // including after reload when the in-memory stop notice no longer exists.
+  const authoritative = placed.map((item): TurnDisclosureOutputItem => {
+    if (item.type !== 'turn_disclosure') return item;
+    const state = terminalStateByTurn.get(item.turnId);
+    return state ? { ...item, state, running: false, defaultCollapsed: true } : item;
+  });
+  return applyStopNotice(authoritative, options.stopNotice);
 }

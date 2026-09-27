@@ -44,6 +44,15 @@ const view = (running: boolean, processItems: Step[] = steps) => (
 
 afterEach(cleanup);
 
+test('a cancelled disclosure names its outcome even while collapsed', () => {
+  const page=render(<I18nextProvider i18n={i18n}><TurnProcessDisclosure
+    item={{...disclosure(false,steps),state:'canceled'}}
+    renderProcessItem={step=><span>{step.id}</span>}
+    getProcessItemKey={step=>step.id} getProcessItemState={step=>step.state}
+  /></I18nextProvider>);
+  expect(page.container.querySelector('.turn-process-disclosure__label')?.textContent).toContain('Execution canceled');
+});
+
 test('only the latest running process row is current; no row animates after the turn finishes', () => {
   const { container, rerender } = render(view(true));
   expect(container.querySelector('.turn-process-disclosure__body')).not.toBeNull();

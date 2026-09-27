@@ -5,7 +5,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use nomifun_agent_contracts::{AgentSessionId, SessionPayloadBody};
-use nomifun_agent_runtime::AgentEngineEvent;
+use nomifun_agent_runtime::{AgentEngineEvent, AgentToolResult};
 use nomifun_agent_session::MessageProjection;
 use nomifun_common::AppError;
 use nomifun_db::SqlitePool;
@@ -20,6 +20,19 @@ pub(super) struct HistoricalToolObservation {
 }
 
 fn observe_tool_event(event: &Value, observations: &mut HashMap<String, HistoricalToolObservation>) {
+    // Cancellation can stop the Runtime before ToolCompleted is emitted. The
+    // owner still commits its bounded settlement while cleanup is permitted.
+    if event.get("event").and_then(Value::as_str) == Some("host_tool_settled") {
+        if let Some(result) = event.get("result")
+            .and_then(|value| serde_json::from_value::<AgentToolResult>(value.clone()).ok())
+            .filter(|result| event.get("call_id").and_then(Value::as_str) == Some(result.call_id.as_ref()))
+        {
+            let observation = observations.entry(result.call_id.as_ref().to_owned()).or_default();
+            observation.output = Some(result.output_text());
+            observation.is_error = Some(result.is_error);
+        }
+        return;
+    }
     let Ok(event) = serde_json::from_value::<AgentEngineEvent>(event.clone()) else {
         return;
     };
@@ -164,6 +177,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn host_settlement_does_not_attach_a_mismatched_call_result() {
+        let mut observations = HashMap::new();
+        observe_tool_event(&json!({
+            "event":"host_tool_settled", "call_id":"expected",
+            "result": AgentToolResult::text(ToolCallId::from("different"), "foreign", false)
+        }), &mut observations);
+        assert!(observations.is_empty());
+    }
+
+    #[test]
     fn completed_runtime_events_restore_the_same_expandable_tool_details() {
         let mut observations = HashMap::new();
         observe_tool_event(&json!({
@@ -178,6 +201,36 @@ mod tests {
         assert_eq!(observation.args.as_ref().unwrap()["path"], "src/app.ts");
         assert_eq!(observation.is_error, Some(false));
         assert_eq!(observation.output.as_deref(), Some("file contents"));
+    }
+
+    #[tokio::test]
+    async fn cancellation_keeps_the_host_settlement_without_a_runtime_tool_completed_event() {
+        let (journal, pool) = test_fixture().await;
+        let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        journal.append(json!({
+            "event":"tool_call_completed", "step":1,
+            "call":{"call_id":"cancel-call","name":"exec_command","arguments":{"command":"bun","args":["wait.mjs"]}}
+        }).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
+        journal.append(json!({
+            "event":"host_tool_dispatch", "dispatch":{
+                "operation_id":"cancel-operation", "call_id":"cancel-call",
+                "capability_id":"workspace.process", "action_id":"workspace.process/exec", "model_name":"exec_command"
+            }
+        }).to_string(), None, EngineJournalWrite::Progress).await.unwrap();
+        let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        store.cancel_active_turn(&session_id, "cancel-test".into(), "session-api".into()).await.unwrap();
+        let output = json!({"state":"cancelled","success":false,"output":{"text":"STARTED"},"cleanup":{"reaped":true}}).to_string();
+        journal.append(json!({
+            "event":"host_tool_settled", "operation_id":"cancel-operation", "call_id":"cancel-call",
+            "result": AgentToolResult::text(ToolCallId::from("cancel-call"), output.clone(), true), "error":null
+        }).to_string(), None, EngineJournalWrite::Settlement).await.unwrap();
+        let (history, _, _) = store.message_history_before(&session_id, None, 50).await.unwrap();
+        let tool = history.iter().find(|item| item.presentation_intent == "tool").unwrap();
+        let details = load_historical_tool_observations(&pool, &session_id, &history).await.unwrap();
+        let detail = details.get(&tool.projection_id).unwrap();
+        assert_eq!(detail.output.as_deref(), Some(output.as_str()));
+        assert_eq!(detail.is_error, Some(true));
+        assert_eq!(detail.args.as_ref().unwrap()["command"], "bun");
     }
 
     #[tokio::test]

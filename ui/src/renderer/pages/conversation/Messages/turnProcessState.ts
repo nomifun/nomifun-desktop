@@ -71,6 +71,7 @@ export const getProcessItemState = (item: ProcessStateItem): TurnDisclosureProce
     case 'tool_group':
       return getToolMessagesProcessState([item]);
     case 'agent_status':
+      if (item.content.turn_summary && item.content.turn_state === 'cancelled') return 'canceled';
       if (item.content.status === 'error') return 'failed';
       if (item.content.status === 'connecting' || item.content.status === 'preparing') return 'running';
       return 'completed';

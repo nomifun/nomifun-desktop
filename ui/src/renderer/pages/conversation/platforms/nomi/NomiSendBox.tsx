@@ -768,6 +768,7 @@ const NomiSendBox: React.FC<{
       confirmStopped();
       setIsStopping(false);
       resetActiveExecution('external-reset');
+      if (result.status === 'released') emitter.emit('chat.history.refresh');
       return;
     }
 
@@ -792,6 +793,7 @@ const NomiSendBox: React.FC<{
       confirmStopped();
       setIsStopping(false);
       resetActiveExecution('external-reset');
+      if (settled === 'released') emitter.emit('chat.history.refresh');
       return;
     }
 
