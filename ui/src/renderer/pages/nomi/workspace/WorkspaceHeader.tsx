@@ -7,7 +7,8 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@arco-design/web-react';
-import { ApplicationMenu } from '@icon-park/react';
+import { ApplicationMenu, ExpandLeft, ExpandRight } from '@icon-park/react';
+import InstantHoverTooltip from '@/renderer/components/base/InstantHoverTooltip';
 import CompanionAvatar from '@renderer/pages/companion/CompanionAvatar';
 import { customFigureMetaOf } from '@renderer/pages/companion/characters/customMeta';
 import type { CompanionMood } from '@renderer/pages/companion/characters';
@@ -21,12 +22,24 @@ interface Props {
   mode: CompanionWorkspaceMode;
   onModeChange: (mode: CompanionWorkspaceMode) => void;
   onOpenQuickWindow: () => void;
+  infoPanelCollapsed: boolean;
+  onToggleInfoPanel: () => void;
 }
 
 /** Stable identity and the only first-level choice inside the companion product. */
-const WorkspaceHeader: React.FC<Props> = ({ companion, mode, onModeChange, onOpenQuickWindow }) => {
+const WorkspaceHeader: React.FC<Props> = ({
+  companion,
+  mode,
+  onModeChange,
+  onOpenQuickWindow,
+  infoPanelCollapsed,
+  onToggleInfoPanel,
+}) => {
   const { t } = useTranslation();
   const { profile, status } = companion;
+  const infoPanelToggleLabel = infoPanelCollapsed
+    ? t('nomi.workspace.showInfoPanel', { defaultValue: '展开伙伴信息' })
+    : t('nomi.workspace.hideInfoPanel', { defaultValue: '收起伙伴信息' });
 
   return (
     <header className={styles.header}>
@@ -38,7 +51,7 @@ const WorkspaceHeader: React.FC<Props> = ({ companion, mode, onModeChange, onOpe
             customFigure={customFigureMetaOf(profile)}
             mood={(status?.mood as CompanionMood) || 'content'}
             activity='idle'
-            size={48}
+            size={42}
           />
         )}
         <div className={styles.identityCopy}>
@@ -70,15 +83,32 @@ const WorkspaceHeader: React.FC<Props> = ({ companion, mode, onModeChange, onOpe
         </button>
       </div>
 
-      <Button
-        className={styles.quickWindowButton}
-        shape='round'
-        size='small'
-        icon={<ApplicationMenu theme='outline' size='14' fill='currentColor' />}
-        onClick={onOpenQuickWindow}
-      >
-        {t('nomi.workspace.quickWindow', { defaultValue: '桌面快捷窗' })}
-      </Button>
+      <div className={styles.headerActions}>
+        <Button
+          className={styles.quickWindowButton}
+          shape='round'
+          size='small'
+          icon={<ApplicationMenu theme='outline' size='14' fill='currentColor' />}
+          onClick={onOpenQuickWindow}
+        >
+          {t('nomi.workspace.quickWindow', { defaultValue: '桌面快捷窗' })}
+        </Button>
+        {mode === 'cohabit' && (
+          <InstantHoverTooltip content={infoPanelToggleLabel} position='bottom'>
+            <Button
+              className={styles.infoPanelToggle}
+              shape='circle'
+              size='small'
+              aria-label={infoPanelToggleLabel}
+              aria-expanded={!infoPanelCollapsed}
+              icon={infoPanelCollapsed
+                ? <ExpandLeft theme='outline' size='15' fill='currentColor' />
+                : <ExpandRight theme='outline' size='15' fill='currentColor' />}
+              onClick={onToggleInfoPanel}
+            />
+          </InstantHoverTooltip>
+        )}
+      </div>
     </header>
   );
 };

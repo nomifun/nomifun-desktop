@@ -26,9 +26,10 @@ interface Props {
   companionId: CompanionId;
   companion: CompanionHandle;
   onManage: (tab: WorkspaceTabKey) => void;
+  infoPanelCollapsed: boolean;
 }
 
-const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManage }) => {
+const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManage, infoPanelCollapsed }) => {
   const { t } = useTranslation();
   const { profile, status } = companion;
   const [conversationId, setConversationId] = useState<ConversationId | null>(null);
@@ -130,16 +131,12 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
   }, [companion, conversation, conversationId, isLoading, onManage, profile?.model, sessionError, t]);
 
   return (
-    <div className={styles.layout}>
+    <div className={styles.layout} data-info-panel-collapsed={infoPanelCollapsed}>
       <section className={styles.chatColumn}>
-        <div className={styles.chatHeading}>
-          <h1>{t('nomi.cohabit.title', { name: profile?.name ?? '', defaultValue: '和{{name}}相处' })}</h1>
-          <p>{t('nomi.cohabit.subtitle', { defaultValue: '分享日常、聊聊想法，让伙伴真正陪在身边。' })}</p>
-        </div>
         <div className={styles.chatBody}>{chat}</div>
       </section>
 
-      <aside className={styles.info} aria-label={t('nomi.cohabit.infoTitle', { defaultValue: '伙伴信息' })}>
+      {!infoPanelCollapsed && <aside className={styles.info} aria-label={t('nomi.cohabit.infoTitle', { defaultValue: '伙伴信息' })}>
         <div className={styles.infoHeader}>
           <h2>{t('nomi.cohabit.infoTitle', { defaultValue: '伙伴信息' })}</h2>
           <button type='button' onClick={() => onManage('overview')}>
@@ -186,7 +183,7 @@ const CompanionCohabitView: React.FC<Props> = ({ companionId, companion, onManag
             <div className={styles.progress}><span style={{ width: `${growthPercent}%` }} /></div>
           </section>
         )}
-      </aside>
+      </aside>}
     </div>
   );
 };

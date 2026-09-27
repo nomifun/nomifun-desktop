@@ -34,6 +34,14 @@ describe('Titlebar action affordances', () => {
     expect(languageMenuSource.includes('Translate')).toBe(false);
   });
 
+  test('routes the desktop-companion roster through the shared ContentSider toggle', () => {
+    expect(titlebarSource.includes('nomiSiderChannel')).toBe(true);
+    expect(titlebarSource.includes("location.pathname === '/nomi'")).toBe(true);
+    expect(titlebarSource.includes("t('nomi.workspace.showRoster')")).toBe(true);
+    expect(titlebarSource.includes("t('nomi.workspace.hideRoster')")).toBe(true);
+    expect(titlebarSource.includes('isSessionRoute || isAgentRoute || isNomiRoute')).toBe(true);
+  });
+
   test('keeps shared history and quick-create navigation behind Creative Studio save gates', () => {
     expect(titlebarSource.includes('requestCreativeStudioBeforeLeave')).toBe(true);
     expect(titlebarSource.includes('navigateAfterCreativeStudioFlush')).toBe(true);

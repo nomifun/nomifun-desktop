@@ -156,6 +156,35 @@
   color: #a1a2aa !important;
 }
 
+/* Desktop-companion composer: references first, editor second, controls last.
+ * The tighter inset keeps the stacked layout compact without shrinking the
+ * 32px attach/send targets or the two-line editor. */
+.sendbox-panel--compact-stacked {
+  padding: 10px 12px !important;
+  border-radius: 18px !important;
+}
+
+.sendbox-panel--compact-stacked [data-composer-attachments] {
+  padding: 0 1px 5px;
+}
+
+.sendbox-panel--compact-stacked .sendbox-highlight-container {
+  min-height: 40px !important;
+  margin-bottom: 0 !important;
+}
+
+.sendbox-panel--compact-stacked textarea {
+  height: 40px !important;
+  min-height: 40px !important;
+  max-height: 40px !important;
+  padding-block: 0 !important;
+}
+
+.sendbox-panel--compact-stacked .sendbox-bottom-row {
+  min-height: 32px;
+  margin-top: 2px;
+}
+
 /* Sendbox tools buttons - prevent layout jitter from theme hover transforms (#1075) */
 .sendbox-tools .arco-btn,
 .sendbox-tools .arco-btn:hover,

@@ -84,3 +84,30 @@ test('focus feedback and drag state share a surface while contextual tools keep 
   fireEvent.drop(surface);
   expect(dropped).toBe(1);
 });
+
+test('compact stacked layout places attachments above the editor and actions below it', () => {
+  const page = render(
+    <Composer
+      compactStacked
+      singleLine
+      inputProps={{ value: '', placeholder: '和伙伴说点什么…' }}
+      attachments={<div data-testid='attachments'>附件</div>}
+      tools={<button type='button'>添加</button>}
+      actions={<ComposerSendButton disabled onClick={() => {}} />}
+    />
+  );
+  const surface = page.container.querySelector<HTMLElement>('[data-composer-surface]')!;
+  const attachments = page.getByTestId('attachments');
+  const input = page.getByRole('textbox');
+  const add = page.getByRole('button', { name: '添加' });
+  const editorRow = surface.querySelector<HTMLElement>('[data-composer-editor-row]')!;
+  const bottomRow = surface.querySelector<HTMLElement>('.sendbox-bottom-row')!;
+
+  expect(surface.dataset.composerLayout).toBe('compact-stacked');
+  expect(surface.className).toContain('sendbox-panel--compact-stacked');
+  expect((input as HTMLTextAreaElement).style.height).toBe('40px');
+  expect(editorRow.className).not.toContain('items-center');
+  expect(editorRow.compareDocumentPosition(bottomRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(attachments.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(input.compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});

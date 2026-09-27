@@ -4,15 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { Message, Modal, Spin } from '@arco-design/web-react';
 import { AddOne, Left } from '@icon-park/react';
 import classNames from 'classnames';
 import { ipcBridge } from '@/common';
+import { useContentSiderCollapse } from '@/renderer/components/layout/ContentSider';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
+import { NOMI_SIDER_TOGGLE_EVENT, dispatchNomiSiderStateEvent } from '@/renderer/utils/workspace/nomiSiderEvents';
 import CompanionSidebar from './CompanionSidebar';
 import CreateCompanionModal from './CompanionSidebar/CreateCompanionModal';
 import FigureLibraryPage from './FigureLibraryPage';
@@ -35,7 +37,9 @@ import type { CompanionId } from '@/common/types/ids';
 import { isTauriRuntime } from '@/common/adapter/tauriRuntime';
 import styles from './NomiWorkspace.module.css';
 
-const SIDER_STORAGE_KEY = 'nomifun:nomi-sider-width';
+const SIDER_COLLAPSE_STORAGE_KEY = 'nomifun:nomi-sider-collapsed';
+const SIDER_WIDTH_STORAGE_KEY = 'nomifun:nomi-sider-width';
+const INFO_PANEL_COLLAPSE_STORAGE_KEY = 'nomifun:nomi-info-panel-collapsed';
 
 type AttentionFlags = Partial<Record<WorkspaceTabKey, boolean>>;
 const EMPTY_ATTENTION: AttentionFlags = {};
@@ -89,13 +93,35 @@ const NomiWorkspacePage: React.FC = () => {
     flags: EMPTY_ATTENTION,
   });
 
+  const {
+    collapsed: siderCollapsed,
+    toggle: toggleSider,
+  } = useContentSiderCollapse(SIDER_COLLAPSE_STORAGE_KEY, false);
+  const {
+    collapsed: infoPanelCollapsed,
+    toggle: toggleInfoPanel,
+  } = useContentSiderCollapse(INFO_PANEL_COLLAPSE_STORAGE_KEY, false);
+
   const resize = useResizableSplit({
     unit: 'px',
     defaultWidth: 248,
     minWidth: 200,
     maxWidth: 360,
-    storageKey: SIDER_STORAGE_KEY,
+    storageKey: SIDER_WIDTH_STORAGE_KEY,
   });
+
+  // ContentSider state belongs to this page; the stable control lives in the
+  // app titlebar so it remains reachable in both the expanded and collapsed states.
+  useEffect(() => {
+    dispatchNomiSiderStateEvent(siderCollapsed);
+  }, [siderCollapsed]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handleToggle = () => toggleSider();
+    window.addEventListener(NOMI_SIDER_TOGGLE_EVENT, handleToggle);
+    return () => window.removeEventListener(NOMI_SIDER_TOGGLE_EVENT, handleToggle);
+  }, [toggleSider]);
 
   // Pane padding follows the PANE width, not the viewport: inside a three-column
   // shell the content column is far narrower than the window.
@@ -364,12 +390,15 @@ const NomiWorkspacePage: React.FC = () => {
         mode={activeMode}
         onModeChange={setMode}
         onOpenQuickWindow={() => void openQuickWindow()}
+        infoPanelCollapsed={infoPanelCollapsed}
+        onToggleInfoPanel={toggleInfoPanel}
       />
       {activeMode === 'cohabit' ? (
         <CompanionCohabitView
           companionId={selectedCompanionId}
           companion={companion}
           onManage={setTab}
+          infoPanelCollapsed={infoPanelCollapsed}
         />
       ) : (
         <div className={styles.manageLayout}>
@@ -441,18 +470,20 @@ const NomiWorkspacePage: React.FC = () => {
           detail pane becomes a third column rather than a sibling of the row. */}
       <div className='relative flex size-full min-h-0'>
         <AsideHost>
-          <CompanionSidebar
-            companions={companions}
-            selectedId={selectedCompanionId}
-            figuresActive={figuresActive}
-            width={resize.splitRatio}
-            onSelect={selectCompanion}
-            onOpenFigures={openFigures}
-            onCreate={() => setCreateOpen(true)}
-            onRequestDelete={requestDelete}
-            onReorder={handleReorder}
-            resizeHandle={resize.createDragHandle({ className: 'right-0' })}
-          />
+          {!siderCollapsed && (
+            <CompanionSidebar
+              companions={companions}
+              selectedId={selectedCompanionId}
+              figuresActive={figuresActive}
+              width={resize.splitRatio}
+              onSelect={selectCompanion}
+              onOpenFigures={openFigures}
+              onCreate={() => setCreateOpen(true)}
+              onRequestDelete={requestDelete}
+              onReorder={handleReorder}
+              resizeHandle={resize.createDragHandle({ className: 'right-0' })}
+            />
+          )}
           <div className={styles.workspaceColumn}>
             {workspace}
           </div>

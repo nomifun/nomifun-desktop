@@ -867,10 +867,10 @@ const NomiSendBox: React.FC<{
         onFilesAdded={handleFilesAdded}
         hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
         supportedExts={allSupportedExts}
-        defaultMultiLine={!compactProductComposer}
-        lockMultiLine={!compactProductComposer}
+        defaultMultiLine
+        lockMultiLine
         compactActions={compactProductComposer}
-        bottomHint={compactProductComposer ? ' ' : undefined}
+        compactStacked={compactProductComposer}
         tools={
           <FileAttachButton
             openFileSelector={openFileSelector}

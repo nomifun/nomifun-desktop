@@ -202,6 +202,7 @@ const SendBox: React.FC<{
   enableBtw?: boolean;
   allowSendWhileLoading?: boolean;
   compactActions?: boolean;
+  compactStacked?: boolean;
   selectedWorkspaceItems?: FileSelectionItem[];
   onSelectedWorkspaceItemsChange?: (items: FileSelectionItem[]) => void;
   bottomHint?: React.ReactNode;
@@ -240,6 +241,7 @@ const SendBox: React.FC<{
   enableBtw = false,
   allowSendWhileLoading = false,
   compactActions = false,
+  compactStacked = false,
   selectedWorkspaceItems,
   onSelectedWorkspaceItemsChange,
   bottomHint,
@@ -1466,6 +1468,7 @@ const SendBox: React.FC<{
       <Composer
         surfaceRef={containerRef}
         singleLine={isSingleLine}
+        compactStacked={compactStacked}
         isFileDragging={isFileDragging}
         dragHandlers={dragHandlers}
         overlayOpen={isOverlayOpen}

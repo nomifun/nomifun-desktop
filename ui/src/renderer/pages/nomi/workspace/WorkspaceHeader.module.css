@@ -1,10 +1,11 @@
 .header {
-  min-height: 78px;
+  min-height: 64px;
+  box-sizing: border-box;
   display: grid;
   grid-template-columns: minmax(180px, 1fr) auto auto;
   align-items: center;
-  gap: 16px;
-  padding: 12px 24px;
+  gap: 12px;
+  padding: 7px 20px;
   border-bottom: 1px solid var(--color-border-2);
   background: var(--color-bg-1);
 }
@@ -13,16 +14,16 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .identityCopy { min-width: 0; }
 .name {
   overflow: hidden;
   color: var(--color-text-1);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
-  line-height: 26px;
+  line-height: 23px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -31,10 +32,10 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 2px;
+  margin-top: 0;
   color: var(--color-text-3);
   font-size: 12px;
-  line-height: 18px;
+  line-height: 16px;
 }
 
 .moodDot {
@@ -47,15 +48,15 @@
 .modeSwitch {
   display: flex;
   align-items: center;
-  padding: 3px;
+  padding: 2px;
   border-radius: 999px;
   background: var(--color-fill-2);
 }
 
 .modeSwitch button {
-  min-width: 76px;
-  height: 30px;
-  padding: 0 16px;
+  min-width: 70px;
+  height: 28px;
+  padding: 0 14px;
   border: 0;
   border-radius: 999px;
   background: transparent;
@@ -73,6 +74,18 @@
 }
 
 .quickWindowButton { white-space: nowrap; }
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.infoPanelToggle {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--color-text-2);
+}
 
 @container (max-width: 680px) {
   .header {
