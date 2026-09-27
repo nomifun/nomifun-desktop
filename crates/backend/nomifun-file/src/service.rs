@@ -583,6 +583,16 @@ impl FileService {
         file: &PreparedAgentPatchFile,
         authority: &PathAuthority,
     ) -> Result<(), AppError> {
+        self.verify_agent_patch_precondition_with_hooks(file, authority, || {}, || {}).await
+    }
+
+    async fn verify_agent_patch_precondition_with_hooks(
+        &self,
+        file: &PreparedAgentPatchFile,
+        authority: &PathAuthority,
+        before_open: impl FnOnce(),
+        after_read: impl FnOnce(),
+    ) -> Result<(), AppError> {
         let path = file.path.to_string_lossy();
         match std::fs::symlink_metadata(file.path.as_path()) {
             Ok(metadata) => {
@@ -605,29 +615,10 @@ impl FileService {
                         file.relative_path
                     )));
                 }
-                let reader = std::fs::File::open(file.path.as_path()).map_err(|error| {
-                    AppError::Internal(format!(
-                        "cannot re-open patch target '{}': {error}",
-                        file.relative_path
-                    ))
-                })?;
-                let mut current = Vec::new();
-                reader
-                    .take((MAX_AGENT_PATCH_FILE_BYTES + 1) as u64)
-                    .read_to_end(&mut current)
-                    .map_err(|error| {
-                        AppError::Internal(format!(
-                            "cannot re-read patch target '{}': {error}",
-                            file.relative_path
-                        ))
-                    })?;
-                if current.len() > MAX_AGENT_PATCH_FILE_BYTES {
-                    return Err(AppError::Conflict(format!(
-                        "patch target '{}' grew beyond the per-file limit",
-                        file.relative_path
-                    )));
-                }
-                if current != file.before {
+                let current = crate::agent_text_read::read_source_bytes_with_hooks(
+                    &file.path, authority, MAX_AGENT_PATCH_FILE_BYTES, &mut 0, before_open, after_read,
+                )?;
+                if current.is_none_or(|(bytes, _, canonical)| bytes != file.before || canonical != file.path) {
                     return Err(AppError::Conflict(format!(
                         "patch target '{}' changed while the patch was being prepared",
                         file.relative_path
@@ -661,7 +652,7 @@ impl FileService {
         for index in applied.iter().rev().copied() {
             let file = &files[index];
             if file.existed {
-                if !current_file_matches(&file.path, &file.after) {
+                if !current_file_matches(&file.path, &file.after, authority) {
                     observation.skipped_changed_or_unreadable.push(index);
                     continue;
                 }
@@ -1557,7 +1548,14 @@ fn write_file_sync(path: &Path, data: &[u8]) -> Result<bool, AppError> {
     Ok(true)
 }
 
-fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
+fn current_file_matches(path: &Path, expected: &[u8], authority: &PathAuthority) -> bool {
+    current_file_matches_with_hooks(path, expected, authority, || {}, || {})
+}
+
+fn current_file_matches_with_hooks(
+    path: &Path, expected: &[u8], authority: &PathAuthority,
+    before_open: impl FnOnce(), after_read: impl FnOnce(),
+) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return false;
     };
@@ -1567,14 +1565,9 @@ fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
     if metadata.len() > (MAX_AGENT_PATCH_FILE_BYTES as u64) {
         return false;
     }
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut bytes = Vec::new();
-    if file.take((MAX_AGENT_PATCH_FILE_BYTES + 1) as u64).read_to_end(&mut bytes).is_err() {
-        return false;
-    }
-    bytes == expected
+    crate::agent_text_read::read_source_bytes_with_hooks(
+        path, authority, MAX_AGENT_PATCH_FILE_BYTES, &mut 0, before_open, after_read,
+    ).is_ok_and(|source| source.is_some_and(|(bytes, _, _)| bytes == expected))
 }
 
 /// Atomically publish one already-authorized AgentSession file.
@@ -1693,8 +1686,12 @@ fn publish_patch_file_with_hooks(
             let metadata = target_metadata.ok_or_else(|| AppError::Conflict(format!(
                 "patch target '{}' disappeared before publication", path.display()
             )))?;
+            // Agent publication holds PreparedParent through this call. The
+            // immediate parent is therefore the narrowest stable read root
+            // for the final source check, including rollback publications.
+            let source_authority = PathAuthority::Confined(vec![path.parent().expect("publication has a parent").to_path_buf()]);
             if let PublicationSource::Matching(expected) = source
-                && !current_file_matches(path, expected)
+                && !current_file_matches(path, expected, &source_authority)
             {
                 return Err(AppError::Conflict(format!(
                     "patch target '{}' changed before publication; re-read before retry", path.display()
@@ -2617,6 +2614,87 @@ mod tests {
             Some(parent) => builder.tempdir_in(parent).unwrap(),
             None => builder.tempdir().unwrap(),
         }
+    }
+
+    #[cfg(windows)]
+    async fn patch_guard_read_race(precondition: bool, replace_parent: bool) {
+        let fixture = cleanup_race_fixture();
+        let root = fixture.path().join("workspace");
+        let parent = root.join("parent");
+        let retained = root.join("retained");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(parent.join("value.txt"), if replace_parent { b"inside" } else { b"source" }).unwrap();
+        fs::write(outside.join("value.txt"), b"source").unwrap();
+        let path = fs::canonicalize(parent.join("value.txt")).unwrap();
+        let authority = PathAuthority::Workspace(root);
+        let redirected = std::cell::Cell::new(false);
+        let before_open = || {
+            if replace_parent {
+                fs::rename(&parent, &retained).unwrap();
+                junction::create(&outside, &parent).unwrap();
+                redirected.set(true);
+            }
+        };
+        let restore = || {
+            if redirected.replace(false) {
+                junction::delete(&parent).unwrap();
+                fs::rename(&retained, &parent).unwrap();
+            }
+        };
+        let after_read = || {
+            restore();
+            if !replace_parent {
+                fs::rename(&path, parent.join("original.txt")).unwrap();
+                fs::write(&path, b"source").unwrap();
+            }
+        };
+        let accepted = if precondition {
+            let file = PreparedAgentPatchFile {
+                path: path.clone(), relative_path: "parent/value.txt".into(),
+                before: b"source".to_vec(), after: b"patched".to_vec(), existed: true, hunks_applied: 1,
+            };
+            make_service().verify_agent_patch_precondition_with_hooks(&file, &authority, before_open, after_read).await.is_ok()
+        } else {
+            current_file_matches_with_hooks(&path, b"source", &authority, before_open, after_read)
+        };
+        restore();
+        if accepted {
+            fs::write(fixture.path().join("observation.txt"), format!(
+                "precondition={precondition}; replace_parent={replace_parent}; incorrectly_accepted={accepted}"
+            )).unwrap();
+            panic!("patch guard accepted a different source; retained fixture: {}", fixture.keep().display());
+        }
+        assert_eq!(fs::read(&path).unwrap(), if replace_parent { b"inside" } else { b"source" });
+        assert_eq!(fs::read(outside.join("value.txt")).unwrap(), b"source");
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), if replace_parent { 1 } else { 2 });
+        if !replace_parent { assert_eq!(fs::read(parent.join("original.txt")).unwrap(), b"source"); }
+        assert!(current_file_matches(&path, if replace_parent { b"inside" } else { b"source" }, &authority));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn patch_precondition_rejects_a_transient_parent_escape() {
+        patch_guard_read_race(true, true).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn patch_precondition_rejects_replacement_during_read() {
+        patch_guard_read_race(true, false).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn patch_content_guard_rejects_a_transient_parent_escape() {
+        patch_guard_read_race(false, true).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn patch_content_guard_rejects_replacement_during_read() {
+        patch_guard_read_race(false, false).await;
     }
 
     #[cfg(windows)]
