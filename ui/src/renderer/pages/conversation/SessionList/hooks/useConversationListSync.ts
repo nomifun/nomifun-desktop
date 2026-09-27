@@ -10,6 +10,7 @@ import type { ConversationId, MessageId, SshHostId } from '@/common/types/ids';
 import { getConversationOrNull } from '@/renderer/pages/conversation/utils/conversationCache';
 import {
   getConversationRuntimeAuthority,
+  getConversationPauseNotice,
   isCompleteMessageProjection,
 } from '@/renderer/pages/conversation/utils/conversationRuntime';
 import { addEventListener } from '@/renderer/utils/emitter';
@@ -216,7 +217,7 @@ const refreshConversations = () => {
           const activeTurnId = getExactSidebarActiveTurnId(conversation);
           if (activeTurnId) {
             activeTurnIdsState.set(conversation.id, activeTurnId);
-          } else if (conversation.status === 'finished') {
+          } else if (conversation.status === 'finished' || getConversationPauseNotice(conversation)) {
             activeTurnIdsState.delete(conversation.id);
             clearGenerating(conversation.id);
           }
@@ -304,6 +305,7 @@ const initializeConversationListSyncStore = () => {
   // may have dropped conversation.listChanged frames (delete/create while
   // offline), so reload the durable conversation snapshot.
   ipcBridge.conversation.reconnected.on(() => refreshConversations());
+  ipcBridge.conversation.turnPaused.on(() => refreshConversations());
   ipcBridge.conversation.listChanged.on((event) => {
     if (event.action === 'deleted') {
       activeTurnIdsState.delete(event.conversation_id);

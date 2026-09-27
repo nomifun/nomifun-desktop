@@ -1,4 +1,12 @@
 {
+  "executionPause": {
+    "title": "执行已暂停",
+    "stop": "结束本回合",
+    "providerUnavailable": "模型服务暂时不可用，任务尚未完成。已完成的操作会保留。",
+    "incomplete": "任务尚未完成，已完成的操作会保留。",
+    "cleanupRequired": "资源清理状态尚未确认，需要先核对执行状态。",
+    "sendBlocked": "继续前需要确认恢复条件，当前会话暂不接受新消息。"
+  },
   "welcome": {
     "title": "新会话",
     "placeholder": "发消息、上传文件、打开文件夹或创建定时任务...",

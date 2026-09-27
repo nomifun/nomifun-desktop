@@ -908,6 +908,11 @@ const fromApiUserMessageCreatedEvent = (
     event.companion_id == null ? event.companion_id : parseCompanionId(event.companion_id),
 });
 
+export const fromApiTurnPausedEvent = (raw: unknown): { conversation_id: ConversationId; turn_id: MessageId } => {
+  const value = raw as Record<string, unknown>;
+  return { conversation_id: parseConversationId(value.conversation_id), turn_id: parseMessageId(value.turn_id) };
+};
+
 export const fromApiTurnCompletedEvent = (raw: unknown): IConversationTurnCompletedEvent => {
   const r = raw as Record<string, unknown>;
   const rawLast = r.last_message as Record<string, unknown> | undefined;
@@ -1150,6 +1155,8 @@ export const conversation = {
     };
   }),
   turnCompleted: wsMappedEmitter<IConversationTurnCompletedEvent, unknown>('turn.completed', fromApiTurnCompletedEvent),
+  // Notification only: consumers re-read the canonical projection before lowering activity.
+  turnPaused: wsMappedEmitter<ReturnType<typeof fromApiTurnPausedEvent>, unknown>('turn.paused', fromApiTurnPausedEvent),
   listChanged: wsEmitter<IConversationListChangedEvent>('conversation.listChanged'),
   // Uses httpRequest directly (instead of httpGet + withResponseMap) because the
   // response mapper needs `workspace` from params to build fullPath/relativePath,

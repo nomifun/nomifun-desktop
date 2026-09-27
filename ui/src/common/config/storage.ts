@@ -112,6 +112,9 @@ export type TChatConversation = IChatConversation<
   'nomi',
   {
     workspace: string;
+    /** Canonical native execution state; a pause retains ownership of its turn. */
+    execution_phase?: string;
+    execution_pause?: { reason: string; cleanup_proven: boolean; paused_at_ms: number };
     custom_workspace?: boolean;
     proxy?: string;
     /** Skills snapshot for this conversation — authoritative list, written
