@@ -15,6 +15,8 @@ import {
   composeMessage,
   joinPath,
   mergeTextMessageContent,
+  mergeToolCallContent,
+  normalizeToolCallContent,
   preferTextMessageVersion,
   transformMessage,
   transformUserCreatedEvent,
@@ -44,6 +46,29 @@ const baseWire = (overrides: Record<string, unknown>) =>
     conversation_id: parseConversationId('0190f5fe-7c00-7a00-8000-000000000001'),
     ...overrides,
   }) as any;
+
+test('cancelled tool history cannot become successful after a late frame', () => {
+  const cancelled = normalizeToolCallContent({call_id:'cancelled',name:'exec_command',status:'canceled',output:'STARTED'}, 'finish');
+  expect(cancelled.status).toBe('canceled');
+  const completed = {...cancelled,status:'completed' as const};
+  expect(mergeToolCallContent(completed, cancelled).status).toBe('canceled');
+  expect(mergeToolCallContent(cancelled, completed).status).toBe('canceled');
+  expect(mergeToolCallContent(cancelled, completed).artifacts).toEqual([]);
+  expect(mergeToolCallContent(cancelled, {...cancelled,status:'error'}).status).toBe('error');
+});
+
+test('canonical cancelled Turn metadata survives transport normalization', () => {
+  const message = transformMessage(baseWire({type:'agent_status',data:{
+    backend:'nomi',status:'error',turn_summary:true,turn_state:'cancelled',finished_at_ms:3000,
+  }}));
+  if(message?.type!=='agent_status')throw new Error('expected status metadata');
+  expect(message.content.turn_state).toBe('cancelled');
+  const ordinary = transformMessage(baseWire({type:'agent_status',data:{
+    backend:'nomi',status:'error',turn_state:'cancelled',
+  }}));
+  if(ordinary?.type!=='agent_status')throw new Error('expected agent status');
+  expect(ordinary.content.turn_state).toBeUndefined();
+});
 
 describe('joinPath compatibility export', () => {
   test('preserves UNC and URI prefixes', () => {

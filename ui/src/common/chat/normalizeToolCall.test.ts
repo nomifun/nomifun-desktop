@@ -6,6 +6,14 @@ import {
 } from './normalizeToolCall';
 
 describe('normalizeToolCall', () => {
+  it('preserves an explicit cancelled process receipt and its partial output', () => {
+    const result = normalizeToolCall({type:'tool_call',content:{
+      call_id:'cancel-call',name:'exec_command',status:'canceled',output:'STARTED',
+    }} as any);
+    expect(result?.status).toBe('canceled');
+    expect(result?.output).toBe('STARTED');
+  });
+
   it('preserves only structurally valid explicit retry identity', () => {
     const result = normalizeToolCall({
       type: 'tool_call',

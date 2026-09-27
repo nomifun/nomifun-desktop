@@ -47,6 +47,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D02-03（REAL-010、OBS-008/014）：真实命令已取消/reaped，但历史仅接受 Runtime ToolCompleted，
+  漏掉取消后的宿主结算，UI 显示“已运行”且无输出。补相同 Turn/call 的有界宿主结算读取、原生
+  已清理 process 取消语义、前端终态/标题和停止确认后的历史刷新。Windows 118 项定向检查及
+  旧记录冷加载、新 Tauri COD 停止样本通过；历史 canonical 行/绑定/Snapshot 不变。首次 UI
+  失败保留，其他角色/复杂清理/macOS 未验，证据见 Windows W04。
+- 取消统计残余：W04 两个真实样本各有 2 个 model_step_started，而 Runtime turn_cancelled
+  payload 的 model_steps 为 0；不得以该字段宣称无模型调用，留 W06 核对，不计 N3 通过。
+
 - S-D03-05（FILE-037/038、LIFE-006/007 子断言）：Windows 非空目录根拒删仍先删除子项；递归
   中途错误被结算普通 failed。新增原生 DELETE 权限预检；递归错误/任务异常作为删除结果未知，
   保留 pending fence 并清除旧文件列表缓存。Windows 原生 ACL、重启/同 key/新 key/其他写拒绝、

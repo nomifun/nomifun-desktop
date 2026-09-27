@@ -44,7 +44,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | 首批 8 回合已验；MM 名称已修；GEN 完成报告仍 FAIL_VISIBLE_UX，不能计 PASS |
 | W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、大小写、ACL/部分删除、隔离 local/file remote；其余逐簇推进 | 文件首批 32、大小写 50、ACL 60 项（重叠不累加）、Git push owner 9 项通过；并发/跨盘、SSH 与完整 UI 待验 |
-| W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧失败历史丢失与无效重试入口已复现并修复；不重写旧 Snapshot | 原旧会话 Tauri 冷加载/刷新复验通过；其他恢复/停止/扩展 Case 待验 |
+| W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧 MM 历史/重试及命令取消历史已修复；不重写旧 Snapshot | 旧会话冷加载、COD 实时停止与输出保留已复验；其他恢复/扩展待验 |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
 | W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | Store checkpoint/lease 首批 19 项通过；真实宿主故障与长稳待验 |
 
@@ -220,5 +220,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   未覆盖两个 OS 进程竞争、正式 Tauri 强杀/恢复、完整 pause/resume、Job/浏览器清理与 N3/LONG；
   无真实模型调用，不计完整 Case 或 macOS PASS。
 
-下一步：W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余真实停止/恢复与扩展；
-W05 条件资源和 W06 原生故障按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。
+### W04 真实进程停止与取消投影（基线 `bfb7b515b`）
+
+- REAL-010/COD、OBS-008/014、LIFE-018/019 子断言：两个独立 data/work/profile 均经正式恢复，
+  从 Tauri 新建 Coding Session，使用既有加密 StepFun Plan / step-3.7-flash，同提示执行只写
+  started PID 标记的 120 秒 Bun 脚本；运行中点击正式停止。首次 native cleanup 正确，但 UI
+  只显示“已运行 bun”，详情遗漏取消状态与已产生的输出，记 `FAIL_VISIBLE_UX`，原证据保留。
+- 根因/修复：取消可先于 Runtime ToolCompleted，历史读取漏掉已提交的 host settlement。
+  现在按相同 Turn/call 读取有界宿主结算；仅原生 process 且 cleanup reaped 的取消标记为
+  canceled，其他错误与清理未确认仍为 error。前端保留该终态、丢弃成功 artifact 资格，迟到
+  completed 不覆盖取消；canonical Turn 元数据控制历史标题，停止确认后刷新已提交历史。
+- 首次后端 1 FAIL、UI 模型 2 FAIL、视图 1 FAIL 保留；修复后 UI 106 + 视图 5、后端历史
+  owner 4 + wire 3，共 **118 项通过**；typecheck、desktop-ui-boundary、Tauri 构建通过。
+- 原取消 Session 冷加载：显示“已取消执行”“已取消 bun”与 STARTED 输出；独立比较数据库
+  确认原 events/turns/messages/effects、绑定及全部 Snapshot content/envelope 均未变。
+- 新 Session 同提示实时回归：无手动刷新也显示取消和部分输出；Turn cancelled，process
+  receipt cancelled/reaped，实际 PID 消失、finished.txt 不存在、源脚本/兄弟文件哈希不变；
+  取消后无新增模型/工具执行。两次分别 **2 模型步、1 个进程**，清理 1165/1175ms；不重复计冷读。
+- 证据：`windows/w04-stop/{01,02-before,03-after,04-final,05-ui-after,06-live-after}/`。
+  未覆盖复杂子孙树、强杀/重启、其他角色、全体恢复矩阵与 macOS。统计残余：两次 Runtime
+  `turn_cancelled.model_steps` 都是 0，而事件链各有 2 个 model step；本页按事件链计数，W06 继续核对。
+
+下一步：取消统计字段、W03 跨盘/并发与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；W05 条件资源和
+W06 原生故障按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。

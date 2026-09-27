@@ -126,7 +126,9 @@ function TurnProcessDisclosure<T>({
         defaultValue: 'Took {{duration}}',
       })
     : t('messages.turnDurationUnknown', { defaultValue: 'Time --' });
-  const label = durationLabel;
+  const label = item.state === 'canceled'
+    ? `${t('messages.canceledExecution', { defaultValue: 'Execution canceled' })} · ${durationLabel}`
+    : durationLabel;
   const bodyId = `turn-process-disclosure-body-${sanitizeDomId(item.id)}`;
   const disclosureExpanded = hasProcessItems && expanded;
   const headerContent = (

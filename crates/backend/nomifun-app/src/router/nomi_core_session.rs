@@ -5635,6 +5635,31 @@ mod session_boundary_tests {
     }
 
     #[test]
+    fn history_projects_confirmed_process_cancellation_without_hiding_other_errors() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
+        for (capability, reaped, expected) in [
+            ("workspace.process", true, "canceled"),
+            ("workspace.process", false, "error"),
+            ("workspace.files", true, "error"),
+        ] {
+            let output = json!({"state":"cancelled","cleanup":{"reaped":reaped},"output":{"text":"STARTED"}}).to_string();
+            let message = canonical_message_response_with_observation(&session_id, 1000,
+                MessageProjection {
+                    session_id:session_id.clone(), projection_id:format!("tool:{message_id}"),
+                    first_seq:4,last_seq:6,presentation_intent:"tool".into(),message_type:None,message_status:None,
+                    projection:json!({"correlation_id":message_id,"state":"recorded",
+                        "tool_summary":{"call_id":"call-1","name":"exec_command","capability_id":capability}}),
+                    semantic_digest:"digest".into(),
+                }, Some(&HistoricalToolObservation { turn_id:None,args:None,output:Some(output.clone()),is_error:Some(true) })
+            ).unwrap().unwrap();
+            assert_eq!(message.content["status"], expected);
+            assert_eq!(message.content["output"], output);
+            assert_eq!(message.status, Some(if expected == "canceled" { MessageStatus::Finish } else { MessageStatus::Error }));
+        }
+    }
+
+    #[test]
     fn history_projects_public_step_text_with_its_turn_identity() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let root = "0190f5fe-7c00-7a00-8abc-012345678911";
@@ -12637,6 +12662,7 @@ fn canonical_message_response_with_observation(
                 "agent_name": "Nomi",
                 "turn_id": root_message_id,
                 "turn_summary": true,
+                "turn_state": state,
                 "started_seq": document.get("started_seq").cloned().unwrap_or(Value::Null),
                 "finished_seq": document.get("finished_seq").cloned().unwrap_or(Value::Null),
                 "started_at_ms": started_at_ms,
@@ -12732,8 +12758,12 @@ fn canonical_message_response_with_observation(
                             summary.insert("output".to_owned(), json!(output));
                         }
                         if let Some(is_error) = observation.is_error {
+                            let cancelled = summary.get("capability_id").and_then(Value::as_str) == Some("workspace.process")
+                                && observation.output.as_deref().and_then(|output| serde_json::from_str::<Value>(output).ok())
+                                    .is_some_and(|result| result.get("state").and_then(Value::as_str) == Some("cancelled")
+                                        && result.pointer("/cleanup/reaped").and_then(Value::as_bool) == Some(true));
                             summary.insert("status".to_owned(), json!(
-                                if is_error { "error" } else { "completed" }
+                                if cancelled { "canceled" } else if is_error { "error" } else { "completed" }
                             ));
                         }
                     }

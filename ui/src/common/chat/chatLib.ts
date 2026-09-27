@@ -237,7 +237,7 @@ export type IMessageToolCall = IMessage<
      */
     args?: Record<string, unknown> | null;
     error?: string;
-    status?: 'running' | 'completed' | 'error';
+    status?: 'running' | 'completed' | 'error' | 'canceled';
     input?: Record<string, unknown>;
     output?: string;
     description?: string;
@@ -270,6 +270,9 @@ export const mergeToolCallContent = (
 
   if (existing.status === 'error' || incoming.status === 'error') {
     return { ...merged, status: 'error', artifacts: [] };
+  }
+  if (existing.status === 'canceled' || incoming.status === 'canceled') {
+    return { ...merged, status: 'canceled', artifacts: [] };
   }
   if (existing.status === 'completed' && incoming.status !== 'completed') {
     return {
@@ -327,6 +330,7 @@ export type IMessageAgentStatus = IMessage<
     has_active_session?: boolean;
     /** Durable, renderer-facing lifecycle receipt derived from the canonical Turn. */
     turn_summary?: boolean;
+    turn_state?: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
     started_seq?: number;
     finished_seq?: number | null;
     /** Canonical wall-clock interval for the owning turn. */
@@ -888,7 +892,7 @@ export const normalizeToolCallContent = (
 ): IMessageToolCall['content'] => {
   const data = isObject(value) ? value : {};
   const rawStatus =
-    data.status === 'running' || data.status === 'completed' || data.status === 'error'
+    data.status === 'running' || data.status === 'completed' || data.status === 'error' || data.status === 'canceled'
       ? data.status
       : undefined;
   let status = rawStatus;
@@ -947,6 +951,9 @@ const normalizeAgentStatusContent = (value: unknown): IMessageAgentStatus['conte
     ...(typeof data.is_connected === 'boolean' ? { is_connected: data.is_connected } : {}),
     ...(typeof data.has_active_session === 'boolean' ? { has_active_session: data.has_active_session } : {}),
     ...(data.turn_summary === true ? { turn_summary: true } : {}),
+    ...(data.turn_summary === true &&
+      ['running', 'completed', 'failed', 'cancelled', 'interrupted'].includes(data.turn_state as string)
+      ? { turn_state: data.turn_state as IMessageAgentStatus['content']['turn_state'] } : {}),
     ...(finiteNumber(data.started_seq) != null ? { started_seq: finiteNumber(data.started_seq) } : {}),
     ...(data.finished_seq === null
       ? { finished_seq: null }

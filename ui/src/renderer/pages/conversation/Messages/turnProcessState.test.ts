@@ -8,6 +8,10 @@ import { describe, expect, test } from 'bun:test';
 import { getProcessItemState, getToolMessagesProcessState } from './turnProcessState';
 
 describe('turn process state', () => {
+  test('uses explicit canonical cancellation without hiding ordinary agent errors', () => {
+    expect(getProcessItemState({type:'agent_status',content:{status:'error',turn_summary:true,turn_state:'cancelled'}} as any)).toBe('canceled');
+    expect(getProcessItemState({type:'agent_status',content:{status:'error',turn_state:'cancelled'}} as any)).toBe('failed');
+  });
   test('does not mark unparsed tool-call text as completed work', () => {
     expect(getProcessItemState({
       type: 'text', position: 'left', content: { content: '<tool_call>\n<function=write_file>\ncontent' },

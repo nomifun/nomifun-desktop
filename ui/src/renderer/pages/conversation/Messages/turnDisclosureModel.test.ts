@@ -34,6 +34,21 @@ const item = (
 });
 
 describe('buildTurnDisclosureItems', () => {
+  test('a durable cancelled summary survives reload and partial assistant text', () => {
+    for (const withProcess of [false, true]) {
+      const result = buildTurnDisclosureItems([
+        item('user', 'user'),
+        ...(withProcess ? [item('tool','process',{createdAt:2000,processState:'canceled'})] : []),
+        item('partial','assistant',{createdAt:2500,processState:'completed'}),
+        item('summary','metadata',{createdAt:3000,turnEndedAt:3000,processState:'canceled'}),
+      ], {tailClosed:true});
+      const disclosure = result.find(entry=>entry.type==='turn_disclosure');
+      expect(disclosure?.state).toBe('canceled');
+      expect(disclosure?.running).toBe(false);
+      expect(disclosure?.endAt).toBe(3000);
+    }
+  });
+
   test('collapses completed intermediate steps while keeping the final answer visible', () => {
     const result = buildTurnDisclosureItems(
       [
