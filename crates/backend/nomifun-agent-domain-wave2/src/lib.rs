@@ -96,6 +96,20 @@ pub struct WorkspaceFileChangedEvent {
     pub kind: WorkspaceFileChangeKind,
 }
 
+impl WorkspaceFileChangedEvent {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.path.is_empty()
+            || self.path.len() > 4096
+            || self.path.starts_with('/')
+            || self.path.contains(['\0', '\\'])
+            || self.path.split('/').any(|part| part.is_empty() || part == "..")
+        {
+            return Err("workspace.files changed event violates its canonical path contract".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceFilesChangedBatch {
@@ -119,13 +133,7 @@ impl WorkspaceFilesChangedBatch {
         if self.capability_id != WORKSPACE_FILES_MODULE_ID
             || self.event_schema != WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID
             || self.events.len() > 256
-            || self.events.iter().any(|event| {
-                event.path.is_empty()
-                    || event.path.len() > 4096
-                    || event.path.starts_with('/')
-                    || event.path.contains(['\0', '\\'])
-                    || event.path.split('/').any(|part| part.is_empty() || part == "..")
-            })
+            || self.events.iter().any(|event| event.validate().is_err())
         {
             return Err("workspace.files changed batch violates its canonical contract".into());
         }

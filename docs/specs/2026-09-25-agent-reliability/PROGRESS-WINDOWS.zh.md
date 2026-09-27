@@ -559,6 +559,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   路径的容量/TTL、尾事件补发、迟到回调、缓存接线、workspace.files/changed 队列/落后 UI、其他
   平台及完整 N3/LONG/99% 仍待验，不计完整 FILE-040 或共享阶段完成。
 
-下一步优先共享：FILE 既有文件发布、扁平遍历/侧栏、watcher 接线与队列，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 FILE changed 批次队列（W25，基线 `e43923041`）
+
+- S-D03-21 / FILE-040、PORT-012：超长相对路径让整批校验失败，正常事件与 dropped 一并
+  清空；批次交付后相同路径新修改被旧 debounce 压掉。两项首次 FAIL/观察保留于
+  `phase-2-3/2026-09-28/windows/w25-workspace-event-queue/01-before/`。
+- 入队共用原路径合同，异常通知计入 dropped 而不污染正常批次；交付时清 debounce，只合并
+  未交付批次内的重复事实。未改 schema、路径边界或扩展可接受输入。
+- 队列/原生监听 **7**、事件合同 **1**，共 **8 项通过**；7 项同构建各重复 **20/20**，包含
+  真实递归 FS 事件。混合反例验证 7 个无效路径 + 7 个溢出 = dropped 14，保留 256 项正确顺序，
+  批内重复仍合并，交付后新事件可见；原 debounce 身份上限保持通过。
+- `03-regression/` 保留 rustc `STATUS_ACCESS_VIOLATION` 崩溃，未执行测试；确认进程结束、
+  保存内存/磁盘状态后，同源码以单 Cargo job 重试通过，未修改断言。最终日志
+  `02-after/event-contract.log`、`04-compiler-retry/`、`05-repeat/`，diff 通过。
+  无模型/UI；native rescan 标记、更多不可表示名称、整体传输预算、取消/恢复中批次消费、客户端
+  全量对账、其他平台及 N3/LONG/99% 仍待验，不计完整 FILE-040/PORT-012 或共享阶段完成。
+
+下一步优先共享：FILE 既有文件发布、扁平遍历/侧栏、watcher 接线与消费者恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
