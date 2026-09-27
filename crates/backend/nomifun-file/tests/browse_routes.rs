@@ -28,9 +28,11 @@ impl UserEventSink for NoopBroadcaster {
 fn make_router(root: &std::path::Path) -> axum::Router {
     let broadcaster = Arc::new(NoopBroadcaster);
     let roots = vec![root.to_path_buf()];
+    let file_service = Arc::new(FileService::new(broadcaster.clone(), roots.clone()));
+    let watch_service = Arc::new(FileWatchService::new(broadcaster, Arc::downgrade(&file_service)).expect("watch service"));
     file_routes(FileRouterState {
-        file_service: Arc::new(FileService::new(broadcaster.clone(), roots.clone())),
-        watch_service: Arc::new(FileWatchService::new(broadcaster).expect("watch service")),
+        file_service,
+        watch_service,
         snapshot_service: Arc::new(SnapshotService::new()),
         allowed_roots: roots.clone(),
         browse_roots: roots,

@@ -797,6 +797,16 @@ impl FileService {
         self.workspace_files_cache.remove(root);
     }
 
+    /// A native change can affect inventories above or below a watched path.
+    /// Use the captured native path: deleted/renamed entries cannot be resolved
+    /// again, and resolving a replacement would invalidate a different target.
+    pub(crate) fn invalidate_caches_for_path(&self, changed: &Path) {
+        self.workspace_files_cache.retain(|root, _| {
+            let root = Path::new(root);
+            !changed.starts_with(root) && !root.starts_with(changed)
+        });
+    }
+
     /// Get the allowed root references for path validation.
     fn allowed_roots_refs(&self) -> Vec<&Path> {
         self.allowed_roots.iter().map(|p| p.as_path()).collect()
@@ -3814,6 +3824,36 @@ mod tests {
         service.invalidate_cache(&fs::canonicalize(&first).unwrap().to_string_lossy());
         assert_eq!(inventory_names(&service.list_workspace_files_impl(first.to_str().unwrap(), &authority).await.unwrap()), ["new.txt", "old.txt"]);
         assert_eq!(inventory_names(&service.list_workspace_files_impl(second.to_str().unwrap(), &authority).await.unwrap()), ["old.txt"]);
+    }
+
+    #[tokio::test]
+    async fn inventory_native_scope_invalidates_related_roots_without_string_prefix_collisions() {
+        let fixture = inventory_fixture();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let watched = root.join("workspace");
+        let nested = watched.join("nested");
+        let sibling = root.join("workspace-other");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(&sibling).unwrap();
+        fs::write(nested.join("old.txt"), b"old").unwrap();
+        fs::write(sibling.join("keep.txt"), b"unrelated").unwrap();
+        let service = make_service();
+        let authority = PathAuthority::Workspace(root.clone());
+        for path in [&root, &watched, &nested, &sibling] {
+            service.list_workspace_files_impl(path.to_str().unwrap(), &authority).await.unwrap();
+        }
+        let sibling_slot = service.workspace_files_cache.get(sibling.to_str().unwrap()).unwrap().clone();
+        fs::write(nested.join("new.txt"), b"new").unwrap();
+        service.invalidate_caches_for_path(&watched);
+        assert!(!service.workspace_files_cache.contains_key(root.to_str().unwrap()));
+        assert!(!service.workspace_files_cache.contains_key(watched.to_str().unwrap()));
+        assert!(!service.workspace_files_cache.contains_key(nested.to_str().unwrap()));
+        assert!(Arc::ptr_eq(&sibling_slot, service.workspace_files_cache.get(sibling.to_str().unwrap()).unwrap().value()));
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(nested.to_str().unwrap(), &authority).await.unwrap()), ["new.txt", "old.txt"]);
+        // Retired paths still identify which parent inventory needs re-reading.
+        fs::remove_file(nested.join("new.txt")).unwrap();
+        service.invalidate_caches_for_path(&nested.join("new.txt"));
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(nested.to_str().unwrap(), &authority).await.unwrap()), ["old.txt"]);
     }
 
     struct InventoryReadingEvents {

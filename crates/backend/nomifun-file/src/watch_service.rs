@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -74,6 +74,8 @@ fn should_emit_at(debounce: &DashMap<String, Instant>, key: &str, now: Instant) 
 ///   creation events.
 pub struct FileWatchService {
     user_events: Arc<dyn UserEventSink>,
+    /// Cache owner shared with the file routes; callbacks must not keep it alive.
+    inventory: Weak<crate::FileService>,
     /// Shared watcher for all single-file watches.
     file_watcher: Mutex<FileWatchState>,
     /// Set of canonical paths being watched (shared with the event handler).
@@ -82,6 +84,39 @@ pub struct FileWatchService {
     office_watchers: Mutex<OfficeWatchState>,
     /// Debounce timestamps for the shared single-file watcher.
     debounce: Arc<DashMap<String, Instant>>,
+}
+
+fn native_inventory_changed(result: &Result<notify::Event, notify::Error>) -> bool {
+    result.as_ref().map_or(true, |event| {
+        event.need_rescan() || event_kind_to_str(&event.kind).is_some()
+    })
+}
+
+fn invalidate_file_inventory(
+    inventory: &Weak<crate::FileService>, watched: &DashMap<String, HashSet<String>>,
+    result: &Result<notify::Event, notify::Error>,
+) {
+    if !native_inventory_changed(result) { return; }
+    let Some(files) = inventory.upgrade() else { return; };
+    if let Ok(event) = result && !event.need_rescan() {
+        for path in &event.paths { files.invalidate_caches_for_path(path); }
+    } else {
+        // Native loss does not identify the affected file. Revoke every cache
+        // intersecting a registration owned by this shared watcher.
+        let paths: Vec<_> = watched.iter().map(|entry| entry.key().clone()).collect();
+        for path in paths { files.invalidate_caches_for_path(Path::new(&path)); }
+    }
+}
+
+fn invalidate_office_inventory(
+    inventory: &Weak<crate::FileService>, workspace: &Path,
+    result: &Result<notify::Event, notify::Error>,
+) {
+    if native_inventory_changed(result) && let Some(files) = inventory.upgrade() {
+        // Every change matters to the inventory, including non-Office files,
+        // ignore rules, renames and stream errors. Filter UI events afterwards.
+        files.invalidate_caches_for_path(workspace);
+    }
 }
 
 struct OfficeWatchRegistration {
@@ -145,16 +180,24 @@ fn confirm_unwatch(watcher: &mut RecommendedWatcher, path: &Path) -> Result<(), 
 }
 
 impl FileWatchService {
+    fn invalidate_registered_inventory(&self, path: &Path) {
+        if let Some(files) = self.inventory.upgrade() {
+            files.invalidate_caches_for_path(path);
+        }
+    }
+
     /// Create a new watch service backed by the platform's recommended watcher.
-    pub fn new(user_events: Arc<dyn UserEventSink>) -> Result<Self, AppError> {
+    pub fn new(user_events: Arc<dyn UserEventSink>, inventory: Weak<crate::FileService>) -> Result<Self, AppError> {
         let watched_files: Arc<DashMap<String, HashSet<String>>> = Arc::new(DashMap::new());
         let debounce: Arc<DashMap<String, Instant>> = Arc::new(DashMap::new());
 
         let events = user_events.clone();
         let wf = watched_files.clone();
         let db = debounce.clone();
+        let callback_inventory = inventory.clone();
 
         let file_watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            invalidate_file_inventory(&callback_inventory, &wf, &res);
             let event = match res {
                 Ok(e) => e,
                 Err(e) => {
@@ -193,6 +236,7 @@ impl FileWatchService {
 
         Ok(Self {
             user_events,
+            inventory,
             file_watcher: Mutex::new(FileWatchState { watcher: file_watcher, aliases: HashMap::new() }),
             watched_files,
             office_watchers: Mutex::new(OfficeWatchState::default()),
@@ -220,6 +264,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
         if let Some(mut owners) = self.watched_files.get_mut(&key) {
             owners.insert(owner_id.to_owned());
             watcher.aliases.insert((owner_id.to_owned(), alias), key);
+            self.invalidate_registered_inventory(&canonical);
             return Ok(());
         }
         self.watched_files
@@ -229,6 +274,8 @@ impl crate::traits::IFileWatchService for FileWatchService {
             return Err(AppError::Internal(format!("failed to watch {file_path}: {error}")));
         }
         watcher.aliases.insert((owner_id.to_owned(), alias), key);
+        // The watcher cannot report changes made before this subscription.
+        self.invalidate_registered_inventory(&canonical);
         Ok(())
     }
 
@@ -287,6 +334,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
         if let Some(registration) = watchers.registrations.get(&key) {
             registration.owners.insert(owner_id.to_owned(), ());
             watchers.aliases.insert((owner_id.to_owned(), alias), key);
+            self.invalidate_registered_inventory(&canonical);
             return Ok(());
         }
 
@@ -299,8 +347,10 @@ impl crate::traits::IFileWatchService for FileWatchService {
         let owners = Arc::new(DashMap::new());
         owners.insert(owner_id.to_owned(), ());
         let callback_owners = owners.clone();
+        let inventory = self.inventory.clone();
 
         let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+            invalidate_office_inventory(&inventory, Path::new(&ws), &res);
             let event = match res {
                 Ok(e) => e,
                 Err(e) => {
@@ -326,6 +376,7 @@ impl crate::traits::IFileWatchService for FileWatchService {
             },
         );
         watchers.aliases.insert((owner_id.to_owned(), alias), key);
+        self.invalidate_registered_inventory(&canonical);
         Ok(())
     }
 
@@ -380,6 +431,187 @@ mod tests {
         }
     }
 
+    struct InventoryDeliveryEvents {
+        files: Mutex<std::sync::Weak<crate::FileService>>,
+        root: PathBuf,
+        runtime: tokio::runtime::Handle,
+        office: bool,
+        observations: tokio::sync::mpsc::UnboundedSender<(String, Result<Vec<String>, String>)>,
+    }
+
+    impl UserEventSink for InventoryDeliveryEvents {
+        fn send_to_user(&self, owner: &str, event: WebSocketMessage<serde_json::Value>) {
+            let expected = if self.office {
+                event.name == "workspaceOfficeWatch.fileAdded"
+            } else {
+                event.name == "fileWatch.fileChanged" && event.data["event_type"] == "remove"
+            };
+            if !expected { return; }
+            let files = self.files.lock().unwrap().upgrade().unwrap();
+            let root = self.root.clone();
+            let runtime = self.runtime.clone();
+            // Observe the public API during delivery, before the callback can
+            // perform any later invalidation. The native callback has no runtime.
+            let observed = std::thread::spawn(move || runtime.block_on(async move {
+                use crate::IFileService;
+                files.list_workspace_files(root.to_str().unwrap()).await
+                    .map(|files| {
+                        let mut names = files.into_iter().map(|file| file.name).collect::<Vec<_>>();
+                        names.sort();
+                        names
+                    }).map_err(|error| error.to_string())
+            })).join().unwrap();
+            let _ = self.observations.send((owner.to_owned(), observed));
+        }
+    }
+
+    async fn inventory_after_native_delivery(office: bool) {
+        use crate::{IFileService, IFileWatchService};
+        let fixture = lifecycle_fixture();
+        let root = fixture.path().join("workspace");
+        std::fs::create_dir(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let old = root.join("old.txt");
+        std::fs::write(&old, b"old").unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let events = Arc::new(InventoryDeliveryEvents {
+            files: Mutex::new(std::sync::Weak::new()), root: root.clone(),
+            runtime: tokio::runtime::Handle::current(), office, observations: sender,
+        });
+        let files = Arc::new(crate::FileService::new(events.clone(), vec![root.clone()]));
+        *events.files.lock().unwrap() = Arc::downgrade(&files);
+        assert_eq!(files.list_workspace_files(root.to_str().unwrap()).await.unwrap().len(), 1);
+        let watches = FileWatchService::new(events, Arc::downgrade(&files)).unwrap();
+        let owner = nomifun_common::generate_id();
+        if office {
+            watches.start_office_watch(&owner, root.to_str().unwrap()).await.unwrap();
+            assert_eq!(files.list_workspace_files(root.to_str().unwrap()).await.unwrap().len(), 1);
+            std::fs::write(root.join("new.docx"), b"new").unwrap();
+        } else {
+            watches.start_watch(&owner, old.to_str().unwrap()).await.unwrap();
+            assert_eq!(files.list_workspace_files(root.to_str().unwrap()).await.unwrap().len(), 1);
+            std::fs::remove_file(old).unwrap();
+        }
+        let observed = tokio::time::timeout(Duration::from_secs(3), receiver.recv()).await;
+        let mut actual = std::fs::read_dir(&root).unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap()).collect::<Vec<_>>();
+        actual.sort();
+        drop(watches);
+        if !matches!(&observed, Ok(Some((recipient, Ok(names)))) if recipient == &owner && names == &actual) {
+            let observation = serde_json::json!({ "office": office, "observed": format!("{observed:?}"), "disk": actual });
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observation).unwrap()).unwrap();
+            panic!("native delivery exposed a stale inventory; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inventory_refreshes_before_native_office_delivery() {
+        inventory_after_native_delivery(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inventory_refreshes_before_native_remove_delivery() {
+        inventory_after_native_delivery(false).await;
+    }
+
+    #[tokio::test]
+    async fn inventory_activation_reconciles_changes_before_subscription() {
+        use crate::{IFileService, IFileWatchService};
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let files = Arc::new(crate::FileService::new(Arc::new(NoEvents), vec![root.clone()]));
+        let watches = FileWatchService::new(Arc::new(NoEvents), Arc::downgrade(&files)).unwrap();
+        let owner = nomifun_common::generate_id();
+        let mut observations = Vec::new();
+        for office in [false, true] {
+            let workspace = root.join(if office { "office" } else { "single" });
+            std::fs::create_dir(&workspace).unwrap();
+            let watched = workspace.join("watched.txt");
+            std::fs::write(&watched, b"old").unwrap();
+            for round in 1..=2 {
+                files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap();
+                // No subscription is active while the cached inventory becomes stale.
+                std::fs::write(workspace.join(format!("gap-{round}.docx")), b"gap").unwrap();
+                if office {
+                    watches.start_office_watch(&owner, workspace.to_str().unwrap()).await.unwrap();
+                } else {
+                    watches.start_watch(&owner, watched.to_str().unwrap()).await.unwrap();
+                }
+                let observed = files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap();
+                let actual = std::fs::read_dir(&workspace).unwrap().count();
+                observations.push((office, round, observed.len(), actual));
+                if office {
+                    watches.stop_office_watch(&owner, workspace.to_str().unwrap()).await.unwrap();
+                } else {
+                    watches.stop_watch(&owner, watched.to_str().unwrap()).await.unwrap();
+                }
+            }
+        }
+        drop(watches);
+        if observations.iter().any(|(_, _, observed, actual)| observed != actual) {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
+            panic!("activation kept a pre-subscription snapshot; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_gaps_and_filtered_office_changes_revoke_cached_snapshots() {
+        use crate::IFileService;
+        let fixture = lifecycle_fixture();
+        let root = std::fs::canonicalize(fixture.path()).unwrap();
+        let files = Arc::new(crate::FileService::new(Arc::new(NoEvents), vec![root.clone()]));
+        let first = root.join("first");
+        let second = root.join("second");
+        let watched = DashMap::new();
+        for workspace in [&first, &second] {
+            std::fs::create_dir(workspace).unwrap();
+            let file = workspace.join("watched.txt");
+            std::fs::write(&file, b"old").unwrap();
+            watched.insert(file.to_string_lossy().into_owned(), HashSet::from(["owner".to_owned()]));
+        }
+        let events = [
+            (false, Err(notify::Error::generic("injected native gap"))),
+            (false, Ok(notify::Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan))),
+            (true, Err(notify::Error::generic("injected native gap"))),
+            (true, Ok(notify::Event::new(EventKind::Access(AccessKind::Any)).set_flag(notify::event::Flag::Rescan))),
+            (true, Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any)).add_path(first.join("plain.txt")))),
+        ];
+        let mut observations = Vec::new();
+        for (index, (office, event)) in events.iter().enumerate() {
+            for workspace in [&first, &second] {
+                files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap();
+                std::fs::write(workspace.join(format!("{index}.txt")), b"new").unwrap();
+            }
+            if *office {
+                // A recursive registration covers all names, even when Office
+                // delivery would filter out this event's kind or extension.
+                invalidate_office_inventory(&Arc::downgrade(&files), &root, event);
+            } else {
+                invalidate_file_inventory(&Arc::downgrade(&files), &watched, event);
+            }
+            for workspace in [&first, &second] {
+                let observed = files.list_workspace_files(workspace.to_str().unwrap()).await.unwrap().len();
+                let actual = std::fs::read_dir(workspace).unwrap().count();
+                observations.push((index, observed, actual));
+            }
+        }
+        if observations.iter().any(|(_, observed, actual)| observed != actual) {
+            std::fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
+            panic!("native gap or filtered change kept stale caches; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[test]
+    fn inventory_callbacks_do_not_retain_the_file_service() {
+        let files = Arc::new(crate::FileService::new(Arc::new(NoEvents), vec![]));
+        let weak = Arc::downgrade(&files);
+        let watches = FileWatchService::new(Arc::new(NoEvents), weak.clone()).unwrap();
+        drop(files);
+        assert!(weak.upgrade().is_none());
+        invalidate_file_inventory(&weak, &watches.watched_files, &Err(notify::Error::generic("closed")));
+        assert!(weak.upgrade().is_none());
+    }
+
     #[tokio::test]
     async fn deleted_file_watch_can_be_stopped_through_its_original_alias() {
         use crate::IFileWatchService;
@@ -389,7 +621,7 @@ mod tests {
         let alias = fixture.path().join("parent/../watched.txt");
         std::fs::write(&file, b"initial").unwrap();
         let owner = nomifun_common::generate_id();
-        let service = FileWatchService::new(Arc::new(NoEvents)).unwrap();
+        let service = FileWatchService::new(Arc::new(NoEvents), Weak::new()).unwrap();
         service.start_watch(&owner, alias.to_str().unwrap()).await.unwrap();
         std::fs::remove_file(&file).unwrap();
         service.stop_watch(&owner, alias.to_str().unwrap()).await.unwrap();
@@ -413,7 +645,7 @@ mod tests {
         let alias = fixture.path().join("parent/../workspace");
         std::fs::create_dir(&workspace).unwrap();
         let owner = nomifun_common::generate_id();
-        let service = FileWatchService::new(Arc::new(NoEvents)).unwrap();
+        let service = FileWatchService::new(Arc::new(NoEvents), Weak::new()).unwrap();
         service.start_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
         std::fs::remove_dir(&workspace).unwrap();
         service.stop_office_watch(&owner, alias.to_str().unwrap()).await.unwrap();
@@ -446,7 +678,7 @@ mod tests {
             let other = if office { second.clone() } else { second.join("watched.txt") };
             let other_key = std::fs::canonicalize(&other).unwrap().to_string_lossy().into_owned();
             let owner = nomifun_common::generate_id();
-            let service = FileWatchService::new(Arc::new(NoEvents)).unwrap();
+            let service = FileWatchService::new(Arc::new(NoEvents), Weak::new()).unwrap();
             if office {
                 service.start_office_watch(&owner, original.to_str().unwrap()).await.unwrap();
                 service.start_office_watch(&owner, other.to_str().unwrap()).await.unwrap();
@@ -493,7 +725,7 @@ mod tests {
         let owner = nomifun_common::generate_id();
         let next_owner = nomifun_common::generate_id();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let service = FileWatchService::new(Arc::new(ChannelEvents(sender))).unwrap();
+        let service = FileWatchService::new(Arc::new(ChannelEvents(sender)), Weak::new()).unwrap();
         let file = fixture.path().join("file.txt");
         let alias = fixture.path().join("parent/../file.txt");
         std::fs::write(&file, b"old").unwrap();
@@ -561,7 +793,7 @@ mod tests {
         let parent_owner = nomifun_common::generate_id();
         let child_owner = nomifun_common::generate_id();
         let events = Arc::new(OfficeDeliveryEvents::default());
-        let service = FileWatchService::new(events.clone()).unwrap();
+        let service = FileWatchService::new(events.clone(), Weak::new()).unwrap();
         service.start_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
         service.start_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
         let now = Instant::now();
@@ -584,7 +816,7 @@ mod tests {
         let old_owner = nomifun_common::generate_id();
         let new_owner = nomifun_common::generate_id();
         let events = Arc::new(OfficeDeliveryEvents::default());
-        let service = FileWatchService::new(events.clone()).unwrap();
+        let service = FileWatchService::new(events.clone(), Weak::new()).unwrap();
         service.start_office_watch(&old_owner, root.to_str().unwrap()).await.unwrap();
         let now = Instant::now();
         inject_office_event(&service, root.to_str().unwrap(), &file, now, &events);
@@ -608,7 +840,7 @@ mod tests {
         let parent_owner = nomifun_common::generate_id();
         let child_owner = nomifun_common::generate_id();
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let service = FileWatchService::new(Arc::new(ChannelEvents(sender))).unwrap();
+        let service = FileWatchService::new(Arc::new(ChannelEvents(sender)), Weak::new()).unwrap();
         service.start_office_watch(&parent_owner, root.to_str().unwrap()).await.unwrap();
         service.start_office_watch(&child_owner, nested.to_str().unwrap()).await.unwrap();
         std::fs::write(nested.join("shared.docx"), b"first fixture").unwrap();
