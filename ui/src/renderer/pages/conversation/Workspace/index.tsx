@@ -101,6 +101,7 @@ const ChatWorkspace: React.FC<WorkspaceProps> = ({
       responseStream: (listener) => ipcBridge.agentConversation.responseStream.on(listener),
       fileUpdates: (listener) => ipcBridge.fileStream.contentUpdate.on(listener),
       turnCompleted: (listener) => ipcBridge.conversation.turnCompleted.on(listener),
+      reconnected: (listener) => ipcBridge.conversation.reconnected.on(listener),
       manual: (listener) => addEventListener(`${eventPrefix}.workspace.refresh`, listener),
     }, conversation_id, workspace, cb),
     [conversation_id, eventPrefix, workspace]

@@ -19,6 +19,7 @@ export interface ConversationWorkspaceRefreshSources {
   responseStream: (listener: (event: { conversation_id?: string; type: string; data?: unknown }) => void) => Unsubscribe;
   fileUpdates: (listener: (event: { workspace: string }) => void) => Unsubscribe;
   turnCompleted: (listener: (event: { conversation_id: string }) => void) => Unsubscribe;
+  reconnected: (listener: () => void) => Unsubscribe;
   manual: (listener: () => void) => Unsubscribe;
 }
 
@@ -60,6 +61,9 @@ export function subscribeConversationWorkspaceRefresh(
     sources.turnCompleted((event) => {
       if (event.conversation_id === conversationId) throttledRefresh();
     }),
+    // The shared bridge uses this for reconnects and server-reported delivery
+    // gaps. Re-read the active workspace because missed frames are not replayed.
+    sources.reconnected(throttledRefresh),
     sources.manual(refresh),
   ];
   return () => {
