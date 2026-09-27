@@ -222,7 +222,7 @@ impl FileService {
 
     /// Read a workspace-relative file through an explicit AgentSession
     /// resource binding. The host supplies the resolved native workspace root;
-    /// all path I/O still goes through the existing confined authority.
+    /// Use the same confined, 8 MiB reader as the Agent text/image tool paths.
     pub async fn read_file_for_agent_session(
         &self,
         scope: &AgentSessionWorkspaceBinding,
@@ -230,7 +230,11 @@ impl FileService {
     ) -> Result<Option<String>, AppError> {
         scope.require_operation(crate::resource::READ_OPERATION)?;
         let path = scope.resolve_relative_path(relative_path)?;
-        self.read_file_impl(&path.to_string_lossy(), &scope.authority()).await
+        let authority = scope.authority();
+        tokio::task::spawn_blocking(move || {
+            crate::agent_text_read::read_source(&path,&authority,MAX_AGENT_PATCH_FILE_BYTES,&mut 0)
+                .map(|source|source.map(|(text,_)|text))
+        }).await.map_err(|error|AppError::Internal(format!("workspace text read task failed: {error}")))?
     }
 
     pub async fn list_workspace_files_for_agent_session(

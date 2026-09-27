@@ -29,6 +29,8 @@ pub mod workspace_listing;
 mod vcs_stage;
 mod workspace_write;
 mod workspace_observation;
+#[cfg(windows)]
+mod windows_read;
 pub use workspace_observation::WorkspacePathObservation;
 
 pub use path_safety::{PathAuthority, has_traversal, validate_path, validate_path_for_write};

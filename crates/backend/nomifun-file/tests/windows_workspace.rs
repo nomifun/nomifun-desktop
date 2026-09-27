@@ -108,6 +108,41 @@ fn saved_dacl(path: &Path) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn reading_a_known_file_does_not_require_directory_listing_or_lock_out_other_readers() {
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
+    let root = tempfile::tempdir().unwrap();
+    let nested = root.path().join("nested");
+    fs::create_dir(&nested).unwrap();
+    let target = nested.join("known.txt");
+    fs::write(&target,b"readable").unwrap();
+    let (service,scope,_) = owner(root.path());
+    let _existing = lock(&target,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE);
+    icacls(&nested,&["/deny".as_ref(),"*S-1-1-0:(RD)".as_ref()]);
+    let native = fs::read(&target);
+    let listing = fs::read_dir(&nested);
+    let read = service.read_bytes_for_agent_session(&scope,"nested/known.txt",64).await;
+    icacls(&nested,&["/remove:d".as_ref(),"*S-1-1-0".as_ref()]);
+    assert_eq!(native.unwrap(),b"readable","known file is readable without listing its parent");
+    assert!(listing.is_err(),"fixture must deny parent listing");
+    assert_eq!(read.unwrap().unwrap().0,b"readable");
+}
+
+#[tokio::test]
+async fn workspace_root_junction_and_internal_alias_keep_their_authorized_read_target() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("workspace");
+    let directory = root.join("actual");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("value.txt"),b"owned").unwrap();
+    junction::create(&directory,root.join("alias")).unwrap();
+    let root_alias = fixture.path().join("workspace-alias");
+    junction::create(&root,&root_alias).unwrap();
+    let (service,scope,_) = owner(&root_alias);
+    let read = service.read_bytes_for_agent_session(&scope,"alias/value.txt",64).await.unwrap().unwrap();
+    assert_eq!(read.0,b"owned");
+}
+
+#[tokio::test]
 async fn acl_deny_write_preserves_existing_file_for_write_and_patch() {
     let root = tempfile::tempdir().unwrap();
     let target = root.path().join("protected.txt");
