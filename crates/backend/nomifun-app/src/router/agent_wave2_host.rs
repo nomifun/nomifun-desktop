@@ -928,6 +928,11 @@ impl Wave2ApplicationHost {
                             }
                             Err(error) => {
                                 let owner_error = operation_error(capability_id, error);
+                                if owner_error.code == "EFFECT_OUTCOME_UNKNOWN" {
+                                    // Recursive removal may have deleted only a
+                                    // subset. Keep the durable resource fence.
+                                    return Err(owner_error);
+                                }
                                 let _ = finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Failed(&owner_error),
@@ -2052,6 +2057,7 @@ fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
         error
             if nomifun_file::artifact_publication_outcome_unknown(error)
                 || nomifun_file::file_write_outcome_unknown(error)
+                || nomifun_file::file_delete_outcome_unknown(error)
                 || nomifun_file::vcs_stage_outcome_unknown(error) =>
         {
             "EFFECT_OUTCOME_UNKNOWN"
@@ -3432,6 +3438,50 @@ mod tests {
             .unwrap();
         drop(tree);
         repository
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn partial_recursive_delete_retains_fence_across_restart_and_new_key() {
+        let acl = |path: &Path, args: &[&str]| {
+            let output = std::process::Command::new("icacls.exe").arg(path).args(args).output().unwrap();
+            assert!(output.status.success(), "ACL fixture failed: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("tree");
+        std::fs::create_dir(&tree).unwrap();
+        let denied = tree.join("denied.txt");
+        std::fs::write(&denied, b"keep").unwrap();
+        acl(&tree, &["/deny", "*S-1-1-0:(DC)"]);
+        acl(&denied, &["/deny", "*S-1-1-0:(DE)"]);
+        let host = test_host(root.path()).await;
+        let store = host.effect_store().unwrap().clone();
+        let mut pending = context(root.path());
+        pending.action_id = ActionId::from("workspace.files/delete");
+        let first = invoke(&host, pending.clone(), "workspace.files/delete", json!({"path":"tree"})).await;
+        acl(&tree, &["/remove:d", "*S-1-1-0"]);
+        acl(&denied, &["/remove:d", "*S-1-1-0"]);
+        assert_eq!(first.unwrap_err().code, "EFFECT_OUTCOME_UNKNOWN");
+        let effect_id = wave2_effect_id(&pending).unwrap();
+        assert_eq!(store.read_effect(&pending.agent_session_id, &effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        drop(host);
+        let restarted = Wave2ApplicationHost::for_workspace_root(root.path()).with_effect_store(store.clone());
+        let same_key = invoke(&restarted, pending.clone(), "workspace.files/delete", json!({"path":"tree"})).await.unwrap_err();
+        assert!(same_key.message.contains("durable pending"));
+        pending.idempotency_key = IdempotencyKey::from("new-delete-key");
+        pending.operation_id = OperationId::from("new-delete-operation");
+        let new_key = invoke(&restarted, pending.clone(), "workspace.files/delete", json!({"path":"tree"})).await.unwrap_err();
+        assert!(new_key.message.contains("unsettled"));
+        assert!(store.read_effect(&pending.agent_session_id, &wave2_effect_id(&pending).unwrap()).await.unwrap().is_none());
+        assert_eq!(std::fs::read(&denied).unwrap(), b"keep", "repairing ACLs must not enable blind replay");
+        let read = invoke(&restarted, pending.clone(), "workspace.files/read", json!({"path":"tree/denied.txt"})).await.unwrap();
+        assert_eq!(read.0["content"], "keep", "safe diagnostic reads remain available");
+        pending.operation_id = OperationId::from("write-after-unknown-delete");
+        pending.idempotency_key = IdempotencyKey::from("write-after-unknown-delete");
+        let write = invoke(&restarted, pending, "workspace.files/write", json!({"path":"new.txt", "content":"must-not-run"})).await.unwrap_err();
+        assert!(write.message.contains("unsettled"));
+        assert!(!root.path().join("new.txt").exists());
     }
 
     #[test]

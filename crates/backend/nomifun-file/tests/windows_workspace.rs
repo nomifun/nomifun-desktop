@@ -93,6 +93,133 @@ fn set_case_sensitive(path: &Path, enabled: bool) {
     assert_ne!(ok, 0, "case-sensitive NTFS fixture unavailable: {}", std::io::Error::last_os_error());
 }
 
+fn icacls(path: &Path, arguments: &[&std::ffi::OsStr]) {
+    let output = std::process::Command::new("icacls.exe").arg(path).args(arguments)
+        .output().expect("Windows ACL fixture requires icacls.exe");
+    assert!(output.status.success(), "ACL fixture failed: {} {}",
+        String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+fn saved_dacl(path: &Path) -> Vec<u8> {
+    let evidence = tempfile::tempdir().unwrap();
+    let saved = evidence.path().join("dacl.txt");
+    icacls(path, &["/save".as_ref(), saved.as_os_str()]);
+    fs::read(saved).unwrap()
+}
+
+#[tokio::test]
+async fn acl_deny_write_preserves_existing_file_for_write_and_patch() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("protected.txt");
+    fs::write(&target, b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    icacls(&target, &["/deny".as_ref(), "*S-1-1-0:(W)".as_ref()]);
+    let dacl = saved_dacl(&target);
+    let written = service.write_file_for_agent_session(&scope, "protected.txt", b"wrong").await;
+    let patched = service.apply_patch_with_observation_for_agent_session(&scope,
+        replacement("protected.txt", "original", "wrong")).await;
+    let unchanged_dacl = dacl == saved_dacl(&target);
+    icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert!(written.is_err());
+    let failure = patched.unwrap_err();
+    assert!(failure.observation.published.is_empty());
+    assert!(failure.observation.temporary_cleanup_unconfirmed.is_empty());
+    assert!(unchanged_dacl);
+    assert_eq!(fs::read(&target).unwrap(), b"original");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn acl_deny_parent_creation_leaves_no_files_or_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let (service, scope, events) = owner(root.path());
+    icacls(root.path(), &["/deny".as_ref(), "*S-1-1-0:(W)".as_ref()]);
+    let written = service.write_file_for_agent_session(&scope, "new.txt", b"wrong").await;
+    let patched = service.apply_patch_with_observation_for_agent_session(&scope,
+        AgentSessionPatchRequest { files: vec![creation("nested/new.txt")] }).await;
+    icacls(root.path(), &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert!(written.is_err());
+    let failure = patched.unwrap_err();
+    assert!(failure.observation.published.is_empty());
+    assert!(failure.observation.temporary_cleanup_unconfirmed.is_empty());
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn acl_denied_entry_and_parent_delete_preserves_target_contents() {
+    for is_directory in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("protected");
+        let content = if is_directory {
+            fs::create_dir(&target).unwrap();
+            target.join("keep.txt")
+        } else { target.clone() };
+        fs::write(&content, b"original").unwrap();
+        let (service, scope, events) = owner(root.path());
+        // Windows grants deletion through either file DELETE or parent DELETE_CHILD;
+        // the negative fixture must deny both access paths.
+        icacls(root.path(), &["/deny".as_ref(), "*S-1-1-0:(DC)".as_ref()]);
+        icacls(&target, &["/deny".as_ref(), "*S-1-1-0:(DE)".as_ref()]);
+        let removed = service.remove_entry_for_agent_session(&scope, "protected").await;
+        icacls(root.path(), &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+        icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+        assert!(removed.is_err());
+        assert!(!nomifun_file::file_delete_outcome_unknown(removed.as_ref().unwrap_err()));
+        assert_eq!(fs::read(&content).unwrap(), b"original", "directory={is_directory}");
+        assert!(events.0.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn acl_and_named_stream_survive_successful_write_and_patch() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("custom.txt");
+    let stream = root.path().join("custom.txt:metadata");
+    fs::write(&target, b"original").unwrap();
+    fs::write(&stream, b"native stream fixture").unwrap();
+    // A non-default, narrower DACL: writing is allowed, execution is denied.
+    icacls(&target, &["/deny".as_ref(), "*S-1-1-0:(X)".as_ref()]);
+    let dacl = saved_dacl(&target);
+    let (service, scope, events) = owner(root.path());
+    assert!(!service.write_file_for_agent_session(&scope, "custom.txt", b"written").await.unwrap());
+    assert_eq!(fs::read(&target).unwrap(), b"written");
+    assert_eq!(saved_dacl(&target), dacl);
+    assert_eq!(fs::read(&stream).unwrap(), b"native stream fixture");
+    service.apply_patch_for_agent_session(&scope, replacement("custom.txt", "written", "patched")).await.unwrap();
+    assert_eq!(fs::read(&target).unwrap(), b"patched");
+    assert_eq!(saved_dacl(&target), dacl);
+    assert_eq!(fs::read(&stream).unwrap(), b"native stream fixture");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert_eq!(events.0.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn acl_failure_inside_recursive_delete_requires_remaining_tree_reconciliation() {
+    let root = tempfile::tempdir().unwrap();
+    let tree = root.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    fs::write(tree.join("a-removable.txt"), b"removable").unwrap();
+    let denied = tree.join("z-denied.txt");
+    fs::write(&denied, b"keep").unwrap();
+    let (service, scope, events) = owner(root.path());
+    icacls(&tree, &["/deny".as_ref(), "*S-1-1-0:(DC)".as_ref()]);
+    icacls(&denied, &["/deny".as_ref(), "*S-1-1-0:(DE)".as_ref()]);
+    assert_eq!(service.list_workspace_files_for_agent_session(&scope).await.unwrap().len(), 2);
+    let removed = service.remove_entry_for_agent_session(&scope, "tree").await;
+    icacls(&tree, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    icacls(&denied, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    let error = removed.unwrap_err();
+    assert!(nomifun_file::file_delete_outcome_unknown(&error), "{error}");
+    assert_eq!(fs::read(&denied).unwrap(), b"keep");
+    assert!(events.0.lock().unwrap().is_empty(), "partial deletion is not a successful delete event");
+    // Other entries may already be gone; the error is never a zero-effect proof.
+    let listed = service.list_workspace_files_for_agent_session(&scope).await.unwrap();
+    assert!(listed.iter().any(|file| file.relative_path == "tree/z-denied.txt"));
+    assert_eq!(listed.len(), fs::read_dir(&tree).unwrap().count(), "reconciliation must not use stale cached entries");
+}
+
 #[tokio::test]
 async fn case_sensitive_directories_preserve_distinct_names_and_inherited_children() {
     let root = tempfile::tempdir().unwrap();
