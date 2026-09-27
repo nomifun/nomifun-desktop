@@ -869,8 +869,26 @@ impl FileService {
         path: &str,
         authority: &PathAuthority,
     ) -> Result<FileMetadata, AppError> {
+        self.get_file_metadata_with_hooks(path, authority, || {}, || {}).await
+    }
+
+    async fn get_file_metadata_with_hooks(
+        &self, path: &str, authority: &PathAuthority,
+        before_read: impl FnOnce() + Send + 'static,
+        after_read: impl FnOnce() + Send + 'static,
+    ) -> Result<FileMetadata, AppError> {
         let canonical = validate_path_authority(path, authority)?;
-        let result = tokio::task::spawn_blocking(move || get_file_metadata_sync(&canonical))
+        let authority = authority.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            before_read();
+            let result = crate::workspace_read_dir::metadata(&canonical, &authority);
+            after_read();
+            let observed = result?.ok_or_else(|| AppError::NotFound("workspace metadata target disappeared".into()))?;
+            if observed.metadata.file_type().is_symlink() {
+                return Err(AppError::Conflict("workspace metadata target changed to a symbolic link".into()));
+            }
+            Ok(file_metadata_from_observation(&observed.canonical, &observed.metadata))
+        })
             .await
             .map_err(|e| AppError::Internal(format!("file metadata task failed: {e}")))??;
         Ok(result)
@@ -1890,10 +1908,14 @@ fn split_base_ext(name: &str) -> (&str, &str) {
 }
 
 /// Get file metadata synchronously.
+#[cfg(test)]
 fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, AppError> {
     let metadata = std::fs::metadata(path)
         .map_err(|e| AppError::NotFound(format!("cannot read metadata for '{}': {e}", path.display())))?;
+    Ok(file_metadata_from_observation(path, &metadata))
+}
 
+fn file_metadata_from_observation(path: &Path, metadata: &std::fs::Metadata) -> FileMetadata {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -1918,14 +1940,14 @@ fn get_file_metadata_sync(path: &Path) -> Result<FileMetadata, AppError> {
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
 
-    Ok(FileMetadata {
+    FileMetadata {
         name,
         path: path.to_string_lossy().into_owned(),
         size,
         mime_type,
         last_modified,
         is_directory,
-    })
+    }
 }
 
 /// Remove a file or directory synchronously. Directories are removed recursively.
@@ -2627,6 +2649,45 @@ mod tests {
             Some(parent) => builder.tempdir_in(parent).unwrap(),
             None => builder.tempdir().unwrap(),
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn agent_metadata_never_returns_attributes_from_a_transient_parent_escape() {
+        let fixture = cleanup_race_fixture();
+        let root = fixture.path().join("workspace");
+        let parent = root.join("parent");
+        let retained = root.join("retained");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(parent.join("source.txt"), b"inside").unwrap();
+        fs::write(outside.join("source.txt"), b"outside private metadata").unwrap();
+        let before = {
+            let (parent, retained, outside) = (parent.clone(), retained.clone(), outside.clone());
+            move || { fs::rename(&parent, &retained).unwrap(); junction::create(&outside, &parent).unwrap(); }
+        };
+        let after = {
+            let (parent, retained) = (parent.clone(), retained.clone());
+            move || { junction::delete(&parent).unwrap(); fs::rename(&retained, &parent).unwrap(); }
+        };
+        let service = make_service();
+        let binding = patch_scope(&root);
+        let result = service.get_file_metadata_with_hooks(parent.join("source.txt").to_str().unwrap(), &binding.authority(), before, after).await;
+        if let Ok(metadata) = &result {
+            if metadata.size != b"inside".len() as u64 {
+                fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                    "name": metadata.name, "path": metadata.path, "size": metadata.size, "is_directory": metadata.is_directory,
+                })).unwrap()).unwrap();
+                panic!("metadata came from outside the workspace; retained fixture: {}", fixture.keep().display());
+            }
+        }
+        assert_eq!(fs::read(parent.join("source.txt")).unwrap(), b"inside");
+        assert_eq!(fs::read(outside.join("source.txt")).unwrap(), b"outside private metadata");
+        let metadata = service.get_file_metadata_for_agent_session(&binding, "parent/source.txt").await.unwrap();
+        assert_eq!(metadata.size, b"inside".len() as u64);
+        assert_eq!(metadata.name, "source.txt");
+        assert_eq!(metadata.mime_type, "text/plain");
     }
 
     #[cfg(windows)]

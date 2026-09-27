@@ -47,6 +47,16 @@ impl FileService {
         &self,
         scope: &AgentSessionWorkspaceBinding,
         request: AgentInstructionScopeRequest,
+        before_listing: impl FnMut(&Path) + Send + 'static,
+        after_listing: impl FnMut(&Path) + Send + 'static,
+    ) -> Result<AgentInstructionScope, AppError> {
+        self.instruction_scope_with_all_hooks(scope, request, || {}, || {}, before_listing, after_listing).await
+    }
+
+    async fn instruction_scope_with_all_hooks(
+        &self, scope: &AgentSessionWorkspaceBinding, request: AgentInstructionScopeRequest,
+        before_metadata: impl FnOnce() + Send + 'static,
+        after_metadata: impl FnOnce() + Send + 'static,
         mut before_listing: impl FnMut(&Path) + Send + 'static,
         mut after_listing: impl FnMut(&Path) + Send + 'static,
     ) -> Result<AgentInstructionScope, AppError> {
@@ -67,11 +77,15 @@ impl FileService {
             let _permit = permit;
             let root = crate::path_safety::validate_path_authority(&root.to_string_lossy(), &authority)?;
             let canonical = resolve_missing(&target, &authority)?;
-            let (kind, directory) = match std::fs::metadata(&canonical) {
-                Ok(metadata) if metadata.is_dir() => ("directory", canonical.clone()),
-                Ok(metadata) if metadata.is_file() => ("file", canonical.parent().ok_or_else(invalid)?.to_owned()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound =>
-                    ("missing", canonical.parent().ok_or_else(invalid)?.to_owned()),
+            before_metadata();
+            let metadata = crate::workspace_read_dir::metadata(&canonical, &authority);
+            after_metadata();
+            let (kind, directory) = match metadata? {
+                Some(observed) if observed.metadata.file_type().is_symlink() =>
+                    return Err(AppError::Conflict("INSTRUCTION_SCOPE_CHANGED: target became a symbolic link".into())),
+                Some(observed) if observed.metadata.is_dir() => ("directory", canonical.clone()),
+                Some(observed) if observed.metadata.is_file() => ("file", canonical.parent().ok_or_else(invalid)?.to_owned()),
+                None => ("missing", canonical.parent().ok_or_else(invalid)?.to_owned()),
                 _ => return Err(invalid()),
             };
             let mut result = AgentInstructionScope {
@@ -237,6 +251,70 @@ mod tests {
             _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
         ) {
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn instruction_metadata_never_adopts_an_outside_entry_kind() {
+        use std::fs;
+        let fixture = match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => tempfile::Builder::new().prefix("scope-metadata-").tempdir_in(parent).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        let root = fixture.path().join("workspace");
+        let parent = root.join("parent");
+        let retained = root.join("retained");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(outside.join("target")).unwrap();
+        fs::write(parent.join("target"), b"inside file").unwrap();
+        let before = {
+            let (parent, retained, outside) = (parent.clone(), retained.clone(), outside.clone());
+            move || { fs::rename(&parent, &retained).unwrap(); junction::create(&outside, &parent).unwrap(); }
+        };
+        let after = {
+            let (parent, retained) = (parent.clone(), retained.clone());
+            move || { junction::delete(&parent).unwrap(); fs::rename(&retained, &parent).unwrap(); }
+        };
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner", [WORKSPACE_READ_OPERATION], &root).unwrap();
+        let service = FileService::new(Arc::new(NullEvents), vec![]);
+        let result = service.instruction_scope_with_all_hooks(&binding,
+            AgentInstructionScopeRequest { path: "parent/target".into(), recursive: false }, before, after, |_| {}, |_| {}).await;
+        if let Ok(observed) = &result {
+            if observed.kind != "file" {
+                fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(observed).unwrap()).unwrap();
+                panic!("instruction kind came from outside the workspace; retained fixture: {}", fixture.keep().display());
+            }
+        }
+        assert_eq!(fs::read(parent.join("target")).unwrap(), b"inside file");
+        assert!(outside.join("target").is_dir());
+        let observed = service.instruction_scope_for_agent_session(&binding,
+            AgentInstructionScopeRequest { path: "parent/target".into(), recursive: false }).await.unwrap();
+        assert_eq!(observed.kind, "file");
+        assert_eq!(observed.directories, BTreeSet::from(["parent".into()]));
+    }
+
+    #[tokio::test]
+    async fn instruction_metadata_preserves_file_directory_and_deep_missing_scope() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("directory")).unwrap();
+        std::fs::write(root.path().join("source.txt"), b"source").unwrap();
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner", [WORKSPACE_READ_OPERATION], root.path()).unwrap();
+        let service = FileService::new(Arc::new(NullEvents), vec![]);
+        for (path, kind, directory) in [(".", "directory", ""), ("directory", "directory", "directory"),
+            ("source.txt", "file", ""), ("future/nested/new.txt", "missing", "future/nested")] {
+            let observed = service.instruction_scope_for_agent_session(&binding,
+                AgentInstructionScopeRequest { path: path.into(), recursive: false }).await.unwrap();
+            assert_eq!(observed.kind, kind, "{path}");
+            assert_eq!(observed.directories, BTreeSet::from([directory.into()]));
+            assert!(observed.complete);
+            assert_eq!(observed.entries_scanned, 0);
+        }
+        for path in ["source.txt/child", "../outside", ".nomifun/internal"] {
+            assert!(service.instruction_scope_for_agent_session(&binding,
+                AgentInstructionScopeRequest { path: path.into(), recursive: false }).await.is_err(), "{path}");
+        }
+        assert!(!root.path().join("future").exists());
     }
 
     #[cfg(windows)]

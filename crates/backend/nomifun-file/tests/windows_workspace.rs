@@ -108,6 +108,70 @@ fn saved_dacl(path: &Path) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn metadata_and_nested_search_need_no_parent_listing_or_synchronize_access() {
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    fs::create_dir_all(parent.join("child")).unwrap();
+    fs::create_dir(parent.join(".GIT")).unwrap();
+    let target = parent.join("Known.TXT");
+    fs::write(&target, b"metadata").unwrap();
+    fs::write(parent.join("child/.GITIGNORE"), b"skip.txt\n").unwrap();
+    fs::write(parent.join("child/keep.txt"), b"needle").unwrap();
+    fs::write(parent.join("child/skip.txt"), b"needle").unwrap();
+    let (service, scope, events) = owner(root.path());
+    icacls(&parent, &["/deny".as_ref(), "*S-1-1-0:(RD,S)".as_ref()]);
+    icacls(&target, &["/deny".as_ref(), "*S-1-1-0:(RD)".as_ref()]);
+    let native = fs::metadata(&target);
+    let forbidden_read = fs::read(&target);
+    let forbidden_listing = fs::read_dir(&parent);
+    let metadata = service.get_file_metadata_for_agent_session(&scope, "parent/KNOWN.txt").await;
+    let instruction = service.instruction_scope_for_agent_session(&scope,
+        nomifun_file::AgentInstructionScopeRequest { path: "parent/Known.TXT".into(), recursive: false }).await;
+    let search = service.search_text_for_agent_session(&scope,
+        nomifun_file::AgentTextSearchRequest { path: Some("parent/child".into()), query: "needle".into(), limit: None }).await;
+    icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert_eq!(native.unwrap().len(), 8);
+    assert!(forbidden_read.is_err());
+    assert!(forbidden_listing.is_err());
+    let metadata = metadata.unwrap();
+    assert_eq!(metadata.size, 8);
+    assert_eq!(metadata.name, "Known.TXT");
+    assert!(metadata.last_modified > 0);
+    assert_eq!(instruction.unwrap().kind, "file");
+    let search = search.unwrap();
+    assert!(!search.truncated, "{:?}", search.incomplete_reasons);
+    assert_eq!(search.matches.iter().map(|item| item.path.as_str()).collect::<Vec<_>>(), ["parent/child/keep.txt"]);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn denied_metadata_does_not_become_missing_scope() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_READ_ATTRIBUTES, FILE_FLAG_OPEN_REPARSE_POINT};
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    let target = parent.join("denied.txt");
+    fs::write(&target, b"preserved").unwrap();
+    let (service, scope, events) = owner(root.path());
+    icacls(&target, &["/deny".as_ref(), "*S-1-1-0:(RA)".as_ref()]);
+    icacls(&parent, &["/deny".as_ref(), "*S-1-1-0:(RD)".as_ref()]);
+    let native = fs::OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&target);
+    let metadata = service.get_file_metadata_for_agent_session(&scope, "parent/denied.txt").await;
+    let instruction = service.instruction_scope_for_agent_session(&scope,
+        nomifun_file::AgentInstructionScopeRequest { path: "parent/denied.txt".into(), recursive: false }).await;
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    icacls(&target, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert_eq!(native.err().expect("fixture must deny an independent native attribute open").raw_os_error(), Some(5));
+    assert!(!matches!(metadata.err().expect("denied metadata must fail"), nomifun_common::AppError::NotFound(_)));
+    assert!(instruction.is_err(), "permission denial must not return a missing scope");
+    assert_eq!(fs::read(&target).unwrap(), b"preserved");
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn file_delete_respects_readonly_and_keeps_old_readers_after_success() {
     use std::io::Read;
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE};
