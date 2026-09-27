@@ -1,13 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{Instant, UNIX_EPOCH};
 
 use base64::Engine;
 use dashmap::DashMap;
-use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::warn;
@@ -1502,58 +1501,49 @@ fn read_children_sync(dir: &Path, root: &Path, authority: &PathAuthority) -> Res
     Ok(children)
 }
 
-/// Recursively list files using the `ignore` crate (respects .gitignore).
+/// Recursively list files under the already validated canonical root. Rule
+/// reads and directory enumeration use that root as their only authority.
 fn list_workspace_files_sync(root: &Path) -> Result<Vec<WorkspaceFlatFile>, AppError> {
-    let walker = WalkBuilder::new(root)
-        .hidden(false)
-        .git_ignore(true)
-        .git_global(false)
-        .git_exclude(true)
-        .require_git(false)
-        .build();
+    list_workspace_files_sync_with_hook(root, || {})
+}
 
+fn list_workspace_files_sync_with_hook(
+    root: &Path,
+    before_walk: impl FnOnce(),
+) -> Result<Vec<WorkspaceFlatFile>, AppError> {
+    list_workspace_files_sync_with_hooks(root, before_walk, |_| {})
+}
+
+fn list_workspace_files_sync_with_hooks(
+    root: &Path,
+    before_walk: impl FnOnce(),
+    before_directory: impl FnMut(&Path),
+) -> Result<Vec<WorkspaceFlatFile>, AppError> {
+    before_walk();
+    let mut reasons = BTreeSet::new();
+    let mut source_bytes = 0;
+    let mut walker = crate::workspace_search_walk::SearchWalk::inventory(
+        root, Instant::now(), &mut reasons, before_directory,
+    )?;
     let mut files = Vec::new();
 
-    for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("skipping unreadable entry: {e}");
-                continue;
-            }
-        };
-
+    while let Some(entry) = walker.next(&mut source_bytes, &mut reasons) {
+        let entry = entry?;
+        let Some(kind) = entry.file_type() else { continue; };
+        if kind.is_dir() && entry.depth() >= 64 {
+            return Err(AppError::Conflict("workspace inventory exceeds the directory depth budget".into()));
+        }
+        if kind.is_symlink() || !kind.is_file() { continue; }
+        if files.len() >= MAX_WORKSPACE_FILES {
+            return Err(AppError::Conflict("workspace inventory exceeds the file budget; narrow the directory".into()));
+        }
         let path = entry.path();
-        if path
-            .strip_prefix(root)
-            .ok()
-            .and_then(|relative| relative.components().next())
-            .is_some_and(|component| {
-                crate::artifact_store::is_workspace_owner_component(component.as_os_str())
-            })
-        {
-            continue;
-        }
-        let metadata = match std::fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(e) => {
-                warn!(path = %path.display(), error = %e, "skipping unreadable workspace entry");
-                continue;
-            }
-        };
-
-        // Skip real directories and symlinks that resolve to directories.
-        if metadata.is_dir() {
-            continue;
-        }
-
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        let full_path = path.to_string_lossy().into_owned();
-        let relative_path = rel_to_api_string(path.strip_prefix(root).unwrap_or(path));
+        let full_path = path.to_str().ok_or_else(|| AppError::BadRequest("workspace inventory path is not valid UTF-8".into()))?.to_owned();
+        let name = path.file_name().and_then(|name| name.to_str())
+            .ok_or_else(|| AppError::BadRequest("workspace inventory entry has no representable name".into()))?.to_owned();
+        let relative = path.strip_prefix(root)
+            .map_err(|_| AppError::Forbidden("workspace inventory escaped its root".into()))?;
+        let relative_path = rel_to_api_string(relative);
 
         files.push(WorkspaceFlatFile {
             name,
@@ -1561,11 +1551,10 @@ fn list_workspace_files_sync(root: &Path) -> Result<Vec<WorkspaceFlatFile>, AppE
             relative_path,
         });
 
-        if files.len() >= MAX_WORKSPACE_FILES {
-            break;
-        }
     }
-
+    if !reasons.is_empty() {
+        return Err(AppError::Conflict(format!("workspace inventory is incomplete: {}", reasons.into_iter().collect::<Vec<_>>().join(", "))));
+    }
     Ok(files)
 }
 
@@ -3447,12 +3436,188 @@ mod tests {
         fs::create_dir(dir.path().join("sub")).unwrap();
         fs::write(dir.path().join("sub/b.txt"), "world").unwrap();
 
-        let files = list_workspace_files_sync(dir.path()).unwrap();
+        let files = list_workspace_files_sync(&dir.path().canonicalize().unwrap()).unwrap();
 
         assert_eq!(files.len(), 2);
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"a.txt"));
         assert!(names.contains(&"b.txt"));
+    }
+
+    #[test]
+    fn inventory_does_not_import_parent_ignore_rules() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(fixture.path().join(".ignore"), b"visible.txt\n").unwrap();
+        fs::write(root.join("visible.txt"), b"inside").unwrap();
+        let files = list_workspace_files_sync(&root.canonicalize().unwrap()).unwrap();
+        assert_eq!(inventory_names(&files), ["visible.txt"],
+            "parent rules are outside the selected workspace; fixture: {}", fixture.path().display());
+    }
+
+    #[test]
+    fn inventory_preserves_hidden_files_ignore_precedence_and_nested_git_boundaries() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        for path in [".git/info", "nested", "repository/.git/info"] {
+            fs::create_dir_all(root.join(path)).unwrap();
+        }
+        fs::write(root.join(".ignore"), b"priority.txt\n!override.log\n").unwrap();
+        fs::write(root.join(".gitignore"), b"*.log\nnested/*.txt\n!keep.txt\n").unwrap();
+        fs::write(root.join(".git/info/exclude"), b"excluded.txt\nkeep.txt\n").unwrap();
+        fs::write(root.join("nested/.gitignore"), b"!keep.txt\n!priority.txt\n").unwrap();
+        fs::write(root.join("repository/.gitignore"), b"own.txt\n").unwrap();
+        for path in ["keep.txt", "skip.log", "priority.txt", "override.log", ".hidden", "excluded.txt",
+            "nested/keep.txt", "nested/no.txt", "nested/priority.txt", "nested/code.rs", "repository/allow.log", "repository/own.txt"] {
+            fs::write(root.join(path), b"inside").unwrap();
+        }
+        let files = list_workspace_files_sync(&root.canonicalize().unwrap()).unwrap();
+        let paths = files.iter().map(|file| file.relative_path.as_str()).collect::<BTreeSet<_>>();
+        for path in ["keep.txt", "override.log", ".hidden", "nested/keep.txt", "nested/code.rs", "repository/allow.log", ".gitignore"] {
+            assert!(paths.contains(path), "required entry missing: {path}; {paths:?}");
+        }
+        for path in ["skip.log", "priority.txt", "excluded.txt", "nested/no.txt", "nested/priority.txt", "repository/own.txt"] {
+            assert!(!paths.contains(path), "ignore precedence changed: {path}; {paths:?}");
+        }
+    }
+
+    #[test]
+    fn inventory_reads_in_root_gitdir_and_commondir_but_rejects_outside_targets() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        fs::create_dir_all(root.join("metadata/worktree")).unwrap();
+        fs::create_dir_all(root.join("metadata/common/info")).unwrap();
+        fs::write(root.join(".git"), b"gitdir: metadata/worktree\n").unwrap();
+        fs::write(root.join("metadata/worktree/commondir"), b"../common\n").unwrap();
+        fs::write(root.join("metadata/common/info/exclude"), b"ignored.txt\n").unwrap();
+        fs::write(root.join("visible.txt"), b"inside").unwrap();
+        fs::write(root.join("ignored.txt"), b"inside").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let files = list_workspace_files_sync(&canonical).unwrap();
+        let names = inventory_names(&files);
+        assert!(names.contains(&"visible.txt".to_owned()));
+        assert!(!names.contains(&"ignored.txt".to_owned()));
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(outside.join("info")).unwrap();
+        fs::write(outside.join("info/exclude"), b"visible.txt\n").unwrap();
+        fs::write(root.join("metadata/worktree/commondir"), b"../../../outside\n").unwrap();
+        assert!(matches!(list_workspace_files_sync(&canonical), Err(AppError::Forbidden(_))));
+        fs::write(root.join(".git"), b"gitdir: ../outside\n").unwrap();
+        assert!(matches!(list_workspace_files_sync(&canonical), Err(AppError::Forbidden(_))));
+        assert_eq!(fs::read(outside.join("info/exclude")).unwrap(), b"visible.txt\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inventory_child_replacement_cannot_supply_entries_or_ignore_rules() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        let child = root.join("child");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&child).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(child.join("inside.txt"), b"inside").unwrap();
+        fs::write(outside.join(".ignore"), b"*\n").unwrap();
+        fs::write(outside.join("outside-only.txt"), b"outside").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let canonical_child = child.canonicalize().unwrap();
+        let mut redirected = false;
+        let result = list_workspace_files_sync_with_hooks(&canonical, || {}, |path| {
+            if path == canonical_child {
+                fs::rename(&child, fixture.path().join("retained-child")).unwrap();
+                junction::create(&outside, &child).unwrap();
+                redirected = true;
+            }
+        });
+        assert!(redirected);
+        assert!(result.is_err(), "partial or outside listing must not be cached: {result:?}");
+        assert_eq!(fs::read(outside.join("outside-only.txt")).unwrap(), b"outside");
+        assert_eq!(fs::read(fixture.path().join("retained-child/inside.txt")).unwrap(), b"inside");
+    }
+
+    #[test]
+    fn inventory_rejects_unreadable_ignore_text_instead_of_caching_a_partial_policy() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(".gitignore"), b"visible.txt\n\xff\n").unwrap();
+        fs::write(root.join("visible.txt"), b"inside").unwrap();
+        let result = list_workspace_files_sync(&root.canonicalize().unwrap());
+        assert!(result.is_err(), "invalid ignore text must be explicit: {result:?}; fixture: {}", fixture.path().display());
+    }
+
+    #[tokio::test]
+    async fn inventory_rule_failure_releases_cache_and_allows_a_corrected_retry() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join(".ignore"), b"\xff").unwrap();
+        fs::write(root.join("visible.txt"), b"inside").unwrap();
+        let service = make_service();
+        let authority = PathAuthority::Workspace(root.clone());
+        let key = root.to_string_lossy().into_owned();
+        assert!(service.list_workspace_files_impl(&key, &authority).await.is_err());
+        assert!(service.workspace_files_cache.is_empty());
+        fs::write(root.join(".ignore"), b"ignored.txt\n").unwrap();
+        fs::write(root.join("ignored.txt"), b"inside").unwrap();
+        let files = service.list_workspace_files_impl(&key, &authority).await.unwrap();
+        assert_eq!(inventory_names(&files), [".ignore", "visible.txt"]);
+    }
+
+    #[test]
+    fn inventory_file_budget_rejects_partial_success_and_accepts_the_exact_limit() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        for index in 0..MAX_WORKSPACE_FILES {
+            fs::write(root.join(format!("{index:05}.txt")), b"").unwrap();
+        }
+        let extra = root.join("extra.txt");
+        fs::write(&extra, b"extra").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        for _ in 0..20 {
+            assert!(matches!(list_workspace_files_sync(&canonical), Err(AppError::Conflict(_))));
+        }
+        fs::rename(&extra, fixture.path().join("retained-extra.txt")).unwrap();
+        for _ in 0..20 {
+            assert_eq!(list_workspace_files_sync(&canonical).unwrap().len(), MAX_WORKSPACE_FILES);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inventory_cannot_read_git_exclude_through_an_outside_junction() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside-git");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(outside.join("info")).unwrap();
+        fs::write(outside.join("info/exclude"), b"visible.txt\n").unwrap();
+        fs::write(root.join("visible.txt"), b"inside").unwrap();
+        junction::create(&outside, root.join(".git")).unwrap();
+        let result = list_workspace_files_sync(&root.canonicalize().unwrap());
+        assert_eq!(fs::read(outside.join("info/exclude")).unwrap(), b"visible.txt\n");
+        assert!(result.is_err(), "unbound Git rules must not supply inventory policy: {result:?}; fixture: {}", fixture.path().display());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn inventory_root_replaced_after_validation_cannot_supply_outside_names() {
+        let fixture = inventory_fixture();
+        let root = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(root.join("inside.txt"), b"inside").unwrap();
+        fs::write(outside.join("outside-only.txt"), b"outside").unwrap();
+        let canonical = root.canonicalize().unwrap();
+        let result = list_workspace_files_sync_with_hook(&canonical, || {
+            fs::rename(&root, fixture.path().join("retained-original")).unwrap();
+            junction::create(&outside, &root).unwrap();
+        });
+        assert_eq!(fs::read(outside.join("outside-only.txt")).unwrap(), b"outside");
+        assert!(result.is_err(), "replaced root supplied an inventory: {result:?}; fixture: {}", fixture.path().display());
     }
 
     #[test]
@@ -3462,7 +3627,7 @@ mod tests {
         fs::write(dir.path().join("kept.txt"), "keep").unwrap();
         fs::write(dir.path().join("ignored.txt"), "skip").unwrap();
 
-        let files = list_workspace_files_sync(dir.path()).unwrap();
+        let files = list_workspace_files_sync(&dir.path().canonicalize().unwrap()).unwrap();
 
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert!(names.contains(&"kept.txt"));
@@ -3473,7 +3638,7 @@ mod tests {
     #[test]
     fn list_workspace_files_sync_empty_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let files = list_workspace_files_sync(dir.path()).unwrap();
+        let files = list_workspace_files_sync(&dir.path().canonicalize().unwrap()).unwrap();
         assert!(files.is_empty());
     }
 
@@ -3483,7 +3648,7 @@ mod tests {
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/main.rs"), "fn main(){}").unwrap();
 
-        let files = list_workspace_files_sync(dir.path()).unwrap();
+        let files = list_workspace_files_sync(&dir.path().canonicalize().unwrap()).unwrap();
         let main_file = files.iter().find(|f| f.name == "main.rs").unwrap();
 
         assert_eq!(main_file.relative_path, "src/main.rs");
@@ -3496,7 +3661,7 @@ mod tests {
         fs::write(dir.path().join(".nomifun/artifacts/receipt"), "owned").unwrap();
         fs::write(dir.path().join("visible.txt"), "visible").unwrap();
 
-        let files = list_workspace_files_sync(dir.path()).unwrap();
+        let files = list_workspace_files_sync(&dir.path().canonicalize().unwrap()).unwrap();
         assert_eq!(
             files
                 .iter()
@@ -3518,7 +3683,7 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         std::os::unix::fs::symlink(&skill_dir, workspace.join("nomifun-skills")).unwrap();
 
-        let files = list_workspace_files_sync(&dir.path().join("workspace")).unwrap();
+        let files = list_workspace_files_sync(&dir.path().join("workspace").canonicalize().unwrap()).unwrap();
 
         assert!(
             files.iter().all(|f| f.name != "nomifun-skills"),

@@ -687,6 +687,25 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 Unix 原生竞态、接纳前/跨重启根身份、权限错误完整分类、扁平清单、全部角色/终端、
   100 seed 与 N3/LONG/99%；不计完整 AUTH-010/FILE-018 或共享阶段完成。
 
-下一步优先共享：FILE 既有文件发布、扁平遍历、watcher 消费者恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 FILE 扁平清单与忽略规则（W32，基线 `79f559ee8`）
+
+- S-D03-28 / FILE-016/018、AUTH-010：父目录 .ignore 误滤、根外 Git 排除规则被读取、损坏
+  UTF-8 规则仍返回成功、根目录置换泄漏名称四项首次 FAIL，见
+  `phase-2-3/2026-09-28/windows/w32-workspace-inventory/01-before/`。正式 Tauri 的
+  `@visible` 显示空候选，但根内 visible.txt 存在且未被根内规则排除；首次 UI FAIL 与
+  HTTP 200、磁盘/hash/DB/截图保留在 `02-before-ui/`。
+- 修复见共享条目。清单/缓存/监听 21、搜索 9、既有同步清单 5、目录 API 6，共 **41 项
+  定向通过**；20 项清单检查各 **20/20**，另一项用同一夹具验证 **20,000 / 20,001** 文件
+  成功边界与显式超限各 **20/20**，无部分结果入缓存。覆盖规则优先级、根内 gitdir/commondir、
+  根外拒绝、子目录置换和坏规则修正后重试；格式/diff 与正式 Tauri 构建通过。
+- `07-after-ui/` 使用新隔离 data/work/profile：visible.txt 恢复可选，ignored.txt 仍被根内
+  .gitignore 排除，普通根外 junction 内容不入候选三项通过；独立核对菜单范围、成功 HTTP、
+  内外文件 hash 和 canonical 状态。修复版二进制 `26460c5b8969…`，完整构建见 `06-fixed-build/`。
+  前后各一个正式 GEN 准备回合，既有加密 StepFun Plan / step-3.7-flash，共 **2 模型步、
+  0 effects**；应用均已结束、profile 子进程为零并正式备份数据。
+- 未覆盖文件候选读取失败的可见提示、根外 Git 元数据的显式资源授权入口、Unix 原生竞态、
+  跨重启根身份、完整 ACL/角色、100 seed 与 N3/LONG/99%；不计完整 Case 或共享阶段完成。
+
+下一步优先共享：FILE 既有文件发布、文件候选读取失败提示、watcher 消费者恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
