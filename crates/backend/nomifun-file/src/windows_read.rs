@@ -88,6 +88,16 @@ impl ReadRoot {
         })
     }
 
+    pub(crate) fn open_directory(&self, canonical: &Path) -> Result<File, AppError> {
+        self.verify()?;
+        if canonical == self.canonical {
+            return self.directory.try_clone().map_err(io_error).map(|directory| directory.into_std_file());
+        }
+        self.open_entry(canonical, || {}, |directory, name| {
+            crate::windows_directory::open(Some(directory),Path::new(name)).map_err(io_error)
+        })
+    }
+
     fn open_with_parent_hook(&self, canonical: &Path, after_parent: impl FnMut()) -> Result<File, AppError> {
         self.open_entry(canonical, after_parent, |directory, name| {
             let mut options = CapOpenOptions::new();

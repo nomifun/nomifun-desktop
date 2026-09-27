@@ -450,6 +450,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   无模型/UI；其他文件系统与 reparse 类型、Unix、进程强杀/IO 故障、100 seed、完整角色及
   N3/LONG/99% 仍待验。普通枚举和既有文件发布竞态单列，未声明共享阶段完成。
 
-下一步优先共享：FILE 既有文件发布/普通枚举，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 FILE 指令目录枚举（W18，基线 `4aac7540d`）
+
+- S-D03-14 / AUTH-009/010、FILE-011/012 递归子断言：工作区根和子目录短暂换成根外 junction 后
+  恢复，旧 owner 均返回 `entries_scanned=13`、`complete=true`，根内原目录实际为空。两项首次
+  owner FAIL、完整 observation 和磁盘现场保留于
+  `phase-2-3/2026-09-28/windows/w18-directory-scope/02-owner-before/`；`01-before/` 的夹具 UUID
+  不合法错误另保留，修正夹具后才命中产品反例，独立对账为 `first-failure-oracle.json`。
+- 递归指令扫描接入受限目录 reader；Windows 在返回条目前核对目录身份，持有拒绝删除共享的
+  列举句柄，以同一原生游标获取名称/类型。复用 W17 游标，未改授权、Schema 或扩大读取范围。
+- 目录/路径 owner **31**、Windows workspace **34**、App host **34**，共 **99 项通过**；新增
+  5 项同构建各重复 **20/20**。覆盖提前停止后的句柄释放、祖先普通/POSIX 改名拒绝、长 Unicode
+  多页、隐藏/忽略目录指令与 junction incomplete；原递归删除/ACL/重启 fence 保持通过。
+- 最终证据 `03-after/`、`04-adjacent/`、`05-regression/`、`06-repeat/`，diff 检查通过。无模型/UI；
+  文件清单/搜索 walker、非递归元数据窗口、Unix/其他文件系统、100 seed、完整角色及长期门槛仍待验。
+
+下一步优先共享：FILE 既有文件发布、文件清单/搜索枚举，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
