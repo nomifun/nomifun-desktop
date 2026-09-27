@@ -796,7 +796,14 @@ struct WatchQueue {
 
 impl WatchQueue {
     fn push(&mut self, event: WorkspaceFileChangedEvent) {
-        let now = Instant::now();
+        self.push_at(event, Instant::now());
+    }
+
+    fn push_at(&mut self, event: WorkspaceFileChangedEvent, now: Instant) {
+        if event.validate().is_err() {
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
         let debounce_key = format!("{:?}\0{}", event.kind, event.path);
         if self
             .debounce
@@ -822,6 +829,9 @@ impl WatchQueue {
     fn drain(&mut self) -> (Vec<WorkspaceFileChangedEvent>, u64) {
         let events = self.events.drain(..).collect();
         let dropped = std::mem::take(&mut self.dropped);
+        // Coalescing belongs to the undelivered batch. A later notification
+        // must remain observable after the consumer has drained the earlier one.
+        self.debounce.clear();
         (events, dropped)
     }
 }
@@ -982,6 +992,91 @@ mod tests {
     use nomifun_agent_contracts::ResourceId;
     use nomifun_file::WORKSPACE_READ_OPERATION;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn event_fixture() -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("workspace-events-");
+        match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => builder.tempdir_in(parent).unwrap(),
+            None => builder.tempdir().unwrap(),
+        }
+    }
+
+    fn watch_batch(context: &str) -> WorkspaceFilesChangedBatch {
+        serde_json::from_str(context.lines().nth(1).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn watch_queue_preserves_valid_events_beside_an_unrepresentable_path() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        watch.push_for_test("good.txt", WorkspaceFileChangeKind::Created);
+        let path = vec!["long-component-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; 24].join("/");
+        assert!(path.len() > 4096);
+        watch.push_for_test(&path, WorkspaceFileChangeKind::Modified);
+        watch.push_for_test("later.txt", WorkspaceFileChangeKind::Removed);
+        let context = watch.pre_turn_context().await;
+        if context.is_none() {
+            let queue = watch.queue.lock().unwrap();
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "context": context, "remaining_events": queue.events.len(), "remaining_dropped": queue.dropped,
+            })).unwrap()).unwrap();
+            drop(queue);
+            panic!("one bad path erased the event batch; retained fixture: {}", fixture.keep().display());
+        }
+        let batch = watch_batch(&context.unwrap());
+        batch.validate().unwrap();
+        assert_eq!(batch.events.iter().map(|event| event.path.as_str()).collect::<Vec<_>>(), ["good.txt", "later.txt"]);
+        assert_eq!(batch.dropped_event_count, 1);
+        assert!(watch.pre_turn_context().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn watch_queue_does_not_suppress_a_change_after_the_prior_batch_was_drained() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        let now = Instant::now();
+        let event = WorkspaceFileChangedEvent { path: "source.txt".into(), kind: WorkspaceFileChangeKind::Modified };
+        watch.queue.lock().unwrap().push_at(event.clone(), now);
+        let first = watch.pre_turn_context().await.unwrap();
+        watch.queue.lock().unwrap().push_at(event, now);
+        let second = watch.pre_turn_context().await;
+        if second.is_none() {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "first": first, "second": second,
+            })).unwrap()).unwrap();
+            panic!("delivered debounce identity hid a later change; retained fixture: {}", fixture.keep().display());
+        }
+        assert_eq!(watch_batch(&first).events.len(), 1);
+        assert_eq!(watch_batch(&second.unwrap()).events.len(), 1);
+    }
+
+    #[test]
+    fn watch_queue_counts_rejections_and_overflow_without_losing_valid_order() {
+        let mut queue = WatchQueue::default();
+        let now = Instant::now();
+        let invalid = ["".to_owned(), "/absolute".into(), "a\\b".into(), "a/../b".into(),
+            "a//b".into(), "a\0b".into(), "日".repeat(1366)];
+        for path in &invalid {
+            queue.push_at(WorkspaceFileChangedEvent { path: path.clone(), kind: WorkspaceFileChangeKind::Modified }, now);
+        }
+        assert!(queue.events.is_empty());
+        assert!(queue.debounce.is_empty(), "rejected paths must not occupy debounce identities");
+        let total = MAX_WATCH_EVENTS + 7;
+        for index in 0..total {
+            let event = WorkspaceFileChangedEvent { path: format!("src/{index}.rs"), kind: WorkspaceFileChangeKind::Modified };
+            queue.push_at(event.clone(), now);
+            queue.push_at(event, now); // Same undelivered fact may still coalesce.
+        }
+        let (events, dropped) = queue.drain();
+        assert_eq!(events.len(), MAX_WATCH_EVENTS);
+        assert_eq!(events.first().unwrap().path, "src/7.rs");
+        assert_eq!(events.last().unwrap().path, format!("src/{}.rs", total - 1));
+        assert_eq!(dropped, invalid.len() as u64 + 7);
+        WorkspaceFilesChangedBatch::new(events, dropped).validate().unwrap();
+        assert!(queue.debounce.is_empty());
+        assert_eq!(queue.dropped, 0);
+    }
 
     fn session_id() -> AgentSessionId {
         AgentSessionId::from(nomifun_common::generate_id())
