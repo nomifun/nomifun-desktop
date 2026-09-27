@@ -465,6 +465,25 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 最终证据 `03-after/`、`04-adjacent/`、`05-regression/`、`06-repeat/`，diff 检查通过。无模型/UI；
   文件清单/搜索 walker、非递归元数据窗口、Unix/其他文件系统、100 seed、完整角色及长期门槛仍待验。
 
-下一步优先共享：FILE 既有文件发布、文件清单/搜索枚举，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 FILE 搜索遍历与规则读取（W19，基线 `5f7403e83`）
+
+- S-D03-15 / AUTH-009/010、FILE-013～018 子断言：校准后的库打开观察器确认正式 owner 仍读取
+  绑定根上方的 `.ignore`；首次证据 `phase-2-3/2026-09-28/windows/w19-search-walk/02-owner-before/`。
+  `09-child-before/` 用旧 walker 配置的组件探针确认子目录规则加载前换链会打开根外 `.ignore`；
+  新 owner 同点拒用该目录，规则读取为零，明确 incomplete，原件及恢复后的正常搜索保持正确。
+- 首次 manifest 误用不存在的 workspace log 依赖记在 `01-before/`；改用已有版本的测试依赖。
+  根直接换链原返回 `symlink_entry`/incomplete，旧夹具要求必须抛错过严，原 FAIL 留存且不计新增
+  生产缺陷；`04-compatibility/` 的大小写规则别名误拒绝另保留，按原生目录敏感性修复。
+- 搜索改为受限目录帧遍历；不读取根外规则，仓库标记不探测根外或读取 gitdir 正文。规则和文本
+  共用 64 MiB 读取预算，规则解析累计至多 4,096 行、每行 4,096 字节；忽略项也受扫描预算约束。
+  规则读取/解析/预算失败明确 incomplete，并停止依赖它的子树；权限、Schema 与实际 match 回读规则保留。
+- 文件/搜索 owner **41**、Windows workspace **34**、App host **34**，共 **109 项通过**；新增
+  9 项最终同构建各重复 **20/20**。覆盖优先级/反选/嵌套仓库、无仓库和指定子目录、显式隐藏文件、
+  Windows hidden 属性、大小写敏感/不敏感、BOM/CRLF/Unicode offset、全文 SHA、match limit 和规则预算。
+- 最终证据 `07-regression/windows-workspace.log`、`10-child-after/`、`11-final/`、`12-repeat-final/`；
+  较早回归另保留，diff 通过。无模型/UI；普通文件清单/侧栏、更多 ACL/文件系统/Unix、文件 symlink
+  夹具、原生 IO 故障、100 seed、完整角色及 N3/LONG/99% 仍待验，未声明共享阶段完成。
+
+下一步优先共享：FILE 既有文件发布、普通文件清单和元数据，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

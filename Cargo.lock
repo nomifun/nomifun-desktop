@@ -6630,6 +6630,7 @@ dependencies = [
  "git2",
  "ignore",
  "junction",
+ "log",
  "mime_guess",
  "nomifun-api-types",
  "nomifun-auth",
