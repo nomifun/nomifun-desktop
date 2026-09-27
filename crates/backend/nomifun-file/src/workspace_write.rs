@@ -234,6 +234,7 @@ fn create_windows_parent_guard(directory: &Dir) -> Result<std::fs::File, AppErro
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::windows_test_support::rename_with_posix_semantics;
     use std::{fs, io, ptr};
     use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{FILE_ADD_FILE, FILE_FLAG_BACKUP_SEMANTICS,
@@ -268,31 +269,6 @@ mod tests {
         if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
-    fn rename_with_posix_semantics(path: &Path, target: &Path) -> io::Result<()> {
-        use windows_sys::Wdk::Storage::FileSystem::FILE_RENAME_POSIX_SEMANTICS;
-        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_RENAME_INFO,
-            FileRenameInfoEx, SetFileInformationByHandle};
-        let file = fs::OpenOptions::new().access_mode(DELETE)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).open(path)?;
-        let name: Vec<u16> = target.as_os_str().encode_wide().collect();
-        let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-        // Keep a trailing NUL for the Win32 DOS-path conversion as well as
-        // the explicit byte length consumed by the native rename operation.
-        let size = offset + (name.len() + 1) * 2;
-        let mut storage = vec![0_usize; size.div_ceil(std::mem::size_of::<usize>())];
-        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: storage has the header's alignment and space for the full
-        // variable-length name. Both it and file remain live through the call.
-        let ok = unsafe {
-            (*info).Anonymous.Flags = FILE_RENAME_POSIX_SEMANTICS;
-            (*info).FileNameLength = (name.len() * 2) as u32;
-            ptr::copy_nonoverlapping(name.as_ptr(), storage.as_mut_ptr().cast::<u8>().add(offset).cast(), name.len());
-            SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfoEx, info.cast(), size as u32)
-        };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
-    }
-
     #[test]
     fn prepared_guard_prevents_attribute_only_reparse_and_releases_on_drop() {
         let fixture = tempfile::tempdir().unwrap();
@@ -308,14 +284,14 @@ mod tests {
         assert!(matches!(fs::remove_file(&guard).unwrap_err().raw_os_error(), Some(5 | 32)));
         assert_eq!(set_junction(&parent, &outside).unwrap_err().raw_os_error(), Some(145));
         assert!(matches!(fs::rename(&root, fixture.path().join("moved")).unwrap_err().raw_os_error(), Some(5 | 32)));
-        let posix_error = rename_with_posix_semantics(&root, &fixture.path().join("moved")).unwrap_err();
+        let posix_error = rename_with_posix_semantics(&root, &fixture.path().join("moved"), false).unwrap_err();
         assert!(matches!(posix_error.raw_os_error(), Some(5 | 32)), "{posix_error:?}");
         assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
         drop(prepared);
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
         set_junction(&parent, &outside).unwrap(); // Prove the same fixture is otherwise writable.
         junction::delete(&parent).unwrap();
-        rename_with_posix_semantics(&root, &fixture.path().join("moved")).unwrap();
+        rename_with_posix_semantics(&root, &fixture.path().join("moved"), false).unwrap();
     }
 
     #[test]
