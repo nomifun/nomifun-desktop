@@ -92,6 +92,38 @@ pub(crate) struct CompletionTracker {
     /// Derived validity through known, disjoint file effects. Historical
     /// observations keep their original epoch; commands never inherit this.
     file_valid_through: BTreeMap<String, u32>,
+    owner_paths: BTreeMap<String, WorkspacePathObservation>,
+}
+
+/// Data from the scoped workspace owner result, never from model arguments.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspacePathObservation {
+    root_sha256: String,
+    path: String,
+    case_resolved: bool,
+}
+
+impl WorkspacePathObservation {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        let value: Self = serde_json::from_value(value.clone()).ok()?;
+        if value.root_sha256.len() != 64
+            || !value.root_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || value.path.is_empty() || value.path.len() > 4096 || value.path.chars().any(char::is_control)
+            || crate::agents_md::normalize_workspace_directory(&value.path).ok().as_deref() != Some(value.path.as_str())
+        { return None; }
+        Some(value)
+    }
+
+    fn may_overlap(&self, target: &Self) -> bool {
+        // A changed binding/root is not evidence of a disjoint mutation.
+        if self.root_sha256 != target.root_sha256 { return true; }
+        if self.case_resolved && target.case_resolved {
+            self.path == target.path || self.path.starts_with(&format!("{}/", target.path))
+        } else {
+            file_paths_may_overlap(&self.path, &target.path)
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -179,26 +211,30 @@ impl CompletionTracker {
         effects_are_scoped: bool,
     ) -> AgentCompletionObservation {
         self.invalidate();
+        let owner_result = (binding.capability_id.as_ref() == "workspace.files"
+            && invocation_attempted && !result.is_error)
+            .then(|| serde_json::from_str::<serde_json::Value>(&result.output_text()).ok()).flatten();
+        let owner_path = owner_result.as_ref().and_then(|value| value.get("workspace_path"))
+            .and_then(WorkspacePathObservation::parse);
         // Writing style.css does not erase the observed index.html content.
         // Advance only file evidence unaffected by this exact confined file
         // action. Opaque commands, VCS and resources remain global barriers.
-        if effects_are_scoped && invocation_attempted && work.running_processes.is_empty()
+        if effects_are_scoped && invocation_attempted && !result.is_error && work.running_processes.is_empty()
             && binding.capability_id.as_ref() == "workspace.files"
             && !matches!(binding.effect_class, crate::AgentEffectClass::ReadOnly)
             && let Some(previous_epoch) = work.workspace_observation_epoch.checked_sub(1)
         {
-            let targets: Option<Vec<String>> = match binding.action_id.as_ref() {
-                "workspace.files/write" | "workspace.files/delete" => call.arguments.0["path"].as_str()
-                    .and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok()).map(|path| vec![path]),
-                "workspace.files/patch" => call.arguments.0["files"].as_array().and_then(|files| files.iter()
-                    .map(|file| file["path"].as_str().and_then(|path| crate::agents_md::normalize_workspace_directory(path).ok()))
-                    .collect()),
+            let targets: Option<Vec<WorkspacePathObservation>> = match binding.action_id.as_ref() {
+                "workspace.files/write" | "workspace.files/delete" => owner_path.clone().map(|path| vec![path]),
+                "workspace.files/patch" => owner_result.as_ref().and_then(|value| value["files"].as_array())
+                    .filter(|files| call.arguments.0["files"].as_array().is_some_and(|requested| requested.len() == files.len()))
+                    .and_then(|files| files.iter().map(|file| WorkspacePathObservation::parse(&file["workspace_path"])).collect()),
                 _ => None,
             };
             if let Some(targets) = targets.filter(|targets| !targets.is_empty()) {
                 for observation in &self.observations {
-                    if observation.path.as_ref().is_some_and(|path| !targets.iter().any(|target|
-                        file_paths_may_overlap(path, target)))
+                    if self.owner_paths.get(&observation.call_id).is_some_and(|path|
+                        !targets.iter().any(|target| path.may_overlap(target)))
                         && self.is_usable(observation, previous_epoch)
                     {
                         self.file_valid_through.insert(observation.call_id.clone(), work.workspace_observation_epoch);
@@ -235,6 +271,9 @@ impl CompletionTracker {
             command_exit_code: command.and_then(|command| command.exit_code),
             command: command.cloned(),
         };
+        if let Some(path) = owner_path {
+            self.owner_paths.insert(observation.call_id.clone(), path);
+        }
         self.observations.push(observation.clone());
         // Interactive provenance can carry several call IDs per observation.
         // Bound the serialized window too, not just its number of records.
@@ -242,12 +281,15 @@ impl CompletionTracker {
             || self
                 .observations
                 .iter()
-                .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |value| value.len()))
+                .map(|item| serde_json::to_vec(item).map_or(usize::MAX, |value| value.len())
+                    .saturating_add(self.owner_paths.get(&item.call_id)
+                        .map_or(0, |path| serde_json::to_vec(path).map_or(usize::MAX, |value| value.len()))))
                 .fold(0usize, usize::saturating_add)
                 > 32 * 1024
         {
             let removed = self.observations.remove(0);
             self.file_valid_through.remove(&removed.call_id);
+            self.owner_paths.remove(&removed.call_id);
             self.omitted = self.omitted.saturating_add(1);
         }
         observation
@@ -301,7 +343,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across known disjoint edits; opaque effects, possible aliases including non-ASCII paths, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its result and scope, not just exit zero. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its result and scope, not just exit zero. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -502,7 +544,8 @@ impl CompletionTracker {
     fn is_usable(&self, observation: &AgentCompletionObservation, epoch: u32) -> bool {
         observation.invocation_attempted && observation.successful && observation.usable_at_observation
             && (observation.workspace_epoch == epoch
-                || (observation.path.is_some() && self.file_valid_through.get(&observation.call_id) == Some(&epoch)))
+                || (self.owner_paths.contains_key(&observation.call_id)
+                    && self.file_valid_through.get(&observation.call_id) == Some(&epoch)))
     }
 
 fn stale_evidence_guidance(&self, epoch: u32) -> String {
@@ -520,7 +563,7 @@ fn stale_evidence_guidance(&self, epoch: u32) -> String {
 }
 
 // macOS/Windows volumes commonly alias case and can alias Unicode spellings.
-// Without an owner-provided filesystem identity, use conservative ASCII case
+// Hosts without verified canonical case spelling use conservative ASCII case
 // comparison and do not carry evidence across non-ASCII file mutations.
 fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
     if target.is_empty() || !observed.is_ascii() || !target.is_ascii() { return true; }
@@ -583,6 +626,32 @@ mod tests {
     }
 
     #[test]
+    fn file_evidence_uses_owner_paths_for_unicode_siblings_and_junction_aliases() {
+        for (read_path, read_canonical, write_path, write_canonical, remains_current) in [
+            ("验收/回执.txt", "验收/回执.txt", "验收/临时.txt", "验收/临时.txt", true),
+            ("shortcut/index.html", "real/index.html", "real/index.html", "real/index.html", false),
+        ] {
+            let owner_result = |path| serde_json::json!({"workspace_path":{
+                "root_sha256":"a".repeat(64),"path":path,"case_resolved":true
+            }}).to_string();
+            let mut tracker = CompletionTracker::default();
+            let read = ChatToolCall { call_id:"observed".into(),name:"read_file".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":read_path})),provider_metadata:None };
+            let mut binding = file_binding("workspace.files/read");
+            binding.effect_class = crate::AgentEffectClass::ReadOnly;
+            tracker.observe(&AgentWorkStatus::default(), &binding, &read,
+                &AgentToolResult::text(read.call_id.clone(), owner_result(read_canonical), false), true);
+            let write = ChatToolCall {call_id:"mutation".into(),name:"write_file".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":write_path,"content":"changed"})),provider_metadata:None};
+            tracker.observe(&AgentWorkStatus {workspace_observation_epoch:1,..Default::default()},
+                &file_binding("workspace.files/write"), &write,
+                &AgentToolResult::text(write.call_id.clone(), owner_result(write_canonical), false),true);
+            assert_eq!(tracker.is_usable(&tracker.observations[0],1), remains_current,
+                "owner paths must distinguish unrelated Unicode names and identify a real alias");
+        }
+    }
+
+    #[test]
     fn disjoint_file_edits_preserve_file_evidence_without_relabeling_history_or_refreshing_commands() {
         assert!(file_paths_may_overlap("Assets/Game.js", "assets"));
         assert!(file_paths_may_overlap("index.html", "INDEX.HTML"));
@@ -590,11 +659,18 @@ mod tests {
         assert!(!file_paths_may_overlap("assets-other.css", "assets"));
         let mut tracker = CompletionTracker { observations:vec![file_observation("html","index.html",1),
             file_observation("nested","assets/style.css",1),file_observation("sibling","assets-other.css",1)], ..Default::default() };
+        for item in &tracker.observations {
+            tracker.owner_paths.insert(item.call_id.clone(), WorkspacePathObservation {
+                root_sha256:"a".repeat(64),path:item.path.clone().unwrap(),case_resolved:false,
+            });
+        }
         let mutate = |tracker: &mut CompletionTracker, action: &str, path: &str, epoch| {
             let call = ChatToolCall { call_id:format!("effect-{epoch}").into(),name:"file_action".into(),
                 arguments:StrictJsonValue(serde_json::json!({"path":path,"content":"updated"})),provider_metadata:None };
             tracker.observe(&AgentWorkStatus { workspace_observation_epoch:epoch,..Default::default() },
-                &file_binding(action),&call,&AgentToolResult::text(call.call_id.clone(),"ok",false),true);
+                &file_binding(action),&call,&AgentToolResult::text(call.call_id.clone(),serde_json::json!({
+                    "workspace_path":{"root_sha256":"a".repeat(64),"path":path,"case_resolved":false}
+                }).to_string(),false),true);
         };
         mutate(&mut tracker,"workspace.files/write","game.js",2);
         assert!(tracker.is_usable(&tracker.observations[0],2));
@@ -613,6 +689,31 @@ mod tests {
         tracker.observe_with_effect_scope(&AgentWorkStatus { workspace_observation_epoch: 1, ..Default::default() },
             &file_binding("workspace.files/write"), &call, &AgentToolResult::text(call.call_id.clone(), "ok", false), true, false);
         assert!(!tracker.is_usable(&tracker.observations[0], 1), "mutating tool middleware prevents path-scoped evidence reuse");
+    }
+
+    #[test]
+    fn missing_malformed_cross_root_and_failed_owner_receipts_do_not_preserve_evidence() {
+        for (read_owner, write_owner, is_error) in [
+            (serde_json::Value::Null, serde_json::json!({"root_sha256":"a".repeat(64),"path":"other.txt","case_resolved":true}), false),
+            (serde_json::json!({"root_sha256":"a".repeat(64),"path":"index.html","case_resolved":true}), serde_json::Value::Null, false),
+            (serde_json::json!({"root_sha256":"a".repeat(64),"path":"index.html","case_resolved":true}), serde_json::json!({"root_sha256":"b".repeat(64),"path":"other.txt","case_resolved":true}), false),
+            (serde_json::json!({"root_sha256":"a".repeat(64),"path":"index.html","case_resolved":true}), serde_json::json!({"root_sha256":"a".repeat(64),"path":"../other.txt","case_resolved":true}), false),
+            (serde_json::json!({"root_sha256":"a".repeat(64),"path":"index.html","case_resolved":true}), serde_json::json!({"root_sha256":"a".repeat(64),"path":"other.txt","case_resolved":true}), true),
+        ] {
+            let mut tracker = CompletionTracker::default();
+            let read = ChatToolCall {call_id:"read".into(),name:"read_file".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":"index.html"})),provider_metadata:None};
+            let mut binding = file_binding("workspace.files/read");
+            binding.effect_class = crate::AgentEffectClass::ReadOnly;
+            tracker.observe(&AgentWorkStatus::default(), &binding, &read,
+                &AgentToolResult::text(read.call_id.clone(), serde_json::json!({"workspace_path":read_owner}).to_string(),false),true);
+            let write = ChatToolCall {call_id:"write".into(),name:"write_file".into(),
+                arguments:StrictJsonValue(serde_json::json!({"path":"other.txt"})),provider_metadata:None};
+            tracker.observe(&AgentWorkStatus {workspace_observation_epoch:1,..Default::default()},
+                &file_binding("workspace.files/write"), &write,
+                &AgentToolResult::text(write.call_id.clone(),serde_json::json!({"workspace_path":write_owner}).to_string(),is_error),true);
+            assert!(!tracker.is_usable(&tracker.observations[0],1));
+        }
     }
 
     #[tokio::test]

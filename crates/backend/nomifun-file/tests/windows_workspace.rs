@@ -370,6 +370,48 @@ fn owner(root: &Path) -> (FileService, AgentSessionWorkspaceBinding, Arc<Events>
     (service, scope, events)
 }
 
+#[tokio::test]
+async fn owner_path_observations_resolve_junctions_case_and_unicode_without_exposing_the_root() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("real")).unwrap();
+    junction::create(root.path().join("real"), root.path().join("shortcut")).unwrap();
+    let (service, scope, _) = owner(root.path());
+    let written = service.write_file_with_observation_for_agent_session(&scope, "real/验收-Report.txt", b"original").await.unwrap();
+    let identity = written.workspace_path.unwrap();
+    assert_eq!(identity.path, "real/验收-Report.txt");
+    assert!(identity.case_resolved);
+    let page = service.read_text_page_for_agent_session(&scope, serde_json::from_value(serde_json::json!({
+        "path":"shortcut/验收-REPORT.TXT"
+    })).unwrap()).await.unwrap().unwrap();
+    assert_eq!(page.path, "shortcut/验收-REPORT.TXT");
+    assert_eq!(page.workspace_path.as_ref(), Some(&identity));
+    assert!(!serde_json::to_string(&page).unwrap().contains(root.path().to_str().unwrap()));
+    let patch = service.apply_patch_for_agent_session(&scope, replacement("shortcut/验收-report.txt", "original", "patched")).await.unwrap();
+    assert_eq!(patch.files[0].workspace_path.as_ref(), Some(&identity));
+    let deleted = service.remove_entry_with_observation_for_agent_session(&scope, "shortcut/验收-REPORT.TXT").await.unwrap();
+    assert_eq!(deleted, Some(identity));
+    assert!(!root.path().join("real/验收-Report.txt").exists());
+}
+
+#[tokio::test]
+async fn canonical_path_metadata_is_inside_the_text_page_wire_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let relative = format!("{}/source.txt", vec!["long-parent-中文"; 20].join("/"));
+    let target = root.path().join(&relative);
+    fs::create_dir_all(target.parent().unwrap()).unwrap();
+    fs::write(&target, "\"\\\n".repeat(12_000)).unwrap();
+    junction::create(target.parent().unwrap(), root.path().join("shortcut")).unwrap();
+    let (service, scope, _) = owner(root.path());
+    let page = service.read_text_page_for_agent_session(&scope, serde_json::from_value(serde_json::json!({
+        "path":"shortcut/source.txt"
+    })).unwrap()).await.unwrap().unwrap();
+    assert_eq!(page.workspace_path.as_ref().unwrap().path, relative);
+    let encoded = serde_json::to_string(&page).unwrap();
+    assert!(encoded.len() <= 24 * 1024);
+    assert!(serde_json::to_vec(&encoded).unwrap().len() <= 24 * 1024);
+    assert!(!page.eof && page.next_offset.is_some_and(|offset| offset > 0));
+}
+
 #[test]
 fn rejects_all_win32_reserved_components() {
     use nomifun_file::path_safety::is_unsafe_path_segment;

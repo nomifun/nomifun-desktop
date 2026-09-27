@@ -28,6 +28,8 @@ pub mod watch_service;
 pub mod workspace_listing;
 mod vcs_stage;
 mod workspace_write;
+mod workspace_observation;
+pub use workspace_observation::WorkspacePathObservation;
 
 pub use path_safety::{PathAuthority, has_traversal, validate_path, validate_path_for_write};
 pub use resource::{
@@ -39,7 +41,7 @@ pub use routes::{FileRouterState, file_routes};
 pub use service::{
     AgentSessionFilePatch, AgentSessionPatchHunk, AgentSessionPatchLine,
     AgentSessionPatchRequest, AgentSessionPatchResult, AgentSessionPatchFileResult,
-    FileService, file_delete_outcome_unknown, file_write_outcome_unknown,
+    AgentSessionWriteResult, FileService, file_delete_outcome_unknown, file_write_outcome_unknown,
 };
 pub use snapshot_service::SnapshotService;
 pub use traits::{

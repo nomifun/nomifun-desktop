@@ -169,6 +169,8 @@ pub struct AgentSessionPatchResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentSessionPatchFileResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<crate::WorkspacePathObservation>,
     /// Normalized workspace-relative path; no native absolute path is
     /// returned to the agent.
     pub path: String,
@@ -183,6 +185,12 @@ pub struct AgentSessionPatchFileResult {
     /// Re-read with expected_sha256 before relying on this version later.
     #[serde(default)]
     pub written_sha256: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct AgentSessionWriteResult {
+    pub created: bool,
+    pub workspace_path: Option<crate::WorkspacePathObservation>,
 }
 
 /// A concrete implementation of [`crate::traits::IFileService`].
@@ -253,6 +261,16 @@ impl FileService {
         relative_path: &str,
         data: &[u8],
     ) -> Result<bool, AppError> {
+        self.write_file_with_observation_for_agent_session(scope, relative_path, data)
+            .await.map(|result| result.created)
+    }
+
+    pub async fn write_file_with_observation_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+        data: &[u8],
+    ) -> Result<AgentSessionWriteResult, AppError> {
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         if data.len() > MAX_AGENT_PATCH_FILE_BYTES {
             return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
@@ -276,7 +294,10 @@ impl FileService {
         if result.as_ref().map_or_else(|failure: &PatchPublicationFailure| failure.published, |_| true) {
             self.emit_content_update(scope.owner_id(), &path, data, &scope.workspace_root().to_string_lossy());
         }
-        result.map_err(file_write_publication_error)
+        result.map(|created| AgentSessionWriteResult {
+            created,
+            workspace_path: crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &path),
+        }).map_err(file_write_publication_error)
     }
 
     pub async fn remove_entry_for_agent_session(
@@ -284,6 +305,14 @@ impl FileService {
         scope: &AgentSessionWorkspaceBinding,
         relative_path: &str,
     ) -> Result<(), AppError> {
+        self.remove_entry_with_observation_for_agent_session(scope, relative_path).await.map(|_| ())
+    }
+
+    pub async fn remove_entry_with_observation_for_agent_session(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        relative_path: &str,
+    ) -> Result<Option<crate::WorkspacePathObservation>, AppError> {
         scope.require_operation(crate::resource::DELETE_OPERATION)?;
         if relative_path.is_empty() {
             return Err(AppError::BadRequest("cannot delete the bound workspace root".into()));
@@ -302,14 +331,17 @@ impl FileService {
         if metadata.file_type().is_symlink() {
             return Err(AppError::Forbidden("workspace deletion does not follow symbolic links or junctions".into()));
         }
+        let canonical = validate_path_authority(&path.to_string_lossy(), &scope.authority())?;
+        let observation = crate::WorkspacePathObservation::from_canonical(scope.workspace_root(), &canonical);
         let workspace = scope.workspace_root().to_string_lossy();
         self.remove_entry_impl(
             scope.owner_id(),
-            &path.to_string_lossy(),
+            &canonical.to_string_lossy(),
             &workspace,
             &scope.authority(),
         )
-        .await
+        .await?;
+        Ok(observation)
     }
 
     pub async fn rename_entry_for_agent_session(
@@ -523,6 +555,7 @@ impl FileService {
             files: prepared
                 .into_iter()
                 .map(|file| AgentSessionPatchFileResult {
+                    workspace_path: crate::WorkspacePathObservation::from_canonical(&workspace_root, &file.path),
                     path: file.relative_path,
                     bytes_before: file.before.len() as u64,
                     bytes_after: file.after.len() as u64,
