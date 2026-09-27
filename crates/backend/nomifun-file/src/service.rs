@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::UNIX_EPOCH;
 
 use base64::Engine;
@@ -193,13 +193,36 @@ pub struct AgentSessionWriteResult {
     pub workspace_path: Option<crate::WorkspacePathObservation>,
 }
 
+#[derive(Default)]
+struct WorkspaceInventory {
+    files: OnceLock<Vec<WorkspaceFlatFile>>,
+    readers: AtomicUsize,
+}
+
+/// The slot identity is the publication token. Removing it revokes all scans
+/// holding that token without keeping an unbounded per-root generation ledger.
+struct WorkspaceInventoryRead<'a> {
+    cache: &'a DashMap<String, Arc<WorkspaceInventory>>,
+    key: &'a str,
+    slot: Arc<WorkspaceInventory>,
+}
+
+impl Drop for WorkspaceInventoryRead<'_> {
+    fn drop(&mut self) {
+        if self.slot.readers.fetch_sub(1, Ordering::AcqRel) == 1 && self.slot.files.get().is_none() {
+            self.cache.remove_if(self.key, |_, current| Arc::ptr_eq(current, &self.slot)
+                && current.readers.load(Ordering::Acquire) == 0 && current.files.get().is_none());
+        }
+    }
+}
+
 /// A concrete implementation of [`crate::traits::IFileService`].
 pub struct FileService {
     user_events: Arc<dyn UserEventSink>,
     /// Allowed root directories for path safety validation.
     allowed_roots: Vec<std::path::PathBuf>,
     /// In-memory cache for `list_workspace_files`, keyed by canonical root.
-    workspace_files_cache: DashMap<String, Vec<WorkspaceFlatFile>>,
+    workspace_files_cache: DashMap<String, Arc<WorkspaceInventory>>,
     /// Cancellation flags for in-progress ZIP operations, keyed by request_id.
     zip_cancellations: DashMap<String, Arc<AtomicBool>>,
     /// Serializes multi-file AgentSession patch commits within this service.
@@ -761,11 +784,11 @@ impl FileService {
             operation: ContentUpdateOperation::Write,
         };
         let payload = serde_json::to_value(&event).unwrap_or_default();
-        self.user_events
-            .send_to_user(owner_id, WebSocketMessage::new("fileStream.contentUpdate", payload));
         if let Ok(canonical_ws) = std::fs::canonicalize(workspace_path) {
             self.invalidate_cache(&canonical_ws.to_string_lossy());
         }
+        self.user_events
+            .send_to_user(owner_id, WebSocketMessage::new("fileStream.contentUpdate", payload));
     }
 
     /// Invalidate the workspace files cache for a given root.
@@ -860,20 +883,40 @@ impl FileService {
         root: &str,
         authority: &PathAuthority,
     ) -> Result<Vec<WorkspaceFlatFile>, AppError> {
+        self.list_workspace_files_with_hook(root, authority, || async {}).await
+    }
+
+    async fn list_workspace_files_with_hook<Fut: std::future::Future<Output = ()>>(
+        &self, root: &str, authority: &PathAuthority, mut after_scan: impl FnMut() -> Fut,
+    ) -> Result<Vec<WorkspaceFlatFile>, AppError> {
         let canonical_root = validate_path_authority(root, authority)?;
         let cache_key = canonical_root.to_string_lossy().into_owned();
 
-        if let Some(cached) = self.workspace_files_cache.get(&cache_key) {
-            return Ok(cached.clone());
+        // One re-read is allowed only after an observed invalidation. A root
+        // that keeps changing must return a conflict, never a stale cache hit.
+        for _ in 0..2 {
+            let slot = {
+                let entry = self.workspace_files_cache.entry(cache_key.clone())
+                    .or_insert_with(|| Arc::new(WorkspaceInventory::default()));
+                entry.readers.fetch_add(1, Ordering::Relaxed);
+                entry.value().clone()
+            };
+            let _read = WorkspaceInventoryRead { cache: &self.workspace_files_cache, key: &cache_key, slot: slot.clone() };
+            if let Some(files) = slot.files.get() { return Ok(files.clone()); }
+            let root_owned = canonical_root.clone();
+            let files = tokio::task::spawn_blocking(move || list_workspace_files_sync(&root_owned))
+                .await
+                .map_err(|e| AppError::Internal(format!("workspace file listing task failed: {e}")))??;
+            after_scan().await;
+            // Hold the map guard through publication so invalidation cannot
+            // fall between the identity check and committing the cached data.
+            if let Some(current) = self.workspace_files_cache.get(&cache_key)
+                && Arc::ptr_eq(current.value(), &slot)
+            {
+                return Ok(slot.files.get_or_init(|| files).clone());
+            }
         }
-
-        let root_owned = canonical_root.clone();
-        let files = tokio::task::spawn_blocking(move || list_workspace_files_sync(&root_owned))
-            .await
-            .map_err(|e| AppError::Internal(format!("workspace file listing task failed: {e}")))??;
-
-        self.workspace_files_cache.insert(cache_key, files.clone());
-        Ok(files)
+        Err(AppError::Conflict("workspace changed repeatedly during file listing; request a fresh inventory".into()))
     }
 
     async fn get_file_metadata_impl(
@@ -1019,11 +1062,10 @@ impl FileService {
         };
         let payload = serde_json::to_value(&event).unwrap_or_default();
         let msg = WebSocketMessage::new("fileStream.contentUpdate", payload);
-        self.user_events.send_to_user(owner_id, msg);
-
         if let Ok(canonical_ws) = std::fs::canonicalize(workspace_path) {
             self.invalidate_cache(&canonical_ws.to_string_lossy());
         }
+        self.user_events.send_to_user(owner_id, msg);
 
         Ok(())
     }
@@ -3638,6 +3680,186 @@ mod tests {
     }
 
     // -- remove_entry_sync tests (task 7.5) --
+
+    fn inventory_fixture() -> tempfile::TempDir {
+        let mut builder = tempfile::Builder::new();
+        builder.prefix("inventory-cache-");
+        match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => builder.disable_cleanup(true).tempdir_in(parent).unwrap(),
+            None => builder.tempdir().unwrap(),
+        }
+    }
+
+    fn inventory_names(files: &[WorkspaceFlatFile]) -> Vec<String> {
+        let mut names = files.iter().map(|file| file.name.clone()).collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn inventory_invalidation_rejects_an_in_flight_stale_scan() {
+        let fixture = inventory_fixture();
+        fs::write(fixture.path().join("old.txt"), b"old").unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let key = root.to_string_lossy().into_owned();
+        let service = make_service();
+        let authority = PathAuthority::Workspace(root.clone());
+        let mut fired = false;
+        let observed = service.list_workspace_files_with_hook(&key, &authority, || {
+            if !fired {
+                fs::write(root.join("new.txt"), b"new").unwrap();
+                service.invalidate_cache(&key);
+                fired = true;
+            }
+            async {}
+        }).await.unwrap();
+        let next = service.list_workspace_files_impl(&key, &authority).await.unwrap();
+        let expected = vec!["new.txt".to_owned(), "old.txt".to_owned()];
+        if inventory_names(&observed) != expected || inventory_names(&next) != expected {
+            fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "first": inventory_names(&observed), "next": inventory_names(&next),
+            })).unwrap()).unwrap();
+            panic!("invalidation was lost; retained fixture: {}", fixture.keep().display());
+        }
+        assert!(fired);
+    }
+
+    #[tokio::test]
+    async fn inventory_old_scan_cannot_overwrite_a_newer_completed_scan() {
+        let fixture = inventory_fixture();
+        fs::write(fixture.path().join("old.txt"), b"old").unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let key = root.to_string_lossy().into_owned();
+        let service = make_service();
+        let authority = PathAuthority::Workspace(root.clone());
+        let fired = AtomicBool::new(false);
+        let observed = service.list_workspace_files_with_hook(&key, &authority, || async {
+            if !fired.swap(true, Ordering::SeqCst) {
+                fs::write(root.join("new.txt"), b"new").unwrap();
+                service.invalidate_cache(&key);
+                let newer = service.list_workspace_files_impl(&key, &authority).await.unwrap();
+                assert_eq!(inventory_names(&newer), ["new.txt", "old.txt"]);
+            }
+        }).await.unwrap();
+        let next = service.list_workspace_files_impl(&key, &authority).await.unwrap();
+        if inventory_names(&observed) != ["new.txt", "old.txt"] || inventory_names(&next) != ["new.txt", "old.txt"] {
+            fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                "older_returned": inventory_names(&observed), "after_newer_scan": inventory_names(&next),
+            })).unwrap()).unwrap();
+            panic!("old scan replaced newer cache; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn inventory_repeated_invalidation_is_bounded_and_does_not_cache_partial_results() {
+        let fixture = inventory_fixture();
+        fs::write(fixture.path().join("source.txt"), b"source").unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let key = root.to_string_lossy().into_owned();
+        let service = make_service();
+        let authority = PathAuthority::Workspace(root);
+        let mut scans = 0;
+        let result = service.list_workspace_files_with_hook(&key, &authority, || {
+            scans += 1;
+            service.invalidate_cache(&key);
+            async {}
+        }).await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        assert_eq!(scans, 2);
+        assert!(service.workspace_files_cache.is_empty());
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(&key, &authority).await.unwrap()), ["source.txt"]);
+    }
+
+    #[tokio::test]
+    async fn inventory_canceled_scan_releases_its_unpublished_slot() {
+        let fixture = inventory_fixture();
+        fs::write(fixture.path().join("old.txt"), b"old").unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let key = root.to_string_lossy().into_owned();
+        let service = Arc::new(make_service());
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let task = {
+            let (service, key, root) = (service.clone(), key.clone(), root.clone());
+            tokio::spawn(async move {
+                let mut started = Some(started);
+                service.list_workspace_files_with_hook(&key, &PathAuthority::Workspace(root), || {
+                    if let Some(started) = started.take() { started.send(()).unwrap(); }
+                    std::future::pending::<()>()
+                }).await
+            })
+        };
+        observed.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(service.workspace_files_cache.is_empty(), "canceled readers must not retain unpublished roots");
+        fs::write(root.join("new.txt"), b"new").unwrap();
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(&key, &PathAuthority::Workspace(root)).await.unwrap()), ["new.txt", "old.txt"]);
+    }
+
+    #[tokio::test]
+    async fn inventory_invalidation_is_isolated_to_its_root() {
+        let fixture = inventory_fixture();
+        let first = fixture.path().join("first");
+        let second = fixture.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        fs::write(first.join("old.txt"), b"old").unwrap();
+        fs::write(second.join("old.txt"), b"old").unwrap();
+        let service = make_service();
+        let authority = PathAuthority::Confined(vec![first.clone(), second.clone()]);
+        service.list_workspace_files_impl(first.to_str().unwrap(), &authority).await.unwrap();
+        service.list_workspace_files_impl(second.to_str().unwrap(), &authority).await.unwrap();
+        fs::write(first.join("new.txt"), b"new").unwrap();
+        fs::write(second.join("new.txt"), b"new").unwrap();
+        service.invalidate_cache(&fs::canonicalize(&first).unwrap().to_string_lossy());
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(first.to_str().unwrap(), &authority).await.unwrap()), ["new.txt", "old.txt"]);
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(second.to_str().unwrap(), &authority).await.unwrap()), ["old.txt"]);
+    }
+
+    struct InventoryReadingEvents {
+        service: std::sync::Mutex<std::sync::Weak<FileService>>,
+        root: PathBuf,
+        observations: std::sync::Mutex<Vec<Vec<String>>>,
+    }
+
+    impl UserEventSink for InventoryReadingEvents {
+        fn send_to_user(&self, _: &str, _: WebSocketMessage<serde_json::Value>) {
+            let service = self.service.lock().unwrap().upgrade().unwrap();
+            let root = self.root.clone();
+            let runtime = tokio::runtime::Handle::current();
+            // A separate subscriber reads the public API while delivery is in
+            // progress, making the event/cache ordering deterministic.
+            let names = std::thread::spawn(move || runtime.block_on(async move {
+                use crate::IFileService;
+                inventory_names(&service.list_workspace_files(root.to_str().unwrap()).await.unwrap())
+            })).join().unwrap();
+            self.observations.lock().unwrap().push(names);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inventory_is_invalidated_before_write_and_delete_events() {
+        use crate::IFileService;
+        let fixture = inventory_fixture();
+        fs::write(fixture.path().join("old.txt"), b"old").unwrap();
+        let events = Arc::new(InventoryReadingEvents { service: std::sync::Mutex::new(std::sync::Weak::new()),
+            root: fixture.path().to_path_buf(), observations: std::sync::Mutex::new(Vec::new()) });
+        let service = Arc::new(FileService::new(events.clone(), vec![fixture.path().to_path_buf()]));
+        *events.service.lock().unwrap() = Arc::downgrade(&service);
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "cache-binding", "workspace", "owner",
+            [crate::WORKSPACE_READ_OPERATION, crate::WORKSPACE_WRITE_OPERATION, crate::WORKSPACE_DELETE_OPERATION], fixture.path()).unwrap();
+        service.list_workspace_files(fixture.path().to_str().unwrap()).await.unwrap();
+        service.write_file_for_agent_session(&binding, "new.txt", b"new").await.unwrap();
+        service.list_workspace_files(fixture.path().to_str().unwrap()).await.unwrap();
+        service.remove_entry_for_agent_session(&binding, "old.txt").await.unwrap();
+        let observed = events.observations.lock().unwrap().clone();
+        if observed != [vec!["new.txt".to_owned(), "old.txt".to_owned()], vec!["new.txt".to_owned()]] {
+            fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+            panic!("subscriber received stale inventory after changes; retained fixture: {}", fixture.keep().display());
+        }
+        assert!(!fixture.path().join("old.txt").exists());
+        assert_eq!(fs::read(fixture.path().join("new.txt")).unwrap(), b"new");
+    }
 
     #[cfg(windows)]
     fn scoped_delete_parent_race(directory: bool) {
