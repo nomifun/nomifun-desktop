@@ -40,6 +40,16 @@ impl FileService {
         scope: &AgentSessionWorkspaceBinding,
         request: AgentInstructionScopeRequest,
     ) -> Result<AgentInstructionScope, AppError> {
+        self.instruction_scope_with_hooks(scope, request, |_| {}, |_| {}).await
+    }
+
+    async fn instruction_scope_with_hooks(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        request: AgentInstructionScopeRequest,
+        mut before_listing: impl FnMut(&Path) + Send + 'static,
+        mut after_listing: impl FnMut(&Path) + Send + 'static,
+    ) -> Result<AgentInstructionScope, AppError> {
         scope.require_operation(WORKSPACE_READ_OPERATION)?;
         validate_relative(&request.path)?;
         // The model-facing scope protocol names the workspace root ".", while
@@ -79,8 +89,10 @@ impl FileService {
                     }
                     let resolved = crate::path_safety::validate_path_authority(&directory.to_string_lossy(), &authority)?;
                     if resolved != directory { return Err(AppError::Conflict("INSTRUCTION_SCOPE_CHANGED: directory identity changed".into())); }
-                    let entries = match std::fs::read_dir(&directory) {
+                    before_listing(&directory);
+                    let entries = match crate::workspace_read_dir::read_directory(&directory, &authority) {
                         Ok(entries) => entries,
+                        Err(error @ (AppError::Conflict(_) | AppError::Forbidden(_))) => return Err(error),
                         Err(_) => { result.incomplete_reasons.insert("unreadable_directory".into()); continue; }
                     };
                     for entry in entries {
@@ -122,6 +134,7 @@ impl FileService {
                             }
                         }
                     }
+                    after_listing(&directory);
                     if result.incomplete_reasons.contains("scan_budget")
                         || result.incomplete_reasons.contains("instruction_directory_budget") { break; }
                 }
@@ -224,6 +237,100 @@ mod tests {
             _event: nomifun_api_types::WebSocketMessage<serde_json::Value>,
         ) {
         }
+    }
+
+    #[cfg(windows)]
+    async fn transient_directory_escape(replace_root: bool) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::fs;
+        let fixture = match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent) => tempfile::Builder::new().prefix("instruction-race-").tempdir_in(parent).unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        let root = fixture.path().join("workspace");
+        let target = if replace_root { root.clone() } else { root.join("parent") };
+        let retained = fixture.path().join("retained");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&target).unwrap();
+        fs::create_dir(&outside).unwrap();
+        for index in 0..13 { fs::write(outside.join(format!("outside-{index}")), b"outside").unwrap(); }
+        let canonical = fs::canonicalize(&target).unwrap();
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [WORKSPACE_READ_OPERATION], &root).unwrap();
+        let files = FileService::new(Arc::new(NullEvents), vec![]);
+        let redirected = Arc::new(AtomicBool::new(false));
+        let before = {
+            let (target, retained, outside, canonical, redirected) = (target.clone(), retained.clone(), outside.clone(), canonical.clone(), redirected.clone());
+            move |directory: &Path| {
+                assert_eq!(directory, canonical);
+                fs::rename(&target, &retained).unwrap();
+                junction::create(&outside, &target).unwrap();
+                redirected.store(true, Ordering::SeqCst);
+            }
+        };
+        let restore = {
+            let (target, retained, redirected) = (target.clone(), retained.clone(), redirected.clone());
+            move || {
+                if redirected.swap(false, Ordering::SeqCst) {
+                    junction::delete(&target).unwrap();
+                    fs::rename(&retained, &target).unwrap();
+                }
+            }
+        };
+        let after = { let restore = restore.clone(); move |_: &Path| restore() };
+        let requested = if replace_root { "." } else { "parent" };
+        let result = files.instruction_scope_with_hooks(&scope,
+            AgentInstructionScopeRequest { path: requested.into(), recursive: true }, before, after).await;
+        restore();
+        if let Ok(observed) = &result {
+            fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(observed).unwrap()).unwrap();
+            panic!("instruction scope accepted outside metadata; retained fixture: {}", fixture.keep().display());
+        }
+        assert!(matches!(result, Err(AppError::Conflict(_) | AppError::Forbidden(_))));
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 13);
+        fs::write(target.join("AGENTS.md"), b"local instructions").unwrap();
+        let observed = files.instruction_scope_for_agent_session(&scope,
+            AgentInstructionScopeRequest { path: requested.into(), recursive: true }).await.unwrap();
+        assert!(observed.complete);
+        assert_eq!(observed.entries_scanned, 1);
+        assert_eq!(observed.directories, BTreeSet::from([if replace_root { "".into() } else { "parent".into() }]));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn transient_instruction_directory_junction_never_supplies_outside_entries() {
+        transient_directory_escape(false).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn transient_instruction_root_junction_never_supplies_outside_entries() {
+        transient_directory_escape(true).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn recursive_scope_keeps_hidden_ignored_instructions_and_reports_links_incomplete() {
+        use std::fs;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".gitignore"), b"ignored/\n").unwrap();
+        for (directory, filename) in [(".hidden/空 格🐱", "AGENTS.override.md"), ("ignored", "agents.md")] {
+            fs::create_dir_all(root.path().join(directory)).unwrap();
+            fs::write(root.path().join(directory).join(filename), b"local instructions").unwrap();
+        }
+        fs::write(outside.path().join("AGENTS.md"), b"outside instructions").unwrap();
+        junction::create(outside.path(), root.path().join("escape")).unwrap();
+        let scope = crate::resource::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner",
+            [WORKSPACE_READ_OPERATION], root.path()).unwrap();
+        let files = FileService::new(Arc::new(NullEvents), vec![]);
+        let observed = files.instruction_scope_for_agent_session(&scope,
+            AgentInstructionScopeRequest { path: ".".into(), recursive: true }).await.unwrap();
+        assert!(!observed.complete);
+        assert_eq!(observed.incomplete_reasons, BTreeSet::from(["symlink_entry".into()]));
+        assert_eq!(observed.directories, BTreeSet::from(["".into(), ".hidden/空 格🐱".into(), "ignored".into()]));
+        assert_eq!(fs::read(outside.path().join("AGENTS.md")).unwrap(), b"outside instructions");
     }
 
     #[tokio::test]

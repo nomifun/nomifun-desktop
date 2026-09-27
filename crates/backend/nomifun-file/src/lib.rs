@@ -29,6 +29,7 @@ pub mod workspace_listing;
 mod vcs_stage;
 mod workspace_write;
 mod workspace_observation;
+mod workspace_read_dir;
 #[cfg(windows)]
 mod windows_read;
 #[cfg(windows)]

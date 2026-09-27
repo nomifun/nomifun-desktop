@@ -1,13 +1,14 @@
 //! Native relative opens for workspace directories, deletion and enumeration.
-use std::{fs::File, io, mem, path::{Component, Path}, ptr};
-use std::os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle}};
+use std::{ffi::OsString, fs::File, io, mem, path::{Component, Path}, ptr};
+use std::os::windows::{ffi::{OsStrExt, OsStringExt}, io::{AsRawHandle, FromRawHandle}};
 
 use cap_std::fs::Dir;
 use windows_sys::Wdk::{Foundation::OBJECT_ATTRIBUTES, Storage::FileSystem::{
     NtOpenFile, FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
 }};
-use windows_sys::Win32::{Foundation::{HANDLE, RtlNtStatusToDosError, UNICODE_STRING},
-    Storage::FileSystem::{DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, SYNCHRONIZE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE},
+use windows_sys::Win32::{Foundation::{ERROR_NO_MORE_FILES, HANDLE, RtlNtStatusToDosError, UNICODE_STRING},
+    Storage::FileSystem::{DELETE, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, SYNCHRONIZE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE,
+        FILE_ID_BOTH_DIR_INFO, FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx},
     System::IO::IO_STATUS_BLOCK};
 
 /// Open one child, or an already canonical absolute root, without following
@@ -27,6 +28,13 @@ pub(crate) fn open_delete(parent: Option<&Dir>, path: &Path) -> io::Result<File>
 pub(crate) fn open_cursor(directory: &File) -> io::Result<File> {
     open_native(directory.as_raw_handle(), &mut [], FILE_LIST_DIRECTORY | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)
+}
+
+/// Listing access participates in sharing checks: retain the directory name
+/// while a read-only caller consumes the cursor.
+pub(crate) fn open_read_cursor(directory: &File) -> io::Result<File> {
+    open_native(directory.as_raw_handle(), &mut [], FILE_LIST_DIRECTORY | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT)
 }
 
 fn open_with(parent: Option<&Dir>, path: &Path, access: u32, sharing: u32, options: u32) -> io::Result<File> {
@@ -70,4 +78,66 @@ fn open_native(parent: HANDLE, name: &mut [u16], access: u32, sharing: u32, opti
         return Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32));
     }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+pub(crate) struct Entry { pub(crate) name: OsString, pub(crate) attributes: u32 }
+
+/// A bounded native directory cursor. cap-std's Windows entries() reopens a
+/// path; this cursor enumerates the retained directory object itself.
+pub(crate) struct Entries { file: File, buffer: [u64; 512], offset: Option<usize>, first: bool, done: bool }
+
+impl Entries {
+    pub(crate) fn new(file: File) -> Self {
+        Self { file, buffer: [0;512], offset: None, first: true, done: false }
+    }
+
+    fn next_entry(&mut self) -> io::Result<Option<Entry>> {
+        loop {
+            if self.done { return Ok(None); }
+            if self.offset.is_none() {
+                self.buffer.fill(0);
+                let class = if self.first { FileIdBothDirectoryRestartInfo } else { FileIdBothDirectoryInfo };
+                // SAFETY: aligned, initialized storage remains live until this
+                // synchronous query completes; its full byte size is provided.
+                let ok = unsafe { GetFileInformationByHandleEx(self.file.as_raw_handle(), class,
+                    self.buffer.as_mut_ptr().cast(), mem::size_of_val(&self.buffer) as u32) };
+                if ok == 0 {
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() == Some(ERROR_NO_MORE_FILES as i32) { self.done = true; return Ok(None); }
+                    return Err(error);
+                }
+                self.first = false;
+                self.offset = Some(0);
+            }
+            let at = self.offset.expect("directory query provided an entry");
+            // SAFETY: view exactly the initialized allocation as bytes. All
+            // native offsets and variable name lengths are checked below.
+            let bytes = unsafe { std::slice::from_raw_parts(self.buffer.as_ptr().cast::<u8>(), mem::size_of_val(&self.buffer)) };
+            let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid native directory record");
+            let field = |offset: usize| -> io::Result<usize> {
+                Ok(u32::from_le_bytes(bytes.get(at + offset..at + offset + 4).ok_or_else(invalid)?.try_into().map_err(|_| invalid())?) as usize)
+            };
+            let next = field(mem::offset_of!(FILE_ID_BOTH_DIR_INFO, NextEntryOffset))?;
+            let length = field(mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength))?;
+            let start = at + mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            if length == 0 || length % 2 != 0 || length > bytes.len().saturating_sub(start) { return Err(invalid()); }
+            let end = start + length;
+            if next != 0 && (next < end - at || next % 8 != 0 || next >= bytes.len() - at) { return Err(invalid()); }
+            self.offset = (next != 0).then_some(at + next);
+            let name = OsString::from_wide(&bytes[start..end].chunks_exact(2).map(|unit| u16::from_le_bytes([unit[0],unit[1]])).collect::<Vec<_>>());
+            if name != "." && name != ".." {
+                return Ok(Some(Entry { name, attributes: field(mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileAttributes))? as u32 }));
+            }
+        }
+    }
+}
+
+impl Iterator for Entries {
+    type Item = io::Result<Entry>;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_entry() {
+            Ok(name) => name.map(Ok),
+            Err(error) => { self.done = true; Some(Err(error)) },
+        }
+    }
 }
