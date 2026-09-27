@@ -632,6 +632,7 @@ mod tests {
                         }],
                         tools: Vec::new(),
                         tool_choice: ChatToolChoice::None,
+                        parallel_tool_calls: None,
                         max_output_tokens: Some(100),
                         reasoning: None,
                         prompt_cache: PromptCachePolicy::Disabled,

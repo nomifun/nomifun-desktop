@@ -396,11 +396,14 @@ impl SingleAttemptHttpExecutor {
             .post(request.url.trim())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone());
-        self.authenticator
+        let response = self.authenticator
             .apply(builder, request, material, &body)?
             .send()
             .await
-            .map_err(|error| net_err(error).redacted(&material.secret_redactor()))
+            .map_err(|error| net_err(error).redacted(&material.secret_redactor()))?;
+        #[cfg(debug_assertions)]
+        tracing::trace!(target: "nomifun_model_wire", http_status = response.status().as_u16(), "provider response status");
+        Ok(response)
     }
 }
 
@@ -410,6 +413,7 @@ fn redacted_tool_surface(body: &Value, redactor: &nomifun_net::secret_redaction:
         "model":body.get("model"),
         "tools":body.get("tools"),
         "tool_choice":body.get("tool_choice"),
+        "parallel_tool_calls":body.get("parallel_tool_calls"),
     }).to_string())
 }
 
@@ -724,7 +728,7 @@ mod tests {
             "headers":{"Authorization":format!("Bearer {secret}")},"credential":"opaque-fixture-handle",
             "tools":[{"type":"function","function":{"name":"report_completion","description":secret,
                 "parameters":{"type":"object","properties":{"evidence_paths":{"type":"array","maxItems":0}}}}}],
-            "tool_choice":"auto"});
+            "tool_choice":"auto","parallel_tool_calls":false});
         let rendered=super::redacted_tool_surface(&body,&nomifun_net::secret_redaction::SecretRedactor::new([secret]));
         for forbidden in [secret,"private message body","Authorization","opaque-fixture-handle"] {
             assert!(!rendered.contains(forbidden));
@@ -732,6 +736,7 @@ mod tests {
         let value:serde_json::Value=serde_json::from_str(&rendered).unwrap();
         assert_eq!(value["tools"][0]["function"]["parameters"]["properties"]["evidence_paths"]["maxItems"],0);
         assert_eq!(value["tool_choice"],"auto");
+        assert_eq!(value["parallel_tool_calls"],false);
         assert_eq!(value["tools"][0]["function"]["name"],"report_completion");
     }
 

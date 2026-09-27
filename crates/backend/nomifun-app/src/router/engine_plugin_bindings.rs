@@ -863,6 +863,7 @@ mod tests {
                 }],
                 tools: vec![tool],
                 tool_choice: ChatToolChoice::Auto,
+                parallel_tool_calls: None,
                 max_output_tokens: None,
                 reasoning: None,
                 prompt_cache: PromptCachePolicy::Disabled,

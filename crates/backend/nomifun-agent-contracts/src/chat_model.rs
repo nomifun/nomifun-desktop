@@ -430,6 +430,10 @@ pub struct ChatModelInput {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ChatToolDefinition>,
     pub tool_choice: ChatToolChoice,
+    /// Delivery preference for protocols with a parallel-tool control. This
+    /// is not execution authority; callers must still validate every batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]

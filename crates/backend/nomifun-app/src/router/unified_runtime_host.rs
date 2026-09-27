@@ -807,6 +807,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 messages,
                 tools: Vec::new(),
                 tool_choice,
+                parallel_tool_calls: None,
                 max_output_tokens: None,
                 reasoning: response.reasoning_effort.map(|effort| ChatReasoningRequest {
                     effort: Some(match effort {

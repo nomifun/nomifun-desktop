@@ -425,6 +425,9 @@ fn encode_anthropic_request(
                 .collect(),
         );
         body["tool_choice"] = anthropic_tool_choice(&input.tool_choice);
+        if let Some(parallel) = input.parallel_tool_calls {
+            body["tool_choice"]["disable_parallel_tool_use"] = json!(!parallel);
+        }
     }
     if let Some(reasoning) = &input.reasoning {
         let budget = reasoning.max_reasoning_tokens.ok_or_else(|| ChatModelError::invalid_request(
@@ -493,6 +496,7 @@ fn encode_openai_chat_request(
                 .collect(),
         );
         body["tool_choice"] = openai_tool_choice(&input.tool_choice);
+        insert_if_some(&mut body, "parallel_tool_calls", input.parallel_tool_calls.map(Value::from));
     }
     if let Some(reasoning) = &input.reasoning
         && let Some(effort) = reasoning.effort
@@ -546,6 +550,7 @@ fn encode_openai_responses_request(
                 .collect(),
         );
         body["tool_choice"] = openai_responses_tool_choice(&input.tool_choice);
+        insert_if_some(&mut body, "parallel_tool_calls", input.parallel_tool_calls.map(Value::from));
     }
     if !matches!(input.response_format, ChatResponseFormat::Text) {
         body["text"] = json!({

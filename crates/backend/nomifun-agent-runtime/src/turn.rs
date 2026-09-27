@@ -345,6 +345,7 @@ pub(crate) async fn run_turn(
         slot
     });
     let requested_tool_choice = model_request.input.tool_choice.clone();
+    let requested_parallel_tool_calls = model_request.input.parallel_tool_calls;
     if let Some(prior) = &request.prior_task {
         model_request.input.instructions.push(prior.context()?);
     }
@@ -613,6 +614,12 @@ pub(crate) async fn run_turn(
         );
         protocol_recovery.constrain_exposed_tool(&mut model_request.input.tool_choice, &model_request.input.tools);
         protocol_recovery.narrow_repair_surface(&model_request.input.tool_choice, &mut model_request.input.tools);
+        // Discovery cannot share an execution batch. Ask supporting providers
+        // for one call while both kinds are visible; keep the complete-batch
+        // guard below even if a provider ignores this delivery preference.
+        model_request.input.parallel_tool_calls = if model_request.input.tools.len() > 1
+            && model_request.input.tools.iter().any(|tool| tool.name == crate::tool_discovery::TOOL_NAME)
+        { Some(false) } else { requested_parallel_tool_calls };
         context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
         let context_bytes = serde_json::to_vec(&model_request.input)
             .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))?.len();
@@ -2674,6 +2681,7 @@ mod tests {
                 }],
                 tools: Vec::new(),
                 tool_choice: ChatToolChoice::None,
+                parallel_tool_calls: None,
                 max_output_tokens: Some(100),
                 reasoning: None,
                 prompt_cache: nomifun_chat_model_broker::PromptCachePolicy::Disabled,
@@ -4153,8 +4161,10 @@ mod tests {
             order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(20),
         });
         let session = open_session(model.clone(), tools.clone());
+        let mut model_input = request();
+        model_input.input.parallel_tool_calls = Some(true);
         let result = session.run_turn(AgentTurnRequest::new(
-            request(), two_tool_plan(AgentEffectClass::ReadOnly, true), principal(), 0,
+            model_input, two_tool_plan(AgentEffectClass::ReadOnly, true), principal(), 0,
         )).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
         assert_eq!(result.tool_call_count, 4); // two reads, closed plan, completion
@@ -4168,6 +4178,7 @@ mod tests {
                 _ => None,
             }).collect::<Vec<_>>();
         assert_eq!(results, vec![(first, false), (second, false)]);
+        assert_eq!(requests[0].input.parallel_tool_calls,Some(true),"ordinary tool surfaces retain the caller preference");
         assert!(model.steps.lock().unwrap().is_empty());
     }
 
@@ -4275,6 +4286,8 @@ mod tests {
             assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
                 matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. } if call_id.as_ref() == id)));
         }
+        assert_eq!(serde_json::to_value(&requests[0].input).unwrap()["parallel_tool_calls"],json!(false),
+            "a surface with exclusive discovery must request single-call delivery without relaxing batch preflight");
     }
 
     #[tokio::test]
