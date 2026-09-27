@@ -7,6 +7,134 @@ import { useWorkspaceTree } from './useWorkspaceTree';
 
 afterEach(cleanup);
 
+test('a failed first root read reports failure instead of an empty successful listing', async () => {
+  const failure = new Error('fixture workspace unavailable');
+  const treeSource = source(async () => { throw failure; }, async () => []);
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    let result: unknown;
+    await act(async () => { result = await hook.result.current.refreshWorkspace(); });
+    expect(result).toBeNull();
+    expect(hook.result.current.hasLoadError).toBe(true);
+    expect(hook.result.current.files).toEqual([]);
+    expect(errors).toHaveBeenCalledWith('[useWorkspaceTree] loadWorkspace failed:', failure);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+test('a failed refresh marks the retained snapshot as stale', async () => {
+  let fail = false;
+  const treeSource = source(async () => {
+    if (fail) throw new Error('fixture workspace moved');
+    return [directory('', [file('known.txt')])];
+  }, async () => []);
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  await act(async () => { await hook.result.current.refreshWorkspace(); });
+  const prior = hook.result.current.files;
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    fail = true;
+    await act(async () => { await hook.result.current.refreshWorkspace(); });
+    expect(hook.result.current.files).toBe(prior);
+    expect(hook.result.current.hasLoadError).toBe(true);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+test('an immediate successful retry clears the preceding root failure', async () => {
+  let fail = true;
+  const treeSource = source(async () => {
+    if (fail) throw new Error('temporary read failure');
+    return [directory('', [file('recovered.txt')])];
+  }, async () => []);
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await act(async () => {
+      await hook.result.current.refreshWorkspace();
+      fail = false;
+      await hook.result.current.retryWorkspace();
+    });
+    expect(hook.result.current.hasLoadError).toBe(false);
+    expect(hook.result.current.files[0].children).toEqual([file('recovered.txt')]);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+test('a pending retry keeps the failure visible and preserves the requested search', async () => {
+  let retry = false;
+  const pending = deferred<IDirOrFile[]>();
+  const queries: Array<string | undefined> = [];
+  const treeSource = source(async (query) => {
+    queries.push(query);
+    if (!retry) throw new Error('read unavailable');
+    return pending.promise;
+  }, async () => []);
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await act(async () => { await hook.result.current.loadWorkspace('', 'needle'); });
+    retry = true;
+    let request!: Promise<IDirOrFile[] | null>;
+    act(() => { request = hook.result.current.retryWorkspace(); });
+    expect(hook.result.current.hasLoadError).toBe(true);
+    await act(async () => { pending.resolve([directory('', [file('needle.txt')])]); await request; });
+    expect(queries).toEqual(['needle', 'needle']);
+    expect(hook.result.current.hasLoadError).toBe(false);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+test('an unrelated child success keeps the failed directory pending until it is re-read', async () => {
+  let failed = true;
+  const reads: string[] = [];
+  const treeSource = source(async () => [directory('', [directory('first'), directory('second'), directory('unread')])], async (node) => {
+    reads.push(node.relativePath);
+    if (node.relativePath === 'first' && failed) throw new Error('first is unavailable');
+    return [directory(node.relativePath, [file(`${node.relativePath}/current.txt`)])];
+  });
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await act(async () => { await hook.result.current.refreshWorkspace(); });
+    await act(async () => { await hook.result.current.loadChildren(directory('first')); });
+    await act(async () => { await hook.result.current.loadChildren(directory('second')); });
+    expect(hook.result.current.hasLoadError).toBe(true);
+    failed = false;
+    await act(async () => { await hook.result.current.retryWorkspace(); });
+    expect(reads).toEqual(['first', 'second', 'first', 'second']);
+    expect(hook.result.current.files[0].children?.[0].children).toEqual([file('first/current.txt')]);
+    expect(hook.result.current.hasLoadError).toBe(false);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
+test('an older root success cannot clear a newer directory failure', async () => {
+  let delayRoot = false;
+  const pending = deferred<IDirOrFile[]>();
+  const rows = [directory('', [directory('nested')])];
+  const treeSource = source(async () => delayRoot ? pending.promise : rows, async () => { throw new Error('new child failure'); });
+  const hook = renderHook(() => useWorkspaceTree({ treeSource }));
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await act(async () => { await hook.result.current.refreshWorkspace(); });
+    delayRoot = true;
+    let request!: Promise<IDirOrFile[] | null>;
+    act(() => { request = hook.result.current.refreshWorkspace(); });
+    await act(async () => { await hook.result.current.loadChildren(directory('nested')); });
+    await act(async () => { pending.resolve(rows); await request; });
+    expect(hook.result.current.hasLoadError).toBe(true);
+  } finally {
+    errors.mockRestore();
+  }
+});
+
 function directory(path: string, children?: IDirOrFile[]): IDirOrFile {
   return { name: path || 'workspace', fullPath: `/workspace/${path}`, relativePath: path,
     isDir: true, isFile: false, ...(children === undefined ? {} : { children }) };
@@ -96,7 +224,7 @@ test('a superseded reconciliation cannot overwrite a newer empty root', async ()
   const hook = renderHook(() => useWorkspaceTree({ treeSource }));
   await act(async () => { await hook.result.current.refreshWorkspace(); });
   await act(async () => { await hook.result.current.loadChildren(directory('nested')); });
-  let previous!: Promise<IDirOrFile[]>;
+  let previous!: Promise<IDirOrFile[] | null>;
   await act(async () => { previous = hook.result.current.refreshWorkspace(); await started.promise; });
   rows = [directory('', [])];
   await act(async () => { await hook.result.current.refreshWorkspace(); });
@@ -132,7 +260,7 @@ test('switching sources rejects responses from the previous workspace', async ()
   const first = source(() => previous.promise, async () => []);
   const second = { ...source(async () => [directory('', [file('current.txt')])], async () => []), key: 'other-workspace' };
   const hook = renderHook(({ treeSource }) => useWorkspaceTree({ treeSource }), { initialProps: { treeSource: first } });
-  let firstRead!: Promise<IDirOrFile[]>;
+  let firstRead!: Promise<IDirOrFile[] | null>;
   act(() => { firstRead = hook.result.current.refreshWorkspace(); });
   hook.rerender({ treeSource: second });
   await act(async () => { await hook.result.current.refreshWorkspace(); });
@@ -180,7 +308,7 @@ test('unmount prevents further reads in an unfinished reconciliation', async () 
     await hook.result.current.loadChildren(directory('second'));
   });
   refreshing = true;
-  let refresh!: Promise<IDirOrFile[]>;
+  let refresh!: Promise<IDirOrFile[] | null>;
   await act(async () => { refresh = hook.result.current.refreshWorkspace(); await started.promise; });
   hook.unmount();
   pending.resolve([directory('first', [])]);

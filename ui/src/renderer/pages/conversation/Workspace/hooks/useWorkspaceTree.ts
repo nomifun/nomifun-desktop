@@ -26,6 +26,13 @@ interface UseWorkspaceTreeOptions {
   onSelectFiles?: (items: SelectedFile[]) => void;
 }
 
+type ReadFailure = {
+  id: number;
+  sourceKey: string;
+  kind: 'root' | 'directory';
+  path: string;
+};
+
 /**
  * useWorkspaceTree - 合并树状态管理和选择逻辑
  * Merge tree state management and selection logic
@@ -36,6 +43,23 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
   const [loading, setLoading] = useState(false);
   const [treeKey, setTreeKey] = useState(Math.random());
   const [expandedKeys, setExpandedKeys] = useState<string[]>([]);
+  const [readFailures, setReadFailures] = useState<ReadFailure[]>([]);
+  const failuresRef = useRef(readFailures);
+  // A recovery request can start before React renders the preceding failure.
+  // Update the failure ref immediately so that request observes it.
+  const updateReadFailures = useCallback((failures: ReadFailure[]) => {
+    failuresRef.current = failures;
+    setReadFailures(failures);
+  }, []);
+  const failureSeqRef = useRef(0);
+  const lastQueryRef = useRef({ sourceKey: treeSource.key, search: '' });
+  const recordFailure = useCallback((sourceKey: string, kind: ReadFailure['kind'], path: string) => {
+    const failure = { id: ++failureSeqRef.current, sourceKey, kind, path };
+    updateReadFailures([
+      ...failuresRef.current.filter((item) => item.sourceKey === sourceKey && !(item.kind === kind && item.path === path)),
+      failure,
+    ]);
+  }, [updateReadFailures]);
 
   // Selection state / 选中状态
   const [selected, setSelected] = useState<string[]>([]);
@@ -109,17 +133,24 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
       childRequestsRef.current.clear();
       const source = sourceRef.current;
       const previousFiles = filesRef.current;
+      lastQueryRef.current = { sourceKey: source.key, search: search || '' };
+      const failures = failuresRef.current.filter((item) => item.sourceKey === source.key);
+      const resolvedFailures = new Set(failures.map((item) => item.id));
+      const retryPaths = new Set(failures.filter((item) => item.kind === 'directory').map((item) => item.path));
       const isCurrent = () => seq === loadSeqRef.current && source.key === sourceRef.current.key;
       setLoadingHandler(true);
       return source
         .listRoot(search || '')
         .then(async (res) => {
-          if (!isCurrent()) return res;
-          const reconciled = !search && !isFirstLoadRef.current
-            ? await reconcileLoadedChildren(res, previousFiles, (node) => source.listChildren(node), isCurrent)
+          if (!isCurrent()) return null;
+          const reconciled = (!search && !isFirstLoadRef.current) || retryPaths.size > 0
+            ? await reconcileLoadedChildren(res, search ? [] : previousFiles, (node) => source.listChildren(node), isCurrent, retryPaths)
             : res;
-          if (!isCurrent()) return res;
+          if (!isCurrent()) return null;
           setFiles(reconciled);
+          // Only clear failures covered by this refresh. A later child failure
+          // must remain visible even if this earlier root request succeeds.
+          updateReadFailures(failuresRef.current.filter((item) => item.sourceKey === source.key && !resolvedFailures.has(item.id)));
           // 只在搜索时才重置 Tree key，否则保持选中状态
           // Only reset Tree key when searching, otherwise keep selection state
           if (search) {
@@ -158,14 +189,17 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
         })
         .catch((err) => {
           // Prevent unhandled rejection when workspace directory is missing (ENOENT)
-          if (isCurrent()) console.error('[useWorkspaceTree] loadWorkspace failed:', err);
-          return [] as IDirOrFile[];
+          if (isCurrent()) {
+            recordFailure(source.key, 'root', '');
+            console.error('[useWorkspaceTree] loadWorkspace failed:', err);
+          }
+          return null;
         })
         .finally(() => {
           if (isCurrent()) setLoadingHandler(false);
         });
     },
-    [setLoadingHandler]
+    [recordFailure, setLoadingHandler, updateReadFailures]
   );
 
   /**
@@ -174,6 +208,11 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
    */
   const refreshWorkspace = useCallback(() => {
     return loadWorkspace('');
+  }, [loadWorkspace]);
+
+  const retryWorkspace = useCallback(() => {
+    const query = lastQueryRef.current;
+    return loadWorkspace('', query.sourceKey === sourceRef.current.key ? query.search : '');
   }, [loadWorkspace]);
 
   /**
@@ -206,14 +245,19 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
             });
           return assign(prev);
         });
+        updateReadFailures(failuresRef.current.filter((item) => item.sourceKey === source.key
+          && !(item.kind === 'directory' && item.path === targetRelPath)));
       })
       .catch((err) => {
-        if (isCurrent()) console.error('[Workspace] loadMore failed:', err);
+        if (isCurrent()) {
+          recordFailure(source.key, 'directory', targetRelPath);
+          console.error('[Workspace] loadMore failed:', err);
+        }
       })
       .finally(() => {
         if (childRequestsRef.current.get(targetRelPath) === childSeq) childRequestsRef.current.delete(targetRelPath);
       });
-  }, []);
+  }, [recordFailure, updateReadFailures]);
 
   /**
    * 确保节点被选中，并可选地发送事件
@@ -298,6 +342,7 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
     // State / 状态
     files,
     loading,
+    hasLoadError: readFailures.some((item) => item.sourceKey === treeSource.key),
     treeKey,
     expandedKeys,
     selected,
@@ -312,6 +357,7 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
     loadWorkspace,
     loadChildren,
     refreshWorkspace,
+    retryWorkspace,
     ensureNodeSelected,
     clearSelection,
   };
