@@ -108,6 +108,82 @@ fn saved_dacl(path: &Path) -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn directory_tree_does_not_report_an_unreadable_child_as_empty() {
+    use nomifun_file::{IFileService, PathAuthority};
+    let root = tempfile::tempdir().unwrap();
+    let private = root.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::write(private.join("present.txt"), b"present").unwrap();
+    let (service, _, events) = owner(root.path());
+    icacls(&private, &["/deny".as_ref(), "*S-1-1-0:(RD)".as_ref()]);
+    let native = fs::read_dir(&private);
+    let result = service.get_files_by_dir_scoped(root.path().to_str().unwrap(), root.path().to_str().unwrap(),
+        &PathAuthority::Workspace(root.path().to_owned())).await;
+    icacls(&private, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert_eq!(native.err().expect("the native directory listing must be denied").raw_os_error(), Some(5));
+    if let Ok(items) = result {
+        fs::write(root.path().join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "entries": items.iter().map(|item| (&item.name, item.children.len())).collect::<Vec<_>>(),
+            "native_access_denied": true,
+        })).unwrap()).unwrap();
+        panic!("unreadable child appeared empty; retained fixture: {}", root.keep().display());
+    }
+    assert!(events.0.lock().unwrap().is_empty());
+    assert_eq!(fs::read(private.join("present.txt")).unwrap(), b"present");
+    let items = service.get_files_by_dir_scoped(root.path().to_str().unwrap(), root.path().to_str().unwrap(),
+        &PathAuthority::Workspace(root.path().to_owned())).await.unwrap();
+    assert_eq!(items[0].children[0].name, "present.txt");
+}
+
+#[tokio::test]
+async fn directory_tree_keeps_authorized_roots_distinct_from_its_projection_root() {
+    use nomifun_file::{IFileService, PathAuthority};
+    let fixture = tempfile::tempdir().unwrap();
+    let workspace = fixture.path().join("workspace");
+    let assets = fixture.path().join("assets");
+    fs::create_dir(&workspace).unwrap();
+    fs::create_dir(&assets).unwrap();
+    fs::write(assets.join("allowed.txt"), b"allowed").unwrap();
+    let (service, _, events) = owner(&workspace);
+    let allowed = PathAuthority::Confined(vec![workspace.clone(), assets.clone()]);
+    let items = service.get_files_by_dir_scoped(assets.to_str().unwrap(), workspace.to_str().unwrap(), &allowed).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "allowed.txt");
+    assert_eq!(Path::new(&items[0].full_path), fs::canonicalize(assets.join("allowed.txt")).unwrap());
+    assert!(service.get_files_by_dir_scoped(assets.to_str().unwrap(), workspace.to_str().unwrap(),
+        &PathAuthority::Workspace(workspace.clone())).await.is_err());
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn directory_tree_does_not_prefetch_link_targets_and_keeps_hidden_entries() {
+    use nomifun_file::{IFileService, PathAuthority};
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("real")).unwrap();
+    fs::create_dir_all(root.path().join(".nomifun/private")).unwrap();
+    fs::write(root.path().join(".hidden.txt"), b"hidden").unwrap();
+    fs::write(root.path().join("real/inside.txt"), b"inside").unwrap();
+    fs::write(outside.path().join("outside.txt"), b"outside").unwrap();
+    junction::create(root.path().join("real"), root.path().join("local-link")).unwrap();
+    junction::create(outside.path(), root.path().join("outside-link")).unwrap();
+    let (service, _, events) = owner(root.path());
+    let authority = PathAuthority::Workspace(root.path().to_owned());
+    let items = service.get_files_by_dir_scoped(root.path().to_str().unwrap(), root.path().to_str().unwrap(), &authority).await.unwrap();
+    assert!(items.iter().any(|item| item.name == ".hidden.txt"));
+    assert!(!items.iter().any(|item| item.name == ".nomifun"));
+    for name in ["local-link", "outside-link"] {
+        assert!(items.iter().find(|item| item.name == name).unwrap().children.is_empty());
+    }
+    assert_eq!(items.iter().find(|item| item.name == "real").unwrap().children[0].name, "inside.txt");
+    let local = service.get_files_by_dir_scoped(root.path().join("local-link").to_str().unwrap(), root.path().to_str().unwrap(), &authority).await.unwrap();
+    assert_eq!(local[0].name, "inside.txt");
+    assert!(service.get_files_by_dir_scoped(root.path().join("outside-link").to_str().unwrap(), root.path().to_str().unwrap(), &authority).await.is_err());
+    assert_eq!(fs::read(outside.path().join("outside.txt")).unwrap(), b"outside");
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn metadata_and_nested_search_need_no_parent_listing_or_synchronize_access() {
     let root = tempfile::tempdir().unwrap();
     let parent = root.path().join("parent");

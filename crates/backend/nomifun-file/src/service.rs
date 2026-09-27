@@ -838,9 +838,21 @@ impl FileService {
         root: &str,
         authority: &PathAuthority,
     ) -> Result<Vec<DirOrFile>, AppError> {
+        self.get_files_by_dir_with_hooks(dir, root, authority, || {}, |_| {}).await
+    }
+
+    async fn get_files_by_dir_with_hooks(
+        &self, dir: &str, root: &str, authority: &PathAuthority,
+        before_tree: impl FnOnce() + Send + 'static,
+        before_children: impl FnMut(&Path) + Send + 'static,
+    ) -> Result<Vec<DirOrFile>, AppError> {
         let canonical_dir = validate_path_authority(dir, authority)?;
         let canonical_root = validate_path_authority(root, authority)?;
-        self.build_dir_tree(&canonical_dir, &canonical_root).await
+        let authority = authority.clone();
+        tokio::task::spawn_blocking(move || {
+            before_tree();
+            build_dir_tree_with_hook(&canonical_dir, &canonical_root, &authority, before_children)
+        }).await.map_err(|error| AppError::Internal(format!("directory listing task failed: {error}")))?
     }
 
     async fn list_workspace_files_impl(
@@ -1054,15 +1066,6 @@ impl FileService {
         Ok(new_path.to_string_lossy().into_owned())
     }
 
-    /// List immediate children of `dir`, building a single-level tree.
-    /// Each child directory also lists *its* children (depth = 2 from `dir`).
-    async fn build_dir_tree(&self, dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppError> {        let dir_owned = dir.to_path_buf();
-        let root_owned = root.to_path_buf();
-
-        tokio::task::spawn_blocking(move || build_dir_tree_sync(&dir_owned, &root_owned))
-            .await
-            .map_err(|e| AppError::Internal(format!("directory listing task failed: {e}")))?
-    }
 }
 
 struct PreparedAgentPatchFile {
@@ -1346,9 +1349,15 @@ fn rel_to_api_string(rel: &Path) -> String {
 }
 
 /// Synchronous directory tree builder (runs in blocking thread pool).
+#[cfg(test)]
 fn build_dir_tree_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppError> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| AppError::BadRequest(format!("cannot read directory '{}': {e}", dir.display())))?;
+    let directory = std::fs::canonicalize(dir).map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let root = std::fs::canonicalize(root).map_err(|error| AppError::BadRequest(error.to_string()))?;
+    build_dir_tree_with_hook(&directory, &root, &PathAuthority::Workspace(root.clone()), |_| {})
+}
+
+fn build_dir_tree_with_hook(dir: &Path, root: &Path, authority: &PathAuthority, mut before_children: impl FnMut(&Path)) -> Result<Vec<DirOrFile>, AppError> {
+    let entries = crate::workspace_read_dir::read_directory(dir, authority)?;
 
     let mut result = Vec::new();
 
@@ -1366,8 +1375,8 @@ fn build_dir_tree_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppErr
         {
             continue;
         }
-        let metadata = entry
-            .metadata()
+        let kind = entry
+            .file_type()
             .map_err(|e| AppError::Internal(format!("cannot read metadata for '{}': {e}", path.display())))?;
 
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -1375,11 +1384,12 @@ fn build_dir_tree_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppErr
         let full_path = path.to_string_lossy().into_owned();
         let relative_path = rel_to_api_string(path.strip_prefix(root).unwrap_or(&path));
 
-        let is_dir = metadata.is_dir();
+        let is_dir = kind.is_dir();
 
         // For directories, also read their immediate children
         let children = if is_dir {
-            read_children_sync(&path, root)?
+            before_children(&path);
+            read_children_sync(&path, root, authority)?
         } else {
             Vec::new()
         };
@@ -1400,19 +1410,13 @@ fn build_dir_tree_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppErr
 }
 
 /// Read immediate children of a directory (one level, no grandchildren).
-fn read_children_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(Vec::new()),
-    };
+fn read_children_sync(dir: &Path, root: &Path, authority: &PathAuthority) -> Result<Vec<DirOrFile>, AppError> {
+    let entries = crate::workspace_read_dir::read_directory(dir, authority)?;
 
     let mut children = Vec::new();
 
     for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        let entry = entry.map_err(|error| AppError::Internal(format!("cannot read child directory entry: {error}")))?;
 
         let path = entry.path();
         if path
@@ -1425,7 +1429,7 @@ fn read_children_sync(dir: &Path, root: &Path) -> Result<Vec<DirOrFile>, AppErro
         {
             continue;
         }
-        let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = entry.file_type().map_err(|error| AppError::Internal(format!("cannot classify child directory entry: {error}")))?.is_dir();
 
         let name = entry.file_name().to_string_lossy().into_owned();
 
@@ -2650,6 +2654,64 @@ mod tests {
             None => builder.tempdir().unwrap(),
         }
     }
+
+    #[cfg(windows)]
+    async fn directory_tree_race(child_window: bool) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let fixture = cleanup_race_fixture();
+        let root = fixture.path().join("workspace");
+        let directory = root.join("directory");
+        let retained = fixture.path().join("retained");
+        let outside = fixture.path().join("outside");
+        fs::create_dir_all(&directory).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(directory.join("inside.txt"), b"inside").unwrap();
+        fs::write(outside.join("outside.txt"), b"outside").unwrap();
+        let canonical_directory = fs::canonicalize(&directory).unwrap();
+        let redirected = Arc::new(AtomicBool::new(false));
+        let replace = {
+            let (directory, retained, outside, redirected) = (directory.clone(), retained.clone(), outside.clone(), redirected.clone());
+            move || {
+                if !redirected.swap(true, Ordering::SeqCst) {
+                    fs::rename(&directory, &retained).unwrap();
+                    junction::create(&outside, &directory).unwrap();
+                }
+            }
+        };
+        let before_tree = { let replace = replace.clone(); move || { if !child_window { replace(); } } };
+        let before_children = move |path: &Path| { if child_window && path == canonical_directory { replace(); } };
+        let service = make_service();
+        let result = service.get_files_by_dir_with_hooks(
+            if child_window { &root } else { &directory }.to_str().unwrap(), root.to_str().unwrap(),
+            &PathAuthority::Workspace(root.clone()), before_tree, before_children).await;
+        assert!(redirected.load(Ordering::SeqCst), "the intended boundary must be reached");
+        junction::delete(&directory).unwrap();
+        fs::rename(&retained, &directory).unwrap();
+        if let Ok(items) = &result {
+            let names = items.iter().flat_map(|item| std::iter::once(&item.name).chain(item.children.iter().map(|child| &child.name)))
+                .cloned().collect::<Vec<_>>();
+            if names.iter().any(|name| name == "outside.txt") {
+                fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+                    "child_window": child_window, "names": names,
+                })).unwrap()).unwrap();
+                panic!("directory tree disclosed outside entries; retained fixture: {}", fixture.keep().display());
+            }
+            assert!(names.iter().any(|name| name == "inside.txt"), "a failed nested read must not look empty");
+        }
+        assert_eq!(fs::read(directory.join("inside.txt")).unwrap(), b"inside");
+        assert_eq!(fs::read(outside.join("outside.txt")).unwrap(), b"outside");
+        let items = service.get_files_by_dir_impl(directory.to_str().unwrap(), root.to_str().unwrap(), &PathAuthority::Workspace(root.clone())).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "inside.txt");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn directory_tree_rejects_replacement_after_path_validation() { directory_tree_race(false).await; }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn directory_tree_rejects_child_replacement_before_prefetch() { directory_tree_race(true).await; }
 
     #[cfg(windows)]
     #[tokio::test]
