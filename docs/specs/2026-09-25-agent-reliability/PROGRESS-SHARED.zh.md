@@ -47,6 +47,12 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-04（WIN-005、FILE-028/032）：Windows 尚不存在的大小写别名绕过字节路径去重，导致
+  multi-file patch 首项已发布、后项才失败。准备期按原生父目录大小写规则逐段判重，拒绝别名及
+  祖先冲突，保留 case-sensitive 目录中的合法不同文件。根消失/查询失败不向根外回退或猜测。
+  Windows 非管理员原生夹具及定向 50 项通过，首次和中间失败见 `windows/w03-case-alias/`；
+  目录置换、其他文件系统/Unicode 等价组、正式 UI 与 macOS 仍未验。
+
 - S-D02-02（AMUL-001、OBS-008/014、MGMT-013 子断言）：旧 Canvas 失败历史硬编码 complete，
   无 pending 的已结算消息仍显示无效 retry。改为由 canonical Turn 补终态并保留消息 ID/公开
   错误；前端恢复 failed/stopped 不冒充完成，重试仅开放给未确认 pending 的末条失败消息。

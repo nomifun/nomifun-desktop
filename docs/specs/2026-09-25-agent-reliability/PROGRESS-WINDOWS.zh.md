@@ -43,7 +43,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 原始分段、原子 write/共享锁、删除链接及长路径回归 | B1/B2/B3 分别 80/57/37 项定向回归通过（重叠不累加）；跨盘/ACL/并发置换及正式 UI 待验 |
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照；文件、产物、删除、伙伴身份及画布名称由 UI/磁盘/DB 对账 | 首批 8 回合已验；MM 名称已修；GEN 完成报告仍 FAIL_VISIBLE_UX，不能计 PASS |
-| W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、隔离 local/file remote；其余文件/SSH 逐簇推进 | 文件首批 32 项、Git push owner 9 项通过；大小写新建碰撞、ACL、SSH 与产品完整路径待验 |
+| W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 文件准备期/错误归因、大小写新建碰撞、隔离 local/file remote；其余逐簇推进 | 文件首批 32 项、大小写批 50 项（有重叠）、Git push owner 9 项通过；ACL、SSH 与产品完整路径待验 |
 | W04 UI/扩展与恢复 | REAL、OBS、D06；旧 MM retry | 旧失败历史丢失与无效重试入口已复现并修复；不重写旧 Snapshot | 原旧会话 Tauri 冷加载/刷新复验通过；其他恢复/停止/扩展 Case 待验 |
 | W05 条件业务资源 | ACSR、媒体、Channel、Robot 及其 D07/D08 Case | 建最小正式入口/模型/测试租户；无前提不计 PASS，不擅自扩权 | 部分 BLOCKED_FIXTURE |
 | W06 生命周期与长稳 | LIFE/CONC/LONG、WIN-015/016/018 | 逐状态故障注入、取消/重启/lease、宿主 UI/API 一致性，最后长稳统计 | 待走查 |
@@ -176,5 +176,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   构建 hash/patch、只读对账脚本均在仓库外。原 Skill 失败及旧错误分类仍按历史保留；本批关闭
   失真显示/无效按钮缺陷，不把旧任务改记成功，也不代表完整 AMUL/恢复矩阵或 macOS 通过。
 
-下一步：W03 新建 alias、跨盘/ACL/并发与剩余 VCS/SSH；W04 其余真实停止/恢复与扩展；
+### W03 新建大小写别名（基线 `875558993`）
+
+- WIN-005、FILE-028/032 子断言：初次同批创建 `Report.txt` / `REPORT.TXT`，第二项失败但
+  第一项已发布并保留（published/retained_created `[0]`）。原失败见 `01-before/new-alias.log`。
+- 准备期逐段比较目标，并读取实际父目录的 Windows case-sensitive 标记；新父目录取根内最近
+  现存祖先的继承规则。不同名称仍按真实目录规则区分；查询失败不猜测，目录查询不越过绑定根。
+  中间消失根反例及修正另存 `02-after/missing-root-before.log`，不覆盖首次结果。
+- Windows 非管理员原生夹具：ASCII/重音 Latin 别名、父目录别名、祖先关系两种顺序全部零写入；
+  case-sensitive 目录及其新建子目录的不同大小写文件保持不同文件身份，混合父目录标记也正确。
+  对照 [Windows 目录规则](https://learn.microsoft.com/en-us/windows/wsl/case-sensitivity)，并保留本机
+  `fsutil` 探针与 token 检查，未修改系统设置或提升权限。
+- `windows_workspace` 19、`path_safety::tests` 20、`service::tests::agent_` 11，**50 项通过**；
+  diff 检查通过。证据 `windows/w03-case-alias/{01-before,02-after,03-final,native-probe}/`。
+  未覆盖大小写标记/目录并发置换、其他文件系统或全部 Unicode 等价组、正式 UI、macOS；无模型调用。
+
+下一步：W03 跨盘/ACL/并发与剩余 VCS/SSH；W04 其余真实停止/恢复与扩展；
 W05/W06 按夹具推进。GEN 完成报告保持开放，不重建 2,374 行日志/状态文件到 Git。

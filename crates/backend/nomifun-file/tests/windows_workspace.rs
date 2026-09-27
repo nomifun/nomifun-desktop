@@ -45,6 +45,87 @@ fn lock(path: &Path, sharing: u32) -> fs::File {
     fs::OpenOptions::new().read(true).share_mode(sharing).open(path).unwrap()
 }
 
+fn creation(path: &str) -> AgentSessionFilePatch {
+    AgentSessionFilePatch {
+        path: path.into(), expected_source: AgentSessionPatchSource::Absent,
+        hunks: vec![AgentSessionPatchHunk {
+            old_start: 0, old_lines: 0, new_start: 1, new_lines: 1,
+            lines: vec![AgentSessionPatchLine::Add { text: "new file".into() }],
+        }],
+    }
+}
+
+#[tokio::test]
+async fn new_case_aliases_reject_before_any_publication_or_directory_creation() {
+    for paths in [
+        ["Report.txt", "REPORT.TXT"],
+        ["fresh/Report.txt", "FRESH/report.txt"],
+        ["new", "NEW/child.txt"],
+        ["NEW/child.txt", "new"],
+        ["Résumé.txt", "RÉSUMÉ.TXT"],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let (service, scope, events) = owner(root.path());
+        let result = service.apply_patch_with_observation_for_agent_session(&scope,
+            AgentSessionPatchRequest { files: paths.iter().map(|path| creation(path)).collect() }).await;
+        let failure = result.unwrap_err();
+        assert!(failure.observation.published.is_empty(),
+            "aliases must fail before publication: {paths:?}, {:?}", failure.observation);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0,
+            "aliases must not create any target or parent: {paths:?}");
+        assert!(events.0.lock().unwrap().is_empty());
+    }
+}
+
+fn set_case_sensitive(path: &Path, enabled: bool) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+        FileCaseSensitiveInfo, SetFileInformationByHandle,
+    };
+    use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
+    let directory = fs::OpenOptions::new().write(true).access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path).unwrap();
+    let info = FILE_CASE_SENSITIVE_INFO { Flags: if enabled { FILE_CS_FLAG_CASE_SENSITIVE_DIR } else { 0 } };
+    let ok = unsafe { SetFileInformationByHandle(directory.as_raw_handle(), FileCaseSensitiveInfo,
+        (&info as *const FILE_CASE_SENSITIVE_INFO).cast(), std::mem::size_of_val(&info) as u32) };
+    assert_ne!(ok, 0, "case-sensitive NTFS fixture unavailable: {}", std::io::Error::last_os_error());
+}
+
+#[tokio::test]
+async fn case_sensitive_directories_preserve_distinct_names_and_inherited_children() {
+    let root = tempfile::tempdir().unwrap();
+    set_case_sensitive(root.path(), true);
+    let (service, scope, _) = owner(root.path());
+    for paths in [["Report.txt", "report.txt"], ["new/Report.txt", "new/report.txt"]] {
+        let receipt = service.apply_patch_for_agent_session(&scope,
+            AgentSessionPatchRequest { files: paths.iter().map(|path| creation(path)).collect() }).await.unwrap();
+        assert_eq!(receipt.files.len(), 2);
+        let first = fs::canonicalize(root.path().join(paths[0])).unwrap();
+        let second = fs::canonicalize(root.path().join(paths[1])).unwrap();
+        assert_ne!(first, second);
+        assert!(!same_file::is_same_file(&first, &second).unwrap());
+        for path in paths { assert_eq!(fs::read(root.path().join(path)).unwrap(), b"new file"); }
+    }
+}
+
+#[tokio::test]
+async fn each_parent_case_flag_controls_new_target_identity() {
+    let root = tempfile::tempdir().unwrap();
+    set_case_sensitive(root.path(), true);
+    let insensitive = root.path().join("insensitive");
+    fs::create_dir(&insensitive).unwrap();
+    set_case_sensitive(&insensitive, false);
+    let (service, scope, events) = owner(root.path());
+    let failure = service.apply_patch_with_observation_for_agent_session(&scope,
+        AgentSessionPatchRequest { files: ["insensitive/New/a.txt", "insensitive/new/A.txt"]
+            .iter().map(|path| creation(path)).collect() }).await.unwrap_err();
+    assert!(failure.observation.published.is_empty());
+    assert_eq!(fs::read_dir(&insensitive).unwrap().count(), 0);
+    assert!(events.0.lock().unwrap().is_empty());
+}
+
 #[tokio::test]
 async fn write_rejects_deny_delete_lock_and_preserves_original_until_explicit_retry() {
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
