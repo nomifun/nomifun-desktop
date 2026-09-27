@@ -166,6 +166,54 @@ async fn file_delete_needs_neither_parent_listing_nor_file_data_read() {
 }
 
 #[tokio::test]
+async fn recursive_delete_pages_wide_and_deep_unicode_trees_without_following_junctions() {
+    let root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    fs::write(outside.path().join("sentinel"), b"outside").unwrap();
+    let tree = root.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    for index in 0..300 {
+        fs::write(tree.join(format!("{index:04}-空 格🐱-{}.txt", "x".repeat(200))), b"remove").unwrap();
+    }
+    let deep = tree.join(vec!["目录-中文"; 40].join("/"));
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("last.txt"), b"deep").unwrap();
+    junction::create(outside.path(), tree.join("outside-link")).unwrap();
+    fs::write(root.path().join("keep.txt"), b"sibling").unwrap();
+    let (service, scope, events) = owner(root.path());
+    service.remove_entry_for_agent_session(&scope, "tree").await.unwrap();
+    assert!(!tree.exists());
+    assert_eq!(fs::read(outside.path().join("sentinel")).unwrap(), b"outside");
+    assert_eq!(fs::read(root.path().join("keep.txt")).unwrap(), b"sibling");
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    assert_eq!(events.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn empty_directory_delete_needs_no_directory_listing_permission() {
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("target");
+    let control = root.path().join("native");
+    fs::create_dir(&target).unwrap();
+    fs::create_dir(&control).unwrap();
+    let (service, scope, events) = owner(root.path());
+    for path in [&target, &control] {
+        icacls(path, &["/deny".as_ref(), "*S-1-1-0:(RD)".as_ref()]);
+    }
+    let listing = fs::read_dir(&target);
+    let native = fs::remove_dir(&control);
+    let deleted = service.remove_entry_for_agent_session(&scope, "target").await;
+    for path in [&target, &control] {
+        if path.exists() { icacls(path, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]); }
+    }
+    assert!(listing.is_err());
+    native.unwrap();
+    deleted.unwrap();
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    assert_eq!(events.0.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn reading_a_known_file_does_not_require_directory_listing_or_lock_out_other_readers() {
     use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ,FILE_SHARE_WRITE,FILE_SHARE_DELETE};
     let root = tempfile::tempdir().unwrap();
