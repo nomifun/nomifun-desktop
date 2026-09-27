@@ -1581,8 +1581,9 @@ fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
 ///
 /// The temporary file is created beside the target, fully written and synced,
 /// and then replaced with a same-filesystem rename. A new file uses a
-/// no-clobber hard-link publication so a concurrent creator cannot be silently
-/// overwritten. Existing files use the platform's atomic replacement primitive.
+/// no-clobber publication (handle rename on Windows, hard link elsewhere) so a
+/// concurrent creator cannot be overwritten. Existing files use the platform's
+/// atomic replacement primitive.
 fn write_file_sync_atomic(path: &Path, data: &[u8], expected: Option<&[u8]>) -> Result<(), PatchPublicationFailure> {
     write_file_with_source_sync_atomic(path, data,
         expected.map_or(PublicationSource::Absent, PublicationSource::Matching))
@@ -1628,6 +1629,10 @@ fn publish_patch_file_with_hooks(
     after_staging: impl FnOnce(),
     after_publication: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<(), PatchPublicationFailure> {
+    #[cfg(windows)]
+    if matches!(source, PublicationSource::Absent) {
+        return crate::windows_create::publish(path, data, temporary, after_staging, after_publication);
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -2611,6 +2616,101 @@ mod tests {
         match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
             Some(parent) => builder.tempdir_in(parent).unwrap(),
             None => builder.tempdir().unwrap(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn new_publication_stage_race(attack: &str) {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("new.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        let foreign = fixture.path().join("foreign.txt");
+        let retained = fixture.path().join("retained.tmp");
+        fs::write(&foreign, b"foreign bytes").unwrap();
+        let mut attack_result = None;
+        let result = publish_patch_file_with_hooks(&target, b"intended bytes", &temporary,
+            PublicationSource::Absent, || {
+                attack_result = Some(match attack {
+                    "rename" => fs::rename(&temporary, &retained).and_then(|()| fs::copy(&foreign, &temporary).map(|_| ())),
+                    "posix-replace" => crate::windows_test_support::rename_with_posix_semantics(&foreign, &temporary, true),
+                    "write" => fs::write(&temporary, b"foreign bytes"),
+                    _ => unreachable!(),
+                });
+            }, || Ok(()));
+        let bytes = fs::read(&target).ok();
+        if bytes.as_deref() != Some(b"intended bytes") {
+            fs::write(fixture.path().join("observation.txt"), format!(
+                "attack={attack}; attack_result={attack_result:?}; publication={result:?}; target={bytes:?}"
+            )).unwrap();
+            panic!("new publication used a changed stage; retained fixture: {}", fixture.keep().display());
+        }
+        result.unwrap();
+        let error = attack_result.unwrap().unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(32), "{attack}: {error}");
+        assert_eq!(fs::read(&foreign).unwrap(), b"foreign bytes");
+        assert!(!temporary.exists());
+        assert!(!retained.exists());
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 2);
+        // Publication releases its lock; this is an operation boundary, not
+        // a promise to prevent subsequent native edits to the completed file.
+        fs::write(&target, b"later edit").unwrap();
+        fs::rename(&target, &retained).unwrap();
+        assert_eq!(fs::read(&retained).unwrap(), b"later edit");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_publication_keeps_the_staged_name_until_publish() {
+        new_publication_stage_race("rename");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_publication_keeps_the_staged_object_during_posix_replace() {
+        new_publication_stage_race("posix-replace");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_publication_keeps_the_staged_bytes_until_publish() {
+        new_publication_stage_race("write");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn new_publication_preserves_concurrent_targets_and_cleans_its_stage() {
+        for entry in ["file", "directory", "junction"] {
+            let fixture = cleanup_race_fixture();
+            let target = fixture.path().join("new.txt");
+            let temporary = fixture.path().join("stage.tmp");
+            let outside = fixture.path().join("outside");
+            fs::create_dir(&outside).unwrap();
+            fs::write(outside.join("sentinel"), b"outside").unwrap();
+            let failure = publish_patch_file_with_hooks(&target, b"intended bytes", &temporary,
+                PublicationSource::Absent, || match entry {
+                    "file" => fs::write(&target, b"concurrent").unwrap(),
+                    "directory" => {
+                        fs::create_dir(&target).unwrap();
+                        fs::write(target.join("sentinel"), b"concurrent").unwrap();
+                    }
+                    "junction" => junction::create(&outside, &target).unwrap(),
+                    _ => unreachable!(),
+                }, || panic!("must not report a rejected publication as successful")).unwrap_err();
+            assert!(!failure.published, "{entry}: {failure:?}");
+            assert!(!failure.temporary_cleanup_unconfirmed, "{entry}: {failure:?}");
+            assert!(!file_write_outcome_unknown(&file_write_publication_error(failure)));
+            assert!(!temporary.exists());
+            match entry {
+                "file" => assert_eq!(fs::read(&target).unwrap(), b"concurrent"),
+                "directory" => assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"concurrent"),
+                "junction" => {
+                    assert!(junction::exists(&target).unwrap());
+                    junction::delete(&target).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(fs::read(outside.join("sentinel")).unwrap(), b"outside");
+            assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
         }
     }
 

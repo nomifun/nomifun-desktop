@@ -47,13 +47,7 @@ impl OwnedFile {
         // reader still holds the original, and allow removal of our staged
         // file after target permissions made it readonly. DELETE access and
         // the existing sharing contract were checked while opening current.
-        let info = FILE_DISPOSITION_INFO_EX { Flags: FILE_DISPOSITION_FLAG_DELETE
-            | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE };
-        // SAFETY: deletion applies to this verified live handle, never to a
-        // path looked up again after the identity comparison.
-        let ok = unsafe { SetFileInformationByHandle(current.as_raw_handle(), FileDispositionInfoEx,
-            (&info as *const FILE_DISPOSITION_INFO_EX).cast(), mem::size_of_val(&info) as u32) };
-        if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+        remove_handle(&current)
     }
 
     fn open_owned(&self, path: &Path, access: u32) -> io::Result<File> {
@@ -73,26 +67,40 @@ impl OwnedFile {
     fn restore_with_hook(&self, backup: &Path, target: &Path, after_identity: impl FnOnce()) -> io::Result<()> {
         let current = self.open_owned(backup, FILE_GENERIC_WRITE)?;
         after_identity();
-        let name: Vec<u16> = target.as_os_str().encode_wide().collect();
-        if name.contains(&0) { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid restore target")); }
-        let offset = mem::offset_of!(FILE_RENAME_INFO, FileName);
-        let size = offset + (name.len() + 1) * 2;
-        let mut storage = vec![0_usize; size.div_ceil(mem::size_of::<usize>())];
-        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-        // SAFETY: the buffer is aligned and large enough for the complete
-        // NUL-terminated name. ReplaceIfExists is false: a concurrent target
-        // cannot be overwritten, even after the caller's absence check.
-        let ok = unsafe {
-            (*info).Anonymous.ReplaceIfExists = false;
-            (*info).FileNameLength = (name.len() * 2) as u32;
-            std::ptr::copy_nonoverlapping(name.as_ptr(), storage.as_mut_ptr().cast::<u8>().add(offset).cast(), name.len());
-            SetFileInformationByHandle(current.as_raw_handle(), FileRenameInfo, info.cast(), size as u32)
-        };
-        if ok == 0 { return Err(io::Error::last_os_error()); }
+        rename_no_replace(&current, target)?;
         // A failure after the rename remains uncertain at the caller; never
         // report a confirmed restore before flushing the original handle.
         current.sync_all()
     }
+}
+
+/// Unlink an already-owned handle without looking up its name again.
+pub(crate) fn remove_handle(file: &File) -> io::Result<()> {
+    let info = FILE_DISPOSITION_INFO_EX { Flags: FILE_DISPOSITION_FLAG_DELETE
+        | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE };
+    // SAFETY: the caller holds a live handle opened with DELETE access, and
+    // the correctly sized disposition buffer is valid for the native call.
+    let ok = unsafe { SetFileInformationByHandle(file.as_raw_handle(), FileDispositionInfoEx,
+        (&info as *const FILE_DISPOSITION_INFO_EX).cast(), mem::size_of_val(&info) as u32) };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+
+pub(crate) fn rename_no_replace(file: &File, target: &Path) -> io::Result<()> {
+    let name: Vec<u16> = target.as_os_str().encode_wide().collect();
+    if name.contains(&0) { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid publication target")); }
+    let offset = mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let size = offset + (name.len() + 1) * 2;
+    let mut storage = vec![0_usize; size.div_ceil(mem::size_of::<usize>())];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the aligned buffer contains the complete NUL-terminated name.
+    // ReplaceIfExists is false: a concurrent target cannot be overwritten.
+    let ok = unsafe {
+        (*info).Anonymous.ReplaceIfExists = false;
+        (*info).FileNameLength = (name.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(name.as_ptr(), storage.as_mut_ptr().cast::<u8>().add(offset).cast(), name.len());
+        SetFileInformationByHandle(file.as_raw_handle(), FileRenameInfo, info.cast(), size as u32)
+    };
+    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
 #[cfg(test)]

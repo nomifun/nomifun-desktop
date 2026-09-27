@@ -35,6 +35,8 @@ mod windows_read;
 mod windows_directory;
 #[cfg(windows)]
 mod windows_cleanup;
+#[cfg(windows)]
+mod windows_create;
 #[cfg(all(test, windows))]
 mod windows_test_support;
 pub use workspace_observation::WorkspacePathObservation;
