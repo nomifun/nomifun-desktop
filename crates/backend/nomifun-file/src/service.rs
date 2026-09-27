@@ -59,6 +59,25 @@ pub const MAX_AGENT_PATCH_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Maximum bytes in one workspace-relative patch path.
 const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
 
+const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
+
+pub fn file_write_outcome_unknown(error: &AppError) -> bool {
+    matches!(error, AppError::Internal(message) if message.contains(FILE_WRITE_OUTCOME_UNKNOWN))
+}
+
+fn file_write_publication_error(failure: PatchPublicationFailure) -> AppError {
+    if file_write_outcome_unknown(&failure.error) {
+        failure.error
+    } else if failure.published || failure.temporary_cleanup_unconfirmed {
+        AppError::Internal(format!(
+            "{FILE_WRITE_OUTCOME_UNKNOWN}; published={}, temporary_cleanup_unconfirmed={}; re-read the target before retry",
+            failure.published, failure.temporary_cleanup_unconfirmed,
+        ))
+    } else {
+        failure.error
+    }
+}
+
 /// Maximum bytes in one patch line's text.
 const MAX_AGENT_PATCH_LINE_BYTES: usize = 1024 * 1024;
 
@@ -221,6 +240,8 @@ impl FileService {
             .await
     }
 
+    /// Publish complete bytes, returning whether a new file was created.
+    /// A failed settlement may require reconciliation; never truncate in place.
     pub async fn write_file_for_agent_session(
         &self,
         scope: &AgentSessionWorkspaceBinding,
@@ -228,17 +249,29 @@ impl FileService {
         data: &[u8],
     ) -> Result<bool, AppError> {
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
+        if data.len() > MAX_AGENT_PATCH_FILE_BYTES {
+            return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
+        }
         let path = scope.resolve_relative_path(relative_path)?;
         let path = crate::workspace_write::prepare_parent(&path, scope.workspace_root())?;
-        let workspace = scope.workspace_root().to_string_lossy();
-        self.write_file_impl(
-            scope.owner_id(),
-            &path.to_string_lossy(),
-            data,
-            &workspace,
-            &scope.authority(),
-        )
-        .await
+        let path_owned = path.clone();
+        let data_owned = data.to_vec();
+        let result = tokio::task::spawn_blocking(move || {
+            let existed = match std::fs::symlink_metadata(&path_owned) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => return Err(AppError::Internal(format!("cannot inspect workspace write target: {error}")).into()),
+            };
+            let source = if existed { PublicationSource::Existing } else { PublicationSource::Absent };
+            write_file_with_source_sync_atomic(&path_owned, &data_owned, source)?;
+            Ok(!existed)
+        }).await.map_err(|_| AppError::Internal(format!(
+            "{FILE_WRITE_OUTCOME_UNKNOWN}; publication task stopped; re-read the target before retry"
+        )))?;
+        if result.as_ref().map_or_else(|failure: &PatchPublicationFailure| failure.published, |_| true) {
+            self.emit_content_update(scope.owner_id(), &path, data, &scope.workspace_root().to_string_lossy());
+        }
+        result.map_err(file_write_publication_error)
     }
 
     pub async fn remove_entry_for_agent_session(
@@ -1464,13 +1497,25 @@ fn current_file_matches(path: &Path, expected: &[u8]) -> bool {
     bytes == expected
 }
 
-/// Atomically publish one already-authorized AgentSession patch file.
+/// Atomically publish one already-authorized AgentSession file.
 ///
 /// The temporary file is created beside the target, fully written and synced,
 /// and then replaced with a same-filesystem rename. A new file uses a
 /// no-clobber hard-link publication so a concurrent creator cannot be silently
 /// overwritten. Existing files use the platform's atomic replacement primitive.
 fn write_file_sync_atomic(path: &Path, data: &[u8], expected: Option<&[u8]>) -> Result<(), PatchPublicationFailure> {
+    write_file_with_source_sync_atomic(path, data,
+        expected.map_or(PublicationSource::Absent, PublicationSource::Matching))
+}
+
+#[derive(Clone, Copy)]
+enum PublicationSource<'a> {
+    Absent,
+    Existing,
+    Matching(&'a [u8]),
+}
+
+fn write_file_with_source_sync_atomic(path: &Path, data: &[u8], source: PublicationSource<'_>) -> Result<(), PatchPublicationFailure> {
     let parent = path.parent().ok_or_else(|| {
         AppError::BadRequest(format!(
             "patch target '{}' has no parent directory",
@@ -1491,10 +1536,10 @@ fn write_file_sync_atomic(path: &Path, data: &[u8], expected: Option<&[u8]>) -> 
         std::process::id(),
         sequence
     ));
-    publish_patch_file(path, data, &temporary, expected)
+    publish_patch_file(path, data, &temporary, source)
 }
 
-fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, expected: Option<&[u8]>) -> Result<(), PatchPublicationFailure> {
+fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>) -> Result<(), PatchPublicationFailure> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -1543,11 +1588,13 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, expected: Opti
                 )));
             }
         };
-        if let Some(expected) = expected {
+        if !matches!(source, PublicationSource::Absent) {
             let metadata = target_metadata.ok_or_else(|| AppError::Conflict(format!(
                 "patch target '{}' disappeared before publication", path.display()
             )))?;
-            if !current_file_matches(path, expected) {
+            if let PublicationSource::Matching(expected) = source
+                && !current_file_matches(path, expected)
+            {
                 return Err(AppError::Conflict(format!(
                     "patch target '{}' changed before publication; re-read before retry", path.display()
                 )));
@@ -1558,8 +1605,7 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, expected: Opti
                     path.display()
                 ))
             })?;
-            replace_file_path(&temporary, path)?;
-            published = true;
+            replace_file_path(&temporary, path, &mut published)?;
         } else {
             // Creation intent is fixed during preparation. Never reinterpret
             // a newly appeared target as an existing-file replacement.
@@ -1616,49 +1662,96 @@ fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, expected: Opti
 }
 
 #[cfg(not(windows))]
-fn replace_file_path(source: &Path, target: &Path) -> Result<(), AppError> {
+fn replace_file_path(source: &Path, target: &Path, published: &mut bool) -> Result<(), AppError> {
     std::fs::rename(source, target).map_err(|error| {
         AppError::Internal(format!(
             "cannot atomically replace patch target '{}': {error}",
             target.display()
         ))
-    })
+    })?;
+    *published = true;
+    Ok(())
 }
 
 #[cfg(windows)]
-fn replace_file_path(source: &Path, target: &Path) -> Result<(), AppError> {
+fn replace_file_path(source: &Path, target: &Path, published: &mut bool) -> Result<(), AppError> {
+    replace_file_path_windows_with(source, target, published, replace_file_windows_native, |path| std::fs::remove_file(path))
+}
+
+#[cfg(windows)]
+fn replace_file_windows_native(source: &Path, target: &Path, backup: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let source = wide(source);
+    let target = wide(target);
+    let backup = wide(backup);
+    // SAFETY: buffers are NUL-terminated and live throughout the native call.
+    // Do not ignore ACL merge failures.
+    if unsafe {
+        ReplaceFileW(target.as_ptr(), source.as_ptr(), backup.as_ptr(),
+            0, std::ptr::null(), std::ptr::null())
+    } != 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(windows)]
+fn replace_file_path_windows_with(
+    source: &Path, target: &Path, published: &mut bool,
+    replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
+    cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), AppError> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        DELETE, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
-    let target_display = target.display().to_string();
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: both vectors are NUL-terminated and remain alive for the call.
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
+    // ReplaceFile supports readers that grant delete sharing and preserves
+    // ACLs/streams. Require write AND delete access first: replacement must
+    // respect deny-write locks even though the native API only needs DELETE.
+    let _access = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(target)
+        .map_err(|error| AppError::Internal(format!("cannot open replacement target: {error}")))?;
+    let backup = source.with_extension(format!("{}.backup", nomifun_common::generate_id()));
+    if backup.try_exists().map_err(|error| AppError::Internal(error.to_string()))? {
+        return Err(AppError::Conflict("replacement backup already exists".into()));
+    }
+    let replaced = replace(source, target, &backup);
+    drop(_access);
+    let error = match replaced {
+        Ok(()) => {
+            *published = true;
+            return cleanup(&backup).map_err(|_| AppError::Internal(format!(
+                "{FILE_WRITE_OUTCOME_UNKNOWN}; original backup cleanup is unconfirmed; re-read the target before retry"
+            )));
+        }
+        Err(error) => error,
+    };
+    // ReplaceFile's partial failure 1177 can leave the original at backup.
+    // Restore only into an absent target, without replacing a concurrent file.
+    if matches!(error.raw_os_error(), Some(1176 | 1177)) {
+        let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+        let target_wide = wide(target);
+        let backup_wide = wide(&backup);
+        // SAFETY: buffers remain live. No replace/copy/delay flags are used.
+        if target.try_exists().ok() == Some(false)
+            && backup.try_exists().ok() == Some(true)
+            && unsafe { MoveFileExW(backup_wide.as_ptr(), target_wide.as_ptr(), MOVEFILE_WRITE_THROUGH) } != 0
+        {
+            return Err(AppError::Internal(format!("replacement failed; original restored: {error}")));
+        }
         return Err(AppError::Internal(format!(
-            "cannot atomically replace patch target '{}': {}",
-            target_display,
-            std::io::Error::last_os_error()
+            "{FILE_WRITE_OUTCOME_UNKNOWN}; replacement failed ({error}); retain original backup and re-read before retry"
         )));
     }
-    Ok(())
+    Err(AppError::Internal(format!("cannot replace workspace file: {error}")))
 }
 
 /// Split a file name into `(base, ext)` where `ext` includes the leading dot.
@@ -2389,9 +2482,94 @@ mod tests {
         fs::write(&target, "original").unwrap();
         fs::write(&temporary, "belongs to another operation").unwrap();
 
-        assert!(publish_patch_file(&target, b"patched", &temporary, None).is_err());
+        assert!(publish_patch_file(&target, b"patched", &temporary, PublicationSource::Absent).is_err());
         assert_eq!(fs::read(&temporary).unwrap(), b"belongs to another operation");
         assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_restores_original_after_partial_native_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let temporary = root.path().join("temporary");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&temporary, b"new").unwrap();
+        let mut published = false;
+        let error = replace_file_path_windows_with(&temporary, &target, &mut published,
+            |_, target, backup| {
+                fs::rename(target, backup)?;
+                Err(std::io::Error::from_raw_os_error(1177))
+            }, |path| fs::remove_file(path)).unwrap_err();
+        assert!(!published);
+        assert!(!file_write_outcome_unknown(&error));
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read(&temporary).unwrap(), b"new");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_partial_failure_never_overwrites_concurrent_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let temporary = root.path().join("temporary");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&temporary, b"new").unwrap();
+        let mut backup_path = None;
+        let mut published = false;
+        let error = replace_file_path_windows_with(&temporary, &target, &mut published,
+            |_, target, backup| {
+                fs::rename(target, backup)?;
+                fs::write(target, b"concurrent")?;
+                backup_path = Some(backup.to_path_buf());
+                Err(std::io::Error::from_raw_os_error(1177))
+            }, |path| fs::remove_file(path)).unwrap_err();
+        assert!(!published);
+        assert!(file_write_outcome_unknown(&error));
+        assert_eq!(fs::read(&target).unwrap(), b"concurrent");
+        assert_eq!(fs::read(backup_path.unwrap()).unwrap(), b"original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_replace_reports_publication_when_backup_cleanup_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let temporary = root.path().join("temporary");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&temporary, b"new").unwrap();
+        let mut locker = None;
+        let mut published = false;
+        let error = replace_file_path_windows_with(&temporary, &target, &mut published,
+            replace_file_windows_native, |backup| {
+                locker = Some(fs::OpenOptions::new().read(true).share_mode(3).open(backup)?);
+                fs::remove_file(backup)
+            }).unwrap_err();
+        assert!(published);
+        assert!(file_write_outcome_unknown(&error));
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!temporary.exists());
+        drop(locker);
+    }
+
+    #[test]
+    fn atomic_write_errors_preserve_uncertainty_and_cleanup_observations() {
+        let error = file_write_publication_error(PatchPublicationFailure {
+            error: AppError::Internal(format!("{FILE_WRITE_OUTCOME_UNKNOWN}; original backup retained")),
+            published: true, temporary_cleanup_unconfirmed: false,
+        });
+        assert!(file_write_outcome_unknown(&error));
+        assert!(error.to_string().contains("original backup retained"));
+        let error = file_write_publication_error(PatchPublicationFailure {
+            error: AppError::Internal("write failed".into()),
+            published: false, temporary_cleanup_unconfirmed: true,
+        });
+        assert!(file_write_outcome_unknown(&error));
+        let rejected = file_write_publication_error(AppError::Forbidden("denied".into()).into());
+        assert!(matches!(rejected, AppError::Forbidden(_)));
+        assert!(!file_write_outcome_unknown(&rejected));
     }
 
     #[tokio::test]

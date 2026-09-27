@@ -776,7 +776,10 @@ impl Wave2ApplicationHost {
                     },
                 )?);
                 let _write_guard = self.workspace_write_lock.lock().await;
-                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
+                match begin_wave2_exclusive_effect(
+                    self.effect_store()?, context, binding, &effect_input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect,
+                ).await? {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let result = self
@@ -806,6 +809,12 @@ impl Wave2ApplicationHost {
                             }
                             Err(error) => {
                                 let owner_error = operation_error(capability_id, error);
+                                if owner_error.code == "EFFECT_OUTCOME_UNKNOWN" {
+                                    // A published file or unconfirmed cleanup is
+                                    // not a safe failure to retry with a new key.
+                                    // Retain the durable pending resource fence.
+                                    return Err(owner_error);
+                                }
                                 let _ = finish_wave2_effect(
                                     &reservation,
                                     Wave2EffectCompletion::Failed(&owner_error),
@@ -868,6 +877,9 @@ impl Wave2ApplicationHost {
                             }
                             Err(failure) => {
                                 let cause = operation_error(capability_id, failure.error);
+                                if cause.code == "EFFECT_OUTCOME_UNKNOWN" {
+                                    return Err(patch_failure_error(&cause.code, &cause.message, &failure.observation, false));
+                                }
                                 let owner_error = patch_failure_error(&cause.code, &cause.message, &failure.observation, true);
                                 if finish_wave2_effect(
                                     &reservation,
@@ -2039,6 +2051,7 @@ fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
     let code = match &error {
         error
             if nomifun_file::artifact_publication_outcome_unknown(error)
+                || nomifun_file::file_write_outcome_unknown(error)
                 || nomifun_file::vcs_stage_outcome_unknown(error) =>
         {
             "EFFECT_OUTCOME_UNKNOWN"
@@ -3032,6 +3045,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(action_conflict.0["written"], true);
+        assert_eq!(action_conflict.0["created"], false);
         let mismatch = invoke(
             &host,
             action_context,
@@ -3364,6 +3378,37 @@ mod tests {
         .unwrap_err();
         assert_eq!(unknown.code, "CAPABILITY_UNAVAILABLE");
         assert!(unknown.message.contains("durable unknown"));
+    }
+
+    #[tokio::test]
+    async fn pending_write_fences_new_key_after_restart_without_another_file_effect() {
+        let root = tempfile::tempdir().unwrap();
+        let host = test_host(root.path()).await;
+        let store = host.effect_store().unwrap().clone();
+        let mut pending = context(root.path());
+        pending.capability_id = CapabilityId::from("workspace.files");
+        pending.action_id = ActionId::from("workspace.files/write");
+        ensure_test_effect_context(&store, &pending).await;
+        let input = StrictJsonValue(json!({"path": "result.txt", "content": "published"}));
+        let admission = begin_wave2_exclusive_effect(&store, &pending,
+            workspace_typed_binding(&pending).unwrap(), &input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect).await.unwrap();
+        assert!(matches!(admission, Wave2EffectAdmission::Reserved(_)));
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        std::fs::write(root.path().join("result.txt"), "published").unwrap();
+        drop(host);
+        let restarted = Wave2ApplicationHost::for_workspace_root(root.path()).with_effect_store(store);
+        pending.idempotency_key = IdempotencyKey::from("different-write-key");
+        pending.operation_id = OperationId::from("different-write-operation");
+        let error = invoke(&restarted, pending.clone(), "workspace.files/write",
+            json!({"path": "result.txt", "content": "must-not-run"})).await.unwrap_err();
+        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("unsettled"), "{error:?}");
+        let store = restarted.effect_store().unwrap();
+        assert_eq!(store.read_effect(&pending.agent_session_id, &pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(store.read_effect(&pending.agent_session_id, &wave2_effect_id(&pending).unwrap()).await.unwrap().is_none());
+        assert_eq!(std::fs::read(root.path().join("result.txt")).unwrap(), b"published");
     }
 
     fn initialize_git_repository(root: &Path) -> git2::Repository {

@@ -24,7 +24,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | W02 | 正式 Session/模型/工具面，中文参数、必填拒绝、版本冻结 | 待走查 |
 | D02 | 302 | W02/W04 | 计划/完成、日志与 UI 终态；用户纠正/停止；零红色正向任务 | 首批 COD 有回归；完整集合待走查 |
-| D03 | 145 | W01/W03 | Win 路径、共享锁、原子 write/patch/delete、Artifact | 待走查 |
+| D03 | 145 | W01/W03 | Win 路径、共享锁、原子 write/patch/delete、Artifact | W01-B1/B2 路径及原子写子断言已验；剩余待走查 |
 | D04 | 476 | W01 | executable/args/cmd、PowerShell/cmd、编码、Job/ConPTY、退出与清理 | 新基线首批组件验证通过；完整 CMD/终端矩阵待走查 |
 | D05 | 69 | W03 | 本地隔离 Git remote、SSH 夹具；取消/未知副作用 | 条件资源待准备 |
 | D06 | 247 | W04/W05 | WebView2 profile、Computer A11y、MCP/Plugin/Skill | Skill 首发已回归；其余待走查 |
@@ -40,7 +40,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | 任务 | 对应 Case / 断言 | 测试与修复安排 | 状态 |
 | --- | --- | --- | --- |
 | W01-A 命令形状与启动 | G0-003/004/010；PROC-001～004；WIN-008/009；CMD-131/133/147 | 验字面 argv、显式脚本、混合形式拒绝、PowerShell 初始化及退出状态；PATH 上 Bun 也通过 owner 实际启动 | 组件子断言已验证；持久/脱离命令 policy 和新构建 Tauri CMD 仍待验收 |
-| W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 补原始分段检查，拒绝 Win32 尾点/尾空格别名、ADS、完整保留名和非法字符 | 路径首批 80 项定向回归通过；共享锁、删除 junction、跨盘/ACL/长路径及正式 UI 待验 |
+| W01-B 路径与权限边界 | AUTH-009/010；FILE-021；WIN-002～007/017 | cwd junction 已验；文件 owner 原始分段校验、原子 write 与共享锁回归 | B1 路径 80 项、B2 原子写 57 项定向回归通过（重叠不累加）；删除 junction、跨盘/ACL/长路径及正式 UI 待验 |
 | W01-C Job 与终端清理 | PROC-027～036/045；WIN-010～012/014/016 | 实际 Job 子孙清理、leader 先退出、stdin/EOF、ConPTY resize/cancel/快速退出/UTF-8 分片 | 首批组件子断言已验证；代码页、模拟锁、应用强杀/重启仍待走查 |
 | W02 正式核心入口 | AGEN-001/014/017；ACOD-001/008；APAL-001；AMUL-001 | 新 Session/冻结快照，复测资源/Skill 合同与已修首发；工具副作用由磁盘/DB 只读 oracle 判定 | 共享合入后排程 |
 | W03 文件/Git/SSH | D03/D05/D11 剩余适用 Case | 先根内读写负向，再隔离 remote/SSH 与外部效果；逐簇修复 | 待走查 |
@@ -66,7 +66,7 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 | `cargo test -p nomifun-engine-core --lib process::tests::managed_owner_launches_bun_from_path -- --exact --ignored` | 本机有 Bun，显式运行该项并通过；本批不再留为 skipped | `engine-bun-path.log` |
 | `cargo test -p nomifun-agent-domain-wave2 --lib process_schema::tests` | 2 通过，覆盖两种入口与互斥 Schema | `process-schema.log` |
 
-### W01-B1 文件路径（基线 `bd9fea1fb`）
+### W01-B1 文件路径（基线 `bd9fea1fb`；提交 `a88932f02`）
 
 - 子断言：AUTH-009、WIN-002～005；GEN/COD/MM 共享文件 owner，不折算为角色或完整 Case PASS。
 - 首次结果：新增 5 项测试中 3 FAIL、2 PASS。真实 ADS 内容可读，`nested./report.txt` 读取了
@@ -80,5 +80,21 @@ Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 - 证据：`windows/w01b-paths/01-before/windows-workspace.log` 与 `02-after/*.log`，日期根同上；
   未调用模型。仅验证普通 workspace 拒绝 UNC，未准备授权 UNC share；macOS/正式 UI 未验。
 
-下一步：继续 W01-B 共享锁、删除 junction 和长路径，再进入 W02 的新构建正式入口；
+### W01-B2 原子写与共享锁（基线 `a88932f02`）
+
+- 子断言：FILE-019～021/038/039、WIN-006/014，GEN/COD/MM 共用 owner；公共根因见 S-D03-01。
+- 首次结果：9 项中的 2 FAIL（deny-delete 下 write 成功、原件被截断）、7 PASS。接入原子发布后，
+  原有 `MoveFileExW` 又在允许全部共享的读句柄下拒绝；独立 Win32 探针确认并保留中间失败。
+- 修复：Windows 原生替换先验证 write/delete 访问并保留 ACL/原件备份；绝不回退直接覆盖。
+  补准确 created 回执、失败时不发成功事件、临时文件清理、明确解锁重试；发布/清理不确定时阻断换 key 重放。
+- 验证：`nomifun-file --test windows_workspace` 10，`--lib service::tests::atomic_` 4、
+  `service::tests::agent_` 10、`patch_temp_collision` 1；
+  `nomifun-app --lib router::agent_wave2_host::tests` 32，共 57 项通过；`git diff --check` 通过。
+  覆盖部分原生失败恢复、不覆盖并发目标、备份清理锁、只读目标以及重启后 durable pending 保持。
+- 证据：`windows/w01b-atomic/{01-before,02-after,03-after,04-final,05-final,native-probe}/`。
+  首次故障夹具未命中清理阶段、首次 App 测试误按旧 key 的 pending 文案判断新 key 拒绝，均保留；
+  后者改为核对既有 Pending 记录、无新 effect 和磁盘原件，未放宽副作用断言。
+- 未覆盖：原生 ACL 拒绝夹具、磁盘耗尽、应用崩溃窗口、macOS、正式 Tauri 全 Case；没有模型调用。
+
+下一步：继续 W01-B 删除 junction 和长路径，再进入 W02 的新构建正式入口；
 旧 MM retry 在 W04 保持待复现，不因本批通过关闭。不要重建 2,374 行日志/状态文件到 Git。
