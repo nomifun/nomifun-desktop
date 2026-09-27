@@ -34,7 +34,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | P0 本轮；P1/P2 待走查 |
-| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | S-D03-01 原子 write 在 Windows 修复/定向回归；macOS 和正式入口待验 |
+| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | S-D03-01/02 原子 write、删除与临时名称在 Windows 修复/定向回归；macOS 和正式入口待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | 条件资源准备后走查，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
@@ -46,6 +46,12 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D03-02（AUTH-009/010、FILE-036、WIN-007/017）：文件删除入口在 canonicalize 后才删除，
+  根内 junction 会被替换成目标目录，空相对路径则指向整个工作区。改为先拒绝根删除并检查原始
+  entry 的链接类型；递归删除普通父目录仍由原生 API 只移除内嵌链接。发布临时名不再拼接目标
+  basename，避免合法的 255 字符文件名使临时名超限。Windows 首次 3 FAIL 及修复后证据见
+  `phase-2-3/2026-09-27/windows/w01b-links-length/`；并发路径置换、macOS/正式入口仍未验。
 
 - S-D03-01（FILE-019～021/038/039；WIN-006/014）：W01-B 的真实 handle 反例确认 Agent
   `write_file` 仍经 `std::fs::write` 原地截断，deny-delete 下错误返回成功；覆盖既有文件还误报

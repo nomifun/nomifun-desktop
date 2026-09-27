@@ -280,7 +280,23 @@ impl FileService {
         relative_path: &str,
     ) -> Result<(), AppError> {
         scope.require_operation(crate::resource::DELETE_OPERATION)?;
+        if relative_path.is_empty() {
+            return Err(AppError::BadRequest("cannot delete the bound workspace root".into()));
+        }
         let path = scope.resolve_relative_path(relative_path)?;
+        // Inspect the requested entry before canonicalization. Resolving a
+        // final symlink/junction and deleting its target changes the operation.
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            let message = format!("cannot inspect workspace deletion target: {error}");
+            if error.kind() == std::io::ErrorKind::NotFound {
+                AppError::NotFound(message)
+            } else {
+                AppError::Internal(message)
+            }
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::Forbidden("workspace deletion does not follow symbolic links or junctions".into()));
+        }
         let workspace = scope.workspace_root().to_string_lossy();
         self.remove_entry_impl(
             scope.owner_id(),
@@ -1522,7 +1538,7 @@ fn write_file_with_source_sync_atomic(path: &Path, data: &[u8], source: Publicat
             path.display()
         ))
     })?;
-    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
+    path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
         AppError::BadRequest(format!(
             "patch target '{}' has no valid file name",
             path.display()
@@ -1532,7 +1548,7 @@ fn write_file_with_source_sync_atomic(path: &Path, data: &[u8], source: Publicat
         std::sync::atomic::AtomicU64::new(0);
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = parent.join(format!(
-        ".{file_name}.nomifun-patch-{}.{}.tmp",
+        ".nomifun-patch-{}.{}.tmp",
         std::process::id(),
         sequence
     ));
