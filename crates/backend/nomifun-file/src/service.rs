@@ -62,7 +62,7 @@ const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
 const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
 
 pub fn file_write_outcome_unknown(error: &AppError) -> bool {
-    matches!(error, AppError::Internal(message) if message.contains(FILE_WRITE_OUTCOME_UNKNOWN))
+    matches!(error, AppError::Internal(message) if message.starts_with(FILE_WRITE_OUTCOME_UNKNOWN))
 }
 
 fn file_write_publication_error(failure: PatchPublicationFailure) -> AppError {
@@ -361,12 +361,15 @@ impl FileService {
 
         for (index, file_patch) in request.files.iter().enumerate() {
             let (path, existed) = validate_agent_patch_target(scope, &file_patch.path, &authority)?;
-            if !seen_paths.insert(path.clone()) {
+            if seen_paths.iter().any(|previous: &PathBuf|
+                path.starts_with(previous) || previous.starts_with(&path))
+            {
                 return Err(AppError::BadRequest(format!(
-                    "agent patch contains duplicate target '{}'",
+                    "agent patch contains duplicate or nested file target '{}'",
                     file_patch.path
                 )).into());
             }
+            seen_paths.insert(path.clone());
 
             let before = if existed {
                 let metadata = std::fs::metadata(&path).map_err(|error| {
@@ -2493,12 +2496,18 @@ mod tests {
     #[test]
     fn patch_temp_collision_preserves_unowned_file() {
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("target.txt");
-        let temporary = dir.path().join("collision.tmp");
+        let named_directory = dir.path().join(FILE_WRITE_OUTCOME_UNKNOWN);
+        fs::create_dir(&named_directory).unwrap();
+        let target = named_directory.join("target.txt");
+        let temporary = named_directory.join("collision.tmp");
         fs::write(&target, "original").unwrap();
         fs::write(&temporary, "belongs to another operation").unwrap();
 
-        assert!(publish_patch_file(&target, b"patched", &temporary, PublicationSource::Absent).is_err());
+        let failure = publish_patch_file(&target, b"patched", &temporary, PublicationSource::Absent).unwrap_err();
+        assert!(!failure.published);
+        assert!(!failure.temporary_cleanup_unconfirmed);
+        let error = file_write_publication_error(failure);
+        assert!(!file_write_outcome_unknown(&error), "a path in an ordinary IO error is not an outcome marker: {error}");
         assert_eq!(fs::read(&temporary).unwrap(), b"belongs to another operation");
         assert_eq!(fs::read(&target).unwrap(), b"original");
     }
@@ -3776,6 +3785,23 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(root.path().join("existing")).unwrap(), "keep");
         assert!(!root.path().join(".nomifun").exists());
+    }
+
+    #[tokio::test]
+    async fn agent_patch_rejects_file_ancestor_targets_before_any_publication() {
+        for paths in [["new", "new/child.txt"], ["new/child.txt", "new"]] {
+            let root = tempfile::tempdir().unwrap();
+            let svc = make_service();
+            let scope = patch_scope(root.path());
+            let failure = svc.apply_patch_with_observation_for_agent_session(&scope,
+                AgentSessionPatchRequest {
+                    files: paths.iter().map(|path| nested_creation_patch(path)).collect(),
+                }).await.unwrap_err();
+            assert!(failure.observation.published.is_empty(),
+                "conflicting file/ancestor targets must fail in preparation: {:?}", failure.observation);
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0,
+                "invalid batch must not create files or parent directories: {paths:?}");
+        }
     }
 
     #[cfg(any(unix, windows))]
