@@ -6,9 +6,9 @@
 
 import type { IDirOrFile } from '@/common/adapter/ipcBridge';
 import { dispatchWorkspaceHasFilesEvent } from '@/renderer/utils/workspace/workspaceEvents';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SelectedFile, SelectedNodeRef, WorkspaceTreeSource } from '../types';
-import { getFirstLevelKeys, mergeLoadedChildren } from '../utils/treeHelpers';
+import { getFirstLevelKeys, reconcileLoadedChildren } from '../utils/treeHelpers';
 
 interface UseWorkspaceTreeOptions {
   /**
@@ -45,6 +45,18 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
   const isFirstLoadRef = useRef(true);
   const selectedKeysRef = useRef<string[]>([]);
   const selectedNodeRef = useRef<SelectedNodeRef | null>(null);
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const loadSeqRef = useRef(0);
+  const childRequestsRef = useRef(new Map<string, number>());
+  const childSeqRef = useRef(0);
+  const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    loadSeqRef.current += 1;
+    childRequestsRef.current.clear();
+    if (loadingTimerRef.current !== null) clearTimeout(loadingTimerRef.current);
+  }, []);
 
   // Loading time tracker / 加载时间追踪
   const lastLoadingTime = useRef(Date.now());
@@ -64,6 +76,10 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
    * Set loading state with debounce to avoid icon flickering
    */
   const setLoadingHandler = useCallback((newState: boolean) => {
+    if (loadingTimerRef.current !== null) {
+      clearTimeout(loadingTimerRef.current);
+      loadingTimerRef.current = null;
+    }
     if (newState) {
       lastLoadingTime.current = Date.now();
       setLoading(true);
@@ -72,9 +88,10 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
       if (Date.now() - lastLoadingTime.current > 1000) {
         setLoading(false);
       } else {
-        setTimeout(() => {
+        loadingTimerRef.current = setTimeout(() => {
+          loadingTimerRef.current = null;
           setLoading(false);
-        }, 1000);
+        }, 1000 - (Date.now() - lastLoadingTime.current));
       }
     }
   }, []);
@@ -83,46 +100,26 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
    * 加载工作空间文件树
    * Load workspace file tree
    */
-  // Track the latest request to ignore stale/aborted responses
-  const loadSeqRef = useRef(0);
-
   // The `_path` parameter is retained for call-site compatibility (e.g.
   // useWorkspaceSearch passes the workspace root); the source's `listRoot`
   // already knows its own root, so it is intentionally ignored here.
   const loadWorkspace = useCallback(
     (_path: string, search?: string) => {
       const seq = ++loadSeqRef.current;
+      childRequestsRef.current.clear();
+      const source = sourceRef.current;
+      const previousFiles = filesRef.current;
+      const isCurrent = () => seq === loadSeqRef.current && source.key === sourceRef.current.key;
       setLoadingHandler(true);
-      return sourceRef.current
+      return source
         .listRoot(search || '')
-        .then((res) => {
-          // Ignore stale responses from aborted requests:
-          // The backend aborts previous getWorkspace calls, returning [].
-          // Only apply the result from the latest request.
-          if (seq !== loadSeqRef.current) {
-            return res;
-          }
-
-          // Guard: on subsequent refreshes (not first load, not search), ignore
-          // empty responses when we already have files — prevents the tree from
-          // flashing empty while the backend is temporarily unable to read the
-          // workspace (e.g. concurrent file operations by another agent).
-          const isEmpty = res.length === 0 || (res[0]?.children?.length ?? 0) === 0;
-          if (!isFirstLoadRef.current && !search && isEmpty) {
-            return res;
-          }
-
-          // On refresh, splice already-lazy-loaded subtrees from the old tree
-          // back into the new response — the backend only returns one level at
-          // a time, so a root refresh would otherwise collapse every dir the
-          // user had expanded via loadMore. Skipped for searches and the very
-          // first load (no prior tree to merge). Functional setState reads the
-          // latest files snapshot without a stale closure.
-          if (!search && !isFirstLoadRef.current) {
-            setFiles((prev) => mergeLoadedChildren(res, prev));
-          } else {
-            setFiles(res);
-          }
+        .then(async (res) => {
+          if (!isCurrent()) return res;
+          const reconciled = !search && !isFirstLoadRef.current
+            ? await reconcileLoadedChildren(res, previousFiles, (node) => source.listChildren(node), isCurrent)
+            : res;
+          if (!isCurrent()) return res;
+          setFiles(reconciled);
           // 只在搜索时才重置 Tree key，否则保持选中状态
           // Only reset Tree key when searching, otherwise keep selection state
           if (search) {
@@ -154,18 +151,18 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
           // actively collapse, which prevents flicker while a workspace is
           // still empty.
           if (hasFiles) {
-            dispatchWorkspaceHasFilesEvent(sourceRef.current.target, true, wasFirstLoad);
+            dispatchWorkspaceHasFilesEvent(source.target, true, wasFirstLoad);
           }
 
-          return res;
+          return reconciled;
         })
         .catch((err) => {
           // Prevent unhandled rejection when workspace directory is missing (ENOENT)
-          console.error('[useWorkspaceTree] loadWorkspace failed:', err);
+          if (isCurrent()) console.error('[useWorkspaceTree] loadWorkspace failed:', err);
           return [] as IDirOrFile[];
         })
         .finally(() => {
-          setLoadingHandler(false);
+          if (isCurrent()) setLoadingHandler(false);
         });
     },
     [setLoadingHandler]
@@ -188,11 +185,18 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
    */
   const loadChildren = useCallback((node: { fullPath: string; relativePath: string }) => {
     const targetRelPath = node.relativePath;
-    return sourceRef.current
+    const source = sourceRef.current;
+    const rootSeq = loadSeqRef.current;
+    const childSeq = ++childSeqRef.current;
+    childRequestsRef.current.set(targetRelPath, childSeq);
+    const isCurrent = () => rootSeq === loadSeqRef.current && source.key === sourceRef.current.key
+      && childRequestsRef.current.get(targetRelPath) === childSeq;
+    return source
       .listChildren({ fullPath: node.fullPath, relativePath: node.relativePath })
       .then((res) => {
-        const newChildren = res[0]?.children;
-        if (!newChildren?.length) return;
+        if (!isCurrent()) return;
+        const newChildren = res.find((item) => !item.isFile && item.relativePath === targetRelPath)?.children;
+        if (newChildren === undefined) throw new Error('Workspace directory response is incomplete');
         setFiles((prev) => {
           const assign = (nodes: IDirOrFile[]): IDirOrFile[] =>
             nodes.map((n) => {
@@ -204,7 +208,10 @@ export function useWorkspaceTree({ treeSource, onSelectFiles }: UseWorkspaceTree
         });
       })
       .catch((err) => {
-        console.error('[Workspace] loadMore failed:', err);
+        if (isCurrent()) console.error('[Workspace] loadMore failed:', err);
+      })
+      .finally(() => {
+        if (childRequestsRef.current.get(targetRelPath) === childSeq) childRequestsRef.current.delete(targetRelPath);
       });
   }, []);
 
