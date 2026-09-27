@@ -188,7 +188,7 @@ fn read_source_bytes(
     read_source_bytes_with_hooks(path, authority, max_bytes, charged_bytes, || {}, || {})
 }
 
-fn read_source_bytes_with_hooks(
+pub(crate) fn read_source_bytes_with_hooks(
     path: &std::path::Path,
     authority: &crate::PathAuthority,
     max_bytes: usize,
