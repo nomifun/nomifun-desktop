@@ -117,6 +117,13 @@ pub struct WorkspaceFilesChangedBatch {
     pub event_schema: String,
     pub events: Vec<WorkspaceFileChangedEvent>,
     pub dropped_event_count: u64,
+    /// The native stream has an unknown gap; the count above covers only
+    /// notifications this host can actually count as discarded.
+    #[serde(
+        default,
+        skip_serializing_if = "WorkspaceFilesChangedBatch::rescan_not_required"
+    )]
+    pub rescan_required: bool,
 }
 
 impl WorkspaceFilesChangedBatch {
@@ -126,7 +133,16 @@ impl WorkspaceFilesChangedBatch {
             event_schema: WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID.to_owned(),
             events,
             dropped_event_count,
+            rescan_required: false,
         }
+    }
+
+    fn rescan_not_required(value: &bool) -> bool {
+        !value
+    }
+
+    pub fn requires_reconciliation(&self) -> bool {
+        self.rescan_required || self.dropped_event_count != 0
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -1701,7 +1717,8 @@ fn canonical_schema(schema_owner: &str, role: &str) -> StrictJsonValue {
                         "required":["path","kind"]
                     }
                 },
-                "dropped_event_count":{"type":"integer","minimum":0}
+                "dropped_event_count":{"type":"integer","minimum":0},
+                "rescan_required":{"type":"boolean","description":"Native event history is incomplete with an unknown gap; refresh workspace state. dropped_event_count counts only known local discards."}
             }),
             &["capability_id", "event_schema", "events", "dropped_event_count"],
         );
@@ -3423,6 +3440,31 @@ mod tests {
             .unwrap()
             .validate(&drifted)
             .is_err());
+    }
+
+    #[test]
+    fn workspace_event_rescan_is_explicit_and_legacy_batches_keep_their_encoding() {
+        let legacy = serde_json::json!({ "capability_id": WORKSPACE_FILES_MODULE_ID,
+            "event_schema": WORKSPACE_FILES_CHANGED_EVENT_SCHEMA_ID, "events": [], "dropped_event_count": 0 });
+        let mut batch: WorkspaceFilesChangedBatch = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(!batch.requires_reconciliation());
+        assert_eq!(serde_json::to_value(&batch).unwrap(), legacy);
+        let validator = jsonschema::options().build(&canonical_schema(WORKSPACE_FILES_MODULE_ID, "event").0).unwrap();
+        validator.validate(&legacy).unwrap();
+        batch.rescan_required = true;
+        assert!(batch.requires_reconciliation());
+        let payload = serde_json::to_value(&batch).unwrap();
+        assert_eq!(payload["dropped_event_count"], 0);
+        assert_eq!(payload["rescan_required"], true);
+        validator.validate(&payload).unwrap();
+        let mut invalid = payload.clone();
+        invalid["rescan_required"] = serde_json::json!("true");
+        assert!(validator.validate(&invalid).is_err());
+        assert!(serde_json::from_value::<WorkspaceFilesChangedBatch>(invalid).is_err());
+        let mut invalid = payload;
+        invalid["unknown_field"] = serde_json::json!(true);
+        assert!(validator.validate(&invalid).is_err());
+        assert!(WorkspaceFilesChangedBatch::new(Vec::new(), 1).requires_reconciliation());
     }
 
     #[test]

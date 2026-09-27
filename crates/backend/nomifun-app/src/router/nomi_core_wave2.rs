@@ -792,9 +792,48 @@ struct WatchQueue {
     events: VecDeque<WorkspaceFileChangedEvent>,
     debounce: HashMap<String, Instant>,
     dropped: u64,
+    rescan_required: bool,
 }
 
 impl WatchQueue {
+    fn record_native(&mut self, root: &Path, result: Result<notify::Event, notify::Error>) {
+        let Ok(event) = result else {
+            self.rescan_required = true;
+            return;
+        };
+        self.rescan_required |= event.need_rescan();
+        let Some(kind) = watch_operation(&event.kind) else {
+            return;
+        };
+        for path in event.paths {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            if relative.components().next().is_some_and(|component| {
+                nomifun_file::is_workspace_owner_component(component.as_os_str())
+            }) {
+                continue;
+            }
+            if relative.as_os_str().is_empty() {
+                self.rescan_required = true;
+                continue;
+            }
+            let parts: Option<Vec<_>> = relative
+                .components()
+                .map(|part| match part {
+                    std::path::Component::Normal(name) => name.to_str(),
+                    _ => None,
+                })
+                .collect();
+            let Some(parts) = parts else {
+                self.dropped = self.dropped.saturating_add(1);
+                continue;
+            };
+            let path = parts.join("/");
+            self.push(WorkspaceFileChangedEvent { path, kind });
+        }
+    }
+
     fn push(&mut self, event: WorkspaceFileChangedEvent) {
         self.push_at(event, Instant::now());
     }
@@ -826,13 +865,14 @@ impl WatchQueue {
         self.events.push_back(event);
     }
 
-    fn drain(&mut self) -> (Vec<WorkspaceFileChangedEvent>, u64) {
+    fn drain(&mut self) -> (Vec<WorkspaceFileChangedEvent>, u64, bool) {
         let events = self.events.drain(..).collect();
         let dropped = std::mem::take(&mut self.dropped);
+        let rescan_required = std::mem::take(&mut self.rescan_required);
         // Coalescing belongs to the undelivered batch. A later notification
         // must remain observable after the consumer has drained the earlier one.
         self.debounce.clear();
-        (events, dropped)
+        (events, dropped, rescan_required)
     }
 }
 
@@ -853,34 +893,10 @@ impl NomiWorkspaceWatchContext {
         let callback_root = root.clone();
         let mut watcher = notify::recommended_watcher(
             move |result: Result<notify::Event, notify::Error>| {
-                let Ok(event) = result else {
-                    let mut queue = callback_queue
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    queue.dropped = queue.dropped.saturating_add(1);
-                    return;
-                };
-                let Some(kind) = watch_operation(&event.kind) else {
-                    return;
-                };
                 let mut queue = callback_queue
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                for path in event.paths {
-                    let Ok(relative) = path.strip_prefix(&callback_root) else {
-                        continue;
-                    };
-                    if relative.components().next().is_some_and(|component| {
-                        nomifun_file::is_workspace_owner_component(component.as_os_str())
-                    }) {
-                        continue;
-                    }
-                    let path = relative.to_string_lossy().replace('\\', "/");
-                    if path.is_empty() {
-                        continue;
-                    }
-                    queue.push(WorkspaceFileChangedEvent { path, kind });
-                }
+                queue.record_native(&callback_root, result);
             },
         )
         .map_err(|error| {
@@ -925,21 +941,27 @@ impl Drop for NomiWorkspaceWatchContext {
 #[async_trait::async_trait]
 impl ContextContributor for NomiWorkspaceWatchContext {
     async fn pre_turn_context(&self) -> Option<String> {
-        let (events, dropped) = self
+        let (events, dropped, rescan_required) = self
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain();
-        if events.is_empty() && dropped == 0 {
+        if events.is_empty() && dropped == 0 && !rescan_required {
             return None;
         }
-        let batch = WorkspaceFilesChangedBatch::new(events, dropped);
+        let mut batch = WorkspaceFilesChangedBatch::new(events, dropped);
+        batch.rescan_required = rescan_required;
         batch.validate().ok()?;
+        let recovery = if batch.requires_reconciliation() {
+            "\nWorkspace notifications are incomplete. Re-read the relevant workspace state before relying on this batch; it cannot establish which other paths stayed unchanged."
+        } else {
+            ""
+        };
         serde_json::to_string(&batch)
         .ok()
         .map(|payload| {
             format!(
-                "<nomifun_workspace_events format=\"canonical-json\">\n{payload}\n</nomifun_workspace_events>"
+                "<nomifun_workspace_events format=\"canonical-json\">\n{payload}\n</nomifun_workspace_events>{recovery}"
             )
         })
     }
@@ -1007,6 +1029,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watch_native_rescan_requires_reconciliation_without_inventing_a_loss_count() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        let event = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        watch.queue.lock().unwrap().record_native(&watch.root, Ok(event));
+        let context = watch.pre_turn_context().await;
+        let payload = context.as_ref().and_then(|context| serde_json::from_str::<serde_json::Value>(context.lines().nth(1).unwrap()).ok());
+        if !payload.as_ref().is_some_and(|payload| payload["rescan_required"] == true && payload["dropped_event_count"] == 0) {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+            panic!("native rescan was not represented; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_native_errors_mark_unknown_loss_without_claiming_one_missing_event() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        watch.queue.lock().unwrap().record_native(&watch.root, Err(notify::Error::generic("injected stream failure")));
+        let context = watch.pre_turn_context().await;
+        let payload = context.as_ref().and_then(|context| serde_json::from_str::<serde_json::Value>(context.lines().nth(1).unwrap()).ok());
+        if !payload.as_ref().is_some_and(|payload| payload["rescan_required"] == true && payload["dropped_event_count"] == 0) {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+            panic!("unknown stream loss was counted as one event; retained fixture: {}", fixture.keep().display());
+        }
+    }
+
+    #[test]
+    fn watch_native_rescan_and_known_discards_are_separate_and_drained_once() {
+        let mut queue = WatchQueue::default();
+        let root = std::env::temp_dir().join("workspace-events-native-gap");
+        // Access notifications are ordinarily ignored, but their rescan flag is not.
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Access(
+            notify::event::AccessKind::Any,
+        )).set_flag(notify::event::Flag::Rescan)));
+        queue.record_native(&root, Err(notify::Error::generic("unknown gap")));
+        queue.push(WorkspaceFileChangedEvent {
+            path: "a/../b".into(), kind: WorkspaceFileChangeKind::Modified,
+        });
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Create(
+            notify::event::CreateKind::File,
+        )).add_path(root.join("visible.txt"))));
+        let (events, dropped, rescan) = queue.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "visible.txt");
+        assert_eq!(dropped, 1);
+        assert!(rescan);
+        assert_eq!(queue.drain(), (Vec::new(), 0, false));
+    }
+
+    #[test]
+    fn watch_native_paths_preserve_names_and_require_reconciliation_for_root_changes() {
+        let mut queue = WatchQueue::default();
+        let root = std::env::temp_dir().join("workspace-events-native-paths");
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(root.join("nested/日😀.txt"))
+            .add_path(root.join(".nomifun/private.txt"))
+            .add_path(root.with_file_name("outside").join("secret.txt"));
+        queue.record_native(&root, Ok(event));
+        let (events, dropped, rescan) = queue.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "nested/日😀.txt");
+        assert_eq!((dropped, rescan), (0, false));
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Remove(
+            notify::event::RemoveKind::Folder,
+        )).add_path(root.clone())));
+        assert_eq!(queue.drain(), (Vec::new(), 0, true));
+    }
+
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn watch_native_unrepresentable_names_are_counted_without_lossy_path_aliases() {
+        #[cfg(windows)]
+        let name = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0xD800, 0x002E, 0x0078])
+        };
+        #[cfg(unix)]
+        let name = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![0xFF, b'.', b'x'])
+        };
+        let root = std::env::temp_dir().join("workspace-events-native-encoding");
+        let mut queue = WatchQueue::default();
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(root.join(name))
+            .add_path(root.join("valid.txt"))));
+        let (events, dropped, rescan) = queue.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "valid.txt");
+        assert_eq!((dropped, rescan), (1, false));
+    }
+
+    #[tokio::test]
     async fn watch_queue_preserves_valid_events_beside_an_unrepresentable_path() {
         let fixture = event_fixture();
         let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
@@ -1068,11 +1183,12 @@ mod tests {
             queue.push_at(event.clone(), now);
             queue.push_at(event, now); // Same undelivered fact may still coalesce.
         }
-        let (events, dropped) = queue.drain();
+        let (events, dropped, rescan_required) = queue.drain();
         assert_eq!(events.len(), MAX_WATCH_EVENTS);
         assert_eq!(events.first().unwrap().path, "src/7.rs");
         assert_eq!(events.last().unwrap().path, format!("src/{}.rs", total - 1));
         assert_eq!(dropped, invalid.len() as u64 + 7);
+        assert!(!rescan_required);
         WorkspaceFilesChangedBatch::new(events, dropped).validate().unwrap();
         assert!(queue.debounce.is_empty());
         assert_eq!(queue.dropped, 0);
