@@ -47,6 +47,12 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D02-04（CTRL-007、WIN-005/007 子断言）：完成证据只比较模型参数路径，中文不相干改动会
+  误使证据失效，参数中的不同名称也不能证明 junction 别名不重叠。文件 owner 现在返回根摘要及
+  实际解析路径；Runtime 只用该观察保留确定不相交的文件证据，缺失/畸形/跨根、失败与不透明
+  mutation 均保留失效边界。Windows 200 项定向检查通过，证据见 W07 owner-paths；
+  Artifact 证据有效期及最终交付仍需继续修复，GEN 原三次 FAIL 不关闭，macOS 未验。
+
 - S-D02-03（REAL-010、OBS-008/014）：真实命令已取消/reaped，但历史仅接受 Runtime ToolCompleted，
   漏掉取消后的宿主结算，UI 显示“已运行”且无输出。补相同 Turn/call 的有界宿主结算读取、原生
   已清理 process 取消语义、前端终态/标题和停止确认后的历史刷新。Windows 118 项定向检查及

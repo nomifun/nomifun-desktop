@@ -50,6 +50,8 @@ fn default_limit() -> usize {
 #[derive(Debug, Serialize)]
 pub struct AgentTextPage {
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<crate::WorkspacePathObservation>,
     pub content: String,
     pub sha256: String,
     pub total_bytes: usize,
@@ -90,6 +92,7 @@ impl FileService {
         tokio::task::spawn_blocking(move || {
             let mut charged_bytes = 0;
             read_source_bytes(&path, &authority, max_bytes, &mut charged_bytes)
+                .map(|source| source.map(|(bytes, digest, _)| (bytes, digest)))
         })
         .await
         .map_err(|error| AppError::Internal(format!("workspace byte read task failed: {error}")))?
@@ -121,9 +124,10 @@ impl FileService {
         }
         let path = scope.resolve_relative_path(&request.path)?;
         let authority = scope.authority();
+        let root = scope.workspace_root().to_path_buf();
         tokio::task::spawn_blocking(move || {
             let mut charged_bytes = 0;
-            let Some((text, digest)) = read_source(&path, &authority, MAX_FILE_BYTES, &mut charged_bytes)? else {
+            let Some((text, digest, canonical)) = read_source_with_path(&path, &authority, MAX_FILE_BYTES, &mut charged_bytes)? else {
                 return Ok(None);
             };
             if request.expected_sha256.as_ref().is_some_and(|expected| expected != &digest) {
@@ -139,7 +143,7 @@ impl FileService {
                 request.offset = start;
                 request.limit = (end - start).min(MAX_PAGE_BYTES);
             }
-            page(request, text, digest).map(Some)
+            page(request, text, digest, crate::WorkspacePathObservation::from_canonical(&root, &canonical)).map(Some)
         }).await.map_err(|error| AppError::Internal(format!("text page task failed: {error}")))?
     }
 }
@@ -152,7 +156,17 @@ pub(crate) fn read_source(
     max_bytes: usize,
     charged_bytes: &mut usize,
 ) -> Result<Option<(String, String)>, AppError> {
-    let Some((bytes, digest)) = read_source_bytes(path, authority, max_bytes, charged_bytes)?
+    read_source_with_path(path, authority, max_bytes, charged_bytes)
+        .map(|source| source.map(|(text, digest, _)| (text, digest)))
+}
+
+fn read_source_with_path(
+    path: &std::path::Path,
+    authority: &crate::PathAuthority,
+    max_bytes: usize,
+    charged_bytes: &mut usize,
+) -> Result<Option<(String, String, std::path::PathBuf)>, AppError> {
+    let Some((bytes, digest, canonical)) = read_source_bytes(path, authority, max_bytes, charged_bytes)?
     else {
         return Ok(None);
     };
@@ -161,7 +175,7 @@ pub(crate) fn read_source(
             "Text source is not UTF-8; no lossy binary conversion was performed".into(),
         )
     })?;
-    Ok(Some((text, digest)))
+    Ok(Some((text, digest, canonical)))
 }
 
 fn read_source_bytes(
@@ -169,7 +183,7 @@ fn read_source_bytes(
     authority: &crate::PathAuthority,
     max_bytes: usize,
     charged_bytes: &mut usize,
-) -> Result<Option<(Vec<u8>, String)>, AppError> {
+) -> Result<Option<(Vec<u8>, String, std::path::PathBuf)>, AppError> {
     if max_bytes > MAX_FILE_BYTES {
         return Err(AppError::BadRequest(
             "Source byte budget exceeds the owner limit".into(),
@@ -219,7 +233,7 @@ fn read_source_bytes(
         ));
     }
     let digest = format!("{:x}", Sha256::digest(&bytes));
-    Ok(Some((bytes, digest)))
+    Ok(Some((bytes, digest, canonical)))
 }
 
 fn io_error(error: std::io::Error) -> AppError {
@@ -250,6 +264,7 @@ fn page(
     request: AgentTextReadRequest,
     text: String,
     sha256: String,
+    workspace_path: Option<crate::WorkspacePathObservation>,
 ) -> Result<AgentTextPage, AppError> {
     let start = request.offset;
     if start > text.len() || !text.is_char_boundary(start) {
@@ -264,6 +279,7 @@ fn page(
     let (start_line, start_column_bytes) = crate::agent_patch_lines::line_position(&text, start);
     let mut result = AgentTextPage {
         path: request.path.trim().to_owned(),
+        workspace_path,
         content: String::new(),
         sha256,
         total_bytes: text.len(),

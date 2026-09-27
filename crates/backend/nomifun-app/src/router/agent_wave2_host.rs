@@ -784,18 +784,19 @@ impl Wave2ApplicationHost {
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let result = self
                             .files
-                            .write_file_for_agent_session(
+                            .write_file_with_observation_for_agent_session(
                                 &scope,
                                 &params.path,
                                 params.content.as_bytes(),
                             )
                             .await;
                         match result {
-                            Ok(created) => {
+                            Ok(receipt) => {
                                 let output = StrictJsonValue(json!({
                                     "path": params.path,
                                     "written": true,
-                                    "created": created,
+                                    "created": receipt.created,
+                                    "workspace_path": receipt.workspace_path,
                                     "bytes": params.content.len(),
                                     "line_count": params.content.lines().count(),
                                     "sha256": nomifun_agent_contracts::digest_bytes(params.content.as_bytes()),
@@ -911,13 +912,14 @@ impl Wave2ApplicationHost {
                     Wave2EffectAdmission::Reserved(reservation) => {
                         let result = self
                             .files
-                            .remove_entry_for_agent_session(&scope, &params.path)
+                            .remove_entry_with_observation_for_agent_session(&scope, &params.path)
                             .await;
                         match result {
-                            Ok(()) => {
+                            Ok(workspace_path) => {
                                 let output = StrictJsonValue(json!({
                                     "path": params.path,
-                                    "deleted": true
+                                    "deleted": true,
+                                    "workspace_path": workspace_path
                                 }));
                                 finish_wave2_effect(
                                     &reservation,
@@ -2528,6 +2530,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(written.0["written"], true);
+        assert_eq!(written.0["workspace_path"]["path"], "test.txt");
+        assert_eq!(written.0["workspace_path"]["root_sha256"].as_str().unwrap().len(), 64);
 
         let read = invoke(
             &host,
@@ -2538,6 +2542,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(read.0["content"], "hello");
+        assert_eq!(read.0["workspace_path"], written.0["workspace_path"]);
 
         let deleted = invoke(
             &host,
@@ -2548,6 +2553,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(deleted.0["deleted"], true);
+        assert_eq!(deleted.0["workspace_path"], written.0["workspace_path"]);
         assert!(!directory.path().join("test.txt").exists());
     }
 
