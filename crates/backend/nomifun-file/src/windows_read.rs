@@ -126,7 +126,7 @@ impl ReadRoot {
     fn open_entry_checked(
         &self, canonical: &Path, mut after_parent: impl FnMut(),
         open_final: impl Fn(&Dir, &std::ffi::OsStr) -> Result<File, AppError>,
-        case_alias: bool,
+        metadata_lookup: bool,
     ) -> Result<File, AppError> {
         self.verify()?;
         let relative = canonical.strip_prefix(&self.canonical)
@@ -136,13 +136,17 @@ impl ReadRoot {
         while let Some(component) = components.next() {
             let Component::Normal(name) = component else { return Err(changed()); };
             let file = if components.peek().is_some() {
-                crate::windows_directory::open(Some(&directory),Path::new(name)).map_err(io_error)?
+                crate::windows_directory::open(Some(&directory),Path::new(name)).map_err(|error| {
+                    if metadata_lookup && error.kind() == std::io::ErrorKind::NotFound {
+                        AppError::NotFound("workspace metadata ancestor is absent".into())
+                    } else { io_error(error) }
+                })?
             } else {
                 open_final(&directory,name)?
             };
             if components.peek().is_none() {
                 let actual = final_path(&file)?;
-                if actual != canonical && (!case_alias || !metadata_name_matches(canonical, &actual)?) { return Err(changed()); }
+                if actual != canonical && (!metadata_lookup || !metadata_name_matches(canonical, &actual)?) { return Err(changed()); }
                 return Ok(file);
             }
             let metadata = file.metadata().map_err(io_error)?;

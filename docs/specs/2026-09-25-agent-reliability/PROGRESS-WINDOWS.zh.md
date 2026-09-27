@@ -484,6 +484,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   较早回归另保留，diff 通过。无模型/UI；普通文件清单/侧栏、更多 ACL/文件系统/Unix、文件 symlink
   夹具、原生 IO 故障、100 seed、完整角色及 N3/LONG/99% 仍待验，未声明共享阶段完成。
 
-下一步优先共享：FILE 既有文件发布、普通文件清单和元数据，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 FILE 元数据读取（W20，基线 `ad468c2c2`）
+
+- S-D03-16 / AUTH-009/010、FILE-011/018 元数据子断言：父目录临时换链后，旧 metadata owner
+  把根内 6 字节文件报告为根外的 24 字节；非递归 instruction_scope 则把根内文件报告为目录且
+  complete。两项首次 FAIL 与原磁盘/observation 保留于
+  `phase-2-3/2026-09-28/windows/w20-entry-metadata/02-owner-before/`。
+- 两入口接入受限元数据 reader；只读取实际句柄属性并拒绝新链接。元数据模式下的真实缺失祖先
+  保留 missing，权限拒绝不转 absence；普通 text/image MIME、大小、时间、名称和合法 alias 保留。
+- `01-before/` 保留测试误序列化内部 DTO 的编译失败。`04-access/`、`05-native-access/` 保留
+  初版仅拒 RA 的夹具失败：独立原生调用同样成功，未形成拒绝条件。补父目录拒列举后原生错误 5、
+  owner 与 scope 均拒绝；恢复顺序失败另留痕并恢复所有临时 ACL，未更改产品权限或放宽原生对照。
+- 元数据/读取 owner **32**、Windows workspace **36**、元数据 API **6**、App host **34**，共
+  **108 项通过**；新增 5 项各重复 **20/20**。覆盖根/文件/目录/深层 missing、非法文件祖先、
+  私有目录拒绝、父目录拒 RD/S 与文件拒数据读、大小写 alias、嵌套搜索及零变更事件。
+- 最终证据 `03-after/`、`06-effective-denial/`、`07-regression/`、`08-repeat/`，diff 通过。无模型/UI；
+  普通清单/侧栏、既有发布、跨重启根身份、其他文件系统/Unix、100 seed、完整角色及长期门槛仍待验。
+
+下一步优先共享：FILE 既有文件发布、普通文件清单，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
