@@ -31,20 +31,26 @@ export type ComposerProps = {
   sideTools?: ReactNode;
   topRightTools?: ReactNode;
   footer?: ReactNode;
+  /** Product-owned stacked layout: attachments first, editor, then bottom actions. */
+  compactStacked?: boolean;
 };
 
 /** The single composer renderer. Home and active conversations supply behavior,
  * not competing shells, editors, toolbar layouts, or visual variants. */
 export default function Composer({ inputProps, surfaceRef, singleLine = false, isFileDragging = false,
   dragHandlers, overlayOpen = false, overlays, header, beforeInput, inputOverlay, highlightInput = false,
-  attachments, tools, creationTools, rightTools, actions, sideTools, topRightTools, footer,
+  attachments, tools, creationTools, rightTools, actions, sideTools, topRightTools, footer, compactStacked = false,
 }: ComposerProps) {
   const [focused, setFocused] = useState(false);
   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
   const { compositionHandlers, isImeActive } = useCompositionInput();
+  // A stacked composer always owns a dedicated editor row. Do not let a stale
+  // adaptive/single-line state (including one preserved by HMR) put the editor
+  // back beside its actions.
+  const resolvedSingleLine = compactStacked ? false : singleLine;
   return <>
-    <div ref={surfaceRef} data-composer-surface
-      className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${sideTools ? 'sendbox-panel--side-tools' : ''} ${overlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'b-dashed sendbox-panel--dragging' : ''}`}
+    <div ref={surfaceRef} data-composer-surface data-composer-layout={compactStacked ? 'compact-stacked' : 'adaptive'}
+      className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${compactStacked ? 'sendbox-panel--compact-stacked' : ''} ${sideTools ? 'sendbox-panel--side-tools' : ''} ${overlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'b-dashed sendbox-panel--dragging' : ''}`}
       style={{
         transition: 'box-shadow 0.25s ease, border-color 0.25s ease',
         padding: sideTools ? 0 : undefined,
@@ -56,22 +62,23 @@ export default function Composer({ inputProps, surfaceRef, singleLine = false, i
       }} {...dragHandlers}>
       <SessionCapabilityComposerLayout picker={sideTools}>
         {overlays}
+        {compactStacked && attachments}
         {topRightTools && <div className='sendbox-internal-status-row mb-8px flex w-full flex-wrap items-start gap-8px' data-testid='sendbox-internal-status-row'>
           <div className='ml-auto flex h-28px flex-shrink-0 items-center' data-testid='sendbox-internal-context-tools'>{topRightTools}</div>
         </div>}
         {header}
         {beforeInput}
         <UploadProgressBar source='sendbox' />
-        <div className={singleLine ? 'flex items-center gap-2 w-full min-w-0 overflow-hidden' : 'w-full overflow-hidden'}>
-          {singleLine && <div className='flex-shrink-0 sendbox-tools'>{tools}</div>}
-          <div className={`sendbox-highlight-container ${singleLine ? 'sendbox-highlight-container--single' : ''}`}
-            style={{ width: singleLine ? 'auto' : '100%', flex: singleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', marginBottom: singleLine ? 0 : 2, minHeight: singleLine ? 20 : 40 }}>
+        <div data-composer-editor-row className={resolvedSingleLine ? 'flex items-center gap-2 w-full min-w-0 overflow-hidden' : 'w-full overflow-hidden'}>
+          {resolvedSingleLine && <div className='flex-shrink-0 sendbox-tools'>{tools}</div>}
+          <div className={`sendbox-highlight-container ${resolvedSingleLine ? 'sendbox-highlight-container--single' : ''}`}
+            style={{ width: resolvedSingleLine ? 'auto' : '100%', flex: resolvedSingleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', marginBottom: resolvedSingleLine ? 0 : 2, minHeight: resolvedSingleLine ? 20 : 40 }}>
             {inputOverlay}
             <Input.TextArea {...inputProps}
               spellCheck={false}
               className={`${highlightInput ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px`}
-              style={{ width: '100%', flex: singleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', margin: 0, paddingBlock: singleLine ? 0 : 1, height: singleLine ? 20 : 'auto', minHeight: singleLine ? 20 : 40, overflowY: singleLine ? 'hidden' : 'auto', overflowX: 'hidden', whiteSpace: singleLine ? 'nowrap' : 'pre-wrap', textOverflow: singleLine ? 'ellipsis' : 'clip', wordBreak: singleLine ? 'normal' : 'break-word', overflowWrap: 'break-word' }}
-              autoSize={singleLine ? false : { minRows: 2, maxRows: 10 }}
+              style={{ width: '100%', flex: resolvedSingleLine ? 1 : 'none', minWidth: 0, maxWidth: '100%', margin: 0, paddingBlock: resolvedSingleLine ? 0 : 1, height: resolvedSingleLine ? 20 : compactStacked ? 40 : 'auto', minHeight: resolvedSingleLine ? 20 : 40, overflowY: resolvedSingleLine ? 'hidden' : 'auto', overflowX: 'hidden', whiteSpace: resolvedSingleLine ? 'nowrap' : 'pre-wrap', textOverflow: resolvedSingleLine ? 'ellipsis' : 'clip', wordBreak: resolvedSingleLine ? 'normal' : 'break-word', overflowWrap: 'break-word' }}
+              autoSize={resolvedSingleLine || compactStacked ? false : { minRows: 2, maxRows: 10 }}
               onFocus={event => { setFocused(true); inputProps.onFocus?.(event); }}
               onBlur={event => { setFocused(false); inputProps.onBlur?.(event); }}
               onCompositionStartCapture={event => { compositionHandlers.onCompositionStartCapture(); inputProps.onCompositionStartCapture?.(event); }}
@@ -79,10 +86,10 @@ export default function Composer({ inputProps, surfaceRef, singleLine = false, i
               onKeyDown={event => { if (!isImeActive(event)) inputProps.onKeyDown?.(event); }}
             />
           </div>
-          {singleLine && <div className='flex items-center gap-2'>{actions}</div>}
+          {resolvedSingleLine && <div className='flex items-center gap-2'>{actions}</div>}
         </div>
-        {attachments}
-        {!singleLine && <ResponsiveComposerRow className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
+        {!compactStacked && attachments}
+        {!resolvedSingleLine && <ResponsiveComposerRow className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
           <div className='sendbox-tools'>{tools}</div>
           {creationTools}
           <div data-composer-group className='sendbox-actions flex items-center gap-2' style={{ marginLeft: 'auto', maxWidth: '100%' }}>

@@ -10,6 +10,7 @@ import TitlebarLanguageMenu from './TitlebarLanguageMenu';
 import WindowControls from '../WindowControls';
 import { sessionSiderChannel } from '@renderer/utils/workspace/sessionSiderEvents';
 import { agentSiderChannel } from '@renderer/utils/workspace/agentSiderEvents';
+import { nomiSiderChannel } from '@renderer/utils/workspace/nomiSiderEvents';
 import ContentSiderTitlebarToggle from '../ContentSider/ContentSiderTitlebarToggle';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
@@ -75,16 +76,26 @@ const Titlebar: React.FC = () => {
   const showHistoryNav = Boolean(navigationHistory);
   const historyBackTooltip = t('common.historyBack', { defaultValue: 'Back' });
   const historyForwardTooltip = t('common.forward', { defaultValue: 'Forward' });
-  // The session secondary-sidebar toggle is shown on session routes only.
+  // Content-area sidebars keep one stable toggle in the titlebar, regardless of
+  // whether their panel is currently mounted.
   const isSessionRoute =
     location.pathname === '/guid' ||
     location.pathname.startsWith('/conversation/') ||
     location.pathname === '/terminal-new' ||
     location.pathname.startsWith('/terminal/');
   const isAgentRoute = location.pathname === '/agent';
-  const contentSiderChannel = isAgentRoute ? agentSiderChannel : sessionSiderChannel;
-  const contentSiderExpandLabel = isAgentRoute ? t('agentSettings.workbench.showList') : t('sessionList.expandList');
-  const contentSiderCollapseLabel = isAgentRoute ? t('agentSettings.workbench.hideList') : t('sessionList.collapseList');
+  const isNomiRoute = location.pathname === '/nomi' || location.pathname.startsWith('/nomi/');
+  const contentSiderChannel = isAgentRoute ? agentSiderChannel : isNomiRoute ? nomiSiderChannel : sessionSiderChannel;
+  const contentSiderExpandLabel = isAgentRoute
+    ? t('agentSettings.workbench.showList')
+    : isNomiRoute
+      ? t('nomi.workspace.showRoster')
+      : t('sessionList.expandList');
+  const contentSiderCollapseLabel = isAgentRoute
+    ? t('agentSettings.workbench.hideList')
+    : isNomiRoute
+      ? t('nomi.workspace.hideRoster')
+      : t('sessionList.collapseList');
 
   const handleSiderToggle = () => {
     if (!showSiderToggle || !layout?.setSiderCollapsed) return;
@@ -188,7 +199,7 @@ const Titlebar: React.FC = () => {
             })}
           </>
         )}
-        {(isSessionRoute || isAgentRoute) && (
+        {(isSessionRoute || isAgentRoute || isNomiRoute) && (
           <ContentSiderTitlebarToggle
             channel={contentSiderChannel}
             expandLabel={contentSiderExpandLabel}

@@ -10,6 +10,28 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('Nomi sendbox control layout', () => {
+  test('uses the compact stacked composer for the desktop companion surface', () => {
+    const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const composer = readSource(new URL('../../../../components/chat/Composer.tsx', import.meta.url));
+    const css = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
+
+    expect(source.includes('compactStacked={compactProductComposer}')).toBe(true);
+    expect(source.includes('defaultMultiLine\n')).toBe(true);
+    expect(source.includes('lockMultiLine\n')).toBe(true);
+    expect(source.includes('defaultMultiLine={!compactProductComposer}')).toBe(false);
+    expect(source.includes("bottomHint={compactProductComposer ? ' '")).toBe(false);
+    expect(composer.indexOf('{compactStacked && attachments}')).toBeLessThan(
+      composer.indexOf('<Input.TextArea')
+    );
+    expect(composer.includes("data-composer-layout={compactStacked ? 'compact-stacked' : 'adaptive'}")).toBe(true);
+    expect(composer.includes('const resolvedSingleLine = compactStacked ? false : singleLine')).toBe(true);
+    expect(composer.includes('data-composer-editor-row')).toBe(true);
+    expect(composer.includes('autoSize={resolvedSingleLine || compactStacked ? false')).toBe(true);
+    expect(css.includes('.sendbox-panel--compact-stacked')).toBe(true);
+    expect(css.includes('padding: 10px 12px !important')).toBe(true);
+    expect(css.includes('height: 40px !important')).toBe(true);
+  });
+
   test('renders context usage as a click ring before the model selector and removes turn metrics copy', () => {
     const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('../../../../components/chat/Composer.tsx', import.meta.url));
