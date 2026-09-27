@@ -42,6 +42,7 @@ import {
 } from './timelineExport';
 import type { CreativeNodePresentationProps } from './types';
 import {
+  compactTimelineClips,
   moveTimelineClip,
   removeTimelineClip,
   reorderTimelineClip,
@@ -118,7 +119,7 @@ const mediaAspectRatio = (
 };
 
 const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
-  node,
+  node: sourceNode,
   assets,
   libraryAssets = [],
   libraryLoading = false,
@@ -141,6 +142,16 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
   onUploadFiles,
 }) => {
   const { t } = useTranslation();
+  const normalizedData = useMemo(
+    () => compactTimelineClips(sourceNode.data),
+    [sourceNode.data]
+  );
+  const node = useMemo(
+    () => normalizedData === sourceNode.data
+      ? sourceNode
+      : { ...sourceNode, data: normalizedData },
+    [normalizedData, sourceNode]
+  );
   const rootRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
   const previewVideoRef = useRef<HTMLVideoElement>(null);
@@ -211,6 +222,11 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     },
     [node.locked, onChange]
   );
+
+  useEffect(() => {
+    if (normalizedData === sourceNode.data) return;
+    commit(normalizedData, `timeline:${sourceNode.id}:compact`);
+  }, [commit, normalizedData, sourceNode.data, sourceNode.id]);
 
   const recordProjectMediaSize = useCallback(
     (assetId: string, width: number, height: number) => {

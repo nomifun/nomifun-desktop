@@ -72,7 +72,37 @@ describe('CreativeTimelineNode interactions', () => {
     expect(view.getByText('01:00')).not.toBeNull();
   });
 
-  test('persists mute changes and pointer-based clip arrangement', () => {
+  test('loads a gapped timeline as a continuous sequence without changing durations', () => {
+    const node = timelineNode();
+    node.data.clips = [0, 10_000, 25_000].map((startMs, index) => ({
+      ...node.data.clips[0]!,
+      id: `clip-${index + 1}`,
+      startMs,
+      durationMs: 5_000 + index * 1_000,
+    }));
+    const compacted: Array<typeof node.data> = [];
+    let mergeKey: string | undefined;
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data, key) => {
+          compacted.push(data);
+          mergeKey = key;
+        }}
+      />
+    ));
+
+    expect(compacted.at(-1)?.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 5_000], [5_000, 6_000], [11_000, 7_000]]);
+    expect(mergeKey).toBe('timeline:timeline-1:compact');
+    expect([...view.container.querySelectorAll<HTMLElement>('[data-timeline-clip-id]')]
+      .map((clip) => Number.parseFloat(clip.style.left)))
+      .toEqual([0, 5_000 / 60_000 * 100, 11_000 / 60_000 * 100]);
+  });
+
+  test('persists mute changes without allowing pointer-created gaps', () => {
     const changes: Array<{ startMs: number; muted: boolean; mergeKey?: string }> = [];
     const node = timelineNode();
     const view = render(withCanvasTestI18n(
@@ -111,7 +141,7 @@ describe('CreativeTimelineNode interactions', () => {
     fireEvent.pointerMove(clip, { pointerId: 4, clientX: 160 });
     fireEvent.pointerUp(clip, { pointerId: 4, clientX: 160 });
 
-    expect(changes.at(-1)?.startMs).toBe(6_000);
+    expect(changes.at(-1)?.startMs).toBe(0);
     expect(changes.at(-1)?.mergeKey).toContain('timeline:timeline-1:clip-1:move');
   });
 
@@ -147,7 +177,7 @@ describe('CreativeTimelineNode interactions', () => {
       [200, [0, 5_000, 17_000, 10_000]],
       [150, [0, 12_000, 17_000, 5_000]],
       [200, [0, 5_000, 17_000, 10_000]],
-      [800, [0, 5_000, 10_000, 66_500]],
+      [800, [0, 5_000, 10_000, 15_000]],
       [285, [0, 5_000, 10_000, 15_000]],
     ] as const) {
       fireEvent.pointerMove(clip, { pointerId: 4, clientX });
@@ -169,6 +199,60 @@ describe('CreativeTimelineNode interactions', () => {
     fireEvent.keyDown(clip, { key: 'ArrowLeft', shiftKey: true });
     view.rerender(renderTimeline());
     expect(node.data.clips[3]?.startMs).toBe(10_000);
+  });
+
+  test('pushes and pulls later clips while trimming a clip end', () => {
+    let node = timelineNode();
+    node.data.clips = [0, 5_000, 10_000].map((startMs, index) => ({
+      ...node.data.clips[0]!,
+      id: `clip-${index + 1}`,
+      startMs,
+    }));
+    const mergeKeys: Array<string | undefined> = [];
+    const renderTimeline = () => withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={node}
+        assets={assets}
+        placement='contained'
+        onChange={(data, mergeKey) => {
+          node = { ...node, data };
+          mergeKeys.push(mergeKey);
+        }}
+      />
+    );
+    const view = render(renderTimeline());
+    const track = view.container.querySelector<HTMLElement>('[data-timeline-track]');
+    if (!track) throw new Error('timeline trim fixture missing');
+    track.getBoundingClientRect = () => ({
+      x: 0, y: 0, top: 0, right: 600, bottom: 60, left: 0,
+      width: 600, height: 60, toJSON: () => ({}),
+    });
+
+    const trimEnd = () => view.container.querySelector<HTMLElement>(
+      '[data-timeline-clip-id="clip-1"] [aria-label="裁切片段终点"]'
+    );
+    const growHandle = trimEnd();
+    if (!growHandle) throw new Error('timeline trim-end handle missing');
+    growHandle.setPointerCapture = () => undefined;
+    growHandle.hasPointerCapture = () => false;
+    fireEvent.pointerDown(growHandle, { button: 0, pointerId: 6, clientX: 50 });
+    fireEvent.pointerMove(growHandle, { pointerId: 6, clientX: 70 });
+    fireEvent.pointerUp(growHandle, { pointerId: 6, clientX: 70 });
+    view.rerender(renderTimeline());
+    expect(node.data.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 7_000], [7_000, 5_000], [12_000, 5_000]]);
+
+    const shrinkHandle = trimEnd();
+    if (!shrinkHandle) throw new Error('timeline trim-end handle missing after growth');
+    shrinkHandle.setPointerCapture = () => undefined;
+    shrinkHandle.hasPointerCapture = () => false;
+    fireEvent.pointerDown(shrinkHandle, { button: 0, pointerId: 7, clientX: 70 });
+    fireEvent.pointerMove(shrinkHandle, { pointerId: 7, clientX: 40 });
+    fireEvent.pointerUp(shrinkHandle, { pointerId: 7, clientX: 40 });
+    view.rerender(renderTimeline());
+    expect(node.data.clips.map(({ startMs, durationMs }) => [startMs, durationMs]))
+      .toEqual([[0, 4_000], [4_000, 5_000], [9_000, 5_000]]);
+    expect(mergeKeys.at(-1)).toBe('timeline:timeline-1:clip-1:trim-end');
   });
 
   test('seeks the playhead anywhere across the visible 60-second track', () => {

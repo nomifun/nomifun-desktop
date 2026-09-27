@@ -25,6 +25,86 @@ const finite = (value: number, fallback = 0): number =>
 const clamp = (value: number, minimum: number, maximum: number): number =>
   Math.min(maximum, Math.max(minimum, finite(value, minimum)));
 
+const orderTimelineClips = (
+  clips: readonly CreativeTimelineClip[]
+): CreativeTimelineClip[] => clips
+  .map((clip, index) => ({ clip, index }))
+  .sort(
+    (left, right) =>
+      left.clip.startMs - right.clip.startMs || left.index - right.index
+  )
+  .map(({ clip }) => clip);
+
+const placeTimelineClipsContinuously = (
+  data: CreativeTimelineNodeData,
+  ordered: readonly CreativeTimelineClip[]
+): CreativeTimelineNodeData => {
+  const starts = new Map<string, number>();
+  let cursor = 0;
+  for (const clip of ordered) {
+    starts.set(clip.id, cursor);
+    cursor += clip.durationMs;
+  }
+  if (cursor > TIMELINE_MAX_DURATION_MS) return data;
+
+  let changed = false;
+  const clips = data.clips.map((clip) => {
+    const startMs = starts.get(clip.id);
+    if (startMs === undefined || startMs === clip.startMs) return clip;
+    changed = true;
+    return { ...clip, startMs };
+  });
+  return changed ? { ...data, clips } : data;
+};
+
+/** Packs clips from zero in their current timeline order without changing media or duration. */
+export const compactTimelineClips = (
+  data: CreativeTimelineNodeData
+): CreativeTimelineNodeData =>
+  placeTimelineClipsContinuously(data, orderTimelineClips(data.clips));
+
+const resizeTimelineClipEnd = (
+  data: CreativeTimelineNodeData,
+  clipId: string,
+  requestedDurationMs: number,
+  sourceMaximumMs: number
+): CreativeTimelineNodeData => {
+  const compacted = compactTimelineClips(data);
+  const ordered = orderTimelineClips(compacted.clips);
+  const clipIndex = ordered.findIndex((clip) => clip.id === clipId);
+  const clip = ordered[clipIndex];
+  if (!clip) return compacted;
+
+  const followers = ordered.slice(clipIndex + 1);
+  const affectedEndMs = followers.reduce(
+    (endMs, item) => Math.max(endMs, item.startMs + item.durationMs),
+    clip.startMs + clip.durationMs
+  );
+  const maximumGrowthMs = Math.max(0, TIMELINE_MAX_DURATION_MS - affectedEndMs);
+  const maximumDurationMs = Math.min(
+    Math.max(TIMELINE_MIN_CLIP_DURATION_MS, sourceMaximumMs),
+    clip.durationMs + maximumGrowthMs
+  );
+  const durationMs = clamp(
+    requestedDurationMs,
+    TIMELINE_MIN_CLIP_DURATION_MS,
+    maximumDurationMs
+  );
+  const durationDeltaMs = durationMs - clip.durationMs;
+  if (durationDeltaMs === 0) return compacted;
+
+  // Ripple the applied trim through the tail so every edit boundary stays closed.
+  const followerIds = new Set(followers.map((item) => item.id));
+  return {
+    ...compacted,
+    clips: compacted.clips.map((item) => {
+      if (item.id === clipId) return { ...item, durationMs };
+      if (!followerIds.has(item.id)) return item;
+      return { ...item, startMs: item.startMs + durationDeltaMs };
+    }),
+  };
+};
+
 export const timelineDurationMs = (
   clips: readonly CreativeTimelineClip[]
 ): number =>
@@ -59,8 +139,9 @@ export const appendTimelineClips = (
   assets: readonly TimelineInsertAsset[],
   createId: () => string
 ): CreativeTimelineNodeData => {
-  let cursor = timelineDurationMs(data.clips);
-  const clips = [...data.clips];
+  const compacted = compactTimelineClips(data);
+  let cursor = timelineDurationMs(compacted.clips);
+  const clips = [...compacted.clips];
   for (const asset of assets) {
     const clip: CreativeTimelineClip = {
       id: createId(),
@@ -74,7 +155,7 @@ export const appendTimelineClips = (
     clips.push(clip);
     cursor += clip.durationMs;
   }
-  return { ...data, clips };
+  return { ...compacted, clips };
 };
 
 export const moveTimelineClip = (
@@ -82,11 +163,12 @@ export const moveTimelineClip = (
   clipId: string,
   startMs: number
 ): CreativeTimelineNodeData => {
-  const clip = data.clips.find((item) => item.id === clipId);
-  if (!clip) return data;
+  const compacted = compactTimelineClips(data);
+  const clip = compacted.clips.find((item) => item.id === clipId);
+  if (!clip) return compacted;
 
   const requestedStart = clamp(startMs, 0, TIMELINE_MAX_DURATION_MS - clip.durationMs);
-  const neighbors = data.clips
+  const neighbors = compacted.clips
     .filter((item) => item.id !== clipId)
     .sort((left, right) => left.startMs - right.startMs);
   let resolvedStart = clip.startMs;
@@ -106,7 +188,7 @@ export const moveTimelineClip = (
     }
   };
 
-  // Only place the whole clip in free time; other clips keep their authored positions.
+  // Resolve a collision-free intended order; compaction below closes all blank time.
   let gapStart = 0;
   for (const neighbor of neighbors) {
     considerGap(gapStart, neighbor.startMs);
@@ -114,13 +196,13 @@ export const moveTimelineClip = (
   }
   considerGap(gapStart, TIMELINE_MAX_DURATION_MS);
 
-  if (resolvedStart === clip.startMs) return data;
-  return {
-    ...data,
-    clips: data.clips.map((item) =>
+  if (resolvedStart === clip.startMs) return compacted;
+  return compactTimelineClips({
+    ...compacted,
+    clips: compacted.clips.map((item) =>
       item.id === clipId ? { ...item, startMs: resolvedStart } : item
     ),
-  };
+  });
 };
 
 export const reorderTimelineClip = (
@@ -129,10 +211,11 @@ export const reorderTimelineClip = (
   startMs: number,
   insertionTimeMs: number
 ): CreativeTimelineNodeData => {
-  const ordered = [...data.clips].sort((left, right) => left.startMs - right.startMs);
+  const compacted = compactTimelineClips(data);
+  const ordered = orderTimelineClips(compacted.clips);
   const originalIndex = ordered.findIndex((clip) => clip.id === clipId);
   const clip = ordered[originalIndex];
-  if (!clip) return data;
+  if (!clip) return compacted;
 
   const requestedStart = clamp(startMs, 0, TIMELINE_MAX_DURATION_MS - clip.durationMs);
   const neighbors = ordered.filter((item) => item.id !== clipId);
@@ -140,37 +223,17 @@ export const reorderTimelineClip = (
     requestedStart < item.startMs + item.durationMs &&
     requestedStart + clip.durationMs > item.startMs
   );
-  if (!overlaps) return moveTimelineClip(data, clipId, requestedStart);
+  if (!overlaps) return moveTimelineClip(compacted, clipId, requestedStart);
 
   // The pointer chooses the insertion boundary, regardless of where the clip was grabbed.
   const targetTime = finite(insertionTimeMs, requestedStart);
   const nextIndex = neighbors.filter((item) =>
     targetTime >= item.startMs + item.durationMs / 2
   ).length;
-  if (nextIndex === originalIndex) return moveTimelineClip(data, clipId, requestedStart);
+  if (nextIndex === originalIndex) return compacted;
 
-  const gaps = ordered.map((item, index) => {
-    const previous = ordered[index - 1];
-    return Math.max(0, item.startMs - (previous ? previous.startMs + previous.durationMs : 0));
-  });
   neighbors.splice(nextIndex, 0, clip);
-  const starts = new Map<string, number>();
-  let cursor = 0;
-  for (const [index, item] of neighbors.entries()) {
-    // Preserve the existing gaps and shift only the clips between the old and new slots.
-    const nextStart = cursor + gaps[index]!;
-    starts.set(item.id, nextStart);
-    cursor = nextStart + item.durationMs;
-  }
-  if (cursor > TIMELINE_MAX_DURATION_MS) return moveTimelineClip(data, clipId, requestedStart);
-
-  return {
-    ...data,
-    clips: data.clips.map((item) => {
-      const nextStart = starts.get(item.id)!;
-      return nextStart === item.startMs ? item : { ...item, startMs: nextStart };
-    }),
-  };
+  return placeTimelineClipsContinuously(compacted, neighbors);
 };
 
 export const trimTimelineClip = (
@@ -178,66 +241,80 @@ export const trimTimelineClip = (
   clipId: string,
   edge: 'start' | 'end',
   deltaMs: number
-): CreativeTimelineNodeData => ({
-  ...data,
-  clips: data.clips.map((clip) => {
-    if (clip.id !== clipId) return clip;
-    if (edge === 'end') {
-      const sourceMaximum = clip.sourceDurationMs === null
-        ? TIMELINE_MAX_DURATION_MS - clip.startMs
-        : Math.max(
-            TIMELINE_MIN_CLIP_DURATION_MS,
-            clip.sourceDurationMs - clip.sourceStartMs
-          );
-      return {
-        ...clip,
-        durationMs: clamp(
-          clip.durationMs + deltaMs,
+): CreativeTimelineNodeData => {
+  const compacted = compactTimelineClips(data);
+  const clip = compacted.clips.find((item) => item.id === clipId);
+  if (!clip) return compacted;
+  if (edge === 'end') {
+    const sourceMaximum = clip.sourceDurationMs === null
+      ? TIMELINE_MAX_DURATION_MS - clip.startMs
+      : Math.max(
           TIMELINE_MIN_CLIP_DURATION_MS,
-          sourceMaximum
-        ),
-      };
-    }
+          clip.sourceDurationMs - clip.sourceStartMs
+        );
+    return resizeTimelineClipEnd(
+      compacted,
+      clipId,
+      clip.durationMs + deltaMs,
+      sourceMaximum
+    );
+  }
 
-    const maximumForward = clip.durationMs - TIMELINE_MIN_CLIP_DURATION_MS;
-    const maximumBackward = Math.min(clip.startMs, clip.sourceStartMs);
-    const applied = clamp(deltaMs, -maximumBackward, maximumForward);
-    return {
-      ...clip,
-      startMs: clip.startMs + applied,
-      sourceStartMs: clip.sourceStartMs + applied,
-      durationMs: clip.durationMs - applied,
-    };
-  }),
-});
+  const maximumForward = clip.durationMs - TIMELINE_MIN_CLIP_DURATION_MS;
+  const maximumBackward = Math.min(clip.startMs, clip.sourceStartMs);
+  const applied = clamp(deltaMs, -maximumBackward, maximumForward);
+  if (applied === 0) return compacted;
+  return compactTimelineClips({
+    ...compacted,
+    clips: compacted.clips.map((item) =>
+      item.id === clipId
+        ? {
+            ...item,
+            startMs: item.startMs + applied,
+            sourceStartMs: item.sourceStartMs + applied,
+            durationMs: item.durationMs - applied,
+          }
+        : item
+    ),
+  });
+};
 
 export const resolveTimelineClipDuration = (
   data: CreativeTimelineNodeData,
   clipId: string,
   sourceDurationMs: number
 ): CreativeTimelineNodeData => {
+  const compacted = compactTimelineClips(data);
   const normalized = clamp(sourceDurationMs, TIMELINE_MIN_CLIP_DURATION_MS, TIMELINE_MAX_DURATION_MS);
-  return {
-    ...data,
-    clips: data.clips.map((clip) => {
-      if (clip.id !== clipId || clip.kind !== 'video') return clip;
-      const available = Math.max(
-        TIMELINE_MIN_CLIP_DURATION_MS,
-        normalized - clip.sourceStartMs
-      );
-      return {
-        ...clip,
-        sourceDurationMs: normalized,
-        durationMs: Math.min(clip.durationMs, available),
-      };
-    }),
+  const clip = compacted.clips.find((item) => item.id === clipId);
+  if (!clip || clip.kind !== 'video') return compacted;
+  const available = Math.max(
+    TIMELINE_MIN_CLIP_DURATION_MS,
+    normalized - clip.sourceStartMs
+  );
+  const withMetadata = {
+    ...compacted,
+    clips: compacted.clips.map((item) =>
+      item.id === clipId
+        ? {
+            ...item,
+            sourceDurationMs: normalized,
+          }
+        : item
+    ),
   };
+  return resizeTimelineClipEnd(
+    withMetadata,
+    clipId,
+    Math.min(clip.durationMs, available),
+    available
+  );
 };
 
 export const removeTimelineClip = (
   data: CreativeTimelineNodeData,
   clipId: string
-): CreativeTimelineNodeData => ({
+): CreativeTimelineNodeData => compactTimelineClips({
   ...data,
   clips: data.clips.filter((clip) => clip.id !== clipId),
 });
