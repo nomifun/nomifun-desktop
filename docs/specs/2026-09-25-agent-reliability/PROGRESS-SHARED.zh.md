@@ -33,12 +33,12 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
-| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | P0 本轮；P1/P2 待走查 |
+| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | S-D02-01 当前证据约束已补；Windows GEN 真实完成报告仍 FAIL，未关闭 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | S-D03-01/02 原子 write、删除与临时名称在 Windows 修复/定向回归；macOS 和正式入口待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | 条件资源准备后走查，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
-| S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 本轮；其余待走查 |
+| S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
 | S-D10 | 15 | PORT-001～015 内部端口、outbox、generation 与外部 grant 隔离 | P0 映射后逐端口确定性回归 |
@@ -46,6 +46,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D02-01（CTRL-007、AGEN-014/017、OBS）：Windows 三个新 GEN 回合的副作用均完成，
+  但都出现一次失效完成引用及后续恢复。提示增强未解决；随后把当前有效 path/call ID 编入
+  Runtime 控制工具 Schema，复用实际暴露 Schema 的整批预检。补失效路径提示，保留旧证据 epoch、
+  失效/缺失/失败引用拒绝和 Kernel 授权。Runtime 138 项通过；真实模型仍提交不允许的路径，
+  最后一次被预检拦截，且最终摘要遗漏所需细节。**问题仍开放**，需继续核对传输与模型交付策略。
+  不将守住拒绝边界或最终 recovered 当作正向体验 PASS。证据见 Windows W02。
+- S-D07-01（AMUL-001）：画布规划上下文未携带已有名称，真实模型因此无法回答。现在仅携带
+  相同 Canvas ID 对应的有界 title；未知时保留 null，节点选择/资源权限不变。context 6 项、
+  TypeScript/桌面边界及 Windows 新 Session 同提示回归通过。旧 MM retry spinner 与该问题分开。
 
 - S-D03-02（AUTH-009/010、FILE-036、WIN-007/017）：文件删除入口在 canonicalize 后才删除，
   根内 junction 会被替换成目标目录，空相对路径则指向整个工作区。改为先拒绝根删除并检查原始

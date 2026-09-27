@@ -104,7 +104,7 @@ struct Submission {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use descriptive criteria (they need not match plan labels). A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. For supported claims cite current observations using exact workspace evidence_paths or evidence_call_ids. Evidence only proves the observed operation, not broader gameplay/test quality. Use unverified/blocked with a reason for missing verification. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
+        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use descriptive criteria (they need not match plan labels). A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. For supported claims use only the current available_evidence: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
@@ -117,8 +117,8 @@ pub(crate) fn definition() -> ChatToolDefinition {
                         "disposition":{"type":"string","enum":["supported","unverified","blocked","scope_changed"]},
                         "requirement_ids":{"type":"array","maxItems":32,"items":{"type":"string","minLength":1,"maxLength":64},"description":"Optional. If omitted, this criterion addresses all accepted requirements. Requirements can be shared across criteria."},
                         "scope_change":crate::requirements::citation_schema(),
-                        "evidence_call_ids":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":256}},
-                        "evidence_paths":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Exact workspace paths from available_evidence. The engine resolves each to its latest current successful observation; this does not claim functional verification."},
+                        "evidence_call_ids":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":256},"description":"Exact call_id entries currently listed in available_evidence, including deletion or artifact observations. A call remembered from an earlier step may no longer be eligible."},
+                        "evidence_paths":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Copy only non-null path entries currently listed in available_evidence. Do not guess a path from prior writes, deletions or artifact source_path. Re-read a needed stale file when authorized before reporting. This does not claim functional verification."},
                         "rationale":{"type":"string","minLength":1,"maxLength":1024}
                     }
                 }}
@@ -128,6 +128,29 @@ pub(crate) fn definition() -> ChatToolDefinition {
 }
 
 impl CompletionTracker {
+    /// Runtime control citations are turn-local data, not Kernel grants. The
+    /// same exposed schema is used by the whole-batch argument preflight.
+    pub(crate) fn definition_with_evidence(&self, work: &AgentWorkStatus) -> ChatToolDefinition {
+        let mut tool = definition();
+        let usable = self.observations.iter()
+            .filter(|item| self.is_usable(item, work.workspace_observation_epoch))
+            .collect::<Vec<_>>();
+        let paths = usable.iter().filter_map(|item| item.path.as_ref())
+            .cloned().collect::<BTreeSet<_>>();
+        let calls = usable.iter().map(|item| item.call_id.clone()).collect::<BTreeSet<_>>();
+        let fields = &mut tool.input_schema.0["properties"]["criteria"]["items"]["properties"];
+        for (name, values) in [("evidence_paths", paths), ("evidence_call_ids", calls)] {
+            if values.is_empty() {
+                // Empty enum is invalid JSON Schema. Only omission or an
+                // empty array is permitted until a usable observation exists.
+                fields[name]["maxItems"] = serde_json::json!(0);
+            } else {
+                fields[name]["items"]["enum"] = serde_json::json!(values);
+            }
+        }
+        tool
+    }
+
     pub(crate) fn invalidate(&mut self) {
         self.revision = self.revision.saturating_add(1);
         self.report = None;
@@ -261,16 +284,24 @@ impl CompletionTracker {
             "summary":report.summary,
             "criteria":report.criteria.iter().map(|criterion| serde_json::json!({"step":criterion.step,"disposition":criterion.disposition,"requirement_ids":criterion.requirement_ids})).collect::<Vec<_>>()
         }));
+        let stale_file_paths = self.observations.iter()
+            .filter(|item| item.successful && item.usable_at_observation
+                && !self.is_usable(item, work.workspace_observation_epoch))
+            .filter_map(|item| item.path.as_ref())
+            .filter(|path| !self.observations.iter().any(|item|
+                item.path.as_ref() == Some(*path) && self.is_usable(item, work.workspace_observation_epoch)))
+            .collect::<BTreeSet<_>>().into_iter().take(8).collect::<Vec<_>>();
         let value = serde_json::json!({"plan_revision":plan.revision,"observation_revision":self.revision,
             "input_revision":input_revision,"workspace_epoch":work.workspace_observation_epoch,
             "available_evidence":self.observations.iter().filter(|item| self.is_usable(item, work.workspace_observation_epoch))
                 .map(|item| serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
                     "command_exit_code":item.command_exit_code,"command":item.command})).collect::<Vec<_>>(),
+            "stale_file_paths":stale_file_paths,
             "unusable_observation_count":self.observations.iter().filter(|item| !self.is_usable(item, work.workspace_observation_epoch)).count(),
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains successful observations currently eligible for citation. File observations remain eligible across known disjoint file edits; opaque commands or changes to their own paths invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its actual result and scope, not just exit zero. A successful syntax check or file read is not a gameplay test. If a check was excluded, unavailable, stale, or not run, use unverified with a reason. Account for every immutable requirement; a requirement may span several criteria, whose labels need not match plan steps. Prefer exact available_evidence paths over manually copying opaque call IDs. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across known disjoint edits; opaque effects, possible aliases including non-ASCII paths, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its result and scope, not just exit zero. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -519,6 +550,39 @@ mod tests {
     }
 
     #[test]
+    fn advertised_evidence_schema_rejects_stale_missing_and_failed_citations() {
+        let mut failed = file_observation("failed", "failed.txt", 2);
+        failed.successful = false;
+        let tracker = CompletionTracker { observations: vec![
+            file_observation("stale", "old.txt", 1),
+            file_observation("current", "current.txt", 2), failed,
+        ], ..Default::default() };
+        let work = AgentWorkStatus { workspace_observation_epoch: 2, ..Default::default() };
+        let schema = tracker.definition_with_evidence(&work).input_schema.0;
+        let validator = jsonschema::options().build(&schema).unwrap();
+        let report = |field: &str, reference: &str| {
+            let mut value = serde_json::json!({"summary":"Finished","criteria":[
+                {"disposition":"supported","rationale":"Observed the requested work"}
+            ]});
+            value["criteria"][0][field] = serde_json::json!([reference]);
+            value
+        };
+        assert!(validator.is_valid(&report("evidence_paths", "current.txt")));
+        assert!(validator.is_valid(&report("evidence_call_ids", "current")));
+        for (path, call) in [("old.txt", "stale"), ("missing.txt", "missing"), ("failed.txt", "failed")] {
+            assert!(!validator.is_valid(&report("evidence_paths", path)));
+            assert!(!validator.is_valid(&report("evidence_call_ids", call)));
+        }
+        let empty = CompletionTracker::default().definition_with_evidence(&work).input_schema.0;
+        let validator = jsonschema::options().build(&empty).unwrap();
+        assert!(!validator.is_valid(&report("evidence_paths", "current.txt")));
+        assert!(!validator.is_valid(&report("evidence_call_ids", "current")));
+        assert!(validator.is_valid(&serde_json::json!({"summary":"Verification unavailable","criteria":[
+            {"disposition":"unverified","rationale":"No authorized observation available"}
+        ]})));
+    }
+
+    #[test]
     fn disjoint_file_edits_preserve_file_evidence_without_relabeling_history_or_refreshing_commands() {
         assert!(file_paths_may_overlap("Assets/Game.js", "assets"));
         assert!(file_paths_may_overlap("index.html", "INDEX.HTML"));
@@ -615,6 +679,42 @@ mod tests {
         assert!(!guidance.contains("\"blocked\""));
         assert!(guidance.contains("do not launch another command"));
         assert!(tracker.stale_evidence_guidance(3).contains("reopen one plan step"));
+    }
+
+    #[tokio::test]
+    async fn completion_context_exposes_stale_file_paths_without_rehabilitating_evidence() {
+        let inputs = vec![crate::context_lifecycle::text_message(
+            nomifun_chat_model_broker::ChatRole::User, "Create and verify the requested files".into())];
+        let mut plan = AgentPlan::default();
+        let mut tracker = CompletionTracker { observations: vec![
+            file_observation("receipt-old", "验收/回执.txt", 1),
+            file_observation("other-old", "验收/其他.txt", 0),
+        ], ..Default::default() };
+        let work = AgentWorkStatus { workspace_observation_epoch: 2, ..Default::default() };
+        let edit = ChatToolCall { call_id: "other-write".into(), name: "write_file".into(),
+            arguments: StrictJsonValue(serde_json::json!({"path":"验收/其他.txt","content":"other"})), provider_metadata: None };
+        tracker.observe(&work, &file_binding("workspace.files/write"), &edit,
+            &AgentToolResult::text(edit.call_id.clone(), "written", false), true);
+        let account = |tracker: &CompletionTracker, plan: &AgentPlan| {
+            let text = tracker.context(plan, &work, 1).unwrap();
+            serde_json::Deserializer::from_str(text.split_once(": ").unwrap().1)
+                .into_iter::<serde_json::Value>().next().unwrap().unwrap()
+        };
+        assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!(["验收/回执.txt"]));
+        let report = ChatToolCall { call_id: "finish".into(), name: TOOL_NAME.into(), provider_metadata: None,
+            arguments: StrictJsonValue(serde_json::json!({"summary":"Verified the receipt","criteria":[
+                {"disposition":"supported","evidence_paths":["验收/回执.txt"],"rationale":"Read the file"}
+            ]})) };
+        assert!(tracker.submit(&report, &mut plan, &work, &inputs, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        let read = ChatToolCall { call_id: "receipt-current".into(), name: "read_file".into(),
+            arguments: StrictJsonValue(serde_json::json!({"path":"验收/回执.txt"})), provider_metadata: None };
+        let mut binding = file_binding("workspace.files/read");
+        binding.effect_class = crate::AgentEffectClass::ReadOnly;
+        tracker.observe(&work, &binding, &read, &AgentToolResult::text(read.call_id.clone(), "receipt", false), true);
+        assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!([]));
+        assert!(!tracker.submit(&report, &mut plan, &work, &inputs, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert_eq!(tracker.observations[0].workspace_epoch, 1, "history is not relabeled");
+        assert_eq!(tracker.current(&plan, &work, 1).unwrap().criteria[0].evidence_call_ids, ["receipt-current"]);
     }
 }
 
