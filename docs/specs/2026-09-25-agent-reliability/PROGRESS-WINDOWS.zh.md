@@ -1,9 +1,10 @@
 # Windows Case 处理进度
 
-更新：2026-09-27。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-09-28。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 覆盖 675 个共享 + 82 个 Windows 专属 Case；按适用 Agent 展开为 2,374 槽。
 Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 共享 P0 已由 `85a079fc0` 提交/推送；W01 首批组件走查完成，不重复维护共享根因文本。
+当前先处理共享 Case 与关联 Windows 问题，Windows 专属余项排在共享阶段之后。
 
 ## Windows 专属集合
 
@@ -381,5 +382,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   最终文件名/发布临时文件置换、枚举/删除、跨重启根身份、网络卷及其他平台仍待验；仅关闭本批
   父目录子断言，完整 Case、100 seed、全矩阵 N3/LONG/99% 不计通过。
 
-下一步：W03 最终文件/临时文件、目录枚举和删除竞态、跨盘与剩余 ACL/VCS/SSH；W04 其余恢复/扩展；
-W05 条件资源和 W06 原生故障、真实取消计数按夹具推进。不重建 2,374 行日志/状态文件到 Git。
+### 共享 FILE 清理与部分失败恢复（W13，基线 `98ba50795`）
+
+- S-D03-09：临时名、备份名被替换后清理误删两项首次 FAIL；原件备份被换名后错误恢复另首次
+  FAIL。原文件/并发文件及 observation 分别保留在 `w13-publication-entries/02-before/`、
+  `05-restore-before/`，不覆盖历史失败。
+- 记录创建/替换时的文件对象；Windows 清理和恢复按完整文件 ID 核对，用句柄执行，恢复目标
+  不覆盖；身份变化保持 unknown。共享逻辑记录临时文件已被发布消耗，后续错误不再按旧名清理。
+- owner/发布/原生句柄 **31**、Windows workspace **30**、App host **34**，共 **95 项通过**；
+  覆盖并发目标、旧读者、只读、ACL/ADS、共享锁、失败结算。最终日志 `07-verified/`，diff 通过。
+  删除等待旧句柄的中间失败已修；POSIX rename 夹具原先误预期能越过 deny-delete，原生证明被
+  sharing error 32 拒绝，夹具增加释放后的成功对照。相关中间结果均在 `04-regression/` 保留。
+- 无模型调用或新增 Tauri UI 验收。ReplaceFile 的最终目标/暂存源发布窗口尚未关闭；文件 symlink
+  夹具在当前普通权限下返回 1314，未提权。其他 reparse/文件系统、Unix 清理与恢复仍需原生验证。
+
+下一步优先共享：FILE 发布/读取预检/枚举/删除竞态，以及 S-D01～11 剩余合同、恢复、资源和产品
+入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
+门槛保留，不重建 2,374 行日志/状态文件到 Git。

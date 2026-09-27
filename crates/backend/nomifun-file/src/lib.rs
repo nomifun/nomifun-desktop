@@ -33,6 +33,10 @@ mod workspace_observation;
 mod windows_read;
 #[cfg(windows)]
 mod windows_directory;
+#[cfg(windows)]
+mod windows_cleanup;
+#[cfg(all(test, windows))]
+mod windows_test_support;
 pub use workspace_observation::WorkspacePathObservation;
 
 pub use path_safety::{PathAuthority, has_traversal, validate_path, validate_path_for_write};
