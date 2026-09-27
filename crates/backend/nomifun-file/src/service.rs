@@ -280,10 +280,14 @@ impl FileService {
             return Err(AppError::BadRequest("workspace write exceeds the 8 MiB byte limit".into()));
         }
         let path = scope.resolve_relative_path(relative_path)?;
-        let path = crate::workspace_write::prepare_parent(&path, scope.workspace_root())?;
+        let prepared_parent = crate::workspace_write::prepare_parent(&path, scope.workspace_root())?;
+        let path = prepared_parent.as_path().to_path_buf();
         let path_owned = path.clone();
         let data_owned = data.to_vec();
         let result = tokio::task::spawn_blocking(move || {
+            // Keep the directory handles alive if this future is cancelled;
+            // the blocking owner still must finish publication and cleanup.
+            let _parent_guard = prepared_parent;
             let existed = match std::fs::symlink_metadata(&path_owned) {
                 Ok(_) => true,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -711,9 +715,13 @@ impl FileService {
                 path
             )).into());
         }
-        let canonical = match authority {
-            PathAuthority::Workspace(root) => crate::workspace_write::prepare_parent(&file.path, root)?,
-            _ => validate_path_for_write_authority(&path, authority)?,
+        let prepared_parent = match authority {
+            PathAuthority::Workspace(root) => Some(crate::workspace_write::prepare_parent(&file.path, root)?),
+            _ => None,
+        };
+        let canonical = match &prepared_parent {
+            Some(parent) => parent.as_path().to_path_buf(),
+            None => validate_path_for_write_authority(&path, authority)?,
         };
         if canonical != file.path {
             return Err(AppError::Conflict(format!(
@@ -2564,6 +2572,72 @@ impl crate::traits::IFileService for FileService {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[cfg(windows)]
+    fn publication_parent_race(source: PublicationSource<'static>, label: &str) {
+        let mut builder=tempfile::Builder::new();
+        builder.prefix("write-race-");
+        let fixture=match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
+            Some(parent)=>builder.tempdir_in(parent).unwrap(),
+            None=>builder.tempdir().unwrap(),
+        };
+        let root=fixture.path().join("workspace");
+        let inside=root.join("inside");
+        let retained=root.join("retained");
+        let outside=fixture.path().join("outside");
+        fs::create_dir_all(&inside).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("sibling.txt"),b"outside sibling").unwrap();
+        if !matches!(source,PublicationSource::Absent) {
+            fs::write(inside.join("value.txt"),b"original").unwrap();
+            fs::write(outside.join("value.txt"),b"original").unwrap();
+        }
+        let prepared=crate::workspace_write::prepare_parent(&inside.join("value.txt"),&root).unwrap();
+        let redirected=match fs::rename(&inside,&retained) {
+            Ok(())=>{ junction::create(&outside,&inside).unwrap(); true },
+            Err(error)=>{ assert!(matches!(error.raw_os_error(),Some(5 | 32)),"{error:?}"); false },
+        };
+        let result=write_file_with_source_sync_atomic(prepared.as_path(),b"patched",source);
+        if redirected {
+            junction::delete(&inside).unwrap();
+            fs::rename(&retained,&inside).unwrap();
+        }
+        let outside_unchanged=match source {
+            PublicationSource::Absent=>!outside.join("value.txt").exists(),
+            _=>fs::read(outside.join("value.txt")).unwrap()==b"original",
+        };
+        assert_eq!(fs::read(outside.join("sibling.txt")).unwrap(),b"outside sibling");
+        if !outside_unchanged {
+            fs::write(fixture.path().join("observation.txt"),format!("mode={label}; redirected={redirected}; result={result:?}")).unwrap();
+            let location=fixture.keep();
+            panic!("publication changed an outside target; retained fixture: {}",location.display());
+        }
+        if redirected { assert!(result.is_err()); }
+        else {
+            result.unwrap();
+            assert_eq!(fs::read(inside.join("value.txt")).unwrap(),b"patched");
+        }
+        drop(prepared);
+        fs::rename(&inside,root.join("released")).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_parent_keeps_existing_write_inside_workspace() {
+        publication_parent_race(PublicationSource::Existing,"write");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_parent_keeps_guarded_patch_inside_workspace() {
+        publication_parent_race(PublicationSource::Matching(b"original"),"patch");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_parent_keeps_absent_publication_inside_workspace() {
+        publication_parent_race(PublicationSource::Absent,"create");
+    }
 
     #[test]
     fn patch_temp_collision_preserves_unowned_file() {

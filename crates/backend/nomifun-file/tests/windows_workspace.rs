@@ -128,6 +128,87 @@ async fn reading_a_known_file_does_not_require_directory_listing_or_lock_out_oth
 }
 
 #[tokio::test]
+async fn writes_do_not_require_parent_listing_or_write_access_to_existing_ancestors() {
+    let root = tempfile::tempdir().unwrap();
+    let ancestor = root.path().join("ancestor");
+    let parent = ancestor.join("parent");
+    fs::create_dir_all(&parent).unwrap();
+    fs::write(parent.join("known.txt"), b"original").unwrap();
+    let (service, scope, events) = owner(root.path());
+    icacls(&ancestor, &["/deny".as_ref(), "*S-1-1-0:(W)".as_ref()]);
+    icacls(&parent, &["/deny".as_ref(), "*S-1-1-0:(RD,X)".as_ref()]);
+    let listing = fs::read_dir(&parent);
+    let forbidden_sibling = fs::write(ancestor.join("denied.txt"), b"denied");
+    let native_write = fs::write(parent.join("native.txt"), b"allowed");
+    let write = service.write_file_for_agent_session(&scope, "ancestor/parent/known.txt", b"replacement").await;
+    let patch = service.apply_patch_for_agent_session(&scope,
+        replacement("ancestor/parent/known.txt", "replacement", "patched")).await;
+    let create = service.write_file_for_agent_session(&scope, "ancestor/parent/new/child.txt", b"created").await;
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    icacls(&ancestor, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    assert!(listing.is_err());
+    assert!(forbidden_sibling.is_err());
+    native_write.unwrap();
+    assert!(!write.unwrap());
+    patch.unwrap();
+    assert!(create.unwrap());
+    assert_eq!(fs::read(parent.join("known.txt")).unwrap(), b"patched");
+    assert_eq!(fs::read(parent.join("new/child.txt")).unwrap(), b"created");
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 3);
+    assert_eq!(fs::read_dir(parent.join("new")).unwrap().count(), 1);
+    assert_eq!(events.0.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn atomic_publication_respects_directory_synchronize_denial() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+    let root = tempfile::tempdir().unwrap();
+    let parent = root.path().join("parent");
+    fs::create_dir(&parent).unwrap();
+    fs::write(parent.join("known.txt"), b"original").unwrap();
+    let original = parent.join("native-original.txt");
+    let staged = parent.join("native-staged.txt");
+    let backup = parent.join("native-backup.txt");
+    let linked = parent.join("native-linked.txt");
+    fs::write(&original, b"native original").unwrap();
+    fs::write(&staged, b"native staged").unwrap();
+    let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let original_wide = wide(&original);
+    let staged_wide = wide(&staged);
+    let backup_wide = wide(&backup);
+    let native_replace = || {
+        // SAFETY: all three NUL-terminated paths remain live for the call.
+        let ok = unsafe { ReplaceFileW(original_wide.as_ptr(), staged_wide.as_ptr(), backup_wide.as_ptr(),
+            0, std::ptr::null(), std::ptr::null()) };
+        if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+    };
+    let (service, scope, events) = owner(root.path());
+    icacls(&parent, &["/deny".as_ref(), "*S-1-1-0:(S)".as_ref()]);
+    let native_in_place = fs::write(&original, b"native original");
+    let replacement = native_replace();
+    let creation = fs::hard_link(&staged, &linked);
+    let write = service.write_file_for_agent_session(&scope, "parent/known.txt", b"replacement").await;
+    let create = service.write_file_for_agent_session(&scope, "parent/new.txt", b"created").await;
+    icacls(&parent, &["/remove:d".as_ref(), "*S-1-1-0".as_ref()]);
+    native_in_place.unwrap();
+    assert_eq!(replacement.unwrap_err().raw_os_error(), Some(1175));
+    assert_eq!(creation.unwrap_err().raw_os_error(), Some(5));
+    assert!(write.is_err());
+    assert!(create.is_err());
+    assert_eq!(fs::read(parent.join("known.txt")).unwrap(), b"original");
+    assert_eq!(fs::read(&original).unwrap(), b"native original");
+    assert_eq!(fs::read(&staged).unwrap(), b"native staged");
+    assert!(!parent.join("new.txt").exists());
+    assert!(!linked.exists());
+    assert!(!backup.exists());
+    assert_eq!(fs::read_dir(&parent).unwrap().count(), 3);
+    assert!(events.0.lock().unwrap().is_empty());
+    fs::hard_link(&staged, &linked).unwrap();
+    native_replace().unwrap(); // Confirm both reference operations work after fixture release.
+}
+
+#[tokio::test]
 async fn workspace_root_junction_and_internal_alias_keep_their_authorized_read_target() {
     let fixture = tempfile::tempdir().unwrap();
     let root = fixture.path().join("workspace");

@@ -1,21 +1,16 @@
 //! Open a previously resolved read target relative to the authorized directory.
 //! Each component is opened without following a newly introduced reparse point.
 use std::ffi::OsString;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::os::windows::ffi::OsStringExt;
-use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, PathBuf};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
-use cap_std::fs::{Dir, OpenOptions as CapOpenOptions, OpenOptionsExt as _};
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 use nomifun_common::AppError;
 use same_file::Handle;
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    GetFinalPathNameByHandleW, SYNCHRONIZE,
-};
+use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
 
 use crate::PathAuthority;
 
@@ -33,7 +28,7 @@ fn changed() -> AppError {
     AppError::Conflict("FILE_CHANGED_DURING_READ: workspace directory identity changed".into())
 }
 
-fn final_path(handle: &impl AsRawHandle) -> Result<PathBuf, AppError> {
+pub(crate) fn final_path(handle: &impl AsRawHandle) -> Result<PathBuf, AppError> {
     let mut buffer = vec![0_u16; 256];
     loop {
         // The borrowed handle remains live and the writable buffer has the
@@ -49,11 +44,7 @@ fn final_path(handle: &impl AsRawHandle) -> Result<PathBuf, AppError> {
 fn open_root(path: &Path) -> Result<File, AppError> {
     // Metadata access is sufficient. Do not require directory listing
     // rights merely to read a known, otherwise accessible file.
-    let file = OpenOptions::new().read(true)
-        .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path).map_err(io_error)?;
+    let file = crate::windows_directory::open(None,path).map_err(io_error)?;
     let metadata = file.metadata().map_err(io_error)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() || final_path(&file)? != path {
         return Err(changed());
@@ -101,11 +92,11 @@ impl ReadRoot {
             let Component::Normal(name) = component else { return Err(changed()); };
             let mut options = CapOpenOptions::new();
             options.read(true).follow(FollowSymlinks::No);
-            if components.peek().is_some() {
-                options.access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
-                    .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-            }
-            let file = directory.open_with(name,&options).map_err(io_error)?.into_std();
+            let file = if components.peek().is_some() {
+                crate::windows_directory::open(Some(&directory),Path::new(name)).map_err(io_error)?
+            } else {
+                directory.open_with(name,&options).map_err(io_error)?.into_std()
+            };
             if components.peek().is_none() {
                 if final_path(&file)? != canonical { return Err(changed()); }
                 return Ok(file);
