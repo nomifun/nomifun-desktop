@@ -60,9 +60,14 @@ pub const MAX_AGENT_PATCH_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 const MAX_AGENT_PATCH_PATH_BYTES: usize = 4 * 1024;
 
 const FILE_WRITE_OUTCOME_UNKNOWN: &str = "workspace file publication outcome is unknown";
+const FILE_DELETE_OUTCOME_UNKNOWN: &str = "workspace entry deletion outcome is unknown";
 
 pub fn file_write_outcome_unknown(error: &AppError) -> bool {
     matches!(error, AppError::Internal(message) if message.starts_with(FILE_WRITE_OUTCOME_UNKNOWN))
+}
+
+pub fn file_delete_outcome_unknown(error: &AppError) -> bool {
+    matches!(error, AppError::Internal(message) if message.starts_with(FILE_DELETE_OUTCOME_UNKNOWN))
 }
 
 fn file_write_publication_error(failure: PatchPublicationFailure) -> AppError {
@@ -914,9 +919,20 @@ impl FileService {
         let canonical = validate_path_authority(path, authority)?;
 
         let path_owned = canonical.clone();
-        tokio::task::spawn_blocking(move || remove_entry_sync(&path_owned))
+        let removed = tokio::task::spawn_blocking(move || remove_entry_sync(&path_owned))
             .await
-            .map_err(|e| AppError::Internal(format!("remove entry task failed: {e}")))??;
+            .map_err(|e| AppError::Internal(format!(
+                "{FILE_DELETE_OUTCOME_UNKNOWN}; removal task stopped: {e}; inspect the remaining tree before retry"
+            )))
+            .and_then(|result| result);
+        if let Err(error) = removed {
+            // Recursive removal may already have changed descendants. Diagnostic
+            // reads must not return a listing cached before that attempt.
+            if let Ok(root) = std::fs::canonicalize(workspace) {
+                self.invalidate_cache(&root.to_string_lossy());
+            }
+            return Err(error);
+        }
 
         let workspace_path = Path::new(workspace);
         let relative_path = rel_to_api_string(
@@ -1836,9 +1852,28 @@ fn remove_entry_sync(path: &Path) -> Result<(), AppError> {
     let metadata =
         std::fs::metadata(path).map_err(|e| AppError::NotFound(format!("cannot remove '{}': {e}", path.display())))?;
 
+    #[cfg(windows)]
+    let _delete_access = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        // Check the root's native delete permission before recursive traversal
+        // can remove any child. Child failures and later races remain uncertain.
+        std::fs::OpenOptions::new().access_mode(DELETE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)
+            .map_err(|error| AppError::Internal(format!(
+                "cannot open workspace entry '{}' for deletion: {error}", path.display()
+            )))?
+    };
+
     if metadata.is_dir() {
         std::fs::remove_dir_all(path)
-            .map_err(|e| AppError::Internal(format!("cannot remove directory '{}': {e}", path.display())))
+            .map_err(|e| AppError::Internal(format!(
+                "{FILE_DELETE_OUTCOME_UNKNOWN}; recursive removal of '{}' failed: {e}; inspect the remaining tree before retry",
+                path.display()
+            )))
     } else {
         std::fs::remove_file(path)
             .map_err(|e| AppError::Internal(format!("cannot remove file '{}': {e}", path.display())))
