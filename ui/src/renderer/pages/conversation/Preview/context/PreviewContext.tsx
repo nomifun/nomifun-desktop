@@ -9,6 +9,7 @@ import type { KnowledgeBaseId } from '@/common/types/ids';
 import type { PreviewContentType } from '@/common/types/office/preview';
 import { emitter } from '@/renderer/utils/emitter';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { usePreviewFileRefresh } from './usePreviewFileRefresh';
 
 import {
   relocateKnowledgePreviewTabs,
@@ -50,6 +51,8 @@ export interface PreviewTab {
   title: string; // Tab 标题
   isDirty?: boolean; // 是否有未保存的修改 / Whether there are unsaved changes
   originalContent?: string; // 原始内容，用于对比 / Original content for comparison
+  fileReadError?: boolean;
+  fileRefreshing?: boolean;
 }
 
 export interface PreviewContextValue {
@@ -68,6 +71,7 @@ export interface PreviewContextValue {
   switchTab: (tabId: string) => void;
   updateContent: (content: string) => void;
   saveContent: (tabId?: string) => Promise<boolean>; // 保存内容 / Save content
+  refreshFile: (tabId?: string) => Promise<void>;
   findPreviewTab: (type: PreviewContentType, content?: string, metadata?: PreviewMetadata) => PreviewTab | null; // 查找匹配的 tab
   closePreviewByIdentity: (type: PreviewContentType, content?: string, metadata?: PreviewMetadata) => void; // 根据内容关闭指定 tab
 
@@ -83,6 +87,12 @@ export interface PreviewContextValue {
 }
 
 const PreviewContext = createContext<PreviewContextValue | null>(null);
+const previewFileIO = {
+  subscribe: (handler: Parameters<typeof ipcBridge.fileStream.contentUpdate.on>[0]) => ipcBridge.fileStream.contentUpdate.on(handler),
+  metadata: (path: string, workspace?: string) => ipcBridge.fs.getFileMetadata.invoke({ path, workspace }),
+  text: (path: string, workspace?: string) => ipcBridge.fs.readFile.invoke({ path, workspace }),
+  image: (path: string, workspace?: string) => ipcBridge.fs.getImageBase64.invoke({ path, workspace }),
+};
 
 // Callers pass a generation-scoped, typed browser-storage namespace. No legacy
 // preview key is read.
@@ -104,6 +114,7 @@ const sanitizeTabsForPersistence = (input: PreviewTab[]): PreviewTab[] => {
       ...tab,
       isDirty: false,
       originalContent: tab.content,
+      fileRefreshing: false,
     }));
 };
 
@@ -126,6 +137,7 @@ const parsePersistedTabs = (value: unknown): PreviewTab[] => {
     .map((tab) => ({
       ...tab,
       originalContent: typeof tab.originalContent === 'string' ? tab.originalContent : tab.content,
+      fileRefreshing: false,
       isDirty: false,
     }));
 };
@@ -176,6 +188,8 @@ export const PreviewProvider: React.FC<{
   const persistedState = loadPersistedState(persistNamespace);
   const [isOpen, setIsOpen] = useState(persistedState.isOpen);
   const [tabs, setTabs] = useState<PreviewTab[]>(persistedState.tabs);
+  const currentPreviewTabs = useRef(tabs);
+  currentPreviewTabs.current = tabs;
   const [activeTabId, setActiveTabId] = useState<string | null>(persistedState.activeTabId);
   // const [sendBoxHandler, setSendBoxHandlerState] = useState<((text: string) => void) | null>(null);
   const sendBoxHandler = useRef<((text: string) => void) | null>(null);
@@ -211,6 +225,9 @@ export const PreviewProvider: React.FC<{
 
   // 追踪是否正在保存（避免与流式更新冲突）/ Track if currently saving (to avoid conflicts with streaming updates)
   const savingFilesRef = useRef<Set<string>>(new Set());
+  const fileMtimeRef = useRef<Map<string, number>>(new Map());
+  const closeFileTabRef = useRef<(id: string) => void>(() => {});
+  const fileRefresh = usePreviewFileRefresh({ tabs, setTabs, saving: savingFilesRef, mtimes: fileMtimeRef, closeTab: closeFileTabRef, io: previewFileIO });
 
   // 获取当前激活的 tab / Get active tab
   const activeTab = useMemo(() => {
@@ -288,20 +305,20 @@ export const PreviewProvider: React.FC<{
 
   const openPreview = useCallback(
     (new_content: string, type: PreviewContentType, meta?: PreviewMetadata) => {
-      let nextActiveTabId: string | null = null;
-
+      const current = findPreviewTabInList(currentPreviewTabs.current, type, new_content, meta);
+      if (current) fileRefresh.cancel(current.id);
       setTabs((prevTabs) => {
         // 如果同一个文件已经打开，则直接激活现有 tab，避免重复 / Focus existing tab when the same file is opened again
         const existingTab = findPreviewTabInList(prevTabs, type, new_content, meta);
 
         if (existingTab) {
-          nextActiveTabId = existingTab.id;
+          setActiveTabId(existingTab.id);
           return prevTabs.map((tab) => {
             if (tab.id !== existingTab.id) return tab;
 
             // 如果用户已编辑内容，则保留当前内容，仅更新元数据 / Keep edited content, only merge metadata
             if (tab.isDirty) {
-              return meta ? { ...tab, metadata: { ...tab.metadata, ...meta } } : tab;
+              return { ...tab, fileRefreshing: false, metadata: meta ? { ...tab.metadata, ...meta } : tab.metadata };
             }
 
             return {
@@ -309,6 +326,8 @@ export const PreviewProvider: React.FC<{
               content: new_content,
               metadata: meta ? { ...tab.metadata, ...meta } : tab.metadata,
               originalContent: new_content,
+              fileReadError: false,
+              fileRefreshing: false,
             };
           });
         }
@@ -339,27 +358,22 @@ export const PreviewProvider: React.FC<{
           originalContent: new_content, // 保存原始内容 / Save original content
         };
 
-        nextActiveTabId = tabId;
+        setActiveTabId(tabId);
         return [...prevTabs, newTab];
       });
-
-      if (nextActiveTabId) {
-        setActiveTabId(nextActiveTabId);
-      }
       setIsOpen(true);
     },
-    [extractFileName, findPreviewTabInList]
+    [extractFileName, findPreviewTabInList, fileRefresh.cancel]
   );
 
   const closePreview = useCallback(() => {
+    fileRefresh.cancel();
+    fileMtimeRef.current.clear();
     setIsOpen(false);
     setTabs([]);
     setActiveTabId(null);
     setDomSnippets([]);
-  }, []);
-
-  // Track last-known mtime per file path for external change detection
-  const fileMtimeRef = useRef<Map<string, number>>(new Map());
+  }, [fileRefresh.cancel]);
 
   // Knowledge documents keep their tab/session identity when their filesystem
   // locator changes. Every PreviewProvider listens because the same knowledge
@@ -435,6 +449,7 @@ export const PreviewProvider: React.FC<{
 
   const closeTab = useCallback(
     (tabId: string) => {
+      fileRefresh.cancel(tabId);
       setTabs((prevTabs) => {
         // Clean up mtime record for the closed tab
         const tabToClose = prevTabs.find((tab) => tab.id === tabId);
@@ -459,8 +474,9 @@ export const PreviewProvider: React.FC<{
         return newTabs;
       });
     },
-    [activeTabId]
+    [activeTabId, fileRefresh.cancel]
   );
+  closeFileTabRef.current = closeTab;
 
   const closePreviewByIdentity = useCallback(
     (type: PreviewContentType, content?: string, meta?: PreviewMetadata) => {
@@ -483,13 +499,15 @@ export const PreviewProvider: React.FC<{
         return;
       }
 
+      fileRefresh.cancel(activeTabId);
+
       try {
         setTabs((prevTabs) => {
           const updated = prevTabs.map((tab) => {
             if (tab.id === activeTabId) {
               // 检查内容是否与原始内容不同 / Check if content differs from original
               const isDirty = new_content !== tab.originalContent;
-              return { ...tab, content: new_content, isDirty };
+              return { ...tab, content: new_content, isDirty, fileRefreshing: false };
             }
             return tab;
           });
@@ -499,7 +517,7 @@ export const PreviewProvider: React.FC<{
         // Silently ignore errors
       }
     },
-    [activeTabId]
+    [activeTabId, fileRefresh.cancel]
   );
 
   const saveContent = useCallback(
@@ -514,6 +532,8 @@ export const PreviewProvider: React.FC<{
       if (tab.metadata?.file_path && tab.metadata?.workspace) {
         try {
           const file_path = tab.metadata.file_path;
+          fileRefresh.cancel(targetTabId);
+          setTabs((previous) => previous.map((item) => item.id === targetTabId ? { ...item, fileRefreshing: false } : item));
 
           // 标记文件正在保存（避免触发文件监听回调）/ Mark file as being saved (to avoid triggering file watch callback)
           savingFilesRef.current.add(file_path);
@@ -527,8 +547,8 @@ export const PreviewProvider: React.FC<{
           if (success) {
             setTabs((prevTabs) =>
               prevTabs.map((t) => {
-                if (t.id === targetTabId) {
-                  return { ...t, isDirty: false, originalContent: t.content };
+                if (t.id === targetTabId && t.metadata?.file_path === file_path && t.metadata?.workspace === tab.metadata?.workspace) {
+                  return { ...t, isDirty: t.content !== tab.content, originalContent: tab.content, fileRefreshing: false };
                 }
                 return t;
               })
@@ -552,8 +572,13 @@ export const PreviewProvider: React.FC<{
       }
       return false;
     },
-    [activeTabId, tabs]
+    [activeTabId, tabs, fileRefresh.cancel]
   );
+
+  const refreshFile = useCallback((tabId?: string) => {
+    const id = tabId || activeTabId;
+    return id ? fileRefresh.refresh(id) : Promise.resolve();
+  }, [activeTabId, fileRefresh.refresh]);
 
   const addToSendBox = useCallback((text: string) => {
     if (sendBoxHandler.current) {
@@ -580,127 +605,6 @@ export const PreviewProvider: React.FC<{
     setDomSnippets([]);
   }, []);
 
-  // 流式内容订阅：订阅 agent 写入文件时的流式更新（替代文件监听）
-  // Streaming content subscription: Subscribe to streaming updates when agent writes files (replaces file watching)
-  // 使用防抖优化：等待 agent 完成写入后再更新预览，避免打字动画被频繁中断
-  // Use debounce optimization: Wait for agent to finish writing before updating preview, avoiding frequent animation interruptions
-  useEffect(() => {
-    // 防抖定时器映射：每个文件路径对应一个定时器 / Debounce timer map: one timer per file path
-    const debounceTimers = new Map<string, NodeJS.Timeout>();
-
-    const unsubscribe = ipcBridge.fileStream.contentUpdate.on(({ file_path, content, operation }) => {
-      // 如果是删除操作，立即处理，不需要防抖 / If delete operation, handle immediately without debounce
-      if (operation === 'delete') {
-        // 清除该文件的防抖定时器 / Clear debounce timer for this file
-        const existingTimer = debounceTimers.get(file_path);
-        if (existingTimer) {
-          clearTimeout(existingTimer);
-          debounceTimers.delete(file_path);
-        }
-
-        setTabs((prevTabs) => {
-          const tabToClose = prevTabs.find((tab) => tab.metadata?.file_path === file_path);
-          if (tabToClose) {
-            closeTab(tabToClose.id);
-          }
-          return prevTabs;
-        });
-        return;
-      }
-
-      // 对写入操作进行防抖：500ms 内没有新的更新才真正更新内容
-      // Debounce write operations: Only update content if no new updates within 500ms
-      const existingTimer = debounceTimers.get(file_path);
-      if (existingTimer) {
-        clearTimeout(existingTimer);
-      }
-
-      const timer = setTimeout(() => {
-        // 使用函数式更新来访问最新的 tabs 状态 / Use functional update to access latest tabs state
-        setTabs((prevTabs) => {
-          // 查找受影响的 tabs / Find affected tabs
-          const affectedTabs = prevTabs.filter((tab) => tab.metadata?.file_path === file_path);
-
-          if (affectedTabs.length === 0) {
-            return prevTabs;
-          }
-
-          return prevTabs.map((tab) => {
-            if (tab.metadata?.file_path !== file_path) return tab;
-
-            // 如果正在保存或用户已编辑，不更新 / Don't update if saving or user has edited
-            if (savingFilesRef.current.has(file_path) || tab.isDirty) {
-              return tab;
-            }
-
-            return {
-              ...tab,
-              content,
-              originalContent: content,
-              isDirty: false,
-            };
-          });
-        });
-
-        // 清除定时器 / Clean up timer
-        debounceTimers.delete(file_path);
-      }, 500); // 500ms 防抖时间 / 500ms debounce delay
-
-      debounceTimers.set(file_path, timer);
-    });
-
-    return () => {
-      unsubscribe();
-      // 清理所有防抖定时器 / Clean up all debounce timers
-      debounceTimers.forEach((timer) => clearTimeout(timer));
-      debounceTimers.clear();
-    };
-  }, [closeTab]); // 只依赖 closeTab，不依赖 tabs，避免重复订阅 / Only depend on closeTab, not tabs, to avoid re-subscribing
-
-  // File mtime polling: detect external file changes (Claude Code CLI, Gemini, etc.) by comparing lastModified.
-  // Only polls the active tab to minimize IPC overhead; checks other tabs once on tab switch.
-  // Uses polling instead of fileWatch IPC events because buildEmitter's main→renderer event delivery
-  // is unreliable after the first emission in Electron (only the first event reaches the renderer).
-  const checkFileUpdate = useCallback(
-    (tab: PreviewTab) => {
-      const file_path = tab.metadata?.file_path;
-      if (!file_path || tab.isDirty || savingFilesRef.current.has(file_path)) return;
-
-      void ipcBridge.fs.getFileMetadata
-        .invoke({ path: file_path, workspace: tab.metadata?.workspace })
-        .then((metadata) => {
-          if (!metadata) return;
-          const prevMtime = fileMtimeRef.current.get(file_path);
-          fileMtimeRef.current.set(file_path, metadata.lastModified);
-          if (prevMtime === undefined || metadata.lastModified === prevMtime) return;
-
-          const readPromise =
-            tab.content_type === 'image'
-              ? ipcBridge.fs.getImageBase64.invoke({ path: file_path, workspace: tab.metadata?.workspace })
-              : ipcBridge.fs.readFile.invoke({ path: file_path, workspace: tab.metadata?.workspace });
-
-          void readPromise
-            .then((content) => {
-              if (content == null) return;
-              setTabs((latest) =>
-                latest.map((t) => {
-                  if (t.metadata?.file_path !== file_path) return t;
-                  if (savingFilesRef.current.has(file_path) || t.isDirty) return t;
-                  return { ...t, content, originalContent: content, isDirty: false };
-                })
-              );
-            })
-            .catch((error) => {
-              console.error('[PreviewContext] Failed to read file after mtime change:', file_path, error);
-            });
-        })
-        .catch((error) => {
-          console.error('[PreviewContext] Failed to get file metadata:', file_path, error);
-        });
-    },
-    [setTabs]
-  );
-
   // Keep a ref to activeTab so the polling interval always sees the latest object
   // without re-running the effect on every tabs state change.
   const activeTabRef = useRef<PreviewTab | null>(null);
@@ -714,17 +618,17 @@ export const PreviewProvider: React.FC<{
 
     const pollId = setInterval(() => {
       const current = activeTabRef.current;
-      if (current) checkFileUpdate(current);
+      if (current) void fileRefresh.refresh(current.id, true);
     }, 1000);
 
     // Check immediately on tab switch
     const current = activeTabRef.current;
-    if (current) checkFileUpdate(current);
+    if (current) void fileRefresh.refresh(current.id, true);
 
     return () => {
       clearInterval(pollId);
     };
-  }, [activeFilePath, checkFileUpdate]);
+  }, [activeFilePath, fileRefresh.refresh]);
 
   // 监听 preview.open 事件（用于 agent 打开网页预览）/ Listen to preview.open event (for agent to open web preview)
   // 同时监听 IPC 和 renderer emitter 两种方式 / Listen to both IPC and renderer emitter
@@ -780,6 +684,7 @@ export const PreviewProvider: React.FC<{
       switchTab: setActiveTabId,
       updateContent,
       saveContent,
+      refreshFile,
       findPreviewTab,
       closePreviewByIdentity,
       addToSendBox,
@@ -800,6 +705,7 @@ export const PreviewProvider: React.FC<{
     setActiveTabId,
     updateContent,
     saveContent,
+    refreshFile,
     findPreviewTab,
     closePreviewByIdentity,
     addToSendBox,

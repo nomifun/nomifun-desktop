@@ -771,6 +771,7 @@ impl FileService {
             // The expected buffer is not evidence of what reached disk. Revoke
             // inventories without advertising unverified bytes as new content.
             self.invalidate_caches_for_path(path);
+            self.emit_content_observation(owner_id, path, None, workspace);
         }
     }
 
@@ -781,6 +782,10 @@ impl FileService {
         data: &[u8],
         workspace: &str,
     ) {
+        self.emit_content_observation(owner_id, canonical, String::from_utf8(data.to_vec()).ok(), workspace);
+    }
+
+    fn emit_content_observation(&self, owner_id: &str, canonical: &Path, content: Option<String>, workspace: &str) {
         let workspace_path = Path::new(workspace);
         let relative_path = rel_to_api_string(
             canonical
@@ -790,7 +795,6 @@ impl FileService {
                 )
                 .unwrap_or(canonical),
         );
-        let content = String::from_utf8(data.to_vec()).ok();
         let event = ContentUpdateEvent {
             file_path: canonical.to_string_lossy().into_owned(),
             content,
@@ -3315,6 +3319,10 @@ mod tests {
         let observed = serde_json::to_value(&*events.0.lock().unwrap()).unwrap();
         fs::write(fixture.path().join("event-observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
         assert!(!observed.to_string().contains("\"content\":\"intended\""), "an unverified publication must not advertise expected bytes");
+        assert_eq!(observed.as_array().unwrap().len(), 1);
+        assert_eq!(observed[0]["name"], "fileStream.contentUpdate");
+        assert_eq!(observed[0]["data"]["operation"], "write");
+        assert!(observed[0]["data"].get("content").is_none());
         assert!(service.workspace_files_cache.is_empty());
         assert_eq!(fs::read(&target).unwrap(), b"actual unverified bytes");
         service.list_workspace_files_impl(&workspace, &PathAuthority::Workspace(root.clone())).await.unwrap();
@@ -3322,6 +3330,9 @@ mod tests {
         cleanup.temporary_cleanup_unconfirmed = true;
         service.observe_file_publication::<()>("owner", &target, b"intended", &workspace, &Err(cleanup));
         assert!(service.workspace_files_cache.is_empty(), "unconfirmed residues also require a fresh inventory");
+        let observed = serde_json::to_value(&*events.0.lock().unwrap()).unwrap();
+        assert_eq!(observed.as_array().unwrap().len(), 2);
+        assert!(observed[1]["data"].get("content").is_none());
     }
 
     #[cfg(windows)]

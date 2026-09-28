@@ -1522,7 +1522,7 @@ export const workspaceOfficeWatch = {
 export const fileStream = {
   contentUpdate: wsEmitter<{
     file_path: string;
-    content: string;
+    content?: string;
     workspace: string;
     relative_path: string;
     operation: 'write' | 'delete';

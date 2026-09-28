@@ -18,7 +18,9 @@ use nomifun_agent_domain_wave2::{
     Wave2CapabilityOperation, Wave2HostContext, Wave2HostPort, Wave2HostPortError,
     Wave2HostRequest,
 };
-use nomifun_api_types::{TypedResourceBindingDto, WebSocketMessage};
+use nomifun_api_types::TypedResourceBindingDto;
+#[cfg(test)]
+use nomifun_api_types::WebSocketMessage;
 use nomifun_common::AppError;
 use nomifun_file::{
     AgentSessionPatchRequest, AgentSessionWorkspaceBinding, FileService,
@@ -92,10 +94,6 @@ fn patch_failure_error(
 }
 
 impl Wave2ApplicationHost {
-    pub(crate) fn new() -> Self {
-        Self::for_workspace_root(std::env::temp_dir())
-    }
-
     pub(crate) fn ensure_git_ready(&self) -> Result<(), AppError> {
         if let Some(Ok(owner)) = self.vcs_push_owner.get() {
             owner.ensure_idle().map_err(|error| AppError::Conflict(error.to_string()))?;
@@ -110,7 +108,15 @@ impl Wave2ApplicationHost {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn for_workspace_root(workspace_root: impl Into<PathBuf>) -> Self {
+        Self::with_user_events(workspace_root, Arc::new(NullUserEvents))
+    }
+
+    pub(crate) fn with_user_events(
+        workspace_root: impl Into<PathBuf>,
+        user_events: Arc<dyn UserEventSink>,
+    ) -> Self {
         let workspace_root = workspace_root.into();
         let vcs_stage_owner = WorkspaceVcsStageOwner::new(&workspace_root)
             .map(Arc::new)
@@ -120,7 +126,7 @@ impl Wave2ApplicationHost {
             .map_err(|error| Arc::<str>::from(error.to_string()));
         Self {
             files: Arc::new(FileService::new(
-                Arc::new(NullUserEvents),
+                user_events,
                 vec![workspace_root.clone()],
             )),
             artifacts,
@@ -235,12 +241,6 @@ impl GitMutationTestHook {
             entered: tokio::sync::Notify::new(),
             release: tokio::sync::Notify::new(),
         })
-    }
-}
-
-impl Default for Wave2ApplicationHost {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -2083,8 +2083,10 @@ fn unavailable(capability_id: &str) -> Wave2HostPortError {
     ))
 }
 
+#[cfg(test)]
 struct NullUserEvents;
 
+#[cfg(test)]
 impl UserEventSink for NullUserEvents {
     fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<Value>) {}
 }
@@ -2518,7 +2520,11 @@ mod tests {
     #[tokio::test]
     async fn workspace_file_actions_use_the_typed_binding_root() {
         let directory = tempfile::tempdir().unwrap();
-        let host = test_host(directory.path()).await;
+        let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(16));
+        let mut user_events = bus.subscribe_user();
+        let mut public_events = bus.subscribe();
+        let host = Wave2ApplicationHost::with_user_events(directory.path(), bus)
+            .with_effect_store(test_effect_store().await);
         let context = context(directory.path());
 
         let written = invoke(
@@ -2532,6 +2538,10 @@ mod tests {
         assert_eq!(written.0["written"], true);
         assert_eq!(written.0["workspace_path"]["path"], "test.txt");
         assert_eq!(written.0["workspace_path"]["root_sha256"].as_str().unwrap().len(), 64);
+        let event = user_events.try_recv().expect("workspace owner must notify the authenticated audience");
+        assert_eq!(event.user_id, context.principal.principal_id);
+        assert_eq!(event.event.name, "fileStream.contentUpdate");
+        assert_eq!(event.event.data["content"], "hello");
 
         let read = invoke(
             &host,
@@ -2543,6 +2553,7 @@ mod tests {
         .unwrap();
         assert_eq!(read.0["content"], "hello");
         assert_eq!(read.0["workspace_path"], written.0["workspace_path"]);
+        assert!(user_events.try_recv().is_err(), "read must not produce a write event");
 
         let deleted = invoke(
             &host,
@@ -2555,6 +2566,10 @@ mod tests {
         assert_eq!(deleted.0["deleted"], true);
         assert_eq!(deleted.0["workspace_path"], written.0["workspace_path"]);
         assert!(!directory.path().join("test.txt").exists());
+        let event = user_events.try_recv().expect("deletion must reach the same audience");
+        assert_eq!(event.user_id, "owner-1");
+        assert_eq!(event.event.data["operation"], "delete");
+        assert!(public_events.try_recv().is_err(), "private file events must never be broadcast to all users");
     }
 
     #[tokio::test]

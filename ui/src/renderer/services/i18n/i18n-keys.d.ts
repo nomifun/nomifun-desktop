@@ -5133,6 +5133,7 @@ export type I18nKey =
   | 'preview.excel.watch.loading'
   | 'preview.excel.watch.startFailed'
   | 'preview.exitEdit'
+  | 'preview.fileRefreshFailed'
   | 'preview.history'
   | 'preview.historyLoadFailed'
   | 'preview.historyLoaded'
