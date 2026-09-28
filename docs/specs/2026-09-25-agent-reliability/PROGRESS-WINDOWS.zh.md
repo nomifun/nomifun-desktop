@@ -1479,6 +1479,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   **122/122**，workspace fmt 通过。真实 OS 调度竞争、两个并发 cancel waiter、cancel/poll/close
   三方并发、child/grandchild、PTY、其他平台及长期压力仍待验；不关闭完整 PROC-038 或共享阶段。
 
+### close stdin、cancel 与 poll 三方并发（W79，基线 `c225443d3`）
+
+- S-D04-09 / PROC-049、A13/A17/A19：可控 owner 将已经 admission 的 `close_stdin` 阻塞在异步
+  平台调用中，再对同一 Session 并发启动 60 秒 poll 与 cancel。close 未占用 registry/session 锁；
+  cancel 仍发送唯一一次 interrupt 并得到 `Cancelled`、`cleanup.reaped=true`，长 poll 及时唤醒并
+  返回逐字段相同的终态；此时注入的 close 仍独立阻塞，释放后正常完成。
+- 底层 `close_stdin`、interrupt、wait/reap 各调用一次，无重复 signal、终态改写或 waiter 遗失。
+  生产实现首次满足断言，本批仅扩展测试 owner 与新增回归，没有修改平台 I/O、清理或权限逻辑。
+- 首次定向 **1/1**，重复 **20/20**，Windows process Runtime lib **123/123**，workspace fmt
+  通过。真实 pipe/PTY stdin 关闭、两个以上 cancel/poll waiter、平台 close 失败、应用退出及其他平台
+  仍待验；不关闭完整 PROC-049 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
