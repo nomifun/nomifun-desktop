@@ -250,6 +250,46 @@ async fn elapsed_process_deadline_rejects_start_before_user_code_runs() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
+async fn running_deadline_preserves_partial_file_effect_and_reports_reaped_timeout() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let marker = directory.path().join("partial-effect.marker");
+    let mut process = helper_request(&[
+        "write-file-then-sleep",
+        marker
+            .to_str()
+            .expect("temporary marker path should be UTF-8"),
+        "60000",
+    ]);
+    process.cwd = directory.path().canonicalize().expect("canonical cwd");
+    process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+    process.policy.deadline = Some(Instant::now() + Duration::from_secs(1));
+    process.policy.interrupt_grace = Duration::from_millis(50);
+    process.policy.terminate_grace = Duration::from_millis(50);
+    process.policy.reap_grace = Duration::from_millis(500);
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor
+        .start(process)
+        .await
+        .expect("partial-effect helper should start before its deadline");
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        wait_for_terminal(&supervisor, &handle),
+    )
+    .await
+    .expect("deadline cleanup must remain bounded");
+    let ProcessOutcome::TimedOut { cleanup, .. } = outcome else {
+        panic!("running deadline must produce TimedOut, got {outcome:?}");
+    };
+    assert!(cleanup.reaped);
+    assert_eq!(
+        fs::read(&marker).expect("the pre-timeout effect should remain observable"),
+        b"partial effect before timeout\n"
+    );
+}
+
+#[tokio::test]
 #[cfg(unix)]
 #[serial_test::serial(unix_process_contract)]
 async fn public_supervisor_preserves_exit_codes_with_nofile_soft_limit_128() {

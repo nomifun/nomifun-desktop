@@ -389,6 +389,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   lib **125/125**。Unix/macOS 启动阶段、刚过 resume 的 StartLost、清理失败与完整 UI/角色仍开放，
   不关闭完整 PROC-047 或共享阶段。
 
+- S-D04-12（PROC-048、A05/A08/A10/A11/A13/A17/A19 运行中 deadline 部分效果子断言）：W83
+  新增跨平台真实 helper，先写入固定 `partial effect before timeout` 文件，再保持运行 60 秒；统一
+  deadline 为 1 秒，清理阶段分别为 50/50/500 ms。Windows Job 与 WSL2 Linux process group 均返回
+  `TimedOut`、`cleanup.reaped=true`，磁盘保留逐字节一致的部分文件，没有删除或声称回滚。生产实现
+  首次满足，本批只补 helper 与回归。两平台各重复 **20/20**；Windows process contract **11/11**，
+  Linux **12/12**。持续写入截断量、后代进程、macOS、正式 UI/模型部分效果披露和 IO fault 组合仍
+  开放，不关闭完整 PROC-048 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

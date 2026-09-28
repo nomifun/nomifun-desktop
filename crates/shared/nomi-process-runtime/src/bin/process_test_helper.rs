@@ -105,6 +105,15 @@ fn main() {
             fs::write(Path::new(&args[1]), b"written by process_test_helper\n")
                 .unwrap_or_else(|error| fail_io("write file", error));
         }
+        "write-file-then-sleep" => {
+            require_len(&args, 3);
+            fs::write(Path::new(&args[1]), b"partial effect before timeout\n")
+                .unwrap_or_else(|error| fail_io("write partial-effect file", error));
+            thread::sleep(Duration::from_millis(parse_u64(
+                &args[2],
+                "sleep duration",
+            )));
+        }
         "print-args-env-cwd" => {
             require_len(&args, 5);
             print_args_env_cwd(&args[1], &args[2], &args[3], &args[4])
