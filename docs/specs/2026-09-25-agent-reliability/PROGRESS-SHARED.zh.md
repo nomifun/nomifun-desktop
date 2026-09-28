@@ -660,9 +660,11 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   保留严格类型校验、整批原子拒绝与零字符串强转。两项精确回归各 **20/20**，Agent Runtime
   **175/175**。正式 Tauri `668062e479e6…` 中 step-3.7-flash 首次形成真实 `args` 数组，唯一进程
   退出 0 且 `reaped=true`，UI 零异常，正确报告 300、`shape-0001.txt`、`shape-0300.txt`；单回合
-  2 个模型步、67 条事件，300 文件摘要不变，应用/profile 清零并正式备份。该单调用回合未暴露
-  `report_completion`，其数组说明只有组件证据；其他数组字段/Provider、N3/100 seed/LONG/99%
-  仍开放，不关闭完整 REG/CTRL/PROC 或共享阶段。
+  2 个模型步、67 条事件。第二个隔离样本按要求执行两条命令后，`report_completion.criteria` 和两组
+  `evidence_call_ids` 首次均为真实数组，UI 同样零异常，3 个模型步、121 条事件；12 文件摘要不变，
+  两次均应用/profile 清零并正式备份。但 alpha criterion 错把 beta call ID 作为证据，因此只通过
+  数组形状子断言，精确 evidence 语义关联另转后续 CTRL 批次。其他数组字段/Provider、N3/100 seed/
+  LONG/99% 仍开放，不关闭完整 REG/CTRL/PROC 或共享阶段。
 
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
