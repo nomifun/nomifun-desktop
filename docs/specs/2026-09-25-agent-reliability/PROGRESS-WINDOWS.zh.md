@@ -1331,6 +1331,30 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   精确 dropped 数，因此只把“确定性 overflow 计数 + 正式 UI 全量重读”作为组合证据；完整丢批/
   重复/乱序/rescan UI、其他 Agent/平台、N3/100 seed/LONG/99% 仍待验，不关闭完整 FILE-040。
 
+### 正式 Runtime watcher 接线与有界诊断（W72，基线 `082d1085b`）
+
+- S-D03-49 / FILE-040、PORT-012、OBS-018、A05/A15/A17/A19：W71 的正式 UI 样本证明模型能
+  主动全量重读，却没有真实 native dropped 计数。W72 首版在 lifecycle contributor 内加入日志后，
+  两个独立 300 文件 burst 均没有 watcher 启动或批次记录；数据库确认 Preset 已启用
+  `workspace.files` 且 Session 持有精确 workspace binding。首次无接线现场、截图、日志和数据库均保留。
+- 根因是正式 Nomi Runtime 走 `EngineKernelSession`：它只组装 initial capability context 与统一
+  Plugin context，未持有 `NomiWorkspaceWatchContext`；通用 Plugin Tool Session 的 lifecycle
+  contributor 只服务另一条 materialization 路径，W64 的直接单测因此不能证明正式产品接线。
+  现由 `EngineKernelSession` 在 Full scope、`workspace.files` 被精确选择且 workspace 已由 host
+  canonicalize 后启动 watcher，并随该 Runtime 跨 Turn 持有；`plugin_context_for_turn` 在每轮模型
+  前先消费 watcher，再合并其余 context。restricted Attempt 维持原先不启用 lifecycle context 的边界。
+- 新增诊断每 Session 只记录一次 watcher 启动；每个非空批次只记录 event count、known dropped、
+  native rescan 与是否需要 reconciliation，不记录路径、文件名或内容。最终正式 Tauri 构建
+  `46063c30f9dd…` 使用隔离 data/work/profile：准备 Turn 后外部并发创建 300 文件，实际收到 603
+  个通知，保留 256、精确 dropped=347、`rescan_required=false`、`requires_reconciliation=true`。
+  下一 Turn 明确禁止工具并只回复标记，UI/canonical 均完成且零工具调用，证明批次在模型前消费。
+- 最终两回合 completed、43 条 canonical 事件；外部 300 文件 count/min/max/hash 保持，应用与
+  profile 子进程清零并完成官方备份。Linux 精确回归 **1/1**；同步远端至 `0fee0eda69d6…` 后
+  正式 Tauri 重建 `7329a6f0dda9…` 与 workspace fmt 亦通过，watcher 源码未变。首轮真实计数
+  探针另暴露旧模型 `cmd` 双层 PowerShell、PowerShell 5.1 `??` 和只读请求仍写
+  `check_marker.ps1` 的失败，原样保留并转后续 CMD/控制子断言；重复/乱序/rescan UI、其他 Agent/
+  macOS、N3/100 seed/LONG/99% 仍待验，不关闭完整 FILE-040。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

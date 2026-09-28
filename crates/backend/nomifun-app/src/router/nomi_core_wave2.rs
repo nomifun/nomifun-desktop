@@ -933,11 +933,13 @@ impl NomiWorkspaceWatchContext {
                     "workspace.files could not subscribe to the Session workspace: {error}"
                 ))
             })?;
-        Ok(Arc::new(Self {
+        let context = Arc::new(Self {
             root,
             watcher: Mutex::new(watcher),
             queue,
-        }))
+        });
+        tracing::info!("workspace notification context started");
+        Ok(context)
     }
 
     #[cfg(test)]
@@ -974,7 +976,15 @@ impl ContextContributor for NomiWorkspaceWatchContext {
         let mut batch = WorkspaceFilesChangedBatch::new(events, dropped);
         batch.rescan_required = rescan_required;
         batch.validate().ok()?;
-        let recovery = if batch.requires_reconciliation() {
+        let requires_reconciliation = batch.requires_reconciliation();
+        tracing::info!(
+            workspace_event_count = batch.events.len(),
+            dropped_event_count = batch.dropped_event_count,
+            rescan_required = batch.rescan_required,
+            requires_reconciliation,
+            "prepared workspace notification batch"
+        );
+        let recovery = if requires_reconciliation {
             "\nWorkspace notifications are incomplete. Re-read the relevant workspace state before relying on this batch; it cannot establish which other paths stayed unchanged."
         } else {
             ""

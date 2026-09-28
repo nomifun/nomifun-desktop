@@ -59,6 +59,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   completed、`output_files=[]`、UI 1/1，旧失败 Session 未重试且保留。完整 Artifact/角色/平台
   矩阵、100 seed 与 LONG/99% 仍开放，不关闭共享 D03。
 
+- S-D03-49（FILE-040、PORT-012、OBS-018、A05/A15/A17/A19 正式 Runtime watcher 接线与
+  诊断子断言）：W71 的正式 300 文件样本虽靠模型主动重读得到正确终值，却没有独立 native dropped
+  计数。W72 首轮增加有界日志后，两次真实 burst 均没有 watcher 启动/批次记录；`workspace.files`
+  已在冻结 Preset 中启用且精确绑定 workspace，说明此前 unit contributor 从未进入正式 Runtime。
+  根因是正式 Nomi 走 `EngineKernelSession`，只消费 initial capability/Plugin context；通用 Plugin Tool
+  Session 的 lifecycle contributor 并不驱动该 Runtime。现由 `EngineKernelSession` 在 Full scope 且
+  精确选择 `workspace.files` 时创建并跨 Turn 持有 `NomiWorkspaceWatchContext`，每轮模型前先消费；
+  启动和非空批次只记录 event/dropped/rescan/reconciliation 四项计数，不记录路径或内容。最终正式
+  Tauri `46063c30f9dd…` 中，300 文件产生 603 个通知，日志精确为 retained=256、dropped=347、
+  rescan=false、requires_reconciliation=true；两回合 completed、43 条事件、零工具调用，磁盘 300
+  文件摘要不变，应用/profile 清零并正式备份。Linux 精确测试 **1/1**；同步远端至
+  `0fee0eda69d6…` 后正式 Tauri 重建 `7329a6f0dda9…` 亦通过，watcher 源码未变。
+  首轮模型命令错误及违背只读要求写入脚本的失败另存并转后续 CMD 子断言；restricted Attempt、
+  重复/乱序/rescan UI、其他 Agent/macOS、N3/100 seed/LONG/99% 仍开放，不关闭完整 FILE-040。
+
 - S-D03-47（FILE-040、PORT-012、A05/A15/A17/A19 watcher overflow 全量对账子断言）：W71
   新增跨过 `WatchQueue`、`ContextContributor` 与 canonical JSON 的溢出回归：263 个唯一变更保留
   最后 256 个，首项为 `marker-0007`、`dropped_event_count=7`、`rescan_required=false`，上下文明示
