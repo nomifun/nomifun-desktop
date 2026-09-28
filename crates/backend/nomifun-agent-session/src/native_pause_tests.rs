@@ -161,6 +161,44 @@ async fn pending_effect_attestation_preserves_uncertainty_audit_and_never_reopen
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
+async fn cancel_racing_a_success_receipt_keeps_the_effect_and_cancels_the_turn() {
+    let store = AgentSessionStore::open_in_memory_with_connections(2).await.unwrap();
+    let (session, started, started_event_id) =
+        create_pending_effect(&store,"cancel-receipt-race",EffectStrategy::ManagedEffect).await;
+    let terminal = EffectEventRequest {
+        recorded_at:1_788_000_000_020,
+        event_id:"effect-succeeded-during-cancel".into(),
+        producer_id:"owning-plugin".into(),
+        causation_event_id:Some(started_event_id),
+        payload:SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+            "receipt":"durable-owner-result"
+        }))),
+        ..started.clone()
+    };
+    let session_id = session.agent_session_id.clone();
+    let (cancelled,succeeded) = tokio::join!(
+        store.cancel_active_turn(&session_id,"cancel-effect-race".into(),"session-api".into()),
+        store.record_effect_terminal(terminal,EffectTerminalState::Succeeded),
+    );
+    assert!(cancelled.is_ok(),"cancel must own the Turn terminal: {cancelled:?}");
+    assert!(succeeded.is_ok(),"an owner success receipt cannot be discarded by Turn cancellation: {succeeded:?}");
+
+    assert_eq!(store.read_turn_receipt(&session_id,&started.turn_id).await.unwrap().status,
+        TurnReceiptStatus::Cancelled);
+    let effect = store.read_effect(&session_id,&started.effect_id).await.unwrap().unwrap();
+    assert_eq!(effect.state,AgentEffectState::Returned);
+    let terminal_count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='turn/cancelled'")
+        .bind(session_id.as_ref()).bind(started.turn_id.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    let effect_count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='effect/succeeded'")
+        .bind(session_id.as_ref()).bind(&started.effect_id).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!((terminal_count,effect_count),(1,1));
+    let payload:String = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='effect/succeeded'")
+        .bind(session_id.as_ref()).bind(&started.effect_id).fetch_one(store.test_pool()).await.unwrap();
+    assert!(payload.contains("durable-owner-result"));
+    assert!(store.head(&session_id).await.unwrap().active_turn_id.is_none());
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn actual_owner_and_human_reconciliation_race_keep_one_audited_outcome() {
     let store = AgentSessionStore::open_in_memory_with_connections(2).await.unwrap();
     let (session, effect, _) = create_pending_effect(&store, "owner-race", EffectStrategy::ManagedEffect).await;

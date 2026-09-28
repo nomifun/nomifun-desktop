@@ -1018,6 +1018,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   连接池/代理变化、cancel 与 effect receipt 竞争、正式 UI 点击停止、其他平台/角色及长期门槛
   仍待验，不关闭完整共享 Case。
 
+### 共享 cancel 与 effect receipt 竞争（W49，基线 `7a4b3b186`）
+
+- S-D09-04 / LIFE-019、G0-025、A04/A05/A10/A17/A19 子断言：在两连接 canonical Store 中
+  同时提交 Turn cancel 与 managed effect 的成功 owner receipt。事务先后不改变归约：Turn 恰好
+  一个 cancelled terminal，effect 恰好一个 succeeded receipt 并保持 returned，active Turn 清空。
+- 首次短测试名配 `--exact` 实际运行 0 项；完整组第一次复跑又因夹具让 terminal 复用 started
+  producer 而触发正确的 identity/idempotency 冲突；随后改成新 key 又被生命周期“必须保留原 key”
+  正确拒绝。三个中间结果均保留；最终使用原 lifecycle key 与独立 owning producer，没有放宽
+  产品断言或修改状态机。
+- 完整 pause/effect **11/11**，新增竞争同源码 **20/20**。仅测试/进度变更，无生产、renderer、
+  模型或 Tauri 验收。App owner 回执、外部 unknown effect、真实 UI、其他 Action/平台及长期门槛
+  仍待验，不关闭完整共享 Case。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
