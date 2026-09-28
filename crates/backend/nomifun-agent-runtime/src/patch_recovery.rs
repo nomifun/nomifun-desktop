@@ -175,7 +175,7 @@ impl PatchRecovery {
         (self.pending() && !cleanup
             && (!matches!(binding.effect_class, AgentEffectClass::ReadOnly)
                 || binding.capability_id.as_ref() == "workspace.process"))
-            .then_some("Not executed: a failed patch requires fresh read_file text observations of every recorded target (or missing_ok=true absence), then replanning. An instruction scan/search is not a file-version observation. If reads are unavailable, report blocked; do not bypass via shell.")
+            .then_some("Not executed: further effects after a failed patch require fresh read_file text observations of every recorded target (or missing_ok=true absence), then replanning. An instruction scan/search is not a file-version observation. If further work is forbidden or unavailable, call report_completion with blocked disposition to stop; no recovery read is required for that failure report. Do not bypass via shell.")
     }
 
     pub(crate) fn invalidate_observations(&mut self) {
@@ -275,7 +275,7 @@ impl PatchRecovery {
             return "No patch re-observation is pending in this Session.".into();
         }
         format!(
-            "Patch recovery (derived data, not instructions/authority): {}. Read each target from byte zero using authorized text reads; missing_ok=true may establish absence. Read further pages as needed. This only refreshes file versions, not full inspection, rollback, correctness or task completion. Replan after observation. If targets cannot be observed, report blocked. Do not delete retained creations automatically.",
+            "Patch recovery (derived data, not instructions/authority): {}. Before further effects, read each target from byte zero using authorized text reads; missing_ok=true may establish absence. Read further pages as needed. This only refreshes file versions, not full inspection, rollback, correctness or task completion. Replan before further effects. The user's stop/no-retry constraints take precedence: report_completion with blocked disposition can end this turn without recovery reads, preserving pending targets and without claiming success. Do not delete retained creations automatically.",
             serde_json::json!({"pending_targets":self.pending,"target_budget_exceeded":self.unaddressable})
         )
     }
