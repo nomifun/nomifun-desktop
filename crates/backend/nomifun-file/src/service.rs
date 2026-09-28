@@ -20,6 +20,7 @@ use crate::path_safety::{
     validate_path_for_write, validate_path_for_write_authority, validate_path_with_extra_root,
 };
 use crate::resource::AgentSessionWorkspaceBinding;
+use crate::publication_identity::PublicationIdentity;
 use crate::agent_patch_outcome::{AgentPatchFailureObservation, AgentSessionPatchFailure, PatchPublicationFailure};
 use crate::types::{
     ContentUpdateEvent, ContentUpdateOperation, CopyResult, DirOrFile, FileMetadata, WorkspaceFlatFile, ZipEntry,
@@ -433,6 +434,15 @@ impl FileService {
         scope: &AgentSessionWorkspaceBinding,
         request: AgentSessionPatchRequest,
     ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
+        self.apply_patch_with_publication_hook(scope, request, |_| {}).await
+    }
+
+    async fn apply_patch_with_publication_hook(
+        &self,
+        scope: &AgentSessionWorkspaceBinding,
+        request: AgentSessionPatchRequest,
+        mut after_publication: impl FnMut(usize),
+    ) -> Result<AgentSessionPatchResult, AgentSessionPatchFailure> {
         let _patch_guard = self.agent_patch_lock.lock().await;
         scope.require_operation(crate::resource::WRITE_OPERATION)?;
         validate_agent_patch_request_shape(&request)?;
@@ -550,6 +560,7 @@ impl FileService {
                 after,
                 existed,
                 hunks_applied: file_patch.hunks.len(),
+                publication: OnceLock::new(),
             });
         }
 
@@ -583,6 +594,7 @@ impl FileService {
                     file,
                     &file.after,
                     file.existed.then_some(file.before.as_slice()),
+                    None,
                     &workspace,
                     &authority,
                 )
@@ -595,6 +607,7 @@ impl FileService {
                 return Err(finish_agent_patch_failure(failure.error, observation));
             }
             applied.push(index);
+            after_publication(index);
         }
 
         Ok(AgentSessionPatchResult {
@@ -691,7 +704,13 @@ impl FileService {
         for index in applied.iter().rev().copied() {
             let file = &files[index];
             if file.existed {
-                if !current_file_matches(&file.path, &file.after, authority) {
+                let Some(identity) = file.publication.get() else {
+                    observation.skipped_changed_or_unreadable.push(index);
+                    continue;
+                };
+                if !current_file_matches(&file.path, &file.after, authority)
+                    || !crate::publication_identity::matches_path(identity, &file.path).unwrap_or(false)
+                {
                     observation.skipped_changed_or_unreadable.push(index);
                     continue;
                 }
@@ -701,6 +720,7 @@ impl FileService {
                         file,
                         &file.before,
                         Some(&file.after),
+                        Some(identity),
                         workspace,
                         authority,
                     )
@@ -738,6 +758,7 @@ impl FileService {
         file: &PreparedAgentPatchFile,
         data: &[u8],
         expected: Option<&[u8]>,
+        identity: Option<&PublicationIdentity>,
         workspace: &str,
         authority: &PathAuthority,
     ) -> Result<bool, PatchPublicationFailure> {
@@ -770,7 +791,19 @@ impl FileService {
                 file.relative_path
             )).into());
         }
-        let result = write_file_sync_atomic(&canonical, data, expected);
+        let source = match (expected, identity) {
+            (Some(bytes), Some(identity)) => PublicationSource::Restoring { bytes, identity },
+            (Some(bytes), None) => PublicationSource::Matching(bytes),
+            (None, _) => PublicationSource::Absent,
+        };
+        let result = write_file_with_source_sync_atomic(&canonical, data, source);
+        let published_identity = match &result {
+            Ok(identity) => identity.as_ref(),
+            Err(failure) if failure.publication_verified => failure.publication_identity.as_ref(),
+            Err(_) => None,
+        };
+        // Compensation must keep the first publication's ownership claim.
+        if let Some(identity) = published_identity { let _ = file.publication.set(identity.clone()); }
         self.observe_file_publication(owner_id, &canonical, data, workspace, &result);
         result?;
         Ok(true)
@@ -1168,6 +1201,7 @@ struct PreparedAgentPatchFile {
     after: Vec<u8>,
     existed: bool,
     hunks_applied: usize,
+    publication: OnceLock<PublicationIdentity>,
 }
 
 fn validate_agent_patch_request_shape(request: &AgentSessionPatchRequest) -> Result<(), AppError> {
@@ -1678,23 +1712,21 @@ fn current_file_matches_with_hooks(
     ).is_ok_and(|source| source.is_some_and(|(bytes, _, _)| bytes == expected))
 }
 
-/// Atomically publish one already-authorized AgentSession file.
-///
-/// The temporary file is created beside the target, fully written and synced,
-/// and then replaced with a same-filesystem rename. A new file uses a
-/// no-clobber publication (handle rename on Windows, hard link elsewhere) so a
-/// concurrent creator cannot be overwritten. Existing files use the platform's
-/// atomic replacement primitive.
-fn write_file_sync_atomic(path: &Path, data: &[u8], expected: Option<&[u8]>) -> Result<(), PatchPublicationFailure> {
-    write_file_with_source_sync_atomic(path, data,
-        expected.map_or(PublicationSource::Absent, PublicationSource::Matching))
-}
-
 #[derive(Clone, Copy)]
 enum PublicationSource<'a> {
     Absent,
     Existing,
     Matching(&'a [u8]),
+    Restoring { bytes: &'a [u8], identity: &'a PublicationIdentity },
+}
+
+impl PublicationSource<'_> {
+    fn expected_bytes(&self) -> Option<&[u8]> {
+        match self { Self::Matching(bytes) | Self::Restoring { bytes, .. } => Some(bytes), _ => None }
+    }
+    fn expected_identity(&self) -> Option<&PublicationIdentity> {
+        match self { Self::Restoring { identity, .. } => Some(identity), _ => None }
+    }
 }
 
 #[cfg(windows)]
@@ -1711,7 +1743,9 @@ struct StagedPublication<'a> {
     bytes: &'a [u8],
 }
 
-fn write_file_with_source_sync_atomic(path: &Path, data: &[u8], source: PublicationSource<'_>) -> Result<(), PatchPublicationFailure> {
+/// Publish a complete temporary file and retain its identity for compensation.
+/// New creations are reported and retained instead of automatically removed.
+fn write_file_with_source_sync_atomic(path: &Path, data: &[u8], source: PublicationSource<'_>) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     let parent = path.parent().ok_or_else(|| {
         AppError::BadRequest(format!(
             "patch target '{}' has no parent directory",
@@ -1735,7 +1769,7 @@ fn write_file_with_source_sync_atomic(path: &Path, data: &[u8], source: Publicat
     publish_patch_file(path, data, &temporary, source)
 }
 
-fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>) -> Result<(), PatchPublicationFailure> {
+fn publish_patch_file(path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     publish_patch_file_with_hooks(path, data, temporary, source, || {}, || Ok(()))
 }
 
@@ -1743,7 +1777,7 @@ fn publish_patch_file_with_hooks(
     path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>,
     after_staging: impl FnOnce(),
     after_publication: impl FnOnce() -> Result<(), AppError>,
-) -> Result<(), PatchPublicationFailure> {
+) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     publish_patch_file_with_prepublication_hook(path, data, temporary, source, after_staging, || {}, after_publication,
         #[cfg(windows)] replace_file_windows_native,
     )
@@ -1755,10 +1789,10 @@ fn publish_patch_file_with_prepublication_hook(
     before_replace: impl FnOnce(),
     after_publication: impl FnOnce() -> Result<(), AppError>,
     #[cfg(windows)] native_replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
-) -> Result<(), PatchPublicationFailure> {
+) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     #[cfg(windows)]
     if matches!(source, PublicationSource::Absent) {
-        return crate::windows_create::publish(path, data, temporary, after_staging, after_publication);
+        return crate::windows_create::publish(path, data, temporary, after_staging, after_publication).map(|()| None);
     }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -1781,13 +1815,15 @@ fn publish_patch_file_with_prepublication_hook(
             temporary.display()
         ))
     })?;
+    let publication_identity = if matches!(source, PublicationSource::Absent) { None } else {
+        Some(crate::publication_identity::capture(&file).map_err(|error| PatchPublicationFailure {
+            error: AppError::Internal(format!("cannot retain temporary publication identity: {error}")),
+            published: false, publication_verified: false, publication_identity: None,
+            temporary_cleanup_unconfirmed: true,
+        })?)
+    };
     #[cfg(windows)]
-    let mut temporary_owner = Some(crate::windows_cleanup::OwnedFile::capture(&file).map_err(|error| PatchPublicationFailure {
-        error: AppError::Internal(format!("cannot retain temporary publication identity: {error}")),
-        published: false,
-        publication_verified: false,
-        temporary_cleanup_unconfirmed: true,
-    })?);
+    let mut temporary_owner = publication_identity.clone();
     let mut published = false;
     let mut temporary_consumed = false;
     #[cfg(windows)]
@@ -1837,7 +1873,7 @@ fn publish_patch_file_with_prepublication_hook(
                 // Agent publication holds PreparedParent through this call.
                 // Windows checks through a handle that denies write sharing.
                 let source_authority = PathAuthority::Confined(vec![path.parent().expect("publication has a parent").to_path_buf()]);
-                if let PublicationSource::Matching(expected) = source
+                if let Some(expected) = source.expected_bytes()
                     && !current_file_matches(path, expected, &source_authority)
                 {
                     return Err(AppError::Conflict(format!(
@@ -1855,16 +1891,17 @@ fn publish_patch_file_with_prepublication_hook(
             #[cfg(windows)]
             let _ = metadata;
             before_replace();
-            let expected = match source { PublicationSource::Matching(bytes) => Some(bytes), _ => None };
+            let expected = source.expected_bytes();
             #[cfg(not(windows))]
-            let replacement = replace_file_path(&temporary, path, &mut published, expected);
+            let replacement = replace_file_path(&temporary, path, &mut published, expected, source.expected_identity());
             #[cfg(not(windows))]
             { temporary_consumed = published; }
             #[cfg(windows)]
             let replacement = {
                 let mut progress = PublicationProgress::default();
                 let result = replace_file_path_windows_verified(temporary, path, &mut progress, expected,
-                    StagedPublication { owner: temporary_owner.as_ref().expect("staged ownership is live"), bytes: data },
+                    source.expected_identity(),
+                    StagedPublication { owner: temporary_owner.as_deref().expect("staged ownership is live"), bytes: data },
                     native_replace, |path, owner| owner.remove(path));
                 published = progress.published;
                 temporary_consumed = progress.temporary_consumed;
@@ -1928,7 +1965,7 @@ fn publish_patch_file_with_prepublication_hook(
         }
         Ok(())
     })();
-    result.map_err(|error| {
+    result.map(|()| publication_identity.clone()).map_err(|error| {
         // Once the source was consumed, this filename is no longer ours.
         // A later failure must not unlink a concurrently created replacement.
         #[cfg(windows)]
@@ -1941,12 +1978,18 @@ fn publish_patch_file_with_prepublication_hook(
             Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => false,
             Err(_) => true,
         };
-        PatchPublicationFailure { error, published, publication_verified, temporary_cleanup_unconfirmed }
+        PatchPublicationFailure { error, published, publication_verified, temporary_cleanup_unconfirmed,
+            publication_identity: if publication_verified { publication_identity } else { None } }
     })
 }
 
 #[cfg(not(windows))]
-fn replace_file_path(source: &Path, target: &Path, published: &mut bool, _expected: Option<&[u8]>) -> Result<(), AppError> {
+fn replace_file_path(source: &Path, target: &Path, published: &mut bool, _expected: Option<&[u8]>, identity: Option<&PublicationIdentity>) -> Result<(), AppError> {
+    if let Some(identity) = identity {
+        if !crate::publication_identity::matches_path(identity, target).map_err(|error| AppError::Internal(format!("cannot verify rollback target identity: {error}")))? {
+            return Err(AppError::Conflict("rollback target changed file identity; retain concurrent file".into()));
+        }
+    }
     std::fs::rename(source, target).map_err(|error| {
         AppError::Internal(format!(
             "cannot atomically replace patch target '{}': {error}",
@@ -1994,7 +2037,7 @@ fn replace_file_path_windows_with(
     if bytes.len() > MAX_AGENT_PATCH_FILE_BYTES { return Err(AppError::BadRequest("staged test source exceeds byte limit".into())); }
     drop(file);
     let mut progress = PublicationProgress::default();
-    let result = replace_file_path_windows_verified(source, target, &mut progress, expected,
+    let result = replace_file_path_windows_verified(source, target, &mut progress, expected, None,
         StagedPublication { owner: &owner, bytes: &bytes }, replace, cleanup);
     *published = progress.published;
     result
@@ -2003,7 +2046,7 @@ fn replace_file_path_windows_with(
 #[cfg(windows)]
 fn replace_file_path_windows_verified(
     source: &Path, target: &Path, progress: &mut PublicationProgress,
-    expected: Option<&[u8]>, staged: StagedPublication<'_>,
+    expected: Option<&[u8]>, expected_identity: Option<&PublicationIdentity>, staged: StagedPublication<'_>,
     replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
     cleanup: impl FnOnce(&Path, &crate::windows_cleanup::OwnedFile) -> std::io::Result<()>,
 ) -> Result<(), AppError> {
@@ -2026,6 +2069,11 @@ fn replace_file_path_windows_verified(
     let metadata = access.metadata().map_err(|error| AppError::Internal(format!("cannot inspect replacement target: {error}")))?;
     if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(AppError::Conflict("replacement target changed to a link or non-regular file".into()));
+    }
+    if let Some(identity) = expected_identity {
+        if !crate::publication_identity::matches_file(identity, &access).map_err(|error| AppError::Internal(format!("cannot verify rollback target identity: {error}")))? {
+            return Err(AppError::Conflict("rollback target changed file identity; retain concurrent file".into()));
+        }
     }
     if let Some(expected) = expected {
         let mut bytes = Vec::new();
@@ -2998,6 +3046,7 @@ mod tests {
             let file = PreparedAgentPatchFile {
                 path: path.clone(), relative_path: "parent/value.txt".into(),
                 before: b"source".to_vec(), after: b"patched".to_vec(), existed: true, hunks_applied: 1,
+                publication: OnceLock::new(),
             };
             make_service().verify_agent_patch_precondition_with_hooks(&file, &authority, before_open, after_read).await.is_ok()
         } else {
@@ -3366,6 +3415,7 @@ mod tests {
         let prepared = [PreparedAgentPatchFile {
             path: target.clone(), relative_path: "target.txt".into(), before: b"original".to_vec(),
             after: b"intended".to_vec(), existed: true, hunks_applied: 1,
+            publication: OnceLock::new(),
         }];
         let mut eligible = Vec::new();
         let mut observation = AgentPatchFailureObservation::failed_publication(0, &mut eligible, &failure);
@@ -3565,8 +3615,12 @@ mod tests {
         let files = ["first.txt", "second.txt"].map(|name| PreparedAgentPatchFile {
             path: root.join(name), relative_path: name.into(), before: b"before".to_vec(),
             after: b"after".to_vec(), existed: true, hunks_applied: 1,
+            publication: OnceLock::new(),
         });
-        for file in &files { fs::write(&file.path, &file.after).unwrap(); }
+        fs::write(&files[0].path, &files[0].before).unwrap();
+        service.write_agent_patch_file(scope.owner_id(), &files[0], &files[0].after,
+            Some(&files[0].before), None, &root.to_string_lossy(), &scope.authority()).await.unwrap();
+        fs::write(&files[1].path, &files[1].after).unwrap();
         let mut failure = PatchPublicationFailure::from(AppError::Internal(format!("{FILE_WRITE_OUTCOME_UNKNOWN}; unverified source identity")));
         failure.published = true;
         let mut eligible = vec![0];
@@ -3580,6 +3634,127 @@ mod tests {
         assert_eq!(fs::read(&files[1].path).unwrap(), b"after");
         assert_eq!(serde_json::to_value(&observation).unwrap()["unverified_publications"], serde_json::json!([1]));
     }
+
+    #[tokio::test]
+    async fn rollback_preserves_a_foreign_file_even_when_its_bytes_match_the_publication() {
+        let fixture = inventory_fixture();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let target = root.join("first.txt");
+        let retained = root.join("retained-publication.txt");
+        fs::write(&target, b"before").unwrap();
+        let scope = patch_scope(&root);
+        let service = make_service();
+        let files = [PreparedAgentPatchFile {
+            path: target.clone(), relative_path: "first.txt".into(), before: b"before".to_vec(),
+            after: b"after".to_vec(), existed: true, hunks_applied: 1,
+            publication: OnceLock::new(),
+        }];
+        service.write_agent_patch_file(scope.owner_id(), &files[0], &files[0].after,
+            Some(&files[0].before), None, &root.to_string_lossy(), &scope.authority()).await.unwrap();
+        fs::rename(&target, &retained).unwrap();
+        fs::write(&target, b"after").unwrap();
+        let mut observation = AgentPatchFailureObservation { failed_file: Some(1), published: vec![0], ..Default::default() };
+        service.rollback_agent_patch_files(&scope, &scope.authority(), &root.to_string_lossy(), &files, &[0], &mut observation).await;
+        fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "observation": observation, "target": fs::read(&target).unwrap(), "retained": fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"after", "a foreign file must not be restored as our publication; fixture: {}", root.display());
+        assert_eq!(fs::read(&retained).unwrap(), b"after");
+        assert!(observation.restored.is_empty());
+        assert_eq!(observation.skipped_changed_or_unreadable, [0]);
+    }
+
+    #[test]
+    fn rollback_rechecks_identity_after_the_early_source_check() {
+        let fixture = inventory_fixture();
+        let target = fixture.path().join("first.txt");
+        let retained = fixture.path().join("retained-publication.txt");
+        let temporary = fixture.path().join("restore.tmp");
+        fs::write(&target, b"before").unwrap();
+        let identity = write_file_with_source_sync_atomic(&target, b"after", PublicationSource::Matching(b"before")).unwrap().unwrap();
+        let result = publish_patch_file_with_prepublication_hook(&target, b"before", &temporary,
+            PublicationSource::Restoring { bytes: b"after", identity: &identity }, || {}, || {
+                fs::rename(&target, &retained).unwrap();
+                fs::write(&target, b"after").unwrap();
+            }, || Ok(()), #[cfg(windows)] replace_file_windows_native);
+        let failure = result.unwrap_err();
+        assert!(matches!(failure.error, AppError::Conflict(_)));
+        assert!(!failure.published);
+        assert!(!failure.temporary_cleanup_unconfirmed);
+        assert_eq!(fs::read(&target).unwrap(), b"after");
+        assert_eq!(fs::read(&retained).unwrap(), b"after");
+        assert!(!temporary.exists());
+    }
+
+    #[test]
+    fn publication_receipt_is_not_rebound_to_a_later_name_occupant() {
+        let fixture = inventory_fixture();
+        let target = fixture.path().join("first.txt");
+        let retained = fixture.path().join("retained-publication.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"before").unwrap();
+        let identity = publish_patch_file_with_hooks(&target, b"after", &temporary,
+            PublicationSource::Matching(b"before"), || {}, || {
+                fs::rename(&target, &retained).unwrap();
+                fs::write(&target, b"after").unwrap();
+                Ok(())
+            }).unwrap().unwrap();
+        assert!(!crate::publication_identity::matches_path(&identity, &target).unwrap_or(false));
+        assert!(crate::publication_identity::matches_path(&identity, &retained).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn publication_receipt_survives_a_verified_late_failure() {
+        let fixture = inventory_fixture();
+        let target = fixture.path().join("first.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"before").unwrap();
+        let failure = publish_patch_file_with_hooks(&target, b"after", &temporary,
+            PublicationSource::Matching(b"before"), || {}, || Err(AppError::Internal("late failure".into()))).unwrap_err();
+        assert!(failure.published && failure.publication_verified);
+        assert!(crate::publication_identity::matches_path(failure.publication_identity.as_ref().unwrap(), &target).unwrap());
+    }
+
+    async fn multi_patch_rollback_identity(replace_first: bool) {
+        let fixture = inventory_fixture();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        for name in ["first.txt", "second.txt"] { fs::write(root.join(name), b"before").unwrap(); }
+        let patches = ["first.txt", "second.txt"].map(|path| serde_json::json!({
+            "path": path, "hunks": [{"old_start": 1, "old_lines": 1, "new_start": 1, "new_lines": 1,
+                "lines": [{"kind": "remove", "text": "before"}, {"kind": "add", "text": "after"}]}]
+        }));
+        let request = serde_json::from_value(serde_json::json!({"files": patches})).unwrap();
+        let scope = patch_scope(&root);
+        let failure = make_service().apply_patch_with_publication_hook(&scope, request, |index| {
+            assert_eq!(index, 0, "the second precondition must fail");
+            if replace_first {
+                fs::rename(root.join("first.txt"), root.join("retained-publication.txt")).unwrap();
+                fs::write(root.join("first.txt"), b"after").unwrap();
+            }
+            fs::write(root.join("second.txt"), b"concurrent second").unwrap();
+        }).await.unwrap_err();
+        fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&failure.observation).unwrap()).unwrap();
+        assert_eq!(failure.observation.failed_file, Some(1));
+        assert_eq!(failure.observation.published, [0]);
+        assert_eq!(fs::read(root.join("second.txt")).unwrap(), b"concurrent second");
+        if replace_first {
+            assert!(failure.observation.restored.is_empty());
+            assert_eq!(failure.observation.skipped_changed_or_unreadable, [0]);
+            assert_eq!(fs::read(root.join("first.txt")).unwrap(), b"after");
+            assert_eq!(fs::read(root.join("retained-publication.txt")).unwrap(), b"after");
+        } else {
+            assert_eq!(failure.observation.restored, [0]);
+            assert!(failure.observation.skipped_changed_or_unreadable.is_empty());
+            assert_eq!(fs::read(root.join("first.txt")).unwrap(), b"before");
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_patch_rollback_preserves_a_same_bytes_foreign_file() { multi_patch_rollback_identity(true).await; }
+
+    #[tokio::test]
+    async fn multi_patch_rollback_restores_the_owned_publication() { multi_patch_rollback_identity(false).await; }
 
     #[test]
     fn unverified_publication_recovery_and_cleanup_cannot_settle_as_known_failure() {
@@ -3808,13 +3983,13 @@ mod tests {
     fn atomic_write_errors_preserve_uncertainty_and_cleanup_observations() {
         let error = file_write_publication_error(PatchPublicationFailure {
             error: AppError::Internal(format!("{FILE_WRITE_OUTCOME_UNKNOWN}; original backup retained")),
-            published: true, publication_verified: true, temporary_cleanup_unconfirmed: false,
+            published: true, publication_verified: true, publication_identity: None, temporary_cleanup_unconfirmed: false,
         });
         assert!(file_write_outcome_unknown(&error));
         assert!(error.to_string().contains("original backup retained"));
         let error = file_write_publication_error(PatchPublicationFailure {
             error: AppError::Internal("write failed".into()),
-            published: false, publication_verified: false, temporary_cleanup_unconfirmed: true,
+            published: false, publication_verified: false, publication_identity: None, temporary_cleanup_unconfirmed: true,
         });
         assert!(file_write_outcome_unknown(&error));
         let rejected = file_write_publication_error(AppError::Forbidden("denied".into()).into());

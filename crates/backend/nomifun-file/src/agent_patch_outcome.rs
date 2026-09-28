@@ -55,6 +55,7 @@ pub(crate) struct PatchPublicationFailure {
     /// Whether the staged bytes and replacement precondition were confirmed.
     /// Required before advertising content or automatically compensating.
     pub publication_verified: bool,
+    pub publication_identity: Option<crate::publication_identity::PublicationIdentity>,
     pub temporary_cleanup_unconfirmed: bool,
 }
 
@@ -64,6 +65,7 @@ impl From<AppError> for PatchPublicationFailure {
             error,
             published: false,
             publication_verified: false,
+            publication_identity: None,
             temporary_cleanup_unconfirmed: false,
         }
     }
