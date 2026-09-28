@@ -1688,6 +1688,15 @@ fn publish_patch_file_with_hooks(
     after_staging: impl FnOnce(),
     after_publication: impl FnOnce() -> Result<(), AppError>,
 ) -> Result<(), PatchPublicationFailure> {
+    publish_patch_file_with_prepublication_hook(path, data, temporary, source, after_staging, || {}, after_publication)
+}
+
+fn publish_patch_file_with_prepublication_hook(
+    path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>,
+    after_staging: impl FnOnce(),
+    before_replace: impl FnOnce(),
+    after_publication: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), PatchPublicationFailure> {
     #[cfg(windows)]
     if matches!(source, PublicationSource::Absent) {
         return crate::windows_create::publish(path, data, temporary, after_staging, after_publication);
@@ -1752,16 +1761,18 @@ fn publish_patch_file_with_hooks(
             let metadata = target_metadata.ok_or_else(|| AppError::Conflict(format!(
                 "patch target '{}' disappeared before publication", path.display()
             )))?;
-            // Agent publication holds PreparedParent through this call. The
-            // immediate parent is therefore the narrowest stable read root
-            // for the final source check, including rollback publications.
-            let source_authority = PathAuthority::Confined(vec![path.parent().expect("publication has a parent").to_path_buf()]);
-            if let PublicationSource::Matching(expected) = source
-                && !current_file_matches(path, expected, &source_authority)
+            #[cfg(not(windows))]
             {
-                return Err(AppError::Conflict(format!(
-                    "patch target '{}' changed before publication; re-read before retry", path.display()
-                )));
+                // Agent publication holds PreparedParent through this call.
+                // Windows checks through a handle that denies write sharing.
+                let source_authority = PathAuthority::Confined(vec![path.parent().expect("publication has a parent").to_path_buf()]);
+                if let PublicationSource::Matching(expected) = source
+                    && !current_file_matches(path, expected, &source_authority)
+                {
+                    return Err(AppError::Conflict(format!(
+                        "patch target '{}' changed before publication; re-read before retry", path.display()
+                    )));
+                }
             }
             std::fs::set_permissions(&temporary, metadata.permissions()).map_err(|error| {
                 AppError::Internal(format!(
@@ -1769,7 +1780,9 @@ fn publish_patch_file_with_hooks(
                     path.display()
                 ))
             })?;
-            let replacement = replace_file_path(&temporary, path, &mut published);
+            before_replace();
+            let expected = match source { PublicationSource::Matching(bytes) => Some(bytes), _ => None };
+            let replacement = replace_file_path(&temporary, path, &mut published, expected);
             temporary_consumed = published;
             #[cfg(windows)]
             if temporary_consumed { temporary_owner = None; }
@@ -1846,7 +1859,7 @@ fn publish_patch_file_with_hooks(
 }
 
 #[cfg(not(windows))]
-fn replace_file_path(source: &Path, target: &Path, published: &mut bool) -> Result<(), AppError> {
+fn replace_file_path(source: &Path, target: &Path, published: &mut bool, _expected: Option<&[u8]>) -> Result<(), AppError> {
     std::fs::rename(source, target).map_err(|error| {
         AppError::Internal(format!(
             "cannot atomically replace patch target '{}': {error}",
@@ -1858,8 +1871,8 @@ fn replace_file_path(source: &Path, target: &Path, published: &mut bool) -> Resu
 }
 
 #[cfg(windows)]
-fn replace_file_path(source: &Path, target: &Path, published: &mut bool) -> Result<(), AppError> {
-    replace_file_path_windows_with(source, target, published, replace_file_windows_native, |path, owner| owner.remove(path))
+fn replace_file_path(source: &Path, target: &Path, published: &mut bool, expected: Option<&[u8]>) -> Result<(), AppError> {
+    replace_file_path_windows_with(source, target, published, expected, replace_file_windows_native, |path, owner| owner.remove(path))
 }
 
 #[cfg(windows)]
@@ -1885,30 +1898,46 @@ fn replace_file_windows_native(source: &Path, target: &Path, backup: &Path) -> s
 #[cfg(windows)]
 fn replace_file_path_windows_with(
     source: &Path, target: &Path, published: &mut bool,
+    expected: Option<&[u8]>,
     replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
     cleanup: impl FnOnce(&Path, &crate::windows_cleanup::OwnedFile) -> std::io::Result<()>,
 ) -> Result<(), AppError> {
-    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
     use windows_sys::Win32::Storage::FileSystem::{
-        DELETE, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        DELETE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT,
     };
 
-    // ReplaceFile supports readers that grant delete sharing and preserves
-    // ACLs/streams. Require write AND delete access first: replacement must
-    // respect deny-write locks even though the native API only needs DELETE.
-    let _access = std::fs::OpenOptions::new()
-        .access_mode(FILE_GENERIC_WRITE | DELETE)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+    // Keep ReplaceFile's native ACL/stream merge. Require write access even
+    // though its target handle only needs read/delete access. Deny other
+    // writers from the final check through the native call; existing readers
+    // remain compatible when they grant write/delete sharing.
+    let mut access = std::fs::OpenOptions::new()
+        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(target)
         .map_err(|error| AppError::Internal(format!("cannot open replacement target: {error}")))?;
-    let original_owner = crate::windows_cleanup::OwnedFile::capture(&_access)
+    let metadata = access.metadata().map_err(|error| AppError::Internal(format!("cannot inspect replacement target: {error}")))?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(AppError::Conflict("replacement target changed to a link or non-regular file".into()));
+    }
+    if let Some(expected) = expected {
+        let mut bytes = Vec::new();
+        std::io::Read::by_ref(&mut access).take(expected.len() as u64 + 1).read_to_end(&mut bytes)
+            .map_err(|error| AppError::Internal(format!("cannot verify replacement target: {error}")))?;
+        if bytes != expected {
+            return Err(AppError::Conflict("patch target changed before publication; re-read before retry".into()));
+        }
+    }
+    let original_owner = crate::windows_cleanup::OwnedFile::capture(&access)
         .map_err(|error| AppError::Internal(format!("cannot retain replacement target identity: {error}")))?;
     let backup = source.with_extension(format!("{}.backup", nomifun_common::generate_id()));
     if backup.try_exists().map_err(|error| AppError::Internal(error.to_string()))? {
         return Err(AppError::Conflict("replacement backup already exists".into()));
     }
     let replaced = replace(source, target, &backup);
-    drop(_access);
+    drop(access);
     let error = match replaced {
         Ok(()) => {
             *published = true;
@@ -2691,7 +2720,7 @@ mod tests {
         let mut builder = tempfile::Builder::new();
         builder.prefix("cleanup-race-");
         match std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT") {
-            Some(parent) => builder.tempdir_in(parent).unwrap(),
+            Some(parent) => builder.disable_cleanup(true).tempdir_in(parent).unwrap(),
             None => builder.tempdir().unwrap(),
         }
     }
@@ -3027,7 +3056,7 @@ mod tests {
         fs::write(&temporary, b"patched").unwrap();
         let mut published = false;
         let backup_name = std::cell::RefCell::new(PathBuf::new());
-        let result = replace_file_path_windows_with(&temporary, &target, &mut published,
+        let result = replace_file_path_windows_with(&temporary, &target, &mut published, None,
             |source, target, backup| {
                 replace_file_windows_native(source, target, backup)?;
                 fs::rename(backup, &retained)?;
@@ -3046,6 +3075,64 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn matching_publication_guard_race(changed: &[u8]) {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        let result = publish_patch_file_with_prepublication_hook(&target, b"patched", &temporary,
+            PublicationSource::Matching(b"original"), || {}, || {
+                fs::write(&target, changed).unwrap();
+            }, || Ok(()));
+        let observed = fs::read(&target).unwrap();
+        fs::write(fixture.path().join("observation.txt"), format!("result={result:?}; target={observed:?}")).unwrap();
+        assert_eq!(observed, changed, "a changed target must survive; fixture: {}", fixture.path().display());
+        let failure = result.unwrap_err();
+        assert!(matches!(failure.error, AppError::Conflict(_)));
+        assert!(!failure.published);
+        assert!(!failure.temporary_cleanup_unconfirmed);
+        assert!(!temporary.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn matching_publication_preserves_a_target_changed_after_the_early_guard() {
+        matching_publication_guard_race(b"concurrent");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn matching_publication_checks_equal_length_bytes_under_the_target_handle() {
+        matching_publication_guard_race(b"modified");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn replacement_keeps_the_target_bytes_locked_through_the_native_call() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&temporary, b"patched").unwrap();
+        let mut published = false;
+        let mut attack = None;
+        let result = replace_file_path_windows_with(&temporary, &target, &mut published, None,
+            |source, target, backup| {
+                attack = Some(fs::write(target, b"concurrent"));
+                replace_file_windows_native(source, target, backup)
+            }, |backup, owner| owner.remove(backup));
+        fs::write(fixture.path().join("observation.txt"), format!("result={result:?}; attack={attack:?}; published={published}")).unwrap();
+        let error = attack.unwrap().expect_err("concurrent writes must be excluded while the original is verified and replaced");
+        assert_eq!(error.raw_os_error(), Some(32));
+        result.unwrap();
+        assert!(published);
+        assert_eq!(fs::read(&target).unwrap(), b"patched");
+        assert!(!temporary.exists());
+        fs::write(&target, b"later edit").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"later edit");
+    }
+
+    #[cfg(windows)]
     #[test]
     fn partial_replacement_never_restores_a_foreign_backup_as_the_original() {
         let fixture = cleanup_race_fixture();
@@ -3056,7 +3143,7 @@ mod tests {
         fs::write(&temporary, b"patched").unwrap();
         let mut published = false;
         let mut backup_name = PathBuf::new();
-        let result = replace_file_path_windows_with(&temporary, &target, &mut published,
+        let result = replace_file_path_windows_with(&temporary, &target, &mut published, None,
             |_, target, backup| {
                 fs::rename(target, backup)?;
                 fs::rename(backup, &retained)?;
@@ -3171,7 +3258,7 @@ mod tests {
         fs::write(&target, b"original").unwrap();
         fs::write(&temporary, b"new").unwrap();
         let mut published = false;
-        let error = replace_file_path_windows_with(&temporary, &target, &mut published,
+        let error = replace_file_path_windows_with(&temporary, &target, &mut published, None,
             |_, target, backup| {
                 fs::rename(target, backup)?;
                 Err(std::io::Error::from_raw_os_error(1177))
@@ -3193,7 +3280,7 @@ mod tests {
         fs::write(&temporary, b"new").unwrap();
         let mut backup_path = None;
         let mut published = false;
-        let error = replace_file_path_windows_with(&temporary, &target, &mut published,
+        let error = replace_file_path_windows_with(&temporary, &target, &mut published, None,
             |_, target, backup| {
                 fs::rename(target, backup)?;
                 fs::write(target, b"concurrent")?;
@@ -3217,7 +3304,7 @@ mod tests {
         fs::write(&temporary, b"new").unwrap();
         let mut locker = None;
         let mut published = false;
-        let error = replace_file_path_windows_with(&temporary, &target, &mut published,
+        let error = replace_file_path_windows_with(&temporary, &target, &mut published, None,
             replace_file_windows_native, |backup, owner| {
                 locker = Some(fs::OpenOptions::new().read(true).share_mode(3).open(backup)?);
                 owner.remove(backup)
