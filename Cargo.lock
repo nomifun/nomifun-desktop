@@ -6631,6 +6631,7 @@ dependencies = [
  "git2",
  "ignore",
  "junction",
+ "libc",
  "log",
  "mime_guess",
  "nomifun-api-types",
