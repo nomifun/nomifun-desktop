@@ -1491,6 +1491,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   通过。真实 pipe/PTY stdin 关闭、两个以上 cancel/poll waiter、平台 close 失败、应用退出及其他平台
   仍待验；不关闭完整 PROC-049 或共享阶段。
 
+### 多 cancel waiter 的单清理所有者（W80，基线 `f7e31b0fd`）
+
+- S-D04-10 / PROC-038、A13/A17/A19：barrier 同时释放 8 个对同一 Session 的 cancel 调用，验证
+  `begin_stop` 只产生一个 leader，其余调用走 follower 等待路径。八个调用全部返回逐字段相同的
+  `Cancelled`，`cleanup.reaped=true`，输出快照一致。
+- 夹具只记录一次 interrupt 与一次 wait/reap，没有重复 terminate/kill、多个 terminal 或遗失 waiter。
+  生产实现首次满足断言，本批仅新增回归，未改信号、清理或 admission 逻辑。
+- 首次定向 **1/1**；8 waiter 场景重复 **20/20**（共核对 160 个返回）；Windows process Runtime
+  lib **124/124**，workspace fmt 通过。真实 OS helper、多 Session 混合、cancel future drop 与平台
+  信号失败组合、其他平台及长期压力仍待验；不关闭完整 PROC-038 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
