@@ -289,6 +289,57 @@ mod tests {
     }
 
     #[test]
+    fn patch_failure_feedback_reports_partial_effect_counts_and_unverified_indices() {
+        let detail = json!({
+            "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
+            "cause":"cannot open replacement target: PRIVATE_PATH SECRET_CONTENT",
+            "observation":{
+                "failed_file":1, "published":[0], "unverified_publications":[0], "restored":[],
+                "restore_published_unconfirmed":[], "retained_created":[], "skipped_changed_or_unreadable":[0],
+                "rollback_failed":[], "temporary_cleanup_unconfirmed":[]
+            }
+        });
+        let result = workspace_write_feedback(&detail.to_string());
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["observed_published_count"], 1);
+        assert_eq!(parsed["confirmed_restored_count"], 0);
+        assert_eq!(parsed["index_base"], 0);
+        assert_eq!(parsed["observation"]["unverified_publications"], json!([0]));
+        assert!(parsed["recovery"].as_str().unwrap().contains("Do not report that no files changed"));
+        assert!(!result.contains("PRIVATE_PATH") && !result.contains("SECRET_CONTENT"));
+    }
+
+    #[test]
+    fn patch_failure_feedback_keeps_all_indices_within_the_error_budget() {
+        let names = ["published", "unverified_publications", "restored", "restore_published_unconfirmed",
+            "retained_created", "skipped_changed_or_unreadable", "rollback_failed", "temporary_cleanup_unconfirmed"];
+        let mut observation = serde_json::Map::new();
+        observation.insert("failed_file".into(), json!(63));
+        for name in names { observation.insert(name.into(), json!((0..64).collect::<Vec<_>>())); }
+        let report = json!({"kind":"workspace_patch_failed", "version":1, "journal_settlement":"unconfirmed",
+            "cause":"cannot open replacement target", "observation":observation});
+        let result = workspace_write_feedback(&report.to_string());
+        assert!(result.len() <= 2048, "bounded feedback must remain complete: {}", result.len());
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        for name in names { assert_eq!(parsed["observation"][name], report["observation"][name]); }
+        assert_eq!(parsed["observed_published_count"], 64);
+        assert_eq!(parsed["journal_settlement"], "unconfirmed");
+    }
+
+    #[test]
+    fn patch_failure_feedback_rejects_malformed_optional_observations() {
+        let report = json!({"kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
+            "cause":"file failed", "observation":{
+                "failed_file":0, "published":[0], "unverified_publications":["PRIVATE_VALUE"], "restored":[],
+                "restore_published_unconfirmed":[], "retained_created":[], "skipped_changed_or_unreadable":[],
+                "rollback_failed":[], "temporary_cleanup_unconfirmed":[]
+            }});
+        let result = workspace_write_feedback(&report.to_string());
+        assert!(!result.contains("PRIVATE_VALUE"));
+        assert!(result.contains("Failure alone does not prove"));
+    }
+
+    #[test]
     fn patch_failure_preserves_bounded_publication_receipt_and_sanitizes_cause() {
         let detail = json!({
             "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",

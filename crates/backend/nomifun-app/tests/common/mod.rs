@@ -201,7 +201,7 @@ pub async fn build_app_with_file_roots(
         .unwrap();
     let (mut states, _) = build_module_states(&services).await;
     states.file.file_service =
-        std::sync::Arc::new(FileService::new(services.event_bus.clone(), allowed_roots));
+        std::sync::Arc::new(FileService::with_inventory_cache(services.event_bus.clone(), allowed_roots, services.file_inventory.clone()));
     let router = create_router_with_states(&services, states);
     (router, services)
 }

@@ -4,6 +4,7 @@ mod artifact_store;
 mod agent_instruction_scope;
 mod agent_patch_lines;
 mod agent_patch_outcome;
+mod publication_identity;
 mod agent_patch_source;
 pub use agent_patch_source::AgentSessionPatchSource;
 pub use artifact_store::{
@@ -55,7 +56,7 @@ pub use routes::{FileRouterState, file_routes};
 pub use service::{
     AgentSessionFilePatch, AgentSessionPatchHunk, AgentSessionPatchLine,
     AgentSessionPatchRequest, AgentSessionPatchResult, AgentSessionPatchFileResult,
-    AgentSessionWriteResult, FileService, file_delete_outcome_unknown, file_write_outcome_unknown,
+    AgentSessionWriteResult, FileService, WorkspaceInventoryCache, file_delete_outcome_unknown, file_write_outcome_unknown,
 };
 pub use snapshot_service::SnapshotService;
 pub use traits::{

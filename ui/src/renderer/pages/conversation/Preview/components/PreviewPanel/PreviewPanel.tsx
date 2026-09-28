@@ -62,6 +62,7 @@ const PreviewPanel: React.FC = () => {
     closePreview,
     updateContent,
     saveContent,
+    refreshFile,
   } = usePreviewContext();
 
   // 视图状态 / View states
@@ -678,6 +679,20 @@ const PreviewPanel: React.FC = () => {
             leftExtra={toolbarExtras?.left}
             rightExtra={toolbarExtras?.right}
           />
+
+        {activeTab.fileReadError && (
+          <div role='alert' className='px-16px py-10px text-12px bg-warning-1 text-warning-7 flex items-center gap-12px'>
+            <span>{t('preview.fileRefreshFailed')}</span>
+            <button
+              type='button'
+              className='px-10px py-4px rounded-6px border border-solid border-warning-3 shrink-0 cursor-pointer'
+              disabled={activeTab.fileRefreshing || activeTab.isDirty}
+              onClick={() => { void refreshFile(); }}
+            >
+              {t('common.retry')}
+            </button>
+          </div>
+        )}
 
         {metadata?.truncated && (
           <div className='sticky top-0 z-1 px-16px py-10px text-12px bg-warning-1 text-warning-7 border-b border-b-solid border-warning-3'>

@@ -694,6 +694,8 @@ pub struct AppServices {
     pub qr_token_store: Arc<QrTokenStore>,
     pub ws_manager: Arc<WebSocketManager>,
     pub event_bus: Arc<BroadcastEventBus>,
+    /// Shared inventory state; API and Agent file owners retain separate authorities.
+    pub file_inventory: nomifun_file::WorkspaceInventoryCache,
     pub agent_runtime_sessions: Arc<dyn AgentRuntimeSessions>,
     pub agent_registry: Arc<AgentRegistry>,
     /// Singleton requirement service (shares its repo + WS emitter with the
@@ -2139,6 +2141,7 @@ impl AppServices {
             qr_token_store: Arc::new(QrTokenStore::new()),
             ws_manager: Arc::new(WebSocketManager::new()),
             event_bus,
+            file_inventory: nomifun_file::WorkspaceInventoryCache::default(),
             agent_runtime_sessions,
             agent_registry,
             requirement_service,

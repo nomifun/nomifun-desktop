@@ -97,7 +97,7 @@ pub(crate) fn action_host_port(
     Arc::new(NomiCoreWave2Host {
         mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
         ssh: Some(nomifun_ssh::SshActionOwner::new(services.ssh_pool.clone())),
-        ..Default::default()
+        ..NomiCoreWave2Host::new(services.event_bus.clone(), services.file_inventory.clone())
     }
     .with_effect_store(effect_store))
 }
@@ -231,8 +231,9 @@ pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError>
 /// File/Snapshot/VCS owner. In particular, `VcsPushOwner`'s push lock and
 /// outcome-unknown fence are cached by repository root rather than one global
 /// `OnceLock` bound to the first Session.
-#[derive(Default)]
 pub(crate) struct NomiCoreWave2Host {
+    user_events: Arc<dyn nomifun_realtime::UserEventSink>,
+    file_inventory: nomifun_file::WorkspaceInventoryCache,
     mcp: Option<super::nomi_core_mcp::NomiCoreMcpHost>,
     ssh: Option<nomifun_ssh::SshActionOwner>,
     effect_store: Option<nomifun_agent_session::AgentSessionStore>,
@@ -240,7 +241,26 @@ pub(crate) struct NomiCoreWave2Host {
     processes: Mutex<HashMap<(String, String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
 }
 
+#[cfg(test)]
+impl Default for NomiCoreWave2Host {
+    fn default() -> Self {
+        Self::new(Arc::new(nomifun_realtime::BroadcastEventBus::new(16)), nomifun_file::WorkspaceInventoryCache::default())
+    }
+}
+
 impl NomiCoreWave2Host {
+    fn new(user_events: Arc<dyn nomifun_realtime::UserEventSink>, file_inventory: nomifun_file::WorkspaceInventoryCache) -> Self {
+        Self {
+            user_events,
+            file_inventory,
+            mcp: None,
+            ssh: None,
+            effect_store: None,
+            roots: Mutex::new(HashMap::new()),
+            processes: Mutex::new(HashMap::new()),
+        }
+    }
+
     /// Inject the canonical durable Agent Session Effect owner before this
     /// host is published to the Kernel. Existing per-root owners cannot be
     /// retrofitted because that would split one workspace's admission epoch.
@@ -519,7 +539,9 @@ impl NomiCoreWave2Host {
         if let Some(owner) = roots.get(&canonical_root) {
             return Ok(Arc::clone(owner));
         }
-        let mut owner = Wave2ApplicationHost::for_workspace_root(canonical_root.clone());
+        let mut owner = Wave2ApplicationHost::with_user_events(
+            canonical_root.clone(), self.user_events.clone(), self.file_inventory.clone(),
+        );
         if let Some(store) = &self.effect_store {
             owner = owner.with_effect_store(store.clone());
         }

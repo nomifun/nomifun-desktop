@@ -9,6 +9,7 @@ use windows_sys::Win32::{Foundation::INVALID_HANDLE_VALUE, Storage::FileSystem::
     FileDispositionInfoEx, FileIdInfo, FileRenameInfo, GetFileInformationByHandleEx, ReOpenFile, SetFileInformationByHandle,
 }};
 
+#[derive(Debug)]
 pub(crate) struct OwnedFile {
     // Metadata access keeps the file ID alive without conflicting with
     // ReplaceFile's exclusive opening of the staged source.
@@ -27,6 +28,10 @@ fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
 }
 
 impl OwnedFile {
+    pub(crate) fn matches_handle(&self, file: &File) -> io::Result<bool> {
+        Ok(identity(file)? == (self.volume, self.id))
+    }
+
     pub(crate) fn capture(file: &File) -> io::Result<Self> {
         // SAFETY: ReOpenFile opens the same file object and returns a new handle.
         let handle = unsafe { ReOpenFile(file.as_raw_handle(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
@@ -39,6 +44,22 @@ impl OwnedFile {
 
     pub(crate) fn remove(&self, path: &Path) -> io::Result<()> {
         self.remove_with_hook(path, || {})
+    }
+
+    /// Observe a name while the caller still holds its original write/delete
+    /// handle. Cleanup separately reacquires a name lock and rechecks identity.
+    pub(crate) fn verify_named_identity(&self, path: &Path) -> io::Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        let current = OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path)?;
+        let metadata = current.metadata()?;
+        if identity(&current)? != (self.volume, self.id) || !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::other("replacement backup changed identity or type"));
+        }
+        Ok(())
     }
 
     /// Read only the recorded object, retaining its name and bytes for the
