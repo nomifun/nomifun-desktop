@@ -990,6 +990,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   会话 UI；LIFE-016 的进程/Browser/MCP in-flight 清理、完整 OBS-007、其他平台/角色及长期门槛
   仍待验，不计完整 Case 或共享阶段完成。
 
+### 共享 in-flight 进程暂停清理（W47，基线 `68f47efed`）
+
+- S-D09-02 / LIFE-016、PROC-033/039、CONC-004、A12/A13/A17/A19 子断言：App 集成夹具用
+  `start_process` 启动实际 PowerShell helper，helper 将自身 PID 写入隔离工作区并保持运行；下一次
+  provider 请求等待期间发起 owner pause。pause 前由独立 process snapshot 证明 PID 存活。
+- paused 状态发布前 `host_cleanup_proven` 已按 seq 落盘，随后 helper PID 不再存在；正确
+  checkpoint/digest 恢复到同一 Turn 的新 generation，重新规划并读取 PID marker 后 completed。
+  canonical 只有一次 turn/started、paused、resume-authorized、completed，零 failed；
+  `workspace.process/start` 恰好一次，证明已完成启动未重放、活句柄未作为恢复证据。
+- 首次运行即通过；完整 `native_execution_recovery` **4/4**，最终 60 秒上限夹具同源码
+  **20/20**。只新增跨层回归、`sysinfo` 测试依赖和简短进度，无生产/renderer 修改，未重复构建
+  Tauri。scripted provider 用于确定 pause 边界，不计真实模型或正式 UI。
+- Browser/MCP in-flight、cleanup 失败后的 owner attestation、macOS process group、真实会话 UI、
+  其他角色及 N3/100 seed/LONG/99% 仍待验，不关闭完整 LIFE-016 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

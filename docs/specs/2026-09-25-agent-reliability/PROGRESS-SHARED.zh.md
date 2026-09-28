@@ -49,6 +49,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D09-02（LIFE-016、PROC-033/039、CONC-004、A12/A13/A17/A19 进程 in-flight 暂停子断言）：
+  新增正式 App 路由夹具，通过实际 `start_process` 启动写入 PID 后长驻的 OS helper，并在下一次
+  provider 请求等待时发起 owner pause。独立进程快照先证明 PID 存活；paused 发布前 canonical
+  `host_cleanup_proven` 已落盘，随后 PID 消失。恢复使用同一 Turn 的新 generation，保留已对账的
+  start/read 历史，重新规划和读取 marker 后 completed；`workspace.process/start` 全程恰好一次，
+  活句柄未进入 checkpoint，也没有重放。完整 App recovery 4/4，新增回归同源码 **20/20**。
+  当前生产清理/恢复实现通过，本批仅补跨层真实进程回归及测试用 process snapshot 依赖，没有
+  修改产品逻辑或 renderer。测试采用 scripted provider 做故障边界，不计真实 StepFun/UI；Browser、
+  MCP in-flight、清理失败/人工证明、macOS 原生进程组及完整 LIFE-016 仍开放。
+
 - S-D09-01（CTRL-009/010、LIFE-015/017/020/021/022、CONC-007/008、A06/A10/A12/A17/A18/A19
   pause checkpoint 子断言）：现有 owner 级 pause/resume 生产路由与 canonical Store 已做完整定向
   复核。合法恢复保持同一 Turn，只增加 execution generation/fence；暂停期间禁止新 Turn，旧
