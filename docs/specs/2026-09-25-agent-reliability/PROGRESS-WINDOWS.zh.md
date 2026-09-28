@@ -1103,6 +1103,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 本批未修改 renderer。单次无 watcher 扫描进行中的外部竞态、完整丢批/乱序、其他角色与平台、
   100 seed/LONG/99% 仍待验，不关闭完整 FILE-040 或共享阶段。
 
-下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher 尾事件/恢复与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 watcher 尾事件与停止 fence（W59，基线 `d528ce875`）
+
+- S-D03-38 / FILE-040、AUTH-005、A09/A13/A17：构造旧单文件 native 注册已排队事件，在停止
+  后以新 owner 重订同一 canonical path，再延迟执行旧 callback。旧实现共用全局 watcher/map，
+  因而把旧事件投给新 owner。首版测试事件使用非 canonical path，未命中映射而假通过；夹具错误
+  保留，改用真实 key 后首次产品 FAIL 见 `02-corrected-fixture/`。
+- 单文件监听改为每个 canonical path 独立 native 注册，callback 捕获该注册自己的 owner fence
+  与 debounce；同路径多 owner 仍共享该注册。Office watcher 也采用同一 owner fence。发送先登记
+  in-flight delivery，再在互斥区外调用 event sink；停止先移除 owner，等待已开始发送结束后再
+  unwatch。等待不持注册表锁，避免 sink 重入 watch route 时死锁；unwatch 未确认则恢复 owner 并
+  报错。旧 callback 只能看到已退休集合，新注册不继承尾事件或抑制时间。
+- 单文件迟到、Office 迟到、发送中停止三项确定性回归各 **20/20**；`nomifun-file` **555/555**，
+  含真实 native 删除重建、重订、重叠 Office 根及 file_watching 14 项。首次失败与修复后日志在
+  W59；本批未改 renderer、未运行模型/Tauri UI。
+- 活动注册数量/资源上限、native callback 永不返回、完整 rescan/dropped/乱序 UI、其他平台、
+  100 seed/LONG/99% 仍待验，不关闭完整 FILE-040 或共享阶段。
+
+下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

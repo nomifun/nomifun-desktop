@@ -49,6 +49,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-38（FILE-040、AUTH-005、A09/A13/A17 watcher 尾事件子断言）：W59 把旧 native
+  注册已排队的单文件事件延迟到同路径重订后分发，旧全局 callback 会按当前 path→owner 映射误投
+  新 owner；首版夹具用非 canonical event path 未击中映射，假通过另存，纠正后首次产品 FAIL
+  保留。单文件 watcher 现按 canonical path 分注册实例，各自捕获独立 owner fence 与 debounce；
+  Office 注册也改用同一 fence。回调取得 delivery token 后才复制 owner，停止先移除 owner 并等待
+  已开始发送结算，再撤销原生注册；等待期间不持注册表锁，event sink 可重入。旧注册 callback
+  只看到已退休 owner 集，新注册不继承尾事件或 debounce；共享同路径的其他 owner 保留。
+  `nomifun-file` **555/555**，单文件迟到、Office 迟到及发送中停止三项各 **20/20**，真实 native
+  创建/删除/重订与 14 项集成回归通过。无 renderer/模型/UI 改动。活动注册容量、native callback
+  永不返回、完整 rescan/dropped/乱序 UI、其他平台及长期门槛仍开放，不关闭完整 FILE-040。
+
 - S-D03-37（FILE-040、A05/A17/A19 未监听外部变更子断言）：W58 首次反例证明完成的扁平
   清单缓存会永久遮蔽未启动 watcher 时的外部创建；显式第二次 `/api/fs/list` 仍只返回旧文件。
   现将完成清单限定为通知/活动读取的一致性快照：新的显式 API/Agent 读取在无人使用时退休旧
