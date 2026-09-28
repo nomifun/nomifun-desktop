@@ -161,7 +161,7 @@ struct Submission {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
+        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
@@ -310,10 +310,12 @@ impl CompletionTracker {
             && work.running_processes.is_empty()
             && (binding.capability_id.as_ref() != "workspace.process"
                 || command.is_some_and(|command| {
-                    command.was_current_at_observation
-                        && command.cleanup_proven
-                        && command.state == "exited"
-                        && command.exit_code == Some(0)
+                    command.cleanup_proven
+                        && ((command.was_current_at_observation
+                            && command.state == "exited"
+                            && command.exit_code == Some(0))
+                            || (binding.action_id.as_ref() == "workspace.process/cancel"
+                                && command.state == "cancelled"))
                 }));
         let observation = AgentCompletionObservation {
             call_id: call.call_id.as_ref().to_owned(),
@@ -408,7 +410,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its result and scope, not just exit zero. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -673,6 +675,76 @@ mod tests {
             effect_class:crate::AgentEffectClass::ManagedEffect,parallel_safe:false }
     }
 
+    fn process_binding(action: &str) -> AgentToolBinding {
+        let mut binding = file_binding(action);
+        binding.model_name = "cancel_process".into();
+        binding.definition.name = "cancel_process".into();
+        binding.capability_id = "workspace.process".into();
+        binding
+    }
+
+    #[test]
+    fn explicit_reaped_cancel_is_eligible_completion_evidence() {
+        let work = AgentWorkStatus {
+            workspace_observation_epoch: 1,
+            recent_commands: vec![crate::AgentCommandObservation {
+                process_id: "process-1".into(),
+                launch_call_id: Some("start-1".into()),
+                observation_call_id: "cancel-1".into(),
+                state: "cancelled".into(),
+                exit_code: None,
+                cleanup_proven: true,
+                launch_workspace_epoch: Some(1),
+                provenance_workspace_epoch: Some(1),
+                interaction_call_ids: vec!["poll-1".into()],
+                omitted_interactions: 0,
+                observed_workspace_epoch: 1,
+                was_current_at_observation: false,
+            }],
+            ..Default::default()
+        };
+        let call = ChatToolCall {
+            call_id: "cancel-1".into(),
+            name: "cancel_process".into(),
+            arguments: StrictJsonValue(serde_json::json!({"process_id":"process-1"})),
+            provider_metadata: None,
+        };
+        let result = AgentToolResult::text(
+            call.call_id.clone(),
+            serde_json::json!({
+                "state":"cancelled", "process_id":"process-1", "success":true,
+                "cleanup":{"reaped":true,"errors":["interrupt unavailable"]}
+            })
+            .to_string(),
+            false,
+        );
+        let mut tracker = CompletionTracker::default();
+        let observation = tracker.observe(&work, &process_binding("workspace.process/cancel"),
+            &call, &result, true);
+        assert!(observation.successful);
+        assert!(observation.usable_at_observation);
+        assert_eq!(observation.command_exit_code, None);
+        assert_eq!(observation.command.as_ref().unwrap().state, "cancelled");
+        assert_eq!(
+            observation
+                .command
+                .as_ref()
+                .unwrap()
+                .interaction_call_ids,
+            ["poll-1"]
+        );
+
+        let schema = tracker.definition_with_evidence(&work, false).input_schema.0;
+        let validator = jsonschema::options().build(&schema).unwrap();
+        assert!(validator.is_valid(&serde_json::json!({
+            "summary":"Cancelled and reaped the managed process",
+            "criteria":[{
+                "disposition":"supported", "evidence_call_ids":["cancel-1"],
+                "rationale":"The explicit cancellation returned cancelled with cleanup.reaped=true"
+            }]
+        })));
+    }
+
     #[test]
     fn advertised_evidence_schema_rejects_stale_missing_and_failed_citations() {
         let mut failed = file_observation("failed", "failed.txt", 2);
@@ -689,6 +761,7 @@ mod tests {
         assert!(definition.description.contains("matching call ID"));
         assert!(definition.description.contains("absent from available_evidence"));
         assert!(definition.description.contains("use unverified"));
+        assert!(definition.description.contains("do not cite launch_call_id"));
         let schema = definition.input_schema.0;
         assert!(schema["properties"]["criteria"]["items"]["properties"]["requirement_ids"]
             ["description"]

@@ -326,6 +326,27 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   并正式备份。多条顺序 process 结果要全部 supported 仍需可证明只读的 owner 合同或原子聚合；
   其他场景/Provider/角色/平台、N3/100 seed/LONG/99% 仍开放，不关闭完整 CTRL 或共享阶段。
 
+- S-D04-07（CMD-139、PROC-033、A13/A17/A19 托管进程显式取消与来源子断言）：W77 首个正式
+  `start_process → poll_process → cancel_process` 样本已得到 `state=cancelled`、
+  `cleanup.reaped=true`，宿主却把所有非 `Exited` 终态统一写成 `success=false`，因此成功清理在
+  canonical/UI 中显示为工具错误。首版宿主修复后，Runtime 又把同一结果计为
+  `failed_commands=1` 且 completion observation 不可用，完成 Schema 收窄为
+  `evidence_call_ids.maxItems=0`；继续修复后，零错误样本还暴露终态 command provenance 未携带
+  中间 poll call ID。三层首次失败、截图、事件、数据库与模型轨迹均保留在仓库外。
+  现仅对显式 `cancel` 且 `reaped=true` 返回成功；未回收或 `exec` 被中断仍失败，并保留
+  `cleanup.errors`。Runtime 不再把成功的显式取消计成失败命令，也不把它冒充正常退出/测试成功；
+  cancel observation 可作为取消/清理证据，但 `was_current_at_observation=false`。同一进程的 poll
+  call ID 进入有界 interaction provenance，且不会推进 workspace effect epoch；完成说明另明确嵌套
+  launch/interaction ID 只有同时出现在顶层 `available_evidence` 时才可直接引用。
+  宿主精确回归 **20/20**，两项 Runtime 回归每项 **20/20**，Agent Runtime **177/177**，workspace
+  fmt 与正式构建通过。最终 Tauri `64d2f85813a8…` 使用隔离 data/work/profile 与 StepFun Plan /
+  `step-3.7-flash`：start、两次 poll、cancel、report_completion 五次调用全部成功；cancel 为
+  `success=true`、`reaped=true`，Windows 无 console interrupt 合同的诊断仍保留。单回合 completed、
+  5 个模型步、166 条事件，`failed_commands=0`、`failed_tools=0`；可用 cancel observation 精确携带
+  launch ID 与两条 poll ID，完成报告一次通过。工作区摘要不变、helper 为 0、应用/profile 清零并
+  正式备份。cancel/自然退出真实竞态、忽略温和中断后的升级与后代清理、PTY、其他平台/角色、
+  N3/100 seed/LONG/99% 仍开放，不关闭完整 CMD/PROC 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
