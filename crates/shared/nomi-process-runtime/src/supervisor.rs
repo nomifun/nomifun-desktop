@@ -3736,6 +3736,103 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn cancel_admitted_before_natural_exit_wins_once_and_is_idempotent() {
+        let (supervisor, handle, fake, output) =
+            register_fake(FakeOwner::exits_after(Duration::from_millis(5), 0)).await;
+        output.push(OutputStream::Stdout, b"race output");
+        let cancelling_supervisor = supervisor.clone();
+        let cancelling_handle = handle.clone();
+        let cancelling = tokio::spawn(async move {
+            cancelling_supervisor
+                .cancel(&cancelling_handle.owner, &cancelling_handle.session_id)
+                .await
+        });
+        wait_for_test_condition(|| !fake.signal_calls().is_empty()).await;
+        tokio::time::advance(Duration::from_millis(120)).await;
+
+        let first = cancelling
+            .await
+            .expect("cancel task should join")
+            .expect("cancel should settle");
+        let ProcessOutcome::Cancelled { cleanup, .. } = &first else {
+            panic!("cancel admitted before natural exit must own the terminal");
+        };
+        assert!(cleanup.reaped);
+        let repeated = supervisor
+            .cancel(&handle.owner, &handle.session_id)
+            .await
+            .expect("repeated cancel should return the same terminal");
+        let polled = finished(
+            supervisor
+                .poll(
+                    &handle.owner,
+                    &handle.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+                .expect("terminal poll should succeed"),
+        );
+
+        assert_eq!(repeated, first);
+        assert_eq!(polled, first);
+        assert_eq!(fake.wait_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn natural_exit_observed_before_cancel_wins_once_and_is_idempotent() {
+        let (supervisor, handle, fake, output) =
+            register_fake(FakeOwner::exits_after(Duration::from_millis(5), 0)).await;
+        output.push(OutputStream::Stdout, b"race output");
+        tokio::time::advance(Duration::from_millis(6)).await;
+        let session = supervisor
+            .registry
+            .get(&handle.session_id)
+            .expect("exit-observed session should remain registered");
+        wait_for_test_condition(|| session.exit_observation().is_some()).await;
+        assert!(session.terminal().is_none());
+
+        let cancelling_supervisor = supervisor.clone();
+        let cancelling_handle = handle.clone();
+        let cancelling = tokio::spawn(async move {
+            cancelling_supervisor
+                .cancel(&cancelling_handle.owner, &cancelling_handle.session_id)
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(120)).await;
+        let first = cancelling
+            .await
+            .expect("cancel task should join")
+            .expect("observed natural exit should settle");
+        let ProcessOutcome::Exited { code, cleanup, .. } = &first else {
+            panic!("natural exit observed before cancel must own the terminal");
+        };
+        assert_eq!(*code, Some(0));
+        assert!(cleanup.reaped);
+        let repeated = supervisor
+            .cancel(&handle.owner, &handle.session_id)
+            .await
+            .expect("repeated cancel should return the natural terminal");
+        let polled = finished(
+            supervisor
+                .poll(
+                    &handle.owner,
+                    &handle.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(10),
+                )
+                .await
+                .expect("terminal poll should succeed"),
+        );
+
+        assert_eq!(repeated, first);
+        assert_eq!(polled, first);
+        assert!(fake.signal_calls().is_empty());
+        assert_eq!(fake.wait_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancelled_terminal_poll_is_idempotent() {
         let (supervisor, handle, _fake, output) =
             register_fake(FakeOwner::reaps_on(FakeSignal::Interrupt, 130)).await;

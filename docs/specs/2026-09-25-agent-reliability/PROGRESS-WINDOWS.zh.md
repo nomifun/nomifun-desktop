@@ -1466,6 +1466,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 cancel 与自然退出的真实竞态、温和中断被忽略后的强制升级、child/grandchild、PTY、应用
   强退、其他 Agent/平台及 N3/100 seed/LONG/99%；不关闭完整 CMD-139/PROC-033 或共享阶段。
 
+### cancel 与自然退出的单一终态（W78，基线 `a0f1674a7`）
+
+- S-D04-08 / PROC-038、A13/A17/A19：新增两个暂停时间的 supervisor owner 回归，分别固定竞争
+  双方的先后顺序。cancel 先进入 stop ownership、5 ms 后进程自然 reap 时，终态稳定为
+  `Cancelled`；自然 reap fact 先被 waiter 观察、终态尚在 120 ms 输出 drain 时发起 cancel，终态
+  稳定为 `Exited(code=0)`。
+- 两种顺序均要求 `cleanup.reaped=true`，重复 cancel 与后续 terminal poll 逐字段等于首次终态，
+  输出快照不改写，底层 wait/reap 只有一次；自然退出先胜时没有发送 interrupt/terminate/kill。
+  生产实现首次即满足全部断言，本批只固化回归，没有修改产品信号、清理、超时或权限逻辑。
+- 首次定向 **2/2**，两项各重复 **20/20**（共 40 次），Windows process Runtime lib
+  **122/122**，workspace fmt 通过。真实 OS 调度竞争、两个并发 cancel waiter、cancel/poll/close
+  三方并发、child/grandchild、PTY、其他平台及长期压力仍待验；不关闭完整 PROC-038 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
