@@ -1407,8 +1407,12 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   Tauri 构建通过。正式二进制 `668062e479e6…` 使用隔离 workspace/data/profile；同类只读任务中
   step-3.7-flash 首次即提交 `command=powershell.exe` 与真实 `args` 数组，唯一进程退出 0、
   `reaped=true`，UI `visible_failure_count=0`，正确报告 300、`shape-0001.txt`、`shape-0300.txt`。
-  单回合 2 个模型步、67 条 canonical 事件；300 文件 count/min/max/hash 不变、无额外路径，应用/
-  profile 清零并完成正式备份。单调用快路径未使用 `report_completion`，其数组形状仍只有组件回归；
+  单回合 2 个模型步、67 条 canonical 事件；300 文件 count/min/max/hash 不变、无额外路径。
+- 第二个隔离正式样本强制两条独立进程调用，随后真实调用 `report_completion`：`criteria` 与两组
+  `evidence_call_ids` 均首次为原生数组，两个进程均成功/reaped，UI 零异常，正确报告 alpha=5、
+  beta=7、合计 12；单回合 3 个模型步、121 条 canonical 事件，12 文件 tree hash 不变。两次样本均
+  应用/profile 清零并完成正式备份。但 alpha criterion 错误复用了 beta 的 call ID，完成工具虽接受，
+  该观察不能证明 alpha；因此本批只关闭数组形状子断言，精确 evidence 语义关联转后续 CTRL 批次。
   其他数组字段/Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验，不关闭完整 REG/CTRL/PROC。
 
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
