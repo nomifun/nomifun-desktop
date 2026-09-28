@@ -49,6 +49,22 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D02-12（CTRL-001/006/007、REAL-013、A05/A07/A17/A18/A19 已闭合任务显式继续子断言）：
+  W45 从 W44 completed Turn 的正式备份跨构建继续，要求导入全部旧要求、先更新计划，只读两个
+  文件且不重放已完成修改。首次确定性 FAIL 证明历史任务仍被旧 build digest 拒绝；现仅允许在
+  Session、runtime binding 与精确 Snapshot 不变时跨 engine build 导入，来源 Turn、记录格式和
+  当前引用仍严格校验。`resume_task` 只在尚未规划/观察的入口暴露，成功后立即移除；导入计划
+  必须先通过仅暴露 `update_plan` 的控制轮次，不能依赖 provider 对 tool choice 的自愿遵守。
+  supported completion 现在必须至少引用一项当前证据；分页 `read_file` 也明确说明任意成功页的
+  sha256 是整份源文件摘要，避免为取摘要读取全文。
+  早期真实样本依次保留重复 resume、计划参数错、无证据完成、重复读取、provider 忽略选择和
+  摘要语义误解；其中一份旧二进制虽通过 oracle，代码复核发现门禁会被通用选择归一化覆盖，
+  未作为最终证明。最终 Runtime **167/167**，8 项关键回归各 **20/20**；正式 Tauri 5 模型步，
+  顺序为 resume→plan→两次目标读取→plan→completion，零工具错误/效果，两文件 hash/mtime
+  不变，canonical completed，严格 verdict 为 `PASS_TASK_CONTINUATION`。本项是 closed-turn
+  task continuation，不是 CTRL-009/010 的 pause checkpoint/终态恢复；后两项仍开放。W42 N3
+  仍为 1/3，完整角色/平台、范围变更、100 seed、LONG/99% 与共享阶段均未关闭。
+
 - S-D02-11（CTRL-006/007、FILE-031、A05/A07/A17/A18/A19 重启后精确修复子断言）：W44 从
   W43 failed Turn 的正式备份继续，先后保留 completed-only 来源拒绝、跨构建 recovery/history
   等值拒绝，以及空计划被恢复上下文刷新误置 `needs_replan` 后首个补丁提案被拒的 FAIL。版本化

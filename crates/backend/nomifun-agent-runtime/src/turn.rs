@@ -358,9 +358,6 @@ pub(crate) async fn run_turn(
     });
     let requested_tool_choice = model_request.input.tool_choice.clone();
     let requested_parallel_tool_calls = model_request.input.parallel_tool_calls;
-    if let Some(prior) = &request.prior_task {
-        model_request.input.instructions.push(prior.context()?);
-    }
     if !request.context_resources.is_empty() {
         model_request.input.instructions.push(crate::context_resources::index(&request.context_resources, request.context_image_input)?);
     }
@@ -426,7 +423,7 @@ pub(crate) async fn run_turn(
         long_horizon.as_ref(),
         retained_inputs.len(),
         !request.context_resources.is_empty(),
-        request.prior_task.is_some(),
+        request.prior_task.as_ref(),
         request.resource_port.is_some(),
         request.history_port.is_some(),
         request.tool_discovery_port.is_some(),
@@ -614,7 +611,7 @@ pub(crate) async fn run_turn(
             long_horizon.as_ref(),
             retained_inputs.len(),
             !request.context_resources.is_empty(),
-            request.prior_task.is_some(),
+            request.prior_task.as_ref(),
             request.resource_port.is_some(),
             request.history_port.is_some(),
             request.tool_discovery_port.is_some(),
@@ -1715,6 +1712,7 @@ struct AdaptiveContextSlots {
     task_plan: Option<usize>,
     completion: Option<usize>,
     discovery_catalog: Option<usize>,
+    task_continuation: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1729,18 +1727,22 @@ fn synchronize_adaptive_context(
     long_horizon: Option<&LongHorizonState>,
     input_revision: usize,
     resources: bool,
-    prior_task: bool,
+    prior_task: Option<&crate::AgentPriorTask>,
     remote_resources: bool,
     history: bool,
     tool_discovery: bool,
     discovered_tools: &std::collections::BTreeSet<String>,
     slots: &mut AdaptiveContextSlots,
 ) -> Result<(), AgentEngineError> {
+    let task_continuation_available = prior_task.is_some()
+        && long_horizon.is_none_or(|state| {
+            crate::task_continuation::available(&state.execution_plan, &state.work_status)
+        });
     configure_tools(
         request,
         plan,
         resources,
-        prior_task,
+        task_continuation_available,
         remote_resources,
         history,
         adaptive.task_ledger(),
@@ -1748,6 +1750,24 @@ fn synchronize_adaptive_context(
         tool_discovery,
         discovered_tools,
     )?;
+    if let Some(prior) = prior_task {
+        let context = if task_continuation_available {
+            prior.context()?
+        } else {
+            prior
+                .inactive_context(
+                    &long_horizon
+                        .expect("ineligible task continuation has turn-local state")
+                        .execution_plan,
+                )
+                .into()
+        };
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.task_continuation,
+            context,
+        );
+    }
     request.input.tool_choice = if request.input.tools.is_empty() {
         ChatToolChoice::None
     } else if matches!(requested_tool_choice, ChatToolChoice::None) {
@@ -1755,6 +1775,28 @@ fn synchronize_adaptive_context(
     } else {
         requested_tool_choice.clone()
     };
+    let continuation_plan_gate = prior_task.is_some_and(|prior| {
+        long_horizon.is_some_and(|state| prior.requires_plan_update(&state.execution_plan))
+    });
+    if continuation_plan_gate {
+        if !request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME)
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "imported task requires an exposed update_plan control".into(),
+            ));
+        }
+        // Apply the continuation gate after restoring the caller's requested
+        // choice. Also expose only the required control: compatible providers
+        // may treat tool_choice as a preference, while the frozen surface and
+        // response guard are authoritative.
+        request.input.tool_choice = ChatToolChoice::Specific {
+            name: crate::planning::TOOL_NAME.into(),
+        };
+    }
     if tool_discovery {
         if let Some(catalog) = crate::tool_discovery::catalog(plan, discovered_tools) {
             upsert_instruction(&mut request.input.instructions, &mut slots.discovery_catalog, catalog);
@@ -1817,6 +1859,14 @@ fn synchronize_adaptive_context(
             &mut slots.tool_history,
             archive.context(),
         );
+    }
+    if continuation_plan_gate {
+        // Build every adaptive instruction and schema before narrowing the
+        // provider-visible surface to the required control.
+        request
+            .input
+            .tools
+            .retain(|tool| tool.name == crate::planning::TOOL_NAME);
     }
     Ok(())
 }
@@ -2844,12 +2894,15 @@ mod tests {
         let plan = tool_plan();
         configure_tools(&mut request, &plan, true, true, true, true, false, false, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
         configure_tools(&mut request, &plan, true, true, true, true, true, true, false, &Default::default()).unwrap();
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
         assert!(request.input.tools.iter().any(|tool| tool.name == crate::tool_archive::SEARCH));
+        configure_tools(&mut request, &plan, true, false, true, true, true, true, false, &Default::default()).unwrap();
+        assert!(!request.input.tools.iter().any(|tool| tool.name == crate::task_continuation::TOOL_NAME));
         assert!(!request.input.tools.iter().any(|tool|
             matches!(tool.name.as_str(), "activate_capability" | "search_capabilities")));
         for name in ["activate_capability", "search_capabilities"] {
@@ -2867,6 +2920,151 @@ mod tests {
             )]).unwrap();
             assert!(configure_tools(&mut request, &shadow, false, false, false, false, false, false, false, &Default::default()).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn imported_task_plan_gate_survives_requested_tool_choice_normalization() {
+        let source = crate::AgentInputCitation {
+            input: 0,
+            quote: "修复文件".into(),
+        };
+        let historical_plan = crate::AgentPlan {
+            revision: 1,
+            explanation: "历史任务".into(),
+            steps: vec![],
+            needs_replan: false,
+            requirements: vec![crate::AgentTaskRequirement {
+                id: "files".into(),
+                description: "修复文件".into(),
+                source: source.clone(),
+                origin: None,
+            }],
+        };
+        let prior = crate::AgentPriorTask::from_closed_turn(
+            "old-turn",
+            &[
+                AgentEngineEvent::TurnStarted {
+                    binding: binding(),
+                    turn_operation_id: OperationId::from("old-turn"),
+                },
+                AgentEngineEvent::PlanUpdated {
+                    plan: historical_plan,
+                },
+                AgentEngineEvent::TurnCompleted {
+                    model_steps: 1,
+                    finish_reason: nomifun_chat_model_broker::ChatFinishReason::Completed,
+                },
+            ],
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut state = LongHorizonState {
+            execution_plan: crate::AgentPlan {
+                revision: 1,
+                explanation: "继续历史任务".into(),
+                steps: vec![],
+                needs_replan: true,
+                requirements: vec![crate::AgentTaskRequirement {
+                    id: "files".into(),
+                    description: "修复文件".into(),
+                    source: crate::AgentInputCitation {
+                        input: 0,
+                        quote: "继续修复文件".into(),
+                    },
+                    origin: Some(crate::AgentRequirementOrigin {
+                        turn_operation_id: "old-turn".into(),
+                        requirement_id: "files".into(),
+                        source,
+                    }),
+                }],
+            },
+            ..Default::default()
+        };
+        assert!(prior.requires_plan_update(&state.execution_plan));
+
+        let plan = tool_plan();
+        let turn_request = AgentTurnRequest::new(request(), plan.clone(), principal(), 0);
+        let scoped = crate::workspace_context::ScopedInstructions::new(&turn_request);
+        let mut adaptive = crate::adaptive::AdaptiveExecution::default();
+        adaptive
+            .activate(
+                crate::adaptive::LEDGER_MODULES,
+                crate::adaptive::AgentRuntimeActivationReason::ExplicitTaskContinuation,
+                &NoopAgentEventSink,
+            )
+            .await
+            .unwrap();
+        let recovery = crate::patch_recovery::PatchRecovery::default();
+        let mut model_request = request();
+        let mut slots = AdaptiveContextSlots::default();
+        synchronize_adaptive_context(
+            &mut model_request,
+            &plan,
+            &ChatToolChoice::Auto,
+            &adaptive,
+            &scoped,
+            &recovery,
+            None,
+            Some(&state),
+            1,
+            false,
+            Some(&prior),
+            false,
+            false,
+            false,
+            &Default::default(),
+            &mut slots,
+        )
+        .unwrap();
+
+        assert_eq!(
+            model_request.input.tool_choice,
+            ChatToolChoice::Specific {
+                name: crate::planning::TOOL_NAME.into(),
+            }
+        );
+        assert!(model_request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert_eq!(
+            model_request
+                .input
+                .tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![crate::planning::TOOL_NAME]
+        );
+        assert!(model_request
+            .input
+            .instructions
+            .iter()
+            .any(|instruction| instruction.contains("was successfully imported")));
+
+        state.execution_plan.needs_replan = false;
+        synchronize_adaptive_context(
+            &mut model_request,
+            &plan,
+            &ChatToolChoice::Auto,
+            &adaptive,
+            &scoped,
+            &recovery,
+            None,
+            Some(&state),
+            1,
+            false,
+            Some(&prior),
+            false,
+            false,
+            false,
+            &Default::default(),
+            &mut slots,
+        )
+        .unwrap();
+        assert_eq!(model_request.input.tool_choice, ChatToolChoice::Auto);
     }
 
     fn tool_binding(

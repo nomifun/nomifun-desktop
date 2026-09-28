@@ -161,7 +161,7 @@ struct Submission {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use descriptive criteria (they need not match plan labels). A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. For supported claims use only the current available_evidence: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
+        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use the fewest descriptive criteria needed; they need not match plan labels. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. The same eligible evidence may support multiple criteria. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
@@ -169,6 +169,13 @@ pub(crate) fn definition() -> ChatToolDefinition {
                 "summary":{"type":"string","minLength":1,"maxLength":2048,"description":"The complete final answer delivered verbatim to the user. This is the ONLY final reply: criteria rationales are internal and are not shown. Include every requested delivery detail, such as paths, artifact IDs, readback contents and deletion results, while following the user's requested language and output format. There is no later assistant reply after an accepted report."},
                 "criteria":{"type":"array","minItems":1,"maxItems":16,"items":{
                     "type":"object","additionalProperties":false,"required":["disposition","rationale"],
+                    "allOf":[{
+                        "if":{"properties":{"disposition":{"const":"supported"}},"required":["disposition"]},
+                        "then":{"anyOf":[
+                            {"required":["evidence_call_ids"],"properties":{"evidence_call_ids":{"minItems":1}}},
+                            {"required":["evidence_paths"],"properties":{"evidence_paths":{"minItems":1}}}
+                        ]}
+                    }],
                     "properties":{
                         "step":{"type":"string","minLength":1,"maxLength":512,"description":"Optional display label; omission uses an indexed delivery label."},
                         "disposition":{"type":"string","enum":["supported","unverified","blocked","scope_changed"]},
@@ -401,7 +408,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its result and scope, not just exit zero. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs: inspect its result and scope, not just exit zero. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -675,7 +682,10 @@ mod tests {
             file_observation("current", "current.txt", 2), failed,
         ], ..Default::default() };
         let work = AgentWorkStatus { workspace_observation_epoch: 2, ..Default::default() };
-        let schema = tracker.definition_with_evidence(&work,false).input_schema.0;
+        let definition = tracker.definition_with_evidence(&work,false);
+        assert!(definition.description.contains("prefer one supported criterion"));
+        assert!(definition.description.contains("never create an evidence-free supported criterion"));
+        let schema = definition.input_schema.0;
         let validator = jsonschema::options().build(&schema).unwrap();
         let report = |field: &str, reference: &str| {
             let mut value = serde_json::json!({"summary":"Finished","criteria":[
@@ -690,12 +700,18 @@ mod tests {
             assert!(!validator.is_valid(&report("evidence_paths", path)));
             assert!(!validator.is_valid(&report("evidence_call_ids", call)));
         }
+        assert!(!validator.is_valid(&serde_json::json!({"summary":"Unsupported claim","criteria":[
+            {"disposition":"supported","rationale":"No observation was cited"}
+        ]})));
         let empty = CompletionTracker::default().definition_with_evidence(&work,false).input_schema.0;
         let validator = jsonschema::options().build(&empty).unwrap();
         assert!(!validator.is_valid(&report("evidence_paths", "current.txt")));
         assert!(!validator.is_valid(&report("evidence_call_ids", "current")));
         assert!(validator.is_valid(&serde_json::json!({"summary":"Verification unavailable","criteria":[
             {"disposition":"unverified","rationale":"No authorized observation available"}
+        ]})));
+        assert!(!validator.is_valid(&serde_json::json!({"summary":"Unsupported claim","criteria":[
+            {"disposition":"supported","rationale":"No observation was cited"}
         ]})));
     }
 
