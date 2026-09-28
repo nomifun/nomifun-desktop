@@ -40,8 +40,11 @@ describe('compact vertical companion switcher', () => {
     const view = mount();
     const trigger = view.getByRole('button', { name: triggerName });
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.mouseEnter(trigger.parentElement!);
+    expect(view.getByRole('tooltip', { name: triggerName }).textContent).toBe(triggerName);
     expect(view.queryByRole('group')).toBeNull();
     fireEvent.click(trigger);
+    expect(view.getByRole('tooltip', { name: 'Nomi' }).textContent).toBe('Nomi');
     const rail = view.getByRole('group');
     expect(within(rail).getAllByRole('button')).toHaveLength(4);
     expect(within(rail).queryByRole('button', { name: switchName(0) })).toBeNull();
