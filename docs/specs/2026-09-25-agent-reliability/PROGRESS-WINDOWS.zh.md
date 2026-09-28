@@ -1137,6 +1137,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   的最窄路径窗口、macOS 主 lane、完整 IO fault/UI/角色、100 seed/LONG/99% 仍待验，不关闭
   完整 FILE Case 或共享阶段。
 
+### 共享 Unix Artifact 目录同步（W61，基线 `a9d145c16`）
+
+- S-D03-40 / ART-001/003/007、A05/A13：W60 Linux 全组的 11 项 Artifact 失败均为
+  `cannot sync artifact directory: Bad file descriptor`。根因是 `cap_std::Dir` 在 Linux 可持有
+  `O_PATH` capability descriptor，旧代码 clone 后直接 `fsync`，内核按合同返回 EBADF。
+- Unix 目录同步现在通过同一 capability Dir 的 `"."` 重新打开可读目录句柄，再调用 `sync_all`；
+  没有重新解析 ambient path，也没有像 Windows 特例一样吞掉权限/IO 错误。新增 focused 回归
+  **20/20**，Linux Artifact **18/18**，Windows Artifact **15/15**。
+- 同源码 Linux 全 crate 从 W60 的 290/302 收敛为 **302/303**；唯一剩余失败为既有
+  `inventory_refreshes_before_native_remove_delivery`，定向复核仍稳定失败，已完整保留并转 W62。
+  本批未改 renderer、未运行模型/Tauri UI。
+- macOS 主 lane、真实磁盘故障/断电 durability、完整 Agent/UI/角色、100 seed/LONG/99% 仍待验，
+  不关闭完整 Artifact Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

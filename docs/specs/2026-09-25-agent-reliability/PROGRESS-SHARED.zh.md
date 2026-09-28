@@ -49,6 +49,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-40（ART-001/003/007、A05/A13 Unix Artifact 目录 durability 子断言）：W60 的 Linux
+  全组中 11 项 Artifact 均在目录同步返回 EBADF；`cap_std::Dir` 可持有只用于 capability traversal
+  的 `O_PATH` descriptor，旧实现 clone 后直接 `fsync`。W61 在同一已授权 Dir 内以 `"."` 重新打开
+  可读目录句柄并同步，不做 ambient 路径解析，也不忽略其他 sync 错误。新增 Linux 目录同步回归
+  **20/20**，Linux Artifact **18/18**，Windows Artifact **15/15**。Linux 全 crate 从 12 项失败
+  收敛为 1 项已有 watcher 时序，最终 302/303；该项定向复核仍失败，转 W62，不计 Artifact 失败。
+  macOS 主 lane、真实磁盘故障/断电 durability、完整 Agent/UI/角色及长期门槛仍开放，不关闭完整
+  Artifact Case 或共享阶段。
+
 - S-D03-39（FILE-019/020/025/028/038/039、A05/A07/A13 Unix 暂存源/清理子断言）：W60
   在 WSL2 Ubuntu 6.18 的 ext4 临时目录执行原生 Linux 夹具；构建目标位于 WSL 私有目录，未把
   drvfs 当 Unix 文件系统。最终核对后把暂存原地改写或换成同字节异 inode，旧 Unix 路径均返回

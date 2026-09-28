@@ -420,10 +420,16 @@ fn is_owner_publication_temp(name: &str) -> bool {
 
 #[cfg(unix)]
 fn sync_directory(directory: &Dir) -> Result<(), AppError> {
+    // cap-std may retain an O_PATH directory descriptor for capability
+    // traversal. fsync on that descriptor returns EBADF on Linux. Reopen the
+    // already-authorized directory itself with a readable descriptor and
+    // flush that handle; no ambient path resolution is introduced.
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
     directory
-        .try_clone()
-        .map_err(|error| AppError::Internal(error.to_string()))?
-        .into_std_file()
+        .open_with(".", &options)
+        .map_err(|error| AppError::Internal(format!("cannot reopen artifact directory for sync: {error}")))?
+        .into_std()
         .sync_all()
         .map_err(|error| AppError::Internal(format!("cannot sync artifact directory: {error}")))
 }
@@ -744,6 +750,14 @@ mod tests {
         assert_eq!(buffer, payload[..ARTIFACT_CHUNK_BYTES]);
         assert_eq!(read_fixed_chunk(&mut reader, &mut buffer).unwrap(), 17);
         assert_eq!(&buffer[..17], &payload[ARTIFACT_CHUNK_BYTES..]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_sync_reopens_a_flushable_capability_handle() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = Dir::open_ambient_dir(fixture.path(), ambient_authority()).unwrap();
+        sync_directory(&directory).unwrap();
     }
 
     fn publication_temp_count(path: &Path) -> usize {
