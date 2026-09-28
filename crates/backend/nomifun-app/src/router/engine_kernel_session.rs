@@ -157,6 +157,7 @@ pub struct EngineKernelSession {
     browser: Arc<super::engine_browser_tools::BrowserRoleOwner>,
     hosted_effects: super::hosted_effect_receipts::HostedEffectReceipts,
     initial_capability_context: tokio::sync::OnceCell<CapabilityContext>,
+    workspace_watch_context: Option<Arc<dyn ContextContributor>>,
     robot: Option<Arc<super::nomi_core_robot::RobotModuleOwner>>,
     robot_tools: tokio::sync::OnceCell<Option<Arc<super::engine_robot_tools::FrozenTools>>>,
     plugin_bindings: Arc<super::engine_plugin_bindings::FrozenAgentPluginBindings>,
@@ -249,11 +250,20 @@ impl EngineKernelSession {
                 .iter()
 
         };
-        let workspace_selected = selected().any(|item| {
+        let workspace_files_selected = selected().any(|item| {
+            item.capability.id.as_ref() == nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID
+                && item.action_allowlist.iter().any(|action_id| {
+                    constraints_allow_action(
+                        constraints,
+                        item.capability.id.as_ref(),
+                        action_id.as_ref(),
+                    )
+                })
+        });
+        let workspace_selected = workspace_files_selected || selected().any(|item| {
             matches!(
                 item.capability.id.as_ref(),
-                nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID
-                    | nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID
+                nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID
                     | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID
             ) && item.action_allowlist.iter().any(|action_id| {
                 constraints_allow_action(
@@ -304,6 +314,14 @@ impl EngineKernelSession {
                 super::nomi_core_wave2::canonical_workspace_root(std::path::Path::new(&workspace))
             })
             .transpose()?;
+        let workspace_watch_context = if workspace_files_selected && !constraints.restricted() {
+            Some(
+                super::nomi_core_wave2::NomiWorkspaceWatchContext::start(&workspace)?
+                    as Arc<dyn ContextContributor>,
+            )
+        } else {
+            None
+        };
         let route_image_input = snapshot
             .content
             .chat_route_identity
@@ -387,6 +405,7 @@ impl EngineKernelSession {
             git_root,
             hosted_effects: assembly.hosted_effects.clone(),
             initial_capability_context: tokio::sync::OnceCell::new(),
+            workspace_watch_context,
             robot: assembly.robot.clone(),
             robot_tools: tokio::sync::OnceCell::new(),
             plugin_bindings,
@@ -669,6 +688,14 @@ impl EngineKernelSession {
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>, AppError> {
         let mut contributions = Vec::new();
+        if let Some(contributor) = &self.workspace_watch_context {
+            let context = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(failure("workspace notification context was canceled")),
+                result = contributor.pre_turn_context_for_turn_result(turn) => result.map_err(failure)?,
+            };
+            contributions.extend(context);
+        }
         if let Some(contributor) = &self.capability_context().await?.before_turn {
             // BeforeTurn capability context uses the same frozen Kernel policy
             // as tools, but must be refreshed for this accepted user input.
