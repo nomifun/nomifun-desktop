@@ -1393,6 +1393,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   子断言，不计零失败 CMD PASS；收紧撤销短语后的最终重建 `baec5c5f06e2…` 通过。opaque process
   内核只读、正式撤销 UI、参数字符串修复、其他角色/平台及 N3/100 seed/LONG/99% 仍待验。
 
+### 模型数组参数原生 JSON 形状说明（W75，基线 `155b88ff0`）
+
+- S-D01-02 / PROC-001/003、CTRL-006/007、A02/A17/A19：W72 的完成报告把
+  `requirement_ids` 传成字符串，W74 的正式回合又把 `exec_command.args` 传成包含 JSON 的字符串；
+  两者均被前置 Schema 正确拒绝且没有 owner dispatch，但 UI 出现可见错误。原失败截图、canonical
+  事件和模型轨迹均保留。
+- W75 首次回归确认两类字段虽然已经是 `type=array`，字段说明没有显式区分 JSON 数组值与包含
+  JSON 的字符串。现为 process `args` 和 completion 的 `criteria`、`requirement_ids`、
+  `evidence_call_ids`、`evidence_paths` 补充实际数组形状及反例说明；没有接受字符串、自动解析或
+  改动 validator，错误类型继续整批拒绝且零副作用。
+- process/completion 两项精确回归各 **20/20**，Agent Runtime **175/175**，workspace fmt 与正式
+  Tauri 构建通过。正式二进制 `668062e479e6…` 使用隔离 workspace/data/profile；同类只读任务中
+  step-3.7-flash 首次即提交 `command=powershell.exe` 与真实 `args` 数组，唯一进程退出 0、
+  `reaped=true`，UI `visible_failure_count=0`，正确报告 300、`shape-0001.txt`、`shape-0300.txt`。
+  单回合 2 个模型步、67 条 canonical 事件；300 文件 count/min/max/hash 不变、无额外路径，应用/
+  profile 清零并完成正式备份。单调用快路径未使用 `report_completion`，其数组形状仍只有组件回归；
+  其他数组字段/Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验，不关闭完整 REG/CTRL/PROC。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
