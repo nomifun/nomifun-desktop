@@ -49,6 +49,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D09-03（MODEL-020/022/023、LIFE-018、A08/A10/A11/A17/A19 Retry-After 取消子断言）：
+  新增正式 App 路由夹具，provider 首次返回 HTTP 429 与 60 秒 `Retry-After`，在 broker 退避期间
+  通过 canonical Turn cancel 取消。Turn 在 2 秒验收预算内进入 cancelled，checkpoint 清空；再观察
+  1 秒仍只有一次 provider request，零后续 model/tool attempt，且没有 completed/failed terminal。
+  首次即通过，完整 App recovery 5/5，新增回归 **20/20**；Broker Retry-After 3 项和 HTTP 解析
+  2 项保持通过。当前生产取消传播正确，本批只补产品路径回归/进度，无生产或 renderer 修改。
+  尚未覆盖真实 provider 连接池/代理切换、取消与 effect receipt 竞争、UI 点击停止及其他平台/角色。
+
 - S-D09-02（LIFE-016、PROC-033/039、CONC-004、A12/A13/A17/A19 进程 in-flight 暂停子断言）：
   新增正式 App 路由夹具，通过实际 `start_process` 启动写入 PID 后长驻的 OS helper，并在下一次
   provider 请求等待时发起 owner pause。独立进程快照先证明 PID 存活；paused 发布前 canonical
