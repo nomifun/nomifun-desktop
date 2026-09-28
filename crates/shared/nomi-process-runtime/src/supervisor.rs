@@ -1720,6 +1720,9 @@ mod tests {
         block_write: Arc<AtomicBool>,
         write_entered: Arc<AtomicBool>,
         write_release: Arc<tokio::sync::Notify>,
+        block_close: Arc<AtomicBool>,
+        close_entered: Arc<AtomicBool>,
+        close_release: Arc<tokio::sync::Notify>,
         reap_release: Arc<tokio::sync::Notify>,
         reap_plan: ReapPlan,
         exit_tx: tokio::sync::watch::Sender<Option<ExitFact>>,
@@ -1742,6 +1745,9 @@ mod tests {
                 block_write: Arc::new(AtomicBool::new(false)),
                 write_entered: Arc::new(AtomicBool::new(false)),
                 write_release: Arc::new(tokio::sync::Notify::new()),
+                block_close: Arc::new(AtomicBool::new(false)),
+                close_entered: Arc::new(AtomicBool::new(false)),
+                close_release: Arc::new(tokio::sync::Notify::new()),
                 reap_release: Arc::new(tokio::sync::Notify::new()),
                 reap_plan: ReapPlan::Pending,
                 exit_tx,
@@ -1856,6 +1862,12 @@ mod tests {
             fake
         }
 
+        fn blocking_close() -> Self {
+            let fake = Self::reaps_on(FakeSignal::Interrupt, 130);
+            fake.block_close.store(true, Ordering::SeqCst);
+            fake
+        }
+
         fn wait_call_count(&self) -> usize {
             self.wait_calls.load(Ordering::SeqCst)
         }
@@ -1952,6 +1964,10 @@ mod tests {
 
         async fn close_stdin(&self) -> io::Result<()> {
             self.close_calls.fetch_add(1, Ordering::SeqCst);
+            if self.block_close.load(Ordering::SeqCst) {
+                self.close_entered.store(true, Ordering::SeqCst);
+                self.close_release.notified().await;
+            }
             Ok(())
         }
 
@@ -2288,6 +2304,72 @@ mod tests {
             .await
             .expect("write task should join")
             .expect("write should finish");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_cancel_and_poll_converge_without_stranding_waiters() {
+        let (supervisor, handle, fake, output) = register_fake(FakeOwner::blocking_close()).await;
+        output.push(OutputStream::Stdout, b"before close");
+        let closing_supervisor = supervisor.clone();
+        let closing_handle = handle.clone();
+        let closing = tokio::spawn(async move {
+            closing_supervisor
+                .close_stdin(&closing_handle.owner, &closing_handle.session_id)
+                .await
+        });
+        wait_for_test_condition(|| fake.close_entered.load(Ordering::SeqCst)).await;
+
+        let polling_supervisor = supervisor.clone();
+        let polling_handle = handle.clone();
+        let polling = tokio::spawn(async move {
+            polling_supervisor
+                .poll(
+                    &polling_handle.owner,
+                    &polling_handle.session_id,
+                    OutputCursor::START,
+                    Instant::now() + Duration::from_secs(60),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        let cancelling_supervisor = supervisor.clone();
+        let cancelling_handle = handle.clone();
+        let cancelling = tokio::spawn(async move {
+            cancelling_supervisor
+                .cancel(&cancelling_handle.owner, &cancelling_handle.session_id)
+                .await
+        });
+        wait_for_test_condition(|| !fake.signal_calls().is_empty()).await;
+        tokio::time::advance(Duration::from_millis(120)).await;
+
+        let cancelled = cancelling
+            .await
+            .expect("cancel task should join")
+            .expect("cancel should settle");
+        let polled = finished(
+            polling
+                .await
+                .expect("poll task should join")
+                .expect("poll should settle"),
+        );
+        let ProcessOutcome::Cancelled { cleanup, .. } = &cancelled else {
+            panic!("cancel must own the shared terminal");
+        };
+        assert!(cleanup.reaped);
+        assert_eq!(polled, cancelled);
+        assert!(
+            !closing.is_finished(),
+            "the injected close waiter must remain independently blocked"
+        );
+
+        fake.close_release.notify_waiters();
+        closing
+            .await
+            .expect("close task should join")
+            .expect("the admitted close should finish");
+        assert_eq!(fake.close_call_count(), 1);
+        assert_eq!(fake.signal_calls(), ["interrupt"]);
+        assert_eq!(fake.wait_call_count(), 1);
     }
 
     #[tokio::test(start_paused = true)]

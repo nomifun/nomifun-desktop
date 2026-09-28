@@ -356,6 +356,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   真实 OS 调度竞争、并发 cancel waiter、child/grandchild、PTY、其他平台和长期压力仍开放，不关闭
   完整 PROC-038 或共享阶段。
 
+- S-D04-09（PROC-049、A13/A17/A19 close/cancel/poll 三方并发子断言）：W79 扩展可控 owner，
+  让已通过 admission 的 `close_stdin` 停在异步 owner 调用内，同时启动 60 秒 poll 与 cancel。
+  阻塞 close 不持有 registry/session 锁；cancel 仍以一次 interrupt 取得 `Cancelled`、
+  `cleanup.reaped=true`，poll 在期限前被唤醒并逐字段得到同一终态，随后释放的 close 独立完成。
+  底层 close/interrupt/wait 各一次。生产实现首次即满足，本批只补回归与测试夹具。首次 **1/1**、
+  重复 **20/20**，process Runtime lib **123/123**。真实 pipe/PTY stdin 关闭、多个 cancel/poll waiter、
+  平台 I/O 失败与应用退出仍开放，不关闭完整 PROC-049 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
