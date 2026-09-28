@@ -15,6 +15,11 @@ describe('desktop companion chrome layout', () => {
     expect(figureIndex).toBeGreaterThan(stageIndex);
   });
 
+  test('keeps desktop companion switcher tooltips flat', () => {
+    const tooltipRule = companionCss.match(/\.nomi-companion-switcher__tooltip \[role='tooltip'\] \{([\s\S]*?)\}/)?.[1] ?? '';
+    expect(tooltipRule.includes('box-shadow: none;')).toBe(true);
+  });
+
   test('only chat surfaces control native resizing; tooltip hover cannot drive geometry', () => {
     expect(companionSource.includes("type ExpandedWindowMode = 'chat';")).toBe(true);
     expect(companionSource.includes('switcherTooltipVisible')).toBe(false);

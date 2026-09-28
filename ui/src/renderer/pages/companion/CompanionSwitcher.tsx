@@ -71,7 +71,11 @@ export default function CompanionSwitcher({
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) onOpenChange(false);
       }}
     >
-      <InstantHoverTooltip content={profile?.name || 'Nomi'} position='left' className='nomi-companion-switcher__tooltip'>
+      <InstantHoverTooltip
+        content={open ? profile?.name || 'Nomi' : t('nomi.companion.switchCompanion')}
+        position='left'
+        className='nomi-companion-switcher__tooltip'
+      >
         <button
           ref={triggerRef}
           type='button'

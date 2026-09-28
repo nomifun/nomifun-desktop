@@ -62,8 +62,10 @@ describe('home companion showcase', () => {
   });
   test('collapse preserves the draft and remembers the manual preference', () => {
     const view = mount({ companions: [companion(1)] });
+    expect(view.getByText('Float on desktop')).toBeTruthy();
     fireEvent.click(view.getByRole('button', { name: 'Collapse' }));
     expect(view.getByRole('button', { name: 'Expand' }).getAttribute('aria-expanded')).toBe('false');
+    expect(view.queryByText('Float on desktop')).toBeNull();
     expect((view.getByRole('textbox', { name: 'Draft' }) as HTMLTextAreaElement).value).toBe('Keep my unsent work');
     view.unmount();
     expect(mount({ companions: [companion(1)] }).getByRole('button', { name: 'Expand' })).toBeTruthy();
