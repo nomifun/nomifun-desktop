@@ -11,6 +11,10 @@ import { useTranslation } from "react-i18next";
 
 import type { CreativeAsset } from "../../assets";
 import {
+  CREATIVE_CANVAS_MODAL_LAYER_STYLE,
+  getCreativeCanvasModalPopupContainer,
+} from "../canvasOverlayLayers";
+import {
   CREATIVE_IMAGE_DEFAULT_CROP,
   creativeImageCropToPixels,
   cropForCreativeImageAspect,
@@ -393,10 +397,9 @@ const CreativeImageCropDialog: React.FC<CreativeImageCropDialogProps> = (
       escToExit={!props.busy}
       closable={!props.busy}
       unmountOnExit
-      getPopupContainer={() =>
-        document.getElementById("resource-page-portal-root") ??
-        document.body
-      }
+      getPopupContainer={getCreativeCanvasModalPopupContainer}
+      maskStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
+      wrapStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
       onCancel={props.onClose}
     >
       <CreativeImageCropDialogContent {...props} />

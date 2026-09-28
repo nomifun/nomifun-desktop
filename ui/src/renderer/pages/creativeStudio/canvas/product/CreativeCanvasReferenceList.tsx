@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 
 import CreativeMediaLightbox from '../../assets/components/CreativeMediaLightbox';
 import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
+import { CREATIVE_CANVAS_MODAL_Z_INDEX } from '../canvasOverlayLayers';
 import type { CreativeCanvasPromptReferenceOption } from './CreativeCanvasReferencePromptInput';
 import styles from './CreativeCanvasReferenceList.module.css';
 
@@ -254,7 +255,7 @@ const CreativeCanvasReferenceList: React.FC<CreativeCanvasReferenceListProps> = 
         src={previewSource}
         posterSrc={previewReference.thumbnailUrl}
         title={previewReference.label}
-        zIndex={1700}
+        zIndex={CREATIVE_CANVAS_MODAL_Z_INDEX}
         onClose={() => setPreviewNodeId(null)}
       />
     ) : null}

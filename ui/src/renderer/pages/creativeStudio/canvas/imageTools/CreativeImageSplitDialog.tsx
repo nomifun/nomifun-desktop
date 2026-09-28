@@ -10,6 +10,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { CreativeAsset } from "../../assets";
+import {
+  CREATIVE_CANVAS_MODAL_LAYER_STYLE,
+  getCreativeCanvasModalPopupContainer,
+} from "../canvasOverlayLayers";
 import type { CreativeImageDimensions } from "./cropModel";
 import {
   CREATIVE_IMAGE_DEFAULT_SPLIT,
@@ -494,10 +498,9 @@ const CreativeImageSplitDialog: React.FC<CreativeImageSplitDialogProps> = (
       escToExit={!props.busy}
       closable={!props.busy}
       unmountOnExit
-      getPopupContainer={() =>
-        document.getElementById("resource-page-portal-root") ??
-        document.body
-      }
+      getPopupContainer={getCreativeCanvasModalPopupContainer}
+      maskStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
+      wrapStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
       onCancel={props.onClose}
     >
       <CreativeImageSplitDialogContent {...props} />
