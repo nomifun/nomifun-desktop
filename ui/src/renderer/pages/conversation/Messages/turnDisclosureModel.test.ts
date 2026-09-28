@@ -150,6 +150,57 @@ describe('buildTurnDisclosureItems', () => {
     expect(disclosure.state).toBe('failed');
   });
 
+  test('keeps the last partial result visible beside a terminal failure', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('progress-note', 'assistant', { createdAt: 1500 }),
+      item('patch', 'process', { createdAt: 2000, processState: 'failed' }),
+      item('partial-result', 'assistant', { createdAt: 2500 }),
+      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true }),
+    ], { tailClosed: true });
+    expect(result.map(entry => entry.id)).toEqual(['user', DISCLOSURE_1, 'partial-result', 'terminal-error']);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure');
+    expect(disclosure?.type).toBe('turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('missing disclosure');
+    expect(disclosure.processItemIds).toEqual(['progress-note', 'patch']);
+    expect(disclosure.state).toBe('failed');
+    expect(disclosure.endAt).toBe(3000);
+  });
+
+  test('uses message wall time when the failure row has a stable cursor timestamp', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('terminal-error', 'assistant', { createdAt: 1020, turnEndedAt: 4000, processState: 'failed', terminal: true }),
+      item('partial-result', 'assistant', { createdAt: 1050, displayAt: 3500 }),
+      item('late-text', 'assistant', { createdAt: 1060, displayAt: 4500 }),
+      item('delayed-old-text', 'assistant', { createdAt: 1070, displayAt: 3000 }),
+    ], { tailClosed: true });
+    const visible = result.filter(entry => entry.type === 'item').map(entry => entry.id);
+    expect(visible).toEqual(['user', 'terminal-error', 'partial-result']);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure');
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('missing disclosure');
+    expect(disclosure.processItemIds).toEqual(['late-text', 'delayed-old-text']);
+    expect(disclosure.state).toBe('failed');
+    expect(disclosure.endAt).toBe(4000);
+  });
+
+  test('late text and another turn cannot replace the preserved failure result', () => {
+    const result = buildTurnDisclosureItems([
+      item('user', 'user', { createdAt: 1000 }),
+      item('partial-result', 'assistant', { createdAt: 2500 }),
+      item('other-user', 'user', { turnId: TURN_2, createdAt: 2600 }),
+      item('other-answer', 'assistant', { turnId: TURN_2, createdAt: 2700 }),
+      item('terminal-error', 'assistant', { createdAt: 3000, processState: 'failed', terminal: true }),
+      item('late-partial', 'assistant', { createdAt: 3500 }),
+    ], { tailClosed: true });
+    const visible = result.filter(entry => entry.type === 'item').map(entry => entry.id);
+    expect(visible).toEqual(['user', 'partial-result', 'other-user', 'other-answer', 'terminal-error']);
+    const disclosure = result.find(entry => entry.type === 'turn_disclosure' && entry.turnId === TURN_1);
+    if (disclosure?.type !== 'turn_disclosure') throw new Error('missing disclosure');
+    expect(disclosure.processItemIds).toEqual(['late-partial']);
+    expect(disclosure.state).toBe('failed');
+  });
+
   test('keeps the final assistant answer outside the disclosure when earlier assistant text was intermediate', () => {
     const result = buildTurnDisclosureItems(
       [

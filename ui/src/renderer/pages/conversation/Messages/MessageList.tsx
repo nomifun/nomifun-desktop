@@ -903,6 +903,7 @@ const MessageList: React.FC<{
         turnId: role === 'user' ? getProcessedItemMsgId(item) : getProcessedItemTurnId(item),
         role,
         createdAt: getProcessedItemCreatedAt(item),
+        displayAt: item.type === 'text' ? item.content.display_at_ms : undefined,
         processState: getProcessItemState(item),
         processStartedAt: getProcessedItemProcessStartedAt(item),
         processEndedAt: getProcessedItemProcessEndedAt(item),
