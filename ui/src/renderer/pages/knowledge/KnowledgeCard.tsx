@@ -15,7 +15,7 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
-import { Tooltip } from '@arco-design/web-react';
+import { Spin, Tooltip } from '@arco-design/web-react';
 import { Delete, EditTwo, LinkOne } from '@icon-park/react';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import { formatSize } from './useKnowledge';
@@ -28,6 +28,8 @@ export interface KnowledgeCardProps {
   /** Map of tag key → IKnowledgeTag, for resolving base.tags to label + color. */
   tagMap?: Record<string, IKnowledgeTag>;
   onOpen?: (base: IKnowledgeBase) => void;
+  onPrefetch?: (base: IKnowledgeBase) => void;
+  opening?: boolean;
   onEdit?: (base: IKnowledgeBase) => void;
   onDelete?: (base: IKnowledgeBase, e: React.MouseEvent) => void;
 }
@@ -156,10 +158,30 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
   base,
   tagMap,
   onOpen,
+  onPrefetch,
+  opening = false,
   onEdit,
   onDelete,
 }) => {
   const { t } = useTranslation();
+  const prefetchTimerRef = React.useRef<number | null>(null);
+  const cancelPrefetch = () => {
+    if (prefetchTimerRef.current === null) return;
+    window.clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = null;
+  };
+  const prefetchNow = () => {
+    cancelPrefetch();
+    onPrefetch?.(base);
+  };
+  const schedulePrefetch = () => {
+    if (!onPrefetch || prefetchTimerRef.current !== null) return;
+    prefetchTimerRef.current = window.setTimeout(() => {
+      prefetchTimerRef.current = null;
+      onPrefetch(base);
+    }, 120);
+  };
+  React.useEffect(() => cancelPrefetch, []);
   const kindConfig = getKindConfig(base.kind, t);
   const metaItems = [
     base.file_count > 0 ? t('knowledge.card.fileCount', { count: base.file_count, defaultValue: '{{count}} 篇' }) : null,
@@ -176,7 +198,25 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
         'transition-all duration-160',
         'hover:border-[var(--color-border-3)] hover:shadow-[0_14px_38px_rgba(0,0,0,0.15)] hover:-translate-y-2px',
       ].join(' ')}
-      onClick={() => onOpen?.(base)}
+      role='button'
+      tabIndex={opening ? -1 : 0}
+      aria-busy={opening}
+      aria-label={`${t('knowledge.card.actionOpen', { defaultValue: '打开' })}: ${base.name}`}
+      data-knowledge-base-id={base.knowledge_base_id}
+      data-knowledge-opening={opening ? 'true' : 'false'}
+      onMouseEnter={schedulePrefetch}
+      onMouseLeave={cancelPrefetch}
+      onFocus={prefetchNow}
+      onPointerDown={prefetchNow}
+      onClick={() => {
+        if (!opening) onOpen?.(base);
+      }}
+      onKeyDown={(event) => {
+        if (!opening && (event.key === 'Enter' || event.key === ' ')) {
+          event.preventDefault();
+          onOpen?.(base);
+        }
+      }}
     >
       {/* Header: icon + name + badges */}
       <div className='flex items-center gap-10px'>
@@ -274,6 +314,21 @@ export const KnowledgeCard: React.FC<KnowledgeCardProps> = ({
           </div>
         </div>
       </div>
+      {opening ? (
+        <div
+          className='absolute inset-0 z-10 flex cursor-progress flex-col items-center justify-center gap-10px rounded-16px bg-[color-mix(in_srgb,var(--color-bg-2)_88%,transparent)] text-13px font-600 text-[var(--color-text-1)] backdrop-blur-5px'
+          role='status'
+          aria-live='polite'
+        >
+          <Spin dot size={18} />
+          <span>
+            {t('knowledge.openingNamed', {
+              name: base.name,
+              defaultValue: '正在打开“{{name}}”…',
+            })}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 };

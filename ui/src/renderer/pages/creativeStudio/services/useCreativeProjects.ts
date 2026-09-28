@@ -5,7 +5,7 @@
  */
 
 import { useCallback } from 'react';
-import useSWR,{ type SWRConfiguration } from 'swr';
+import useSWR, { preload, type SWRConfiguration } from 'swr';
 import type {
 CreativeProjectDetail,
 CreativeProjectDocument,
@@ -25,6 +25,21 @@ const CREATIVE_PROJECT_SWR_OPTIONS: SWRConfiguration = {
   revalidateOnFocus: false,
   shouldRetryOnError: false,
 };
+
+/**
+ * Start the document request before the large Canvas editor route mounts.
+ * SWR consumes the same keyed promise in both the product shell and editor, so
+ * an intent preload never creates a second request during navigation.
+ */
+export function preloadCreativeProject(
+  projectId: string,
+  repository: CreativeProjectRepository = creativeProjectRepository
+): Promise<CreativeProjectDetail> {
+  return preload(
+    creativeProjectDetailKey(projectId),
+    () => repository.load(projectId)
+  );
+}
 
 export function sortCreativeProjectSummaries(
   projects: readonly CreativeProjectSummary[]

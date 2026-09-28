@@ -76,6 +76,7 @@
 }
 
 .card {
+  position: relative;
   box-sizing: border-box;
   display: flex;
   min-width: 0;
@@ -101,6 +102,24 @@
     border-color 160ms ease,
     background-color 160ms ease,
     box-shadow 160ms ease;
+}
+
+.cardOpening {
+  position: absolute;
+  z-index: 4;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--color-bg-2, var(--bg-1)) 88%, transparent);
+  color: var(--color-text-1, var(--text-primary));
+  font-size: 13px;
+  font-weight: 550;
+  cursor: progress;
+  backdrop-filter: blur(5px);
 }
 
 .card:hover {

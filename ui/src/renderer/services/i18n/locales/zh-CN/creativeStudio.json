@@ -1274,6 +1274,7 @@
     "loading": "正在加载画布…",
     "newCanvas": "新建画布",
     "openCanvas": "打开画布",
+    "openingCanvas": "正在打开“{{title}}”…",
     "renameCanvas": "重命名",
     "renameFailed": "重命名失败，请重试。",
     "renamePlaceholder": "输入画布名称",

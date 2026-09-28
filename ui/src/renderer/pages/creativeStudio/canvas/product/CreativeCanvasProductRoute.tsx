@@ -27,7 +27,7 @@ import React, {
 } from 'react';
 import { flushSync } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 
 import {
   creativeAssetClient,
@@ -878,9 +878,25 @@ const CreativeCanvasProductRoute: React.FC = () => {
   // Legacy local adapter: the migrated product internals still use projectId.
   const projectId = canvasId;
   const navigate = useNavigate();
+  const location = useLocation();
   const { t, i18n } = useTranslation();
   const locale = i18n.resolvedLanguage ?? i18n.language ?? 'zh-CN';
   const project = useCreativeProject(projectId || null);
+  const openingCanvasTitle = useMemo(() => {
+    if (!location.state || typeof location.state !== 'object') return null;
+    if (!('canvasSummary' in location.state)) return null;
+    const summary = location.state.canvasSummary;
+    if (!summary || typeof summary !== 'object') return null;
+    if (
+      !('canvasId' in summary) ||
+      summary.canvasId !== canvasId ||
+      !('title' in summary) ||
+      typeof summary.title !== 'string'
+    ) {
+      return null;
+    }
+    return summary.title;
+  }, [canvasId, location.state]);
   const modelCatalog = useNomiCreativeModelCatalog();
   const templateRuntime = useCreativeTemplateRuntime();
   const templateAssetPicker = useCreativeAssetPickerDialog();
@@ -4768,6 +4784,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
     );
   const canvasTitle =
     project.detail?.project.title ??
+    openingCanvasTitle ??
     (project.isLoading
       ? t('creativeStudio.canvas.loadingTitle', {
           defaultValue: '正在载入画布…',
