@@ -225,6 +225,26 @@ mod tests {
         assert!(error.contains("exact contiguous substring"));
         assert!(!error.contains("src/ledger.js"));
     }
+
+    #[test]
+    fn explicit_failure_stop_policy_is_conservative_and_later_input_can_revoke_it() {
+        let input = |text: &str| {
+            crate::context_lifecycle::text_message(ChatRole::User, text.into())
+        };
+        assert!(failure_stop_requested(&[input(
+            "遇到错误立即停止并报告实际结果，不重试，不改用其他工具。"
+        )]));
+        assert!(failure_stop_requested(&[input(
+            "Apply one patch. Stop on error; do not retry or do more reads."
+        )]));
+        assert!(!failure_stop_requested(&[input(
+            "Explain the retry behavior and report errors."
+        )]));
+        assert!(!failure_stop_requested(&[
+            input("Stop after an error and do not retry."),
+            input("I inspected the result; you may retry now."),
+        ]));
+    }
 }
 
 pub(crate) fn validate_ledger_budget(next: &[AgentTaskRequirement]) -> Result<(), String> {
@@ -249,4 +269,68 @@ pub(crate) fn require_input_coverage(
         return Err("Use update_plan.requirements to record the obligations/constraints in every accepted input (input 0 is the original request); include newly accepted corrections. Plans cannot silently discard input.".into());
     }
     Ok(())
+}
+
+/// Conservative structured policy derived only from explicit accepted-user
+/// wording. This never grants a retry; a later accepted input can explicitly
+/// revoke an earlier stop policy. Requiring both stop-on-error and no-retry
+/// language avoids treating incidental mentions of either word as control.
+pub(crate) fn failure_stop_requested(inputs: &[ChatMessage]) -> bool {
+    let mut policy = None;
+    for input in inputs.iter().filter(|input| input.role == ChatRole::User) {
+        for text in input.content.iter().filter_map(|part| match part {
+            ChatContentPart::Text { text } => Some(text),
+            _ => None,
+        }) {
+            let normalized = text
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let retry_allowed = [
+                "you may retry",
+                "retry is allowed",
+                "continue retrying",
+                "可以重试",
+                "允许重试",
+                "继续重试",
+            ]
+            .iter()
+            .any(|phrase| normalized.contains(phrase));
+            if retry_allowed {
+                policy = Some(false);
+            }
+            let stop_on_error = [
+                "stop on error",
+                "on error stop",
+                "stop after an error",
+                "stop after any error",
+                "遇到错误立即停止",
+                "错误后立即停止",
+                "出错立即停止",
+                "失败立即停止",
+            ]
+            .iter()
+            .any(|phrase| normalized.contains(phrase));
+            let retry_forbidden = (normalized.contains("do not")
+                && normalized.contains("retry"))
+                || (normalized.contains("don't") && normalized.contains("retry"))
+                || [
+                "do not retry",
+                "don't retry",
+                "never retry",
+                "no retries",
+                "不重试",
+                "不要重试",
+                "不得重试",
+                "禁止重试",
+            ]
+            .iter()
+            .any(|phrase| normalized.contains(phrase));
+            if stop_on_error && retry_forbidden {
+                policy = Some(true);
+            }
+        }
+    }
+    policy.unwrap_or(false)
 }

@@ -421,6 +421,7 @@ pub(crate) async fn run_turn(
         &patch_recovery,
         tool_archive.as_ref(),
         long_horizon.as_ref(),
+        &retained_inputs,
         retained_inputs.len(),
         !request.context_resources.is_empty(),
         request.prior_task.as_ref(),
@@ -609,6 +610,7 @@ pub(crate) async fn run_turn(
             &patch_recovery,
             tool_archive.as_ref(),
             long_horizon.as_ref(),
+            &retained_inputs,
             retained_inputs.len(),
             !request.context_resources.is_empty(),
             request.prior_task.as_ref(),
@@ -1713,6 +1715,7 @@ struct AdaptiveContextSlots {
     completion: Option<usize>,
     discovery_catalog: Option<usize>,
     task_continuation: Option<usize>,
+    failure_stop: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1725,6 +1728,7 @@ fn synchronize_adaptive_context(
     patch_recovery: &crate::patch_recovery::PatchRecovery,
     tool_archive: Option<&crate::tool_archive::ToolArchive>,
     long_horizon: Option<&LongHorizonState>,
+    accepted_inputs: &[ChatMessage],
     input_revision: usize,
     resources: bool,
     prior_task: Option<&crate::AgentPriorTask>,
@@ -1778,24 +1782,19 @@ fn synchronize_adaptive_context(
     let continuation_plan_gate = prior_task.is_some_and(|prior| {
         long_horizon.is_some_and(|state| prior.requires_plan_update(&state.execution_plan))
     });
-    if continuation_plan_gate {
-        if !request
-            .input
-            .tools
-            .iter()
-            .any(|tool| tool.name == crate::planning::TOOL_NAME)
-        {
-            return Err(AgentEngineError::InvalidContract(
-                "imported task requires an exposed update_plan control".into(),
-            ));
-        }
-        // Apply the continuation gate after restoring the caller's requested
-        // choice. Also expose only the required control: compatible providers
-        // may treat tool_choice as a preference, while the frozen surface and
-        // response guard are authoritative.
-        request.input.tool_choice = ChatToolChoice::Specific {
-            name: crate::planning::TOOL_NAME.into(),
-        };
+    let failure_stop_gate = adaptive.task_ledger()
+        && long_horizon.is_some_and(|state| state.work_status.failed_tools > 0)
+        && crate::requirements::failure_stop_requested(accepted_inputs);
+    if failure_stop_gate {
+        let targets = patch_recovery.snapshot().targets;
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.failure_stop,
+            format!(
+                "The accepted user input explicitly requires stopping after an error and forbids retries. A tool error is now recorded. Do not read, inspect history, replan, or attempt another effect. Report the actual partial result now with report_completion and a blocked disposition; do not claim success or rollback. The user-visible summary must name every affected target and state that it failed or is only partial. A blocked criterion is not evidence: omit evidence_paths, evidence_call_ids, requirement_ids, step and scope_change. Use exactly the minimal shape {{\"summary\":\"...\",\"criteria\":[{{\"disposition\":\"blocked\",\"rationale\":\"...\"}}]}}. Affected patch targets: {}.",
+                serde_json::to_string(&targets).unwrap_or_else(|_| "[]".into())
+            ),
+        );
     }
     if tool_discovery {
         if let Some(catalog) = crate::tool_discovery::catalog(plan, discovered_tools) {
@@ -1860,13 +1859,44 @@ fn synchronize_adaptive_context(
             archive.context(),
         );
     }
-    if continuation_plan_gate {
+    if failure_stop_gate {
+        if !request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::completion::TOOL_NAME)
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "failure-stop policy requires an exposed report_completion control".into(),
+            ));
+        }
+        request
+            .input
+            .tools
+            .retain(|tool| tool.name == crate::completion::TOOL_NAME);
+        request.input.tool_choice = ChatToolChoice::Specific {
+            name: crate::completion::TOOL_NAME.into(),
+        };
+    } else if continuation_plan_gate {
         // Build every adaptive instruction and schema before narrowing the
         // provider-visible surface to the required control.
+        if !request
+            .input
+            .tools
+            .iter()
+            .any(|tool| tool.name == crate::planning::TOOL_NAME)
+        {
+            return Err(AgentEngineError::InvalidContract(
+                "imported task requires an exposed update_plan control".into(),
+            ));
+        }
         request
             .input
             .tools
             .retain(|tool| tool.name == crate::planning::TOOL_NAME);
+        request.input.tool_choice = ChatToolChoice::Specific {
+            name: crate::planning::TOOL_NAME.into(),
+        };
     }
     Ok(())
 }
@@ -3007,6 +3037,7 @@ mod tests {
             &recovery,
             None,
             Some(&state),
+            &turn_request.model_request.input.messages,
             1,
             false,
             Some(&prior),
@@ -3054,6 +3085,7 @@ mod tests {
             &recovery,
             None,
             Some(&state),
+            &turn_request.model_request.input.messages,
             1,
             false,
             Some(&prior),
@@ -4811,7 +4843,7 @@ mod tests {
         let model = Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![
             control_step("patch-once", "apply_patch", json!({"files":[{"path":"a"},{"path":"b"}]})),
             control_step("blocked", "report_completion", json!({
-                "summary":"Partial publication; stopped after the error as requested. Current files remain unverified.",
+                "summary":"Partial publication for a and b failed; stopped after the error as requested. Current files remain unverified.",
                 "criteria":[{"disposition":"blocked","rationale":"A patch failed and the user forbids further operations"}]
             })),
             text_step("must not request another model response"),
@@ -4832,7 +4864,19 @@ mod tests {
         assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::CompletionDelivered {text,..}
             if text.contains("Partial publication"))), "blocked result must reach the user without another tool call");
         assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
-        assert_eq!(model.requests.lock().unwrap().len(),2);
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(),2);
+        assert_eq!(requests[1].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),
+            vec![crate::completion::TOOL_NAME]);
+        assert_eq!(requests[1].input.tool_choice,ChatToolChoice::Specific {
+            name:crate::completion::TOOL_NAME.into(),
+        });
+        assert!(requests[1].input.instructions.iter().any(|instruction|
+            instruction.contains("explicitly requires stopping after an error")
+                && instruction.contains("Affected patch targets: [\"a\",\"b\"]")
+                && instruction.contains("omit evidence_paths")
+                && instruction.contains("minimal shape")));
+        drop(requests);
         assert_eq!(tools.0.load(Ordering::SeqCst),1);
         assert!(!events.iter().any(|event| matches!(event,AgentEngineEvent::TurnCompleted {..})));
         let recovery = events.iter().rev().find_map(|event| match event {

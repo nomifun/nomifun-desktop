@@ -1042,6 +1042,32 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 生产恢复筛选无需修改；仅测试/进度变更，无 renderer/Tauri/真实模型。强杀提交窗口、
   cancelled Session 删除、其他平台/角色及长期恢复门槛仍待验，不关闭完整共享 Case。
 
+### 共享失败即停与部分结果固定样本闭环（W51～W56，基线 `481152660`）
+
+- S-D02-13 / CTRL-007、FILE-031/039、A17/A18：W51 复用 W42 的提示、oracle、并发 helper
+  与三套独立 data/work/profile，在 W45 冻结构建 `8f43261a2137…` 上复验。`01` 通过；`02`
+  在首次参数错误后继续补丁/读取，`03` 在真实部分发布失败后继续重读/补丁。三次总计 43 模型步、
+  6 effects，首轮仍为 **1/3**；完整数据库、事件、模型轨迹与首次 FAIL 原样保留。
+- Runtime 新增保守的 accepted-input failure-stop：只有用户同时明确错误即停及禁止重试才生效，
+  后续明确允许重试可撤销。首个工具失败后完成全部上下文/Schema 构造，再把工具面收窄为仅
+  `report_completion`，强制 blocked 报告并禁止重读、历史、重规划和 effect。`apply_patch` 说明
+  同时补充一行替换必须使用 remove+add；context+add 只表示插入。解析器首次漏认英文
+  `on error stop` 的定向 FAIL 保留，修正后 4 项定向、Runtime 169/169、4 项关键回归各 20/20。
+- W53 用首版修复二进制 `4fc950c4c7df…` 正式复验，首个样本已做到一次 guarded patch、一次
+  rejected effect、错误后零文件/进程动作，但模型给 blocked criterion 填入不可用
+  `evidence_paths`，产生额外控制错误；修正后的摘要又没有点名两文件，严格 oracle 保留 FAIL。
+  门禁因此加入待恢复目标和精确最小报告形状，要求用户可见摘要逐项说明部分结果，blocked 条目
+  不得携带证据字段。对应回归和正式桌面构建通过；最终二进制为 `e2fc6f5e17ac…`。
+- W56 重新从同一官方备份恢复三套隔离数据，冻结二进制、GEN Revision、route/preset、提示与
+  helper。三个新 Session 均为 4 模型步、一次带两份全文摘要的多文件 patch、一次 rejected effect；
+  `first.txt` 的外来并发内容及保留发布对象为 after，`second.txt` 全文 hash 不变。每次均在首个
+  错误后直接 blocked 交付，零后续文件/进程动作、零额外工具错误，failed terminal 和两项 pending
+  target 保留；正式 UI 同时显示部分成功、两文件结果和不重试。canonical/disk/UI 全部独立通过，
+  聚合为 **N3=3/3**、12 模型步、3 effects；应用/helper/profile 全部清零并生成官方备份。
+- W55 复制已恢复 data 造成 storage-root 冲突，应用未进入 Case；该准备错误单独保留且不计分母，
+  W56 改为逐套官方 restore。W42/W51/W53 的历史失败不改写。完整角色、其他失败/完成分支、
+  Unix/macOS、100 seed、LONG/99% 与共享阶段仍待验，不关闭完整 Case。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
