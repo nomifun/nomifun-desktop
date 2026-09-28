@@ -1120,6 +1120,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 活动注册数量/资源上限、native callback 永不返回、完整 rescan/dropped/乱序 UI、其他平台、
   100 seed/LONG/99% 仍待验，不关闭完整 FILE-040 或共享阶段。
 
+### 共享 Unix 暂存源与失败清理（W60，基线 `9ab072a4f`）
+
+- S-D03-39 / FILE-019/020/025/028/038/039、A05/A07/A13：使用本机 WSL2 Ubuntu 6.18，
+  编译输出放 `/home`，夹具在 ext4 临时目录运行；仅源码来自 `/mnt/c`，不把 drvfs 的文件语义作为
+  验收。既有替换在最终检查后分别原地改写暂存、换入同字节异 inode，旧实现均返回成功并把错误
+  对象发布到目标。首次两项 FAIL 的完整 ext4 目录已复制到 W60 `01-before/`。
+- Unix 发布现在为所有暂存保留 inode 身份；rename/hard-link 前使用 `O_NOFOLLOW` 打开名称，核对
+  inode 与调用字节，并通过该句柄继承权限；发布后再次核对目标名称仍指向该 inode 且字节一致。
+  失败清理先核对同名对象身份，只删除本 operation 的暂存；异 inode 文件保留并设置
+  `temporary_cleanup_unconfirmed`。新建目标的 hard-link 分支也使用同一规则，未扩大文件权限。
+- 既有文件两项及新建文件一项 Linux 原生回归各 **20/20**；Unix `service::tests` **124/124**，
+  Windows `nomifun-file` **555/555**。首次重复脚本漏 WSL Cargo PATH 的夹具错误另存并修正。
+- Linux 全 crate 仍有 12 项单独失败：11 项为 WSL2 artifact 目录 fsync 的 EBADF，1 项为既有
+  native watcher 时序；没有忽略或修改它们来制造全组通过。身份核对→rename、身份检查→unlink
+  的最窄路径窗口、macOS 主 lane、完整 IO fault/UI/角色、100 seed/LONG/99% 仍待验，不关闭
+  完整 FILE Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

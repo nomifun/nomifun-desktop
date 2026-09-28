@@ -49,6 +49,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-39（FILE-019/020/025/028/038/039、A05/A07/A13 Unix 暂存源/清理子断言）：W60
+  在 WSL2 Ubuntu 6.18 的 ext4 临时目录执行原生 Linux 夹具；构建目标位于 WSL 私有目录，未把
+  drvfs 当 Unix 文件系统。最终核对后把暂存原地改写或换成同字节异 inode，旧 Unix 路径均返回
+  成功并发布错误对象；两项首次 FAIL 及 ext4 现场复制到 Windows 外部证据目录。现在所有 Unix
+  暂存都保留 inode 身份；rename/hard-link 前以 `O_NOFOLLOW` 打开并核对 inode/调用字节，权限按
+  已核对句柄继承，发布后再次核对目标身份/字节。失败清理仅删除仍属于该 operation 的 inode；
+  外来同名文件保留并将 cleanup 记为未确认。新建分支同样覆盖，三项 Linux 回归各 **20/20**，
+  Unix `service::tests` **124/124**；Windows `nomifun-file` **555/555**。
+  Linux 全 crate 另保留 12 项非本批失败：11 项 WSL artifact 目录 fsync 返回 EBADF、1 项已有
+  native watcher 时序，不能据此宣称 Linux 全组通过。身份核对到 rename、身份检查到 unlink 的
+  最窄路径窗口、macOS 主 lane、完整 IO fault/UI/角色及长期门槛仍开放，不关闭完整 FILE Case。
+
 - S-D03-38（FILE-040、AUTH-005、A09/A13/A17 watcher 尾事件子断言）：W59 把旧 native
   注册已排队的单文件事件延迟到同路径重订后分发，旧全局 callback 会按当前 path→owner 映射误投
   新 owner；首版夹具用非 canonical event path 未击中映射，假通过另存，纠正后首次产品 FAIL
