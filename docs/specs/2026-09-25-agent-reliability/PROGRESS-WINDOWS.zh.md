@@ -1181,6 +1181,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - macOS、非 UTF-8 Git path、更多 filemode、父目录并发置换、完整 VCS/角色、100 seed/LONG/99%
   仍待验，不关闭完整 VCS Case 或共享阶段。
 
-下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 watcher 丢批/重扫系统上下文（W64，基线 `ded5cae92`）
+
+- S-D03-42 / FILE-040、PORT-012、A08/A14/A15/A17：在 App watcher 队列内同时注入 native
+  rescan、会被拒绝的 `a/../b` 与合法 `src/visible.rs`。pre-turn batch 精确保留一个合法事件、
+  `dropped_event_count=1` 和 `rescan_required=true`；警告要求重读相关 workspace 状态，并说明不能
+  据此判定其他路径未变化。绝对 workspace root 不进入上下文，第二次读取为空。
+- 新回归继续经过 `merge_pre_turn_context` 组成实际 system prompt，确认上述 canonical JSON 与
+  对账说明没有在 contributor/提示合并边界丢失。现有生产实现直接通过；本批只增加跨层回归，
+  没有新增 Action、工具或权限，也未修改 renderer。
+- Linux Cargo 单项 **1/1**、watcher 上下文 **12/12**、新增用例 **20/20**；Windows Cargo 单项
+  **1/1**、watcher 上下文 **12/12**、新增用例 **20/20**。首次 WSL 通用命令在 lib 12 项通过后
+  继续启动零匹配 integration binary，因共享 `build.noindex` 混入异平台产物触发 loader 失败；
+  首次 `--exact` 过滤名不完整而执行 0 项。Windows 首次切回编译又在 `nomifun-db` 发生 rustc
+  栈溢出；提高该验证进程的 `RUST_MIN_STACK` 后同命令通过。三项首次 runner/编译失败均原样保留。
+- 本批是确定性的模型请求上下文组合验证，未调用模型或 Tauri UI。正式 UI 收到丢批后触发全量
+  对账、模型遵循重读提醒、重复/乱序恢复、macOS、100 seed/LONG/99% 仍待验，不关闭完整
+  FILE-040、PORT-012 或共享阶段。
+
+下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

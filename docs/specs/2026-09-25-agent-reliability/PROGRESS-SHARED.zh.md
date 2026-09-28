@@ -49,14 +49,27 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-42（FILE-040、PORT-012、A08/A14/A15/A17 workspace rescan/dropped 上下文组合子断言）：
+  既有 watcher 队列会分别记录已知丢弃数与原生 rescan 标记，但缺少跨过 pre-turn contributor 和
+  system prompt 合并边界的证明。W64 新增组合回归，同时注入一个合法相对事件、一个被拒绝路径和
+  native rescan；合并后的 canonical JSON 保留 `dropped_event_count=1`、`rescan_required=true` 与
+  合法事件，并明确要求重读相关状态、不得据此推断其他路径未变化。绝对 workspace root 不进入提示，
+  contributor 仍一次消费。现有生产路径直接通过，本批只补回归，未扩大 Action、工具或权限。
+  Linux/Windows 各有 watcher 上下文 **12/12**，新增组合用例各 **20/20**；两平台 Cargo 单项也
+  各 **1/1**。WSL 首次通用命令在已通过 lib 用例后误启动零匹配 integration binary，因共享构建目录
+  混入异平台产物触发 loader 失败；首次 `--exact` 又因过滤名不完整执行 0 项；Windows 首次切回编译
+  在 `nomifun-db` 发生 rustc 栈溢出。三项 runner/编译失败均保留，修正命令或提高编译线程栈后通过。
+  正式 UI 全量对账、模型是否遵循重读提醒、完整丢批/重复/乱序、macOS、100 seed/LONG/99% 仍开放，
+  不关闭完整 FILE-040、PORT-012 或共享阶段。
+
 - S-D04-01（PROC-011/012/014、A11/A13 Unix 确定 pre-spawn 子断言）：显式 Unix executable
   不存在或无 X_OK 时，旧路径先创建 watchdog，再在 exec/wrapper 失败后共用 setup deadline 回收，
   压力下可从确定“未启动”退化为 `start_lost`；macOS 产品 owner 还未启用已有 Seatbelt 策略。
   现将显式路径诊断及 sandbox 环境准备移到任何物理 authority 之前，bare PATH 名继续走真实
   exec 并保留 ABORT/watchdog 回收反例；Engine 只把确定的 pre-spawn 类型标为
   `user_code_not_started`。macOS 产品接线与原生结果见 M01-01；Linux/Windows 行为未据此代判。
-  macOS `nomi-process-runtime` 全组 **243/243**，显式路径及进程/PTY 压力回归通过；正式 UI、其他平台、完整
-  PROC/CMD/LONG 门槛仍开放，不关闭共享 D04。
+  macOS `nomi-process-runtime` 全组 **243/243**，显式路径及进程/PTY 压力回归通过；正式 UI、
+  其他平台、完整 PROC/CMD/LONG 门槛仍开放，不关闭共享 D04。
 
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
