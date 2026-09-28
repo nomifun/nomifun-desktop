@@ -29,6 +29,8 @@
     "viewDetail": "查看详情"
   },
   "backToList": "返回知识库列表",
+  "opening": "正在打开知识库…",
+  "openingNamed": "正在打开“{{name}}”…",
   "card": {
     "actionEdit": "编辑",
     "actionMore": "更多",

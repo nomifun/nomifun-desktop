@@ -226,7 +226,8 @@ const shouldDeferPersistence = (command: CanvasCommand): boolean =>
 
 const defaultLoading = (label: string) => (
   <div className={styles.centerState} data-creative-canvas-state='loading' role='status'>
-    {label}
+    <span className={styles.loadingSpinner} aria-hidden='true' />
+    <span>{label}</span>
   </div>
 );
 

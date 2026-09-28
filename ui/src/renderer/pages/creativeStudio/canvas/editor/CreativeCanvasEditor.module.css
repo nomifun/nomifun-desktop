@@ -201,8 +201,28 @@
   font-size: 16px;
 }
 
+.loadingSpinner {
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, rgb(var(--primary-6)) 24%, transparent);
+  border-top-color: rgb(var(--primary-6));
+  border-radius: 50%;
+  animation: creative-canvas-editor-spin 720ms linear infinite;
+}
+
+@keyframes creative-canvas-editor-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .connectionHandle {
     transition: none;
+  }
+
+  .loadingSpinner {
+    animation: none;
   }
 }

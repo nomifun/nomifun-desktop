@@ -1274,6 +1274,7 @@
     "loading": "Loading canvases…",
     "newCanvas": "New canvas",
     "openCanvas": "Open canvas",
+    "openingCanvas": "Opening “{{title}}”…",
     "renameCanvas": "Rename",
     "renameFailed": "Rename failed. Try again.",
     "renamePlaceholder": "Enter a canvas name",

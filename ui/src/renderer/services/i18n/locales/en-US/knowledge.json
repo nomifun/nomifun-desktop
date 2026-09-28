@@ -29,6 +29,8 @@
     "viewDetail": "View details"
   },
   "backToList": "Back to knowledge bases",
+  "opening": "Opening knowledge base…",
+  "openingNamed": "Opening “{{name}}”…",
   "card": {
     "actionEdit": "Edit",
     "actionMore": "More",
