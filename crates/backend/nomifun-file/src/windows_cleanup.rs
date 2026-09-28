@@ -18,6 +18,12 @@ pub(crate) struct OwnedFile {
     id: [u8; 16],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileIdentity {
+    volume: u64,
+    id: [u8; 16],
+}
+
 fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
     let mut info = FILE_ID_INFO::default();
     // SAFETY: the live handle and correctly sized writable buffer remain valid.
@@ -28,8 +34,42 @@ fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
 }
 
 impl OwnedFile {
+    pub(crate) fn capture_named_regular(path: &Path) -> io::Result<Self> {
+        use std::os::windows::fs::MetadataExt;
+        let file = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::other(
+                "publication recovery target changed type",
+            ));
+        }
+        let (volume, id) = identity(&file)?;
+        Ok(Self {
+            _file: file,
+            volume,
+            id,
+        })
+    }
+
     pub(crate) fn matches_handle(&self, file: &File) -> io::Result<bool> {
         Ok(identity(file)? == (self.volume, self.id))
+    }
+
+    pub(crate) fn identity(&self) -> FileIdentity {
+        FileIdentity {
+            volume: self.volume,
+            id: self.id,
+        }
+    }
+
+    pub(crate) fn matches_identity(&self, identity: FileIdentity) -> bool {
+        (self.volume, self.id) == (identity.volume, identity.id)
     }
 
     pub(crate) fn capture(file: &File) -> io::Result<Self> {
@@ -99,6 +139,11 @@ impl OwnedFile {
 
     pub(crate) fn restore(&self, backup: &Path, target: &Path) -> io::Result<()> {
         self.restore_with_hook(backup, target, || {})
+    }
+
+    pub(crate) fn move_no_replace(&self, source: &Path, target: &Path) -> io::Result<()> {
+        let current = self.open_owned(source, 0)?;
+        rename_no_replace(&current, target)
     }
 
     fn restore_with_hook(&self, backup: &Path, target: &Path, after_identity: impl FnOnce()) -> io::Result<()> {

@@ -1738,6 +1738,13 @@ struct PublicationProgress {
 }
 
 #[cfg(windows)]
+#[derive(Default)]
+struct UnverifiedReplacementRecovery {
+    replacement_returned: bool,
+    original_restored: bool,
+}
+
+#[cfg(windows)]
 struct StagedPublication<'a> {
     owner: &'a crate::windows_cleanup::OwnedFile,
     bytes: &'a [u8],
@@ -1788,7 +1795,11 @@ fn publish_patch_file_with_prepublication_hook(
     after_staging: impl FnOnce(),
     before_replace: impl FnOnce(),
     after_publication: impl FnOnce() -> Result<(), AppError>,
-    #[cfg(windows)] native_replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
+    #[cfg(windows)] native_replace: impl FnOnce(
+        &Path,
+        &Path,
+        &Path,
+    ) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
 ) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     #[cfg(windows)]
     if matches!(source, PublicationSource::Absent) {
@@ -2001,7 +2012,27 @@ fn replace_file_path(source: &Path, target: &Path, published: &mut bool, _expect
 }
 
 #[cfg(windows)]
-fn replace_file_windows_native(source: &Path, target: &Path, backup: &Path) -> std::io::Result<()> {
+fn replace_file_windows_native(
+    source: &Path,
+    target: &Path,
+    backup: &Path,
+) -> std::io::Result<crate::windows_cleanup::FileIdentity> {
+    // ReplaceFile opens the replacement name without sharing, so the read
+    // guard cannot remain open. Record the exact object at the native-call
+    // boundary; compensation later requires this identity to still own the
+    // target name and never acts on a post-dispatch concurrent replacement.
+    let source_identity = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?
+        .identity();
+    replace_file_windows_native_untracked(source, target, backup)?;
+    Ok(source_identity)
+}
+
+#[cfg(windows)]
+fn replace_file_windows_native_untracked(
+    source: &Path,
+    target: &Path,
+    backup: &Path,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
     let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
@@ -2024,7 +2055,7 @@ fn replace_file_windows_native(source: &Path, target: &Path, backup: &Path) -> s
 fn replace_file_path_windows_with(
     source: &Path, target: &Path, published: &mut bool,
     expected: Option<&[u8]>,
-    replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
     cleanup: impl FnOnce(&Path, &crate::windows_cleanup::OwnedFile) -> std::io::Result<()>,
 ) -> Result<(), AppError> {
     // Native fault-injection tests capture the source before their callback.
@@ -2047,7 +2078,7 @@ fn replace_file_path_windows_with(
 fn replace_file_path_windows_verified(
     source: &Path, target: &Path, progress: &mut PublicationProgress,
     expected: Option<&[u8]>, expected_identity: Option<&PublicationIdentity>, staged: StagedPublication<'_>,
-    replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
+    replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
     cleanup: impl FnOnce(&Path, &crate::windows_cleanup::OwnedFile) -> std::io::Result<()>,
 ) -> Result<(), AppError> {
     use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
@@ -2103,15 +2134,49 @@ fn replace_file_path_windows_verified(
     drop(staged_file);
     let replaced = replace(source, target, &backup);
     let error = match replaced {
-        Ok(()) => {
+        Ok(dispatched_identity) => {
             progress.published = true;
+            progress.temporary_consumed = true;
             let unverified = |reason: &str| AppError::Internal(format!(
                 "{FILE_WRITE_OUTCOME_UNKNOWN}; publication precondition or bytes are unverified ({reason}); retain original backup and reconcile before retry"
             ));
-            let mut published_file = staged.owner.open_for_verification(target).map_err(|error| unverified(&error.to_string()))?;
-            progress.temporary_consumed = true;
-            if !publication_bytes_match(&mut published_file, staged.bytes).map_err(|error| unverified(&error.to_string()))? {
-                return Err(unverified("intended bytes do not match"));
+            let mut published_file = match staged.owner.open_for_verification(target) {
+                Ok(file) => file,
+                Err(error) => {
+                    drop(access);
+                    let recovery = recover_unverified_replacement(
+                        source,
+                        target,
+                        &backup,
+                        &original_owner,
+                        dispatched_identity,
+                    );
+                    progress.temporary_consumed = !recovery.replacement_returned;
+                    return Err(unverified_replacement_error(
+                        &error.to_string(),
+                        &recovery,
+                    ));
+                }
+            };
+            let bytes_match = publication_bytes_match(&mut published_file, staged.bytes);
+            if !matches!(bytes_match, Ok(true)) {
+                let reason = match bytes_match {
+                    Ok(false) => "intended bytes do not match".to_owned(),
+                    Err(error) => error.to_string(),
+                    Ok(true) => unreachable!(),
+                };
+                drop(published_file);
+                drop(access);
+                let recovery =
+                    recover_unverified_replacement(
+                        source,
+                        target,
+                        &backup,
+                        &original_owner,
+                        dispatched_identity,
+                    );
+                progress.temporary_consumed = !recovery.replacement_returned;
+                return Err(unverified_replacement_error(&reason, &recovery));
             }
             // A successful path-based replacement does not prove it replaced
             // the object guarded above. Keep every recovery file until the
@@ -2146,6 +2211,52 @@ fn publication_bytes_match(file: &mut std::fs::File, expected: &[u8]) -> std::io
     let mut bytes = Vec::new();
     std::io::Read::by_ref(file).take(expected.len() as u64 + 1).read_to_end(&mut bytes)?;
     Ok(bytes == expected)
+}
+
+#[cfg(windows)]
+fn recover_unverified_replacement(
+    source: &Path,
+    target: &Path,
+    backup: &Path,
+    original_owner: &crate::windows_cleanup::OwnedFile,
+    dispatched_identity: crate::windows_cleanup::FileIdentity,
+) -> UnverifiedReplacementRecovery {
+    let mut recovery = UnverifiedReplacementRecovery::default();
+    let Ok(replacement_owner) = crate::windows_cleanup::OwnedFile::capture_named_regular(target)
+    else {
+        return recovery;
+    };
+    // The target can change again after ReplaceFile returns. Only undo the
+    // object observed at dispatch; a different current target belongs to the
+    // concurrent writer and remains available for reconciliation.
+    if !replacement_owner.matches_identity(dispatched_identity) {
+        return recovery;
+    }
+    if replacement_owner.move_no_replace(target, source).is_err() {
+        return recovery;
+    }
+    recovery.replacement_returned = true;
+    if original_owner.restore(backup, target).is_ok() {
+        recovery.original_restored = true;
+        return recovery;
+    }
+    if target.try_exists().ok() == Some(false)
+        && replacement_owner.move_no_replace(source, target).is_ok()
+    {
+        recovery.replacement_returned = false;
+    }
+    recovery
+}
+
+#[cfg(windows)]
+fn unverified_replacement_error(
+    reason: &str,
+    recovery: &UnverifiedReplacementRecovery,
+) -> AppError {
+    AppError::Internal(format!(
+        "{FILE_WRITE_OUTCOME_UNKNOWN}; publication source is unverified ({reason}); original_restored={}, replacement_returned={}; reconcile before retry",
+        recovery.original_restored, recovery.replacement_returned
+    ))
 }
 
 /// Split a file name into `(base, ext)` where `ext` includes the leading dot.
@@ -3245,11 +3356,11 @@ mod tests {
         let backup_name = std::cell::RefCell::new(PathBuf::new());
         let result = replace_file_path_windows_with(&temporary, &target, &mut published, None,
             |source, target, backup| {
-                replace_file_windows_native(source, target, backup)?;
+                let dispatched = replace_file_windows_native(source, target, backup)?;
                 fs::rename(backup, &retained)?;
                 fs::write(backup, b"foreign backup")?;
                 *backup_name.borrow_mut() = backup.to_path_buf();
-                Ok(())
+                Ok(dispatched)
             }, |backup, owner| owner.remove(backup));
         assert_eq!(fs::read(&target).unwrap(), b"patched");
         assert_eq!(fs::read(&retained).unwrap(), b"original");
@@ -3348,12 +3459,17 @@ mod tests {
         assert!(result.as_ref().is_err_and(file_write_outcome_unknown),
             "unverified source must not report success; fixture: {}", fixture.path().display());
         assert!(published);
-        assert_eq!(fs::read(&backup).unwrap(), b"original", "recovery evidence must survive");
+        assert_eq!(fs::read(&target).unwrap(), b"original",
+            "an unverified replacement source must be compensated before returning; fixture: {}",
+            fixture.path().display());
+        assert!(!backup.exists(), "the original backup should be consumed by confirmed compensation");
         if swap_identity {
             assert_eq!(fs::read(&retained).unwrap(), b"intended");
-            assert_eq!(fs::read(&target).unwrap(), b"intended");
+            assert_eq!(fs::read(&temporary).unwrap(), b"intended",
+                "the same-bytes foreign source must be returned to its pre-dispatch name");
         } else {
-            assert_eq!(fs::read(&target).unwrap(), b"tampered");
+            assert_eq!(fs::read(&temporary).unwrap(), b"tampered",
+                "the changed staged object must be returned for owned cleanup");
         }
     }
 
@@ -3479,6 +3595,94 @@ mod tests {
         replacement_source_race(true);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn unverified_source_compensation_preserves_a_post_dispatch_concurrent_target() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        let retained_publication = fixture.path().join("retained-publication.txt");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&temporary, b"intended").unwrap();
+        let mut published = false;
+        let mut backup_path = None;
+        let result = replace_file_path_windows_with(
+            &temporary,
+            &target,
+            &mut published,
+            Some(b"original"),
+            |source, target, backup| {
+                let dispatched = replace_file_windows_native(source, target, backup)?;
+                fs::rename(target, &retained_publication)?;
+                fs::write(target, b"post-dispatch concurrent")?;
+                backup_path = Some(backup.to_owned());
+                Ok(dispatched)
+            },
+            |backup, owner| owner.remove(backup),
+        );
+        fs::write(
+            fixture.path().join("observation.txt"),
+            format!(
+                "result={result:?}; published={published}; target={:?}; retained={:?}; backup={:?}",
+                fs::read(&target),
+                fs::read(&retained_publication),
+                backup_path.as_ref().map(fs::read),
+            ),
+        )
+        .unwrap();
+        assert!(result.as_ref().is_err_and(file_write_outcome_unknown));
+        assert!(published);
+        assert_eq!(fs::read(&target).unwrap(), b"post-dispatch concurrent");
+        assert_eq!(fs::read(&retained_publication).unwrap(), b"intended");
+        assert_eq!(fs::read(backup_path.unwrap()).unwrap(), b"original");
+        assert!(!temporary.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_swap_after_dispatch_identity_keeps_backup_without_unsafe_compensation() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        let retained = fixture.path().join("retained-intended.txt");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&temporary, b"intended").unwrap();
+        let mut published = false;
+        let mut backup_path = None;
+        let result = replace_file_path_windows_with(
+            &temporary,
+            &target,
+            &mut published,
+            Some(b"original"),
+            |source, target, backup| {
+                let dispatched = crate::windows_cleanup::OwnedFile::capture_named_regular(source)?
+                    .identity();
+                fs::rename(source, &retained)?;
+                fs::write(source, b"intended")?;
+                backup_path = Some(backup.to_owned());
+                replace_file_windows_native_untracked(source, target, backup)?;
+                Ok(dispatched)
+            },
+            |backup, owner| owner.remove(backup),
+        );
+        fs::write(
+            fixture.path().join("observation.txt"),
+            format!(
+                "result={result:?}; published={published}; target={:?}; retained={:?}; backup={:?}",
+                fs::read(&target),
+                fs::read(&retained),
+                backup_path.as_ref().map(fs::read),
+            ),
+        )
+        .unwrap();
+        assert!(result.as_ref().is_err_and(file_write_outcome_unknown));
+        assert!(published);
+        assert_eq!(fs::read(&target).unwrap(), b"intended");
+        assert_eq!(fs::read(&retained).unwrap(), b"intended");
+        assert_eq!(fs::read(backup_path.unwrap()).unwrap(), b"original");
+        assert!(!temporary.exists());
+    }
+
     #[derive(Default)]
     struct PublicationEvents(std::sync::Mutex<Vec<WebSocketMessage<serde_json::Value>>>);
 
@@ -3563,9 +3767,15 @@ mod tests {
             assert!(!failure.publication_verified);
             assert_eq!(failure.temporary_cleanup_unconfirmed, swap);
             assert!(file_write_outcome_unknown(&file_write_publication_error(failure)));
-            assert_eq!(fs::read(backup_path.unwrap()).unwrap(), b"original");
-            if swap { assert_eq!(fs::read(&retained).unwrap(), b"intended"); }
-            assert_eq!(fs::read(&target).unwrap(), if swap { b"intended" } else { b"tampered" });
+            assert!(!backup_path.unwrap().exists(), "confirmed compensation must consume the original backup");
+            assert_eq!(fs::read(&target).unwrap(), b"original");
+            if swap {
+                assert_eq!(fs::read(&retained).unwrap(), b"intended");
+                assert_eq!(fs::read(&temporary).unwrap(), b"intended",
+                    "the same-bytes foreign source is preserved at its pre-dispatch name");
+            } else {
+                assert!(!temporary.exists(), "the returned owned stage should be cleaned by identity");
+            }
         }
     }
 
