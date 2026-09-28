@@ -2922,6 +2922,17 @@ fn spawn_transaction(
     runtime: &tokio::runtime::Handle,
     output: Arc<OutputBuffer>,
 ) -> Result<SpawnTransaction, ProcessError> {
+    // Prepare and validate the command before creating the watchdog. In
+    // particular, a rejected sandbox environment or unavailable explicit
+    // executable is a proven pre-spawn failure and must not leave an
+    // unregistered cleanup authority behind.
+    let mut command = std_command_for(&request)?;
+    command.current_dir(&request.cwd);
+    apply_safe_environment_overrides(
+        &mut command,
+        &request.env,
+        &request.capability.sandbox,
+    )?;
     let _gate = lock_spawn_gate(deadline, cancelled)?;
     #[cfg(target_os = "macos")]
     if matches!(transport, SpawnTransport::Pty { .. }) {
@@ -3067,13 +3078,6 @@ fn spawn_transaction(
     let registration_fd = registration_child.as_raw_fd();
     #[cfg(test)]
     let registration_fault = options.registration_fault;
-    let mut command = std_command_for(&request)?;
-    command.current_dir(&request.cwd);
-    apply_safe_environment_overrides(
-        &mut command,
-        &request.env,
-        &request.capability.sandbox,
-    )?;
     let pty_slave_fd = pty.as_ref().map(PtyPair::slave_fd);
     let pty_master_fd = pty.as_ref().map(PtyPair::master_fd);
     match pty_child_stdio {
@@ -3406,6 +3410,7 @@ fn enforce_sandbox(request: &NormalizedProcessRequest) -> Result<(), ProcessErro
 }
 
 fn std_command_for(request: &NormalizedProcessRequest) -> Result<StdCommand, ProcessError> {
+    validate_explicit_unix_program(&request.command, &request.cwd)?;
     #[cfg(target_os = "macos")]
     if let SandboxPolicy::MacSeatbelt { write_roots } = &request.capability.sandbox {
         let trusted_temporary = trusted_macos_user_temp(&request.cwd)?;
@@ -3428,6 +3433,40 @@ fn std_command_for(request: &NormalizedProcessRequest) -> Result<StdCommand, Pro
     command.args(args);
     harden_subprocess_environment(&mut command);
     Ok(command)
+}
+
+fn validate_explicit_unix_program(
+    command: &CommandSpec,
+    cwd: &Path,
+) -> Result<(), ProcessError> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let CommandSpec::Program { program, .. } = command else {
+        return Ok(());
+    };
+    let program = Path::new(program);
+    if !program.is_absolute() && program.components().count() == 1 {
+        // Bare names deliberately retain execvp/PATH semantics. The sandbox
+        // wrapper or direct command resolves them at the real spawn.
+        return Ok(());
+    }
+    let program = if program.is_absolute() {
+        program.to_path_buf()
+    } else {
+        cwd.join(program)
+    };
+    let encoded = CString::new(program.as_os_str().as_bytes()).map_err(|_| {
+        ProcessError::InvalidCommand {
+            reason: "explicit executable path contains a NUL byte".to_owned(),
+        }
+    })?;
+    // SAFETY: encoded is a live NUL-terminated path and access only queries
+    // the current process credentials. The eventual exec remains authoritative
+    // if the path changes after this diagnostic preflight.
+    if unsafe { libc::access(encoded.as_ptr(), libc::X_OK) } == 0 {
+        return Ok(());
+    }
+    Err(spawn_failed(io::Error::last_os_error()))
 }
 
 fn command_argv(spec: &CommandSpec) -> (OsString, Vec<OsString>) {
@@ -4812,6 +4851,60 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn seatbelt_preflight_rejections_do_not_create_process_authority() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture_root = std::env::current_dir().expect("fixture root");
+        let workspace = tempfile::tempdir_in(&fixture_root).expect("workspace");
+        let workspace = workspace.path().canonicalize().expect("canonical workspace");
+
+        let mut tmpdir_request = request("/usr/bin/true".into(), Vec::new());
+        tmpdir_request.cwd = workspace.clone();
+        tmpdir_request.env.insert(
+            OsString::from("TMPDIR"),
+            OsString::from("/tmp/untrusted-override"),
+        );
+        tmpdir_request.capability = CapabilityPolicy {
+            cwd_roots: vec![workspace.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt {
+                write_roots: vec![workspace.clone()],
+            },
+        };
+
+        let script = workspace.join("not executable.sh");
+        fs::write(&script, "#!/bin/sh\nexit 0\n").expect("script fixture");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644))
+            .expect("remove executable mode");
+        let mut no_exec_request = request(script.into_os_string(), Vec::new());
+        no_exec_request.cwd = workspace.clone();
+        no_exec_request.capability = CapabilityPolicy {
+            cwd_roots: vec![workspace.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt {
+                write_roots: vec![workspace],
+            },
+        };
+
+        for (request, expected) in [
+            (tmpdir_request, "invalid_command"),
+            (no_exec_request, "spawn_failed"),
+        ] {
+            let audit = TestSpawnAudit::default();
+            let error = match spawn_with_fault(request, TestSpawnFault::None, &audit).await {
+                Ok(_) => panic!("Seatbelt preflight must reject before physical spawn"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), expected);
+            assert_eq!(audit.watchdog_pid.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.leader_pid.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.watchdog_reaps.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.leader_reaps.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.cleanup_attempts.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_profile_uses_only_canonical_capability_scoped_roots_and_trusted_temp() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -5072,10 +5165,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(unix_spawn)]
     async fn invalid_exec_abort_reaps_watchdog_without_group_signal() {
-        let request = request(
-            "/definitely/not/a/nomifun-executable".into(),
-            Vec::new(),
-        );
+        // A bare PATH name intentionally reaches execvp after watchdog setup;
+        // explicit missing paths are rejected by the zero-authority preflight.
+        let request = request("definitely-not-a-nomifun-executable".into(), Vec::new());
         let audit = TestSpawnAudit::default();
 
         let result = tokio::time::timeout(
