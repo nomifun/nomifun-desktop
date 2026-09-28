@@ -658,6 +658,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1.35;
+  box-shadow: none;
 }
 
 .nomi-companion-switcher__item,

@@ -190,7 +190,7 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
               <button type='button' className={styles.textButton} onClick={() => onManage(companion.companion_id)}>{t('guid.showcase.manage')}</button>
             </GuidPopover>
             <div className={styles.floatingControl}>
-              <span>{t('guid.showcase.floating')}</span>
+              {!collapsed && <span>{t('guid.showcase.floating')}</span>}
               {floatingSwitch(companion)}
             </div>
           </div>;
