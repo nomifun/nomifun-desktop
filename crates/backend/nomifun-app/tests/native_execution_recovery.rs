@@ -317,6 +317,72 @@ async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn cancel_interrupts_provider_retry_after_without_opening_another_request() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let handler_requests = requests.clone(); let handler_entered = entered.clone();
+    let provider = Router::new().route("/v1/chat/completions", axum::routing::post(move || {
+        let requests = handler_requests.clone(); let entered = handler_entered.clone();
+        async move {
+            requests.fetch_add(1,Ordering::SeqCst);
+            entered.notify_one();
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER,"60")],
+                axum::Json(json!({"error":{"message":"fixture cooldown","type":"rate_limit_error"}})),
+            )
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener,provider).await.unwrap(); });
+    let db = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let app = AppServices::from_config(db,&config).await.unwrap();
+    let router = create_router(&app).await;
+    let provider = call(&router,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"scripted retry cancellation", "base_url":format!("http://{address}/v1"),
+        "auth_scheme":"bearer","credentials":{"api_keys":["test-only"]},"enabled":true,
+        "initial_model":{"model":"step-3.7-flash","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","provider_params":{}}]}})).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
+    let preset = call(&router,"POST","/api/agent-presets/from-template/coding.codex",json!({"reuse_existing":false,"display_name":"Retry cancel fixture","model":model})).await;
+    let session = call(&router,"POST","/api/agent-sessions",json!({"preset_id":preset["preset"]["preset_id"],"model":model,"workspace":project,
+        "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"},{"resource_kind":"process_session","resource_id":"managed-process-session"},{"resource_kind":"project_memory","resource_id":"default-project-memory"}]})).await;
+    let id = session["agent_session_id"].as_str().unwrap();
+    let execution = format!("/api/agent-sessions/{id}/execution");
+    call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"retry-task",
+        "input":{"content":"Reply after the provider becomes available."}})).await;
+    tokio::time::timeout(Duration::from_secs(10),entered.notified()).await.unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst),1);
+    let started = tokio::time::Instant::now();
+    call(&router,"POST",&format!("/api/agent-sessions/{id}/turns/cancel"),json!({"idempotency_key":"cancel-retry"})).await;
+    let cancelled = tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let state = call(&router,"GET",&execution,Value::Null).await;
+            if state["state"] == "cancelled" { break state; }
+            assert_eq!(state["state"],"running","retry cancellation failed: {state}");
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2),"cancel waited for provider Retry-After");
+    assert_eq!(cancelled["checkpoint_retained"],false);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(requests.load(Ordering::SeqCst),1,"cancellation must prevent the retry attempt");
+    for (kind,count) in [("turn/cancelled",1i64),("turn/completed",0),("turn/failed",0)] {
+        let actual:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind=?")
+            .bind(id).bind(kind).fetch_one(app.database.pool()).await.unwrap();
+        assert_eq!(actual,count,"{kind}");
+    }
+    drop(router);
+    app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
+    server.abort(); let _ = server.await;
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn startup_resumes_crash_image_without_repeating_the_completed_write() {
     startup_recovery_scenario(false).await;
 }

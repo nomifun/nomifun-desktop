@@ -1005,6 +1005,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - Browser/MCP in-flight、cleanup 失败后的 owner attestation、macOS process group、真实会话 UI、
   其他角色及 N3/100 seed/LONG/99% 仍待验，不关闭完整 LIFE-016 或共享阶段。
 
+### 共享 Retry-After 中取消（W48，基线 `c114febf3`）
+
+- S-D09-03 / MODEL-020/022/023、LIFE-018、A08/A10/A11/A17/A19 子断言：正式 App 路由的
+  scripted provider 首次返回 HTTP 429 与 60 秒 `Retry-After`；确认首个请求到达后，通过 canonical
+  cancel endpoint 取消同一 Turn。独立墙钟断言在 2 秒内得到 cancelled，未等待服务端冷却。
+- 取消后 checkpoint 不保留；再观察 1 秒 provider 请求数仍为 1，零第二 attempt/工具调用；
+  canonical 恰好一个 cancelled，completed/failed 均为零。首次运行即通过，完整 App recovery
+  **5/5**，新增产品路径回归 **20/20**；Broker 退避/取消 **3** 项、HTTP Retry-After 秒数与
+  HTTP-date 解析 **2** 项通过。
+- 生产取消链无需修改；本批仅新增回归与进度，未改 renderer、未构建 Tauri。真实 provider
+  连接池/代理变化、cancel 与 effect receipt 竞争、正式 UI 点击停止、其他平台/角色及长期门槛
+  仍待验，不关闭完整共享 Case。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
