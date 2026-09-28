@@ -2730,6 +2730,29 @@ mod tests {
         assert_eq!(read.0["sha256"], artifact_id);
     }
 
+    #[test]
+    fn patch_failure_reports_unverified_publications_without_settlement_or_truncation() {
+        let observation = nomifun_file::AgentPatchFailureObservation {
+            failed_file: Some(63),
+            published: (0..64).collect(),
+            unverified_publications: (0..64).collect(),
+            restore_published_unconfirmed: (0..63).collect(),
+            temporary_cleanup_unconfirmed: (0..64).collect(),
+            ..Default::default()
+        };
+        let cause = operation_error("workspace.files/patch", AppError::Internal(
+            "workspace file publication outcome is unknown; published source could not be verified".into(),
+        ));
+        assert_eq!(cause.code, "EFFECT_OUTCOME_UNKNOWN");
+        let error = patch_failure_error(&cause.code, &cause.message, &observation, false);
+        assert!(error.message.len() < 2048);
+        let report: serde_json::Value = serde_json::from_str(&error.message).unwrap();
+        assert_eq!(report["journal_settlement"], "unconfirmed");
+        assert_eq!(report["observation"]["unverified_publications"], serde_json::json!((0..64).collect::<Vec<_>>()));
+        assert_eq!(report["observation"]["restore_published_unconfirmed"], serde_json::json!((0..63).collect::<Vec<_>>()));
+        assert_eq!(report["observation"]["temporary_cleanup_unconfirmed"], serde_json::json!((0..64).collect::<Vec<_>>()));
+    }
+
     #[tokio::test]
     async fn artifact_marker_in_patch_target_is_known_failure_without_pending_fence() {
         assert_eq!(operation_error("workspace.artifacts/publish",AppError::Conflict(

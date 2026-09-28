@@ -37,11 +37,12 @@ pub(crate) fn publish(
     let result = result.map_err(|error| PatchPublicationFailure {
         error,
         published,
+        content_verified: published,
         temporary_cleanup_unconfirmed: !published && remove_handle(&file).is_err(),
     });
     drop(file);
     result?;
     after_publication().map_err(|error| PatchPublicationFailure {
-        error, published: true, temporary_cleanup_unconfirmed: false,
+        error, published: true, content_verified: true, temporary_cleanup_unconfirmed: false,
     })
 }
