@@ -110,12 +110,13 @@ impl Wave2ApplicationHost {
 
     #[cfg(test)]
     pub(crate) fn for_workspace_root(workspace_root: impl Into<PathBuf>) -> Self {
-        Self::with_user_events(workspace_root, Arc::new(NullUserEvents))
+        Self::with_user_events(workspace_root, Arc::new(NullUserEvents), nomifun_file::WorkspaceInventoryCache::default())
     }
 
     pub(crate) fn with_user_events(
         workspace_root: impl Into<PathBuf>,
         user_events: Arc<dyn UserEventSink>,
+        inventory: nomifun_file::WorkspaceInventoryCache,
     ) -> Self {
         let workspace_root = workspace_root.into();
         let vcs_stage_owner = WorkspaceVcsStageOwner::new(&workspace_root)
@@ -125,9 +126,10 @@ impl Wave2ApplicationHost {
             .map(Arc::new)
             .map_err(|error| Arc::<str>::from(error.to_string()));
         Self {
-            files: Arc::new(FileService::new(
+            files: Arc::new(FileService::with_inventory_cache(
                 user_events,
                 vec![workspace_root.clone()],
+                inventory,
             )),
             artifacts,
             workspace_write_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2523,7 +2525,7 @@ mod tests {
         let bus = Arc::new(nomifun_realtime::BroadcastEventBus::new(16));
         let mut user_events = bus.subscribe_user();
         let mut public_events = bus.subscribe();
-        let host = Wave2ApplicationHost::with_user_events(directory.path(), bus)
+        let host = Wave2ApplicationHost::with_user_events(directory.path(), bus, nomifun_file::WorkspaceInventoryCache::default())
             .with_effect_store(test_effect_store().await);
         let context = context(directory.path());
 

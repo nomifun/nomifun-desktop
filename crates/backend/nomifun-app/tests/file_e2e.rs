@@ -94,6 +94,41 @@ async fn list_workspace_files_flat_list() {
 }
 
 #[tokio::test]
+async fn file_routes_share_inventory_with_another_scoped_owner() {
+    let (mut app, services) = build_app().await;
+    let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path();
+    std::fs::write(root.join("old.txt"), b"old").unwrap();
+    let request_list = || json_with_token("POST", "/api/fs/list", json!({"root": root}), &token, &csrf);
+    let response = app.clone().oneshot(request_list()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["data"].as_array().unwrap().len(), 1);
+
+    let owner = nomifun_file::FileService::with_inventory_cache(
+        services.event_bus.clone(), vec![root.to_path_buf()], services.file_inventory.clone(),
+    );
+    let scope = nomifun_file::workspace_binding(nomifun_common::generate_id(), "cache-binding", "workspace",
+        services.authoritative_user_id.to_string(),
+        [nomifun_file::WORKSPACE_READ_OPERATION, nomifun_file::WORKSPACE_WRITE_OPERATION, nomifun_file::WORKSPACE_DELETE_OPERATION], root).unwrap();
+    owner.write_file_for_agent_session(&scope, "new.txt", b"new").await.unwrap();
+    let response = app.clone().oneshot(request_list()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = body_json(response).await;
+    let mut names = listed["data"].as_array().unwrap().iter().map(|item| item["name"].as_str().unwrap()).collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["new.txt", "old.txt"]);
+
+    owner.remove_entry_for_agent_session(&scope, "old.txt").await.unwrap();
+    let response = app.clone().oneshot(request_list()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed = body_json(response).await;
+    assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["data"][0]["name"], "new.txt");
+    assert_eq!(std::fs::read(root.join("new.txt")).unwrap(), b"new");
+}
+
+#[tokio::test]
 async fn get_file_metadata_returns_info() {
     let (mut app, services) = build_app().await;
     let (token, csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;

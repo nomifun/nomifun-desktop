@@ -982,7 +982,9 @@ pub fn build_file_state(services: &AppServices) -> FileRouterState {
         allowed_roots.push(services.data_dir.clone());
     }
     let browse_roots = nomifun_file::browse::default_browse_roots();
-    let file_service = Arc::new(FileService::new(broadcaster.clone(), allowed_roots.clone()));
+    let file_service = Arc::new(FileService::with_inventory_cache(
+        broadcaster.clone(), allowed_roots.clone(), services.file_inventory.clone(),
+    ));
     let watch_service = Arc::new(FileWatchService::new(broadcaster, Arc::downgrade(&file_service)).expect("file watch service initialization"));
     let snapshot_service = Arc::new(SnapshotService::new());
     FileRouterState {

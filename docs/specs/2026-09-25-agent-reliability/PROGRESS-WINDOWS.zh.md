@@ -788,6 +788,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 其他预览类型/角色、丢批乱序、完整发布窗口、Unix/macOS、N3/100 seed/LONG/99% 仍待验，
   不计完整 Case 或共享阶段完成。
 
-下一步优先共享：FILE 目标名称发布窗口、跨 owner 缓存与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享 FILE 跨实例与相交根缓存（W37，基线 `d7ae3dad0`）
+
+- S-D03-33 / FILE-040 清单对账子断言：不同实例在通知时读到旧清单，嵌套写入/删除遗留
+  祖先缓存，重命名遗留旧名，四项首次 FAIL 与夹具见
+  `phase-2-3/2026-09-28/windows/w37-shared-inventory/02-native-before/`。
+  首轮测试宏限定名编译错误保留在 `01-before/`。
+- `03-before-ui/` 通过普通设置关闭 Office 自动预览，先查询 `@old`，再由真实模型创建
+  new.txt；磁盘与回执成功，但重新查询 `@new` 显示无匹配。原 UI FAIL、截图、DB、事件、
+  模型轨迹和两次 HTTP 200 清单读取保留；没有启动 Office watcher。
+- 修复见共享条目。**31 项去重定向通过，7 项新增各 20/20**，涵盖跨实例通知时序、相交
+  根写/删/重命名、读取权限、扫描中途失效、原有缓存/watcher 生命周期及正式路由接线。
+  未修改 renderer；复用已验证 UI 产物，正式 Tauri 构建与 diff 检查通过。
+- 新隔离 `07-after-ui/`（二进制 `cc233e17bb65…`）在同样配置下，新文件候选恢复、原文件
+  候选保留，UIA 的实际选项与独立磁盘字节、canonical 终态/回执一致。前后两个 GEN 会话
+  使用已有加密 StepFun Plan / step-3.7-flash，共 **6 模型步、2 returned effects**。
+  应用均已结束、profile 子进程为零并正式备份；首次传输计数漏读 backend log 的记录与
+  修正另存，没有覆盖原结果。
+- 未覆盖无 watcher 的外部变更、原生名称/映射发布竞态、完整丢批/乱序、Unix/macOS、
+  全部角色、N3/100 seed/LONG/99%；不计完整 Case 或共享阶段完成。
+
+下一步优先共享：FILE 目标名称发布窗口、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

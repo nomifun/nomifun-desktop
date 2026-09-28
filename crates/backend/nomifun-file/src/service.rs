@@ -225,13 +225,20 @@ impl Drop for WorkspaceInventoryRead<'_> {
     }
 }
 
+/// Application-scoped inventories shared by file owners. This contains no
+/// path authority: each service validates its own request before a cache hit.
+#[derive(Clone, Default)]
+pub struct WorkspaceInventoryCache {
+    entries: Arc<DashMap<String, Arc<WorkspaceInventory>>>,
+}
+
 /// A concrete implementation of [`crate::traits::IFileService`].
 pub struct FileService {
     user_events: Arc<dyn UserEventSink>,
     /// Allowed root directories for path safety validation.
     allowed_roots: Vec<std::path::PathBuf>,
     /// In-memory cache for `list_workspace_files`, keyed by canonical root.
-    workspace_files_cache: DashMap<String, Arc<WorkspaceInventory>>,
+    workspace_files_cache: Arc<DashMap<String, Arc<WorkspaceInventory>>>,
     /// Cancellation flags for in-progress ZIP operations, keyed by request_id.
     zip_cancellations: DashMap<String, Arc<AtomicBool>>,
     /// Serializes multi-file AgentSession patch commits within this service.
@@ -243,10 +250,18 @@ pub struct FileService {
 
 impl FileService {
     pub fn new(user_events: Arc<dyn UserEventSink>, allowed_roots: Vec<std::path::PathBuf>) -> Self {
+        Self::with_inventory_cache(user_events, allowed_roots, WorkspaceInventoryCache::default())
+    }
+
+    pub fn with_inventory_cache(
+        user_events: Arc<dyn UserEventSink>,
+        allowed_roots: Vec<std::path::PathBuf>,
+        inventory: WorkspaceInventoryCache,
+    ) -> Self {
         Self {
             user_events,
             allowed_roots,
-            workspace_files_cache: DashMap::new(),
+            workspace_files_cache: inventory.entries,
             zip_cancellations: DashMap::new(),
             agent_patch_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -786,6 +801,7 @@ impl FileService {
     }
 
     fn emit_content_observation(&self, owner_id: &str, canonical: &Path, content: Option<String>, workspace: &str) {
+        self.invalidate_caches_for_path(canonical);
         let workspace_path = Path::new(workspace);
         let relative_path = rel_to_api_string(
             canonical
@@ -1069,11 +1085,11 @@ impl FileService {
         if let Err(error) = removed {
             // Recursive removal may already have changed descendants. Diagnostic
             // reads must not return a listing cached before that attempt.
-            if let Ok(root) = std::fs::canonicalize(workspace) {
-                self.invalidate_cache(&root.to_string_lossy());
-            }
+            self.invalidate_caches_for_path(&canonical);
             return Err(error);
         }
+
+        self.invalidate_caches_for_path(&canonical);
 
         let workspace_path = Path::new(workspace);
         let relative_path = rel_to_api_string(
@@ -1129,10 +1145,16 @@ impl FileService {
         let canonical = validate_path_authority(path, authority)?;
 
         let new_name_owned = new_name.to_owned();
-        let path_owned = canonical;
-        let new_path: PathBuf = tokio::task::spawn_blocking(move || rename_entry_sync(&path_owned, &new_name_owned))
+        let path_owned = canonical.clone();
+        let renamed = tokio::task::spawn_blocking(move || rename_entry_sync(&path_owned, &new_name_owned))
             .await
-            .map_err(|e| AppError::Internal(format!("rename entry task failed: {e}")))??;
+            .map_err(|e| AppError::Internal(format!("rename entry task failed: {e}")))
+            .and_then(|result| result);
+        // The old name may already be gone even if the task cannot report its
+        // outcome. Revoke both name scopes before any caller can read again.
+        self.invalidate_caches_for_path(&canonical);
+        self.invalidate_caches_for_path(&canonical.with_file_name(new_name));
+        let new_path = renamed?;
 
         Ok(new_path.to_string_lossy().into_owned())
     }
@@ -4504,6 +4526,109 @@ mod tests {
         }
         assert!(!fixture.path().join("old.txt").exists());
         assert_eq!(fs::read(fixture.path().join("new.txt")).unwrap(), b"new");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inventory_owner_publications_are_visible_to_a_separate_reader_before_events() {
+        use crate::IFileService;
+        let fixture = inventory_fixture();
+        fs::write(fixture.path().join("old.txt"), b"old").unwrap();
+        let events = Arc::new(InventoryReadingEvents { service: std::sync::Mutex::new(std::sync::Weak::new()),
+            root: fixture.path().to_path_buf(), observations: std::sync::Mutex::new(Vec::new()) });
+        let inventory = WorkspaceInventoryCache::default();
+        let reader = Arc::new(FileService::with_inventory_cache(events.clone(), vec![fixture.path().to_path_buf()], inventory.clone()));
+        let writer = FileService::with_inventory_cache(events.clone(), vec![fixture.path().to_path_buf()], inventory);
+        *events.service.lock().unwrap() = Arc::downgrade(&reader);
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "cache-binding", "workspace", "owner",
+            [crate::WORKSPACE_READ_OPERATION, crate::WORKSPACE_WRITE_OPERATION, crate::WORKSPACE_DELETE_OPERATION], fixture.path()).unwrap();
+        reader.list_workspace_files(fixture.path().to_str().unwrap()).await.unwrap();
+        writer.write_file_for_agent_session(&binding, "new.txt", b"new").await.unwrap();
+        writer.remove_entry_for_agent_session(&binding, "old.txt").await.unwrap();
+        let observed = events.observations.lock().unwrap().clone();
+        fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&observed).unwrap()).unwrap();
+        assert_eq!(observed, [vec!["new.txt".to_owned(), "old.txt".to_owned()], vec!["new.txt".to_owned()]],
+            "another file owner must not serve stale names during delivery; fixture: {}", fixture.path().display());
+    }
+
+    async fn inventory_owner_overlapping_roots(mutation: &str) {
+        use crate::IFileService;
+        let fixture = inventory_fixture();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let nested = root.join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("old.txt"), b"old").unwrap();
+        let service = FileService::new(Arc::new(NullBroadcaster), vec![root.clone()]);
+        for path in [&root, &nested] { service.list_workspace_files(path.to_str().unwrap()).await.unwrap(); }
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "cache-binding", "workspace", "owner",
+            [crate::WORKSPACE_READ_OPERATION, crate::WORKSPACE_WRITE_OPERATION, crate::WORKSPACE_DELETE_OPERATION], &nested).unwrap();
+        let expected = match mutation {
+            "write" => {
+                service.write_file_for_agent_session(&binding, "new.txt", b"new").await.unwrap();
+                vec!["new.txt", "old.txt"]
+            }
+            "delete" => {
+                service.remove_entry_for_agent_session(&binding, "old.txt").await.unwrap();
+                vec![]
+            }
+            "rename" => {
+                service.rename_entry_for_agent_session(&binding, "old.txt", "renamed.txt").await.unwrap();
+                vec!["renamed.txt"]
+            }
+            _ => unreachable!(),
+        };
+        let ancestor = inventory_names(&service.list_workspace_files(root.to_str().unwrap()).await.unwrap());
+        let child = inventory_names(&service.list_workspace_files(nested.to_str().unwrap()).await.unwrap());
+        fs::write(root.join("observation.json"), serde_json::to_vec_pretty(&serde_json::json!({"mutation": mutation, "ancestor": ancestor, "child": child})).unwrap()).unwrap();
+        assert_eq!(ancestor, expected, "ancestor inventory stayed stale; fixture: {}", root.display());
+        assert_eq!(child, expected, "nested inventory stayed stale; fixture: {}", root.display());
+    }
+
+    #[tokio::test]
+    async fn inventory_owner_write_invalidates_ancestor_roots() { inventory_owner_overlapping_roots("write").await; }
+
+    #[tokio::test]
+    async fn inventory_owner_delete_invalidates_ancestor_roots() { inventory_owner_overlapping_roots("delete").await; }
+
+    #[tokio::test]
+    async fn inventory_owner_rename_invalidates_both_names() { inventory_owner_overlapping_roots("rename").await; }
+
+    #[tokio::test]
+    async fn inventory_owner_shared_cache_preserves_each_readers_path_authority() {
+        use crate::IFileService;
+        let fixture = inventory_fixture();
+        let allowed = fixture.path().join("allowed");
+        let other = fixture.path().join("other");
+        fs::create_dir(&allowed).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::write(allowed.join("private.txt"), b"private").unwrap();
+        let inventory = WorkspaceInventoryCache::default();
+        let first = FileService::with_inventory_cache(Arc::new(NullBroadcaster), vec![allowed.clone()], inventory.clone());
+        let second = FileService::with_inventory_cache(Arc::new(NullBroadcaster), vec![other.clone()], inventory);
+        assert_eq!(inventory_names(&first.list_workspace_files(allowed.to_str().unwrap()).await.unwrap()), ["private.txt"]);
+        assert!(second.list_workspace_files(allowed.to_str().unwrap()).await.is_err(), "a populated shared cache cannot grant a different service access");
+        assert!(second.list_workspace_files(other.to_str().unwrap()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn inventory_owner_publication_revokes_another_owners_in_flight_scan() {
+        use crate::IFileService;
+        let fixture = inventory_fixture();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        fs::write(root.join("old.txt"), b"old").unwrap();
+        let inventory = WorkspaceInventoryCache::default();
+        let reader = FileService::with_inventory_cache(Arc::new(NullBroadcaster), vec![root.clone()], inventory.clone());
+        let writer = FileService::with_inventory_cache(Arc::new(NullBroadcaster), vec![root.clone()], inventory);
+        let binding = crate::workspace_binding(nomifun_common::generate_id(), "cache-binding", "workspace", "owner",
+            [crate::WORKSPACE_READ_OPERATION, crate::WORKSPACE_WRITE_OPERATION], &root).unwrap();
+        let fired = AtomicBool::new(false);
+        let observed = reader.list_workspace_files_with_hook(root.to_str().unwrap(), &PathAuthority::Workspace(root.clone()), || async {
+            if !fired.swap(true, Ordering::SeqCst) {
+                writer.write_file_for_agent_session(&binding, "new.txt", b"new").await.unwrap();
+            }
+        }).await.unwrap();
+        assert!(fired.load(Ordering::SeqCst));
+        assert_eq!(inventory_names(&observed), ["new.txt", "old.txt"]);
+        assert_eq!(inventory_names(&reader.list_workspace_files(root.to_str().unwrap()).await.unwrap()), ["new.txt", "old.txt"]);
     }
 
     #[cfg(windows)]
