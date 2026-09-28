@@ -115,6 +115,27 @@ async fn browse_show_files_true_includes_files() {
 }
 
 #[tokio::test]
+async fn workspace_list_route_reconciles_external_changes_without_a_watcher() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("old.txt"), "old").unwrap();
+    let router = make_router(tmp.path());
+    let body = serde_json::json!({ "root": tmp.path().to_str().unwrap() });
+
+    let (status, first, raw) =
+        post_json(router.clone(), "/api/fs/list", body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "initial list failed: {raw}");
+    assert_eq!(first["data"].as_array().unwrap().len(), 1);
+
+    std::fs::write(tmp.path().join("new.txt"), "new").unwrap();
+    std::fs::remove_file(tmp.path().join("old.txt")).unwrap();
+    let (status, refreshed, raw) = post_json(router, "/api/fs/list", body).await;
+    assert_eq!(status, StatusCode::OK, "refresh list failed: {raw}");
+    let items = refreshed["data"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "explicit list returned a stale snapshot: {raw}");
+    assert_eq!(items[0]["relative_path"], "new.txt");
+}
+
+#[tokio::test]
 async fn browse_error_bodies_are_json_envelopes() {
     // The picker surfaces `errorData.error` from a JSON body; a sandbox
     // rejection must therefore arrive as the structured error envelope, not

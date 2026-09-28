@@ -961,7 +961,17 @@ impl FileService {
         root: &str,
         authority: &PathAuthority,
     ) -> Result<Vec<WorkspaceFlatFile>, AppError> {
-        self.list_workspace_files_with_hook(root, authority, || async {}).await
+        let canonical_root = validate_path_authority(root, authority)?;
+        let cache_key = canonical_root.to_string_lossy().into_owned();
+        // A completed inventory is only a notification/in-flight consistency
+        // snapshot. A new explicit API/tool read must reconcile native edits
+        // that happened without an active watcher. Do not retire a slot while
+        // another reader is still publishing or consuming that same snapshot.
+        self.workspace_files_cache.remove_if(&cache_key, |_, current| {
+            current.readers.load(Ordering::Acquire) == 0 && current.files.get().is_some()
+        });
+        self.list_workspace_files_with_hook(&cache_key, authority, || async {})
+            .await
     }
 
     async fn list_workspace_files_with_hook<Fut: std::future::Future<Output = ()>>(
@@ -4944,11 +4954,17 @@ mod tests {
         let authority = PathAuthority::Confined(vec![first.clone(), second.clone()]);
         service.list_workspace_files_impl(first.to_str().unwrap(), &authority).await.unwrap();
         service.list_workspace_files_impl(second.to_str().unwrap(), &authority).await.unwrap();
+        let second_key = fs::canonicalize(&second).unwrap().to_string_lossy().into_owned();
+        let second_slot = service.workspace_files_cache.get(&second_key).unwrap().clone();
         fs::write(first.join("new.txt"), b"new").unwrap();
         fs::write(second.join("new.txt"), b"new").unwrap();
         service.invalidate_cache(&fs::canonicalize(&first).unwrap().to_string_lossy());
+        assert!(Arc::ptr_eq(
+            &second_slot,
+            service.workspace_files_cache.get(&second_key).unwrap().value(),
+        ));
         assert_eq!(inventory_names(&service.list_workspace_files_impl(first.to_str().unwrap(), &authority).await.unwrap()), ["new.txt", "old.txt"]);
-        assert_eq!(inventory_names(&service.list_workspace_files_impl(second.to_str().unwrap(), &authority).await.unwrap()), ["old.txt"]);
+        assert_eq!(inventory_names(&service.list_workspace_files_impl(second.to_str().unwrap(), &authority).await.unwrap()), ["new.txt", "old.txt"]);
     }
 
     #[tokio::test]
