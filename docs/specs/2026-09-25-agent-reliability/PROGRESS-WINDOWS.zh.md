@@ -926,6 +926,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   W42 N3 仍为 1/3，不重写旧失败。完整角色/平台、N3、100 seed、LONG/99% 仍未验，
   不计完整 Case 或共享阶段完成。
 
-下一步优先共享：完成证据及恢复矩阵、失败后精确修复/范围变更的正式入口，FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享重启后精确修复（W44，基线 `8036f4363`）
+
+- S-D02-11 / CTRL-006/007、FILE-031、A05/A07/A17/A18/A19：从 W43 failed Session 的原始
+  正式备份恢复，固定提示要求重读两文件、只修 unresolved `second.txt`，不得再写 `first.txt`。
+  确定性 completed-only 来源 FAIL、`03-ui` 的旧构建 recovery 拒绝、`05-ui` 的 history 拒绝
+  （0 模型步）均保留；两层版本化只读状态现跨构建，Session/Turn/Snapshot 与记录格式仍精确校验，
+  运行中 checkpoint 不放宽。`09-ui` 又保留 recovered 后首个补丁提案被空计划门禁拒绝的 FAIL：
+  最终虽修复，但有 2 次 patch 调用、1 工具错误，独立判定不通过。恢复上下文刷新现只使已有
+  计划要求重规划，不再把空计划变成 effect gate。
+- **18 项去重定向通过，4 项新增各 20/20**；两次关闭增量的正式 Tauri 构建通过。最终
+  `12-ui/`（二进制 `3ecc583caf5e…`，同一 Session）用未污染 W43 备份及独立 data/profile：
+  5 模型步，effect 前重读 first/second，恰好一次只含 second 且绑定新摘要的 patch、一次成功
+  effect、零工具错误，成功后再读两文件。first SHA-256 和 mtime 均不变，second 精确变为 after，
+  v2 recovery 清空、canonical completed；UI 展开显示“已读取 4 个文件，已编辑 1 个文件”。
+  应用/profile 清零并生成官方备份，独立 verdict 为 `PASS_RESTART_REPAIR`。
+- 本批只记 recovered PASS，不把 W42 的首轮 1/3 改写为 N3，也不外推其他角色、范围变更、
+  Unix/macOS、100 seed、LONG/99% 或完整共享 Case。完整证据在仓库外 Windows W44。
+
+下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

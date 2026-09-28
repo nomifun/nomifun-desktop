@@ -80,10 +80,10 @@ pub(super) async fn load(
     };
     let source_terminal = facts.events.iter().find(|event| {
         event.correlation_id.as_ref() == source_operation
-            && event.kind.0 == "turn/completed"
+            && patch_recovery_source_terminal(event.kind.0.as_str())
     });
     if source_terminal.is_none() {
-        return Err(failure("recovery source is not a completed canonical Turn"));
+        return Err(failure("recovery source has no canonical terminal Turn"));
     }
     let source_start = facts.events.iter().find_map(|event| {
         if event.kind.0 != "runtime/progress-recorded"
@@ -105,13 +105,13 @@ pub(super) async fn load(
     let Some((recorded, turn_operation_id)) = source_start else {
         return Err(failure("recovery source has no engine binding"));
     };
-    let binding = receipt.session().engine_binding();
-    if recorded.agent_session_id() != &session
-        || turn_operation_id.as_ref() != source_operation
-        || recorded.build_id().as_ref() != binding.build_id
-        || recorded.build_digest().as_ref() != binding.build_digest
-        || recorded.resolved_snapshot_ref() != snapshot
-    {
+    if !patch_recovery_source_matches(
+        &recorded,
+        &turn_operation_id,
+        &session,
+        source_operation.as_str(),
+        snapshot,
+    ) {
         return Err(failure(
             "recovery state differs from exact Session engine/snapshot",
         ));
@@ -122,4 +122,118 @@ pub(super) async fn load(
         ));
     }
     Ok(state)
+}
+
+fn patch_recovery_source_terminal(kind: &str) -> bool {
+    matches!(kind, "turn/completed" | "turn/failed" | "turn/cancelled")
+}
+
+fn patch_recovery_source_matches(
+    recorded: &nomifun_agent_runtime::EngineBinding,
+    turn_operation_id: &OperationId,
+    session: &AgentSessionId,
+    source_operation: &str,
+    snapshot: &ResolvedSnapshotRef,
+) -> bool {
+    // This is a versioned, validated recovery obligation, not an executable
+    // checkpoint. It remains portable across app/engine builds while the exact
+    // Session, source Turn and immutable capability Snapshot stay identical.
+    recorded.validate().is_ok()
+        && recorded.agent_session_id() == session
+        && turn_operation_id.as_ref() == source_operation
+        && recorded.resolved_snapshot_ref() == snapshot
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{patch_recovery_source_matches, patch_recovery_source_terminal};
+    use nomifun_agent_contracts::{
+        AgentSessionId, DigestHex, OperationId, ResolvedSnapshotId, ResolvedSnapshotRef,
+        RuntimeBindingId,
+    };
+    use nomifun_agent_runtime::{EngineBinding, EngineBuildId};
+
+    #[test]
+    fn completed_failed_and_cancelled_turns_can_own_permanent_patch_recovery() {
+        for kind in ["turn/completed", "turn/failed", "turn/cancelled"] {
+            assert!(patch_recovery_source_terminal(kind), "{kind}");
+        }
+        for kind in [
+            "turn/started",
+            "turn/paused",
+            "turn/unknown",
+            "message/completed",
+        ] {
+            assert!(!patch_recovery_source_terminal(kind), "{kind}");
+        }
+    }
+
+    #[test]
+    fn versioned_patch_recovery_crosses_builds_but_not_session_turn_or_snapshot() {
+        let session = AgentSessionId::from("session");
+        let snapshot = ResolvedSnapshotRef {
+            snapshot_id: ResolvedSnapshotId::from("snapshot"),
+            snapshot_digest: DigestHex::from("a".repeat(64)),
+        };
+        let recorded = EngineBinding::new(
+            session.clone(),
+            RuntimeBindingId::from("old-runtime"),
+            EngineBuildId::from("old-build"),
+            DigestHex::from("b".repeat(64)),
+            snapshot.clone(),
+        )
+        .unwrap();
+        let operation = OperationId::from("old-turn");
+
+        assert!(
+            patch_recovery_source_matches(
+                &recorded,
+                &operation,
+                &session,
+                "old-turn",
+                &snapshot,
+            ),
+            "build identity is deliberately absent from this portable-state check"
+        );
+        assert!(!patch_recovery_source_matches(
+            &recorded,
+            &operation,
+            &AgentSessionId::from("other"),
+            "old-turn",
+            &snapshot,
+        ));
+        assert!(!patch_recovery_source_matches(
+            &recorded,
+            &OperationId::from("other"),
+            &session,
+            "old-turn",
+            &snapshot,
+        ));
+        let other = ResolvedSnapshotRef {
+            snapshot_id: ResolvedSnapshotId::from("other"),
+            snapshot_digest: DigestHex::from("c".repeat(64)),
+        };
+        assert!(!patch_recovery_source_matches(
+            &recorded,
+            &operation,
+            &session,
+            "old-turn",
+            &other,
+        ));
+        let malformed: EngineBinding = serde_json::from_value(serde_json::json!({
+            "agent_session_id": "session",
+            "runtime_binding_id": "old-runtime",
+            "build_id": "old-build",
+            "build_digest": "bad",
+            "resolved_snapshot_ref": snapshot,
+        }))
+        .unwrap();
+        assert!(!patch_recovery_source_matches(
+            &malformed,
+            &operation,
+            &session,
+            "old-turn",
+            malformed.resolved_snapshot_ref(),
+        ));
+    }
 }

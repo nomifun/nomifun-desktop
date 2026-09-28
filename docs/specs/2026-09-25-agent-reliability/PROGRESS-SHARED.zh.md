@@ -49,6 +49,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D02-11（CTRL-006/007、FILE-031、A05/A07/A17/A18/A19 重启后精确修复子断言）：W44 从
+  W43 failed Turn 的正式备份继续，先后保留 completed-only 来源拒绝、跨构建 recovery/history
+  等值拒绝，以及空计划被恢复上下文刷新误置 `needs_replan` 后首个补丁提案被拒的 FAIL。版本化
+  patch 状态与只读闭合历史现可跨应用构建读取，但仍校验记录格式、Session、来源 Turn 和精确/
+  模型兼容 Snapshot；运行中 checkpoint 继续绑定原构建。恢复读回只使既有计划失效，不再凭空
+  创建计划门禁。18 项去重定向通过，4 项新增各 20/20；最终正式 Tauri 5 模型步，先后各读两
+  文件、仅一次 second 补丁及一次成功 effect、零工具错误，first 摘要/mtime 不变，second 精确
+  修复，v2 recovery 清空且 canonical completed。该结果记 recovered PASS；W42 首轮 N3 仍为
+  1/3，完整角色/平台、范围变更、100 seed、LONG/99% 与共享阶段仍开放。
+
 - S-D02-10（CTRL-006/007、FILE-031、A05/A07/A17/A18 部分任务完成判定）：W42 第 3 次
   首次 FAIL 证明多文件补丁部分发布后，只要重读目标并把事实写成 supported，原任务就会
   误结 completed。根因是恢复状态把“已重读”和“未发布的任务义务”混为一体。v2 状态现
