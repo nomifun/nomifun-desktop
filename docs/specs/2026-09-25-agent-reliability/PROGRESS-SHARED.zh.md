@@ -347,6 +347,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   正式备份。cancel/自然退出真实竞态、忽略温和中断后的升级与后代清理、PTY、其他平台/角色、
   N3/100 seed/LONG/99% 仍开放，不关闭完整 CMD/PROC 或共享阶段。
 
+- S-D04-08（PROC-038、A13/A17/A19 cancel/自然退出线性化子断言）：W78 在暂停时间的 owner
+  夹具中固定两种竞争顺序。cancel 先取得 stop ownership、进程随后自然 reap 时，唯一终态保持
+  `Cancelled`；自然 reap fact 先发布、仍处于最终输出 drain 时再 cancel，唯一终态保持 `Exited`。
+  两种顺序的重复 cancel 与终态 poll 都逐字段等于首次结果，`cleanup.reaped=true`，底层 wait/reap
+  恰好一次；自然退出先胜时零 signal。生产实现首次即满足，未改清理、信号或权限逻辑，只新增
+  两项确定性回归。首次 **2/2**、两项各重复 **20/20**，process Runtime lib **122/122**。
+  真实 OS 调度竞争、并发 cancel waiter、child/grandchild、PTY、其他平台和长期压力仍开放，不关闭
+  完整 PROC-038 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
