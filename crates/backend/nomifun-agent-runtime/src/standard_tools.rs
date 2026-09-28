@@ -120,7 +120,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run a workspace process. Prefer command plus args for an ordinary single-executable invocation; every argument remains a literal argv token. Use cmd only when shell semantics such as pipelines, redirection, globbing, or compound syntax are required. Command alone never gets silently split or evaluated as shell text. Do not combine the two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a workspace process. Prefer command plus args for an ordinary single-executable invocation; every argument remains a literal argv token. With command, args must be an actual JSON array, never a quoted string containing JSON. Use cmd only when shell semantics such as pipelines, redirection, globbing, or compound syntax are required. Command alone never gets silently split or evaluated as shell text. Do not combine the two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -404,7 +404,7 @@ fn process_launch(include_wait: bool) -> Value {
     let mut properties = json!({
         "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":cmd_description},
         "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Preferred for an ordinary single executable: the executable name or path only, for example git, bun, /bin/ls, or powershell.exe. Never include arguments such as ls -la in this field."},
-        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Literal separate argument tokens, for example [\"status\",\"--short\"] for git or [\"-a\"] for /bin/ls."},
+        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Literal separate argument tokens as an actual JSON array value, for example [\"status\",\"--short\"] for git or [\"-a\"] for /bin/ls; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\"."},
         "cwd":{"type":"string","maxLength":4096},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
@@ -613,6 +613,10 @@ mod tests {
         assert!(properties["command"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("Preferred for an ordinary single executable")));
+        assert!(properties["args"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("JSON array value")
+                && description.contains("never a JSON-encoded string")));
     }
 
     #[test]

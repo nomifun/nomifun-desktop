@@ -652,6 +652,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   实际请求均带 false，每模型步一调用，文件/回读/答复完整。旧 FAIL 不改写。
   **该 GEN 场景 N3 通过**；Gemini 当前无对应请求字段，其他模型/角色/macOS 与长期统计仍待验。
 
+- S-D01-02（PROC-001/003、CTRL-006/007、A02/A17/A19 模型数组参数形状子断言）：W72 的
+  `report_completion.requirement_ids` 与 W74 的 `exec_command.args` 均曾把数组编码为 JSON 字符串；
+  前置 Schema 正确拒绝且零 dispatch，但合法任务出现可见错误。W75 两项首次说明回归确认字段虽为
+  `type=array`，模型说明没有明示“实际 JSON 数组、不得传字符串”。现只增强 process `args` 以及
+  completion 的 `criteria`/`requirement_ids`/`evidence_call_ids`/`evidence_paths` 模型可见说明，
+  保留严格类型校验、整批原子拒绝与零字符串强转。两项精确回归各 **20/20**，Agent Runtime
+  **175/175**。正式 Tauri `668062e479e6…` 中 step-3.7-flash 首次形成真实 `args` 数组，唯一进程
+  退出 0 且 `reaped=true`，UI 零异常，正确报告 300、`shape-0001.txt`、`shape-0300.txt`；单回合
+  2 个模型步、67 条事件，300 文件摘要不变，应用/profile 清零并正式备份。该单调用回合未暴露
+  `report_completion`，其数组说明只有组件证据；其他数组字段/Provider、N3/100 seed/LONG/99%
+  仍开放，不关闭完整 REG/CTRL/PROC 或共享阶段。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session
