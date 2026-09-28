@@ -104,6 +104,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   最终完整组通过，未加 sleep 或放宽断言。macOS 结果仍以原 M01-01 为准；正式 UI、更多 Unix
   发行版/架构与 LONG 门槛仍开放，不关闭完整 PROC Case 或共享阶段。
 
+- S-D04-03（CMD-135/150、A08/A17/A19 host shell Schema 子断言）：W65 的 Windows 正式样本
+  在 broad search 被有界 withheld 后，首个进程调用提交 `cmd: "dir /b /s burst"`；`cmd` 实际由
+  PowerShell 执行，因而产生可见失败。顶层工具说明虽带 host OS，但共享基础句先给出 Unix
+  `cmd=ls -la` 示例，字段级 Schema 又只写泛化 host shell。W67 首次回归确认 `cmd` 字段没有
+  PowerShell 事实。现移除跨平台基础说明中的 Unix 示例，并在字段层明确 Windows 为 PowerShell、
+  禁止直接使用 `dir /b`/`dir /s`，Command Prompt 必须显式 `command=cmd.exe` + 分离 args；Unix
+  字段明确 `/bin/sh -c`。合法输入集合、Action、权限和 owner 执行不变。Windows/Linux Runtime
+  各 **172/172**，新增平台 Schema 回归各 **20/20**。正式 Tauri `57515a20e31c…` 复验同类 400
+  文件场景：首个及后续三个进程调用均使用 PowerShell 且零进程错误，最终磁盘/UI/canonical 一致；
+  对账回合为 5 个模型步、264 条事件。broad-search withheld 仍是可见错误，因此仅关闭 host shell
+  映射子断言；macOS/Linux 真实模型、完整 CMD-135/150、N3/100 seed/LONG/99% 仍开放。
+
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
   分隔处理并返回成功，字面文件保持 staged。W63 诊断补出精确文件名；首版 one-entry 内存 index

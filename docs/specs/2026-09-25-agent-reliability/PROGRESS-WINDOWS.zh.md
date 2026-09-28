@@ -1238,6 +1238,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - macOS 原生行为不由 WSL/Windows 代判，仍引用远端 M01-01；更多 Unix 发行版/架构、正式 UI、
   100 seed/LONG/99% 仍待验，不关闭完整 PROC Case 或共享阶段。
 
+### 共享进程工具 host shell 字段说明（W67，基线 `c3bc6e0b9`）
+
+- S-D04-03 / CMD-135/150、A08/A17/A19；Windows CMD-133 子断言：W65 修复版正式样本在
+  `search_context_withheld` 后，首个进程调用是 `cmd: "dir /b /s burst"`。Windows 的 `cmd`
+  形态经 PowerShell 执行，因 Command Prompt 参数语法失败并在 UI 留下错误。现有顶层说明已经
+  声明 PowerShell，但基础句的 `cmd=ls -la` 示例与字段级泛化描述仍给模型相反暗示；首次 Schema
+  回归也确认字段中没有 `PowerShell`。
+- Runtime 工具基础说明不再嵌入 Unix 示例；`cmd` 字段按实际 process host 写明 Windows
+  PowerShell 与 Unix `/bin/sh -c`。Windows 字段明确 `dir /b`、`dir /s` 不能直接使用，需要
+  Command Prompt 时采用 `command=cmd.exe` 和独立 `args`。只改模型可见描述，不改 Schema 接受集、
+  Action、权限、调用 owner 或 shell 实现。
+- Windows/Linux Runtime 各 **172/172**；新增字段回归各 **20/20**。正式 Tauri 构建
+  `57515a20e31c…` 使用独立 data/work/profile、StepFun Plan / `step-3.7-flash` 和同类 400 文件
+  夹具。准备回合 1 步；对账回合 5 步：broad search 按 W65 边界 withheld 后，首个调用直接使用
+  PowerShell `Get-ChildItem`，三个进程调用全部成功，零进程错误；最终正确报告 400、
+  `marker-0001.txt`、`marker-0400.txt`，磁盘未变，canonical 两回合 completed，共 264 条事件。
+- 应用与 profile 子进程已清零并完成官方备份。单个真实模型样本不计 N3；UI 仍显示预期的 broad
+  search withheld，故不关闭完整正向 CMD-135/150。macOS/Linux 真实模型、其他 Agent、100 seed/
+  LONG/99% 仍待验。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
