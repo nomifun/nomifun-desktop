@@ -4175,6 +4175,7 @@ export type I18nKey =
   | 'messages.processReceipt.repeatedOperation'
   | 'messages.processReceipt.runCommands'
   | 'messages.processReceipt.runningCommands'
+  | 'messages.processReceipt.searchResultsLimited'
   | 'messages.processReceipt.searchedCode'
   | 'messages.processReceipt.searchedTarget'
   | 'messages.processReceipt.searchingCode'

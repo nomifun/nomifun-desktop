@@ -49,6 +49,7 @@
     "prepareResponse": "整理结果",
     "failedOperations": "{{count}} 项操作未完成",
     "recoveredOperations": "{{count}} 项操作出现异常",
+    "searchResultsLimited": "搜索结果受限，需要完整核对",
     "recoveredAfterRetry": "{{target}} 已恢复 · 重试 {{count}} 次",
     "summarySeparator": "，",
     "skippedAfterFailure": "此前操作失败，已跳过后续调用",

@@ -5,6 +5,7 @@ import { normalizeToolGroupStatus } from './toolGroupStatus';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
 export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight';
+export type NormalizedToolBoundedResult = 'search_context_withheld';
 
 interface NormalizedToolRetry {
   retryGroupId: string;
@@ -20,6 +21,8 @@ export interface NormalizedToolCall {
   kind?: string;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
+  /** Exact local Runtime result whose data was intentionally withheld at a documented bound. */
+  boundedResult?: NormalizedToolBoundedResult;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
   skipped?: boolean;
   /** The runtime rejected the call before dispatching it to the tool. */
@@ -164,6 +167,25 @@ const isOrdinaryDirectProbeFailure = (name: unknown, status: unknown, output: un
   return isExplicitProbeMiss(name, output);
 };
 
+const isSearchContextWithheld = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (name !== 'search_files' || status !== 'error') return false;
+  const text = toDisplayText(output).trim();
+  if (!text || text.length > 4096) return false;
+  try {
+    const value = JSON.parse(text) as Record<string, unknown>;
+    if (!value || Array.isArray(value) || typeof value !== 'object') return false;
+    if (Object.keys(value).sort().join(',') !== 'kind,notice,search_executed,snippets_withheld') return false;
+    return value.kind === 'search_context_withheld'
+      && value.search_executed === true
+      && value.snippets_withheld === true
+      && typeof value.notice === 'string'
+      && value.notice.length > 0
+      && value.notice.length <= 2048;
+  } catch {
+    return false;
+  }
+};
+
 const skippedAfterPriorErrorPrefix = 'Skipped because a previous tool call in this assistant turn failed.';
 
 const isSkippedAfterPriorError = (status: unknown, output: unknown): boolean =>
@@ -228,6 +250,10 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
   const skipped = isSkippedAfterPriorError(status, output);
   const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
   const runtimePreflightNotExecuted = !skipped && isRuntimePreflightNotExecuted(name, status, output);
+  const searchContextWithheld = isSearchContextWithheld(name, status, output);
+  const nonFatalFailure = searchContextWithheld
+    || isOrdinaryShellExit(name, status, output)
+    || isOrdinaryDirectProbeFailure(name, status, output);
 
   return {
     key: toDisplayText(call_id),
@@ -236,9 +262,8 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
     ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),
-    ...(isOrdinaryShellExit(name, status, output) || isOrdinaryDirectProbeFailure(name, status, output)
-      ? { nonFatalFailure: true }
-      : {}),
+    ...(searchContextWithheld ? { boundedResult: 'search_context_withheld' as const } : {}),
+    ...(nonFatalFailure ? { nonFatalFailure: true } : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
     output:

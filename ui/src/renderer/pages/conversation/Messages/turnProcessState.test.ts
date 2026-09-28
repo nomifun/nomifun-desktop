@@ -36,6 +36,23 @@ describe('turn process state', () => {
     ).toBe('canceled');
   });
 
+  test('keeps an exact bounded search result from failing the turn receipt', () => {
+    expect(getToolMessagesProcessState([{
+      type: 'tool_call',
+      content: {
+        call_id: 'call-search',
+        name: 'search_files',
+        status: 'error',
+        output: JSON.stringify({
+          kind: 'search_context_withheld',
+          search_executed: true,
+          snippets_withheld: true,
+          notice: 'Narrow the search before using snippets.',
+        }),
+      },
+    } as any])).toBe('completed');
+  });
+
   test('keeps the root error failed while classifying barrier-skipped commands as canceled', () => {
     const skipped = {
       type: 'tool_call',

@@ -49,6 +49,7 @@
     "prepareResponse": "Prepare the result",
     "failedOperations": "{{count}} operations did not complete",
     "recoveredOperations": "{{count}} operations encountered an error",
+    "searchResultsLimited": "Search results limited; full reconciliation required",
     "recoveredAfterRetry": "{{target}} recovered · retried {{count}} times",
     "summarySeparator": ", ",
     "skippedAfterFailure": "Skipped after an earlier failed operation",

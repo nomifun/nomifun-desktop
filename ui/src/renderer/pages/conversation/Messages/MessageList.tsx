@@ -47,6 +47,8 @@ import TurnProcessReceipt, { type TurnProcessReceiptIcon } from './components/Tu
 import {
   buildToolReceiptDetailRows,
   buildToolReceiptSummaryParts,
+  countBoundedSearchResults,
+  countNonFatalToolFailures,
   getToolReceiptIconFromSummaryParts,
   type ToolReceiptSummaryPart,
 } from './components/toolGroupSummaryModel';
@@ -438,8 +440,7 @@ const countRecoveredToolFailures = (
     (count, row) => count + (row.attempts?.filter((attempt) => attempt.state === 'failed').length ?? 0),
     0
   );
-  const nonFatalFailures = tools.filter((tool) => tool.nonFatalFailure === true).length;
-  return retryFailures + nonFatalFailures;
+  return retryFailures + countNonFatalToolFailures(tools);
 };
 
 const buildProcessReceiptSummary = (
@@ -453,6 +454,7 @@ const buildProcessReceiptSummary = (
     const tools = normalizeToolMessages(item.messages);
     const receiptParts = buildToolReceiptSummaryParts(tools, state);
     const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
+    const boundedSearchCount = countBoundedSearchResults(tools);
     const recoveredFailureCount = options.recovered
       ? Math.max(1, buildToolReceiptDetailRows(tools).filter((row) => row.state === 'failed').length)
       : countRecoveredToolFailures(tools);
@@ -462,6 +464,10 @@ const buildProcessReceiptSummary = (
           count: recoveredFailureCount,
           defaultValue: '{{count}} operations encountered an error',
         })
+      : boundedSearchCount > 0
+        ? t('messages.processReceipt.searchResultsLimited', {
+            defaultValue: 'Search results limited; full reconciliation required',
+          })
       : receiptParts.length
         ? receiptParts.map((part) => formatToolReceiptPart(part, t)).join(summarySeparator)
         : t('messages.processReceipt.tools', {
@@ -473,7 +479,7 @@ const buildProcessReceiptSummary = (
       icon: getToolReceiptIconFromSummaryParts(receiptParts) ?? getToolReceiptIcon(item.messages),
       defaultExpanded: false,
       hasDetail: true,
-      ...(recovered ? { recovered: true } : {}),
+      ...(recovered || boundedSearchCount > 0 ? { recovered: true } : {}),
     };
   }
 

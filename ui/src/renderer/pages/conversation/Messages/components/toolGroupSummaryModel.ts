@@ -52,6 +52,12 @@ export interface ToolReceiptDetailRow {
   attempts?: ToolReceiptAttemptRow[];
 }
 
+export const countBoundedSearchResults = (tools: NormalizedToolCall[]): number =>
+  tools.filter((tool) => tool.boundedResult === 'search_context_withheld').length;
+
+export const countNonFatalToolFailures = (tools: NormalizedToolCall[]): number =>
+  tools.filter((tool) => tool.nonFatalFailure === true && tool.boundedResult === undefined).length;
+
 interface ToolReceiptAttemptRow {
   key: string;
   attemptNo: number;

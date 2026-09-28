@@ -1,6 +1,6 @@
 # 跨平台共享 Case 处理进度
 
-更新：2026-09-28。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-09-29。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 本表管理 675 个 Both Case 的公共根因；Windows/macOS 产品验收分别记在各自文档。
 本轮 S-P0-01～05 已完成共享子断言的走查、修复与回归；不等于 675 条完整 Case 全部通过。
 当前优先共享队列，相关 Windows 修复一并完成；共享阶段结算后通知并交付 macOS 接续 prompt，
@@ -205,6 +205,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   `second.txt` 失败，canonical/disk/UI 独立断言全部通过。总计 12 模型步、3 effects，应用、helper、
   profile 清零并正式备份，**修复后固定样本 N3=3/3**。W42/W51/W53 的旧失败不改写；其他角色、
   普通完成分支的完整矩阵、Unix/macOS、100 seed、LONG/99% 及共享阶段仍未关闭。
+
+- S-D02-14（FILE-015、A08/A15/A17/A19 有界搜索 UI 分类子断言）：W67 正式 Tauri 样本中，
+  `search_files` 按既有资源上限返回精确 `search_context_withheld` 后，Runtime 正确要求模型完整
+  核对，但 UI 把该预期有界结果汇总为“1 项操作出现异常”；首次可见失败和 canonical 结果均保留。
+  W68 只对本地 `search_files`、`status=error`、四个精确字段且布尔值成立的结果增加
+  `boundedResult` 分类；canonical `is_error=true`、模型重规划和可展开详情不变。格式错误、多字段、
+  远端或其他工具错误继续按失败处理。Turn 回执不再把该结果计入普通错误数，改用琥珀色“搜索结果
+  受限，需要完整核对”。三组定向 UI 回归 **72/72**，typecheck、i18n parity 与桌面 UI 边界通过。
+  正式 Tauri `a1d254ff1c18…` 使用隔离 data/work/profile 与 StepFun Plan / `step-3.7-flash` 重验
+  400 文件 burst：canonical 仍是有界错误，随后两个 PowerShell 只读调用成功，最终磁盘/UI/
+  canonical 一致报告 400、`marker-0001.txt`、`marker-0400.txt`；工作区摘要未变，两回合 completed、
+  214 条事件，应用/profile 清零并完成官方备份。其他有界结果、其他 Agent/平台、完整 FILE-015、
+  100 seed/LONG/99% 仍开放，不关闭共享阶段。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
