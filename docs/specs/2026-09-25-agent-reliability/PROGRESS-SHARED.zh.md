@@ -58,6 +58,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **464/464**；Linux、更多 Unicode case-fold、ACL 竞态、IO fault、正式 UI/角色及长期门槛仍开放，
   不关闭完整 FILE Case 或共享阶段。
 
+- S-D03-44（FILE-013/015、A15/A17/A19 广搜后的 instruction lookup 资源子断言）：W65 正式
+  Tauri 基线在独立 workspace 外部写入 400 个同标记文件；模型以 `search_files(limit=200)` 对账时，
+  Runtime 会对每个唯一命中再做精确 instruction-scope lookup。首个搜索因此产生 **100** 次内部读取，
+  整个回合累计 **415** 次内部读取、**2,313** 条 canonical 事件；最终虽正确报告 400、首尾文件且
+  磁盘未变，但过程显示工具错误并用了 11 个模型步，首次 FAIL/RECOVERED 保留，不计正向 Case 通过。
+  搜索结果进入模型前现独立限制最多 64 个唯一 instruction hit path；公开搜索上限和 owner 扫描不变，
+  超界搜索已执行但 snippets 明确 withheld，且在逐命中读取前停止，不增加 Action、授权或 ambient IO。
+  64 项接受/65 项拒绝回归在 Windows/Linux 各 **20/20**，W65 源码同步远端前两平台 Runtime
+  各 **171/171**；同步远端 `b046314cd` 后 Windows 仍 **171/171**，Linux 在用例启动前被该远端
+  Unix 文件新增但未导入 `Path` 的编译错误阻断，首次失败保留并单独转 W66，不混入本批修复。
+  修复版正式样本使用相同 400 文件内容摘要，首个搜索内部读取从 100 降至 5（只含固定根/AGENTS
+  预检），总内部读取 **68**、canonical 事件 **664**，最终磁盘/UI/canonical 仍一致。该单样本仍有
+  可见命令/完成报告错误并用了 16 个模型步，只证明资源 fan-out 已有硬界；完整搜索 UX、真实 native
+  dropped 数独立观测、其他 Agent/macOS、100 seed/LONG/99% 仍开放，不关闭完整 FILE Case 或共享阶段。
+
 - S-D03-42（FILE-040、PORT-012、A08/A14/A15/A17 workspace rescan/dropped 上下文组合子断言）：
   既有 watcher 队列会分别记录已知丢弃数与原生 rescan 标记，但缺少跨过 pre-turn contributor 和
   system prompt 合并边界的证明。W64 新增组合回归，同时注入一个合法相对事件、一个被拒绝路径和

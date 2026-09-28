@@ -1199,6 +1199,30 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   对账、模型遵循重读提醒、重复/乱序恢复、macOS、100 seed/LONG/99% 仍待验，不关闭完整
   FILE-040、PORT-012 或共享阶段。
 
+### 共享广搜 instruction lookup 资源上限（W65，基线 `f7b9db045`）
+
+- S-D03-44 / FILE-013/015、A15/A17/A19：正式 Tauri 基线 `5737d45caf98…` 使用独立安装、
+  workspace/profile 和 StepFun Plan / `step-3.7-flash`。准备回合 1 步、零工具；随后由应用外写入
+  400 个 `marker-0001.txt`～`marker-0400.txt`，内容摘要 `2854742e…ec43`，再要求同一 Session
+  统计标记总数和首尾名称。完整数据库、事件、截图、模型轨迹和官方备份均在仓库外。
+- 基线模型首个 `search_files(limit=200)` 后，Runtime 对每个唯一 hit 做 instruction-scope lookup，
+  单次产生 **100** 个内部读取；回合合计 **415** 个内部读取、**2,313** 条 canonical 事件、11 个
+  模型步。最终答复与独立磁盘一致，但 UI 曾显示工具错误，按统一规则保留 FAIL/RECOVERED，不把
+  正确终值改记正向 Case 通过。65-hit 定向测试也首次失败，证明旧边界仍接受无上限 fan-out。
+- Runtime 现在另设 64 个唯一 hit path 的 instruction-discovery 上限。64 项继续接受；第 65 项在任何
+  逐命中读取前返回 `search_context_withheld`。原 owner 搜索仍真实执行且公开 `limit<=200` 不变，
+  snippets 不会在缺少完整 instruction 核对时进入模型；没有新增工具、授权或隐式文件读取。
+- Windows/Linux Runtime 在 W65 源码上各 **171/171**；新增 64/65 边界各 **20/20**。修复版正式构建
+  `8e7b433e481a…` 重复同一 400 文件摘要，最终仍正确报告 400、`marker-0001.txt`、
+  `marker-0400.txt` 且磁盘未变；首个搜索内部读取从 100 降到 5，总内部读取从 415 降到 68，
+  canonical 事件从 2,313 降到 664。应用与 profile 子进程均清零并完成官方备份。
+- 合入远端 macOS sandbox/Companion 三个提交后，Windows Runtime 再次 **171/171**，同步后的正式
+  Tauri 构建 `eca9197833bf…` 通过；Linux 复验在 W65 用例前因远端 `platform/unix.rs` 漏导入
+  `Path` 编译失败，完整日志保留并转 W66，不把同步前结果冒充当前 HEAD 的 Linux 通过。
+- 修复样本仍有可见命令/完成报告错误并用了 16 个模型步，因此只关闭资源 fan-out 子断言；本次
+  native 400 文件 burst 未独立采集 provider system prompt 或实际 dropped 数，不替代 W64 的确定性
+  组合证明。完整正向搜索体验、重复/乱序、其他 Agent/macOS、100 seed/LONG/99% 仍待验。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

@@ -3,6 +3,8 @@ use crate::{AgentEngineError, AgentToolResult};
 use nomifun_chat_model_broker::{ChatToolCall, ChatToolResultPart};
 use std::collections::BTreeSet;
 
+const MAX_INSTRUCTION_DISCOVERY_HIT_PATHS: usize = 64;
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SearchResponse {
@@ -117,5 +119,82 @@ pub(super) fn hit_paths(
     if paths.len() as u64 > response.files_scanned {
         return Err(invalid());
     }
+    // Each distinct hit needs an owner-backed canonical instruction-scope
+    // lookup before its snippet can enter model context. Bound that work
+    // independently of the public search result limit: a broad valid search
+    // must be withheld before it can fan out into hundreds of internal reads.
+    if paths.len() > MAX_INSTRUCTION_DISCOVERY_HIT_PATHS {
+        return Err(AgentEngineError::WorkspaceContext(
+            "workspace.files/search instruction discovery hit budget exceeded".into(),
+        ));
+    }
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_agent_contracts::StrictJsonValue;
+    use nomifun_chat_model_broker::ToolCallId;
+    use serde_json::json;
+
+    fn search_call() -> ChatToolCall {
+        ChatToolCall {
+            call_id: ToolCallId::from("search-many"),
+            name: "search_files".into(),
+            arguments: StrictJsonValue(json!({
+                "path": "burst",
+                "query": "needle",
+                "limit": 200,
+            })),
+            provider_metadata: None,
+        }
+    }
+
+    fn search_result(files: usize) -> AgentToolResult {
+        let matches = (0..files)
+            .map(|index| {
+                json!({
+                    "path": format!("burst/file-{index:03}.txt"),
+                    "line": 1,
+                    "column_bytes": 1,
+                    "byte_offset": 0,
+                    "sha256": "0".repeat(64),
+                    "text": "needle",
+                    "text_start_column_bytes": 1,
+                    "truncated": false,
+                })
+            })
+            .collect::<Vec<_>>();
+        AgentToolResult::text(
+            "search-many".into(),
+            json!({
+                "query": "needle",
+                "matches": matches,
+                "truncated": false,
+                "incomplete_reasons": [],
+                "files_scanned": files,
+                "files_skipped": 0,
+                "source_bytes_read": files * 6,
+                "notice": "",
+            })
+            .to_string(),
+            false,
+        )
+    }
+
+    #[test]
+    fn instruction_discovery_rejects_more_than_sixty_four_unique_search_hits() {
+        let error = hit_paths(&search_call(), &search_result(65)).unwrap_err();
+        assert!(matches!(
+            error,
+            AgentEngineError::WorkspaceContext(message)
+                if message.contains("instruction discovery hit budget")
+        ));
+    }
+
+    #[test]
+    fn instruction_discovery_accepts_sixty_four_unique_search_hits() {
+        assert_eq!(hit_paths(&search_call(), &search_result(64)).unwrap().len(), 64);
+    }
 }
