@@ -384,11 +384,30 @@ fn workspace_write_feedback(detail: &str) -> String {
             };
             observation.insert(name.into(), serde_json::Value::Array(indices.clone()));
         }
-        return serde_json::json!({
+        if let Some(value) = source.get("unverified_publications") {
+            let Some(indices) = value.as_array().filter(|indices| indices.len() <= 64
+                && indices.iter().all(|index| index.as_u64().is_some_and(|index| index < 64))) else {
+                    return guidance.into();
+                };
+            observation.insert("unverified_publications".into(), serde_json::Value::Array(indices.clone()));
+        }
+        let published_count = observation["published"].as_array().expect("validated indices").len();
+        let restored_count = observation["restored"].as_array().expect("validated indices").len();
+        let effect_warning = if published_count > 0 {
+            "Files were published before this error. Do not report that no files changed. "
+        } else { "" };
+        let mut feedback = serde_json::json!({
             "kind":"workspace_patch_failed", "version":1,
             "journal_settlement": if report["journal_settlement"] == "settled" { "settled" } else { "unconfirmed" },
-            "observation": observation, "recovery": guidance,
-        }).to_string();
+            "index_base":0, "observed_published_count":published_count, "confirmed_restored_count":restored_count,
+            "observation": observation,
+            "recovery":format!("{effect_warning}{guidance} Indices are positions in request.files; observations are historical."),
+        });
+        if feedback.to_string().len() > 2048 {
+            // Keep every bounded index even for the largest owner report.
+            feedback["recovery"] = serde_json::json!(format!("{effect_warning}Indices refer to request.files. Re-read current state; do not retry unchanged."));
+        }
+        return feedback.to_string();
     }
     guidance.into()
 }

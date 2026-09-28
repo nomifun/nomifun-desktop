@@ -720,6 +720,32 @@ async fn readonly_target_rejects_write_and_patch_without_temporary_files() {
     assert!(events.0.lock().unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn uncertain_staging_preserves_target_and_requests_content_reconciliation() {
+    let root = tempfile::Builder::new().prefix("reconcile-stage-").disable_cleanup(true).tempdir().unwrap();
+    let parent = root.path().join("publish");
+    fs::create_dir(&parent).unwrap();
+    let target = parent.join("report.txt");
+    fs::write(&target, b"disk truth").unwrap();
+    icacls(&target, &["/inheritance:d".as_ref()]);
+    let account = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap(), std::env::var("USERNAME").unwrap());
+    let deny = format!("{account}:(OI)(IO)(RD,DE)");
+    icacls(&parent, &["/deny".as_ref(), deny.as_ref()]);
+    let deny_child_delete = format!("{account}:(DC)");
+    icacls(&parent, &["/deny".as_ref(), deny_child_delete.as_ref()]);
+    let (service, scope, events) = owner(root.path());
+    let result = service.write_file_for_agent_session(&scope, "publish/report.txt", b"intended bytes").await;
+    icacls(&parent, &["/remove:d".as_ref(), account.as_ref()]);
+    fs::write(root.path().join("observation.txt"), format!("result={result:?}; events={:?}", events.0.lock().unwrap())).unwrap();
+    assert!(result.as_ref().is_err_and(nomifun_file::file_write_outcome_unknown), "fixture must produce an uncertain staging cleanup: {result:?}");
+    assert_eq!(fs::read(&target).unwrap(), b"disk truth");
+    let events = events.0.lock().unwrap();
+    assert_eq!(events.len(), 1, "uncertainty must request a reread; fixture: {}", root.path().display());
+    assert_eq!(events[0].name, "fileStream.contentUpdate");
+    assert_eq!(events[0].data["operation"], "write");
+    assert!(events[0].data.get("content").is_none(), "unverified bytes must not be broadcast");
+}
+
 fn owner(root: &Path) -> (FileService, AgentSessionWorkspaceBinding, Arc<Events>) {
     let events = Arc::new(Events::default());
     let service = FileService::new(events.clone(), vec![root.to_path_buf()]);

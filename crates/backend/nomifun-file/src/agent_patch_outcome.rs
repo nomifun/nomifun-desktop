@@ -24,7 +24,7 @@ impl AgentPatchFailureObservation {
         let mut observation = Self { failed_file: Some(index), published: rollback_eligible.clone(), ..Self::default() };
         if failure.published {
             observation.published.push(index);
-            if failure.content_verified { rollback_eligible.push(index); }
+            if failure.publication_verified { rollback_eligible.push(index); }
             else { observation.unverified_publications.push(index); }
         }
         if failure.temporary_cleanup_unconfirmed { observation.temporary_cleanup_unconfirmed.push(index); }
@@ -52,8 +52,10 @@ impl From<AppError> for AgentSessionPatchFailure {
 pub(crate) struct PatchPublicationFailure {
     pub error: AppError,
     pub published: bool,
-    /// Whether the intended bytes were confirmed before a later failure.
-    pub content_verified: bool,
+    /// Whether the staged bytes and replacement precondition were confirmed.
+    /// Required before advertising content or automatically compensating.
+    pub publication_verified: bool,
+    pub publication_identity: Option<crate::publication_identity::PublicationIdentity>,
     pub temporary_cleanup_unconfirmed: bool,
 }
 
@@ -62,7 +64,8 @@ impl From<AppError> for PatchPublicationFailure {
         Self {
             error,
             published: false,
-            content_verified: false,
+            publication_verified: false,
+            publication_identity: None,
             temporary_cleanup_unconfirmed: false,
         }
     }
