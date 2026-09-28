@@ -1373,6 +1373,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   正式备份。`cmd` 直接脚本、`start_process`、完成参数形状、只读任务写入防线、N3/100 seed/
   LONG/99% 仍待验，不关闭完整 CMD/PROC 或共享 D04。
 
+### 明确只读任务的 workspace mutation 工具收窄（W74，基线 `4692f38cb`）
+
+- S-D04-06 / CMD-137、A08/A11/A17/A19：W72 首个正式只读计数探针虽明确“不要修改任何文件”，
+  模型仍能调用 `write_file` 并创建 `check_marker.ps1`。W74 新增跨过 accepted input 与实际模型工具
+  列表的回归，首次稳定确认 `write_file`、`apply_patch`、`git_stage`、`publish_artifact` 仍全部可见；
+  两个首次失败现场均保留。
+- Runtime 现保守识别明确的中英文 workspace 禁写措辞；每个模型步在完整冻结工具面重新物化后，
+  只隐藏 workspace files/VCS/Artifact 的非 ReadOnly binding，保留读取和 process。附加约束明确
+  process 也须保持内联只读，不得重定向、运行变更命令或创建 helper/temp script。后续 accepted
+  input 明确允许修改时恢复原冻结 binding；含“不允许修改”的否定句不会误撤销。没有新增 Action、
+  扩大权限或改变 owner admission；opaque shell 是否写入仍不能由此在 Kernel 层确定阻断。
+- 策略解析与撤销回归通过，工具面收窄/恢复 **20/20**，Agent Runtime **175/175**，workspace fmt
+  与正式构建通过。正式 Tauri `10c052e32ac6…` 使用隔离 workspace/data/profile：真实模型未调用
+  workspace mutation 工具，仅一次 process effect 真正执行，300 文件 count/min/max/hash 不变且
+  无额外路径，应用/profile 清零并完成正式备份。首次仍把 `exec_command.args` 传成 JSON 字符串，
+  owner 前置 Schema 拒绝且 UI 显示 1 项异常；第二步改成数组后正确报告 300、`readonly-0001.txt`、
+  `readonly-0300.txt`，单回合 3 模型步、87 条 canonical 事件。该错误不覆盖，正式样本只验证禁写
+  子断言，不计零失败 CMD PASS；收紧撤销短语后的最终重建 `baec5c5f06e2…` 通过。opaque process
+  内核只读、正式撤销 UI、参数字符串修复、其他角色/平台及 N3/100 seed/LONG/99% 仍待验。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

@@ -1716,6 +1716,7 @@ struct AdaptiveContextSlots {
     discovery_catalog: Option<usize>,
     task_continuation: Option<usize>,
     failure_stop: Option<usize>,
+    workspace_mutation_policy: Option<usize>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1754,6 +1755,34 @@ fn synchronize_adaptive_context(
         tool_discovery,
         discovered_tools,
     )?;
+    let workspace_mutation_forbidden =
+        crate::requirements::workspace_mutation_forbidden(accepted_inputs);
+    let requested_workspace_mutation = match requested_tool_choice {
+        ChatToolChoice::Specific { name } => plan.binding(name).is_some_and(|binding| {
+            matches!(
+                binding.capability_id.as_ref(),
+                "workspace.files" | "workspace.vcs" | "workspace.artifacts"
+            ) && !matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+        }),
+        _ => false,
+    };
+    if workspace_mutation_forbidden {
+        upsert_instruction(
+            &mut request.input.instructions,
+            &mut slots.workspace_mutation_policy,
+            "The accepted user input explicitly forbids workspace mutation. While this restriction is active, workspace file, VCS and Artifact mutation tools are hidden; read-only inspection remains available. Process execution can still modify files, so keep process commands read-only and inline: do not redirect output, run mutating commands, or create helper or temporary scripts. A later accepted user input must explicitly permit file changes before the mutation tools return.".into(),
+        );
+        request.input.tools.retain(|tool| {
+            plan.binding(&tool.name).is_none_or(|binding| {
+                !matches!(
+                    binding.capability_id.as_ref(),
+                    "workspace.files" | "workspace.vcs" | "workspace.artifacts"
+                ) || matches!(binding.effect_class, AgentEffectClass::ReadOnly)
+            })
+        });
+    } else if let Some(slot) = slots.workspace_mutation_policy {
+        request.input.instructions[slot] = "A later accepted user input permits workspace mutation; the earlier turn-local read-only restriction is no longer active. The immutable frozen tool plan still bounds every available action.".into();
+    }
     if let Some(prior) = prior_task {
         let context = if task_continuation_available {
             prior.context()?
@@ -1775,6 +1804,8 @@ fn synchronize_adaptive_context(
     request.input.tool_choice = if request.input.tools.is_empty() {
         ChatToolChoice::None
     } else if matches!(requested_tool_choice, ChatToolChoice::None) {
+        ChatToolChoice::Auto
+    } else if workspace_mutation_forbidden && requested_workspace_mutation {
         ChatToolChoice::Auto
     } else {
         requested_tool_choice.clone()
@@ -3097,6 +3128,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(model_request.input.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn explicit_read_only_input_hides_workspace_mutations_and_later_permission_restores_them() {
+        let plan = AgentToolPlan::new([
+            ("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            ("write_file", "workspace.files", "workspace.files/write", AgentEffectClass::ManagedEffect, false),
+            ("apply_patch", "workspace.files", "workspace.files/patch", AgentEffectClass::ManagedEffect, false),
+            ("git_status", "workspace.vcs", "workspace.vcs/status", AgentEffectClass::ReadOnly, true),
+            ("git_stage", "workspace.vcs", "workspace.vcs/stage", AgentEffectClass::ManagedEffect, false),
+            ("publish_artifact", "workspace.artifacts", "workspace.artifacts/publish", AgentEffectClass::ManagedEffect, false),
+            ("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ].into_iter().map(|(name, capability, action, effect, parallel)| {
+            tool_binding(name, capability, action, effect, parallel)
+        }))
+        .unwrap();
+        let mut initial = request();
+        let mut accepted_inputs = vec![crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "查看 Git 状态和 diff，不要修改任何文件。".into(),
+        )];
+        initial.input.messages = accepted_inputs.clone();
+        let turn_request = AgentTurnRequest::new(initial.clone(), plan.clone(), principal(), 0);
+        let scoped = crate::workspace_context::ScopedInstructions::new(&turn_request);
+        let adaptive = crate::adaptive::AdaptiveExecution::default();
+        let recovery = crate::patch_recovery::PatchRecovery::default();
+        let mut model_request = initial;
+        let mut slots = AdaptiveContextSlots::default();
+        let discovered = Default::default();
+        let sync = |model_request: &mut ChatModelRequest,
+                    inputs: &[ChatMessage],
+                    revision,
+                    slots: &mut AdaptiveContextSlots| {
+            synchronize_adaptive_context(
+                model_request,
+                &plan,
+                &ChatToolChoice::Auto,
+                &adaptive,
+                &scoped,
+                &recovery,
+                None,
+                None,
+                inputs,
+                revision,
+                false,
+                None,
+                false,
+                false,
+                false,
+                &discovered,
+                slots,
+            )
+        };
+
+        sync(&mut model_request, &accepted_inputs, 1, &mut slots).unwrap();
+        let names = model_request
+            .input
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in ["read_file", "git_status", "exec_command"] {
+            assert!(names.contains(name));
+        }
+        for name in ["write_file", "apply_patch", "git_stage", "publish_artifact"] {
+            assert!(!names.contains(name));
+        }
+        assert!(model_request.input.instructions.iter().any(|instruction| {
+            instruction.contains("explicitly forbids workspace mutation")
+                && instruction.contains("process commands read-only")
+        }));
+
+        accepted_inputs.push(crate::context_lifecycle::text_message(
+            ChatRole::User,
+            "现在可以修改文件。".into(),
+        ));
+        sync(&mut model_request, &accepted_inputs, 2, &mut slots).unwrap();
+        let names = model_request
+            .input
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for name in ["write_file", "apply_patch", "git_stage", "publish_artifact"] {
+            assert!(names.contains(name), "later accepted permission restores {name}");
+        }
+        assert!(model_request.input.instructions.iter().any(|instruction| {
+            instruction.contains("later accepted user input permits workspace mutation")
+        }));
     }
 
     fn tool_binding(
