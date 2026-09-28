@@ -1502,6 +1502,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   lib **124/124**，workspace fmt 通过。真实 OS helper、多 Session 混合、cancel future drop 与平台
   信号失败组合、其他平台及长期压力仍待验；不关闭完整 PROC-038 或共享阶段。
 
+### Unix 失败清理的 compare-and-unlink 窗口（W81，基线 `dca6ad842`）
+
+- S-D03-50 / FILE-019/020/028/038、A05/A07/A13/A17/A19：在 WSL2 Ubuntu ext4 的确定性 hook
+  中，既有目标在暂存完成后消失，迫使 publication 失败；错误清理先确认 `stage.tmp` 是本次 inode，
+  随后 hook 将它移到 `retained-stage` 并在原名写入同字节外来文件。旧代码继续按名称 unlink，外来
+  文件被删除，原暂存仍在 retained 名下，却报告 `temporary_cleanup_unconfirmed=false`。首次失败
+  日志、observation、保留文件和缺失外来名均已复制到仓库外。
+- Unix 没有可靠的 compare-and-unlink 原语。现在 publication 失败且暂存未被原子消费时，不再执行
+  path-based 删除；保留暂存名供 owner 显式对账，并设置 `temporary_cleanup_unconfirmed=true`，使上层
+  进入 outcome unknown，而不是把 Conflict 当作已安全清理。相同策略覆盖暂存字节被改写和 rollback
+  guard 失败。Windows 仍通过持有的文件 handle 删除，行为不变；未扩大权限、吞错或自动重试。
+- 修复后 WSL2 精确反例 **20/20**，Linux service **127/127**；Windows `nomifun-file` lib
+  **362/362**，workspace fmt 通过。固定现场保留 8 字节 `stage.tmp`，目标缺失且清理明确未确认。
+  暂存后续对账/清理、macOS 原生执行、其他 Unix portable fallback、磁盘/IO fault、完整 UI/角色及
+  长期统计仍待验；不关闭完整 FILE Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
