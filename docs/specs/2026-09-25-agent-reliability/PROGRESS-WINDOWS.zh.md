@@ -1556,6 +1556,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   永久失权负向与分类器另各通过。macOS 真实 relay、跨重启 quarantine、组合故障、正式 UI/角色和
   长期压力仍待验；不关闭完整 PROC-050 或共享阶段。
 
+### 并发 start 的 admission 前容量预留（W85，基线 `7ccf1def6`）
+
+- S-D04-14 / PROC-042、A03/A11/A13/A17/A19：公开 supervisor 容量设为 2，以 barrier 同时释放
+  32 个真实 `write-pid-then-sleep` helper。Windows Job 与 WSL2 Linux process group 都只创建 2 个
+  PID marker，其余 30 个调用返回 `capacity_exhausted`；磁盘 oracle 没有发现短暂执行过的超额 helper。
+- 两个已准入进程均以 `Cancelled`、`cleanup.reaped=true` 结算；随后第三个 helper 能重新 start 并
+  清理，证明失败 start 不占额且终态 cleanup 释放额度。生产实现首次满足，本批只补 helper/回归。
+- Windows/Linux 精确竞争各重复 **20/20**（每轮 32 个 start）；Windows process contract
+  **12/12**，Linux **13/13**，workspace fmt 通过。start/shutdown 竞争、Lost/quarantine 占额、PTY、
+  macOS、不同 owner 混合及 1,000 次长稳仍待验；不关闭完整 PROC-042 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
