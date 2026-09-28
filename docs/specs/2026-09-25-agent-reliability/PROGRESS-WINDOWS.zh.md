@@ -1223,6 +1223,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   native 400 文件 burst 未独立采集 provider system prompt 或实际 dropped 数，不替代 W64 的确定性
   组合证明。完整正向搜索体验、重复/乱序、其他 Agent/macOS、100 seed/LONG/99% 仍待验。
 
+### 共享 Unix 显式程序预检编译修复（W66，基线 `13e7349da`）
+
+- S-D04-02 / PROC-011/012/014、A19：W65 合入远端 `b046314cd` 后，Linux 在编译
+  `nomi-process-runtime` 时报告 `cannot find type Path`，W65 测试尚未启动。根因是新加入的
+  `validate_explicit_unix_program` 面向所有 Unix，而 `Path` 仍只在 macOS cfg 下导入；首次编译
+  失败已复制到 W66 外部证据。
+- `Path` 现随 Unix 模块无条件导入，`PathBuf` 继续限定 macOS；只修构建可见性，不改进程启动、
+  sandbox、权限、错误分类或清理语义，也没有 renderer/模型/UI 变更。
+- Linux `nomi-process-runtime` 完整 **245/245**，当前 HEAD 的 Agent Runtime **171/171**；
+  Windows process Runtime lib **120/120**。首次 Linux 完整组在 `parent_death` 的 PTY 子项出现一次
+  reap 时序失败，普通进程子项及此前各组均通过；该失败保留，原测试定向复跑 **1/1**、随后
+  **20/20**，最终完整组通过，未增加等待或修改断言。
+- macOS 原生行为不由 WSL/Windows 代判，仍引用远端 M01-01；更多 Unix 发行版/架构、正式 UI、
+  100 seed/LONG/99% 仍待验，不关闭完整 PROC Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

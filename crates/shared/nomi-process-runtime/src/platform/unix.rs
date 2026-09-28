@@ -9,13 +9,14 @@ use std::{
         ChildStdout as StdChildStdout, Command as StdCommand, ExitStatus,
     },
     process::Stdio,
+    path::Path,
     sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 #[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use tokio::{

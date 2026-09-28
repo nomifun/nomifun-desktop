@@ -95,6 +95,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   macOS `nomi-process-runtime` 全组 **243/243**，显式路径及进程/PTY 压力回归通过；正式 UI、
   其他平台、完整 PROC/CMD/LONG 门槛仍开放，不关闭共享 D04。
 
+- S-D04-02（PROC-011/012/014、A19 Unix 构建可移植性子断言）：同步远端 S-D04-01 后，新增的
+  `validate_explicit_unix_program` 在所有 Unix 编译，却仍把 `Path` 导入限定为 macOS，Linux 因
+  `cannot find type Path` 在任何 W65 用例前失败。W66 将 `Path` 改为 Unix 无条件导入，仅保留
+  `PathBuf` 为 macOS 专用；没有改变 spawn、sandbox、权限或清理逻辑。Linux process Runtime 完整
+  **245/245**，Agent Runtime **171/171**；Windows process Runtime lib **120/120**。首次 Linux
+  完整组另有一次 PTY parent-death reap 时序失败，原样保留；定向复跑 **1/1**、随后 **20/20**，
+  最终完整组通过，未加 sleep 或放宽断言。macOS 结果仍以原 M01-01 为准；正式 UI、更多 Unix
+  发行版/架构与 LONG 门槛仍开放，不关闭完整 PROC Case 或共享阶段。
+
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
   分隔处理并返回成功，字面文件保持 staged。W63 诊断补出精确文件名；首版 one-entry 内存 index
