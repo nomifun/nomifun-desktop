@@ -33,6 +33,7 @@ import ChannelTelegramLogo from '@/renderer/assets/channel-logos/telegram.svg';
 import ChannelWecomLogo from '@/renderer/assets/channel-logos/wecom.svg';
 import ChannelWeixinLogo from '@/renderer/assets/channel-logos/weixin.svg';
 import CompanionAvatar from './CompanionAvatar';
+import CompanionSwitcher from './CompanionSwitcher';
 import { browserNarrationFor } from './browserNarration';
 import { getDeskSpecFor } from './characters';
 import { customFigureMetaOf } from './characters/customMeta';
@@ -43,6 +44,7 @@ import {
   type MonitorLayout,
 } from './deskRestoreGeometry';
 import { placeResizedWindow, translateAnchorAfterDrag, type GeomRect } from './windowGeometry';
+import { COMPANION_TOOLTIP_GUTTER, companionContentPosition, companionNativePosition, withCompanionTooltipGutters } from './companionWindowSize';
 import { buildCompanionMenuEntries, type CompanionMenuAction } from './companionNativeMenu';
 import { useCompanionClickThrough } from './useCompanionClickThrough';
 import { switchCompanionDesktopWindow } from './companionWindowSwitch';
@@ -181,6 +183,7 @@ const CompanionPage: React.FC = () => {
   /** 展开时预解析的会话 id（供粘贴上传关联；best-effort）。 */
   const [composerThreadId, setComposerThreadId] = useState<ConversationId | null>(null);
   const [roster, setRoster] = useState<ICompanionWithStatus[]>([]);
+  const [compactSwitchOpen, setCompactSwitchOpen] = useState(false);
   const [switchingCompanionId, setSwitchingCompanionId] = useState<CompanionId | null>(null);
   const switchingCompanionRef = useRef<CompanionId | null>(null);
   const [quickHistory, setQuickHistory] = useState<HistoryEntry[]>([]);
@@ -354,8 +357,10 @@ const CompanionPage: React.FC = () => {
       // an already-visible companion keeps its current focus state.
       const wasVisible = await win.isVisible();
       let target: { x: number; y: number } | null = null;
+      let savedContentPosition: { x: number; y: number } | null = null;
       if (!opts?.skipPosition && cfg.appearance.companion_x != null && cfg.appearance.companion_y != null) {
-        target = { x: cfg.appearance.companion_x, y: cfg.appearance.companion_y };
+        savedContentPosition = { x: cfg.appearance.companion_x, y: cfg.appearance.companion_y };
+        target = companionNativePosition(savedContentPosition, await win.scaleFactor());
         // A saved position can point at no connected monitor: configs written
         // by older builds (launch-time scale bug doubled the coords every
         // start on Retina) or a since-unplugged external display. Restoring
@@ -373,6 +378,7 @@ const CompanionPage: React.FC = () => {
               return overlapX >= MIN_REACHABLE && overlapY >= MIN_REACHABLE;
             });
             if (!onScreen) {
+              savedContentPosition = null;
               const p = (await primaryMonitor()) ?? monitors[0];
               target = {
                 x: p.position.x + p.size.width - size.width - 24,
@@ -395,6 +401,7 @@ const CompanionPage: React.FC = () => {
       // (compounding every launch until the companion is off-screen). Once visible
       // the scale is correct; this second call is idempotent elsewhere.
       if (target) {
+        if (savedContentPosition) target = companionNativePosition(savedContentPosition, await win.scaleFactor());
         await win.setPosition(new PhysicalPosition(target.x, target.y));
       }
     } catch (e) {
@@ -418,8 +425,9 @@ const CompanionPage: React.FC = () => {
       const { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
       const desk = getDeskSpecFor(cfg.character, customFigureMetaOf(cfg));
+      const nativeDesk = withCompanionTooltipGutters({ width: desk.windowWidth, height: desk.windowHeight });
       const [pos, size, scale] = await Promise.all([win.outerPosition(), win.outerSize(), win.scaleFactor()]);
-      const target = { width: Math.round(desk.windowWidth * scale), height: Math.round(desk.windowHeight * scale) };
+      const target = { width: Math.round(nativeDesk.width * scale), height: Math.round(nativeDesk.height * scale) };
       // outerSize === innerSize for companion windows (decorations(false) + shadow(false)).
       if (size.width === target.width && size.height === target.height) return;
       let monitors: { x: number; y: number; width: number; height: number }[] = [];
@@ -448,7 +456,7 @@ const CompanionPage: React.FC = () => {
       // anchoring from that small rect would climb 280px every launch and
       // compound through the onMoved persistence. Keep the top-left, clamp only.
       const anchorRect =
-        opts?.anchor === 'top-left'
+        opts?.anchor === 'top-left' && cfg.appearance.companion_x != null
           ? { x: pos.x, y: pos.y, width: achieved.width, height: achieved.height }
           : { x: pos.x, y: pos.y, width: size.width, height: size.height };
       const next = placeResizedWindow(anchorRect, achieved, monitors);
@@ -474,6 +482,8 @@ const CompanionPage: React.FC = () => {
     }
     if (mode !== null) expandedWindowRestoreRetriesRef.current = 0;
     const queued = expandedWindowQueueRef.current.then(async () => {
+      // Coalesce obsolete queued layouts instead of replaying old open/close requests.
+      if (mode !== expandedWindowRequestedModeRef.current) return;
       const cfg = profileRef.current;
       const { getCurrentWindow, PhysicalPosition, PhysicalSize, availableMonitors } = await import('@tauri-apps/api/window');
       const win = getCurrentWindow();
@@ -501,12 +511,14 @@ const CompanionPage: React.FC = () => {
           // Fall back to browser screen metrics below.
         }
 
+        if (mode !== expandedWindowRequestedModeRef.current) return;
+
         if (!mode) {
           const session = expandedWindowSessionRef.current;
           if (!session) return;
           const deskNow = cfg ? getDeskSpecFor(cfg.character, customFigureMetaOf(cfg)) : null;
           const logicalDesk = deskNow
-            ? { width: deskNow.windowWidth, height: deskNow.windowHeight }
+            ? withCompanionTooltipGutters({ width: deskNow.windowWidth, height: deskNow.windowHeight })
             : {
                 width: session.anchor.width / session.scaleFactor,
                 height: session.anchor.height / session.scaleFactor,
@@ -582,11 +594,12 @@ const CompanionPage: React.FC = () => {
         const host = hostMonitor?.workArea ?? fallbackHost;
         const deskNow = getDeskSpecFor(cfg.character, customFigureMetaOf(cfg));
         const reservePx = deskNow.figureHeight + 84;
-        const screenWidth = host.width / scale;
+        const screenWidth = host.width / scale - COMPANION_TOOLTIP_GUTTER * 2;
         const screenHeight = host.height / scale;
         const clampPx = (min: number, value: number, max: number) => Math.round(Math.max(min, Math.min(max, value)));
+        const chatContent = withCompanionTooltipGutters({ width: clampPx(500, screenWidth * 0.34, 700), height: 0 });
         const targetSize = {
-          width: Math.max(session.anchor.width, Math.round(clampPx(500, screenWidth * 0.34, 700) * scale)),
+          width: Math.max(session.anchor.width, Math.round(chatContent.width * scale)),
           height: Math.max(
             session.anchor.height,
             Math.round(clampPx(600, Math.max(screenHeight * 0.78, reservePx + 340), 840) * scale)
@@ -1041,11 +1054,15 @@ const CompanionPage: React.FC = () => {
         lastLocalMoveAt.current = Date.now();
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => {
+          if (internalWindowLayoutRef.current || expandedWindowSessionRef.current) return;
           lastLocalMoveAt.current = Date.now();
           // Merge-patch only this companion's position: never clobbers concurrent
           // edits (settings toggles in the main window) the way a full PUT does.
-          void ipcBridge.companion.patchCompanion
-            .invoke({ companion_id: companionId, patch: { appearance: { companion_x: payload.x, companion_y: payload.y } } })
+          void getCurrentWindow().scaleFactor()
+            .then((scale) => {
+              const position = companionContentPosition(payload, scale);
+              return ipcBridge.companion.patchCompanion.invoke({ companion_id: companionId, patch: { appearance: { companion_x: position.x, companion_y: position.y } } });
+            })
             .then((saved) => {
               profileRef.current = saved;
               setProfile(saved);
@@ -1060,7 +1077,7 @@ const CompanionPage: React.FC = () => {
     };
   }, [companionId]);
 
-  // Reply and composer continue to share one expanded companion rectangle.
+  // Only reply/composer surfaces resize the native window. Name tooltips are DOM-only.
   // Memory uses its own native window and never participates here.
   const hasBubble = bubble.length > 0;
   const expandedMode: ExpandedWindowMode | null = hasBubble || composerOpen ? 'chat' : null;
@@ -1233,12 +1250,13 @@ const CompanionPage: React.FC = () => {
             if (activeSession) activeSession.anchor = nextAnchor;
             lastLocalMoveAt.current = Date.now();
             if (companionId) {
+              const savedPosition = companionContentPosition(nextAnchor, await nativeWindow.scaleFactor());
               await ipcBridge.companion.patchCompanion.invoke({
                 companion_id: companionId,
                 patch: {
                   appearance: {
-                    companion_x: nextAnchor.x,
-                    companion_y: nextAnchor.y,
+                    companion_x: savedPosition.x,
+                    companion_y: savedPosition.y,
                   },
                 },
               });
@@ -1624,6 +1642,7 @@ const CompanionPage: React.FC = () => {
   /** 展开 composer：把迷你输入迁入 composer（并清空迷你框，单一来源防重复发送）、
    *  预解析会话 id（供粘贴上传关联，best-effort）。 */
   const openComposer = useCallback(() => {
+    setCompactSwitchOpen(false);
     setComposerOpen(true);
     setComposerText((prev) => (prev ? prev : input));
     setInput('');
@@ -1697,8 +1716,10 @@ const CompanionPage: React.FC = () => {
           })),
           getCurrentPosition: async () => {
             try {
-              const position = await currentWindow.outerPosition();
-              return { x: position.x, y: position.y };
+              // A reply may have expanded the source. Transfer its compact content
+              // origin, not the temporary chat rectangle or transparent gutter.
+              const position = expandedWindowSessionRef.current?.anchor ?? await currentWindow.outerPosition();
+              return companionContentPosition(position, await currentWindow.scaleFactor());
             } catch {
               return null;
             }
@@ -1740,7 +1761,8 @@ const CompanionPage: React.FC = () => {
           },
           placeTarget: async (target, position) => {
             try {
-              await target.setPosition(new PhysicalPosition(position.x, position.y));
+              const nativePosition = companionNativePosition(position, await target.scaleFactor());
+              await target.setPosition(new PhysicalPosition(nativePosition.x, nativePosition.y));
             } catch (error) {
               console.warn('companion quick switch could not inherit source position:', error);
             }
@@ -1900,10 +1922,6 @@ const CompanionPage: React.FC = () => {
             text: '记住了，出发前我提醒你看看天气。',
           },
         ];
-  const compactSwitchTargets = roster
-    .filter((item) => item.companion_id !== companionId)
-    .slice(0, 3);
-  const compactSwitchOverflow = Math.max(0, roster.length - 1 - compactSwitchTargets.length);
 
   // 反应控件：□ 打断（本地或远程 IM 回合生成中）+ × 忽略（有气泡时）。从气泡上移到输入条
   // 发送按钮右侧的固定位置——气泡随内容伸缩、原位置动态难点中，固定常驻更易选中（点 5）。
@@ -1962,7 +1980,11 @@ const CompanionPage: React.FC = () => {
     <div
       className={`nomi-companion-window${composerOpen ? ' is-quick-open' : ''}`}
       // 气泡可用高度 = 100vh − 预留（立绘高 + 输入条/边距）。让正文吃满窗口剩余空间又不压到立绘。
-      style={{ '--companion-reserve': `${desk.figureHeight + 84}px` } as React.CSSProperties}
+      style={{
+        '--companion-reserve': `${desk.figureHeight + 84}px`,
+        '--companion-desk-width': `${desk.windowWidth}px`,
+        '--companion-tooltip-gutter': `${isTauriRuntime() ? COMPANION_TOOLTIP_GUTTER : 0}px`,
+      } as React.CSSProperties}
       onContextMenu={(e) => {
         e.preventDefault();
         // 同步捕获：不等下个轮询 tick，先确保这次右键不会被透明穿透状态影响。
@@ -2261,63 +2283,29 @@ const CompanionPage: React.FC = () => {
           </div>
         </div>
       </div>
-      {!composerOpen && compactSwitchTargets.length > 0 && (
-        <aside
-          className='nomi-companion-switcher'
-          aria-label={t('nomi.companion.switchCompanion')}
-          data-companion-hit
-        >
-          <span className='nomi-companion-switcher__label'>{t('nomi.companion.switchLabel')}</span>
-          {compactSwitchTargets.map((item) => {
-            const switching = switchingCompanionId === item.companion_id;
-            return (
-              <button
-                key={item.companion_id}
-                type='button'
-                className={`nomi-companion-switcher__item${switching ? ' is-switching' : ''}`}
-                aria-label={t('nomi.companion.switchTo', { name: item.name })}
-                aria-busy={switching || undefined}
-                title={t('nomi.companion.switchTo', { name: item.name })}
-                disabled={switchingCompanionId !== null}
-                onClick={() => void activateCompanionWindow(item.companion_id)}
-              >
-                <CompanionAvatar
-                  character={item.character}
-                  companionId={item.companion_id}
-                  customFigure={customFigureMetaOf(item)}
-                  mood={(item.status.mood as RabbitMood) || 'content'}
-                  activity='idle'
-                  size={32}
-                />
-                <i className={item.model ? 'is-online' : ''} />
-              </button>
-            );
-          })}
-          {compactSwitchOverflow > 0 && (
-            <button
-              type='button'
-              className='nomi-companion-switcher__more'
-              aria-label={t('nomi.companion.showAll', { count: roster.length })}
-              title={t('nomi.companion.showAll', { count: roster.length })}
-              onClick={openComposer}
-            >
-              +{compactSwitchOverflow}
-            </button>
-          )}
-        </aside>
-      )}
       {!composerOpen && (
         <div
-          className={`nomi-companion-chatbar ${input || barRevealed ? 'is-active' : ''}`}
+          className={`nomi-companion-chatbar ${input || barRevealed || compactSwitchOpen ? 'is-active' : ''}`}
           // 常驻命中候选；隐藏态 pointer-events:none 会被 companionHitTarget 跳过，
           // CSS hover 先显示但 React reveal 尚未赶上时也不会出现「看得到却穿透」。
           data-companion-hit
         >
+          <CompanionSwitcher
+            companionId={companionId}
+            profile={profile}
+            roster={roster}
+            switchingCompanionId={switchingCompanionId}
+            open={compactSwitchOpen}
+            onOpenChange={setCompactSwitchOpen}
+            onSwitch={(id) => void activateCompanionWindow(id)}
+            onShowAll={openComposer}
+          />
           <input
             value={input}
             aria-label={t('nomi.companion.chatPlaceholder', { name: profile?.name || 'Nomi' })}
             placeholder={t('nomi.companion.chatPlaceholder', { name: profile?.name || 'Nomi' })}
             onChange={(e) => setInput(e.target.value)}
+            onFocus={() => setCompactSwitchOpen(false)}
             onPaste={onComposerPaste}
             onKeyDown={(e) => {
               if (e.key === 'Enter') void sendChat();

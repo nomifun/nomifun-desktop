@@ -14,6 +14,9 @@
 }
 
 .nomi-companion-window {
+  /* Native bounds include permanent click-through space for names. Visible
+     chrome keeps its original content width, even while a tooltip appears. */
+  --companion-content-width: max(var(--companion-desk-width, 200px), calc(100vw - var(--companion-tooltip-gutter, 0px) * 2));
   position: relative;
   width: 100vw;
   height: 100vh;
@@ -74,7 +77,7 @@
      100vh − 预留(立绘高+输入条)」，都带上限——既舒展又不喧宾夺主。 */
   display: flex;
   flex-direction: column;
-  max-width: min(94vw, 560px);
+  max-width: min(calc(var(--companion-content-width) * 0.94), 560px);
   max-height: clamp(180px, calc(100vh - var(--companion-reserve, 300px)), 560px);
   margin-bottom: 8px;
   padding: 11px 14px;
@@ -124,7 +127,7 @@
   flex: 1 1 auto;
   min-height: 420px;
   max-height: 720px;
-  width: min(96vw, 640px);
+  width: min(calc(var(--companion-content-width) * 0.96), 640px);
   display: grid;
   grid-template-columns: 80px minmax(0, 1fr);
   margin-bottom: 0;
@@ -454,7 +457,7 @@
 .nomi-companion-window.is-quick-open .nomi-companion-stage-shell {
   position: relative;
   z-index: 4;
-  width: min(96vw, 640px);
+  width: min(calc(var(--companion-content-width) * 0.96), 640px);
   justify-content: flex-end;
   margin-top: -18px;
   padding-right: 6px;
@@ -589,45 +592,80 @@
 /* ---- quick-input row (mini, appears on hover) ---- */
 
 .nomi-companion-switcher {
-  position: absolute;
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 30px;
   z-index: 5;
-  left: calc(50% - min(46vw, 180px));
-  bottom: 48px;
-  width: 44px;
+}
+
+.nomi-companion-switcher__trigger {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-base);
+  border-radius: 50%;
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.nomi-companion-switcher__trigger:hover,
+.nomi-companion-switcher__trigger[aria-expanded='true'] {
+  border-color: color-mix(in srgb, var(--primary) 50%, var(--border-base));
+  background: color-mix(in srgb, var(--primary) 10%, var(--bg-base));
+}
+
+.nomi-companion-switcher__rail {
+  position: absolute;
+  left: -4px;
+  bottom: calc(100% + 6px);
+  width: 38px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
-  padding: 5px 4px 6px;
-  border: 1px solid color-mix(in srgb, var(--border-base) 82%, transparent);
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border-base);
   border-radius: 18px;
-  background: color-mix(in srgb, var(--bg-base) 88%, transparent);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  background: var(--bg-base);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.14);
   color: var(--text-secondary);
-  opacity: 0.84;
-  backdrop-filter: blur(12px);
-  transition: opacity 0.16s ease, box-shadow 0.16s ease;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(10px) scaleY(0.92);
+  transform-origin: center bottom;
+  transition: opacity 0.16s ease, transform 0.18s ease, visibility 0.18s;
 }
 
-.nomi-companion-window:hover .nomi-companion-switcher,
-.nomi-companion-switcher:focus-within {
+.nomi-companion-switcher__rail.is-open {
   opacity: 1;
-  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.2);
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scaleY(1);
 }
 
-.nomi-companion-switcher__label {
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 12px;
+/* Size to the name, never to the 28px avatar wrapper. Transparent native space
+   is reserved at initialization, never resized in response to hover/focus. */
+.nomi-companion-switcher__tooltip [role='tooltip'] {
+  width: max-content;
+  max-width: 160px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
 }
 
 .nomi-companion-switcher__item,
 .nomi-companion-switcher__more {
   position: relative;
   flex: none;
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -637,7 +675,7 @@
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 10px;
+  font-size: 11px;
   cursor: pointer;
   transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
 }
@@ -647,12 +685,12 @@
 .nomi-companion-switcher__more:hover,
 .nomi-companion-switcher__more:focus-visible {
   outline: none;
-  transform: translateY(-1px);
   border-color: color-mix(in srgb, var(--primary) 50%, var(--border-base));
   background: color-mix(in srgb, var(--primary) 10%, var(--bg-base));
 }
 
-.nomi-companion-switcher__item:disabled {
+.nomi-companion-switcher__item:disabled,
+.nomi-companion-switcher__more:disabled {
   cursor: progress;
 }
 
@@ -666,38 +704,25 @@
   animation: nomi-spin 0.7s linear infinite;
 }
 
-.nomi-companion-switcher__item.is-switching i {
-  opacity: 0;
-}
-
-.nomi-companion-switcher__item i {
-  position: absolute;
-  right: 1px;
-  bottom: 1px;
-  width: 6px;
-  height: 6px;
-  border: 1px solid var(--bg-base);
-  border-radius: 50%;
-  background: var(--text-secondary);
-}
-
-.nomi-companion-switcher__item i.is-online {
-  background: var(--success);
-}
-
 .nomi-companion-switcher__more {
-  height: 26px;
+  height: 24px;
   border-radius: 12px;
   background: var(--bg-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nomi-companion-switcher__rail {
+    transition: none;
+  }
 }
 
 .nomi-companion-chatbar {
   display: flex;
   align-items: center;
   gap: 6px;
-  /* 桌面态窗口 200 宽 → ~184px（仅 输入/展开/发送）；聊天态窗口放大 →
+  /* 桌面态窗口 200 宽 → ~184px（伙伴/输入/展开/发送）；聊天态窗口放大 →
      封顶 360px，给发送右侧的 反应控件（□/×）留位。 */
-  width: min(92vw, 360px);
+  width: min(calc(var(--companion-content-width) * 0.92), 360px);
   margin-top: 6px;
   margin-bottom: 10px;
   opacity: 0;
@@ -709,6 +734,7 @@
 }
 
 .nomi-companion-window:hover .nomi-companion-chatbar,
+.nomi-companion-chatbar:focus-within,
 .nomi-companion-chatbar.is-active {
   opacity: 1;
   transform: translateY(0);
@@ -789,7 +815,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(94vw, 520px);
+  width: min(calc(var(--companion-content-width) * 0.94), 520px);
   margin-top: 6px;
   margin-bottom: 10px;
   padding: 10px;
