@@ -4,6 +4,7 @@ mod artifact_store;
 mod agent_instruction_scope;
 mod agent_patch_lines;
 mod agent_patch_outcome;
+mod publication_identity;
 mod agent_patch_source;
 pub use agent_patch_source::AgentSessionPatchSource;
 pub use artifact_store::{

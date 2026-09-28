@@ -9,6 +9,7 @@ use windows_sys::Win32::{Foundation::INVALID_HANDLE_VALUE, Storage::FileSystem::
     FileDispositionInfoEx, FileIdInfo, FileRenameInfo, GetFileInformationByHandleEx, ReOpenFile, SetFileInformationByHandle,
 }};
 
+#[derive(Debug)]
 pub(crate) struct OwnedFile {
     // Metadata access keeps the file ID alive without conflicting with
     // ReplaceFile's exclusive opening of the staged source.
@@ -27,6 +28,10 @@ fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
 }
 
 impl OwnedFile {
+    pub(crate) fn matches_handle(&self, file: &File) -> io::Result<bool> {
+        Ok(identity(file)? == (self.volume, self.id))
+    }
+
     pub(crate) fn capture(file: &File) -> io::Result<Self> {
         // SAFETY: ReOpenFile opens the same file object and returns a new handle.
         let handle = unsafe { ReOpenFile(file.as_raw_handle(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,

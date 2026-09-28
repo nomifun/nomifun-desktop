@@ -2070,7 +2070,7 @@ fn operation_error(capability_id: &str, error: AppError) -> Wave2HostPortError {
         AppError::Forbidden(_) => "PRESET_RESOURCE_NOT_BOUND",
         AppError::NotFound(_) => "RESOURCE_NOT_FOUND",
         AppError::Conflict(_) | AppError::RevisionConflict(_) => "CAPABILITY_UNAVAILABLE",
-        _ => "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+        _ => "CAPABILITY_EXECUTION_FAILED",
     };
     Wave2HostPortError::new(code, format!("{capability_id} failed: {error}"))
 }
@@ -2745,6 +2745,12 @@ mod tests {
         .unwrap();
         assert_eq!(read.0["complete"], true);
         assert_eq!(read.0["sha256"], artifact_id);
+    }
+
+    #[test]
+    fn workspace_io_failure_is_execution_failure_not_platform_absence() {
+        let failure = operation_error("workspace.files", AppError::Internal("cannot open replacement target: sharing violation".into()));
+        assert_eq!(failure.code, "CAPABILITY_EXECUTION_FAILED");
     }
 
     #[test]
