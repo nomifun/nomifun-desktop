@@ -1085,6 +1085,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   renderer，未运行模型或 Tauri UI。Unix/macOS 的未消耗暂存清理/发布、100 seed、完整角色/UI
   与长期门槛仍待验，不关闭完整 FILE Case 或共享阶段。
 
-下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
+### 共享无 watcher 外部变更主动刷新（W58，基线 `7b2bebd14`）
+
+- S-D03-37 / FILE-040、A05/A17/A19：直接 FileService 首次反例在完成快照后由外部创建
+  `new.txt`，第二次显式清单仍只返回 `old.txt`；FAIL 与磁盘现场见 `01-before/`。完成缓存原先
+  没有失效来源时可永久存活，关闭再打开 `@文件` 菜单也无法恢复。
+- 新的显式 API/Agent 清单读取会先退休无人使用的完成快照，再从磁盘扫描。仍有活动读者时不
+  撤销其快照；扫描中 watcher/owner 失效、最多一次有依据重读、旧扫描不得覆盖新扫描及不同根
+  失效隔离均保留。外部创建+删除的直接 owner、真实 Axum `/api/fs/list` 与根隔离三项回归各
+  **20/20**，`nomifun-file` **552/552**。完整组中一次无关原生 watcher 3 秒超时原样保留；未加
+  sleep 或放宽断言，定向复跑和最终完整组通过。
+- 正式 Tauri 构建 `fcc93ec68118…`；`11-ui/` 使用独立 data/work/profile 和新 Session。
+  初次 `@old` 只显示 `old.txt`，随后不经过 NomiFun 写路由、也不启动 watcher，由外部 PowerShell
+  创建 `new.txt` 并删除旧文件。关闭重开菜单后 `@new` 只显示新文件，`@old` 显示“搜索结果为空”；
+  四次真实 `/api/fs/list` 均为 HTTP 200，watch route 调用为 0，磁盘 hash 与 UIA 选项独立一致。
+  准备回合 1 模型步、0 effects，canonical completed；应用/profile 清零并生成官方备份。
+- 本批未修改 renderer。单次无 watcher 扫描进行中的外部竞态、完整丢批/乱序、其他角色与平台、
+  100 seed/LONG/99% 仍待验，不关闭完整 FILE-040 或共享阶段。
+
+下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher 尾事件/恢复与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
