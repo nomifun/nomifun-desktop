@@ -1077,6 +1077,47 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn incomplete_watch_batch_survives_system_prompt_composition() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        {
+            let mut queue = watch.queue.lock().unwrap();
+            queue.record_native(
+                &watch.root,
+                Ok(notify::Event::new(EventKind::Other)
+                    .set_flag(notify::event::Flag::Rescan)),
+            );
+            queue.push(WorkspaceFileChangedEvent {
+                path: "a/../b".into(),
+                kind: WorkspaceFileChangeKind::Modified,
+            });
+            queue.push(WorkspaceFileChangedEvent {
+                path: "src/visible.rs".into(),
+                kind: WorkspaceFileChangeKind::Modified,
+            });
+        }
+        let context = watch.pre_turn_context().await.unwrap();
+        let batch = watch_batch(&context);
+        assert_eq!(batch.events.len(), 1);
+        assert_eq!(batch.events[0].path, "src/visible.rs");
+        assert_eq!(batch.dropped_event_count, 1);
+        assert!(batch.rescan_required);
+        assert!(context.contains("Workspace notifications are incomplete"));
+        assert!(context.contains("Re-read the relevant workspace state"));
+        assert!(context.contains("cannot establish which other paths stayed unchanged"));
+        assert!(!context.contains(&watch.root.to_string_lossy().into_owned()));
+
+        let prompt = nomifun_ai_agent::context_contributor::merge_pre_turn_context(
+            "base system prompt".into(),
+            vec![context],
+        );
+        assert!(prompt.starts_with("base system prompt\n\n<nomifun_workspace_events"));
+        assert!(prompt.contains("\"rescan_required\":true"));
+        assert!(prompt.contains("\"dropped_event_count\":1"));
+        assert!(watch.pre_turn_context().await.is_none());
+    }
+
     #[test]
     fn watch_native_rescan_and_known_discards_are_separate_and_drained_once() {
         let mut queue = WatchQueue::default();
