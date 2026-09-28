@@ -11,6 +11,7 @@ import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
 import SlashCommandMenu, { type SlashCommandMenuItem } from '@/renderer/components/chat/SlashCommandMenu';
 import { useBtwCommand } from '@/renderer/components/chat/BtwOverlay/useBtwCommand';
 import { useSlashCommandController } from '@/renderer/hooks/chat/useSlashCommandController';
+import { useWorkspaceMentionFiles } from '@/renderer/hooks/file/useWorkspaceMentionFiles';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { warmupConversation } from '@/renderer/pages/conversation/utils/warmupConversation';
@@ -49,6 +50,7 @@ import Composer, { ComposerSendButton } from '../Composer';
 import { StopButtonPortal } from './StopButtonPortal';
 
 const constVoid = (): void => undefined;
+const listWorkspaceMentionFiles = (root: string) => ipcBridge.fs.listWorkspaceFiles.invoke({ root });
 // 临界值：超过该字符数直接切换至多行模式，避免为超长文本做昂贵的宽度测量
 // Threshold: switch to multi-line mode directly when character count exceeds this value to avoid heavy layout work
 const MAX_SINGLE_LINE_CHARACTERS = 800;
@@ -270,8 +272,6 @@ const SendBox: React.FC<{
   const editingCreatedAtRef = useRef<number>(0);
   const editPrevDraftRef = useRef<string | null>(null);
   const [caretPosition, setCaretPosition] = useState(0);
-  const [workspaceMentionItems, setWorkspaceMentionItems] = useState<FileOrFolderItem[]>([]);
-  const [workspaceMentionLoading, setWorkspaceMentionLoading] = useState(false);
   const [atFileMenuActiveIndex, setAtFileMenuActiveIndex] = useState(0);
   const [dismissedAtFileToken, setDismissedAtFileToken] = useState<string | null>(null);
   const mentionOwnedPathsRef = useRef<Set<string>>(new Set());
@@ -279,7 +279,6 @@ const SendBox: React.FC<{
   const externalOwnedPathsRef = useRef<Set<string>>(new Set());
   const selectedItemByPathRef = useRef<Map<string, FileSelectionItem>>(new Map());
   const suppressedExternalAppendPathsRef = useRef<Set<string>>(new Set());
-  const fetchedAtFileSessionKeyRef = useRef<string | null>(null);
   const highlightScrollRef = useRef<HTMLDivElement>(null);
 
   // Listen for reply events from message actions
@@ -450,8 +449,8 @@ const SendBox: React.FC<{
     if (!conversationContext?.workspace || !activeAtFileQuery) {
       return null;
     }
-    return `${conversationContext.workspace}:${activeAtFileQuery.start}`;
-  }, [activeAtFileQuery, conversationContext?.workspace]);
+    return JSON.stringify([conversationContext.conversation_id, conversationContext.workspace, activeAtFileQuery.start]);
+  }, [activeAtFileQuery, conversationContext?.conversation_id, conversationContext?.workspace]);
   const allAtFileQueries = useMemo(() => getAllAtFileQueries(input), [input]);
   const deferredAtFileQuery = useDeferredValue(activeAtFileQuery?.query ?? '');
   const inputHistory = useMemo(
@@ -577,9 +576,15 @@ const SendBox: React.FC<{
     Boolean(activeAtFileQuery) &&
     activeAtFileTokenKey !== dismissedAtFileToken &&
     !isCommandMenuOpen;
+  const workspaceMentions = useWorkspaceMentionFiles({
+    listFiles: listWorkspaceMentionFiles,
+    workspace: conversationContext?.workspace,
+    sessionKey: atFileSessionKey,
+    enabled: isAtFileMenuOpen,
+  });
   const visibleAtFileMenuItems = useMemo(
-    () => filterWorkspaceMentionItems(workspaceMentionItems, deferredAtFileQuery),
-    [deferredAtFileQuery, workspaceMentionItems]
+    () => filterWorkspaceMentionItems(workspaceMentions.items, deferredAtFileQuery),
+    [deferredAtFileQuery, workspaceMentions.items]
   );
   const isOverlayOpen = isCommandMenuOpen || btwCommand.isOpen || isAtFileMenuOpen;
 
@@ -723,54 +728,6 @@ const SendBox: React.FC<{
       </div>
     );
   };
-
-  useEffect(() => {
-    if (!isAtFileMenuOpen || !conversationContext?.workspace || !atFileSessionKey) {
-      fetchedAtFileSessionKeyRef.current = null;
-      setWorkspaceMentionItems([]);
-      setWorkspaceMentionLoading(false);
-      return;
-    }
-
-    if (fetchedAtFileSessionKeyRef.current === atFileSessionKey) {
-      return;
-    }
-
-    let cancelled = false;
-    fetchedAtFileSessionKeyRef.current = atFileSessionKey;
-    setWorkspaceMentionLoading(true);
-
-    void ipcBridge.fs.listWorkspaceFiles
-      .invoke({ root: conversationContext.workspace })
-      .then((result) => {
-        if (cancelled) {
-          return;
-        }
-        const files = result.map((item) => ({
-          path: item.fullPath,
-          name: item.name,
-          isFile: true,
-          relativePath: item.relativePath || undefined,
-        }));
-        setWorkspaceMentionItems(files);
-      })
-      .catch((error) => {
-        if (!cancelled) {
-          fetchedAtFileSessionKeyRef.current = null;
-          console.warn('[SendBox] Failed to load workspace file mentions:', error);
-          setWorkspaceMentionItems([]);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setWorkspaceMentionLoading(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [atFileSessionKey, conversationContext?.workspace, isAtFileMenuOpen]);
 
   useEffect(() => {
     if (!activeAtFileTokenKey) {
@@ -1495,8 +1452,13 @@ const SendBox: React.FC<{
                     : t('messages.atFile.hint', { defaultValue: 'Type to search for files' })
                 }
                 items={visibleAtFileMenuItems}
+                failure={workspaceMentions.hasError ? {
+                  message: t('conversation.workspace.readErrorTitle'),
+                  retryLabel: t('common.retry'),
+                  onRetry: workspaceMentions.retry,
+                } : undefined}
                 label={t('messages.atFile.menuLabel', { defaultValue: 'File mentions' })}
-                loading={workspaceMentionLoading}
+                loading={workspaceMentions.loading}
                 loadingText={t('messages.atFile.loading', { defaultValue: 'Loading...' })}
                 onHoverItem={setAtFileMenuActiveIndex}
                 onSelectItem={insertSelectedAtFile}
