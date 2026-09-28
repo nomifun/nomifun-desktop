@@ -406,6 +406,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **20/20**。macOS 真实 relay、跨重启 quarantine、组合故障与长期压力仍开放，不关闭完整
   PROC-050 或共享阶段。
 
+- S-D04-14（PROC-042、A03/A11/A13/A17/A19 并发 start 容量预留子断言）：W85 用 barrier 在公开
+  supervisor 上同时释放 32 个真实 helper start，并把容量固定为 2。Windows 与 WSL2 Linux 都恰好
+  允许 2 个 helper 写出 PID，另外 30 个在物理 spawn 前返回 `capacity_exhausted`；独立目录中没有
+  超额 marker。两个已准入进程均 cancel/reaped 后，新 start 能复用额度。生产实现首次满足，本批只
+  新增 helper 与回归。两平台各重复 **20/20**；Windows process contract **12/12**，Linux
+  **13/13**。start/shutdown 竞争、Lost/quarantine 占额、PTY、macOS 与 1,000 次长稳仍开放，不关闭
+  完整 PROC-042 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

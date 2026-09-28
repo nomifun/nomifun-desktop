@@ -100,6 +100,15 @@ fn main() {
             write_pid_atomically(Path::new(&args[1]), process::id())
                 .unwrap_or_else(|error| fail_io("write PID marker", error));
         }
+        "write-pid-then-sleep" => {
+            require_len(&args, 3);
+            write_pid_atomically(Path::new(&args[1]), process::id())
+                .unwrap_or_else(|error| fail_io("write PID marker", error));
+            thread::sleep(Duration::from_millis(parse_u64(
+                &args[2],
+                "sleep duration",
+            )));
+        }
         "write-file" => {
             require_len(&args, 2);
             fs::write(Path::new(&args[1]), b"written by process_test_helper\n")

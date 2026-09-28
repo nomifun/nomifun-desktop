@@ -5,6 +5,7 @@ use std::{
     ffi::OsString,
     fs,
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -287,6 +288,119 @@ async fn running_deadline_preserves_partial_file_effect_and_reports_reaped_timeo
         fs::read(&marker).expect("the pre-timeout effect should remain observable"),
         b"partial effect before timeout\n"
     );
+}
+
+#[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
+async fn concurrent_starts_reserve_capacity_before_spawn_and_release_after_cleanup() {
+    const MAX_SESSIONS: usize = 2;
+    const ATTEMPTS: usize = 32;
+    let directory = Arc::new(tempfile::tempdir().expect("temporary directory"));
+    let supervisor = ProcessSupervisor::new(SupervisorConfig {
+        max_sessions: MAX_SESSIONS,
+        ..SupervisorConfig::default()
+    });
+    let barrier = Arc::new(tokio::sync::Barrier::new(ATTEMPTS + 1));
+    let mut starts = tokio::task::JoinSet::new();
+    for index in 0..ATTEMPTS {
+        let directory = directory.clone();
+        let supervisor = supervisor.clone();
+        let barrier = barrier.clone();
+        starts.spawn(async move {
+            let marker = directory.path().join(format!("attempt-{index:02}.pid"));
+            let mut process = helper_request(&[
+                "write-pid-then-sleep",
+                marker.to_str().expect("marker path should be UTF-8"),
+                "60000",
+            ]);
+            process.cwd = directory.path().canonicalize().expect("canonical cwd");
+            process.capability = CapabilityPolicy::local_owner(process.cwd.clone());
+            process.policy.interrupt_grace = Duration::from_millis(10);
+            process.policy.terminate_grace = Duration::from_millis(20);
+            process.policy.reap_grace = Duration::from_millis(500);
+            barrier.wait().await;
+            (index, supervisor.start(process).await)
+        });
+    }
+    barrier.wait().await;
+
+    let mut handles = Vec::new();
+    let mut capacity_rejections = 0;
+    while let Some(joined) = starts.join_next().await {
+        let (index, result) = joined.expect("start task should join");
+        match result {
+            Ok(handle) => handles.push((index, handle)),
+            Err(error) if error.code() == "capacity_exhausted" => capacity_rejections += 1,
+            Err(error) => panic!("unexpected concurrent start error: {error:?}"),
+        }
+    }
+    assert_eq!(handles.len(), MAX_SESSIONS);
+    assert_eq!(capacity_rejections, ATTEMPTS - MAX_SESSIONS);
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let count = fs::read_dir(directory.path())
+                .expect("marker directory should be readable")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "pid"))
+                .count();
+            if count == MAX_SESSIONS {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("admitted helpers should publish readiness");
+    assert_eq!(
+        fs::read_dir(directory.path())
+            .expect("marker directory should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|extension| extension == "pid"))
+            .count(),
+        MAX_SESSIONS,
+        "capacity-rejected starts must not execute user code"
+    );
+
+    for (_, handle) in handles {
+        let outcome = supervisor
+            .cancel(&handle.owner, &handle.session_id)
+            .await
+            .expect("admitted helper cleanup should succeed");
+        let ProcessOutcome::Cancelled { cleanup, .. } = outcome else {
+            panic!("admitted helper should settle as Cancelled");
+        };
+        assert!(cleanup.reaped);
+    }
+
+    let reuse_marker = directory.path().join("reuse.pid");
+    let mut reuse = helper_request(&[
+        "write-pid-then-sleep",
+        reuse_marker
+            .to_str()
+            .expect("reuse marker path should be UTF-8"),
+        "60000",
+    ]);
+    reuse.cwd = directory.path().canonicalize().expect("canonical cwd");
+    reuse.capability = CapabilityPolicy::local_owner(reuse.cwd.clone());
+    reuse.policy.interrupt_grace = Duration::from_millis(10);
+    reuse.policy.terminate_grace = Duration::from_millis(20);
+    reuse.policy.reap_grace = Duration::from_millis(500);
+    let handle = supervisor
+        .start(reuse)
+        .await
+        .expect("cleanup should release one capacity slot");
+    let outcome = supervisor
+        .cancel(&handle.owner, &handle.session_id)
+        .await
+        .expect("reused capacity helper cleanup should succeed");
+    assert!(matches!(
+        outcome,
+        ProcessOutcome::Cancelled {
+            cleanup: nomi_process_runtime::CleanupReport { reaped: true, .. },
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
