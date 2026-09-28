@@ -1294,6 +1294,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - macOS 原生执行、其他 Unix fallback、失败路径的身份检查→unlink、既有目标 verify→rename、
   IO fault、完整 UI/角色、100 seed/LONG/99% 仍待验，不关闭完整 FILE Case 或共享阶段。
 
+### 共享 Unix 既有目标派发源窗口（W70，基线 `df06d593e`）
+
+- S-D03-46 / FILE-020/025/038、A05/A07/A17/A19：在 Linux ext4 夹具中，于暂存 inode 与精确
+  字节已通过句柄核对之后、`rename` 实际按名称取源之前，把暂存名换成外来 7 字节文件。实际系统
+  调用会发布该外来对象，原意 8 字节暂存保留到独立名称；这是 W60 尚未覆盖的最窄派发窗口。
+- 现有发布后核对首次即得到正确保守终态：`published=true`、`publication_verified=false`、
+  `publication_identity=None`，错误包含 `outcome_unknown` 和 `re-read before retry`；目标真实为外来
+  字节，暂存原件仍可核对。但首版断言遗漏了 retained 暂存仍存活，因而把
+  `temporary_cleanup_unconfirmed=false` 当成通过；该假通过单独保留。收紧断言后首次产品 FAIL 证明
+  rename 成功被错误等同为“自有暂存已消费”，清理 receipt 少报残留。
+- Unix 发布后现在只有目标仍匹配自有暂存 inode 时才设置 `temporary_consumed=true`。目标身份不符
+  时继续保留 `outcome_unknown`、`published=true`、未验证且无 publication identity，并增加
+  `temporary_cleanup_unconfirmed=true`；不会对已经被复用的暂存名称做补删。未增加重试、权限或
+  乐观终态。失败现场、修复后 observation 和首次弱断言均在仓库外；一次 WSL stdout 路径采集
+  导致的夹具复制失败另行保留，随后按精确目录复制。
+- 修复后 Linux 精确回归 **1/1**、重复 **20/20**、service **126/126**；Windows
+  `nomifun-file` lib **362/362**，`cargo fmt --all -- --check` 通过。本批无 renderer/模型/Tauri UI
+  变更。零副作用补偿、失败清理 check→unlink、macOS 原生执行、IO fault、完整 UI/角色、100 seed/
+  LONG/99% 仍待验，不关闭完整 FILE Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
