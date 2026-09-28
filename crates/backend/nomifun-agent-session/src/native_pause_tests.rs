@@ -201,6 +201,45 @@ async fn competing_distinct_resume_authorizations_have_one_winner() {
     assert_eq!(budget.revision,1); assert_eq!(budget.session_payload_bytes,17*1024*1024);
 }
 
+#[tokio::test(flavor="multi_thread", worker_threads=3)]
+async fn concurrent_pause_resume_and_cancel_leave_one_irreversible_terminal() {
+    let store = AgentSessionStore::open_in_memory_with_connections(3).await.unwrap();
+    let (f, _, request) = paused(&store,"pause-resume-cancel-race").await;
+    let prepared = prepare(&store,&f).await;
+    let after_terminal_prepared = prepare(&store,&f).await;
+    let principal = owner();
+    let session = f.session.agent_session_id.clone();
+    let operation = request.operation_id.clone();
+    let (resumed, paused_again, cancelled) = tokio::join!(
+        store.commit_native_resume(&principal,&session,&request,prepared),
+        store.request_native_pause(&principal,&session,&operation,"concurrent-pause","keep paused"),
+        store.cancel_active_turn(&session,"concurrent-cancel".into(),"session-api".into()),
+    );
+    assert!(cancelled.is_ok(),"cancel must win the lifecycle race: {cancelled:?}");
+    let _serialized_preterminal_results = (resumed,paused_again);
+
+    let receipt = store.read_turn_receipt(&session,&operation).await.unwrap();
+    assert_eq!(receipt.status,TurnReceiptStatus::Cancelled);
+    let head = store.head(&session).await.unwrap();
+    assert_eq!(head.status,"ready");
+    assert!(head.active_turn_id.is_none());
+    assert!(store.native_pause_state(&session,&operation).await.unwrap().is_none());
+    assert!(store.load_native_checkpoint(&principal,&session,&operation).await.unwrap().is_none());
+    let terminal_count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind IN ('turn/completed','turn/failed','turn/cancelled')")
+        .bind(session.as_ref()).bind(operation.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert_eq!(terminal_count,1);
+    let resume_count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='turn/resume-authorized'")
+        .bind(session.as_ref()).bind(operation.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    let pause_request_count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='turn/pause-requested'")
+        .bind(session.as_ref()).bind(operation.as_ref()).fetch_one(store.test_pool()).await.unwrap();
+    assert!(resume_count <= 1 && pause_request_count <= 1);
+
+    let mut after_terminal = request;
+    after_terminal.idempotency_key = "resume-after-cancel".into();
+    assert!(store.commit_native_resume(&principal,&session,&after_terminal,after_terminal_prepared).await.is_err());
+    assert_eq!(store.read_turn_receipt(&session,&operation).await.unwrap().status,TurnReceiptStatus::Cancelled);
+}
+
 #[tokio::test]
 async fn payload_allowance_preserves_usage_and_readability_above_the_default_limit() {
     let store=AgentSessionStore::open_in_memory().await.unwrap();

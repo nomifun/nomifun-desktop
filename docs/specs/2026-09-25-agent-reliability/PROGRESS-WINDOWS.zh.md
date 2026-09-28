@@ -971,6 +971,25 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   cancelled/completed checkpoint 恢复；不关闭这些 Case。W42 N3 仍为 1/3；其他范围变更、角色、
   Unix/macOS、100 seed、LONG/99% 与完整共享阶段仍待验。
 
+### 共享 pause/resume 终态与竞争矩阵（W46，基线 `085ce59e3`）
+
+- S-D09-01 / CTRL-009/010、LIFE-015/017/020/021/022、CONC-007/008 子断言：生产 owner API
+  的合法暂停/恢复基线通过，保持同一 Turn、递增 generation/fence，恢复前已完成 write 只执行
+  一次；错误 digest/revision/owner/Snapshot/build/active set、超预算、未证 cleanup 均原子拒绝。
+- 新增三命令竞争回归：paused 状态下 pause request、resume authorization 与 cancel 并发，无论
+  前两者的串行次序，最终恰好一个 cancelled terminal；active Turn、pause 与 checkpoint 清空，
+  后续新 key 不能恢复。首次整组运行把 terminal head 误期望为 idle，第二次又在 terminal 后重新
+  构造 preparation 而先被正确 fence；两个夹具 FAIL 分别保留，改用既有 ready 合同及预先准备的
+  stale 数据后通过，未改产品状态机。
+- App 路由补 completed 负向：完成后的新 resume key 返回客户端错误；原 key 仅重放旧授权回执，
+  150 ms 后事件数、模型请求数、写次数与 completed 状态均不变。新增 Store/App 两项各
+  **20/20**；完整定向为 Session pause **10**、checkpoint **8**、App recovery **3**、pause 投影
+  **2**、UI 暂停组件 **9** 项通过。仅测试/进度变更，无生产或 renderer 改动，未重复构建 Tauri。
+- 本批证明的是 owner `/execution/resume` checkpoint 路径；W45 的 model-facing `resume_task` 是
+  closed-turn continuation。会话区现只验证暂停原因、发送阻断与停止入口，owner resume 尚无正式
+  会话 UI；LIFE-016 的进程/Browser/MCP in-flight 清理、完整 OBS-007、其他平台/角色及长期门槛
+  仍待验，不计完整 Case 或共享阶段完成。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

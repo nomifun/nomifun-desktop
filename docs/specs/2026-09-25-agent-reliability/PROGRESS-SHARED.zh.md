@@ -49,6 +49,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D09-01（CTRL-009/010、LIFE-015/017/020/021/022、CONC-007/008、A06/A10/A12/A17/A18/A19
+  pause checkpoint 子断言）：现有 owner 级 pause/resume 生产路由与 canonical Store 已做完整定向
+  复核。合法恢复保持同一 Turn，只增加 execution generation/fence；暂停期间禁止新 Turn，旧
+  producer 被 fence，已完成 write 不重放。错误 digest/revision、owner、Snapshot、build、active
+  set、预算和 cleanup 证明均在提交前拒绝。completed 后的新 resume key 与 cancelled 后的 stale
+  preparation 都拒绝；旧 key 只返回原幂等授权回执，不新增事件、模型请求或写入。新增三命令
+  竞争证明 cancel 终态唯一且不可逆，pause/checkpoint/active Turn 均清空；两项新增回归各
+  **20/20**。相关 Session pause 10、checkpoint 8、App 恢复 3、投影 2、UI 暂停状态 9 项通过。
+  两次首次失败均为新增夹具错误（terminal head 应为 ready；terminal 后重新 prepare 本应先被
+  fence），已原样保留，未修改产品状态机。本批未发现需改的生产缺陷，只补缺失回归。
+  当前 pause checkpoint 授权来自 owner `/execution/resume`，与 W45 model-facing closed-turn
+  `resume_task` 不同；会话区只验证暂停提示/发送阻断/停止，尚无 owner resume 正式 UI 入口，
+  因此不关闭完整 CTRL-009/010、OBS-007、LIFE-016 或真实 UI/平台矩阵。
+
 - S-D02-12（CTRL-001/006/007、REAL-013、A05/A07/A17/A18/A19 已闭合任务显式继续子断言）：
   W45 从 W44 completed Turn 的正式备份跨构建继续，要求导入全部旧要求、先更新计划，只读两个
   文件且不重放已完成修改。首次确定性 FAIL 证明历史任务仍被旧 build digest 拒绝；现仅允许在

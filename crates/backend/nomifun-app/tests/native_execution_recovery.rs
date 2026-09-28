@@ -124,7 +124,7 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     let mut stale = resume.clone(); stale["expected_checkpoint_digest"] = json!("f".repeat(64));
     assert!(response(&router,"POST",&format!("{execution}/resume"),stale).await.0.is_client_error());
     let resume_path = format!("{execution}/resume");
-    let (authorized,duplicate) = tokio::join!(call(&router,"POST",&resume_path,resume.clone()),call(&router,"POST",&resume_path,resume));
+    let (authorized,duplicate) = tokio::join!(call(&router,"POST",&resume_path,resume.clone()),call(&router,"POST",&resume_path,resume.clone()));
     assert_ne!(authorized["duplicate"],duplicate["duplicate"]);
     assert_eq!(authorized["authorization_event_id"],duplicate["authorization_event_id"]);
     let completed = tokio::time::timeout(Duration::from_secs(30),async {
@@ -146,6 +146,20 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     assert_eq!(writes,1);
     assert_eq!(requests.load(Ordering::SeqCst),5);
     assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(),"PAUSE_RESUME_OK");
+    let event_count:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=?")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap();
+    let replay = call(&router,"POST",&resume_path,resume.clone()).await;
+    assert_eq!(replay["duplicate"],true,"an exact retry returns only its old authorization receipt");
+    let mut after_terminal = resume;
+    after_terminal["idempotency_key"] = json!("resume-after-completed");
+    let (status,_) = response(&router,"POST",&resume_path,after_terminal).await;
+    assert!(status.is_client_error(),"a new resume command cannot reopen a completed Turn");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(requests.load(Ordering::SeqCst),5,"terminal resume attempts cannot open a model request");
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM agent_events WHERE session_id=?")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap(),event_count,
+        "terminal resume attempts cannot append canonical events");
+    assert_eq!(call(&router,"GET",&execution,Value::Null).await["state"],"completed");
     drop(router);
     app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
     server.abort(); let _ = server.await;
