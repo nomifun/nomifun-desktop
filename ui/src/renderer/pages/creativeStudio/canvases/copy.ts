@@ -24,6 +24,7 @@ export interface CreativeStudioCanvasesCopy {
   canvasStats: (nodeCount: number, connectionCount: number) => string;
   updatedAt: (formattedDate: string) => string;
   openCanvas: string;
+  openingCanvas: (title: string) => string;
   exportCanvas: string;
   renameCanvas: string;
   deleteCanvas: string;
@@ -114,6 +115,11 @@ export const resolveCreativeStudioCanvasesCopy = (
     openCanvas: t('creativeStudio.canvases.openCanvas', {
       defaultValue: 'Open canvas',
     }),
+    openingCanvas: (title) =>
+      t('creativeStudio.canvases.openingCanvas', {
+        title,
+        defaultValue: 'Opening “{{title}}”…',
+      }),
     exportCanvas: t('creativeStudio.canvases.exportCanvas', {
       defaultValue: 'Export',
     }),

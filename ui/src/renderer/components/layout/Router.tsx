@@ -1,10 +1,20 @@
 import React, { Suspense } from 'react';
+import { useTranslation } from 'react-i18next';
 import { HashRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router-dom';
 import AppLoader from '@renderer/components/layout/AppLoader';
 import ProtectedAppRuntime from '@renderer/components/layout/ProtectedAppRuntime';
 import RouteErrorBoundary from '@renderer/components/layout/RouteErrorBoundary';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { CANVASES_PATH, CANVAS_PATTERN, ASSET_LIBRARY_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, resourceSectionForPath, type ResourceSection } from '@renderer/pages/creativeStudio/app/resourceRoutes';
+import { CANVASES_PATH, CANVAS_PATTERN, ASSET_LIBRARY_PATH, MATERIALS_PATH, PROMPTS_PATH, TEMPLATES_PATH, resourceSectionForPath } from '@renderer/pages/creativeStudio/app/resourceRoutes';
+import {
+  loadCreativeStudioAssetsRoute,
+  loadCreativeStudioCanvasRoute,
+  loadCreativeStudioCanvasesRoute,
+  loadCreativeStudioPromptsRoute,
+  loadCreativeStudioTemplateRoute,
+  loadKnowledgeDetailRoute,
+  loadResourcePageBoundary,
+} from './routePreload';
 const Conversation = React.lazy(() => import('@renderer/pages/conversation'));
 const Guid = React.lazy(() => import('@renderer/pages/guid'));
 const AgentSettingsPage = React.lazy(() => import('@renderer/pages/agentSettings'));
@@ -31,47 +41,7 @@ const NomiConfigPage = React.lazy(() => import('@renderer/pages/nomi'));
 const CustomerServiceRosterPage = React.lazy(() => import('@renderer/pages/customerService'));
 const CustomerServiceDetailPage = React.lazy(() => import('@renderer/pages/customerService/CsAgentDetailPage'));
 const KnowledgeListPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeListPage'));
-const KnowledgeDetailPage = React.lazy(() => import('@renderer/pages/knowledge/KnowledgeDetailPage'));
-const loadResourcePageBoundary = () =>
-  import('@renderer/pages/creativeStudio/app/ResourcePageBoundary');
-const loadCreativeStudioCanvasesRoute = () =>
-  import('@renderer/pages/creativeStudio/canvases/CreativeStudioCanvasesRoute');
-const loadCreativeStudioPromptsRoute = () =>
-  import('@renderer/pages/creativeStudio/prompts/page/CreativeStudioPromptsRoute');
-const loadCreativeStudioAssetsRoute = () =>
-  import('@renderer/pages/creativeStudio/assets/page/CreativeAssetLibraryPage');
-const loadCreativeStudioCanvasRoute = () =>
-  import('@renderer/pages/creativeStudio/canvases/CreativeCanvasProductRoute');
-const loadCreativeStudioTemplateRoute = () =>
-  import('@renderer/pages/creativeStudio/templates/page/CreativeTemplateRoute');
-
-const resourceRouteLoaders: Record<ResourceSection, () => Promise<unknown>> = {
-  canvases: loadCreativeStudioCanvasesRoute,
-  canvas: loadCreativeStudioCanvasRoute,
-  prompts: loadCreativeStudioPromptsRoute,
-  assets: loadCreativeStudioAssetsRoute,
-  templates: loadCreativeStudioTemplateRoute,
-};
-
-const ignoreResourcePreloadFailure = (preload: Promise<unknown>): Promise<void> =>
-  preload.then(
-    () => undefined,
-    () => undefined
-  );
-
-/**
- * Warms the exact retained resource page and its themed overlay host. Preloading remains best-effort: route errors
- * still render through the normal route error boundary when the user navigates.
- */
-export const preloadResourceRoute = (path: string): Promise<void> => {
-  const section = resourceSectionForPath(path);
-  const loader = section ? resourceRouteLoaders[section] : null;
-  if (!loader) return Promise.resolve();
-
-  return ignoreResourcePreloadFailure(
-    Promise.all([loadResourcePageBoundary(), loader()])
-  );
-};
+const KnowledgeDetailPage = React.lazy(loadKnowledgeDetailRoute);
 
 const ResourcePageBoundary = React.lazy(loadResourcePageBoundary);
 const CreativeStudioCanvasesRoute = React.lazy(loadCreativeStudioCanvasesRoute);
@@ -86,11 +56,28 @@ const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/
 
 const RouteFallback: React.FC<{ Component: React.LazyExoticComponent<React.ComponentType> }> = ({ Component }) => {
   const location = useLocation();
+  const { t } = useTranslation();
   const resetKey = `${location.pathname}${location.search}${location.hash}`;
+  const stateLabel =
+    location.state &&
+    typeof location.state === 'object' &&
+    'routeLoadingLabel' in location.state &&
+    typeof location.state.routeLoadingLabel === 'string'
+      ? location.state.routeLoadingLabel.slice(0, 160)
+      : undefined;
+  const routeLoadingLabel =
+    stateLabel ||
+    (location.pathname.startsWith('/knowledge/')
+      ? t('knowledge.opening', { defaultValue: '正在打开知识库…' })
+      : resourceSectionForPath(location.pathname) === 'canvas'
+        ? t('creativeStudio.canvas.editor.loading', {
+            defaultValue: '正在载入画布…',
+          })
+        : undefined);
 
   return (
     <RouteErrorBoundary resetKey={resetKey}>
-      <Suspense fallback={<AppLoader />}>
+      <Suspense fallback={<AppLoader label={routeLoadingLabel} />}>
         <Component />
       </Suspense>
     </RouteErrorBoundary>

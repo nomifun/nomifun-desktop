@@ -17,7 +17,7 @@
 
 import classNames from 'classnames';
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { uuidv7 } from '@/common/utils/uuidv7';
 import { useTranslation } from 'react-i18next';
@@ -121,6 +121,25 @@ import {
 
 type TabKey = 'docs' | 'use' | 'set';
 const ALL_TABS: TabKey[] = ['docs', 'use', 'set'];
+
+function openingBaseFromNavigation(
+  state: unknown,
+  id: ReturnType<typeof parseKnowledgeBaseId> | undefined
+): IKnowledgeBase | undefined {
+  if (!id || !state || typeof state !== 'object' || !('knowledgeBase' in state)) {
+    return undefined;
+  }
+  const candidate = state.knowledgeBase;
+  if (
+    !candidate ||
+    typeof candidate !== 'object' ||
+    !('knowledge_base_id' in candidate) ||
+    candidate.knowledge_base_id !== id
+  ) {
+    return undefined;
+  }
+  return candidate as IKnowledgeBase;
+}
 
 // ─── Kind config (shared with KnowledgeCard via ../knowledgeKind) ──────────────
 
@@ -518,14 +537,29 @@ const KnowledgeDetailPage: React.FC = () => {
     [t]
   );
   const navigate = useNavigate();
+  const location = useLocation();
   const { id: rawId } = useParams<{ id: string }>();
   const id = rawId == null ? undefined : parseKnowledgeBaseId(rawId);
+  const openingBase = useMemo(
+    () => openingBaseFromNavigation(location.state, id),
+    [id, location.state]
+  );
   const activeKnowledgeBaseIdRef = useRef(id);
   activeKnowledgeBaseIdRef.current = id;
   const [searchParams, setSearchParams] = useSearchParams();
 
   // ─── Data hooks ─────────────────────────────────────────────────────────────
-  const { base, files: remoteFiles, tree, loading, error, refresh } = useKnowledgeBase(id);
+  const {
+    base,
+    files: remoteFiles,
+    tree,
+    loading,
+    filesLoading,
+    filesLoaded,
+    error,
+    refresh,
+    loadFiles,
+  } = useKnowledgeBase(id, openingBase);
   const { choice: modelChoice, setChoice: setModelChoice } = useKnowledgeAutogenModel();
   const { tags: allTags, createTag } = useKnowledgeTags();
 
@@ -598,6 +632,11 @@ const KnowledgeDetailPage: React.FC = () => {
   const moveDirectoryRequestRef = useRef(0);
   const lastTreeRevisionRef = useRef<number | null>(null);
   const isTreeSearch = fileSearch.trim().length > 0;
+
+  useEffect(() => {
+    if (!isTreeSearch || filesLoaded || filesLoading) return;
+    void loadFiles().catch(() => undefined);
+  }, [filesLoaded, filesLoading, isTreeSearch, loadFiles]);
 
   const source = getBaseSource(base);
   const canMutateTree = base?.tree_access === 'editable';
@@ -1766,6 +1805,23 @@ const KnowledgeDetailPage: React.FC = () => {
       )}
     >
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
+        {loading ? (
+          <div
+            className='flex min-h-38px items-center justify-center gap-10px rounded-10px border border-solid border-[var(--color-border-2)] bg-[var(--color-fill-1)] px-14px text-13px text-[var(--color-text-2)]'
+            role='status'
+            aria-live='polite'
+          >
+            <Spin dot size={16} />
+            <span>
+              {base
+                ? t('knowledge.openingNamed', {
+                    name: base.name,
+                    defaultValue: '正在打开“{{name}}”…',
+                  })
+                : t('knowledge.opening', { defaultValue: '正在打开知识库…' })}
+            </span>
+          </div>
+        ) : null}
         {/* ─── Back link ─────────────────────────────────────────────────────── */}
         <button
           type='button'
@@ -2011,7 +2067,10 @@ const KnowledgeDetailPage: React.FC = () => {
                       });
                     }}
                   >
-                    <Spin loading={loading} className='w-full'>
+                    <Spin
+                      loading={loading || (isTreeSearch && filesLoading)}
+                      className='w-full'
+                    >
                     {displayedTreeData.length === 0 ? (
                       <Empty
                         description={

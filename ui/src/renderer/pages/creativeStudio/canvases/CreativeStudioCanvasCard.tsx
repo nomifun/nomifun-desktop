@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Checkbox, Input } from '@arco-design/web-react';
+import { Button, Checkbox, Input, Spin } from '@arco-design/web-react';
 import { Check, Close, Delete, Download, EditTwo } from '@icon-park/react';
 import React from 'react';
 
@@ -21,9 +21,11 @@ interface CreativeStudioCanvasCardProps {
   editing: boolean;
   editingTitle: string;
   disabled?: boolean;
+  opening?: boolean;
   exportDisabled?: boolean;
   archiveUnavailableMessage?: string;
   onOpen: (canvas: CreativeCanvasSummary) => void;
+  onPrefetch?: (canvas: CreativeCanvasSummary) => void;
   onToggleSelected: (canvas: CreativeCanvasSummary, selected: boolean) => void;
   onStartRename: (canvas: CreativeCanvasSummary) => void;
   onEditingTitleChange: (title: string) => void;
@@ -41,9 +43,11 @@ const CreativeStudioCanvasCard: React.FC<CreativeStudioCanvasCardProps> = ({
   editing,
   editingTitle,
   disabled = false,
+  opening = false,
   exportDisabled = false,
   archiveUnavailableMessage,
   onOpen,
+  onPrefetch,
   onToggleSelected,
   onStartRename,
   onEditingTitleChange,
@@ -52,6 +56,25 @@ const CreativeStudioCanvasCard: React.FC<CreativeStudioCanvasCardProps> = ({
   onExport,
   onDelete,
 }) => {
+  const prefetchTimerRef = React.useRef<number | null>(null);
+  const cancelPrefetch = () => {
+    if (prefetchTimerRef.current === null) return;
+    window.clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = null;
+  };
+  const prefetchNow = () => {
+    cancelPrefetch();
+    onPrefetch?.(canvas);
+  };
+  const schedulePrefetch = () => {
+    if (!onPrefetch || prefetchTimerRef.current !== null) return;
+    prefetchTimerRef.current = window.setTimeout(() => {
+      prefetchTimerRef.current = null;
+      onPrefetch(canvas);
+    }, 120);
+  };
+  React.useEffect(() => cancelPrefetch, []);
+
   const open = () => {
     if (!editing && !disabled) onOpen(canvas);
   };
@@ -63,8 +86,14 @@ const CreativeStudioCanvasCard: React.FC<CreativeStudioCanvasCardProps> = ({
       role='button'
       tabIndex={disabled || editing ? -1 : 0}
       aria-label={`${copy.openCanvas}: ${canvas.title}`}
+      aria-busy={opening}
       data-canvas-id={canvas.canvasId}
       data-canvas-selected={selected ? 'true' : 'false'}
+      data-canvas-opening={opening ? 'true' : 'false'}
+      onMouseEnter={schedulePrefetch}
+      onMouseLeave={cancelPrefetch}
+      onFocus={prefetchNow}
+      onPointerDown={prefetchNow}
       onClick={open}
       onKeyDown={(event) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -182,6 +211,12 @@ const CreativeStudioCanvasCard: React.FC<CreativeStudioCanvasCardProps> = ({
           )}
         </div>
       </div>
+      {opening ? (
+        <div className={styles.cardOpening} role='status' aria-live='polite'>
+          <Spin dot size={18} />
+          <span>{copy.openingCanvas(canvas.title)}</span>
+        </div>
+      ) : null}
     </article>
   );
 };

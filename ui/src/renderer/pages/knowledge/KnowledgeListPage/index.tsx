@@ -12,7 +12,7 @@
  * The old Form-based create Modal has been removed; only the edit path (openEdit)
  * retains a simple modal.
  */
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
@@ -30,10 +30,12 @@ import { AddOne, Brain, Search, SettingTwo } from '@icon-park/react';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { ipcBridge } from '@/common';
 import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
+import { preloadKnowledgeDetailRoute } from '@/renderer/components/layout/routePreload';
 import type { KnowledgeKindShortcut } from '../KnowledgeEmptyState';
 import type { IKnowledgeBase, IKnowledgeTag } from '@/common/adapter/ipcBridge';
 import {
   knowledgeErrorText,
+  prefetchKnowledgeBaseOpen,
   useKnowledgeBases,
 } from '../useKnowledge';
 import { useKnowledgeTags } from '../useKnowledgeTags';
@@ -108,6 +110,39 @@ const KnowledgeListPage: React.FC = () => {
   const { tags, createTag, updateTag, deleteTag } = useKnowledgeTags();
   const [tagModalVisible, setTagModalVisible] = useState(false);
   const [retrievalModalVisible, setRetrievalModalVisible] = useState(false);
+  const openingBaseIdRef = useRef<string | null>(null);
+  const [openingBaseId, setOpeningBaseId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void preloadKnowledgeDetailRoute();
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  const prefetchBase = useCallback((base: IKnowledgeBase) => {
+    void preloadKnowledgeDetailRoute();
+    void prefetchKnowledgeBaseOpen(base).catch(() => undefined);
+  }, []);
+
+  const openBase = useCallback(
+    (base: IKnowledgeBase) => {
+      if (openingBaseIdRef.current) return;
+      openingBaseIdRef.current = base.knowledge_base_id;
+      setOpeningBaseId(base.knowledge_base_id);
+      prefetchBase(base);
+      navigate(`/knowledge/${base.knowledge_base_id}`, {
+        state: {
+          routeLoadingLabel: t('knowledge.openingNamed', {
+            name: base.name,
+            defaultValue: '正在打开“{{name}}”…',
+          }),
+          knowledgeBase: base,
+        },
+      });
+    },
+    [navigate, prefetchBase, t]
+  );
 
   // Filter state
   const [kindFilter, setKindFilter] = useState<KnowledgeKind | null>(null);
@@ -469,7 +504,9 @@ const KnowledgeListPage: React.FC = () => {
                   key={base.knowledge_base_id}
                   base={base}
                   tagMap={tagMap}
-                  onOpen={(b) => navigate(`/knowledge/${b.knowledge_base_id}`)}
+                  opening={openingBaseId === base.knowledge_base_id}
+                  onPrefetch={prefetchBase}
+                  onOpen={openBase}
                   onEdit={(b) => openEdit(b)}
                   onDelete={handleCardDelete}
                 />
