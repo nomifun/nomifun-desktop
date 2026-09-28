@@ -88,3 +88,11 @@ pub use provider_usage::{ProviderInUseDetails, ProviderUsage, ProviderUsageFeatu
 pub use timestamp::{TimestampMs, now_ms};
 pub use types::{CommandSpec, EnvVar, ProviderWithModel};
 pub use vision_registry::VisionUnsupportedRegistry;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn publish_new_file_noreplace(
+    source: &std::path::Path,
+    target: &std::path::Path,
+) -> std::io::Result<()> {
+    atomic_file::publish_new_file(source, target)
+}

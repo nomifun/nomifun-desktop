@@ -49,6 +49,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-45（FILE-019/028、A05/A13/A17/A19 Unix 新建发布清理窗口子断言）：W69 在 WSL2
+  Ubuntu ext4 夹具中把并发替换精确放到暂存 inode 身份确认之后、`unlink` 之前；旧 hard-link
+  发布先正确生成目标，随后删除了占用原暂存名的外来文件，并仍返回成功。首次 FAIL、ext4 现场和
+  runner 夹具错误分别保留。Linux/macOS 新建发布现复用共享原生 no-replace rename：Linux
+  `renameat2(RENAME_NOREPLACE)`、macOS `renamex_np(RENAME_EXCL)` 在同一原子操作中完成“不覆盖
+  目标”和消费暂存名，不再经过按路径清理窗口；既有目标、权限与内容核对保持不变。新增 Linux
+  反例修复后 **20/20**，Linux service **125/125**，Windows `nomifun-file` lib **362/362**，
+  workspace fmt 通过。Windows 发布路径未改变；macOS 原生执行、其他 Unix fallback、失败路径的
+  身份检查→unlink、既有目标 verify→rename、完整 UI/角色与长期门槛仍开放，不关闭完整 FILE Case。
+
 - S-D03-43（FILE-020/022/024/031/032/036、A02/A05/A14/A19 macOS APFS identity 与 Unix
   目标权限子断言）：Unix 批量 patch 只按词法路径判重，APFS case 或 NFC/NFD 等价目标会先发布
   第 1 项再在第 2 项冲突；POSIX rename 又能在父目录可写时替换 mode/ACL 只读目标。现由 macOS

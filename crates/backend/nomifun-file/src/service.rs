@@ -1811,6 +1811,32 @@ fn publish_patch_file_with_prepublication_hook(
         &Path,
     ) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
 ) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
+    publish_patch_file_with_cleanup_hook(
+        path,
+        data,
+        temporary,
+        source,
+        after_staging,
+        before_replace,
+        || {},
+        after_publication,
+        #[cfg(windows)]
+        native_replace,
+    )
+}
+
+fn publish_patch_file_with_cleanup_hook(
+    path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>,
+    after_staging: impl FnOnce(),
+    before_replace: impl FnOnce(),
+    _after_cleanup_identity: impl FnOnce(),
+    after_publication: impl FnOnce() -> Result<(), AppError>,
+    #[cfg(windows)] native_replace: impl FnOnce(
+        &Path,
+        &Path,
+        &Path,
+    ) -> std::io::Result<crate::windows_cleanup::FileIdentity>,
+) -> Result<Option<PublicationIdentity>, PatchPublicationFailure> {
     #[cfg(windows)]
     if matches!(source, PublicationSource::Absent) {
         return crate::windows_create::publish(path, data, temporary, after_staging, after_publication).map(|()| None);
@@ -1970,36 +1996,64 @@ fn publish_patch_file_with_prepublication_hook(
             before_replace();
             #[cfg(not(windows))]
             let mut staged_file = open_verified_publication_source(&temporary_owner, temporary, data)?;
-            // hard_link is intentionally used for the create case: unlike
-            // rename, it fails rather than replacing a target that appeared
-            // after the precondition check.
-            std::fs::hard_link(&temporary, path).map_err(|error| {
-                if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    AppError::Conflict(format!(
-                        "patch target '{}' appeared during publication",
-                        path.display()
-                    ))
-                } else {
+            #[cfg(all(not(windows), any(target_os = "linux", target_os = "macos")))]
+            {
+                // The native no-replace rename consumes the only staging name
+                // in the same atomic operation that publishes the target. A
+                // hard-link followed by path-based cleanup leaves a window in
+                // which cleanup can unlink a foreign replacement.
+                nomifun_common::publish_new_file_noreplace(temporary, path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        AppError::Conflict(format!(
+                            "patch target '{}' appeared during publication",
+                            path.display()
+                        ))
+                    } else {
+                        AppError::Internal(format!(
+                            "cannot publish new patch target '{}': {error}",
+                            path.display()
+                        ))
+                    }
+                })?;
+                published = true;
+                temporary_consumed = true;
+            }
+            #[cfg(any(windows, all(not(windows), not(any(target_os = "linux", target_os = "macos")))))]
+            {
+                // Other targets retain the portable no-clobber hard-link
+                // fallback until they provide an atomic no-replace rename.
+                std::fs::hard_link(&temporary, path).map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::AlreadyExists {
+                        AppError::Conflict(format!(
+                            "patch target '{}' appeared during publication",
+                            path.display()
+                        ))
+                    } else {
+                        AppError::Internal(format!(
+                            "cannot publish new patch target '{}': {error}",
+                            path.display()
+                        ))
+                    }
+                })?;
+                published = true;
+                #[cfg(windows)]
+                let cleanup = temporary_owner.as_ref().expect("staged file ownership is live").remove(temporary);
+                #[cfg(not(windows))]
+                let cleanup = remove_owned_publication_source_with_hook(
+                    &temporary_owner,
+                    temporary,
+                    _after_cleanup_identity,
+                );
+                cleanup.map_err(|error| {
                     AppError::Internal(format!(
-                        "cannot publish new patch target '{}': {error}",
-                        path.display()
+                        "cannot remove temporary patch file '{}': {error}",
+                        temporary.display()
                     ))
-                }
-            })?;
-            published = true;
-            #[cfg(windows)]
-            let cleanup = temporary_owner.as_ref().expect("staged file ownership is live").remove(temporary);
-            #[cfg(not(windows))]
-            let cleanup = remove_owned_publication_source(&temporary_owner, temporary);
-            cleanup.map_err(|error| {
-                AppError::Internal(format!(
-                    "cannot remove temporary patch file '{}': {error}",
-                    temporary.display()
-                ))
-            })?;
-            temporary_consumed = true;
-            #[cfg(windows)]
-            { temporary_owner = None; }
+                })?;
+                temporary_consumed = true;
+                #[cfg(windows)]
+                { temporary_owner = None; }
+            }
             #[cfg(not(windows))]
             {
                 let target_is_staged = crate::publication_identity::matches_path(&temporary_owner, path)
@@ -2347,8 +2401,20 @@ fn remove_owned_publication_source(
     owner: &PublicationIdentity,
     path: &Path,
 ) -> std::io::Result<()> {
+    remove_owned_publication_source_with_hook(owner, path, || {})
+}
+
+#[cfg(not(windows))]
+fn remove_owned_publication_source_with_hook(
+    owner: &PublicationIdentity,
+    path: &Path,
+    after_identity: impl FnOnce(),
+) -> std::io::Result<()> {
     match crate::publication_identity::matches_path(owner, path) {
-        Ok(true) => std::fs::remove_file(path),
+        Ok(true) => {
+            after_identity();
+            std::fs::remove_file(path)
+        }
         Ok(false) => Err(std::io::Error::other(
             "publication cleanup path changed file identity",
         )),
@@ -3259,6 +3325,49 @@ mod tests {
         assert!(!target.exists(), "{observed}");
         assert_eq!(fs::read(&temporary).unwrap(), b"foreign", "{observed}");
         assert_eq!(fs::read(&retained).unwrap(), b"intended", "{observed}");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unix_new_publication_has_no_owned_check_to_unlink_window() {
+        use std::cell::Cell;
+
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("new.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        let retained = fixture.path().join("retained-stage");
+        let cleanup_window_reached = Cell::new(false);
+        let result = publish_patch_file_with_cleanup_hook(
+            &target,
+            b"intended",
+            &temporary,
+            PublicationSource::Absent,
+            || {},
+            || {},
+            || {
+                cleanup_window_reached.set(true);
+                fs::rename(&temporary, &retained).unwrap();
+                fs::write(&temporary, b"foreign").unwrap();
+            },
+            || Ok(()),
+        );
+        let observed = format!(
+            "cleanup_window_reached={}; result={result:?}; target={:?}; temporary={:?}; retained={:?}",
+            cleanup_window_reached.get(),
+            fs::read(&target),
+            fs::read(&temporary),
+            fs::read(&retained),
+        );
+        fs::write(fixture.path().join("observation.txt"), &observed).unwrap();
+        assert!(result.is_ok(), "{observed}");
+        assert_eq!(fs::read(&target).unwrap(), b"intended", "{observed}");
+        if cleanup_window_reached.get() {
+            assert_eq!(fs::read(&temporary).unwrap(), b"foreign", "{observed}");
+            assert_eq!(fs::read(&retained).unwrap(), b"intended", "{observed}");
+        } else {
+            assert!(!temporary.exists(), "{observed}");
+            assert!(!retained.exists(), "{observed}");
+        }
     }
 
     #[cfg(windows)]
