@@ -120,7 +120,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run a shell command using cmd (for example cmd=ls -la or cmd=node --check game.js). For exact executable/argv invocation instead use command with args; command alone never gets silently split or evaluated as shell text. Do not combine these two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a script through the host shell using the cmd field. For exact executable/argv invocation instead use command with args; command alone never gets silently split or evaluated as shell text. Do not combine these two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -396,8 +396,13 @@ fn patch_schema() -> Value {
 }
 
 fn process_launch(include_wait: bool) -> Value {
+    let cmd_description = if cfg!(target_os = "windows") {
+        "PowerShell script on this process host. Do not use Command Prompt-only syntax such as dir /b or dir /s here; use PowerShell cmdlets, or set command=cmd.exe with separate args beginning [\"/d\",\"/c\"]. Alternative to command plus args; never combine the forms."
+    } else {
+        "/bin/sh -c script on this process host. Alternative to command plus args; never combine the forms."
+    };
     let mut properties = json!({
-        "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":"Preferred: shell command or script, for example node --check game.js. Runs through the host shell. Do not combine with command or nonempty args."},
+        "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":cmd_description},
         "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable name or path only, for example git, bun, or powershell.exe. Never include arguments such as ls -la in this field."},
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Separate argument tokens, for example [\"status\",\"--short\"] for git."},
         "cwd":{"type":"string","maxLength":4096},
@@ -559,6 +564,25 @@ mod tests {
         assert!(hunk["description"].as_str().is_some_and(|description|
             description.contains("context is unchanged text")
                 && description.contains("minItems/maxItems are not arguments")));
+    }
+
+    #[test]
+    fn process_cmd_schema_names_the_actual_host_shell() {
+        let process = standard_agent_tool_exposures()
+            .into_iter()
+            .find(|tool| tool.definition.name == "exec_command")
+            .unwrap();
+        let description = process.definition.input_schema.0["properties"]["cmd"]["description"]
+            .as_str()
+            .unwrap();
+        if cfg!(target_os = "windows") {
+            assert!(!process.definition.description.contains("cmd=ls -la"));
+            assert!(description.contains("PowerShell"));
+            assert!(description.contains("dir /b"));
+            assert!(description.contains("command=cmd.exe"));
+        } else {
+            assert!(description.contains("/bin/sh -c"));
+        }
     }
 
     #[test]
