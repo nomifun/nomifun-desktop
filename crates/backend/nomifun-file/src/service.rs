@@ -1895,6 +1895,11 @@ fn publish_patch_file_with_prepublication_hook(
                 "patch target '{}' disappeared before publication", path.display()
             )))?;
             #[cfg(not(windows))]
+            // POSIX rename can replace a mode/ACL read-only file whenever its
+            // parent is writable. Prove access to this inode and retain the
+            // write handle until publication finishes.
+            let _writable_target = open_writable_publication_target(path, &metadata)?;
+            #[cfg(not(windows))]
             {
                 // Agent publication holds PreparedParent through this call.
                 // Windows checks through a handle that denies write sharing.
@@ -2039,6 +2044,48 @@ fn publish_patch_file_with_prepublication_hook(
         PatchPublicationFailure { error, published, publication_verified, temporary_cleanup_unconfirmed,
             publication_identity: if publication_verified { publication_identity } else { None } }
     })
+}
+
+#[cfg(not(windows))]
+fn open_writable_publication_target(
+    path: &Path,
+    expected: &std::fs::Metadata,
+) -> Result<std::fs::File, AppError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::PermissionDenied => AppError::Forbidden(format!(
+                "patch target '{}' is not writable: {error}",
+                path.display()
+            )),
+            std::io::ErrorKind::NotFound => AppError::Conflict(format!(
+                "patch target '{}' disappeared before publication",
+                path.display()
+            )),
+            _ => AppError::Internal(format!(
+                "cannot open patch target '{}' for write verification: {error}",
+                path.display()
+            )),
+        })?;
+    let actual = file.metadata().map_err(|error| {
+        AppError::Internal(format!(
+            "cannot inspect writable patch target '{}': {error}",
+            path.display()
+        ))
+    })?;
+    if !actual.is_file()
+        || actual.dev() != expected.dev()
+        || actual.ino() != expected.ino()
+    {
+        return Err(AppError::Conflict(format!(
+            "patch target '{}' changed identity before publication",
+            path.display()
+        )));
+    }
+    Ok(file)
 }
 
 #[cfg(not(windows))]
