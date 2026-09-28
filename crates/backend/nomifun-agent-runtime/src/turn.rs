@@ -1386,7 +1386,7 @@ pub(crate) async fn run_turn(
                         && retained_inputs.len() == 1));
             if (terminal_handoff || terminal_report.is_some())
                 && state.work_status.running_processes.is_empty()
-                && !patch_recovery.pending()
+                && (!patch_recovery.pending() || terminal_report.as_ref().is_some_and(|report| report.is_blocked()))
             {
                 // `take(..., true)` is the terminal fence: when it returns
                 // empty, the host atomically closes steering for this turn.
@@ -1742,7 +1742,7 @@ fn synchronize_adaptive_context(
         let completion_tool = request.input.tools.iter_mut()
             .find(|tool| tool.name == crate::completion::TOOL_NAME)
             .ok_or_else(|| AgentEngineError::InvalidContract("active task ledger has no completion tool".into()))?;
-        *completion_tool = state.completion.definition_with_evidence(&state.work_status);
+        *completion_tool = state.completion.definition_with_evidence(&state.work_status,patch_recovery.pending());
         // Temporary workflow gates do not revoke tools from the frozen
         // capability surface. Removing schemas made repairable command errors
         // look like lost shell permission and forced needless tool discovery.
@@ -2045,11 +2045,8 @@ async fn invoke_tool_calls(
         let planned = execution_plan.update(&completed[0], accepted_inputs, event_sink).await?;
         let report = if planned.is_error {
             AgentToolResult::text(completed[1].call_id.clone(), "Completion was not applied because the preceding plan update failed. The prior plan and effects remain unchanged.", true)
-        } else if patch_recovery.pending() {
-            completion.invalidate();
-            AgentToolResult::text(completed[1].call_id.clone(),"Completion is not ready: re-observe failed patch targets before finalizing.",true)
         } else {
-            completion.submit(&completed[1], execution_plan, work_status, accepted_inputs, event_sink).await?
+            completion.submit(&completed[1], execution_plan, work_status, accepted_inputs, patch_recovery.pending(), event_sink).await?
         };
         return finish_tool_results(vec![
             (completed[0].call_id.clone(), Ok(planned)),
@@ -2059,11 +2056,8 @@ async fn invoke_tool_calls(
     if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
         let mut results = Vec::new();
         for call in &completed {
-            let result = if patch_recovery.pending() {
-                completion.invalidate();
-                AgentToolResult::text(call.call_id.clone(),"Completion is not ready: re-observe failed patch targets before finalizing.",true)
-            } else if completed.len() == 1 {
-                completion.submit(call, execution_plan, work_status, accepted_inputs, event_sink).await?
+            let result = if completed.len() == 1 {
+                completion.submit(call, execution_plan, work_status, accepted_inputs, patch_recovery.pending(), event_sink).await?
             } else {
                 AgentToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
             };
@@ -4520,6 +4514,81 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(model.requests.lock().unwrap().len(), 3);
         assert_eq!(model.steps.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn blocked_patch_report_stops_without_rereading_or_retrying_the_effect() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        #[derive(Default)]
+        struct FailedPatch(AtomicUsize);
+        #[async_trait]
+        impl AgentToolInvoker for FailedPatch {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                assert_eq!(invocation.binding.action_id.as_ref(), "workspace.files/patch", "no recovery read or other effect was authorized");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(AgentToolResult::text(invocation.call.call_id,
+                    "Partial publication: a changed, b failed; final file state is not verified", true))
+            }
+        }
+        let model = Arc::new(ObservingModel { steps:std::sync::Mutex::new(vec![
+            control_step("patch-once", "apply_patch", json!({"files":[{"path":"a"},{"path":"b"}]})),
+            control_step("blocked", "report_completion", json!({
+                "summary":"Partial publication; stopped after the error as requested. Current files remain unverified.",
+                "criteria":[{"disposition":"blocked","rationale":"A patch failed and the user forbids further operations"}]
+            })),
+            text_step("must not request another model response"),
+            text_step("must not complete"),
+        ]),requests:Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("apply_patch", "workspace.files", "workspace.files/patch", AgentEffectClass::ManagedEffect, false),
+        ]).unwrap();
+        let mut input = request();
+        input.input.messages = vec![crate::context_lifecycle::text_message(ChatRole::User,
+            "Apply one patch; on error stop, do not reread or retry.".into())];
+        let sink = Arc::new(Sink::default());
+        let tools = Arc::new(FailedPatch::default());
+        let result = run_turn(binding(),model.clone(),tools.clone(),sink.clone(),
+            AgentTurnRequest::new(input,plan,principal(),0),AgentContextBudget::default(),CancellationToken::new()).await;
+        let events = sink.0.lock().unwrap();
+        assert!(events.iter().any(|event| matches!(event, AgentEngineEvent::CompletionDelivered {text,..}
+            if text.contains("Partial publication"))), "blocked result must reach the user without another tool call");
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),2);
+        assert_eq!(tools.0.load(Ordering::SeqCst),1);
+        assert!(!events.iter().any(|event| matches!(event,AgentEngineEvent::TurnCompleted {..})));
+        let recovery = events.iter().rev().find_map(|event| match event {
+            AgentEngineEvent::PatchRecoveryUpdated {state} => Some(state), _ => None,
+        }).unwrap();
+        assert_eq!(recovery.targets,["a","b"],"failure delivery must retain the pending recovery obligation");
+    }
+
+    #[tokio::test]
+    async fn restored_patch_obligation_can_end_with_a_blocked_control_batch() {
+        let mut controls = control_step("close-plan", "update_plan", json!({
+            "plan":[{"step":"Patch recovery","status":"blocked"}]
+        }));
+        controls.pop();
+        controls.extend(control_step("blocked", "report_completion", json!({"summary":"Recovery stopped",
+            "criteria":[{"disposition":"blocked","rationale":"No further operations are authorized"}]})));
+        let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![controls,
+            text_step("must not continue"),text_step("must not complete")]),requests:Default::default()});
+        let result = open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_patch_recovery(crate::AgentPatchRecoveryState {
+                targets:vec!["a".into()],..Default::default()
+            }),
+        ).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),1,"blocked control batch must terminate without a recovery read");
+        assert_eq!(model.steps.lock().unwrap().len(),2);
     }
 
     #[tokio::test]

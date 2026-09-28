@@ -187,8 +187,13 @@ pub(crate) fn definition() -> ChatToolDefinition {
 impl CompletionTracker {
     /// Runtime control citations are turn-local data, not Kernel grants. The
     /// same exposed schema is used by the whole-batch argument preflight.
-    pub(crate) fn definition_with_evidence(&self, work: &AgentWorkStatus) -> ChatToolDefinition {
+    pub(crate) fn definition_with_evidence(&self, work: &AgentWorkStatus, pending_patch: bool) -> ChatToolDefinition {
         let mut tool = definition();
+        if pending_patch {
+            tool.description = format!(
+                "A failed patch has unresolved targets. To honor an error-stop/no-retry request, end with this tool now: provide the actual partial-result summary and one criterion {{\"disposition\":\"blocked\",\"rationale\":\"why the requested work cannot be completed\"}}. Omit evidence_call_ids, evidence_paths and requirement_ids for that blocked account. Historical reads and failed calls cannot support current success. No tool-history search, recovery read, replan or repeat mutation is required to report this failure. Pending recovery remains recorded and the turn ends as failed. {}",
+                tool.description);
+        }
         let usable = self.observations.iter()
             .filter(|item| self.is_usable(item, work.workspace_observation_epoch))
             .collect::<Vec<_>>();
@@ -407,17 +412,25 @@ impl CompletionTracker {
         plan: &mut AgentPlan,
         work: &AgentWorkStatus,
         inputs: &[ChatMessage],
+        pending_patch: bool,
         sink: &dyn AgentEventSink,
     ) -> Result<AgentToolResult, AgentEngineError> {
         // A rejected replacement must not leave an old successful report as
         // an accidental fallback after the model was told its account failed.
         self.report = None;
         let mut closing = plan.clone();
-        if !closing.needs_replan {
+        let reporting_blocked = call.arguments.0.get("criteria").and_then(serde_json::Value::as_array)
+            .is_some_and(|criteria| criteria.iter().any(|criterion| criterion["disposition"] == "blocked"));
+        if !closing.needs_replan || reporting_blocked {
+            // A truthful failure report needs no further effect or recovery read.
+            // Validate it before committing; unresolved work stays blocked.
+            closing.needs_replan = false;
             closing.requirements = crate::requirements::merge(&plan.requirements, &[], inputs)
                 .map_err(AgentEngineError::InvalidContract)?;
             for step in &mut closing.steps {
-                if step.status != AgentPlanStatus::Blocked { step.status = AgentPlanStatus::Completed; }
+                if matches!(step.status, AgentPlanStatus::Pending | AgentPlanStatus::InProgress) {
+                    step.status = if reporting_blocked { AgentPlanStatus::Blocked } else { AgentPlanStatus::Completed };
+                }
             }
             if closing.revision == 0 {
                 closing.explanation = "Completion account for the accepted task.".into();
@@ -432,6 +445,10 @@ impl CompletionTracker {
             Ok(report) => report,
             Err(reason) => return Ok(AgentToolResult::text(call.call_id.clone(), reason, true)),
         };
+        if pending_patch && !report.is_blocked() {
+            return Ok(AgentToolResult::text(call.call_id.clone(),
+                "Failed patch targets remain unobserved. Task completion is unavailable. Report blocked to stop without more operations, or re-observe targets only if the user authorizes further work. Pending recovery will be retained.", true));
+        }
         // Validate the entire account before changing control state. A bad
         // evidence reference cannot accidentally close the current plan.
         if closing != *plan {
@@ -654,7 +671,7 @@ mod tests {
             file_observation("current", "current.txt", 2), failed,
         ], ..Default::default() };
         let work = AgentWorkStatus { workspace_observation_epoch: 2, ..Default::default() };
-        let schema = tracker.definition_with_evidence(&work).input_schema.0;
+        let schema = tracker.definition_with_evidence(&work,false).input_schema.0;
         let validator = jsonschema::options().build(&schema).unwrap();
         let report = |field: &str, reference: &str| {
             let mut value = serde_json::json!({"summary":"Finished","criteria":[
@@ -669,7 +686,7 @@ mod tests {
             assert!(!validator.is_valid(&report("evidence_paths", path)));
             assert!(!validator.is_valid(&report("evidence_call_ids", call)));
         }
-        let empty = CompletionTracker::default().definition_with_evidence(&work).input_schema.0;
+        let empty = CompletionTracker::default().definition_with_evidence(&work,false).input_schema.0;
         let validator = jsonschema::options().build(&empty).unwrap();
         assert!(!validator.is_valid(&report("evidence_paths", "current.txt")));
         assert!(!validator.is_valid(&report("evidence_call_ids", "current")));
@@ -851,7 +868,7 @@ mod tests {
                 {"step":"Styles","disposition":"supported","evidence_paths":["./style.css"],"rationale":"Fresh file read"},
                 {"step":"Gameplay","disposition":"unverified","rationale":"No interactive test was run"}
             ]})) };
-        let result = tracker.submit(&call,&mut plan,&work,&inputs,&crate::NoopAgentEventSink).await.unwrap();
+        let result = tracker.submit(&call,&mut plan,&work,&inputs,false,&crate::NoopAgentEventSink).await.unwrap();
         assert!(!result.is_error,"{}",result.output_text());
         let report = tracker.current(&plan,&work,1).unwrap();
         assert_eq!(report.criteria[0].evidence_call_ids,["html-new"]);
@@ -877,8 +894,76 @@ mod tests {
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Done","criteria":[
                     {"step":"Game","disposition":"supported","evidence_paths":[path],"rationale":"Claimed verification"}
                 ]})) };
-            assert!(tracker.submit(&call,&mut plan,&work,&inputs,&crate::NoopAgentEventSink).await.unwrap().is_error);
+            assert!(tracker.submit(&call,&mut plan,&work,&inputs,false,&crate::NoopAgentEventSink).await.unwrap().is_error);
             assert_eq!(plan,original);
+            assert!(tracker.current(&plan,&work,1).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_patch_requires_blocked_disposition_and_preserves_rejected_state() {
+        let inputs = vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,
+            "Stop after the patch error; do not retry".into())];
+        for disposition in ["supported", "unverified", "blocked"] {
+            let mut plan = AgentPlan::default();
+            let before = plan.clone();
+            let work = AgentWorkStatus::default();
+            let mut tracker = CompletionTracker { observations:vec![file_observation("read-a","a",0)], ..Default::default() };
+            let call = ChatToolCall { call_id:"report".into(),name:TOOL_NAME.into(),provider_metadata:None,
+                arguments:StrictJsonValue(serde_json::json!({"summary":"Partial result", "criteria":[{
+                    "disposition":disposition,"evidence_call_ids":["read-a"],"rationale":"The remaining target is unobserved"
+                }]})) };
+            let result = tracker.submit(&call,&mut plan,&work,&inputs,true,&crate::NoopAgentEventSink).await.unwrap();
+            assert_eq!(result.is_error,disposition != "blocked");
+            if result.is_error {
+                assert_eq!(plan,before,"rejected success or unverified completion cannot close the plan");
+                assert!(tracker.current(&plan,&work,1).is_none());
+            } else {
+                assert!(tracker.current(&plan,&work,1).unwrap().is_blocked());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_patch_report_closes_pending_steps_without_discarding_new_input() {
+        let inputs = vec![
+            crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,"Patch files".into()),
+            crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,"Stop after an error".into()),
+        ];
+        let mut plan = AgentPlan { revision:1,needs_replan:true,
+            steps:vec![crate::AgentPlanStep {step:"Patch files".into(),status:AgentPlanStatus::InProgress}],
+            requirements:crate::requirements::merge(&[],&[],&inputs[..1]).unwrap(),..Default::default() };
+        let call = ChatToolCall {call_id:"blocked".into(),name:TOOL_NAME.into(),provider_metadata:None,
+            arguments:StrictJsonValue(serde_json::json!({"summary":"Stopped with partial effects", "criteria":[{
+                "disposition":"blocked","rationale":"The patch failed and further operations are forbidden"
+            }]})) };
+        let mut tracker = CompletionTracker::default();
+        let work = AgentWorkStatus::default();
+        assert!(!tracker.submit(&call,&mut plan,&work,&inputs,true,&crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert_eq!(plan.steps[0].status,AgentPlanStatus::Blocked);
+        assert!(!plan.needs_replan);
+        let report = tracker.current(&plan,&work,2).unwrap();
+        assert_eq!(report.requirements.len(),2);
+        assert_eq!(report.criteria[0].requirement_ids.len(),2);
+        assert!(report.is_blocked());
+    }
+
+    #[tokio::test]
+    async fn blocked_patch_report_does_not_bypass_evidence_or_process_checks() {
+        let inputs = vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,"Patch files".into())];
+        for running in [false,true] {
+            let mut plan = AgentPlan {needs_replan:true,..Default::default()};
+            let before = plan.clone();
+            let work = AgentWorkStatus {workspace_observation_epoch:1,
+                running_processes:if running {std::collections::BTreeSet::from(["live".into()])} else {Default::default()},
+                ..Default::default()};
+            let mut tracker = CompletionTracker {observations:vec![file_observation("old-a","a",0)],..Default::default()};
+            let mut criteria = vec![serde_json::json!({"disposition":"blocked","rationale":"Patch failed"})];
+            if !running { criteria.push(serde_json::json!({"disposition":"supported","evidence_call_ids":["old-a"],"rationale":"Stale claim"})); }
+            let call = ChatToolCall {call_id:"bad".into(),name:TOOL_NAME.into(),provider_metadata:None,
+                arguments:StrictJsonValue(serde_json::json!({"summary":"Partial result","criteria":criteria}))};
+            assert!(tracker.submit(&call,&mut plan,&work,&inputs,true,&crate::NoopAgentEventSink).await.unwrap().is_error);
+            assert_eq!(plan,before);
             assert!(tracker.current(&plan,&work,1).is_none());
         }
     }
@@ -925,14 +1010,14 @@ mod tests {
             arguments: StrictJsonValue(serde_json::json!({"summary":"Verified the receipt","criteria":[
                 {"disposition":"supported","evidence_paths":["验收/回执.txt"],"rationale":"Read the file"}
             ]})) };
-        assert!(tracker.submit(&report, &mut plan, &work, &inputs, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(tracker.submit(&report, &mut plan, &work, &inputs, false, &crate::NoopAgentEventSink).await.unwrap().is_error);
         let read = ChatToolCall { call_id: "receipt-current".into(), name: "read_file".into(),
             arguments: StrictJsonValue(serde_json::json!({"path":"验收/回执.txt"})), provider_metadata: None };
         let mut binding = file_binding("workspace.files/read");
         binding.effect_class = crate::AgentEffectClass::ReadOnly;
         tracker.observe(&work, &binding, &read, &AgentToolResult::text(read.call_id.clone(), "receipt", false), true);
         assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!([]));
-        assert!(!tracker.submit(&report, &mut plan, &work, &inputs, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!tracker.submit(&report, &mut plan, &work, &inputs, false, &crate::NoopAgentEventSink).await.unwrap().is_error);
         assert_eq!(tracker.observations[0].workspace_epoch, 1, "history is not relabeled");
         assert_eq!(tracker.current(&plan, &work, 1).unwrap().criteria[0].evidence_call_ids, ["receipt-current"]);
     }
