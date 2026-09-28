@@ -197,6 +197,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   2 个模型步、67 条事件、仅一项 process effect；300 文件摘要不变，应用/profile 清零并正式备份。
   `cmd` 直接脚本、`start_process`、N3/100 seed/LONG/99% 及 W72 的只读写入/完成参数失败仍开放。
 
+- S-D04-06（CMD-137、A08/A11/A17/A19 accepted-input 只读工具面子断言）：W72 的正式只读
+  计数任务仍向模型暴露文件写入工具，模型随后创建 `check_marker.ps1`；W74 新回归首次确认明确
+  “不要修改任何文件”后 `write_file` 仍可见并失败，均原样保留。Runtime 现仅从明确的中英文
+  accepted input 派生可撤销只读策略：每个模型步重新物化冻结工具面后，隐藏 workspace file、VCS、
+  Artifact 的非 ReadOnly binding，保留读取与 process；同时要求 process 保持内联只读，禁止重定向、
+  变更命令和临时脚本。后续 accepted input 明确允许修改时恢复原冻结工具，不新增 Action 或权限。
+  保守解析与工具面恢复回归通过，核心收窄回归 **20/20**，Agent Runtime **175/175**。正式 Tauri
+  `10c052e32ac6…` 中零 workspace mutation tool call、仅一个 returned process effect，300 文件及
+  tree hash 不变、无额外路径，应用/profile 清零并正式备份；但首次 `exec_command.args` 被模型编码
+  为 JSON 字符串，UI 保留 1 项可见异常，第二步修成数组后才完成（3 个模型步、87 条事件），因此
+  不计零失败 CMD PASS。收紧撤销短语后的正式重建 `baec5c5f06e2…` 通过。opaque process 的内核级
+  只读隔离、正式撤销 UI、参数字符串失败、其他 Agent/平台及 N3/100 seed/LONG/99% 仍开放。
+
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
   分隔处理并返回成功，字面文件保持 staged。W63 诊断补出精确文件名；首版 one-entry 内存 index

@@ -245,6 +245,34 @@ mod tests {
             input("I inspected the result; you may retry now."),
         ]));
     }
+
+    #[test]
+    fn explicit_workspace_read_only_policy_is_conservative_and_revocable() {
+        let input = |text: &str| {
+            crate::context_lifecycle::text_message(ChatRole::User, text.into())
+        };
+        assert!(workspace_mutation_forbidden(&[input(
+            "这是只读验收。不要修改任何文件。"
+        )]));
+        assert!(workspace_mutation_forbidden(&[input(
+            "Inspect the repository without modifying any files."
+        )]));
+        assert!(!workspace_mutation_forbidden(&[input(
+            "Explain how read-only verification works."
+        )]));
+        assert!(!workspace_mutation_forbidden(&[
+            input("Do not modify any files."),
+            input("You may modify files now."),
+        ]));
+        assert!(workspace_mutation_forbidden(&[
+            input("You may modify files now."),
+            input("不要创建、修改或删除任何文件。"),
+        ]));
+        assert!(workspace_mutation_forbidden(&[
+            input("不要修改任何文件。"),
+            input("仍然不允许修改文件。"),
+        ]));
+    }
 }
 
 pub(crate) fn validate_ledger_budget(next: &[AgentTaskRequirement]) -> Result<(), String> {
@@ -329,6 +357,67 @@ pub(crate) fn failure_stop_requested(inputs: &[ChatMessage]) -> bool {
             .any(|phrase| normalized.contains(phrase));
             if stop_on_error && retry_forbidden {
                 policy = Some(true);
+            }
+        }
+    }
+    policy.unwrap_or(false)
+}
+
+/// Conservative turn-local policy derived only from explicit accepted-user
+/// wording. It narrows workspace mutation tools but never removes read-only
+/// inspection or process execution, whose shell text remains model-authored.
+/// A later accepted input can explicitly revoke the restriction.
+pub(crate) fn workspace_mutation_forbidden(inputs: &[ChatMessage]) -> bool {
+    const FORBIDDEN: &[&str] = &[
+        "do not modify any files",
+        "don't modify any files",
+        "do not change any files",
+        "don't change any files",
+        "do not create, modify, or delete any files",
+        "without modifying any files",
+        "no file changes",
+        "不要修改任何文件",
+        "不得修改任何文件",
+        "不修改任何文件",
+        "不要创建、修改或删除任何文件",
+        "不要创建、修改或删除文件",
+        "不要写入任何文件",
+    ];
+    const ALLOWED: &[&str] = &[
+        "you may modify files now",
+        "you can modify files now",
+        "file changes are now allowed",
+        "you may write files now",
+        "现在可以修改文件",
+        "你可以修改文件",
+        "现在允许修改文件",
+        "我允许你修改文件",
+        "现在可以写入文件",
+        "现在可以继续修改",
+    ];
+
+    let mut policy = None;
+    for input in inputs.iter().filter(|input| input.role == ChatRole::User) {
+        for text in input.content.iter().filter_map(|part| match part {
+            ChatContentPart::Text { text } => Some(text),
+            _ => None,
+        }) {
+            let normalized = text
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let newest = FORBIDDEN
+                .iter()
+                .flat_map(|phrase| normalized.match_indices(phrase).map(|(index, _)| (index, true)))
+                .chain(ALLOWED.iter().flat_map(|phrase| {
+                    normalized
+                        .match_indices(phrase)
+                        .map(|(index, _)| (index, false))
+                }))
+                .max_by_key(|(index, _)| *index);
+            if let Some((_, next)) = newest {
+                policy = Some(next);
             }
         }
     }
