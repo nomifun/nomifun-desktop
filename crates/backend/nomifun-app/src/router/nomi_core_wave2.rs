@@ -97,7 +97,7 @@ pub(crate) fn action_host_port(
     Arc::new(NomiCoreWave2Host {
         mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
         ssh: Some(nomifun_ssh::SshActionOwner::new(services.ssh_pool.clone())),
-        ..NomiCoreWave2Host::new(services.event_bus.clone())
+        ..NomiCoreWave2Host::new(services.event_bus.clone(), services.file_inventory.clone())
     }
     .with_effect_store(effect_store))
 }
@@ -233,6 +233,7 @@ pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError>
 /// `OnceLock` bound to the first Session.
 pub(crate) struct NomiCoreWave2Host {
     user_events: Arc<dyn nomifun_realtime::UserEventSink>,
+    file_inventory: nomifun_file::WorkspaceInventoryCache,
     mcp: Option<super::nomi_core_mcp::NomiCoreMcpHost>,
     ssh: Option<nomifun_ssh::SshActionOwner>,
     effect_store: Option<nomifun_agent_session::AgentSessionStore>,
@@ -243,14 +244,15 @@ pub(crate) struct NomiCoreWave2Host {
 #[cfg(test)]
 impl Default for NomiCoreWave2Host {
     fn default() -> Self {
-        Self::new(Arc::new(nomifun_realtime::BroadcastEventBus::new(16)))
+        Self::new(Arc::new(nomifun_realtime::BroadcastEventBus::new(16)), nomifun_file::WorkspaceInventoryCache::default())
     }
 }
 
 impl NomiCoreWave2Host {
-    fn new(user_events: Arc<dyn nomifun_realtime::UserEventSink>) -> Self {
+    fn new(user_events: Arc<dyn nomifun_realtime::UserEventSink>, file_inventory: nomifun_file::WorkspaceInventoryCache) -> Self {
         Self {
             user_events,
+            file_inventory,
             mcp: None,
             ssh: None,
             effect_store: None,
@@ -537,7 +539,9 @@ impl NomiCoreWave2Host {
         if let Some(owner) = roots.get(&canonical_root) {
             return Ok(Arc::clone(owner));
         }
-        let mut owner = Wave2ApplicationHost::with_user_events(canonical_root.clone(), self.user_events.clone());
+        let mut owner = Wave2ApplicationHost::with_user_events(
+            canonical_root.clone(), self.user_events.clone(), self.file_inventory.clone(),
+        );
         if let Some(store) = &self.effect_store {
             owner = owner.with_effect_store(store.clone());
         }
