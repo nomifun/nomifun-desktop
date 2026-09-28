@@ -35,7 +35,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
-| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
+| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建暂存源、来源读取、指令目录、搜索规则和按句柄删除有定向回归；既有发布、普通文件清单、其他平台及完整入口待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | 条件资源准备后走查，禁止共享生产 remote |
@@ -48,6 +48,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D02-13（CTRL-007、FILE-031/039、A17/A18 失败即停与部分结果子断言）：W51 用 W45
+  冻结构建、相同 StepFun Plan / step-3.7-flash、提示和三套隔离目录重验 W42 场景，首轮仍仅
+  **1/3**；两次失败分别在参数错误或真实部分发布错误后继续读/补丁，43 模型步、6 effects，
+  原失败均保留。Runtime 现只在 accepted user input 同时明确“错误即停”和“禁止重试”时启用
+  failure-stop；首个工具失败后仅暴露 `report_completion`，要求 blocked 部分结果，不能重读、
+  查历史、重规划或再做 effect。`apply_patch` Schema/说明补一行替换的精确 remove+add 形状，
+  避免把 context+add 当替换。W53 首次正式复验又保留 blocked 报告误填 `evidence_paths`、摘要
+  未点名两个目标的 FAIL；门禁随后注入待恢复目标和最小报告形状，blocked 条目不得伪造证据。
+  最终 Runtime **169/169**，相关 4 项回归各 **20/20**，正式 Tauri 构建通过。W56 冻结二进制
+  `e2fc6f5e17ac…`、GEN Revision、route/preset 和原提示，三个新 Session 均为 4 模型步、一次
+  guarded patch、一次 rejected effect；错误后零文件/进程动作，部分回执明确 `first.txt` 已发布、
+  `second.txt` 失败，canonical/disk/UI 独立断言全部通过。总计 12 模型步、3 effects，应用、helper、
+  profile 清零并正式备份，**修复后固定样本 N3=3/3**。W42/W51/W53 的旧失败不改写；其他角色、
+  普通完成分支的完整矩阵、Unix/macOS、100 seed、LONG/99% 及共享阶段仍未关闭。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从

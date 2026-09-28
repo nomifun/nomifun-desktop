@@ -99,7 +99,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "apply_patch",
         capability_id: "workspace.files",
         action_id: "workspace.files/patch",
-        description: "Apply bounded, ordered, exact line hunks through the workspace owner. Missing parent directories are created after the entire patch is validated. Prefer each file's expected_source={kind:existing,sha256:<full read_file digest>} or {kind:absent} after observing absence; this detects changes outside the hunk too. Omission/any preserves legacy line-only matching, not a source-version check. Never remove a rejected guard just to retry; re-read and replan. Supply logical text without CR/LF or a file-leading UTF-8 BOM; source BOM, unchanged line endings and EOF-newline policy are preserved, added lines use the first source ending (LF if none). Nonempty ranges are 1-based; old_lines=0 inserts after old_start source lines (0=BOF), new_lines=0 names the surviving output prefix. Context/remove text must match exactly; re-read on mismatch. All targets and source guards are prepared before writes, with per-file atomic publication and best-effort restoration of existing files, not a multi-file transaction. Failed patches may retain newly created files; inspect zero-based request.files indices in the failure observation and re-read every target before replanning/retrying. A restored result is historical, not a current-state lock. Concurrent native edits remain possible. Each file's written_sha256 identifies published bytes for a later guarded read_file or patch, not task completion.",
+        description: "Apply bounded, ordered, exact line hunks through the workspace owner. Missing parent directories are created after the entire patch is validated. Prefer each file's expected_source={kind:existing,sha256:<full read_file digest>} or {kind:absent} after observing absence; this detects changes outside the hunk too. Omission/any preserves legacy line-only matching, not a source-version check. Never remove a rejected guard just to retry; re-read and replan. Supply logical text without CR/LF or a file-leading UTF-8 BOM; source BOM, unchanged line endings and EOF-newline policy are preserved, added lines use the first source ending (LF if none). For a one-line replacement use old_start=1, old_lines=1, new_start=1, new_lines=1 and lines=[{kind:remove,text:old},{kind:add,text:new}]. A context line is retained and counts in both old_lines and new_lines; context+add inserts after that line and does not replace it. Nonempty ranges are 1-based; old_lines=0 inserts after old_start source lines (0=BOF), new_lines=0 names the surviving output prefix. Context/remove text must match exactly; re-read on mismatch. All targets and source guards are prepared before writes, with per-file atomic publication and best-effort restoration of existing files, not a multi-file transaction. Failed patches may retain newly created files; inspect zero-based request.files indices in the failure observation and re-read every target before replanning/retrying. A restored result is historical, not a current-state lock. Concurrent native edits remain possible. Each file's written_sha256 identifies published bytes for a later guarded read_file or patch, not task completion.",
         schema: patch_schema,
     },
     StandardTool {
@@ -363,6 +363,7 @@ fn patch_schema() -> Value {
                             "maxItems": 256,
                             "items": {
                                 "type": "object",
+                                "description":"For replacement, lines must contain remove(old) then add(new). context is unchanged text and counts in both old_lines and new_lines; it does not replace itself. Schema keywords such as minItems/maxItems are not arguments.",
                                 "additionalProperties": false,
                                 "properties": {
                                     "old_start": {"type": "integer", "minimum": 0, "maximum":131072},
@@ -544,6 +545,20 @@ mod tests {
             ["description"]
             .as_str()
             .is_some_and(|description| description.contains("whole-source SHA-256")));
+    }
+
+    #[test]
+    fn patch_tool_explains_exact_replacement_shape() {
+        let patch = standard_agent_tool_exposures()
+            .into_iter()
+            .find(|tool| tool.definition.name == "apply_patch")
+            .unwrap();
+        assert!(patch.definition.description.contains("lines=[{kind:remove,text:old},{kind:add,text:new}]"));
+        let hunk = &patch.definition.input_schema.0["properties"]["files"]["items"]
+            ["properties"]["hunks"]["items"];
+        assert!(hunk["description"].as_str().is_some_and(|description|
+            description.contains("context is unchanged text")
+                && description.contains("minItems/maxItems are not arguments")));
     }
 
     #[test]
