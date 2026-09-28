@@ -1531,6 +1531,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   通过。Unix/macOS 启动阶段、deadline 刚过 resume 的 `StartLost`、清理证明失败、正式 UI/角色及
   长期压力仍待验；不关闭完整 PROC-047 或共享阶段。
 
+### 运行中 deadline 的可观察部分效果（W83，基线 `1d20fad57`）
+
+- S-D04-12 / PROC-048、A05/A08/A10/A11/A13/A17/A19：跨平台真实 helper 先把固定字节
+  `partial effect before timeout\n` 写入工作目录，再睡眠 60 秒；process deadline 设为 1 秒，
+  interrupt/terminate/reap grace 为 50/50/500 ms。
+- Windows Job 与 WSL2 Linux process group 都返回 `TimedOut` 且 `cleanup.reaped=true`；独立磁盘
+  oracle 在终态后仍读取到完全相同的部分文件。Runtime 没有删除该文件或把 timeout 表示成回滚。
+  生产实现首次满足，本批只新增 helper 子命令与公开 supervisor 回归。
+- Windows/Linux 精确场景各重复 **20/20**；Windows process contract **11/11**，Linux
+  **12/12**，workspace fmt 通过。持续写入时的截断/游标、child/grandchild、macOS、正式 UI/模型
+  对部分效果的披露、IO fault 与长期压力仍待验；不关闭完整 PROC-048 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
