@@ -38,7 +38,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源、来源读取、指令目录、搜索规则、主动清单刷新和按句柄删除有定向回归；其他平台及完整入口待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
-| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | 条件资源准备后走查，禁止共享生产 remote |
+| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径已有定向回归；remote/host 条件资源准备后继续，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
@@ -48,6 +48,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
+  `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
+  分隔处理并返回成功，字面文件保持 staged。W63 诊断补出精确文件名；首版 one-entry 内存 index
+  checkout 又在 Windows 删除邻居 index/worktree，两次中间 FAIL 均保留并撤回该方案。最终仅对
+  Unix 含反斜杠的已验证 Git index 路径直接读取 HEAD blob，以同目录唯一临时名原子发布；普通
+  路径继续使用 libgit2。tracked executable mode 与 symlink target 同时保留，邻居 index/worktree
+  不变。Linux 两项关键回归各 **20/20**、snapshot **51/51**，`nomifun-file` 全组 **460/460**；
+  Windows snapshot **50/50**。无 renderer/模型/UI 改动；macOS、非 UTF-8 Git path、更多 filemode/
+  并发父目录竞态及完整 VCS/角色/长期门槛仍开放，不关闭完整 VCS Case。
 
 - S-D03-41（FILE-040、A05/A17 Linux 删除事件归约子断言）：W61 Linux 全组唯一剩余失败
   是单文件删除通知稳定超时。W62 原生轨迹确认 inotify/notify 先发 `Modify(Metadata)`，紧接同路径

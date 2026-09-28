@@ -842,7 +842,11 @@ async fn single_file_operations_use_literal_paths() {
             assert_eq!(std::fs::read(tmp.path().join(literal)).unwrap(), b"staged");
             assert_neighbor();
             svc.discard_file(ws, literal, FileChangeOperation::Modify).await.unwrap();
-            assert_eq!(std::fs::read(tmp.path().join(literal)).unwrap(), b"original");
+            assert_eq!(
+                std::fs::read(tmp.path().join(literal)).unwrap(),
+                b"original",
+                "discard changed the wrong literal path: {literal:?}, git_repo={git_repo}",
+            );
             assert_neighbor();
 
             for operation in [FileChangeOperation::Modify, FileChangeOperation::Delete] {
@@ -863,6 +867,79 @@ async fn single_file_operations_use_literal_paths() {
             svc.dispose(ws).await.unwrap();
         }
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unix_literal_checkout_preserves_executable_and_symlink_modes() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let executable = r"exec\tool.sh";
+    let link = r"link\alias";
+    std::fs::write(tmp.path().join(executable), "#!/bin/sh\necho original\n").unwrap();
+    std::fs::set_permissions(
+        tmp.path().join(executable),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::write(tmp.path().join("target.txt"), "target").unwrap();
+    symlink("target.txt", tmp.path().join(link)).unwrap();
+    let repo = Repository::init(tmp.path()).unwrap();
+    let mut index = repo.index().unwrap();
+    for path in [executable, link, "target.txt"] {
+        index.add_path(Path::new(path)).unwrap();
+    }
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    let signature = git2::Signature::now("test", "test@example.com").unwrap();
+    repo.commit(Some("HEAD"), &signature, &signature, "baseline", &tree, &[])
+        .unwrap();
+    drop(tree);
+    drop(repo);
+
+    let service = SnapshotService::new();
+    let workspace = tmp.path().to_str().unwrap();
+    service.init(workspace).await.unwrap();
+    std::fs::write(tmp.path().join(executable), "modified").unwrap();
+    std::fs::set_permissions(
+        tmp.path().join(executable),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    std::fs::remove_file(tmp.path().join(link)).unwrap();
+    std::fs::write(tmp.path().join(link), "not a symlink").unwrap();
+
+    service
+        .discard_file(workspace, executable, FileChangeOperation::Modify)
+        .await
+        .unwrap();
+    service
+        .discard_file(workspace, link, FileChangeOperation::Modify)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(tmp.path().join(executable)).unwrap(),
+        b"#!/bin/sh\necho original\n"
+    );
+    assert_ne!(
+        std::fs::metadata(tmp.path().join(executable))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o111,
+        0
+    );
+    assert!(
+        std::fs::symlink_metadata(tmp.path().join(link))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_link(tmp.path().join(link)).unwrap(), Path::new("target.txt"));
+    assert_eq!(std::fs::read(tmp.path().join("target.txt")).unwrap(), b"target");
 }
 
 #[tokio::test]

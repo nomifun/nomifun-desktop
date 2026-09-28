@@ -1165,6 +1165,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   49/50，原样保留并转 W63；不计本批 watcher 失败。本批未改 renderer、未运行模型/Tauri UI。
 - macOS、事件洪泛/乱序、完整 UI/角色、100 seed/LONG/99% 仍待验，不关闭完整 FILE-040 或共享阶段。
 
+### 共享 Unix snapshot 字面路径恢复（W63，基线 `9ba99719e`）
+
+- S-D05-01 / VCS-004/005、A05/A14/A17：W62 Linux 全组的 snapshot 49/50 失败稳定落在
+  `file\\1.txt`。libgit2 checkout 在 Unix 即使设置 `disable_pathspec_match(true)`，仍把反斜杠作为
+  分隔符并返回成功，因此 discard 后字面文件仍是 staged。诊断前原断言未输出名称的首次 FAIL，
+  补诊断后的精确 FAIL 均保留。
+- 首版修复用只含目标的内存 index checkout，Windows 回归先把邻居 index 清空，再把邻居 worktree
+  删除；两项中间 FAIL 已记录，方案撤回。最终仅对 Unix 含反斜杠的已验证 Git index 路径读取
+  HEAD blob，通过同目录唯一临时对象原子发布；普通路径继续走原 libgit2 checkout。regular 文件
+  恢复 Git executable mode，tracked symlink 恢复原 target，邻居 index/worktree 不变。
+- Linux 字面路径全流程与 executable/symlink 两项各 **20/20**，snapshot **51/51**；Linux
+  `nomifun-file` 首次完整 **460/460**。Windows snapshot **50/50**，证明 Unix 特例没有改变现有
+  方括号/感叹号等 Windows literal 行为。本批未改 renderer、未运行模型/Tauri UI。
+- macOS、非 UTF-8 Git path、更多 filemode、父目录并发置换、完整 VCS/角色、100 seed/LONG/99%
+  仍待验，不关闭完整 VCS Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
