@@ -4,7 +4,8 @@ use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::{AsRawHandle, From
 use windows_sys::Win32::{Foundation::INVALID_HANDLE_VALUE, Storage::FileSystem::{
     DELETE, FILE_DISPOSITION_INFO_EX, FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
     FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE, SYNCHRONIZE,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_WRITE_ATTRIBUTES, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE, SYNCHRONIZE,
     FileDispositionInfoEx, FileIdInfo, FileRenameInfo, GetFileInformationByHandleEx, ReOpenFile, SetFileInformationByHandle,
 }};
 
@@ -38,6 +39,21 @@ impl OwnedFile {
 
     pub(crate) fn remove(&self, path: &Path) -> io::Result<()> {
         self.remove_with_hook(path, || {})
+    }
+
+    /// Read only the recorded object, retaining its name and bytes for the
+    /// observation. WRITE_ATTRIBUTES preserves target permissions by handle.
+    pub(crate) fn open_for_verification(&self, path: &Path) -> io::Result<File> {
+        use std::os::windows::fs::MetadataExt;
+        let file = OpenOptions::new().access_mode(FILE_GENERIC_READ | FILE_WRITE_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path)?;
+        let metadata = file.metadata()?;
+        if identity(&file)? != (self.volume, self.id) || !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::other("publication source changed identity or type"));
+        }
+        Ok(file)
     }
 
     fn remove_with_hook(&self, path: &Path, after_identity: impl FnOnce()) -> io::Result<()> {
