@@ -238,4 +238,89 @@ mod tests {
         assert_eq!(work.workspace_observation_epoch,8);
         assert!(!work.command_observed_after_latest_mutation);
     }
+
+    #[test]
+    fn explicit_reaped_cancel_is_not_a_failed_command_observation() {
+        let start = binding("workspace.process", "workspace.process/start");
+        let cancel = binding("workspace.process", "workspace.process/cancel");
+        let mut work = crate::AgentWorkStatus::default();
+        let mut commands = crate::workflow::CommandTracker::default();
+        let start_call = nomifun_chat_model_broker::ChatToolCall {
+            call_id: "start-1".into(),
+            name: "start_process".into(),
+            arguments: StrictJsonValue(serde_json::json!({"command":"worker"})),
+            provider_metadata: None,
+        };
+        work.observe(
+            &start,
+            &start_call,
+            &crate::AgentToolResult::text(
+                start_call.call_id.clone(),
+                serde_json::json!({
+                    "state":"running", "process_id":"process-1", "success":null
+                })
+                .to_string(),
+                false,
+            ),
+            &mut commands,
+        );
+        assert!(work.running_processes.contains("process-1"));
+
+        let poll = binding_with_effect(
+            "workspace.process",
+            "workspace.process/poll",
+            EngineEffectClass::ReadOnly,
+        );
+        let poll_call = nomifun_chat_model_broker::ChatToolCall {
+            call_id: "poll-1".into(),
+            name: "poll_process".into(),
+            arguments: StrictJsonValue(serde_json::json!({"process_id":"process-1"})),
+            provider_metadata: None,
+        };
+        work.observe(
+            &poll,
+            &poll_call,
+            &crate::AgentToolResult::text(
+                poll_call.call_id.clone(),
+                serde_json::json!({
+                    "state":"running", "process_id":"process-1", "success":null
+                })
+                .to_string(),
+                false,
+            ),
+            &mut commands,
+        );
+        assert_eq!(work.workspace_observation_epoch, 1);
+
+        let cancel_call = nomifun_chat_model_broker::ChatToolCall {
+            call_id: "cancel-1".into(),
+            name: "cancel_process".into(),
+            arguments: StrictJsonValue(serde_json::json!({"process_id":"process-1"})),
+            provider_metadata: None,
+        };
+        work.observe(
+            &cancel,
+            &cancel_call,
+            &crate::AgentToolResult::text(
+                cancel_call.call_id.clone(),
+                serde_json::json!({
+                    "state":"cancelled", "process_id":"process-1", "success":true,
+                    "cleanup":{"reaped":true,"errors":["interrupt unavailable"]}
+                })
+                .to_string(),
+                false,
+            ),
+            &mut commands,
+        );
+
+        assert_eq!(work.successful_commands, 0);
+        assert_eq!(work.failed_commands, 0);
+        assert!(work.running_processes.is_empty());
+        assert!(!work.command_observed_after_latest_mutation);
+        assert_eq!(work.recent_commands.len(), 1);
+        assert_eq!(work.recent_commands[0].state, "cancelled");
+        assert!(work.recent_commands[0].cleanup_proven);
+        assert_eq!(work.recent_commands[0].interaction_call_ids, ["poll-1"]);
+        assert!(!work.recent_commands[0].was_current_at_observation);
+    }
 }

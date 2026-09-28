@@ -1435,6 +1435,37 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   不变，应用/profile 清零并完成正式备份。多条顺序 process 结果要全部 supported 仍需可证明只读
   的 owner 合同或原子聚合；其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验。
 
+### 托管进程显式取消、清理终态与轮询来源（W77，基线 `7be61a7c9`）
+
+- S-D04-07 / CMD-139、PROC-033、A13/A17/A19：首个隔离正式 Tauri 样本按要求执行
+  `start_process → poll_process → cancel_process`，实际进程输出 READY 后仍在运行，并在自然退出前
+  被取消；PID 已消失且 `cleanup.reaped=true`。但 `engine_process_host` 把 `Cancelled` 落入统一
+  `success=false` 分支，canonical `is_error=true`，UI 显示普通错误。该首次失败、工作区前后摘要、
+  helper 快照、截图、数据库、完整事件与模型轨迹均保留。
+- 首版把已回收 cancel 映射为成功后，第二个正式样本确认工具本身已是 `success=true`，但 Runtime
+  仍把它计为 `failed_commands=1`、`usable_at_observation=false`，模型首次 completion 引用进程 ID
+  时被动态 Schema 的 `maxItems=0` 拒绝。修正工作状态与完成证据后，第三个正式样本达到零工具错误，
+  但 cancel command provenance 的 `interaction_call_ids=[]`，完成报告用最终 cancel observation
+  说明两次 poll 时缺少中间来源。两项后续首次失败继续独立保留，没有覆盖前一现场。
+- 宿主结果现在接收 operation：只有显式 `cancel` 且 `cleanup.reaped=true` 才为成功，未回收取消及
+  `exec` 被中断仍为失败；Windows `CREATE_NO_WINDOW` 无可信 console interrupt 的诊断继续留在
+  `cleanup.errors`，没有吞错或放宽清理断言。Runtime 将成功显式取消视为成功的控制结算，不计普通
+  command 成功/失败，也不设置 `command_observed_after_latest_mutation`；cancel completion observation
+  可用但仍保持 `was_current_at_observation=false`，不能冒充正常退出或测试通过。运行中的 poll ID
+  进入同一进程的有界 interaction provenance，不推进 workspace effect epoch；完成提示明确嵌套
+  launch/poll ID 仅为来源上下文，除非也是顶层 `available_evidence`，不得直接引用。
+- 宿主取消边界精确回归 **20/20**；Runtime 的取消聚合/完成证据两项每项 **20/20**，最终
+  Agent Runtime **177/177**，completion Schema 定向回归、workspace fmt 与正式 Tauri 构建通过。
+  最终二进制 `64d2f85813a8…` 使用全新 data/work/profile 和 StepFun Plan / `step-3.7-flash`：
+  `start_process`、两次 `poll_process`、`cancel_process`、`report_completion` 全部 `is_error=false`；
+  cancel 返回 `state=cancelled`、`success=true`、`reaped=true`，输出只含
+  `W77_PROVENANCE_READY`，无自然退出标记。单回合 completed、5 个模型步、166 条 canonical 事件；
+  `failed_commands=0`、`failed_tools=0`，最终可用 cancel observation 精确保存 launch call ID 与两条
+  poll call ID，完成报告一次通过且如实把自然退出标记缺席列为 unverified。worker.ps1 前后 tree hash
+  一致，PID/helper 为 0，应用/profile 清零并完成官方备份。
+- 未覆盖 cancel 与自然退出的真实竞态、温和中断被忽略后的强制升级、child/grandchild、PTY、应用
+  强退、其他 Agent/平台及 N3/100 seed/LONG/99%；不关闭完整 CMD-139/PROC-033 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

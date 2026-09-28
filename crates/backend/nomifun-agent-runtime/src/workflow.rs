@@ -138,13 +138,17 @@ impl AgentWorkStatus {
                     .strip_prefix("workspace.process/")
                     .unwrap_or("");
                 let launch = matches!(operation, "exec" | "start");
-                let interaction = matches!(operation, "input" | "close_stdin" | "resize");
+                let workspace_interaction =
+                    matches!(operation, "input" | "close_stdin" | "resize");
+                let provenance_interaction = workspace_interaction || operation == "poll";
                 let previous_epoch = self.workspace_observation_epoch;
                 // Commands and stdin are opaque effects. Do not classify them
                 // as tests or assume a shell stayed inside a particular path.
                 // EOF and terminal resize can also cause an active program to
                 // perform work. They invalidate earlier workspace observations.
-                if launch || interaction {
+                // Polls retain lifecycle provenance without advancing that
+                // workspace-effect fence.
+                if launch || workspace_interaction {
                     self.invalidate_workspace_observation();
                 }
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&result.output_text())
@@ -171,7 +175,7 @@ impl AgentWorkStatus {
                         }
                     });
                 }
-                if interaction {
+                if provenance_interaction {
                     if let Some(provenance) = commands.launches.get_mut(id) {
                         let attributable = !result.is_error
                             && self.running_processes.len() == 1
@@ -226,7 +230,11 @@ impl AgentWorkStatus {
                     });
                 if state == "exited" && exit_code == Some(0) && cleanup_proven && !result.is_error {
                     self.successful_commands = self.successful_commands.saturating_add(1);
-                } else {
+                } else if !(operation == "cancel"
+                    && state == "cancelled"
+                    && cleanup_proven
+                    && !result.is_error)
+                {
                     self.failed_commands = self.failed_commands.saturating_add(1);
                 }
                 self.command_observed_after_latest_mutation |= current;

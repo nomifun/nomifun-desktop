@@ -291,7 +291,7 @@ impl EngineProcessScope {
             .ok_or_else(|| error("process_id is not owned by this exact turn"))?;
         if let Some(poll) = &entry.terminal {
             if matches!(params.operation, Operation::Poll | Operation::Cancel) {
-                return process_output(&id, poll);
+                return process_output(&id, poll, params.operation);
             }
             return Err(error(
                 "process already terminated; stdin/resize cannot restart it",
@@ -351,7 +351,7 @@ impl EngineProcessScope {
         if cleanup_is_proven(&poll) {
             entry.terminal = Some(poll.clone());
         }
-        process_output(&id, &poll)
+        process_output(&id, &poll, params.operation)
     }
 
     /// Close admission before waiting for any running launch/poll. The token
@@ -405,12 +405,16 @@ impl EngineProcessScope {
 fn process_output(
     id: &str,
     poll: &EngineProcessPoll,
+    operation: Operation,
 ) -> Result<StrictJsonValue, Wave2HostPortError> {
     let success = match poll {
         EngineProcessPoll::Running { .. } => None,
         EngineProcessPoll::Exited {
             exit_code, cleanup, ..
         } => Some(*exit_code == Some(0) && cleanup.reaped),
+        EngineProcessPoll::Cancelled { cleanup, .. } => {
+            Some(operation == Operation::Cancel && cleanup.reaped)
+        },
         _ => Some(false),
     };
     let mut output = serde_json::to_value(poll).map_err(error)?;
@@ -422,6 +426,7 @@ fn process_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
 
     #[test]
     fn omitted_wait_matches_explicit_zero_wire_contract() {
@@ -438,5 +443,54 @@ mod tests {
         .unwrap();
         assert_eq!(poll_wait(&omitted), Duration::ZERO);
         assert_eq!(poll_wait(&explicit), Duration::ZERO);
+    }
+
+    #[test]
+    fn reaped_explicit_cancellation_is_a_successful_process_result() {
+        let mut poll = EngineProcessPoll::Cancelled {
+            output: EngineProcessOutput {
+                text: "READY\n".to_owned(),
+                next_cursor: 6,
+                retained_bytes: 6,
+                dropped_bytes: 0,
+                source_encoding: "utf-8".to_owned(),
+                decode_errors: 0,
+            },
+            cleanup: EngineCleanupReport {
+                interrupt_attempted: true,
+                terminate_attempted: true,
+                force_kill_attempted: false,
+                reaped: true,
+                elapsed_ms: 42,
+                errors: vec!["interrupt unavailable; terminated instead".to_owned()],
+            },
+        };
+
+        let output = process_output("process-1", &poll, Operation::Cancel)
+            .unwrap()
+            .0;
+        assert_eq!(output["state"], "cancelled");
+        assert_eq!(output["success"], true);
+        assert_eq!(output["cleanup"]["reaped"], true);
+        assert_eq!(
+            output["cleanup"]["errors"][0],
+            "interrupt unavailable; terminated instead"
+        );
+
+        if let EngineProcessPoll::Cancelled { cleanup, .. } = &mut poll {
+            cleanup.reaped = false;
+        }
+        let unreaped = process_output("process-1", &poll, Operation::Cancel)
+            .unwrap()
+            .0;
+        assert_eq!(unreaped["success"], false);
+
+        if let EngineProcessPoll::Cancelled { cleanup, .. } = &mut poll {
+            cleanup.reaped = true;
+        }
+        let interrupted_exec = process_output("process-1", &poll, Operation::Exec)
+            .unwrap()
+            .0;
+        assert_eq!(interrupted_exec["success"], false);
     }
 }
