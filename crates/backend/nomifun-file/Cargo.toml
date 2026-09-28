@@ -44,4 +44,4 @@ serde_urlencoded = "0.7"
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = "1.4.2"
-windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl"] }
+windows-sys = { version = "0.61", features = ["Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Memory", "Win32_Security"] }
