@@ -49,6 +49,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-47（FILE-040、PORT-012、A05/A15/A17/A19 watcher overflow 全量对账子断言）：W71
+  新增跨过 `WatchQueue`、`ContextContributor` 与 canonical JSON 的溢出回归：263 个唯一变更保留
+  最后 256 个，首项为 `marker-0007`、`dropped_event_count=7`、`rescan_required=false`，上下文明示
+  批次不完整并要求重读，且只消费一次；Windows/Linux 各 **1/1**。现有生产路径首次即通过，本批
+  只补回归与正式证据。正式 Tauri `8c54fc75dd29…` 使用隔离 data/work/profile 和 StepFun Plan /
+  `step-3.7-flash`，Session 建立后从外部并发创建 300 个文件；下一回合首个工具调用即为完整
+  PowerShell 清单重读，随后所有进程/读取调用均成功，最终磁盘/UI/canonical 一致报告 300、
+  `event-0001.txt`、`event-0300.txt`。两回合 completed、311 条事件、零工具错误，工作区摘要未变，
+  应用/profile 清零并完成官方备份。真实 native 样本的精确 dropped 数未独立落盘；丢批/重复/
+  乱序与 rescan 的更多 UI 组合、其他 Agent/平台、100 seed/LONG/99% 仍开放，不关闭完整 FILE-040。
+
 - S-D03-46（FILE-020/025/038、A05/A07/A17/A19 Unix 既有目标派发源窗口子断言）：W70 在
   Linux ext4 上把同名源替换精确放到暂存 inode/字节句柄核对之后、实际 `rename` 之前。系统调用
   因此把外来 7 字节对象放入目标，原意 8 字节暂存被保留到独立名称；发布后核对正确返回
