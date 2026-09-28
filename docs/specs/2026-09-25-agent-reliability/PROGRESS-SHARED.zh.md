@@ -49,6 +49,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D09-04（LIFE-019、G0-025、A04/A05/A10/A17/A19 cancel/receipt 竞争子断言）：新增
+  canonical Store 两连接事务竞争，让 Turn cancel 与同一 managed effect 的成功 owner receipt
+  同时提交。最终始终只有一个 cancelled Turn terminal；已完成 effect 保留 `effect/succeeded`
+  receipt 并投影为 returned，active Turn 清空，没有把 cancel 当回滚。首次短 filter 实际未命中；
+  随后两次真实 FAIL 分别暴露夹具复用了 started producer、又误改生命周期 idempotency key，均保留。
+  按既有合同使用原 key + 独立 owning producer 后，完整 pause/effect 11/11、新竞争 **20/20**。
+  生产事务归约无需修改，本批只补回归/进度；App owner 回执、外部 unknown effect、真实 UI 与
+  其他 Action/平台的 cancel 竞争仍待验。
+
 - S-D09-03（MODEL-020/022/023、LIFE-018、A08/A10/A11/A17/A19 Retry-After 取消子断言）：
   新增正式 App 路由夹具，provider 首次返回 HTTP 429 与 60 秒 `Retry-After`，在 broker 退避期间
   通过 canonical Turn cancel 取消。Turn 在 2 秒验收预算内进入 cancelled，checkpoint 清空；再观察
