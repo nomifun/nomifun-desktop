@@ -1,10 +1,10 @@
 //! Read-only replay of closed Nomi turns from the existing Conversation owner.
 use std::collections::BTreeMap;
 
-use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
-use nomifun_agent_runtime::{AgentEngineEvent, AgentPriorTask, replay_closed_turn};
-use nomifun_common::AppError;
 use nomifun_agent_contracts::MAX_NATIVE_HISTORY_WINDOW_BYTES;
+use nomifun_agent_runtime::{AgentEngineEvent, AgentPriorTask, EngineBinding, replay_closed_turn};
+use nomifun_chat_model_broker::{ChatContentPart, ChatMessage, ChatRole};
+use nomifun_common::AppError;
 
 /// The canonical terminal can outlive a crashed Runtime that never wrote its
 /// private terminal record. Reconstruct only interruption, NEVER success or
@@ -34,7 +34,6 @@ pub(super) async fn load(
     admitted: &super::engine_session_host::EngineTurnReceipt,
 ) -> Result<Option<AgentHistory>, AppError> {
     let conversation = admitted.session().session().conversation_id.as_str();
-    let binding = admitted.session().engine_binding();
     let snapshot = &admitted.session().snapshot().snapshot_ref;
     let fail = |message: String| AppError::Conflict(format!("Nomi history: {message}"));
     if window.turns.is_empty() {
@@ -116,12 +115,13 @@ pub(super) async fn load(
             historical_compatibility.insert(recorded_snapshot.clone(), compatible);
             compatible
         };
-        if recorded.build_id().as_ref() != binding.build_id
-            || recorded.build_digest().as_ref() != binding.build_digest
-            || recorded.agent_session_id().as_ref() != conversation
-            || !snapshot_compatible
-            || recorded_operation.as_ref() != turn.operation_id
-        {
+        if !history_source_matches(
+            recorded,
+            recorded_operation,
+            conversation,
+            &turn.operation_id,
+            snapshot_compatible,
+        ) {
             return Err(fail(
                 "history differs from the exact Session binding".into(),
             ));
@@ -195,6 +195,23 @@ pub(super) async fn load(
         messages: history,
         prior_task,
     }))
+}
+
+fn history_source_matches(
+    recorded: &EngineBinding,
+    recorded_operation: &nomifun_agent_contracts::OperationId,
+    conversation: &str,
+    expected_operation: &str,
+    snapshot_compatible: bool,
+) -> bool {
+    // Closed history is versioned, parsed data rather than an executable
+    // checkpoint. App updates may change the engine build while retaining the
+    // same Session and a model-compatible Snapshot. Keep executable recovery
+    // build-bound, but allow this read-only replay to cross that build boundary.
+    recorded.validate().is_ok()
+        && recorded.agent_session_id().as_ref() == conversation
+        && recorded_operation.as_ref() == expected_operation
+        && snapshot_compatible
 }
 
 /// Shared data-only projection for pure legacy history and the prefix before
@@ -274,4 +291,60 @@ async fn unresolved_steering(
     // prompt: replaying an ambiguous steer would duplicate user intent.
     let _ = wire;
     Ok(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::history_source_matches;
+    use nomifun_agent_contracts::{
+        AgentSessionId, DigestHex, OperationId, ResolvedSnapshotId, ResolvedSnapshotRef,
+        RuntimeBindingId,
+    };
+    use nomifun_agent_runtime::{EngineBinding, EngineBuildId};
+
+    #[test]
+    fn versioned_closed_history_crosses_builds_but_not_session_turn_or_snapshot() {
+        let snapshot = ResolvedSnapshotRef {
+            snapshot_id: ResolvedSnapshotId::from("snapshot"),
+            snapshot_digest: DigestHex::from("a".repeat(64)),
+        };
+        let recorded = EngineBinding::new(
+            AgentSessionId::from("session"),
+            RuntimeBindingId::from("old-runtime"),
+            EngineBuildId::from("old-build"),
+            DigestHex::from("b".repeat(64)),
+            snapshot,
+        )
+        .unwrap();
+        let operation = OperationId::from("old-turn");
+
+        assert!(history_source_matches(
+            &recorded,
+            &operation,
+            "session",
+            "old-turn",
+            true,
+        ));
+        assert!(!history_source_matches(
+            &recorded,
+            &operation,
+            "other-session",
+            "old-turn",
+            true,
+        ));
+        assert!(!history_source_matches(
+            &recorded,
+            &OperationId::from("other-turn"),
+            "session",
+            "old-turn",
+            true,
+        ));
+        assert!(!history_source_matches(
+            &recorded,
+            &operation,
+            "session",
+            "old-turn",
+            false,
+        ));
+    }
 }

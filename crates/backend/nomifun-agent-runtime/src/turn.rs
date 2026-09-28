@@ -587,7 +587,7 @@ pub(crate) async fn run_turn(
             completion_review_used = false;
             model_request.input.provider_round_parent = None;
             if let Some(state) = long_horizon.as_mut() {
-                state.execution_plan.needs_replan = true;
+                mark_patch_recovery_context_changed(&mut state.execution_plan);
                 state.completion.invalidate();
             }
         }
@@ -1599,6 +1599,16 @@ pub(crate) async fn run_turn(
         return Ok(result);
     }
 
+}
+
+fn mark_patch_recovery_context_changed(plan: &mut crate::AgentPlan) {
+    // Fresh recovery reads change the model-visible facts before any effect.
+    // They invalidate an established plan, but must not turn the deliberately
+    // optional empty plan into a synthetic gate that rejects the first repair.
+    // A gate already raised by steering or another cause remains raised.
+    if plan.revision > 0 || !plan.steps.is_empty() || !plan.requirements.is_empty() {
+        plan.needs_replan = true;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2679,6 +2689,27 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn patch_recovery_context_refresh_does_not_gate_the_first_repair_without_a_plan() {
+        let mut absent = crate::AgentPlan::default();
+        mark_patch_recovery_context_changed(&mut absent);
+        assert!(!absent.needs_replan);
+
+        let mut already_blocked = crate::AgentPlan {
+            needs_replan: true,
+            ..Default::default()
+        };
+        mark_patch_recovery_context_changed(&mut already_blocked);
+        assert!(already_blocked.needs_replan);
+
+        let mut established = crate::AgentPlan {
+            revision: 1,
+            ..Default::default()
+        };
+        mark_patch_recovery_context_changed(&mut established);
+        assert!(established.needs_replan);
     }
 
     fn request() -> ChatModelRequest {
