@@ -90,6 +90,20 @@ describe('knowledge detail tree model', () => {
     ]);
   });
 
+  test('selects the first visible root document before the recursive file index is loaded', () => {
+    const state = knowledgeTreeViewReducer(initialKnowledgeTreeViewState, {
+      type: 'sync',
+      files: [],
+      tree: [
+        node('docs', 'docs', true),
+        node('README.md', 'README.md', false),
+      ],
+    });
+
+    expect(state.selectedPath).toBe('README.md');
+    expect(state.selectedTreeKey).toBe('README.md');
+  });
+
   test('search preserves stable identity, revision, capabilities, and source metadata', () => {
     const entryId = parseKnowledgeEntryId('01912345-6789-7abc-8def-0123456789ab');
     const sourceFile: IKnowledgeFileEntry = {

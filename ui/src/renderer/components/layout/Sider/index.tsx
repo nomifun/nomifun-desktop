@@ -8,7 +8,7 @@ import React, { Suspense, useCallback, useEffect, useRef } from 'react';
 import PluginPinnedEntries from '@/renderer/pages/plugins/PluginPinnedEntries';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { preloadResourceRoute } from '@renderer/components/layout/Router';
+import { preloadResourceRoute } from '@renderer/components/layout/routePreload';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
