@@ -296,12 +296,24 @@ impl ManagedEngineProcessOwner {
             .await
             .map_err(|cause| {
                 let no_live_process_proven = match &cause {
-                    ProcessError::SpawnFailed { .. } | ProcessError::CapacityExhausted { .. } => true,
+                    ProcessError::InvalidWorkingDirectory { .. }
+                    | ProcessError::CapabilityDenied { .. }
+                    | ProcessError::InvalidCommand { .. }
+                    | ProcessError::InvalidTransport { .. }
+                    | ProcessError::CapacityExhausted { .. }
+                    | ProcessError::SupervisorShuttingDown
+                    | ProcessError::SpawnFailed { .. } => true,
                     ProcessError::StartLost { cleanup, .. } => cleanup.reaped,
                     _ => false,
                 };
                 let user_code_not_started = matches!(&cause,
-                    ProcessError::SpawnFailed { .. } | ProcessError::CapacityExhausted { .. });
+                    ProcessError::InvalidWorkingDirectory { .. }
+                    | ProcessError::CapabilityDenied { .. }
+                    | ProcessError::InvalidCommand { .. }
+                    | ProcessError::InvalidTransport { .. }
+                    | ProcessError::CapacityExhausted { .. }
+                    | ProcessError::SupervisorShuttingDown
+                    | ProcessError::SpawnFailed { .. });
                 EngineProcessStartError { error: process_error(cause), no_live_process_proven, user_code_not_started }
             })?;
         let session = EngineProcessSession {
@@ -466,7 +478,7 @@ impl ManagedEngineProcessOwner {
             policy,
             capability: CapabilityPolicy {
                 cwd_roots: vec![self.workspace_root.clone()],
-                sandbox: SandboxPolicy::UnrestrictedLocalOwner,
+                sandbox: workspace_process_sandbox(&self.workspace_root),
             },
         };
         normalize_request(request, &self.workspace_root).map_err(process_error)
@@ -561,6 +573,21 @@ fn invalid_relative_path(value: &str) -> bool {
                     | std::path::Component::Prefix(_)
             )
         })
+}
+
+fn workspace_process_sandbox(workspace_root: &Path) -> SandboxPolicy {
+    #[cfg(target_os = "macos")]
+    {
+        return SandboxPolicy::MacSeatbelt {
+            write_roots: vec![workspace_root.to_path_buf()],
+        };
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = workspace_root;
+        SandboxPolicy::UnrestrictedLocalOwner
+    }
 }
 
 fn convert_output(output: OutputSnapshot) -> EngineProcessOutput {
@@ -771,6 +798,197 @@ mod tests {
             owner.start(request, CancellationToken::new()).await,
             Err(EngineProcessError::Process(_))
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn managed_owner_seatbelt_denies_writes_outside_the_workspace() {
+        // The trusted Darwin temporary directories are writable by design, so
+        // place both siblings beside the checkout to exercise the declared
+        // workspace write boundary rather than the trusted-temp exception.
+        let fixture_root = std::env::current_dir().unwrap();
+        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
+        let outside = tempfile::tempdir_in(&fixture_root).unwrap();
+        let inside_marker = workspace.path().join("inside.marker");
+        let outside_marker = outside.path().join("outside.marker");
+        let owner =
+            ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
+
+        for (marker, expected_exit) in [(&inside_marker, Some(0)), (&outside_marker, None)] {
+            let mut request = EngineProcessRequest::pipe("/usr/bin/touch");
+            request.args = vec![marker.to_string_lossy().into_owned()];
+            let outcome = owner
+                .execute(request, CancellationToken::new())
+                .await
+                .unwrap();
+            let EngineProcessPoll::Exited {
+                exit_code, cleanup, ..
+            } = outcome
+            else {
+                panic!("touch should settle as an exited process");
+            };
+            assert!(cleanup.reaped);
+            if let Some(expected_exit) = expected_exit {
+                assert_eq!(exit_code, Some(expected_exit));
+            } else {
+                assert_ne!(exit_code, Some(0));
+            }
+        }
+
+        assert!(inside_marker.exists());
+        assert!(
+            !outside_marker.exists(),
+            "the product process owner must apply the macOS workspace write sandbox"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn managed_owner_preserves_literal_macos_argv_without_shell_expansion() {
+        let fixture_root = std::env::current_dir().unwrap();
+        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
+        let expansion_marker = workspace.path().join("must-not-expand.marker");
+        let owner =
+            ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
+        let tokens = [
+            "*".to_owned(),
+            "$HOME".to_owned(),
+            "`uname`".to_owned(),
+            format!("$(touch {})", expansion_marker.display()),
+            "semi;colon".to_owned(),
+            "line\nbreak".to_owned(),
+        ];
+        let mut request = EngineProcessRequest::pipe("/usr/bin/printf");
+        request.args = std::iter::once("<%s>\\n".to_owned())
+            .chain(tokens.iter().cloned())
+            .collect();
+
+        let outcome = owner
+            .execute(request, CancellationToken::new())
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            exit_code,
+            output,
+            cleanup,
+            ..
+        } = outcome
+        else {
+            panic!("literal argv probe should exit normally");
+        };
+        assert_eq!(exit_code, Some(0));
+        assert!(cleanup.reaped);
+        assert_eq!(
+            output.text,
+            tokens
+                .iter()
+                .map(|token| format!("<{token}>\n"))
+                .collect::<String>()
+        );
+        assert!(!expansion_marker.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn managed_owner_seatbelt_rejects_tmpdir_override_before_user_code() {
+        let fixture_root = std::env::current_dir().unwrap();
+        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
+        let marker = workspace.path().join("must-not-run.marker");
+        let owner =
+            ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
+        let mut request = EngineProcessRequest::pipe("/usr/bin/touch");
+        request.args = vec![marker.to_string_lossy().into_owned()];
+        request
+            .env
+            .insert("TMPDIR".to_owned(), "/tmp/untrusted-override".to_owned());
+
+        let failure = owner
+            .start_with_evidence(request, CancellationToken::new())
+            .await
+            .expect_err("a model-supplied TMPDIR must not bypass the Seatbelt profile");
+
+        assert!(failure.no_live_process_proven);
+        assert!(failure.user_code_not_started);
+        assert!(!marker.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn managed_owner_rejects_a_non_executable_without_shell_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture_root = std::env::current_dir().unwrap();
+        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
+        let script = workspace.path().join("not executable.sh");
+        let marker = workspace.path().join("must-not-run.marker");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let owner =
+            ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
+        let request = EngineProcessRequest::pipe(script.to_string_lossy());
+
+        let failure = owner
+            .start_with_evidence(request, CancellationToken::new())
+            .await
+            .expect_err("a non-executable file must fail before user code starts");
+
+        assert!(failure.no_live_process_proven);
+        assert!(failure.user_code_not_started);
+        assert!(!marker.exists());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn managed_owner_keeps_posix_cmd_and_explicit_zsh_semantics_distinct() {
+        let fixture_root = std::env::current_dir().unwrap();
+        let workspace = tempfile::tempdir_in(&fixture_root).unwrap();
+        let owner =
+            ManagedEngineProcessOwner::new(workspace.path(), SupervisorConfig::default()).unwrap();
+
+        let sh = owner
+            .execute(
+                EngineProcessRequest::shell("printf 'sh:%s' \"${ZSH_VERSION-unset}\""),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            exit_code: Some(0),
+            output: sh_output,
+            cleanup: sh_cleanup,
+            ..
+        } = sh
+        else {
+            panic!("the product cmd transport should execute through /bin/sh");
+        };
+        assert!(sh_cleanup.reaped);
+        assert_eq!(sh_output.text, "sh:unset");
+
+        let mut zsh = EngineProcessRequest::pipe("/bin/zsh");
+        zsh.args = vec![
+            "-lc".to_owned(),
+            "printf 'zsh:%s' \"$ZSH_VERSION\"".to_owned(),
+        ];
+        let zsh = owner
+            .execute(zsh, CancellationToken::new())
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            exit_code: Some(0),
+            output: zsh_output,
+            cleanup: zsh_cleanup,
+            ..
+        } = zsh
+        else {
+            panic!("an explicit /bin/zsh invocation should retain zsh semantics");
+        };
+        assert!(zsh_cleanup.reaped);
+        assert!(zsh_output.text.starts_with("zsh:"));
+        assert_ne!(zsh_output.text, "zsh:");
     }
 
     #[tokio::test]

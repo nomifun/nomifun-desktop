@@ -49,6 +49,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D04-01（PROC-011/012/014、A11/A13 Unix 确定 pre-spawn 子断言）：显式 Unix executable
+  不存在或无 X_OK 时，旧路径先创建 watchdog，再在 exec/wrapper 失败后共用 setup deadline 回收，
+  压力下可从确定“未启动”退化为 `start_lost`；macOS 产品 owner 还未启用已有 Seatbelt 策略。
+  现将显式路径诊断及 sandbox 环境准备移到任何物理 authority 之前，bare PATH 名继续走真实
+  exec 并保留 ABORT/watchdog 回收反例；Engine 只把确定的 pre-spawn 类型标为
+  `user_code_not_started`。macOS 产品接线与原生结果见 M01-01；Linux/Windows 行为未据此代判。
+  macOS `nomi-process-runtime` 全组 **243/243**，显式路径及进程/PTY 压力回归通过；正式 UI、其他平台、完整
+  PROC/CMD/LONG 门槛仍开放，不关闭共享 D04。
+
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
   分隔处理并返回成功，字面文件保持 staged。W63 诊断补出精确文件名；首版 one-entry 内存 index

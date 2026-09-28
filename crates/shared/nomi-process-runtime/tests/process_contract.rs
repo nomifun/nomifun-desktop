@@ -81,12 +81,17 @@ async fn wait_for_terminal(
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
 async fn output_arrival_wakes_a_running_poll_before_the_yield_deadline() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    #[cfg(unix)]
+    let process = request("/bin/cat", Vec::<OsString>::new());
+    #[cfg(windows)]
+    let process = helper_request(&["echo-stdin"]);
     let handle = supervisor
-        .start(helper_request(&["echo-stdin"]))
+        .start(process)
         .await
-        .expect("echo helper should start");
+        .expect("echo process should start");
     let began = Instant::now();
     let poll = supervisor.poll_until_activity(
         &handle.owner,
@@ -120,18 +125,22 @@ async fn output_arrival_wakes_a_running_poll_before_the_yield_deadline() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn unix_pipe_preserves_zero_and_nonzero_exit_codes() {
     for expected in [0, 7] {
         let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let process = request(
+            "/bin/sh",
+            [
+                OsString::from("-c"),
+                OsString::from(format!("exit {expected}")),
+            ],
+        );
         let handle = supervisor
-            .start(helper_request(&["exit", &expected.to_string()]))
+            .start(process)
             .await
-            .expect("Unix pipe helper should start");
+            .expect("Unix quick-exit shell should start");
 
-        // A freshly linked Rust helper can spend more than 250 ms in dyld on
-        // current macOS debug builds even though the lifecycle wakeup is
-        // immediate. Keep the bound far below the 30-second poll deadline
-        // without making loader startup part of the process-runtime contract.
         let quick_exit_bound = if cfg!(target_os = "macos") {
             Duration::from_secs(1)
         } else {
@@ -156,6 +165,66 @@ async fn unix_pipe_preserves_zero_and_nonzero_exit_codes() {
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
+#[serial_test::serial(unix_process_contract)]
+async fn macos_concurrent_quick_shells_each_commit_and_report_their_exit() {
+    let long_supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let long_handle = long_supervisor
+        .start(request("/bin/cat", Vec::<OsString>::new()))
+        .await
+        .expect("long-running peer should start");
+    let mut starts = tokio::task::JoinSet::new();
+    for index in 0..16 {
+        starts.spawn(async move {
+            let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+            let mut process = request("unused", []);
+            process.command = CommandSpec::Shell {
+                shell: ShellKind::Posix,
+                script: "printf '%s' \"$NOMIFUN_MACOS_SHELL_VALUE\"; exit 7".to_owned(),
+            };
+            let value = format!("quick-shell-{index}");
+            process.env.insert(
+                OsString::from("NOMIFUN_MACOS_SHELL_VALUE"),
+                OsString::from(&value),
+            );
+            let handle = supervisor
+                .start(process)
+                .await
+                .unwrap_or_else(|error| panic!("quick shell {index} failed to start: {error:?}"));
+            let outcome = wait_for_terminal(&supervisor, &handle).await;
+            let ProcessOutcome::Exited {
+                code,
+                output,
+                cleanup,
+                ..
+            } = outcome
+            else {
+                panic!("quick shell {index} did not exit truthfully: {outcome:?}");
+            };
+            assert_eq!(code, Some(7));
+            assert_eq!(output.text(), value);
+            assert!(cleanup.reaped);
+        });
+    }
+    while let Some(result) = starts.join_next().await {
+        result.expect("quick-shell task must not panic");
+    }
+    long_supervisor
+        .close_stdin(&long_handle.owner, &long_handle.session_id)
+        .await
+        .expect("long-running peer stdin should close");
+    let outcome = wait_for_terminal(&long_supervisor, &long_handle).await;
+    assert!(matches!(
+        outcome,
+        ProcessOutcome::Exited {
+            code: Some(0),
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_process_contract))]
 async fn elapsed_process_deadline_rejects_start_before_user_code_runs() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let marker = directory.path().join("must-not-run.marker");
@@ -182,6 +251,7 @@ async fn elapsed_process_deadline_rejects_start_before_user_code_runs() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn public_supervisor_preserves_exit_codes_with_nofile_soft_limit_128() {
     let mut command = tokio::process::Command::new(low_fd_harness_binary());
     command.arg(helper_binary()).kill_on_drop(true);
@@ -202,6 +272,7 @@ async fn public_supervisor_preserves_exit_codes_with_nofile_soft_limit_128() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn public_supervisor_closes_inherited_high_fd_sentinel() {
     let mut command = tokio::process::Command::new(fd_sentinel_harness_binary());
     command.arg(helper_binary()).kill_on_drop(true);
@@ -222,6 +293,7 @@ async fn public_supervisor_closes_inherited_high_fd_sentinel() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn unix_pipe_round_trips_stdin_and_close_stdin_delivers_eof() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = supervisor
@@ -248,6 +320,7 @@ async fn unix_pipe_round_trips_stdin_and_close_stdin_delivers_eof() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_preserves_unicode_executable_path_argv_environment_and_cwd() {
     let directory = tempfile::tempdir().expect("temporary working directory");
     let cwd = directory.path().join("中文 workspace 'quoted'");
@@ -293,6 +366,7 @@ async fn macos_preserves_unicode_executable_path_argv_environment_and_cwd() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_posix_shell_preserves_literal_environment_and_exit_status() {
     let mut process = request("unused", []);
     process.command = CommandSpec::Shell {
@@ -314,6 +388,7 @@ async fn macos_posix_shell_preserves_literal_environment_and_exit_status() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
     // Darwin's trusted temporary directories are intentionally writable in
     // the profile. Keep both fixtures beside the checkout so `outside` really
@@ -378,6 +453,7 @@ async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_seatbelt_rejects_tmpdir_override_before_user_code_runs() {
     let workspace = tempfile::tempdir().expect("workspace");
     let workspace = workspace.path().canonicalize().expect("canonical workspace");
@@ -413,6 +489,7 @@ async fn macos_seatbelt_rejects_tmpdir_override_before_user_code_runs() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn invalid_executable_is_a_stable_spawn_failure_without_a_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let missing = Path::new("/definitely/not/a/nomifun-executable");
@@ -434,6 +511,7 @@ async fn invalid_executable_is_a_stable_spawn_failure_without_a_session() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn cancel_removes_the_leader_and_same_group_grandchild() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("grandchild.pid");
@@ -471,6 +549,7 @@ async fn cancel_removes_the_leader_and_same_group_grandchild() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn ignored_sigint_escalates_to_sigterm_and_removes_the_group() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("interrupt-ignoring-grandchild.pid");
@@ -517,6 +596,7 @@ async fn ignored_sigint_escalates_to_sigterm_and_removes_the_group() {
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn leader_exit_does_not_publish_success_while_same_group_descendant_survives() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("leader-first-grandchild.pid");
@@ -554,6 +634,7 @@ async fn leader_exit_does_not_publish_success_while_same_group_descendant_surviv
 
 #[tokio::test]
 #[cfg(unix)]
+#[serial_test::serial(unix_process_contract)]
 async fn observable_setsid_escape_is_lost_instead_of_waiting_for_fake_pipe_eof() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("escaped-descendant.pid");
@@ -599,7 +680,10 @@ async fn observable_setsid_escape_is_lost_instead_of_waiting_for_fake_pipe_eof()
 
 #[cfg(unix)]
 async fn wait_for_pid_marker(path: &Path) -> u32 {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // A freshly linked macOS debug helper may pay one-time dyld and validation
+    // cost before its user code runs. Poll immediately, but keep that loader
+    // cost outside the process cleanup and wakeup SLAs asserted elsewhere.
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Ok(contents) = fs::read_to_string(path)
                 && let Ok(pid) = contents.trim().parse::<u32>()

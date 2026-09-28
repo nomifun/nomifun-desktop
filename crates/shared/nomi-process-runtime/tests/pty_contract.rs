@@ -24,13 +24,16 @@ fn helper_binary() -> &'static str {
     env!("CARGO_BIN_EXE_process_test_helper")
 }
 
-fn helper_request(args: &[&str]) -> NormalizedProcessRequest {
+fn program_request(
+    program: impl Into<OsString>,
+    args: impl IntoIterator<Item = OsString>,
+) -> NormalizedProcessRequest {
     let cwd = std::env::current_dir().expect("current directory should exist");
     NormalizedProcessRequest {
         owner: ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
         command: CommandSpec::Program {
-            program: helper_binary().into(),
-            args: args.iter().map(OsString::from).collect(),
+            program: program.into(),
+            args: args.into_iter().collect(),
         },
         cwd: cwd.clone(),
         env: BTreeMap::new(),
@@ -41,6 +44,10 @@ fn helper_request(args: &[&str]) -> NormalizedProcessRequest {
         policy: ProcessPolicy::default(),
         capability: CapabilityPolicy::local_owner(cwd),
     }
+}
+
+fn helper_request(args: &[&str]) -> NormalizedProcessRequest {
+    program_request(helper_binary(), args.iter().map(OsString::from))
 }
 
 async fn start_pty(
@@ -132,6 +139,7 @@ fn strip_terminal_controls(text: &str) -> String {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn consecutive_pty_sessions_do_not_lose_quick_exit_output() {
     let first = ProcessSupervisor::new(SupervisorConfig::default());
     let first_handle = start_pty(&first, &["exit", "0"])
@@ -157,6 +165,7 @@ async fn consecutive_pty_sessions_do_not_lose_quick_exit_output() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn pty_echoes_stdin_and_close_stdin_delivers_eof() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["echo-stdin"])
@@ -217,6 +226,7 @@ async fn pty_echoes_stdin_and_close_stdin_delivers_eof() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn unix_pty_close_stdin_flushes_unterminated_canonical_input_then_eof() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["echo-stdin"])
@@ -246,6 +256,7 @@ async fn unix_pty_close_stdin_flushes_unterminated_canonical_input_then_eof() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn pty_decodes_utf8_split_one_byte_at_a_time() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["emit-split-utf8"])
@@ -274,6 +285,7 @@ async fn pty_decodes_utf8_split_one_byte_at_a_time() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn pty_preserves_fast_output_after_a_prior_terminal_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let warmup = start_pty(&supervisor, &["exit", "0"])
@@ -293,12 +305,21 @@ async fn pty_preserves_fast_output_after_a_prior_terminal_session() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn quick_pty_exit_wakes_a_far_yield_within_one_second() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let started = Instant::now();
-    let handle = start_pty(&supervisor, &["exit", "0"])
+    #[cfg(unix)]
+    let request = program_request(
+        "/bin/sh",
+        [OsString::from("-c"), OsString::from("exit 0")],
+    );
+    #[cfg(windows)]
+    let request = helper_request(&["exit", "0"]);
+    let handle = supervisor
+        .start(request)
         .await
-        .expect("quick PTY helper should start");
+        .expect("quick PTY process should start");
 
     let result = tokio::time::timeout(
         Duration::from_secs(1),
@@ -333,6 +354,48 @@ async fn quick_pty_exit_wakes_a_far_yield_within_one_second() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
+async fn macos_concurrent_pty_sessions_keep_output_and_cleanup_isolated() {
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let mut sessions = tokio::task::JoinSet::new();
+    for index in 0..8 {
+        let supervisor = std::sync::Arc::clone(&supervisor);
+        sessions.spawn(async move {
+            let expected = format!("pty-{index}");
+            let request = program_request(
+                "/bin/sh",
+                [
+                    OsString::from("-c"),
+                    OsString::from(format!("printf '{expected}'")),
+                ],
+            );
+            let handle = supervisor
+                .start(request)
+                .await
+                .unwrap_or_else(|error| panic!("PTY {index} failed to start: {error:?}"));
+            let outcome = wait_for_terminal(&supervisor, &handle).await;
+            let ProcessOutcome::Exited {
+                code,
+                output,
+                cleanup,
+                ..
+            } = outcome
+            else {
+                panic!("PTY {index} did not exit truthfully: {outcome:?}");
+            };
+            assert_eq!(code, Some(0));
+            assert!(cleanup.reaped);
+            assert_eq!(strip_terminal_controls(&output.text()), expected);
+        });
+    }
+    while let Some(result) = sessions.join_next().await {
+        result.expect("concurrent PTY task must not panic");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
     // Darwin's trusted temporary directories are intentionally writable in
     // the profile. Keep both fixtures beside the checkout so `outside` really
@@ -374,6 +437,7 @@ async fn macos_seatbelt_program_pty_blocks_out_of_root_writes() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn running_pty_supports_poll_write_resize_and_cancel() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["ignore-interrupt"])
@@ -441,6 +505,7 @@ async fn running_pty_supports_poll_write_resize_and_cancel() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn resize_rejects_zero_dimensions_without_mutating_the_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["sleep", "60000"])
@@ -466,6 +531,7 @@ async fn resize_rejects_zero_dimensions_without_mutating_the_session() {
 }
 
 #[tokio::test]
+#[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
 async fn resize_after_terminal_close_fails_truthfully() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["exit", "0"])
@@ -484,6 +550,7 @@ async fn resize_after_terminal_close_fails_truthfully() {
 
 #[cfg(unix)]
 #[tokio::test]
+#[serial_test::serial(unix_pty_contract)]
 async fn unix_pty_cancellation_reaps_the_leader_and_grandchild_group() {
     let directory = tempfile::tempdir().expect("temporary directory should be created");
     let marker = directory.path().join("pty-grandchild.pid");
