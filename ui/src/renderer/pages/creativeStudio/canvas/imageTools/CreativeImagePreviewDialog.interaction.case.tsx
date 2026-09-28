@@ -13,10 +13,17 @@ import common from '../../../../services/i18n/locales/zh-CN/common.json';
 import zh from '../../../../services/i18n/locales/zh-CN/creativeStudio.json';
 import type { CreativeAsset } from '../../assets';
 import type { CreativeCanvasNode } from '../../domain';
+import type { CreativeModelCatalogSnapshot } from '../../models';
 import CreativeCanvasImageToolbar from './CreativeCanvasImageToolbar';
+import CreativeImageCropDialog from './CreativeImageCropDialog';
+import CreativeImageMaskEditDialog from './CreativeImageMaskEditDialog';
 import CreativeImagePreviewDialog from './CreativeImagePreviewDialog';
+import CreativeImageSplitDialog from './CreativeImageSplitDialog';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  document.getElementById('resource-page-portal-root')?.remove();
+});
 const i18n = createInstance();
 await i18n.init({ lng: 'zh-CN', resources: { 'zh-CN': { translation: { creativeStudio: zh, common } } } });
 
@@ -30,6 +37,11 @@ const asset: CreativeAsset = {
   mimeType: 'image/png', width: 1920, height: 1080, bytes: 1, inLibrary: true,
   textContent: null, origin: null, originalUrl: '/original.png', thumbnailUrl: '/thumbnail.png',
   createdAt: 1, updatedAt: 1,
+};
+const emptyCatalog: CreativeModelCatalogSnapshot = {
+  status: 'ready',
+  providers: [],
+  error: null,
 };
 
 const Harness = ({ resolveAsset, onCanvasInput = () => {} }: {
@@ -56,6 +68,47 @@ const Harness = ({ resolveAsset, onCanvasInput = () => {} }: {
 };
 
 describe('canvas image preview', () => {
+  test.each([
+    ['preview', () => (
+      <CreativeImagePreviewDialog
+        node={node}
+        resolveAsset={() => new Promise<CreativeAsset>(() => {})}
+        onClose={() => {}}
+      />
+    )],
+    ['crop', () => (
+      <CreativeImageCropDialog visible asset={asset} onClose={() => {}} onConfirm={() => {}} />
+    )],
+    ['mask edit', () => (
+      <CreativeImageMaskEditDialog
+        visible
+        asset={asset}
+        catalog={emptyCatalog}
+        model={null}
+        onModelChange={() => {}}
+        onClose={() => {}}
+        onConfirm={() => {}}
+      />
+    )],
+    ['split', () => (
+      <CreativeImageSplitDialog visible asset={asset} onClose={() => {}} onConfirm={() => {}} />
+    )],
+  ] as const)('mounts the %s modal above viewport-portaled canvas controls', (_name, dialog) => {
+    const resourcePortal = document.createElement('div');
+    resourcePortal.id = 'resource-page-portal-root';
+    document.body.append(resourcePortal);
+
+    const view = render(<I18nextProvider i18n={i18n}>{dialog()}</I18nextProvider>);
+    const modal = view.getByRole('dialog');
+    const wrapper = modal.closest<HTMLElement>('.arco-modal-wrapper');
+    const mask = wrapper?.parentElement?.querySelector<HTMLElement>('.arco-modal-mask');
+
+    expect(wrapper?.style.zIndex).toBe('1700');
+    expect(mask?.style.zIndex).toBe('1700');
+    expect(resourcePortal.contains(wrapper)).toBe(false);
+    expect(document.body.contains(wrapper)).toBe(true);
+  });
+
   test('opens the original image, zooms independently and restores focus after closing', async () => {
     let canvasInputs = 0;
     const view = render(<Harness resolveAsset={async () => asset} onCanvasInput={() => { canvasInputs += 1; }} />);

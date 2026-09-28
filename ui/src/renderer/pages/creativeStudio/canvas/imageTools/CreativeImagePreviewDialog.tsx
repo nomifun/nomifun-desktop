@@ -10,6 +10,10 @@ import { useTranslation } from 'react-i18next';
 
 import { creativeAssetClient, isCreativeAssetDeleted, subscribeCreativeAssetDeletion, type CreativeAsset } from '../../assets';
 import type { CreativeCanvasNode } from '../../domain';
+import {
+  CREATIVE_CANVAS_MODAL_LAYER_STYLE,
+  getCreativeCanvasModalPopupContainer,
+} from '../canvasOverlayLayers';
 import styles from './CreativeImageTools.module.css';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
@@ -84,9 +88,9 @@ const CreativeImagePreviewDialog: React.FC<CreativeImagePreviewDialogProps> = ({
       className={styles.previewModal}
       // Escape the canvas shell's clipping/stacking context, including its
       // viewport-portaled composers (1600) and node toolbars (1601).
-      getPopupContainer={() => document.body}
-      maskStyle={{ zIndex: 1700 }}
-      wrapStyle={{ zIndex: 1700 }}
+      getPopupContainer={getCreativeCanvasModalPopupContainer}
+      maskStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
+      wrapStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
       alignCenter
       autoFocus
       focusLock
