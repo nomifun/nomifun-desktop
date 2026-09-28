@@ -1314,6 +1314,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   变更。零副作用补偿、失败清理 check→unlink、macOS 原生执行、IO fault、完整 UI/角色、100 seed/
   LONG/99% 仍待验，不关闭完整 FILE Case 或共享阶段。
 
+### 共享 watcher overflow 全量对账（W71，基线 `99c827a5c`）
+
+- S-D03-47 / FILE-040、PORT-012、A05/A15/A17/A19：新增确定性 contributor 回归，向同一
+  Session watcher 队列写入 263 个唯一事件。队列保留最后 256 个，首尾为 `marker-0007` /
+  `marker-0262`，精确记录 `dropped_event_count=7` 且不伪造 native `rescan_required`；生成的系统
+  上下文明确批次不完整、要求重读并禁止据此推断其他路径未变，随后一次 drain 清空全部状态。
+  Windows/Linux 精确测试各 **1/1**，生产代码首次即满足断言，本批只增加回归。
+- 正式 Tauri 构建 `8c54fc75dd29…` 使用独立 data/work/profile、StepFun Plan /
+  `step-3.7-flash`。准备回合完成后，外部并发创建 300 个含 `W71_EVENT_MARKER` 的文件并等待 native
+  watcher 分发；用户只询问总数与按名首尾。模型首步即用 PowerShell 完整列举目录，随后做全文
+  统计和抽样读取；三次进程调用及四次读取全部成功，零工具错误。最终 UI/canonical/磁盘一致报告
+  300、`event-0001.txt`、`event-0300.txt`，并明确结果完整、未修改文件。
+- 两回合均 completed，共 8 个模型 step、311 条 canonical 事件；工作区前后 count/min/max/hash
+  完全一致。应用与 profile 子进程清零并完成官方备份。真实 native 300 文件样本没有独立持久化其
+  精确 dropped 数，因此只把“确定性 overflow 计数 + 正式 UI 全量重读”作为组合证据；完整丢批/
+  重复/乱序/rescan UI、其他 Agent/平台、N3/100 seed/LONG/99% 仍待验，不关闭完整 FILE-040。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

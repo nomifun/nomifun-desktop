@@ -1118,6 +1118,31 @@ mod tests {
         assert!(watch.pre_turn_context().await.is_none());
     }
 
+    #[tokio::test]
+    async fn watch_overflow_context_requires_full_reconciliation_and_drains_once() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        for index in 0..(MAX_WATCH_EVENTS + 7) {
+            watch.push_for_test(
+                &format!("burst/marker-{index:04}.txt"),
+                WorkspaceFileChangeKind::Created,
+            );
+        }
+
+        let context = watch.pre_turn_context().await.unwrap();
+        let batch = watch_batch(&context);
+        assert_eq!(batch.events.len(), MAX_WATCH_EVENTS);
+        assert_eq!(batch.events.first().unwrap().path, "burst/marker-0007.txt");
+        assert_eq!(batch.events.last().unwrap().path, "burst/marker-0262.txt");
+        assert_eq!(batch.dropped_event_count, 7);
+        assert!(!batch.rescan_required);
+        assert!(batch.requires_reconciliation());
+        assert!(context.contains("Workspace notifications are incomplete"));
+        assert!(context.contains("Re-read the relevant workspace state"));
+        assert!(context.contains("cannot establish which other paths stayed unchanged"));
+        assert!(watch.pre_turn_context().await.is_none());
+    }
+
     #[test]
     fn watch_native_rescan_and_known_discards_are_separate_and_drained_once() {
         let mut queue = WatchQueue::default();
