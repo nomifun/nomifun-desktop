@@ -708,12 +708,95 @@ fn checkout_path_from_head(repo: &Repository, rel_path: &str) -> Result<(), AppE
     if entry.kind() == Some(git2::ObjectType::Tree) {
         return Err(AppError::BadRequest("snapshot checkout path must be a file".into()));
     }
+    #[cfg(unix)]
+    if rel_path.contains('\\') {
+        return restore_unix_literal_entry(repo, &entry, rel_path);
+    }
     let mut cb = git2::build::CheckoutBuilder::new();
     cb.force().disable_pathspec_match(true).path(rel_path);
 
     repo.checkout_tree(tree.as_object(), Some(&mut cb))
         .map_err(|e| AppError::Internal(format!("Failed to checkout {} from HEAD: {}", rel_path, e)))?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn restore_unix_literal_entry(
+    repo: &Repository,
+    entry: &git2::TreeEntry<'_>,
+    rel_path: &str,
+) -> Result<(), AppError> {
+    use std::io::Write as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if entry.kind() != Some(git2::ObjectType::Blob) {
+        return Err(AppError::BadRequest(
+            "snapshot checkout path must be a regular file or symlink".into(),
+        ));
+    }
+    let workspace = repo
+        .workdir()
+        .ok_or_else(|| AppError::Internal("Repository has no workdir".into()))?;
+    let requested = workspace.join(rel_path);
+    let parent = crate::path_safety::validate_path(
+        &requested
+            .parent()
+            .expect("validated relative snapshot path")
+            .to_string_lossy(),
+        &[workspace],
+    )?;
+    let target = parent.join(
+        requested
+            .file_name()
+            .expect("validated relative snapshot path"),
+    );
+    let temporary = parent.join(format!(
+        ".nomifun-snapshot-{}.tmp",
+        nomifun_common::generate_id()
+    ));
+    let blob = repo
+        .find_blob(entry.id())
+        .map_err(|error| AppError::Internal(format!("Failed to read HEAD blob: {error}")))?;
+    let result = (|| -> Result<(), AppError> {
+        if entry.filemode() == 0o120000 {
+            std::os::unix::fs::symlink(
+                std::ffi::OsStr::from_bytes(blob.content()),
+                &temporary,
+            )
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to stage literal snapshot symlink: {error}"))
+            })?;
+        } else {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+                .map_err(|error| {
+                    AppError::Internal(format!("Failed to stage literal snapshot file: {error}"))
+                })?;
+            file.write_all(blob.content()).map_err(|error| {
+                AppError::Internal(format!("Failed to write literal snapshot file: {error}"))
+            })?;
+            file.set_permissions(std::fs::Permissions::from_mode(
+                (entry.filemode() as u32) & 0o777,
+            ))
+            .map_err(|error| {
+                AppError::Internal(format!("Failed to restore literal snapshot mode: {error}"))
+            })?;
+            file.sync_all().map_err(|error| {
+                AppError::Internal(format!("Failed to sync literal snapshot file: {error}"))
+            })?;
+        }
+        std::fs::rename(&temporary, &target).map_err(|error| {
+            AppError::Internal(format!("Failed to publish literal snapshot file: {error}"))
+        })?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
