@@ -5,18 +5,20 @@
  */
 
 import classNames from 'classnames';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 type InstantHoverTooltipProps = {
   content: React.ReactNode;
   children: React.ReactNode;
-  position?: 'top' | 'right' | 'bottom';
+  position?: 'top' | 'right' | 'bottom' | 'left';
   className?: string;
+  disabled?: boolean;
 };
 
 const positionClassName: Record<NonNullable<InstantHoverTooltipProps['position']>, string> = {
   top: 'left-1/2 bottom-[calc(100%+6px)] -translate-x-1/2',
   right: 'left-[calc(100%+8px)] top-1/2 -translate-y-1/2',
+  left: 'right-[calc(100%+8px)] top-1/2 -translate-y-1/2',
   bottom: 'left-1/2 top-[calc(100%+6px)] -translate-x-1/2',
 };
 
@@ -25,8 +27,14 @@ const InstantHoverTooltip: React.FC<InstantHoverTooltipProps> = ({
   children,
   position = 'top',
   className,
+  disabled = false,
 }) => {
   const [visible, setVisible] = useState(false);
+  const shown = visible && !disabled;
+
+  useEffect(() => {
+    if (disabled) setVisible(false);
+  }, [disabled]);
 
   return (
     <div
@@ -39,11 +47,11 @@ const InstantHoverTooltip: React.FC<InstantHoverTooltipProps> = ({
       {children}
       <span
         role='tooltip'
-        aria-hidden={!visible}
+        aria-hidden={!shown}
         className={classNames(
           'pointer-events-none absolute z-[10000] whitespace-nowrap rd-6px bg-[var(--color-tooltip-bg)] px-8px py-5px text-12px font-500 leading-none text-white shadow-[0_6px_18px_rgba(0,0,0,0.18)] transition-opacity duration-75',
           positionClassName[position],
-          visible ? 'visible opacity-100' : 'invisible opacity-0'
+          shown ? 'visible opacity-100' : 'invisible opacity-0'
         )}
       >
         {content}
