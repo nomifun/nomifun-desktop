@@ -1518,6 +1518,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   暂存后续对账/清理、macOS 原生执行、其他 Unix portable fallback、磁盘/IO fault、完整 UI/角色及
   长期统计仍待验；不关闭完整 FILE Case 或共享阶段。
 
+### Windows 启动事务内 deadline（W82，基线 `0eb31d623`）
+
+- S-D04-11 / PROC-047、A08/A11/A13/A17/A19：使用真实 `CreateProcessW(CREATE_SUSPENDED)` 与
+  Job owner，audit facade 将 assignment 阶段延迟 200 ms，共享 process deadline 设为 50 ms。
+  deadline 在进程尚未 resume 时到达；事件精确停在 `[Created, Assigned]`，从未调用
+  `ResumeThread`，用户命令的 marker 没有创建。
+- 事务返回可证明用户代码零执行的 `SpawnFailed`；保留的精确进程 handle 已 signaled，说明 suspended
+  child 在结果返回前完成回收。首次实际耗时约 220 ms 且始终小于唯一 5 秒 setup 上限，没有在
+  assignment 返回后重新授予一轮 setup timeout。生产实现首次满足，本批只新增 fault-injection 回归。
+- 首次定向 **1/1**，重复 **20/20**，Windows process Runtime lib **125/125**，workspace fmt
+  通过。Unix/macOS 启动阶段、deadline 刚过 resume 的 `StartLost`、清理证明失败、正式 UI/角色及
+  长期压力仍待验；不关闭完整 PROC-047 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

@@ -4701,6 +4701,7 @@ mod tests {
     struct AuditFacade {
         events: Mutex<Vec<SpawnAuditEvent>>,
         fail_assignment: bool,
+        assignment_delay: Duration,
         created: Mutex<Option<CreatedProcess>>,
     }
 
@@ -4714,6 +4715,7 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 fail_assignment: true,
+                assignment_delay: Duration::ZERO,
                 created: Mutex::new(None),
             }
         }
@@ -4722,7 +4724,15 @@ mod tests {
             Self {
                 events: Mutex::new(Vec::new()),
                 fail_assignment: false,
+                assignment_delay: Duration::ZERO,
                 created: Mutex::new(None),
+            }
+        }
+
+        fn delayed_assignment(delay: Duration) -> Self {
+            Self {
+                assignment_delay: delay,
+                ..Self::successful()
             }
         }
 
@@ -4792,6 +4802,9 @@ mod tests {
                 .lock()
                 .map_err(|_| io::Error::other("spawn audit event mutex is poisoned"))?
                 .push(SpawnAuditEvent::Assigned);
+            if !self.assignment_delay.is_zero() {
+                std::thread::sleep(self.assignment_delay);
+            }
             if self.fail_assignment {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -4858,6 +4871,55 @@ mod tests {
                 .created_process_is_signaled()
                 .expect("exact process handle liveness probe should succeed"),
             "the suspended child was not reaped before SpawnFailed returned"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(windows_process_runtime)]
+    async fn setup_deadline_during_assignment_never_resumes_or_restarts_the_timeout() {
+        let temporary = TempDir::new().expect("temporary marker directory should be created");
+        let marker = temporary.path().join("deadline-must-not-exist.marker");
+        let facade = Arc::new(AuditFacade::delayed_assignment(Duration::from_millis(200)));
+        let mut request = program_request(
+            command_shell(),
+            &[
+                OsString::from("/D"),
+                OsString::from("/C"),
+                OsString::from(format!(">\"{}\" echo resumed", marker.display())),
+            ],
+        );
+        request.policy.deadline = Some(Instant::now() + Duration::from_millis(50));
+        let started_at = Instant::now();
+        let result = spawn_pipe_inner(
+            request,
+            Arc::new(OutputBuffer::new(4096)),
+            facade.clone(),
+        )
+        .await;
+        let elapsed = started_at.elapsed();
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("the shared process deadline must stop ownership setup"),
+        };
+        let ProcessError::SpawnFailed { failure } = error else {
+            panic!("suspended pre-resume timeout must be a proven SpawnFailed: {error:?}");
+        };
+        assert_eq!(failure.code, "spawn_failed");
+        assert!(
+            facade.events() == [SpawnAuditEvent::Created, SpawnAuditEvent::Assigned],
+            "ResumeThread must never run after the shared deadline"
+        );
+        assert!(!marker.exists(), "the suspended child executed user code");
+        assert!(
+            facade
+                .created_process_is_signaled()
+                .expect("the exact process liveness probe should succeed"),
+            "the suspended child was not reaped before SpawnFailed returned"
+        );
+        assert!(
+            elapsed < SETUP_TIMEOUT,
+            "setup received another full timeout after the shared deadline: {elapsed:?}"
         );
     }
 

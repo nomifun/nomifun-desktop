@@ -381,6 +381,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   `nomifun-file` lib **362/362**。保留暂存的后续 owner 对账/清理、macOS 原生执行、其他 Unix
   portable fallback、磁盘/IO fault、完整 UI/角色和长期统计仍开放，不关闭完整 FILE Case 或共享阶段。
 
+- S-D04-11（PROC-047、A08/A11/A13/A17/A19 Windows pre-resume deadline 子断言）：W82 用真实
+  Windows suspended process，把 Job assignment 延迟 200 ms，并把共享 process deadline 固定为
+  50 ms。事务跨期后从未调用 `ResumeThread`，用户 marker 零创建；精确进程句柄在返回前已终止，
+  结果为可证明 pre-spawn `SpawnFailed`。首次耗时约 220 ms，未重新获得 5 秒 setup timeout。
+  生产实现首次满足，本批只扩展 audit facade 和回归。首次 **1/1**、重复 **20/20**，process Runtime
+  lib **125/125**。Unix/macOS 启动阶段、刚过 resume 的 StartLost、清理失败与完整 UI/角色仍开放，
+  不关闭完整 PROC-047 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
