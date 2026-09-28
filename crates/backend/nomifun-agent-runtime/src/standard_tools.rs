@@ -32,12 +32,12 @@ impl StandardTool {
     fn exposure(&self) -> AgentToolExposure {
         let description = if self.action_id == "workspace.process/exec" {
             let shell = if cfg!(target_os = "windows") {
-                "cmd invokes PowerShell on this host; command plus args remains literal program invocation."
+                "cmd invokes the supplied script directly through Windows PowerShell 5.1 on this host; do not prefix cmd with powershell.exe or pwsh. command plus args remains literal program invocation."
             } else {
                 "cmd invokes /bin/sh -c on this host; command plus args remains literal program invocation."
             };
             let host_guidance = match std::env::consts::OS {
-                "windows" => "For a top-level listing including Hidden/System entries, use powershell.exe with args [\"-NoProfile\",\"-Command\",\"Get-ChildItem -LiteralPath . -Force | Select-Object Name,Attributes,LinkType\"]. Do not recurse or follow links unless requested. A leading dot does not imply the Windows Hidden attribute; report flags and entry types only from metadata. For Windows Command Prompt syntax, invoke cmd.exe with /d /c; dir /a /b returns names only and cannot prove attributes.",
+                "windows" => "For a top-level listing including Hidden/System entries, use command=powershell.exe with args [\"-NoProfile\",\"-Command\",\"Get-ChildItem -LiteralPath . -Force | Select-Object Name,Attributes,LinkType\"]. Write scripts for Windows PowerShell 5.1; do not assume pwsh or PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Do not recurse or follow links unless requested. A leading dot does not imply the Windows Hidden attribute; report flags and entry types only from metadata. For Windows Command Prompt syntax, invoke command=cmd.exe with args beginning [\"/d\",\"/c\"]; dir /a /b returns names only and cannot prove attributes.",
                 "macos" => "For a top-level listing including dot entries, use command=/bin/ls and args=[\"-a\"]. Do not put the entire command line in command. Omit . and .. from business entry counts.",
                 "linux" => "For a top-level listing including dot entries, use command=/usr/bin/ls and args=[\"-a\"]. Do not put the entire command line in command. Omit . and .. from business entry counts.",
                 _ => "Select native commands for this process host; the UI client's OS does not determine command syntax.",
@@ -397,7 +397,7 @@ fn patch_schema() -> Value {
 
 fn process_launch(include_wait: bool) -> Value {
     let cmd_description = if cfg!(target_os = "windows") {
-        "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through PowerShell on this process host. Do not use Command Prompt-only syntax such as dir /b or dir /s here; use PowerShell cmdlets, or set command=cmd.exe with separate args beginning [\"/d\",\"/c\"]. For an ordinary single executable use command plus args. Never combine the forms."
+        "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. The supplied string runs directly through Windows PowerShell 5.1 on this process host. Do not prefix cmd with powershell.exe or pwsh; to invoke an executable, set command=powershell.exe with a separate args array. Do not assume PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Do not use Command Prompt-only syntax such as dir /b or dir /s here; use PowerShell cmdlets, or set command=cmd.exe with separate args beginning [\"/d\",\"/c\"]. For an ordinary single executable use command plus args. Never combine the forms."
     } else {
         "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
     };
@@ -577,7 +577,16 @@ mod tests {
             .unwrap();
         if cfg!(target_os = "windows") {
             assert!(!process.definition.description.contains("cmd=ls -la"));
+            assert!(
+                process
+                    .definition
+                    .description
+                    .contains("Windows PowerShell 5.1")
+            );
             assert!(description.contains("PowerShell"));
+            assert!(description.contains("Windows PowerShell 5.1"));
+            assert!(description.contains("Do not prefix cmd with powershell.exe"));
+            assert!(description.contains("PowerShell 7-only syntax such as ??"));
             assert!(description.contains("dir /b"));
             assert!(description.contains("command=cmd.exe"));
         } else {
