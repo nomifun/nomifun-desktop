@@ -49,6 +49,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
+  边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
+  step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
+  误判为必须交付持久文件，导致 completed Turn 被翻成不可重试失败。现仅对
+  `完整/原始/命令…输出` 与 `在/从/于输出中/里/内` 排除名词用法，并在确定 next-verb 前移除
+  token，因此“保存命令输出为文件”仍能看到前一真实动词的 target。“输出一个文件”、
+  显式格式和计数仍严格。Agent execution **112/112**；修复后正式 Execution/Attempt
+  completed、`output_files=[]`、UI 1/1，旧失败 Session 未重试且保留。完整 Artifact/角色/平台
+  矩阵、100 seed 与 LONG/99% 仍开放，不关闭共享 D03。
+
 - S-D03-47（FILE-040、PORT-012、A05/A15/A17/A19 watcher overflow 全量对账子断言）：W71
   新增跨过 `WatchQueue`、`ContextContributor` 与 canonical JSON 的溢出回归：263 个唯一变更保留
   最后 256 个，首项为 `marker-0007`、`dropped_event_count=7`、`rescan_required=false`，上下文明示
@@ -147,6 +157,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   文件场景：首个及后续三个进程调用均使用 PowerShell 且零进程错误，最终磁盘/UI/canonical 一致；
   对账回合为 5 个模型步、264 条事件。broad-search withheld 仍是可见错误，因此仅关闭 host shell
   映射子断言；macOS/Linux 真实模型、完整 CMD-135/150、N3/100 seed/LONG/99% 仍开放。
+
+- S-D04-04（`CMD-132/146/148`、`PROC-006/014`、A01/A11/A13 model-facing 字面 argv
+  子断言）：process host 文案已要求 macOS 使用 `command`/`args`，但本批基线 JSON Schema
+  反而把 `cmd` 标成“Preferred”，首个真实 StepFun 轨迹因而发出 `cmd:"ls -a"`。
+  同步 S-D04-03 后进一步将普通单 executable 明确设为 `command` + 字面 `args`
+  首选，`cmd` 只在 pipeline、redirection、globbing、compound syntax 或 shell script
+  需要时使用；Windows PowerShell/Command Prompt 禁用语义与 Unix `/bin/sh -c` 字段级事实
+  全部保留。Agent runtime **173/173**。修复后两个新真实轨迹均首次形成
+  `{"command":"ls","args":["-a"]}`；最终样本恰好 1 个 process effect、退出 0、
+  `reaped=true`、完整隐藏项且 `visible_failure_count=0`。异构 client/host 和故意错配
+  `HOST_OS_COMMAND_MAPPING_ERROR`（`CMD-149/150`）未在本批执行，不关闭完整 CMD/PROC 或共享 D04。
 
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径

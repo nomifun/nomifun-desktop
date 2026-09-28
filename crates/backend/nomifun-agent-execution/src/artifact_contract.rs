@@ -153,6 +153,12 @@ fn infer_expected_artifacts(step_spec: &str) -> Option<ExpectedArtifactContract>
         let verbs = matching_terms(clause, OUTPUT_VERBS)
             .into_iter()
             .map(|(position, verb)| (position, position + verb.len(), verb))
+            // A noun-shaped `输出` is not merely non-actionable itself; it
+            // also must not truncate the target search for a preceding real
+            // action such as `保存命令输出为文件`.
+            .filter(|(start, end, verb)| {
+                !output_is_observation_noun(clause, *start, *end, verb)
+            })
             .collect::<Vec<_>>();
         for (verb_index, (verb_start, verb_end, verb)) in verbs.iter().copied().enumerate() {
             if verb_is_nested_capability(clause, verb_start) {
@@ -274,6 +280,48 @@ fn verb_is_nested_capability(clause: &str, verb_start: usize) -> bool {
     ]
     .iter()
     .any(|cue| matching_term_positions(before_to, cue).last().is_some())
+}
+
+/// Chinese `输出` can name observed process/model output as well as request an
+/// output action.  A noun such as `完整输出` must not make a later mention of
+/// workspace files look like a durable file deliverable.  Keep the exclusion
+/// anchored to a preceding source/quality modifier; imperative forms such as
+/// `输出一个文件` remain strict.
+fn output_is_observation_noun(
+    clause: &str,
+    verb_start: usize,
+    verb_end: usize,
+    verb: &str,
+) -> bool {
+    if verb != "输出" {
+        return false;
+    }
+    let prefix = clause[..verb_start].trim_end();
+    let suffix = clause[verb_end..].trim_start();
+    let modified_observation = [
+        "完整",
+        "原始",
+        "全部",
+        "命令",
+        "终端",
+        "控制台",
+        "标准",
+        "错误",
+        "进程",
+        "运行",
+        "工具",
+        "模型",
+        "日志",
+    ]
+    .iter()
+    .any(|modifier| prefix.ends_with(modifier));
+    let located_observation = ["在", "从", "于"]
+        .iter()
+        .any(|preposition| prefix.ends_with(preposition))
+        && ["中", "里", "内"]
+            .iter()
+            .any(|location| suffix.starts_with(location));
+    modified_observation || located_observation
 }
 
 fn output_artifacts_after(
@@ -1114,6 +1162,8 @@ mod tests {
             "输出：关键文件清单",
             "输出关键文件列表报告",
             "返回当前工作区的文件目录",
+            "在当前项目根目录执行一次 `ls -a` 命令，不递归、不跟随符号链接。请捕获完整输出，并分别说明：. 和 .. 的含义，以及其他业务文件和隐藏项（以 . 开头的文件/目录）的列表。",
+            "在项目根目录执行 `ls -a` 命令。要求：\n1. 仅执行一次，不使用 -R（递归）参数，不使用 -L（跟随符号链接）参数；\n2. 结果必须包含当前目录的所有隐藏项（以 . 开头的文件）；\n3. 在输出中明确区分并单独说明当前目录项（.）和上级目录项（..），将其与业务文件分开列出；\n4. 使用 Bash 工具执行，并直接返回命令的原始输出及整理后的说明。",
             "Output: key file list and recommended test commands.",
             "Return a file inventory for the workspace.",
             "List the file names and explain their purpose.",
@@ -1133,6 +1183,8 @@ mod tests {
             validate_required_artifacts("Export a CSV file", &files(&["/w/result.csv"])).is_ok()
         );
         assert!(validate_required_artifacts("生成一个文件", &[]).is_err());
+        assert!(validate_required_artifacts("输出一个文件", &[]).is_err());
+        assert!(validate_required_artifacts("保存命令输出为文件", &[]).is_err());
         assert!(validate_required_artifacts("生成一个文件清单，然后再生成一个文件", &[]).is_err());
         assert!(validate_required_artifacts("Generate a report file listing all errors", &[]).is_err());
     }
