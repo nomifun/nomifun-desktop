@@ -1355,6 +1355,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   `check_marker.ps1` 的失败，原样保留并转后续 CMD/控制子断言；重复/乱序/rescan UI、其他 Agent/
   macOS、N3/100 seed/LONG/99% 仍待验，不关闭完整 FILE-040。
 
+### Windows PowerShell 5.1 模型调用合同（W73，基线 `6b1cd04ea`）
+
+- S-D04-05 / CMD-135/150、PROC-014、A08/A13/A17/A19；Windows CMD-133 子断言：W72 首次
+  正式计数探针把 `powershell.exe -Command ...` 整段放进已由 PowerShell 执行的 `cmd`，`$files`
+  等变量被外层 shell 提前展开而失败；改用 `command`/`args` 后又提交 PowerShell 7 的 `??`，
+  System32 WindowsPowerShell v1.0（5.1）解析失败。两项真实失败和随后写入临时脚本的轨迹均保留。
+- 同步 S-D04-04 的普通 executable 字面 argv 首选后，首次新回归仍因 model-facing Schema 没有
+  `Windows PowerShell 5.1` 事实而失败。现明确 `cmd` 的内容由 5.1 直接执行，不能再加
+  `powershell.exe`/`pwsh` 前缀；显式调用用 `command=powershell.exe` 与分离 `args`，脚本不得假定
+  `??`、`??=`、三元 `? :`、`&&`、`||` 等 PowerShell 7 语法。没有改变合法参数、Action、权限或 owner。
+- 精确 Schema 回归 **20/20**、Agent Runtime **173/173**、workspace fmt 与正式 Tauri 构建通过。
+  正式二进制 `90a0d26b79b6…` 使用隔离 workspace/data/profile；step-3.7-flash 首次即形成
+  `command=powershell.exe`、`args=["-NoProfile","-Command",...]`，仅一次 process effect，退出 0、
+  `reaped=true`，正确报告 300、`ps51-0001.txt`、`ps51-0300.txt`。单回合 completed、2 个模型步、
+  67 条 canonical 事件；300 文件 count/min/max/hash 不变、无额外路径，应用/profile 清零并完成
+  正式备份。`cmd` 直接脚本、`start_process`、完成参数形状、只读任务写入防线、N3/100 seed/
+  LONG/99% 仍待验，不关闭完整 CMD/PROC 或共享 D04。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

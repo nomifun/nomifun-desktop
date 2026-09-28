@@ -184,6 +184,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   `reaped=true`、完整隐藏项且 `visible_failure_count=0`。异构 client/host 和故意错配
   `HOST_OS_COMMAND_MAPPING_ERROR`（`CMD-149/150`）未在本批执行，不关闭完整 CMD/PROC 或共享 D04。
 
+- S-D04-05（CMD-135/150、PROC-014、A08/A13/A17/A19 Windows PowerShell 版本与调用形状
+  子断言）：W72 首次正式计数探针先把 `powershell.exe -Command ...` 整段再次放进 PowerShell
+  `cmd`，变量被外层 shell 展开而失败；后续改用字面 argv 后又提交 PowerShell 7 的 `??`，而
+  Windows owner 固定调用 System32 WindowsPowerShell v1.0（5.1）。同步 S-D04-04 后，首次 Schema
+  回归仍因没有 `Windows PowerShell 5.1` 事实而失败并保留。现明确 `cmd` 字符串已由 5.1 直接执行、
+  不得再加 `powershell.exe`/`pwsh` 前缀；显式 executable 必须使用 `command=powershell.exe` 与分离
+  `args`，且不得假定 `??`、`??=`、三元 `? :`、`&&`、`||` 等 PowerShell 7 语法。合法参数、权限和
+  owner 执行均未改变。精确回归 **20/20**、Agent Runtime **173/173**；正式 Tauri
+  `90a0d26b79b6…` 在隔离 workspace/data/profile 中首次形成字面 `powershell.exe` argv，唯一进程
+  退出 0 且 `reaped=true`，正确返回 300、`ps51-0001.txt`、`ps51-0300.txt`。单回合 completed、
+  2 个模型步、67 条事件、仅一项 process effect；300 文件摘要不变，应用/profile 清零并正式备份。
+  `cmd` 直接脚本、`start_process`、N3/100 seed/LONG/99% 及 W72 的只读写入/完成参数失败仍开放。
+
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径
   分隔处理并返回成功，字面文件保持 staged。W63 诊断补出精确文件名；首版 one-entry 内存 index
