@@ -1277,6 +1277,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 应用与 profile 子进程已清零，官方备份完成。单个真实模型样本不计 N3；其他有界结果、其他
   Agent/平台、完整 FILE-015、100 seed/LONG/99% 仍待验，不关闭共享阶段。
 
+### 共享 Unix 新建发布清理窗口（W69，基线 `90097d1f7`）
+
+- S-D03-45 / FILE-019/028、A05/A13/A17/A19：在 WSL2 Ubuntu ext4 上为新建发布增加确定性
+  cleanup hook。旧路径先 hard-link 暂存 inode 到目标，再按“核对 inode、按名称 unlink”清理暂存；
+  hook 在核对后把该名称换成外来文件。首次运行显示目标字节正确、operation 返回成功，但外来
+  `stage.tmp` 被删除，证明成功 receipt 遮蔽了额外副作用。首次日志、`new.txt`、保留的原暂存 inode
+  和 observation 均在仓库外；首个脚本 CRLF 退出码问题及后续 PATH 未加引号的 runner 错误另行保留。
+- Linux/macOS 新建发布改用 `nomifun-common` 已有的原生 no-replace rename。Linux 的
+  `renameat2(RENAME_NOREPLACE)` 与 macOS 的 `renamex_np(RENAME_EXCL)` 都在不覆盖并发目标的同时
+  原子消费暂存名，因此成功路径没有 check→unlink 窗口。没有增加权限、删除重试或失败吞并；其他
+  Unix 暂时保留 portable hard-link fallback，Windows 继续使用原句柄 owner 路径。
+- 修复后 Linux 精确回归 **1/1**、同一反例 **20/20**、service **125/125**；固定现场显示 hook
+  不再可达，只有正确的 `new.txt`，无暂存/retained 残留。Windows `nomifun-file` lib **362/362**，
+  `cargo fmt --all -- --check` 通过。本批是原生文件 owner 边界，无 renderer/模型/Tauri UI 变更。
+- macOS 原生执行、其他 Unix fallback、失败路径的身份检查→unlink、既有目标 verify→rename、
+  IO fault、完整 UI/角色、100 seed/LONG/99% 仍待验，不关闭完整 FILE Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
