@@ -371,6 +371,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   真实 OS helper、多 Session 混合、cancel future drop 与平台信号失败组合、长期压力仍开放，不关闭
   完整 PROC-038 或共享阶段。
 
+- S-D03-50（FILE-019/020/028/038、A05/A07/A13/A17/A19 Unix 失败清理子断言）：W81 在 WSL2
+  ext4 上于失败清理确认 `stage.tmp` inode 后、`remove_file(path)` 前，把该名称换成同字节外来文件。
+  旧实现删除外来对象，保留原暂存 inode 到独立名称，却返回
+  `temporary_cleanup_unconfirmed=false`；首次失败日志、observation、保留 inode 与缺失外来名均在
+  仓库外保留。Unix 没有可信 compare-and-unlink，因此未消费的失败暂存现不再按名称删除，而是保留
+  供显式对账并返回 `temporary_cleanup_unconfirmed=true`；上层据此进入 outcome unknown。Windows
+  继续使用 handle 绑定删除。修复后精确反例 **20/20**，Linux service **127/127**，Windows
+  `nomifun-file` lib **362/362**。保留暂存的后续 owner 对账/清理、macOS 原生执行、其他 Unix
+  portable fallback、磁盘/IO fault、完整 UI/角色和长期统计仍开放，不关闭完整 FILE Case 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

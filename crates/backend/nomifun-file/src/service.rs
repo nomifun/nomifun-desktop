@@ -2100,16 +2100,20 @@ fn publish_patch_file_with_cleanup_hook(
         // A later failure must not unlink a concurrently created replacement.
         #[cfg(windows)]
         let cleanup = || temporary_owner.as_ref().expect("unconsumed file ownership is live").remove(temporary);
-        #[cfg(not(windows))]
-        let cleanup = || remove_owned_publication_source(&temporary_owner, temporary);
         let temporary_cleanup_unconfirmed = if temporary_owner_unconfirmed {
             true
         } else if !temporary_consumed {
-            match cleanup() {
-                Ok(()) => false,
-                #[cfg(not(windows))]
-                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => false,
-                Err(_) => true,
+            #[cfg(windows)]
+            {
+                cleanup().is_err()
+            }
+            #[cfg(not(windows))]
+            {
+                // Unix has no portable compare-and-unlink operation. Even an
+                // identity check immediately before remove_file leaves a
+                // window in which a foreign replacement can be deleted.
+                // Retain the staged name for explicit reconciliation instead.
+                true
             }
         } else {
             false
@@ -2415,15 +2419,7 @@ fn open_verified_publication_source(
     Ok(file)
 }
 
-#[cfg(not(windows))]
-fn remove_owned_publication_source(
-    owner: &PublicationIdentity,
-    path: &Path,
-) -> std::io::Result<()> {
-    remove_owned_publication_source_with_hook(owner, path, || {})
-}
-
-#[cfg(not(windows))]
+#[cfg(all(not(windows), not(any(target_os = "linux", target_os = "macos"))))]
 fn remove_owned_publication_source_with_hook(
     owner: &PublicationIdentity,
     path: &Path,
@@ -3295,8 +3291,8 @@ mod tests {
             assert_eq!(fs::read(&temporary).unwrap(), b"intended", "{observed}");
             assert_eq!(fs::read(&retained).unwrap(), b"intended", "{observed}");
         } else {
-            assert!(!failure.temporary_cleanup_unconfirmed, "{observed}");
-            assert!(!temporary.exists(), "{observed}");
+            assert!(failure.temporary_cleanup_unconfirmed, "{observed}");
+            assert_eq!(fs::read(&temporary).unwrap(), b"tampered", "{observed}");
         }
     }
 
@@ -3429,6 +3425,39 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"foreign", "{observed}");
         assert!(!temporary.exists(), "{observed}");
         assert_eq!(fs::read(&retained).unwrap(), b"intended", "{observed}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_failed_publication_retains_owned_staging_for_safe_reconciliation() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        let result = publish_patch_file_with_cleanup_hook(
+            &target,
+            b"intended",
+            &temporary,
+            PublicationSource::Matching(b"original"),
+            || fs::remove_file(&target).unwrap(),
+            || {},
+            || {},
+            || {},
+            || Ok(()),
+        );
+        let observed = format!(
+            "result={result:?}; target={:?}; temporary={:?}",
+            fs::read(&target),
+            fs::read(&temporary),
+        );
+        fs::write(fixture.path().join("observation.txt"), &observed).unwrap();
+        let failure = result.unwrap_err();
+        assert!(!failure.published, "{observed}");
+        assert!(!failure.publication_verified, "{observed}");
+        assert!(failure.publication_identity.is_none(), "{observed}");
+        assert!(failure.temporary_cleanup_unconfirmed, "{observed}");
+        assert!(!target.exists(), "{observed}");
+        assert_eq!(fs::read(&temporary).unwrap(), b"intended", "{observed}");
     }
 
     #[cfg(windows)]
@@ -4299,10 +4328,18 @@ mod tests {
         let failure = result.unwrap_err();
         assert!(matches!(failure.error, AppError::Conflict(_)));
         assert!(!failure.published);
-        assert!(!failure.temporary_cleanup_unconfirmed);
         assert_eq!(fs::read(&target).unwrap(), b"after");
         assert_eq!(fs::read(&retained).unwrap(), b"after");
-        assert!(!temporary.exists());
+        #[cfg(unix)]
+        {
+            assert!(failure.temporary_cleanup_unconfirmed);
+            assert_eq!(fs::read(&temporary).unwrap(), b"before");
+        }
+        #[cfg(windows)]
+        {
+            assert!(!failure.temporary_cleanup_unconfirmed);
+            assert!(!temporary.exists());
+        }
     }
 
     #[test]
