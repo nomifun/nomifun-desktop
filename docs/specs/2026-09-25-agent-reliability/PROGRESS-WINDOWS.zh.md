@@ -1415,6 +1415,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   该观察不能证明 alpha；因此本批只关闭数组形状子断言，精确 evidence 语义关联转后续 CTRL 批次。
   其他数组字段/Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验，不关闭完整 REG/CTRL/PROC。
 
+### 多命令完成证据的匹配与不可用归约（W76，基线 `148e74fe3`）
+
+- S-D02-15 / CTRL-006/007、A05/A07/A17/A18/A19：W75 正式完成报告把 alpha criterion 与
+  beta criterion 都绑定到第二条 beta call ID，数组形状合法但 alpha 没有对应证据。首版修复仅要求
+  “不同命令引用匹配 ID”；正式 Tauri `d5e34c3e3b11…` 随即暴露合同冲突：第二条 process 启动后，
+  第一条 command observation 按保守 workspace epoch 规则已退出 `available_evidence`。模型在匹配
+  ID、重跑、历史加载和 unverified 之间反复推演，6 个模型步后因续写预算耗尽 failed。截图、完整
+  reasoning/canonical、数据库和磁盘断言均保留。
+- 最终 completion 说明与 `evidence_call_ids` 字段明确：只引用当前 `available_evidence` 内的匹配
+  call ID；匹配的早期调用缺席时，以无证据 `unverified` 如实闭合，不得借用最新 ID、加载历史或
+  未经授权重跑。一个观察确实支持多个 criterion 的合法形状仍保留；没有改变 evidence 有效期、
+  Schema validator、Kernel admission 或权限。
+- 最终精确回归 **20/20**、Agent Runtime **175/175**、workspace fmt 与正式构建通过。正式 Tauri
+  `c90c28c56c46…` 使用隔离 workspace/data/profile：epsilon/zeta 两个进程均成功/reaped；完成报告
+  dispositions 精确为 `[unverified,supported,unverified]`，evidence IDs 为 `[[],[zeta_call],[]]`，
+  未伪用 epsilon 的过期 ID。最终正确报告 epsilon=3、zeta=8、合计 11，并明确披露 epsilon/合计
+  未验证；单回合 completed、5 个模型步、140 条 canonical 事件、UI 零工具异常，11 文件 tree hash
+  不变，应用/profile 清零并完成正式备份。多条顺序 process 结果要全部 supported 仍需可证明只读
+  的 owner 合同或原子聚合；其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

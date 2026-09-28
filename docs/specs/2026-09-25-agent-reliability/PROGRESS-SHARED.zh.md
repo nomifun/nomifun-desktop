@@ -313,6 +313,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   214 条事件，应用/profile 清零并完成官方备份。其他有界结果、其他 Agent/平台、完整 FILE-015、
   100 seed/LONG/99% 仍开放，不关闭共享阶段。
 
+- S-D02-15（CTRL-006/007、A05/A07/A17/A18/A19 多命令完成证据子断言）：W75 两条独立
+  process 均成功，但 completion 的 alpha criterion 复用最新 beta call ID；该 ID 不能证明 alpha。
+  W76 首版只要求匹配 ID，又与既有保守合同冲突：后续 process 启动会使前一 command observation
+  退出 `available_evidence`，模型在不可满足约束中反复推演，6 个模型步后续写预算耗尽并 failed。
+  两次首次失败均保留。最终说明要求仅引用当前 `available_evidence` 中的匹配 ID；若先前调用已不可用，
+  必须用无证据的 `unverified`，不得借用最新 ID、加载历史或未经授权重跑。证据有效期、validator 与
+  权限均未放宽。精确回归 **20/20**、Agent Runtime **175/175**。正式 Tauri `c90c28c56c46…`
+  中两进程成功/reaped，completion dispositions 为 `[unverified,supported,unverified]`，证据为
+  `[[],[zeta_call],[]]`；最终正确报告 epsilon=3、zeta=8、合计 11 并披露 epsilon/合计未验证，
+  单回合 completed、5 个模型步、140 条事件、UI 零工具异常，11 文件摘要不变，应用/profile 清零
+  并正式备份。多条顺序 process 结果要全部 supported 仍需可证明只读的 owner 合同或原子聚合；
+  其他场景/Provider/角色/平台、N3/100 seed/LONG/99% 仍开放，不关闭完整 CTRL 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
