@@ -1,6 +1,6 @@
 # Windows Case 处理进度
 
-更新：2026-09-28。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-09-29。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 覆盖 675 个共享 + 82 个 Windows 专属 Case；按适用 Agent 展开为 2,374 槽。
 Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 共享 P0 已由 `85a079fc0` 提交/推送；W01 首批组件走查完成，不重复维护共享根因文本。
@@ -1257,6 +1257,25 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 应用与 profile 子进程已清零并完成官方备份。单个真实模型样本不计 N3；UI 仍显示预期的 broad
   search withheld，故不关闭完整正向 CMD-135/150。macOS/Linux 真实模型、其他 Agent、100 seed/
   LONG/99% 仍待验。
+
+### 共享有界搜索 UI 分类（W68，基线 `454c8fc692`）
+
+- S-D02-14 / FILE-015、A08/A15/A17/A19：W67 正式样本中的 `search_context_withheld` 是 Runtime
+  有意保留的有界结果，canonical 为 `is_error=true` 并触发模型完整核对；UI 却显示“1 项操作出现
+  异常”，把预期资源边界与普通工具失败混在一起。该首次失败、截图和数据库轨迹保留在仓库外。
+- UI 归一化现在只接受本地 `search_files`、`status=error`、总长不超过 4 KiB、字段集合精确为
+  `kind/notice/search_executed/snippets_withheld` 且两个布尔值均为 true 的 JSON。命中时记录
+  `boundedResult=search_context_withheld`，保留 `nonFatalFailure` 供现有 Turn 状态使用；回执统计把它
+  从普通非致命错误数分离，显示琥珀色“搜索结果受限，需要完整核对”。格式错误、额外字段、错误
+  工具名或其他错误仍保持 fatal；没有改变 canonical、Runtime 重规划、工具权限或结果详情。
+- 三个定向测试文件 **72/72**；typecheck、i18n parity、生成 key 与
+  `check:desktop-ui-boundary`（1,949 个 renderer 源，最小 880×600）通过。正式 Tauri 构建
+  `a1d254ff1c18…` 使用独立 data/work/profile、StepFun Plan / `step-3.7-flash` 和外部创建的
+  400 文件 burst。中途 UI 显示新的有界提示而非普通异常；canonical 仍保留 `is_error=true`，模型
+  随后用两个成功的 PowerShell 只读调用完整核对，最终正确报告 400、`marker-0001.txt`、
+  `marker-0400.txt`。两回合 completed、共 214 条事件，工作区前后摘要相同。
+- 应用与 profile 子进程已清零，官方备份完成。单个真实模型样本不计 N3；其他有界结果、其他
+  Agent/平台、完整 FILE-015、100 seed/LONG/99% 仍待验，不关闭共享阶段。
 
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%

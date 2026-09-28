@@ -67,6 +67,45 @@ describe('normalizeToolCall', () => {
     expect(result?.nonFatalFailure).toBe(true);
   });
 
+  it('keeps an exact bounded search result inspectable without calling it an execution failure', () => {
+    const output = JSON.stringify({
+      kind: 'search_context_withheld',
+      search_executed: true,
+      snippets_withheld: true,
+      notice: 'The search ran, but snippets need a narrower instruction scope.',
+    });
+    const result = normalizeToolCall({
+      type: 'tool_call',
+      content: {
+        call_id: 'call-search',
+        name: 'search_files',
+        status: 'error',
+        args: { path: 'burst', query: 'needle', limit: 200 },
+        output,
+      },
+    } as any);
+
+    expect(result?.status).toBe('error');
+    expect(result?.boundedResult).toBe('search_context_withheld');
+    expect(result?.nonFatalFailure).toBe(true);
+    expect(result?.output).toBe(output);
+  });
+
+  it('keeps malformed or mismatched bounded-search claims fatal', () => {
+    for (const [name, value] of [
+      ['search_files', { kind: 'search_context_withheld', search_executed: false, snippets_withheld: true, notice: 'x' }],
+      ['read_file', { kind: 'search_context_withheld', search_executed: true, snippets_withheld: true, notice: 'x' }],
+      ['search_files', { kind: 'search_context_withheld', search_executed: true, snippets_withheld: true, notice: 'x', extra: true }],
+    ] as const) {
+      const result = normalizeToolCall({
+        type: 'tool_call',
+        content: { call_id: `call-${name}`, name, status: 'error', output: JSON.stringify(value) },
+      } as any);
+      expect(result?.boundedResult).toBeUndefined();
+      expect(result?.nonFatalFailure).toBeUndefined();
+    }
+  });
+
   it('marks prior-error barrier results as skipped cancellations', () => {
     const result = normalizeToolCall({
       type: 'tool_call',

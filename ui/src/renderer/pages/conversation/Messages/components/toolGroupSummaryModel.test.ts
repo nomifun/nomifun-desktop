@@ -10,6 +10,8 @@ import {
   buildToolReceiptDetailRows,
   buildToolReceiptSummaryParts,
   buildToolSummaryDescriptor,
+  countBoundedSearchResults,
+  countNonFatalToolFailures,
   getToolReceiptIconFromSummaryParts,
 } from './toolGroupSummaryModel';
 
@@ -19,6 +21,17 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
+  test('counts only exact bounded search results for the dedicated warning summary', () => {
+    const tools = [
+      tool({ key: 'limited', name: 'search_files', status: 'error', nonFatalFailure: true,
+        boundedResult: 'search_context_withheld' }),
+      tool({ key: 'ordinary', name: 'Bash', status: 'error', nonFatalFailure: true }),
+      tool({ key: 'failed', name: 'search_files', status: 'error' }),
+    ];
+    expect(countBoundedSearchResults(tools)).toBe(1);
+    expect(countNonFatalToolFailures(tools)).toBe(1);
+  });
+
   test('collapses a complete explicit retry chain and preserves attempt history', () => {
     const firstAttempt = tool({
       key: 'call-1',
