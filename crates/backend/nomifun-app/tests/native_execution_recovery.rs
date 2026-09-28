@@ -41,6 +41,35 @@ fn stream_body(tool: Option<(&str, &str, Value)>, text: &str) -> String {
     format!("data: {data}\n\ndata: {done}\n\ndata: [DONE]\n\n")
 }
 
+fn long_helper_command() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "powershell.exe".into(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "[IO.File]::WriteAllText('helper.pid',[string]$PID,[Text.Encoding]::ASCII); Start-Sleep -Seconds 60".into(),
+            ],
+        )
+    } else {
+        (
+            "/bin/sh".into(),
+            vec!["-c".into(), "printf %s $$ > helper.pid; sleep 60".into()],
+        )
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    system.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     let root = tempfile::tempdir().unwrap();
@@ -160,6 +189,128 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
         .bind(id).fetch_one(app.database.pool()).await.unwrap(),event_count,
         "terminal resume attempts cannot append canonical events");
     assert_eq!(call(&router,"GET",&execution,Value::Null).await["state"],"completed");
+    drop(router);
+    app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
+    server.abort(); let _ = server.await;
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn pause_cleans_a_running_process_before_resume_and_never_restarts_it() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (helper_command, helper_args) = long_helper_command();
+    let handler_requests = requests.clone(); let handler_entered = entered.clone(); let handler_release = release.clone();
+    let provider = Router::new().route("/v1/chat/completions", axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+        let requests = handler_requests.clone(); let entered = handler_entered.clone(); let release = handler_release.clone();
+        let helper_command = helper_command.clone(); let helper_args = helper_args.clone();
+        async move {
+            let round = requests.fetch_add(1,Ordering::SeqCst);
+            let data = match round {
+                0 => stream_body(Some(("start-helper","start_process",json!({
+                    "command":helper_command,"args":helper_args,"wait_ms":0
+                }))),""),
+                1 => {
+                    entered.notify_one();
+                    release.notified().await;
+                    stream_body(Some(("read-before-pause","read_file",json!({"path":"helper.pid"}))),"")
+                },
+                2 => {
+                    let encoded = body.to_string();
+                    assert!(encoded.contains("start-helper") && encoded.contains("read-before-pause"),
+                        "resume lost reconciled process/read history");
+                    stream_body(Some(("replan","update_plan",json!({"explanation":"Verify the marker after pause cleanup",
+                        "plan":[{"step":"Verify helper marker","status":"in_progress"}]}))),"")
+                },
+                3 => stream_body(Some(("read-marker","read_file",json!({"path":"helper.pid"}))),""),
+                4 => stream_body(Some(("close-plan","update_plan",json!({"explanation":"Fresh marker read complete",
+                    "plan":[{"step":"Verify helper marker","status":"completed"}]}))),""),
+                5 => stream_body(Some(("report","report_completion",json!({"summary":"Helper marker verified after pause cleanup",
+                    "criteria":[{"step":"Verify helper marker","disposition":"supported","evidence_call_ids":["read-marker"],
+                        "requirement_ids":["input_0"],"rationale":"Fresh marker read confirms the helper started before pause"}]}))),""),
+                _ => panic!("unexpected process recovery model request {round}"),
+            };
+            ([(axum::http::header::CONTENT_TYPE,"text/event-stream")], data)
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener,provider).await.unwrap(); });
+    let db = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let app = AppServices::from_config(db,&config).await.unwrap();
+    let router = create_router(&app).await;
+    let provider = call(&router,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"scripted process pause", "base_url":format!("http://{address}/v1"),
+        "auth_scheme":"bearer","credentials":{"api_keys":["test-only"]},"enabled":true,
+        "initial_model":{"model":"step-3.7-flash","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","provider_params":{}}]}})).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
+    let preset = call(&router,"POST","/api/agent-presets/from-template/coding.codex",json!({"reuse_existing":false,"display_name":"Process pause fixture","model":model})).await;
+    let session = call(&router,"POST","/api/agent-sessions",json!({"preset_id":preset["preset"]["preset_id"],"model":model,"workspace":project,
+        "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"},{"resource_kind":"process_session","resource_id":"managed-process-session"},{"resource_kind":"project_memory","resource_id":"default-project-memory"}]})).await;
+    let id = session["agent_session_id"].as_str().unwrap();
+    let execution = format!("/api/agent-sessions/{id}/execution");
+    call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"process-task",
+        "input":{"content":"Start one helper that writes its PID to helper.pid, then verify the marker and report. Never start it twice."}})).await;
+    tokio::time::timeout(Duration::from_secs(30),entered.notified()).await.unwrap();
+    let marker = project.join("helper.pid");
+    let pid = tokio::time::timeout(Duration::from_secs(10),async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&marker)
+                && let Ok(pid) = text.trim().parse::<u32>() { break pid; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert!(process_exists(pid),"managed helper must be live before pause cleanup");
+    let running = call(&router,"GET",&execution,Value::Null).await;
+    let pause = json!({"operation_id":running["operation_id"],"idempotency_key":"pause-process","reason":"inspect cleanup"});
+    call(&router,"POST",&format!("{execution}/pause"),pause).await;
+    release.notify_one();
+    let paused = tokio::time::timeout(Duration::from_secs(30),async {
+        loop {
+            let state = call(&router,"GET",&execution,Value::Null).await;
+            if state["state"] == "paused" { break state; }
+            assert_eq!(state["state"],"running","process pause failed: {state}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(paused["pause"]["cleanup_proven"],true);
+    tokio::time::timeout(Duration::from_secs(10),async {
+        while process_exists(pid) { tokio::time::sleep(Duration::from_millis(50)).await; }
+    }).await.expect("pause must reap the managed process tree");
+    let cleanup_seq:i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='host_cleanup_proven'")
+        .bind(id).bind(paused["operation_id"].as_str().unwrap()).fetch_one(app.database.pool()).await.unwrap();
+    let pause_seq:i64 = sqlx::query_scalar("SELECT seq FROM agent_events WHERE session_id=? AND correlation_id=? AND kind='turn/paused'")
+        .bind(id).bind(paused["operation_id"].as_str().unwrap()).fetch_one(app.database.pool()).await.unwrap();
+    assert!(cleanup_seq < pause_seq,"cleanup proof must precede the pause state");
+
+    let resume = json!({"operation_id":paused["operation_id"],"idempotency_key":"resume-process",
+        "expected_pause_revision":paused["pause"]["revision"],"expected_checkpoint_revision":paused["checkpoint_revision"],
+        "expected_checkpoint_digest":paused["checkpoint_digest"],"budget":{}});
+    call(&router,"POST",&format!("{execution}/resume"),resume).await;
+    let completed = tokio::time::timeout(Duration::from_secs(30),async {
+        loop {
+            let state = call(&router,"GET",&execution,Value::Null).await;
+            if state["state"] == "completed" { break state; }
+            assert_eq!(state["state"],"running","process resume failed: {state}");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    assert!(completed["execution_generation"].as_u64().unwrap() > paused["execution_generation"].as_u64().unwrap());
+    assert!(!process_exists(pid));
+    let starts:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='tool_started' AND json_extract(inline_json,'$.event.action_id')='workspace.process/start'")
+        .bind(id).fetch_one(app.database.pool()).await.unwrap();
+    assert_eq!(starts,1,"resume must not replay the completed process start");
+    assert_eq!(requests.load(Ordering::SeqCst),6);
+    for (kind,count) in [("turn/started",1i64),("turn/paused",1),("turn/resume-authorized",1),("turn/completed",1),("turn/failed",0)] {
+        let actual:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind=?")
+            .bind(id).bind(kind).fetch_one(app.database.pool()).await.unwrap();
+        assert_eq!(actual,count,"{kind}");
+    }
     drop(router);
     app.shutdown_browser_platform().await.unwrap(); app.database.close().await;
     server.abort(); let _ = server.await;

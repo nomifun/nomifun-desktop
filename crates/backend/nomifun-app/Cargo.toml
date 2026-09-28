@@ -309,6 +309,7 @@ nomifun-ai-agent = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
 http-body-util.workspace = true
 tempfile = "3"
+sysinfo.workspace = true
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite.workspace = true
 wiremock = "0.6"
