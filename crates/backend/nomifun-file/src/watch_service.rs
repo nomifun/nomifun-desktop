@@ -128,7 +128,8 @@ fn emit_file_event(
         if path_str != registered {
             continue;
         }
-        if !should_emit_at(debounce, &path_str, now) {
+        let debounce_key = format!("{event_type}\0{path_str}");
+        if !should_emit_at(debounce, &debounce_key, now) {
             continue;
         }
         let payload = FileWatchEvent {
@@ -903,6 +904,34 @@ mod tests {
         ) {
             self.0.lock().unwrap().push(owner.to_owned());
         }
+    }
+
+    #[test]
+    fn metadata_change_does_not_debounce_a_following_remove_event() {
+        let path = std::env::temp_dir().join("watch-debounce-kind.txt");
+        let key = path.to_string_lossy().into_owned();
+        let owners = OwnerFence::with_owner("owner");
+        let debounce = DashMap::new();
+        let events = RoutedEvents::default();
+        let now = Instant::now();
+        for kind in [
+            EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any)),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            emit_file_event(
+                Ok(notify::Event::new(kind).add_path(path.clone())),
+                &key,
+                &owners,
+                &debounce,
+                &events,
+                now,
+            );
+        }
+        assert_eq!(
+            events.0.lock().unwrap().len(),
+            2,
+            "different event kinds for one path carry different facts"
+        );
     }
 
     struct BlockingEvents {

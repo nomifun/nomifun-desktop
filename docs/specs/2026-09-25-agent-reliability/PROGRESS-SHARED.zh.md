@@ -49,6 +49,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-41（FILE-040、A05/A17 Linux 删除事件归约子断言）：W61 Linux 全组唯一剩余失败
+  是单文件删除通知稳定超时。W62 原生轨迹确认 inotify/notify 先发 `Modify(Metadata)`，紧接同路径
+  `Remove(File)`；旧 debounce 只按 path，前者把真正删除抑制 200 ms，而 UI sink 有意忽略 metadata
+  change。现以 `event_type + path` 作为去重身份，同类抖动仍合并，不同事实不互相吞掉。Linux
+  纯归约与真实 ext4 删除两项各 **20/20**，Linux lib **304/304**、file_watching **14/14**；Windows
+  file_watching **14/14** 及真实删除回归通过。Linux 全 crate 随后在无关 snapshot literal-path
+  用例稳定失败并转 W63，不计 watcher 失败。无 renderer/模型/UI 改动；macOS、事件洪泛/乱序及
+  完整 UI/长期门槛仍开放，不关闭完整 FILE-040。
+
 - S-D03-40（ART-001/003/007、A05/A13 Unix Artifact 目录 durability 子断言）：W60 的 Linux
   全组中 11 项 Artifact 均在目录同步返回 EBADF；`cap_std::Dir` 可持有只用于 capability traversal
   的 `O_PATH` descriptor，旧实现 clone 后直接 `fsync`。W61 在同一已授权 Dir 内以 `"."` 重新打开
@@ -59,9 +68,10 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   Artifact Case 或共享阶段。
 
 - S-D03-39（FILE-019/020/025/028/038/039、A05/A07/A13 Unix 暂存源/清理子断言）：W60
-  在 WSL2 Ubuntu 6.18 的 ext4 临时目录执行原生 Linux 夹具；构建目标位于 WSL 私有目录，未把
-  drvfs 当 Unix 文件系统。最终核对后把暂存原地改写或换成同字节异 inode，旧 Unix 路径均返回
-  成功并发布错误对象；两项首次 FAIL 及 ext4 现场复制到 Windows 外部证据目录。现在所有 Unix
+  在 WSL2 Ubuntu 6.18 的 `/home` ext4 临时目录执行原生 Linux 夹具；源码从 `/mnt/c` 挂载，
+  文件语义断言仅作用于 ext4 夹具，未把 drvfs 当 Unix 文件系统。最终核对后把暂存原地改写或
+  换成同字节异 inode，旧 Unix 路径均返回成功并发布错误对象；两项首次 FAIL 及 ext4 现场复制到
+  Windows 外部证据目录。现在所有 Unix
   暂存都保留 inode 身份；rename/hard-link 前以 `O_NOFOLLOW` 打开并核对 inode/调用字节，权限按
   已核对句柄继承，发布后再次核对目标身份/字节。失败清理仅删除仍属于该 operation 的 inode；
   外来同名文件保留并将 cleanup 记为未确认。新建分支同样覆盖，三项 Linux 回归各 **20/20**，

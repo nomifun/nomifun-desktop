@@ -1123,9 +1123,9 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 ### 共享 Unix 暂存源与失败清理（W60，基线 `9ab072a4f`）
 
 - S-D03-39 / FILE-019/020/025/028/038/039、A05/A07/A13：使用本机 WSL2 Ubuntu 6.18，
-  编译输出放 `/home`，夹具在 ext4 临时目录运行；仅源码来自 `/mnt/c`，不把 drvfs 的文件语义作为
-  验收。既有替换在最终检查后分别原地改写暂存、换入同字节异 inode，旧实现均返回成功并把错误
-  对象发布到目标。首次两项 FAIL 的完整 ext4 目录已复制到 W60 `01-before/`。
+  夹具在 `/home` ext4 临时目录运行；源码来自 `/mnt/c`，文件语义断言只作用于 ext4 夹具，不把
+  drvfs 行为作为验收。既有替换在最终检查后分别原地改写暂存、换入同字节异 inode，旧实现均
+  返回成功并把错误对象发布到目标。首次两项 FAIL 的完整 ext4 目录已复制到 W60 `01-before/`。
 - Unix 发布现在为所有暂存保留 inode 身份；rename/hard-link 前使用 `O_NOFOLLOW` 打开名称，核对
   inode 与调用字节，并通过该句柄继承权限；发布后再次核对目标名称仍指向该 inode 且字节一致。
   失败清理先核对同名对象身份，只删除本 operation 的暂存；异 inode 文件保留并设置
@@ -1150,6 +1150,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   本批未改 renderer、未运行模型/Tauri UI。
 - macOS 主 lane、真实磁盘故障/断电 durability、完整 Agent/UI/角色、100 seed/LONG/99% 仍待验，
   不关闭完整 Artifact Case 或共享阶段。
+
+### 共享 Linux 删除事件去重（W62，基线 `ce1f789e2`）
+
+- S-D03-41 / FILE-040、A05/A17：W61 Linux 全组唯一剩余失败为
+  `inventory_refreshes_before_native_remove_delivery`，定向重跑仍稳定超时。W62 保留 raw notify
+  轨迹，确认 Linux 删除一个被监听文件时先发同路径 `Modify(Metadata)`，随后才发 `Remove(File)`。
+  旧 debounce 只使用 path，前一个 change 占据 200 ms 窗口；接收方按合同忽略 metadata change，
+  因而永远收不到删除事实。
+- 单文件监听现以 `event_type + path` 为 debounce key；相同类型抖动仍合并，create/change/remove
+  不再互相抑制。Linux 纯归约和真实 ext4 删除两项各 **20/20**，Linux lib **304/304**、
+  file_watching **14/14**；Windows file_watching **14/14** 及真实删除回归通过。
+- Linux 全 crate 随后运行到独立 snapshot 集合，`single_file_operations_use_literal_paths` 稳定失败
+  49/50，原样保留并转 W63；不计本批 watcher 失败。本批未改 renderer、未运行模型/Tauri UI。
+- macOS、事件洪泛/乱序、完整 UI/角色、100 seed/LONG/99% 仍待验，不关闭完整 FILE-040 或共享阶段。
 
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 与完整丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
