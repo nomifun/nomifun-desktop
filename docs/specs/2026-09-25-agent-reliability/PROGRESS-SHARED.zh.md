@@ -49,6 +49,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-43（FILE-020/022/024/031/032/036、A02/A05/A14/A19 macOS APFS identity 与 Unix
+  目标权限子断言）：Unix 批量 patch 只按词法路径判重，APFS case 或 NFC/NFD 等价目标会先发布
+  第 1 项再在第 2 项冲突；POSIX rename 又能在父目录可写时替换 mode/ACL 只读目标。现由 macOS
+  卷 `_PC_CASE_SENSITIVE` + canonical Unicode component key 在准备期拒绝等价/祖先目标；合法
+  Case-sensitive APFS case 变体保持区分。Unix 替换前持有同 dev/inode 的可写目标句柄，权限拒绝
+  保持旧字节并清理暂存。macOS 主卷/Case-sensitive APFS 新回归各 **20/20**，`nomifun-file`
+  **464/464**；Linux、更多 Unicode case-fold、ACL 竞态、IO fault、正式 UI/角色及长期门槛仍开放，
+  不关闭完整 FILE Case 或共享阶段。
+
 - S-D03-42（FILE-040、PORT-012、A08/A14/A15/A17 workspace rescan/dropped 上下文组合子断言）：
   既有 watcher 队列会分别记录已知丢弃数与原生 rescan 标记，但缺少跨过 pre-turn contributor 和
   system prompt 合并边界的证明。W64 新增组合回归，同时注入一个合法相对事件、一个被拒绝路径和

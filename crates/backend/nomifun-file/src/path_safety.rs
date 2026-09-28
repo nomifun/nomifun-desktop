@@ -117,10 +117,62 @@ pub(crate) fn patch_targets_overlap(
     left: &Path,
     right: &Path,
 ) -> Result<bool, AppError> {
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         let _ = root;
         Ok(left.starts_with(right) || right.starts_with(left))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        use unicode_normalization::UnicodeNormalization;
+
+        let relative = |path: &Path| {
+            path.strip_prefix(root).map(Path::to_path_buf).map_err(|_| {
+                AppError::Forbidden("patch target is outside the bound workspace".to_owned())
+            })
+        };
+        let root_path = CString::new(root.as_os_str().as_bytes()).map_err(|_| {
+            AppError::BadRequest("workspace root contains a NUL byte".to_owned())
+        })?;
+        // SAFETY: root_path is a live NUL-terminated path. _PC_CASE_SENSITIVE
+        // returns the filesystem comparison mode without mutating the volume.
+        let case_sensitive = unsafe { libc::pathconf(root_path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+        if case_sensitive < 0 {
+            return Err(AppError::Conflict(format!(
+                "cannot determine macOS volume case sensitivity for '{}': {}",
+                root.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        let component_key = |component: Component<'_>| -> Result<String, AppError> {
+            let Component::Normal(name) = component else {
+                return Err(AppError::BadRequest(
+                    "patch target contains a non-normal path component".to_owned(),
+                ));
+            };
+            let name = name.to_str().ok_or_else(|| {
+                AppError::BadRequest("patch target is not valid UTF-8".to_owned())
+            })?;
+            let normalized = name.nfd().collect::<String>();
+            Ok(if case_sensitive == 0 {
+                normalized.to_lowercase()
+            } else {
+                normalized
+            })
+        };
+        let left = relative(left)?;
+        let right = relative(right)?;
+        let mut left = left.components();
+        let mut right = right.components();
+        loop {
+            match (left.next(), right.next()) {
+                (Some(a), Some(b)) if component_key(a)? == component_key(b)? => continue,
+                (Some(_), Some(_)) => return Ok(false),
+                // Equality or either normalized path being an ancestor is an overlap.
+                (None, _) | (_, None) => return Ok(true),
+            }
+        }
     }
     #[cfg(windows)]
     {
