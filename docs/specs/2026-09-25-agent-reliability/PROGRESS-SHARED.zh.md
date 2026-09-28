@@ -49,6 +49,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D03-46（FILE-020/025/038、A05/A07/A17/A19 Unix 既有目标派发源窗口子断言）：W70 在
+  Linux ext4 上把同名源替换精确放到暂存 inode/字节句柄核对之后、实际 `rename` 之前。系统调用
+  因此把外来 7 字节对象放入目标，原意 8 字节暂存被保留到独立名称；发布后核对正确返回
+  `outcome_unknown`，但旧代码仍以 rename 成功等同“自有暂存已消费”，错误记录
+  `temporary_cleanup_unconfirmed=false`。首版弱断言假通过与收紧后的首次 FAIL 都保留。现改为只有
+  目标仍匹配暂存 inode 才确认消费；身份不符时保留 unknown、无 publication identity、要求重读，
+  同时显式标记临时清理未确认且不再按已复用名称清理。新增 Linux 回归 **20/20**，Linux service
+  **126/126**，Windows `nomifun-file` lib **362/362**，workspace fmt 通过。该窗口的零副作用补偿、
+  失败清理 check→unlink、macOS 原生执行、完整 IO fault/UI/角色与长期门槛仍开放，不关闭完整
+  FILE Case 或共享阶段。
+
 - S-D03-45（FILE-019/028、A05/A13/A17/A19 Unix 新建发布清理窗口子断言）：W69 在 WSL2
   Ubuntu ext4 夹具中把并发替换精确放到暂存 inode 身份确认之后、`unlink` 之前；旧 hard-link
   发布先正确生成目标，随后删除了占用原暂存名的外来文件，并仍返回成功。首次 FAIL、ext4 现场和

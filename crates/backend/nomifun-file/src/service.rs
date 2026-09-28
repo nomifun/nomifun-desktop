@@ -1819,6 +1819,7 @@ fn publish_patch_file_with_prepublication_hook(
         after_staging,
         before_replace,
         || {},
+        || {},
         after_publication,
         #[cfg(windows)]
         native_replace,
@@ -1829,6 +1830,7 @@ fn publish_patch_file_with_cleanup_hook(
     path: &Path, data: &[u8], temporary: &Path, source: PublicationSource<'_>,
     after_staging: impl FnOnce(),
     before_replace: impl FnOnce(),
+    _after_source_verification: impl FnOnce(),
     _after_cleanup_identity: impl FnOnce(),
     after_publication: impl FnOnce() -> Result<(), AppError>,
     #[cfg(windows)] native_replace: impl FnOnce(
@@ -1878,6 +1880,10 @@ fn publish_patch_file_with_cleanup_hook(
     let temporary_owner = temporary_identity;
     let mut published = false;
     let mut temporary_consumed = false;
+    #[cfg(not(windows))]
+    let mut temporary_owner_unconfirmed = false;
+    #[cfg(windows)]
+    let temporary_owner_unconfirmed = false;
     #[cfg(windows)]
     let mut publication_verified = false;
     #[cfg(not(windows))]
@@ -1954,14 +1960,17 @@ fn publish_patch_file_with_cleanup_hook(
                 file
             };
             #[cfg(not(windows))]
+            _after_source_verification();
+            #[cfg(not(windows))]
             let replacement = replace_file_path(&temporary, path, &mut published, expected, source.expected_identity());
             #[cfg(not(windows))]
             {
-                temporary_consumed = published;
                 if published {
                     let target_is_staged = crate::publication_identity::matches_path(&temporary_owner, path)
                         .unwrap_or(false);
                     let bytes_match = publication_bytes_match(&mut staged_file, data).unwrap_or(false);
+                    temporary_consumed = target_is_staged;
+                    temporary_owner_unconfirmed = !target_is_staged;
                     if !target_is_staged || !bytes_match {
                         return Err(AppError::Internal(format!(
                             "{FILE_WRITE_OUTCOME_UNKNOWN}; published Unix target does not match the staged object and bytes; retain recovery state and re-read before retry"
@@ -2059,6 +2068,10 @@ fn publish_patch_file_with_cleanup_hook(
                 let target_is_staged = crate::publication_identity::matches_path(&temporary_owner, path)
                     .unwrap_or(false);
                 let bytes_match = publication_bytes_match(&mut staged_file, data).unwrap_or(false);
+                if !target_is_staged {
+                    temporary_consumed = false;
+                    temporary_owner_unconfirmed = true;
+                }
                 if !target_is_staged || !bytes_match {
                     return Err(AppError::Internal(format!(
                         "{FILE_WRITE_OUTCOME_UNKNOWN}; published Unix target does not match the staged object and bytes; re-read before retry"
@@ -2089,11 +2102,17 @@ fn publish_patch_file_with_cleanup_hook(
         let cleanup = || temporary_owner.as_ref().expect("unconsumed file ownership is live").remove(temporary);
         #[cfg(not(windows))]
         let cleanup = || remove_owned_publication_source(&temporary_owner, temporary);
-        let temporary_cleanup_unconfirmed = !temporary_consumed && match cleanup() {
-            Ok(()) => false,
-            #[cfg(not(windows))]
-            Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => true,
+        let temporary_cleanup_unconfirmed = if temporary_owner_unconfirmed {
+            true
+        } else if !temporary_consumed {
+            match cleanup() {
+                Ok(()) => false,
+                #[cfg(not(windows))]
+                Err(cleanup) if cleanup.kind() == std::io::ErrorKind::NotFound => false,
+                Err(_) => true,
+            }
+        } else {
+            false
         };
         PatchPublicationFailure { error, published, publication_verified, temporary_cleanup_unconfirmed,
             publication_identity: if publication_verified { publication_identity } else { None } }
@@ -3344,6 +3363,7 @@ mod tests {
             PublicationSource::Absent,
             || {},
             || {},
+            || {},
             || {
                 cleanup_window_reached.set(true);
                 fs::rename(&temporary, &retained).unwrap();
@@ -3368,6 +3388,47 @@ mod tests {
             assert!(!temporary.exists(), "{observed}");
             assert!(!retained.exists(), "{observed}");
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn unix_replacement_source_swap_after_verification_is_unknown() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        let retained = fixture.path().join("retained-stage");
+        fs::write(&target, b"original").unwrap();
+        let result = publish_patch_file_with_cleanup_hook(
+            &target,
+            b"intended",
+            &temporary,
+            PublicationSource::Matching(b"original"),
+            || {},
+            || {},
+            || {
+                fs::rename(&temporary, &retained).unwrap();
+                fs::write(&temporary, b"foreign").unwrap();
+            },
+            || {},
+            || Ok(()),
+        );
+        let observed = format!(
+            "result={result:?}; target={:?}; temporary={:?}; retained={:?}",
+            fs::read(&target),
+            fs::read(&temporary),
+            fs::read(&retained),
+        );
+        fs::write(fixture.path().join("observation.txt"), &observed).unwrap();
+        let failure = result.unwrap_err();
+        assert!(failure.published, "{observed}");
+        assert!(!failure.publication_verified, "{observed}");
+        assert!(failure.publication_identity.is_none(), "{observed}");
+        assert!(failure.temporary_cleanup_unconfirmed, "{observed}");
+        assert!(failure.error.to_string().contains(FILE_WRITE_OUTCOME_UNKNOWN), "{observed}");
+        assert!(failure.error.to_string().contains("re-read before retry"), "{observed}");
+        assert_eq!(fs::read(&target).unwrap(), b"foreign", "{observed}");
+        assert!(!temporary.exists(), "{observed}");
+        assert_eq!(fs::read(&retained).unwrap(), b"intended", "{observed}");
     }
 
     #[cfg(windows)]
