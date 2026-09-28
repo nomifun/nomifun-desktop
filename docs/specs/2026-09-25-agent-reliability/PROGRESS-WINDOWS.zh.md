@@ -1543,6 +1543,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   **12/12**，workspace fmt 通过。持续写入时的截断/游标、child/grandchild、macOS、正式 UI/模型
   对部分效果的披露、IO fault 与长期压力仍待验；不关闭完整 PROC-048 或共享阶段。
 
+### 临时 cleanup 探测失败的 authority 保留（W84，基线 `fa5519a72`）
+
+- S-D04-13 / PROC-050、A08/A11/A13/A17/A19：现有 Windows Job 故障注入确认首次 member
+  snapshot、supplemental snapshot 或 terminate 失败不会被误判为永久失权；精确 process handle 与
+  Job authority 保留，后续重试收敛为 exact cleanup。相关三项、架构唤醒/typed retry 合同和通用
+  authority 分类器均通过。
+- WSL2 Unix relay 在 group quiescence 暂未证明时返回 Retry，保持 `CleanupOwned` 和 Running
+  completion；ECHILD 明确证明 exact child identity 丢失时才 quarantine，且不向缓存 PGID 发信号。
+  生产实现首次满足，未修改分类、重试或清理逻辑。
+- Windows 临时 snapshot 代表场景重复 **20/20**；Unix retry 代表场景重复 **20/20**，两平台的
+  永久失权负向与分类器另各通过。macOS 真实 relay、跨重启 quarantine、组合故障、正式 UI/角色和
+  长期压力仍待验；不关闭完整 PROC-050 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

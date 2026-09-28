@@ -397,6 +397,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   Linux **12/12**。持续写入截断量、后代进程、macOS、正式 UI/模型部分效果披露和 IO fault 组合仍
   开放，不关闭完整 PROC-048 或共享阶段。
 
+- S-D04-13（PROC-050、A08/A11/A13/A17/A19 cleanup authority 分类子断言）：W84 复核既有
+  两平台故障注入。Windows Job 的首次 member snapshot、supplemental snapshot 与 terminate 失败都
+  保留精确 handle/Job authority 并在重试后完成清理；Unix relay 在 group quiescence 未证明时保持
+  `CleanupOwned` 且 completion 仍为 Running，只有 ECHILD 的明确身份丢失才隔离，并且隔离前不向
+  缓存 PGID 发信号。分类器仅把 `Unsupported` 视为永久 authority lost。生产实现和既有回归首次
+  全部通过，本批只补进度证据；Windows 临时 snapshot 代表场景 **20/20**，Unix retry 代表场景
+  **20/20**。macOS 真实 relay、跨重启 quarantine、组合故障与长期压力仍开放，不关闭完整
+  PROC-050 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
