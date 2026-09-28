@@ -41,6 +41,22 @@ impl OwnedFile {
         self.remove_with_hook(path, || {})
     }
 
+    /// Observe a name while the caller still holds its original write/delete
+    /// handle. Cleanup separately reacquires a name lock and rechecks identity.
+    pub(crate) fn verify_named_identity(&self, path: &Path) -> io::Result<()> {
+        use std::os::windows::fs::MetadataExt;
+        let current = OpenOptions::new().access_mode(FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(path)?;
+        let metadata = current.metadata()?;
+        if identity(&current)? != (self.volume, self.id) || !metadata.is_file()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(io::Error::other("replacement backup changed identity or type"));
+        }
+        Ok(())
+    }
+
     /// Read only the recorded object, retaining its name and bytes for the
     /// observation. WRITE_ATTRIBUTES preserves target permissions by handle.
     pub(crate) fn open_for_verification(&self, path: &Path) -> io::Result<File> {

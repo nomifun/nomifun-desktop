@@ -1,6 +1,48 @@
 use std::{fs, io, path::Path, ptr};
 use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
 
+/// A writable section whose creating file handle is already closed.
+pub(crate) struct WritableMapping {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    view: windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS,
+    length: usize,
+}
+
+impl WritableMapping {
+    pub(crate) fn open(path: &Path, length: usize) -> io::Result<Self> {
+        use windows_sys::Win32::System::Memory::{CreateFileMappingW, MapViewOfFile, PAGE_READWRITE, FILE_MAP_WRITE};
+        let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let handle = unsafe { CreateFileMappingW(file.as_raw_handle(), ptr::null(), PAGE_READWRITE, 0, 0, ptr::null()) };
+        if handle.is_null() { return Err(io::Error::last_os_error()); }
+        let view = unsafe { MapViewOfFile(handle, FILE_MAP_WRITE, 0, 0, length) };
+        if view.Value.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(handle); }
+            return Err(error);
+        }
+        Ok(Self { handle, view, length })
+    }
+
+    pub(crate) fn write(&self, bytes: &[u8]) -> io::Result<()> {
+        assert_eq!(bytes.len(), self.length);
+        // SAFETY: this test owns a writable view of exactly length bytes.
+        unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), self.view.Value.cast(), bytes.len()); }
+        if unsafe { windows_sys::Win32::System::Memory::FlushViewOfFile(self.view.Value, self.length) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for WritableMapping {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Memory::UnmapViewOfFile(self.view);
+            windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
 pub(crate) fn rename_with_posix_semantics(path: &Path, target: &Path, replace: bool) -> io::Result<()> {
     use windows_sys::Wdk::Storage::FileSystem::{FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS};
     use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_RENAME_INFO,
