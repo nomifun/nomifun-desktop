@@ -3915,6 +3915,52 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn concurrent_cancel_waiters_share_one_cleanup_driver_and_terminal() {
+        const WAITER_COUNT: usize = 8;
+        let (supervisor, handle, fake, output) = register_fake(
+            FakeOwner::reaps_after_signal(
+                FakeSignal::Interrupt,
+                Duration::from_millis(5),
+                130,
+            ),
+        )
+        .await;
+        output.push(OutputStream::Stdout, b"shared cancel output");
+        let barrier = Arc::new(tokio::sync::Barrier::new(WAITER_COUNT + 1));
+        let mut waiters = Vec::new();
+        for _ in 0..WAITER_COUNT {
+            let supervisor = supervisor.clone();
+            let handle = handle.clone();
+            let barrier = barrier.clone();
+            waiters.push(tokio::spawn(async move {
+                barrier.wait().await;
+                supervisor.cancel(&handle.owner, &handle.session_id).await
+            }));
+        }
+        barrier.wait().await;
+        wait_for_test_condition(|| !fake.signal_calls().is_empty()).await;
+        tokio::time::advance(Duration::from_millis(200)).await;
+
+        let mut outcomes = Vec::new();
+        for waiter in waiters {
+            outcomes.push(
+                waiter
+                    .await
+                    .expect("cancel waiter should join")
+                    .expect("cancel waiter should receive a terminal outcome"),
+            );
+        }
+        let first = outcomes.first().expect("at least one cancel outcome");
+        let ProcessOutcome::Cancelled { cleanup, .. } = first else {
+            panic!("concurrent cancel waiters must share a Cancelled terminal");
+        };
+        assert!(cleanup.reaped);
+        assert!(outcomes.iter().all(|outcome| outcome == first));
+        assert_eq!(fake.signal_calls(), ["interrupt"]);
+        assert_eq!(fake.wait_call_count(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancelled_terminal_poll_is_idempotent() {
         let (supervisor, handle, _fake, output) =
             register_fake(FakeOwner::reaps_on(FakeSignal::Interrupt, 130)).await;

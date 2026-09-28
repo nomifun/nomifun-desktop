@@ -364,6 +364,13 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   重复 **20/20**，process Runtime lib **123/123**。真实 pipe/PTY stdin 关闭、多个 cancel/poll waiter、
   平台 I/O 失败与应用退出仍开放，不关闭完整 PROC-049 或共享阶段。
 
+- S-D04-10（PROC-038、A13/A17/A19 并发 cancel follower 子断言）：W80 用 barrier 同时释放 8 个
+  cancel waiter，只有一个调用成为清理 leader，其余 follower 等待同一 terminal。八个结果逐字段
+  相等且均为已回收 `Cancelled`，只发送一次 interrupt、只执行一次 wait/reap。生产实现首次满足，
+  本批仅新增回归。首次 **1/1**，8 waiter 场景重复 **20/20**，process Runtime lib **124/124**。
+  真实 OS helper、多 Session 混合、cancel future drop 与平台信号失败组合、长期压力仍开放，不关闭
+  完整 PROC-038 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
