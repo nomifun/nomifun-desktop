@@ -187,11 +187,11 @@ pub(crate) fn definition() -> ChatToolDefinition {
 impl CompletionTracker {
     /// Runtime control citations are turn-local data, not Kernel grants. The
     /// same exposed schema is used by the whole-batch argument preflight.
-    pub(crate) fn definition_with_evidence(&self, work: &AgentWorkStatus, pending_patch: bool) -> ChatToolDefinition {
+    pub(crate) fn definition_with_evidence(&self, work: &AgentWorkStatus, unresolved_patch: bool) -> ChatToolDefinition {
         let mut tool = definition();
-        if pending_patch {
+        if unresolved_patch {
             tool.description = format!(
-                "A failed patch has unresolved targets. To honor an error-stop/no-retry request, end with this tool now: provide the actual partial-result summary and one criterion {{\"disposition\":\"blocked\",\"rationale\":\"why the requested work cannot be completed\"}}. Omit evidence_call_ids, evidence_paths and requirement_ids for that blocked account. Historical reads and failed calls cannot support current success. No tool-history search, recovery read, replan or repeat mutation is required to report this failure. Pending recovery remains recorded and the turn ends as failed. {}",
+                "A failed patch has targets that still require observation or a successful owner receipt. Fresh reads report current state but do not by themselves prove an unpublished requested mutation completed. To honor an error-stop/no-retry request, provide the actual partial-result summary and a blocked criterion. Repair exact unresolved targets only when authorized, or use scope_changed with an exact later accepted-input citation. Do not report the original task supported from reads alone. {}",
                 tool.description);
         }
         let usable = self.observations.iter()
@@ -412,7 +412,8 @@ impl CompletionTracker {
         plan: &mut AgentPlan,
         work: &AgentWorkStatus,
         inputs: &[ChatMessage],
-        pending_patch: bool,
+        unresolved_patch: bool,
+        unresolved_before_input: Option<usize>,
         sink: &dyn AgentEventSink,
     ) -> Result<AgentToolResult, AgentEngineError> {
         // A rejected replacement must not leave an old successful report as
@@ -445,9 +446,12 @@ impl CompletionTracker {
             Ok(report) => report,
             Err(reason) => return Ok(AgentToolResult::text(call.call_id.clone(), reason, true)),
         };
-        if pending_patch && !report.is_blocked() {
+        let scoped_out = unresolved_before_input.is_some_and(|boundary| {
+            report.scopes_out_requirements_before(boundary)
+        });
+        if unresolved_patch && !report.is_blocked() && !scoped_out {
             return Ok(AgentToolResult::text(call.call_id.clone(),
-                "Failed patch targets remain unobserved. Task completion is unavailable. Report blocked to stop without more operations, or re-observe targets only if the user authorizes further work. Pending recovery will be retained.", true));
+                "A failed patch still has targets requiring observation or successful repair. Current-state reads do not prove an unpublished requested mutation completed. Report blocked, repair exact unresolved targets when authorized, or cite an exact later accepted-input scope change; the original task cannot be completed yet.", true));
         }
         // Validate the entire account before changing control state. A bad
         // evidence reference cannot accidentally close the current plan.
@@ -868,7 +872,7 @@ mod tests {
                 {"step":"Styles","disposition":"supported","evidence_paths":["./style.css"],"rationale":"Fresh file read"},
                 {"step":"Gameplay","disposition":"unverified","rationale":"No interactive test was run"}
             ]})) };
-        let result = tracker.submit(&call,&mut plan,&work,&inputs,false,&crate::NoopAgentEventSink).await.unwrap();
+        let result = tracker.submit(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink).await.unwrap();
         assert!(!result.is_error,"{}",result.output_text());
         let report = tracker.current(&plan,&work,1).unwrap();
         assert_eq!(report.criteria[0].evidence_call_ids,["html-new"]);
@@ -894,7 +898,7 @@ mod tests {
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Done","criteria":[
                     {"step":"Game","disposition":"supported","evidence_paths":[path],"rationale":"Claimed verification"}
                 ]})) };
-            assert!(tracker.submit(&call,&mut plan,&work,&inputs,false,&crate::NoopAgentEventSink).await.unwrap().is_error);
+            assert!(tracker.submit(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink).await.unwrap().is_error);
             assert_eq!(plan,original);
             assert!(tracker.current(&plan,&work,1).is_none());
         }
@@ -913,7 +917,7 @@ mod tests {
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Partial result", "criteria":[{
                     "disposition":disposition,"evidence_call_ids":["read-a"],"rationale":"The remaining target is unobserved"
                 }]})) };
-            let result = tracker.submit(&call,&mut plan,&work,&inputs,true,&crate::NoopAgentEventSink).await.unwrap();
+            let result = tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap();
             assert_eq!(result.is_error,disposition != "blocked");
             if result.is_error {
                 assert_eq!(plan,before,"rejected success or unverified completion cannot close the plan");
@@ -922,6 +926,31 @@ mod tests {
                 assert!(tracker.current(&plan,&work,1).unwrap().is_blocked());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn exact_later_scope_change_can_settle_the_original_patch_obligation() {
+        let inputs = vec![
+            crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,"Patch both files".into()),
+            crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,"Only keep the first file change".into()),
+        ];
+        let mut plan=AgentPlan {revision:1,explanation:"Updated scope".into(),steps:vec![
+            crate::AgentPlanStep {step:"Honor revised scope".into(),status:AgentPlanStatus::Completed}],
+            requirements:crate::requirements::merge(&[],&[],&inputs).unwrap(),needs_replan:false};
+        let mut tracker=CompletionTracker {observations:vec![file_observation("fresh-a","a",0)],..Default::default()};
+        let work=AgentWorkStatus::default();
+        let call=ChatToolCall {call_id:"scope".into(),name:TOOL_NAME.into(),provider_metadata:None,
+            arguments:StrictJsonValue(serde_json::json!({"summary":"Revised scope delivered","criteria":[
+                {"disposition":"scope_changed","requirement_ids":["input_0"],"scope_change":{
+                    "input":1,"quote":"Only keep the first file change"},"rationale":"Later user input removed the second mutation"},
+                {"disposition":"supported","requirement_ids":["input_1"],"evidence_call_ids":["fresh-a"],
+                    "rationale":"Fresh owner read supports the retained first-file result"}
+            ]}))};
+        let result=tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap();
+        assert!(!result.is_error,"{}",result.output_text());
+        let report=tracker.current(&plan,&work,2).unwrap();
+        assert!(report.scopes_out_requirements_before(1));
+        assert!(!report.is_blocked());
     }
 
     #[tokio::test]
@@ -939,7 +968,7 @@ mod tests {
             }]})) };
         let mut tracker = CompletionTracker::default();
         let work = AgentWorkStatus::default();
-        assert!(!tracker.submit(&call,&mut plan,&work,&inputs,true,&crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap().is_error);
         assert_eq!(plan.steps[0].status,AgentPlanStatus::Blocked);
         assert!(!plan.needs_replan);
         let report = tracker.current(&plan,&work,2).unwrap();
@@ -962,7 +991,7 @@ mod tests {
             if !running { criteria.push(serde_json::json!({"disposition":"supported","evidence_call_ids":["old-a"],"rationale":"Stale claim"})); }
             let call = ChatToolCall {call_id:"bad".into(),name:TOOL_NAME.into(),provider_metadata:None,
                 arguments:StrictJsonValue(serde_json::json!({"summary":"Partial result","criteria":criteria}))};
-            assert!(tracker.submit(&call,&mut plan,&work,&inputs,true,&crate::NoopAgentEventSink).await.unwrap().is_error);
+            assert!(tracker.submit(&call,&mut plan,&work,&inputs,true,Some(1),&crate::NoopAgentEventSink).await.unwrap().is_error);
             assert_eq!(plan,before);
             assert!(tracker.current(&plan,&work,1).is_none());
         }
@@ -1010,14 +1039,14 @@ mod tests {
             arguments: StrictJsonValue(serde_json::json!({"summary":"Verified the receipt","criteria":[
                 {"disposition":"supported","evidence_paths":["验收/回执.txt"],"rationale":"Read the file"}
             ]})) };
-        assert!(tracker.submit(&report, &mut plan, &work, &inputs, false, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(tracker.submit(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink).await.unwrap().is_error);
         let read = ChatToolCall { call_id: "receipt-current".into(), name: "read_file".into(),
             arguments: StrictJsonValue(serde_json::json!({"path":"验收/回执.txt"})), provider_metadata: None };
         let mut binding = file_binding("workspace.files/read");
         binding.effect_class = crate::AgentEffectClass::ReadOnly;
         tracker.observe(&work, &binding, &read, &AgentToolResult::text(read.call_id.clone(), "receipt", false), true);
         assert_eq!(account(&tracker, &plan)["stale_file_paths"], serde_json::json!([]));
-        assert!(!tracker.submit(&report, &mut plan, &work, &inputs, false, &crate::NoopAgentEventSink).await.unwrap().is_error);
+        assert!(!tracker.submit(&report, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink).await.unwrap().is_error);
         assert_eq!(tracker.observations[0].workspace_epoch, 1, "history is not relabeled");
         assert_eq!(tracker.current(&plan, &work, 1).unwrap().criteria[0].evidence_call_ids, ["receipt-current"]);
     }
@@ -1028,6 +1057,18 @@ impl AgentCompletionReport {
         self.criteria
             .iter()
             .any(|criterion| criterion.disposition == AgentCriterionDisposition::Blocked)
+    }
+
+    pub(crate) fn scopes_out_requirements_before(&self, input_count: usize) -> bool {
+        let affected = self.requirements.iter()
+            .filter(|requirement| requirement.source.input < input_count)
+            .collect::<Vec<_>>();
+        !affected.is_empty() && affected.into_iter().all(|requirement| {
+            self.criteria.iter().any(|criterion| {
+                criterion.disposition == AgentCriterionDisposition::ScopeChanged
+                    && criterion.requirement_ids.contains(&requirement.id)
+            })
+        })
     }
 
     pub(crate) fn unverified_disclosure(&self) -> Option<String> {
