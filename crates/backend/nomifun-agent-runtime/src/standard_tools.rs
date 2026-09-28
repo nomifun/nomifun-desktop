@@ -64,7 +64,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "read_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/read",
-        description: "Read a workspace file or inspect instruction scope. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
+        description: "Read a workspace file or inspect instruction scope. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. In every successful text result, sha256 always identifies the entire source and total_bytes is its full size, even when content is only one line/byte page and eof=false; do not read the whole file only to obtain its digest. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
         schema: read_schema,
     },
     StandardTool {
@@ -230,7 +230,7 @@ fn read_schema() -> Value {
             "line_count":{"type":"integer", "minimum":1, "maximum":2000, "default":200,"description":"Number of source lines to inspect, still bounded by the response byte budget."},
             "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0,"description":"Byte offset, NOT a line number. For pagination use the exact prior next_offset and expected_sha256."},
             "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384,"description":"Byte budget, NOT a number of lines. Omit for normal reads; use line_count for source lines."},
-            "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$"}
+            "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$", "description":"The whole-source SHA-256 returned by any successful text or image read. Use it to pin a later page or source version."}
         },
         "allOf":[{"if":{"properties":{"format":{"enum":["image","instruction_scope"]}},"required":["format"]},"then":{"properties":{"missing_ok":{"const":false}}}},{"if":{"anyOf":[{"required":["start_line"]},{"required":["line_count"]}]},
                   "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]}]}}},
@@ -527,6 +527,23 @@ mod tests {
             json!({"path":"image.png","format":"image","start_line":1}),
             json!({"path":"file.txt","start_line":1,"offset":0}),
         ] { assert!(!validator.is_valid(&input), "{input}"); }
+    }
+
+    #[test]
+    fn read_tool_explains_whole_source_digest_for_partial_pages() {
+        let read = standard_agent_tool_exposures()
+            .into_iter()
+            .find(|tool| tool.definition.name == "read_file")
+            .unwrap();
+        assert!(
+            read.definition
+                .description
+                .contains("sha256 always identifies the entire source")
+        );
+        assert!(read.definition.input_schema.0["properties"]["expected_sha256"]
+            ["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("whole-source SHA-256")));
     }
 
     #[test]

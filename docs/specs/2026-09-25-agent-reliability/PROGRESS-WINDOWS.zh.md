@@ -944,6 +944,33 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 本批只记 recovered PASS，不把 W42 的首轮 1/3 改写为 N3，也不外推其他角色、范围变更、
   Unix/macOS、100 seed、LONG/99% 或完整共享 Case。完整证据在仓库外 Windows W44。
 
+### 共享已闭合任务显式继续（W45，基线 `187d3ddec`）
+
+- S-D02-12 / CTRL-001/006/007、REAL-013、A05/A07/A17/A18/A19 子断言：从 W44 `12-ui`
+  completed Turn 的未污染正式备份恢复，同一 Session/Snapshot 下跨新构建显式调用
+  `resume_task`；固定提示要求先更新计划，只重读 first/second 前 3 行及取得整文件摘要，
+  不得重放修改。确定性跨构建拒绝的首次 FAIL 保留；现在只忽略历史 engine build ID/digest，
+  Session、runtime binding、Snapshot、来源 Turn、当前精确引用和记录格式仍严格校验。
+- `05-ui`～`21-ui` 依次保留重复 resume、计划参数错误、错误声称未导入、无证据 supported
+  completion，以及 AGENTS/目标重复读取。`25-ui` 曾以 4 模型步通过原 oracle，但代码复核发现
+  导入后指定的 `update_plan` 会被通用 tool-choice 归一化覆盖，因此只保留为中间样本。
+  修正顺序后的 `29-ui` 又证明 provider 可忽略 Specific 选择：6 次目标读取后才更新计划，严格
+  oracle FAIL。现导入待重规划时先构造全部 schema/context，再把模型工具面收窄为仅
+  `update_plan`；首版过早收窄导致 completion schema 构造失败的单测也保留并修复。
+- `33-ui` 已先完成 resume/plan，但模型误把分页 `read_file.sha256` 当页摘要，尝试超 schema 的
+  8 MiB 读取并进入重复读取/压缩；3 个可见错误，超过预设 12 步后由正式停止按钮结束为
+  cancelled。工具说明和 `expected_sha256` schema 现明确任意成功文本页都返回整份源文件摘要与
+  总大小，不需要为取摘要读取全文。所有真实 FAIL、截图、数据库、事件和模型轨迹均保留。
+- **Runtime 167/167 通过，8 项关键回归各 20/20**（其中新增 6 项）；格式、diff 与相关正式
+  Tauri 构建通过。最终 `37-ui`（二进制 `8f43261a2137…`）用新的 data/profile 再从 W44 备份
+  恢复：5 模型步，调用顺序为 resume_task、update_plan、恰好两次 read_file、update_plan、
+  report_completion；零工具错误、零 effect。first/second 的 SHA-256 与 mtime 均不变，UI 展开
+  显示两次读取及 4 类工具，canonical completed，严格 verdict 为 `PASS_TASK_CONTINUATION`。
+  应用/profile 子进程清零并生成官方备份。
+- 本批验证的是 closed-turn task continuation，不是 CTRL-009/010 的同 Turn pause checkpoint、
+  cancelled/completed checkpoint 恢复；不关闭这些 Case。W42 N3 仍为 1/3；其他范围变更、角色、
+  Unix/macOS、100 seed、LONG/99% 与完整共享阶段仍待验。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
