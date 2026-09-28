@@ -1031,6 +1031,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   模型或 Tauri 验收。App owner 回执、外部 unknown effect、真实 UI、其他 Action/平台及长期门槛
   仍待验，不关闭完整共享 Case。
 
+### 共享 cancel 后应用重启（W50，基线 `892f058a4`）
+
+- S-D09-05 / LIFE-020、A10/A12/A17/A19 子断言：让 Turn 在 429/Retry-After 等待中进入
+  canonical cancelled，随后关闭首个 AppServices/Router/数据库，并用同一隔离 data root 重建
+  完整服务。`create_router` 返回前执行的 startup recovery 查询选中 0 个候选。
+- 重启后 provider 请求数保持 1，GET execution 仍为 cancelled，checkpoint_retained=false，
+  `execution_resumed` 事件为零；没有新模型、工具或 terminal。首次即通过，完整 App recovery
+  **6/6**，新增重启回归 **20/20**。
+- 生产恢复筛选无需修改；仅测试/进度变更，无 renderer/Tauri/真实模型。强杀提交窗口、
+  cancelled Session 删除、其他平台/角色及长期恢复门槛仍待验，不关闭完整共享 Case。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、无 watcher 的外部变更与 watcher 恢复，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

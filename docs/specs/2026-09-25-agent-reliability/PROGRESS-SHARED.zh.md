@@ -49,6 +49,13 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
+  先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
+  同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
+  请求仍为 1；GET execution 保持 cancelled、checkpoint 不保留、`execution_resumed` 为零。
+  首次即通过，完整 App recovery 6/6，新回归 **20/20**。生产恢复查询无需修改，本批仅补测试/
+  进度；强杀中间窗口、cancelled Session 删除、真实 UI/平台及长期恢复矩阵仍开放。
+
 - S-D09-04（LIFE-019、G0-025、A04/A05/A10/A17/A19 cancel/receipt 竞争子断言）：新增
   canonical Store 两连接事务竞争，让 Turn cancel 与同一 managed effect 的成功 owner receipt
   同时提交。最终始终只有一个 cancelled Turn terminal；已完成 effect 保留 `effect/succeeded`

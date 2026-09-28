@@ -383,6 +383,81 @@ async fn cancel_interrupts_provider_retry_after_without_opening_another_request(
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn cancelled_turn_is_never_selected_by_startup_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let config = AppConfig { data_dir: root.path().join("data"), work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken, local_trust_secret: Some(TRUST.into()), ..Default::default() };
+    std::fs::create_dir_all(&config.data_dir).unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let handler_requests = requests.clone(); let handler_entered = entered.clone();
+    let provider = Router::new().route("/v1/chat/completions", axum::routing::post(move || {
+        let requests = handler_requests.clone(); let entered = handler_entered.clone();
+        async move {
+            requests.fetch_add(1,Ordering::SeqCst);
+            entered.notify_one();
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER,"60")],
+                axum::Json(json!({"error":{"message":"fixture cooldown","type":"rate_limit_error"}})),
+            )
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener,provider).await.unwrap(); });
+    let db = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let first = AppServices::from_config(db,&config).await.unwrap();
+    let router = create_router(&first).await;
+    let provider = call(&router,"POST","/api/providers",json!({"platform":"stepfun-plan","name":"scripted cancelled recovery", "base_url":format!("http://{address}/v1"),
+        "auth_scheme":"bearer","credentials":{"api_keys":["test-only"]},"enabled":true,
+        "initial_model":{"model":"step-3.7-flash","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","provider_params":{}}]}})).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
+    let preset = call(&router,"POST","/api/agent-presets/from-template/coding.codex",json!({"reuse_existing":false,"display_name":"Cancelled recovery fixture","model":model})).await;
+    let session = call(&router,"POST","/api/agent-sessions",json!({"preset_id":preset["preset"]["preset_id"],"model":model,"workspace":project,
+        "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"},{"resource_kind":"process_session","resource_id":"managed-process-session"},{"resource_kind":"project_memory","resource_id":"default-project-memory"}]})).await;
+    let id = session["agent_session_id"].as_str().unwrap().to_owned();
+    let execution = format!("/api/agent-sessions/{id}/execution");
+    call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"cancel-before-restart",
+        "input":{"content":"Wait for the provider."}})).await;
+    tokio::time::timeout(Duration::from_secs(10),entered.notified()).await.unwrap();
+    call(&router,"POST",&format!("/api/agent-sessions/{id}/turns/cancel"),json!({"idempotency_key":"cancel-terminal"})).await;
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let state = call(&router,"GET",&execution,Value::Null).await;
+            if state["state"] == "cancelled" { break; }
+            assert_eq!(state["state"],"running","cancel before restart failed: {state}");
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    assert_eq!(requests.load(Ordering::SeqCst),1);
+    drop(router);
+    first.shutdown_browser_platform().await.unwrap(); first.database.close().await; drop(first);
+
+    let reopened = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let second = AppServices::from_config(reopened,&config).await.unwrap();
+    let restored_router = create_router(&second).await;
+    let candidates:i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_session_heads h JOIN agent_sessions s ON s.agent_session_id=h.session_id \
+         JOIN agent_turns t ON t.session_id=h.session_id AND t.operation_id=h.active_turn_id \
+         WHERE s.state='live' AND h.status IN ('running','reconciliation') AND t.state='running'")
+        .fetch_one(second.database.pool()).await.unwrap();
+    assert_eq!(candidates,0,"cancelled Turn cannot enter the startup recovery candidate set");
+    assert_eq!(requests.load(Ordering::SeqCst),1,"restart must not reopen the provider");
+    let restored = call(&restored_router,"GET",&execution,Value::Null).await;
+    assert_eq!(restored["state"],"cancelled");
+    assert_eq!(restored["checkpoint_retained"],false);
+    let resumed:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='execution_resumed'")
+        .bind(&id).fetch_one(second.database.pool()).await.unwrap();
+    assert_eq!(resumed,0);
+    drop(restored_router);
+    second.shutdown_browser_platform().await.unwrap(); second.database.close().await;
+    server.abort(); let _ = server.await;
+}
+
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn startup_resumes_crash_image_without_repeating_the_completed_write() {
     startup_recovery_scenario(false).await;
 }
