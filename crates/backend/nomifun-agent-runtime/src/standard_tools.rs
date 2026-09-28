@@ -32,9 +32,9 @@ impl StandardTool {
     fn exposure(&self) -> AgentToolExposure {
         let description = if self.action_id == "workspace.process/exec" {
             let shell = if cfg!(target_os = "windows") {
-                "cmd uses PowerShell on this host; command plus args remains literal program invocation."
+                "cmd invokes PowerShell on this host; command plus args remains literal program invocation."
             } else {
-                "cmd uses /bin/sh -c on this host. Example: cmd=ls -la. command plus args remains literal program invocation."
+                "cmd invokes /bin/sh -c on this host; command plus args remains literal program invocation."
             };
             let host_guidance = match std::env::consts::OS {
                 "windows" => "For a top-level listing including Hidden/System entries, use powershell.exe with args [\"-NoProfile\",\"-Command\",\"Get-ChildItem -LiteralPath . -Force | Select-Object Name,Attributes,LinkType\"]. Do not recurse or follow links unless requested. A leading dot does not imply the Windows Hidden attribute; report flags and entry types only from metadata. For Windows Command Prompt syntax, invoke cmd.exe with /d /c; dir /a /b returns names only and cannot prove attributes.",
@@ -120,7 +120,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run a script through the host shell using the cmd field. For exact executable/argv invocation instead use command with args; command alone never gets silently split or evaluated as shell text. Do not combine these two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a workspace process. Prefer command plus args for an ordinary single-executable invocation; every argument remains a literal argv token. Use cmd only when shell semantics such as pipelines, redirection, globbing, or compound syntax are required. Command alone never gets silently split or evaluated as shell text. Do not combine the two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -397,14 +397,14 @@ fn patch_schema() -> Value {
 
 fn process_launch(include_wait: bool) -> Value {
     let cmd_description = if cfg!(target_os = "windows") {
-        "PowerShell script on this process host. Do not use Command Prompt-only syntax such as dir /b or dir /s here; use PowerShell cmdlets, or set command=cmd.exe with separate args beginning [\"/d\",\"/c\"]. Alternative to command plus args; never combine the forms."
+        "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through PowerShell on this process host. Do not use Command Prompt-only syntax such as dir /b or dir /s here; use PowerShell cmdlets, or set command=cmd.exe with separate args beginning [\"/d\",\"/c\"]. For an ordinary single executable use command plus args. Never combine the forms."
     } else {
-        "/bin/sh -c script on this process host. Alternative to command plus args; never combine the forms."
+        "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
     };
     let mut properties = json!({
         "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":cmd_description},
-        "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable name or path only, for example git, bun, or powershell.exe. Never include arguments such as ls -la in this field."},
-        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Separate argument tokens, for example [\"status\",\"--short\"] for git."},
+        "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Preferred for an ordinary single executable: the executable name or path only, for example git, bun, /bin/ls, or powershell.exe. Never include arguments such as ls -la in this field."},
+        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Literal separate argument tokens, for example [\"status\",\"--short\"] for git or [\"-a\"] for /bin/ls."},
         "cwd":{"type":"string","maxLength":4096},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
@@ -583,6 +583,27 @@ mod tests {
         } else {
             assert!(description.contains("/bin/sh -c"));
         }
+    }
+
+    #[test]
+    fn process_tool_prefers_literal_argv_for_single_executables() {
+        let process = standard_agent_tool_exposures()
+            .into_iter()
+            .find(|tool| tool.definition.name == "exec_command")
+            .unwrap();
+        assert!(
+            process
+                .definition
+                .description
+                .contains("Prefer command plus args for an ordinary single-executable invocation")
+        );
+        let properties = &process.definition.input_schema.0["properties"];
+        assert!(properties["cmd"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Use cmd only when shell semantics")));
+        assert!(properties["command"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("Preferred for an ordinary single executable")));
     }
 
     #[test]

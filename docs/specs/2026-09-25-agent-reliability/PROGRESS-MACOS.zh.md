@@ -1,6 +1,6 @@
 # macOS Case 处理进度
 
-更新：2026-09-28。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
+更新：2026-09-29。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
 覆盖 675 个共享 + 72 个 macOS 专属 Case，合计 2,366 槽。
 Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
@@ -23,9 +23,9 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | 已导入部分历史验证；新构建待原生复验 |
-| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | 已导入公共合同修复；完整 Case 未验收 |
+| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03 正式 Tauri `CMD-132` 首发完成；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 子断言已验证；其余待走查 |
-| D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01 原生 owner 子断言已验证；正式 Tauri/CMD 全集待验 |
+| D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01 原生 owner 及 M01-03 `CMD-132` 子断言已验；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | 引用共享修复，新 Session 复验 |
@@ -98,3 +98,27 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 未覆盖：更多 Unicode case-fold 特殊组、ACL 动态撤权、immutable flags、目录/目标在最后系统调用
   前的剩余竞态、磁盘/IO fault、正式 Tauri UI 与 100 seed；因此只关闭本批子断言，不关闭完整
   FILE/MAC Case 或 M01。
+
+- **M01-03 formal Tauri command-first**（`CMD-132` 及 `CMD-146～148` 的 macOS 子断言，
+  `TERM-012` 组件子断言）：使用 arm64 `NomiFun Dev.app`、`com.nomifun.desktop.dev`、
+  隔离 data/workspace 与已有加密 StepFun Plan / `step-3.7-flash` 配置。两个新 Session 的首次
+  反例均原样保留且未点击重试：首个用 `cmd:"ls -a"`，且成功命令被误判为必须交付
+  文件；首轮修复后已改为字面 `command`/`args`，但 planner 的“在输出中…业务文件”变体
+  仍触发同一 Artifact 误判。
+- 共享修复将普通单 executable 的 `command` + 字面 `args` 设为模型 Schema 首选，`cmd`
+  只用于 pipeline/redirection/glob/compound 等真正 shell 语义。Artifact 推断现区分
+  `完整/原始/命令…输出` 及 `在/从/于输出中/里/内` 的观测名词，并在动词序列中移除该 token；
+  `输出一个文件`、`保存命令输出为文件` 等真交付仍 fail closed。
+- 修复后以第 3 个新 Session 重新首发（不重试旧失败）：Execution/Step/Attempt 均
+  `completed`，`delegation_policy=disabled`，2 个模型 step，恰好 1 个 process effect，调用为
+  `{"command":"ls","args":["-a"]}`；退出 0、`reaped=true`、无 tool error，原始输出精确为
+  `.`、`..`、`.hidden-case`、`inside-link`、`visible.txt`、`中文 space.txt`，UI 绿色 1/1 且
+  `visible_failure_count=0`。symlink 仅列名未跟随，fixture hash/链接目标不变，应用退出后端口/进程清零。
+- 确定性验证：Agent execution **112/112**、同步远端后 Agent runtime **173/173**、Artifact 定向
+  **15/15**；Terminal lib + parent-death **148/148**，两项 process-group 关键用例各 **20/20**；
+  合并上游 host-shell/UI 修复后的精确 `.app` 仍 build/start 通过，arm64 二进制
+  `fff3fa60359e…`，退出后进程/端口为 0。为遵守冻结的 3 个新 Session 预算，同步后未创建第 4 个
+  付费模型 Session；最终真实模型轨迹来自紧邻同步前修复版，同步组合以全组回归和正式启动覆盖。
+  证据：`2026-09-28/macos/m01-tauri-command/`。未覆盖
+  `CMD-134/139/149/150`、应用内 login-shell Terminal、quarantine/App Translocation 及 x86_64 lane；
+  因此不关闭完整 M01、`TERM-012`、`MAC-013`、`REAL-016/017` 或 CMD 家族。
