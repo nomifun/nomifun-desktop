@@ -15176,6 +15176,8 @@ mod cancel_error_tests {
             state: nomifun_agent_runtime::AgentPatchRecoveryState {
                 version: 1,
                 targets: vec!["src/lib.rs".to_owned()],
+                unresolved_targets: Vec::new(),
+                unresolved_before_input: None,
                 target_budget_exceeded: false,
             },
         };
@@ -15184,6 +15186,20 @@ mod cancel_error_tests {
             .unwrap()
             .expect("pending recovery blocker");
         assert_eq!(blocker.code, "AGENT_SESSION_HANDOFF_RECOVERY_PENDING");
+        assert_eq!(blocker.details.unwrap()["pending"], true);
+
+        let unresolved = nomifun_agent_runtime::AgentEngineEvent::PatchRecoveryUpdated {
+            state: nomifun_agent_runtime::AgentPatchRecoveryState {
+                version: 2,
+                targets: Vec::new(),
+                unresolved_targets: vec!["src/unpublished.rs".to_owned()],
+                unresolved_before_input: Some(1),
+                target_budget_exceeded: false,
+            },
+        };
+        let unresolved = serde_json::to_string(&json!({ "event": unresolved })).unwrap();
+        let blocker = agent_switch_recovery_blocker_from_rows(vec![(1, unresolved)])
+            .unwrap().expect("unresolved mutation blocker");
         assert_eq!(blocker.details.unwrap()["pending"], true);
 
         let cleared = nomifun_agent_runtime::AgentEngineEvent::PatchRecoveryUpdated {

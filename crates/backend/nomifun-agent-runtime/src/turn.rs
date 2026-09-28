@@ -256,8 +256,20 @@ pub(crate) async fn run_turn(
         request.model_request.input.provider_round_parent = None;
         let mut targets = request.patch_recovery.targets.iter().cloned().collect::<std::collections::BTreeSet<_>>();
         targets.extend(recovery.checkpoint.patch_recovery.targets.iter().cloned());
-        request.patch_recovery.target_budget_exceeded |= recovery.checkpoint.patch_recovery.target_budget_exceeded || targets.len() > 64;
+        let mut unresolved = request.patch_recovery.unresolved_targets.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        unresolved.extend(recovery.checkpoint.patch_recovery.unresolved_targets.iter().cloned());
+        if request.patch_recovery.version == 1 { unresolved.extend(request.patch_recovery.targets.iter().cloned()); }
+        if recovery.checkpoint.patch_recovery.version == 1 {
+            unresolved.extend(recovery.checkpoint.patch_recovery.targets.iter().cloned());
+        }
+        request.patch_recovery.target_budget_exceeded |= recovery.checkpoint.patch_recovery.target_budget_exceeded
+            || targets.len() > 64 || unresolved.len() > 64;
+        request.patch_recovery.version = 2;
         request.patch_recovery.targets = targets.into_iter().take(64).collect();
+        request.patch_recovery.unresolved_targets = unresolved.into_iter().take(64).collect();
+        request.patch_recovery.unresolved_before_input = (!request.patch_recovery.unresolved_targets.is_empty())
+            .then(|| request.patch_recovery.unresolved_before_input.into_iter()
+                .chain(recovery.checkpoint.patch_recovery.unresolved_before_input).max()).flatten();
     }
     request.model_budget = request.model_budget.for_request(request.model_request.input.max_output_tokens)?;
     let mut context_lifecycle = crate::context_lifecycle::ContextLifecycle::new(request.model_budget, context_budget)?;
@@ -312,7 +324,7 @@ pub(crate) async fn run_turn(
             )
             .await?;
     }
-    if patch_recovery.pending() {
+    if patch_recovery.pending() || patch_recovery.unresolved() {
         adaptive
             .activate(
                 crate::adaptive::LONG_HORIZON_MODULES
@@ -1467,7 +1479,9 @@ pub(crate) async fn run_turn(
         // An unresolved patch already rules out task success. Preserve the
         // model's final failure/partial-result text and the recovery obligation;
         // a completion review must not reopen work the model has just ended.
-        if matches!(finish_reason, ChatFinishReason::Completed) && patch_recovery.pending() {
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && (patch_recovery.pending() || patch_recovery.unresolved())
+        {
             return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
         }
         // At most one evidence review, never an unbounded self-retry. The
@@ -1745,7 +1759,8 @@ fn synchronize_adaptive_context(
         let completion_tool = request.input.tools.iter_mut()
             .find(|tool| tool.name == crate::completion::TOOL_NAME)
             .ok_or_else(|| AgentEngineError::InvalidContract("active task ledger has no completion tool".into()))?;
-        *completion_tool = state.completion.definition_with_evidence(&state.work_status,patch_recovery.pending());
+        *completion_tool = state.completion.definition_with_evidence(&state.work_status,
+            patch_recovery.pending() || patch_recovery.unresolved());
         // Temporary workflow gates do not revoke tools from the frozen
         // capability surface. Removing schemas made repairable command errors
         // look like lost shell permission and forced needless tool discovery.
@@ -1776,7 +1791,7 @@ fn synchronize_adaptive_context(
             scoped_instructions.context(),
         );
     }
-    if patch_recovery.pending() || slots.patch_recovery.is_some() {
+    if patch_recovery.pending() || patch_recovery.unresolved() || slots.patch_recovery.is_some() {
         upsert_instruction(
             &mut request.input.instructions,
             &mut slots.patch_recovery,
@@ -2049,8 +2064,17 @@ async fn invoke_tool_calls(
         let report = if planned.is_error {
             AgentToolResult::text(completed[1].call_id.clone(), "Completion was not applied because the preceding plan update failed. The prior plan and effects remain unchanged.", true)
         } else {
-            completion.submit(&completed[1], execution_plan, work_status, accepted_inputs, patch_recovery.pending(), event_sink).await?
+            completion.submit(&completed[1], execution_plan, work_status, accepted_inputs,
+                patch_recovery.pending() || patch_recovery.unresolved(),
+                patch_recovery.unresolved_before_input(), event_sink).await?
         };
+        if !report.is_error && completion.current(execution_plan, work_status, accepted_inputs.len())
+            .is_some_and(|report| !report.is_blocked() && patch_recovery.unresolved_before_input()
+                .is_some_and(|boundary| report.scopes_out_requirements_before(boundary)))
+        {
+            patch_recovery.accept_scope_change();
+            patch_recovery.persist(event_sink).await?;
+        }
         return finish_tool_results(vec![
             (completed[0].call_id.clone(), Ok(planned)),
             (completed[1].call_id.clone(), Ok(report)),
@@ -2060,10 +2084,19 @@ async fn invoke_tool_calls(
         let mut results = Vec::new();
         for call in &completed {
             let result = if completed.len() == 1 {
-                completion.submit(call, execution_plan, work_status, accepted_inputs, patch_recovery.pending(), event_sink).await?
+                completion.submit(call, execution_plan, work_status, accepted_inputs,
+                    patch_recovery.pending() || patch_recovery.unresolved(),
+                    patch_recovery.unresolved_before_input(), event_sink).await?
             } else {
                 AgentToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
             };
+            if !result.is_error && completion.current(execution_plan, work_status, accepted_inputs.len())
+                .is_some_and(|report| !report.is_blocked() && patch_recovery.unresolved_before_input()
+                    .is_some_and(|boundary| report.scopes_out_requirements_before(boundary)))
+            {
+                patch_recovery.accept_scope_change();
+                patch_recovery.persist(event_sink).await?;
+            }
             results.push((call.call_id.clone(), Ok(result)));
         }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
@@ -2258,7 +2291,7 @@ async fn invoke_tool_calls(
         if let Some(call) = &patch_call {
             // Persist BEFORE the invoker owns the effect, including cancellation
             // and crash windows where no engine result can ever be observed.
-            if let Err(error) = patch_recovery.arm(call) {
+            if let Err(error) = patch_recovery.arm(call, accepted_inputs.len()) {
                 let reason = format!("Not executed: {error}");
                 defer_remaining = Some(reason.clone());
                 let result = AgentToolResult::text(call_id.clone(), reason, true);
@@ -2274,6 +2307,7 @@ async fn invoke_tool_calls(
             patch_recovery.persist(event_sink).await?;
         }
         let observed_call = invocation.call.clone();
+        let observed_binding = invocation.binding.clone();
         let result = tokio::select! {
             _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
             result = invoker.invoke(invocation, cancellation.clone()) => result,
@@ -2291,6 +2325,9 @@ async fn invoke_tool_calls(
             }
             Err(error) => Err(error),
         };
+        let patch_failure = patch_call.as_ref().and_then(|_| {
+            crate::patch_recovery::PatchFailureOutcome::from_result(&result)
+        });
         // Persist every settled result before the next serial effect. A later
         // cancellation/failure cannot erase the already recorded prefix. This
         // is a tool observation, not owner cleanup or task-success proof.
@@ -2298,10 +2335,11 @@ async fn invoke_tool_calls(
         if recorded.1.is_error || plan.binding(&observed_call.name).is_some_and(|binding|
             crate::execution_policy::failed_process_observation(binding, &recorded.1)
         ) {
-            if let Some(call) = patch_call { patch_recovery.failed(&call); }
+            if let Some(call) = patch_call { patch_recovery.failed(&call, patch_failure.as_ref()); }
             defer_remaining = Some("Not executed: an earlier serial call or command failed. Inspect its result and correct the call before proposing remaining effects again. Replan if scope changed or an attempted effect has an uncertain outcome; read/argument errors alone do not require a new plan.".into());
-        } else if patch_call.is_some() {
-            patch_recovery.published_successfully();
+        } else {
+            if patch_call.is_some() { patch_recovery.published_successfully(); }
+            else { patch_recovery.observe_successful_file_repair(&observed_binding, &recorded.1); }
             patch_recovery.persist(event_sink).await?;
         }
         results.push(recorded);
@@ -4595,6 +4633,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restored_unresolved_mutation_cannot_complete_from_a_fresh_read_alone() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("fresh-b","read_file",json!({"path":"b"})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Patch b","status":"completed"}]})),
+            control_step("report","report_completion",json!({"summary":"b was inspected","criteria":[{
+                "disposition":"supported","evidence_call_ids":["fresh-b"],"rationale":"fresh read"}]})),
+            text_step("The original patch is still incomplete."),text_step("must not continue"),
+        ]),requests:Default::default()});
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_patch_recovery(crate::AgentPatchRecoveryState {
+                unresolved_targets:vec!["b".into()],unresolved_before_input:Some(1),..Default::default()
+            })).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),4);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
     async fn unresolved_patch_final_answer_ends_failed_before_completion_review() {
         #[derive(Default)]
         struct FailedPatch(AtomicUsize);
@@ -4666,6 +4722,107 @@ mod tests {
         assert!(requests[2].input.messages.iter().flat_map(|message|&message.content).any(|part|
             matches!(part,ChatContentPart::Text{text} if text.starts_with("Engine execution observations"))),
             "resolved recovery still requires a supported completion account");
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+    }
+
+    struct PartialPatchOwner { patches:AtomicUsize,writes:AtomicUsize }
+
+    #[async_trait]
+    impl AgentToolInvoker for PartialPatchOwner {
+        async fn invoke(&self, invocation:AgentToolInvocation, _:CancellationToken) -> Result<AgentToolResult,AgentEngineError> {
+            if let Some(result)=instruction_result(&invocation) { return Ok(result); }
+            let path=invocation.call.arguments.0.get("path").and_then(serde_json::Value::as_str);
+            match invocation.binding.action_id.as_ref() {
+                "workspace.files/patch" => {
+                    self.patches.fetch_add(1,Ordering::SeqCst);
+                    Err(AgentEngineError::CapabilityKernel {code:"CAPABILITY_EXECUTION_FAILED".into(),message:json!({
+                        "kind":"workspace_patch_failed","version":1,"journal_settlement":"settled",
+                        "index_base":0,"observed_published_count":1,"confirmed_restored_count":0,
+                        "observation":{"failed_file":1,"published":[0],"restored":[],
+                            "restore_published_unconfirmed":[],"retained_created":[],"skipped_changed_or_unreadable":[0],
+                            "rollback_failed":[],"temporary_cleanup_unconfirmed":[]},"recovery":"re-read targets"
+                    }).to_string()})
+                }
+                "workspace.files/read" => {
+                    let path=path.unwrap();
+                    let content=if path=="a" {"after"} else {"before"};
+                    Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":path,"content":content,
+                        "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes()),"total_bytes":content.len(),
+                        "offset":0,"next_offset":null,"eof":true,"workspace_path":{
+                            "root_sha256":"d".repeat(64),"path":path,"case_resolved":true}
+                    }).to_string(),false))
+                }
+                "workspace.files/write" => {
+                    self.writes.fetch_add(1,Ordering::SeqCst);
+                    let path=path.unwrap();
+                    Ok(AgentToolResult::text(invocation.call.call_id,json!({"path":path,"written":true,
+                        "workspace_path":{"root_sha256":"d".repeat(64),"path":path,"case_resolved":true}
+                    }).to_string(),false))
+                }
+                other=>panic!("unexpected action {other}"),
+            }
+        }
+    }
+
+    fn two_file_reads(prefix:&str) -> Vec<Result<ChatModelEvent,ChatModelError>> {
+        let mut reads=control_step(&format!("{prefix}-a"),"read_file",json!({"path":"a"}));
+        reads.pop(); reads.extend(control_step(&format!("{prefix}-b"),"read_file",json!({"path":"b"}))); reads
+    }
+
+    fn patch_fulfillment_plan() -> AgentToolPlan {
+        AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("apply_patch","workspace.files","workspace.files/patch",AgentEffectClass::ManagedEffect,false),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+        ]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn fresh_reads_cannot_turn_a_partial_patch_into_completed_work() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("patch","apply_patch",json!({"files":[{"path":"a"},{"path":"b"}]})),
+            two_file_reads("read"),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Patch both files","status":"completed"}]})),
+            control_step("report","report_completion",json!({"summary":"Only a changed; b remains before","criteria":[
+                {"disposition":"supported","evidence_call_ids":["read-a"],"rationale":"a is after"},
+                {"disposition":"supported","evidence_call_ids":["read-b"],"rationale":"b is still before"}]})),
+            text_step("Partial result; the original two-file task is not complete."),
+            text_step("must not reopen"),
+        ]),requests:Default::default()});
+        let tools=Arc::new(PartialPatchOwner {patches:AtomicUsize::new(0),writes:AtomicUsize::new(0)});
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),patch_fulfillment_plan(),principal(),0)).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(tools.patches.load(Ordering::SeqCst),1);
+        assert_eq!(tools.writes.load(Ordering::SeqCst),0);
+        assert_eq!(model.requests.lock().unwrap().len(),5);
+        let requests=model.requests.lock().unwrap();
+        let rejected=&requests[4].input.messages;
+        assert!(rejected.iter().flat_map(|message|&message.content).any(|part|matches!(part,
+            ChatContentPart::ToolResult{call_id,is_error:true,output} if call_id.as_ref()=="report"
+                && output.iter().any(|part|matches!(part,nomifun_chat_model_broker::ChatToolResultPart::Text{text}
+                    if text.contains("original task cannot be completed"))))));
+    }
+
+    #[tokio::test]
+    async fn successful_exact_repair_allows_fresh_evidence_to_complete() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("patch","apply_patch",json!({"files":[{"path":"a"},{"path":"b"}]})),
+            two_file_reads("read"),
+            control_step("repair-plan","update_plan",json!({"plan":[{"step":"Repair b","status":"in_progress"}]})),
+            control_step("write-b","write_file",json!({"path":"b","content":"after"})),
+            two_file_reads("verify"),
+            control_step("done-plan","update_plan",json!({"plan":[{"step":"Repair b","status":"completed"}]})),
+            control_step("done","report_completion",json!({"summary":"Both targets repaired and reread","criteria":[
+                {"disposition":"supported","evidence_call_ids":["verify-a","verify-b"],"rationale":"fresh current reads"}]})),
+            text_step("must not continue"),
+        ]),requests:Default::default()});
+        let tools=Arc::new(PartialPatchOwner {patches:AtomicUsize::new(0),writes:AtomicUsize::new(0)});
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),patch_fulfillment_plan(),principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(tools.patches.load(Ordering::SeqCst),1);
+        assert_eq!(tools.writes.load(Ordering::SeqCst),1);
         assert_eq!(model.steps.lock().unwrap().len(),1);
     }
 
