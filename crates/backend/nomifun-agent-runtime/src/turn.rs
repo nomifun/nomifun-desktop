@@ -1464,6 +1464,12 @@ pub(crate) async fn run_turn(
         }
 
         append_assistant_step(&mut model_request, &step)?;
+        // An unresolved patch already rules out task success. Preserve the
+        // model's final failure/partial-result text and the recovery obligation;
+        // a completion review must not reopen work the model has just ended.
+        if matches!(finish_reason, ChatFinishReason::Completed) && patch_recovery.pending() {
+            return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
+        }
         // At most one evidence review, never an unbounded self-retry. The
         // model may report a blocker/unverified result instead of invoking a
         // command; a user prohibition on verification remains authoritative.
@@ -1500,9 +1506,6 @@ pub(crate) async fn run_turn(
                 .is_some_and(|state| state.execution_plan.is_open())
         {
             return fail_turn(&event_sink, model_steps, "execution plan remains unresolved; completion was not accepted").await;
-        }
-        if matches!(finish_reason, ChatFinishReason::Completed) && patch_recovery.pending() {
-            return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
         }
         if matches!(finish_reason, ChatFinishReason::Completed)
             && long_horizon
@@ -4589,6 +4592,81 @@ mod tests {
         assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
         assert_eq!(model.requests.lock().unwrap().len(),1,"blocked control batch must terminate without a recovery read");
         assert_eq!(model.steps.lock().unwrap().len(),2);
+    }
+
+    #[tokio::test]
+    async fn unresolved_patch_final_answer_ends_failed_before_completion_review() {
+        #[derive(Default)]
+        struct FailedPatch(AtomicUsize);
+        #[async_trait]
+        impl AgentToolInvoker for FailedPatch {
+            async fn invoke(&self, invocation: AgentToolInvocation, _: CancellationToken) -> Result<AgentToolResult, AgentEngineError> {
+                if let Some(result) = instruction_result(&invocation) { return Ok(result); }
+                assert_eq!(invocation.binding.action_id.as_ref(),"workspace.files/patch");
+                self.0.fetch_add(1,Ordering::SeqCst);
+                Ok(AgentToolResult::text(invocation.call.call_id,"Partial publication: a changed, b failed",true))
+            }
+        }
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event); Ok(())
+            }
+        }
+        let final_text = "The patch failed after a partial publication. Stopped as requested; no retry.";
+        let model = Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            control_step("only-patch","apply_patch",json!({"files":[{"path":"a"},{"path":"b"}]})),
+            text_step(final_text),text_step("must not restart the task to account for an already known failure"),
+        ]),requests:Default::default()});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("apply_patch","workspace.files","workspace.files/patch",AgentEffectClass::ManagedEffect,false),
+        ]).unwrap();
+        let mut input=request();
+        input.input.messages=vec![crate::context_lifecycle::text_message(ChatRole::User,
+            "Apply one patch. Stop on error; do not retry or do more reads.".into())];
+        let tools=Arc::new(FailedPatch::default());
+        let sink=Arc::new(Sink::default());
+        let result=run_turn(binding(),model.clone(),tools.clone(),sink.clone(),
+            AgentTurnRequest::new(input,plan,principal(),0),AgentContextBudget::default(),CancellationToken::new()).await;
+        assert!(matches!(result,Err(AgentEngineError::TurnFailed(_))));
+        assert_eq!(model.requests.lock().unwrap().len(),2,"known unresolved patch must fail without reopening model work");
+        assert_eq!(tools.0.load(Ordering::SeqCst),1);
+        let events=sink.0.lock().unwrap();
+        assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::CompletionReview{..}|AgentEngineEvent::TurnCompleted{..})));
+        assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::OutputTextDelta{text,..} if text==final_text)));
+        let recovery=events.iter().rev().find_map(|event|match event {
+            AgentEngineEvent::PatchRecoveryUpdated{state}=>Some(state),_=>None,
+        }).unwrap();
+        assert_eq!(recovery.targets,["a","b"]);
+    }
+
+    #[tokio::test]
+    async fn resolved_patch_final_answer_still_requires_a_valid_completion_account() {
+        let mut reads=control_step("fresh-a","read_file",json!({"path":"a"}));
+        reads.pop();
+        reads.extend(control_step("fresh-b","read_file",json!({"path":"b"})));
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
+            reads,text_step("Current files inspected"),
+            control_step("settle-plan","update_plan",json!({"plan":[{"step":"Inspect current files","status":"completed"}]})),
+            control_step("report","report_completion",json!({"summary":"Current files inspected",
+                "criteria":[{"disposition":"supported","evidence_call_ids":["fresh-a","fresh-b"],"rationale":"Fresh reads of both files"}]})),
+            text_step("must not ask for more work"),
+        ]),requests:Default::default()});
+        let result=open_session(model.clone(),Arc::new(EchoTool)).run_turn(
+            AgentTurnRequest::new(request(),tool_plan(),principal(),0).with_patch_recovery(crate::AgentPatchRecoveryState {
+                targets:vec!["a".into(),"b".into()],..Default::default()
+            }),
+        ).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests.len(),4);
+        assert!(requests[2].input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::Text{text} if text.starts_with("Engine execution observations"))),
+            "resolved recovery still requires a supported completion account");
+        assert_eq!(model.steps.lock().unwrap().len(),1);
     }
 
     #[tokio::test]

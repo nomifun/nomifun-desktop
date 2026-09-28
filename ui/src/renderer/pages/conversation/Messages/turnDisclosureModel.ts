@@ -14,13 +14,15 @@ export interface TurnDisclosureInputItem {
   turnId?: MessageId;
   role: TurnDisclosureRole;
   createdAt: number;
+  /** Wall-clock content time; createdAt may instead be a stable history cursor. */
+  displayAt?: number;
   processStartedAt?: number;
   processEndedAt?: number;
   processState?: TurnDisclosureProcessState;
   /** Canonical wall-clock interval supplied by the owning Turn projection. */
   turnStartedAt?: number;
   turnEndedAt?: number;
-  /** Terminal assistant rows (notably errors) win over partial streamed text. */
+  /** Terminal assistant rows (notably errors) own the settled outcome. */
   terminal?: boolean;
   running?: boolean;
   sourceMessageIds?: MessageId[];
@@ -248,7 +250,8 @@ function buildSegmentOutput(
   isClosed: boolean,
   finalAssistantForTurn?: TurnDisclosureInputItem,
   turnStartedAt?: number,
-  turnEndedAt?: number
+  turnEndedAt?: number,
+  resultBeforeFailure?: TurnDisclosureInputItem
 ): TurnDisclosureOutputItem[] {
   const turnId = segment[0]?.turnId;
   if (!turnId) return segment.map((entry) => ({ type: 'item', id: entry.id }));
@@ -262,11 +265,15 @@ function buildSegmentOutput(
   const finalAssistantIndex = isClosed && finalAssistantForTurn
     ? segment.findIndex((entry) => entry === finalAssistantForTurn)
     : -1;
+  const resultBeforeFailureIndex = isClosed && resultBeforeFailure
+    ? segment.findIndex((entry) => entry === resultBeforeFailure)
+    : -1;
+  const isVisibleAssistant = (index: number) => index === finalAssistantIndex || index === resultBeforeFailureIndex;
   const stateOptions = { isClosed };
 
   const processItems = segment.filter((entry, index) => {
     if (entry.role === 'user' || entry.role === 'metadata' || entry.role === 'other') return false;
-    return index !== finalAssistantIndex;
+    return !isVisibleAssistant(index);
   });
 
   if (!processItems.length) {
@@ -334,11 +341,11 @@ function buildSegmentOutput(
 
   segment.forEach((entry, index) => {
     if (entry.role === 'metadata') return;
-    if (entry.role !== 'user' && entry.role !== 'other' && index !== finalAssistantIndex) {
+    if (entry.role !== 'user' && entry.role !== 'other' && !isVisibleAssistant(index)) {
       return;
     }
 
-    if (index === finalAssistantIndex && !insertedDisclosure) {
+    if (isVisibleAssistant(index) && !insertedDisclosure) {
       output.push(disclosure);
       insertedDisclosure = true;
     }
@@ -534,6 +541,25 @@ export function buildTurnDisclosureItems(
     }
   }
 
+  // Keep the last result produced before an error next to that error. It can
+  // describe partial effects the user needs; older progress stays in the trace.
+  // Text arriving after the terminal timestamp cannot replace this result.
+  const resultBeforeFailureByTurn = new Map<MessageId, TurnDisclosureInputItem>();
+  for (const item of items) {
+    if (!item.turnId || item.role !== 'assistant' || item.terminal) continue;
+    const terminal = finalAssistantByTurn.get(item.turnId);
+    if (!terminal?.terminal || terminal.processState !== 'failed') continue;
+    const usesWallTime = item.displayAt !== undefined && terminal.turnEndedAt !== undefined;
+    const contentTime = usesWallTime ? item.displayAt! : item.createdAt;
+    const terminalTime = usesWallTime ? terminal.turnEndedAt! : terminal.createdAt;
+    if (contentTime > terminalTime) continue;
+    const previous = resultBeforeFailureByTurn.get(item.turnId);
+    const latest = !previous || (item.displayAt !== undefined && previous.displayAt !== undefined
+      ? item.displayAt >= previous.displayAt
+      : item.createdAt >= previous.createdAt);
+    if (latest) resultBeforeFailureByTurn.set(item.turnId, item);
+  }
+
   const flush = (fallbackClosed: boolean) => {
     if (!segment.length) return;
     const segmentTurnId = segment[0]?.turnId;
@@ -544,7 +570,8 @@ export function buildTurnDisclosureItems(
         isClosed,
         segmentTurnId ? finalAssistantByTurn.get(segmentTurnId) : undefined,
         segmentTurnId ? turnStartedAtByTurn.get(segmentTurnId) : undefined,
-        segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined
+        segmentTurnId ? turnEndedAtByTurn.get(segmentTurnId) : undefined,
+        segmentTurnId ? resultBeforeFailureByTurn.get(segmentTurnId) : undefined
       )
     );
     segment = [];
