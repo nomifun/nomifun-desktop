@@ -1137,6 +1137,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   基线首次 **20/20**，Agent Runtime **196/196**。本批只补防漂移回归，无新产品失败、模型调用或
   正式 UI；文件/VCS/Artifact 及其他 Wave Schema、生成时跨 crate 单一来源仍待后续，不关闭完整 REG。
 
+- S-D01-08（REG-008、G0-027、FILE-017/024/032、ART-004、VCS-011 workspace Schema 同构
+  子断言）：W109 将 W108 守卫扩到全部 19 个 Wave2 workspace 工具，首次 **0/1** 于
+  `read_file.path`：模型 Schema 缺 canonical `\\S`，可生成必然在 admission 被拒的全空白路径。
+  继续走查还确认 write/patch/delete/diff/stage/publish 同类路径缺口、search 全空白 query、Artifact
+  read 默认页长 65536/16384 分歧，以及 push 允许 4096 字符任意 refspec 和 `force=true`，canonical
+  实际只允许 1024 字符的显式本地分支 refspec 且 force=false。现统一这些约束和默认值；patch 行由
+  三个等价 oneOf 改用 canonical kind enum，保留 context/add/remove 与严格文本合同；空 required
+  数组也显式一致。递归守卫允许模型侧增加安全收窄，但禁止缺 canonical 字段/约束或放宽范围。
+  修复后完整 workspace 同构 **20/20**；同步远端 `d4dcae8a3` 后 Agent Runtime **197/197**，
+  push/空白路径直接反例通过。
+  本批无模型调用或正式 UI；其他 Wave、动态/MCP schema 及跨 crate 单一生成源仍待验，不关闭完整 REG。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session
