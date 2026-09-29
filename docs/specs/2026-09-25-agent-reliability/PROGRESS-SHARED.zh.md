@@ -408,6 +408,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无完整 Runtime invocation/API/UI。正式 tool result/event/UI、Browser/SSH/Computer 真实入口、其他
   平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/PROC/BROW/SSH/OBS 或共享阶段。
 
+- S-D09-29（OBS-001/006/009/015/016/020、REG-004/007、A01/A03/A08/A15/A16/A17/A19 Runtime
+  Kernel 投影子断言）：W148 用三套真实编译 Snapshot/ActiveSet/ToolPlan 和正式
+  `KernelAgentToolInvoker` 分别注入 success/failed/unknown settlement loss。三次均只 dispatch 一次，
+  Runtime typed error 保持 `CAPABILITY_UNAVAILABLE`，W147 固定恢复语义、≤2 KiB 上限和 host 路径/
+  secret 隔离完整穿过 Kernel 与 Agent Runtime 适配。新增场景首次及连续 **20/20**；正常 Kernel
+  invocation、未选择 capability 的 plan 拒绝及 W147 Engine 投影 **3/3**。生产代码无需修改，无事件
+  Store/API/UI。正式 tool result/event 持久化、tool row/UI、不同 Action/角色及其他平台、N3/LONG/99%
+  仍开放，不关闭完整 REG/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
