@@ -1695,6 +1695,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 其他基础命令语义、其他 Provider/模型/Agent、macOS、50 个独立用户回合、N3/100 seed/LONG/99%
   仍待验；不关闭完整 CMD-143/144 或共享阶段。
 
+### 参数预检失败后的恢复与错误披露（W93，基线 `a1b4f965e`）
+
+- S-D04-23 / OBS-002、REAL-021～024、A02/A08/A17/A18/A19：复用 W92 最终二进制
+  `712cf9457e11f2b9f3a6295bf961d5e451c5d3ee250e6049ee52fde26dca2408`，以新的正式 Tauri
+  data/work/profile 和 StepFun Coding Plan / `step-3.7-flash` 执行负向协议。step 1 提交规定的
+  `exec_command {cmd:"cmd.exe",args:[...]}`，得到 `INVALID_TOOL_ARGUMENTS` 与
+  `status=not_executed`；数据库中没有对应 effect，确认零 dispatch。step 2 使用合法
+  `{command:"cmd.exe",args:[...]}`，输出精确为 `W93-RECOVERED`、exit 0、`reaped=true`，唯一
+  `workspace.process/exec` effect 为 returned。
+- step 3 只调用一次 `report_completion`，其 `observed_tool_error_count=1`；模型摘要明确无效调用未
+  执行、恢复命令成功和可见错误数为 1，最终 UI 又显示 Runtime 固定披露：后续成功没有抹除该错误。
+  Session `01a0eb67-97f3-7542-997f-4e099fb6a9d9` 单回合 completed、3 个模型步骤、98 条 canonical
+  事件；独立 24 项断言通过。工作区前后仅含同一 `AGENTS.md` 且 tree hash 均为
+  `e265d753a82bbfdb88c5d7c6bb599e4187e204c7ee90c5792ecd216a79c0d9a0`，匹配 cmd 残留 0，应用/
+  profile 进程清零，正式备份完成。本批无需生产代码修改。
+- 只覆盖一种参数预检错误及该模型/Agent；业务工具错误、权限/超时/取消/unknown、其他 Provider/
+  模型/角色、macOS 与 N3/100 seed/LONG/99% 仍待验；不关闭完整 REAL/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
