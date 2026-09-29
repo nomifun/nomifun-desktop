@@ -143,6 +143,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   terminal commit 进程强杀、stage 结果人工核对、linked worktree/submodule、其他平台及 N3/LONG/99%
   仍开放，不关闭完整 VCS/LIFE 或共享阶段。
 
+- S-D09-06（CONC-015、FILE-038、LIFE-006/007、AUTH-009、A05/A13/A17/A19 跨 Session
+  workspace fence 子断言）：W122 在 Session A 的磁盘 Effect reserve 后由实际 `FileService` 发布文件，
+  故意丢失 terminal receipt，并关闭全部数据库连接；重开 Store/host 后创建同一认证 owner、同一物理
+  workspace 的独立 Session B。B 的不同 operation/key 在文件 owner 前被全局 unsettled-resource 索引
+  拒绝，未创建 B Effect 或目标文件；A 仍只有一个 Pending，已发布字节不变。新增断言首次及连续
+  **20/20**；既有 owner-scoped/跨模块 fence、W115 写入重开及 Store external uncertainty **3/3**。
+  生产代码无需修改，无模型/UI。正式 App 多会话入口、真正同时竞争、跨 owner 错配同一路径绑定、
+  owner 核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/LIFE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
