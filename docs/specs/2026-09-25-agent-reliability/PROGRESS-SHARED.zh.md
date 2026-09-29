@@ -480,6 +480,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   tool row、PORT-012 watcher 丢批/乱序对账、其他平台及 N3/LONG/99% 仍开放，不关闭完整
   PORT/OBS 或共享阶段。
 
+- S-D09-35（OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19 分页期间并发追加与正向
+  截断子断言）：W154 在 W152 正式 Axum Router/本地信任 API 上让同一 Turn 内两个 tool call
+  乱序结算（后建的 call 先落 result），再用 `GET /messages?limit=1` 正向分页并在翻页间追加
+  新 Turn。**首次失败已单独保留**：正向 cursor 按 `last_seq` 过滤却按 `first_seq` 排序，
+  `take(limit)` 截断后游标取页内 `max(last_seq)`，使 `last_seq` 仍落后于页内最大值的早建
+  投影被永久跳过——committed 5 行只交付 4 行（证据 `run-1-first-failure.log`）。修复
+  `messages_after_tx` 改按 `last_seq ASC` 排序：每个事件只更新一个 projection，`last_seq`
+  天然唯一且与游标判定同键，截断页不再丢行；全部 `messages_after` 调用方均为
+  find/max_by_key/自行重排，无 first_seq 排序依赖。事件 feed 在分页间追加 Turn 时 seq 严格
+  连续、追加事件恰好交付一次；history 锚定窗口不受后续追加影响，新 Turn 的 turn_summary 与
+  源消息只在下一次 fresh 读出现。修复后两场景首次及连续 **20/20**，W153 相邻回归 **1/1**，
+  `nomifun-agent-session` 库 **76/76**，fmt/diff 通过。WS 推送消费方、正式 Tauri renderer tool
+  row、PORT-012 watcher 丢批/乱序对账、history cursor 与 turn_summary 边界的更大并发矩阵、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 PORT/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
