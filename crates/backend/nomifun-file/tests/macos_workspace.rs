@@ -122,6 +122,39 @@ fn acl_listing(path: &Path) -> String {
     String::from_utf8(output.stdout).expect("ACL listing is UTF-8")
 }
 
+fn write_xattr(path: &Path, name: &str, value: &str) {
+    let output = Command::new("/usr/bin/xattr")
+        .arg("-w")
+        .arg(name)
+        .arg(value)
+        .arg(path)
+        .output()
+        .expect("macOS xattr fixture requires /usr/bin/xattr");
+    assert!(
+        output.status.success(),
+        "failed to write xattr on {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn read_xattr(path: &Path, name: &str) -> String {
+    let output = Command::new("/usr/bin/xattr")
+        .arg("-p")
+        .arg(name)
+        .arg(path)
+        .output()
+        .expect("macOS xattr fixture requires /usr/bin/xattr");
+    assert!(
+        output.status.success(),
+        "failed to read xattr on {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = String::from_utf8(output.stdout).expect("xattr value is UTF-8");
+    value.strip_suffix('\n').unwrap_or(&value).to_owned()
+}
+
 async fn assert_alias_batch_rejected_before_publication(first: &str, second: &str) {
     let root = tempfile::tempdir().unwrap();
     let probe = root.path().join(first);
@@ -264,6 +297,46 @@ async fn successful_write_and_patch_preserve_extended_acl() {
             "successful publication dropped the target ACL: {}",
             target.display()
         );
+    }
+}
+
+#[tokio::test]
+async fn successful_write_and_patch_preserve_extended_attributes() {
+    const XATTR_NAME: &str = "com.nomifun.reliability.fixture";
+    const XATTR_VALUE: &str = "M03-XATTR-SENTINEL";
+    const RESOURCE_FORK: &str = "com.apple.ResourceFork";
+    const RESOURCE_VALUE: &str = "M03-RESOURCE-FORK-SENTINEL";
+
+    let root = tempfile::tempdir().unwrap();
+    let write_target = root.path().join("write-xattr.txt");
+    let patch_target = root.path().join("patch-xattr.txt");
+    fs::write(&write_target, b"original").unwrap();
+    fs::write(&patch_target, b"original").unwrap();
+    for target in [&write_target, &patch_target] {
+        write_xattr(target, XATTR_NAME, XATTR_VALUE);
+        write_xattr(target, RESOURCE_FORK, RESOURCE_VALUE);
+        assert_eq!(read_xattr(target, XATTR_NAME), XATTR_VALUE);
+        assert_eq!(read_xattr(target, RESOURCE_FORK), RESOURCE_VALUE);
+    }
+    let (service, scope, _) = owner(root.path());
+
+    service
+        .write_file_for_agent_session(&scope, "write-xattr.txt", b"replacement")
+        .await
+        .unwrap();
+    service
+        .apply_patch_for_agent_session(
+            &scope,
+            replacement("patch-xattr.txt", "original", "replacement"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(fs::read(&write_target).unwrap(), b"replacement");
+    assert_eq!(fs::read(&patch_target).unwrap(), b"replacement");
+    for target in [&write_target, &patch_target] {
+        assert_eq!(read_xattr(target, XATTR_NAME), XATTR_VALUE);
+        assert_eq!(read_xattr(target, RESOURCE_FORK), RESOURCE_VALUE);
     }
 }
 

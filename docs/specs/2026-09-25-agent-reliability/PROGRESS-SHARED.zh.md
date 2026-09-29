@@ -425,6 +425,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   ACL copy 后至 rename 的最后系统调用窗口、xattr/resource fork/flags、非 APFS 卷、IO fault、正式
   UI/角色和长期门槛仍开放，不关闭完整 FILE/AUTH Case 或共享 D03。
 
+- S-D03-52（`FILE-020/025/038/039`、D11 既有目标 xattr/resource-fork 子断言）：M03-06 首轮夹具
+  因 `/usr/bin/xattr -p` 展示换行失败，纠正 CLI oracle 后命中真实产品反例：成功 write/patch 返回
+  success，却删除 `com.nomifun.reliability.fixture`。S-D03-51 的 descriptor-bound macOS 元数据复制现
+  扩展为 `COPYFILE_ACL | COPYFILE_XATTR`，仍位于最终 hook 后、rename 前并执行 `sync_all`；任何复制/
+  持久化失败在目标名称改变前停止，不记录真实 xattr 值，Linux/Windows 路径不变。原生断言同时覆盖
+  普通 xattr、`com.apple.ResourceFork`，以及 final hook 新增的 before/after xattr。
+- 修复后普通 xattr + resource fork **20/20**、最终 hook 动态 xattr **20/20**；`nomifun-file` lib
+  **309/309**，macOS workspace **7 passed / 1 ignored**，既有 ACL 回归与 fmt/diff 通过。metadata copy
+  后至 rename 的最后窗口、copyfile 故障、超大 resource fork、immutable flags、非 APFS、正式 UI/
+  角色及长期门槛仍开放，不关闭完整 FILE Case 或共享 D03。
+
 - S-D04-11（PROC-047、A08/A11/A13/A17/A19 Windows pre-resume deadline 子断言）：W82 用真实
   Windows suspended process，把 Job assignment 延迟 200 ms，并把共享 process deadline 固定为
   50 ms。事务跨期后从未调用 `ResumeThread`，用户 marker 零创建；精确进程句柄在返回前已终止，
