@@ -172,7 +172,7 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   PID 均消失，row 保留 `exited`/`exit_code=null`。随后再次 relaunch 的 login probe 正常 `exit 0`。
   含双引号 `$!` 的 `dquote>` 已在原生交互 zsh 独立复现为 shell/BangHist 语义，产品传输字节一致，
   未以吞错修复。
-- 验证：Terminal **149/149**；login + job-group 两项各 **20/20**；Runtime **184/184**；Engine
+- 验证：Terminal **149/149**；login + job-group 两项各 **20/20**；同步远端后 Runtime **187/187**；Engine
   **33 通过 / 1 ignored**；host mismatch、AppTranslocation classifier 定向回归、process boundary、
   Agent vocabulary、fmt/diff 及正式 arm64 `.app`/DMG build 通过。当前构建无
   `com.apple.quarantine`，未实际触发 Gatekeeper/App Translocation；x86_64 仍未运行。证据：
