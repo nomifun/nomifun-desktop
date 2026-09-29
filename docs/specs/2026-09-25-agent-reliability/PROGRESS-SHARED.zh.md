@@ -43,7 +43,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
-| S-D10 | 15 | PORT-001～015 内部端口、outbox、generation 与外部 grant 隔离 | PORT-012 队列、native rescan、UI 手动/重连对账子断言见 S-D03-21/22/24/25；其余端口及完整恢复待验 |
+| S-D10 | 15 | PORT-001～015 内部端口、outbox、generation 与外部 grant 隔离 | PORT-012 队列、native rescan、UI 手动/重连对账子断言见 S-D03-21/22/24/25，残余丢失信号见 S-D03-52；其余端口及完整恢复待验 |
 | S-D11 | 15 | 权限/资源/旧快照/撤权/secret 负向，验证拒绝前无副作用 | 本轮只验关联静态与资源断言；竞态仍待走查 |
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
@@ -495,6 +495,58 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无正式 Realtime 传输/renderer UI。分页期间并发追加新事件、WS 推送消费方、正式 Tauri renderer
   tool row、PORT-012 watcher 丢批/乱序对账、其他平台及 N3/LONG/99% 仍开放，不关闭完整
   PORT/OBS 或共享阶段。
+
+- S-D09-35（OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19 分页期间并发追加与正向
+  截断子断言）：W154 在 W152 正式 Axum Router/本地信任 API 上让同一 Turn 内两个 tool call
+  乱序结算（后建的 call 先落 result），再用 `GET /messages?limit=1` 正向分页并在翻页间追加
+  新 Turn。**首次失败已单独保留**：正向 cursor 按 `last_seq` 过滤却按 `first_seq` 排序，
+  `take(limit)` 截断后游标取页内 `max(last_seq)`，使 `last_seq` 仍落后于页内最大值的早建
+  投影被永久跳过——committed 5 行只交付 4 行（证据 `run-1-first-failure.log`）。修复
+  `messages_after_tx` 改按 `last_seq ASC` 排序：每个事件只更新一个 projection，`last_seq`
+  天然唯一且与游标判定同键，截断页不再丢行；全部 `messages_after` 调用方均为
+  find/max_by_key/自行重排，无 first_seq 排序依赖。事件 feed 在分页间追加 Turn 时 seq 严格
+  连续、追加事件恰好交付一次；history 锚定窗口不受后续追加影响，新 Turn 的 turn_summary 与
+  源消息只在下一次 fresh 读出现。修复后两场景首次及连续 **20/20**，W153 相邻回归 **1/1**，
+  `nomifun-agent-session` 库 **76/76**，fmt/diff 通过。WS 推送消费方、正式 Tauri renderer tool
+  row、PORT-012 watcher 丢批/乱序对账、history cursor 与 turn_summary 边界的更大并发矩阵、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 PORT/OBS 或共享阶段。
+
+- S-D09-36（OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19 正式 Realtime/WebSocket
+  消费方子断言）：W155 在真实 TCP 上启动完整产品 Router（含正式 `forward_user_events`
+  桥接），owner 以桌面 webview 握手（`tauri.localhost` Origin + `Sec-WebSocket-Protocol`
+  本地信任密钥）连接 `/ws`，第二用户持不同 user_id 的 JWT Bearer 连接。经正式
+  `POST /turns` admission 派发注入的 Runtime mock，由 canonical Store 依次提交
+  tool/call-started、含 CAPABILITY_UNAVAILABLE 的 tool/result-recorded 与 turn/failed，
+  并经 stream relay 发对应 ToolCall/Error 帧。Turn 1 在 running 帧送达后断开 socket：
+  settlement 在 owner 零连接期间落库，重连后 socket 无任何补推，消费方改由
+  `GET events?after_seq` 逐页 replay——call/result/terminal 各恰一条且 seq 严格递增，
+  `GET messages` 与 `message-history` 各恰一条保留 CAPABILITY_UNAVAILABLE 与
+  “Do not retry” 指引的 error tool row；event cursor 与 history cursor 混用仍 400。
+  Turn 2 验证重连后的实时投递：同一 socket 依次收到 turn.started、tool_call running、
+  携带完整指引的 tool_call error、stream error 与 turn.completed state=error；同
+  idempotency key 重放返回 replayed/completed 及同一 terminal 事实，不再推帧、不新增
+  canonical 事件。第二用户连接全程静默。新增场景首次通过并连续 **20/20**；
+  `websocket_e2e` **18/18**，W152～W154 cursor 相邻回归 **4/4**，fmt 通过。生产代码无需
+  修改（正式 Realtime 链路已满足语义），无正式 Tauri renderer。renderer tool row、
+  PORT-012 watcher 丢批/乱序对账、该场景的 WS lag/resync 注入、其他平台及 N3/LONG/99%
+  仍开放，不关闭完整 PORT/OBS 或共享阶段。
+
+- S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
+  `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
+  path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
+  事件、不计 dropped 也不置 rescan——变化完全消失；现 `record_native` 对零可归因 in-root
+  path 的 change 类事件置 `rescan_required`（`.nomifun` owner 组件、非法名计数 dropped、
+  空 relative→rescan 等已归因路径仍算 handled，不放大信号）。其二：`pre_turn_context`
+  drain 后 `validate`/`serialize` 失败曾直接返回 `None`——已 drain 批次在投递侧丢失且对
+  后续 Turn 零信号，比 overflow 丢弃（保留 dropped 计数）更糟；现 `WatchQueue::take_batch`
+  在投递失败时把 `rescan_required` 滞留回队列，下一批强制全量对账。新增三回归：
+  零 path/全 out-of-root/mixed path 的归因语义；debounce 窗口外的重复与乱序事件按到达
+  顺序原样送达且不产生 dropped（批次不承诺顺序/唯一性，磁盘仍是唯一事实）；注入一个
+  schema 拒绝事件模拟 drain 后投递失败，断言下一 Turn 批次携带空 events+dropped=0+
+  rescan_required=true。首败先保留（仅测试打回旧码两条均失败），修复后 **22/22**、
+  连续 **20/20**，fmt 通过。正式 UI 全量对账、模型是否遵循重读提醒、批次 drain 后未被
+  消费（context contributor 为 fire-and-forget）、macOS、100 seed/LONG/99% 仍开放，
+  不关闭完整 FILE-040、PORT-012 或共享阶段。
 
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际

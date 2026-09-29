@@ -33,6 +33,10 @@ name = "websocket_e2e"
 path = "tests/websocket_e2e.rs"
 
 [[test]]
+name = "nomi_core_realtime_stream"
+path = "tests/nomi_core_realtime_stream.rs"
+
+[[test]]
 name = "channel_e2e"
 path = "tests/channel_e2e.rs"
 
