@@ -80,6 +80,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   ID、错误类型仍拒绝。Runtime **184/184**；macOS 修复后一次 completion report 成功、4 模型 step、
   零 control error。其他多命令/并发链、Provider/角色/平台及完整 CTRL 矩阵仍开放，不关闭共享 D02。
 
+- S-D02-17（CTRL-006/007、A05/A09/A15/A17/A18/A19 多命令证据关联子断言）：W101 首次正式
+  Tauri 中 ALPHA/BETA 两个命令均一次 exit 0/reaped，但第二个 opaque command 推进 workspace epoch
+  后，第一条已结算命令从 `available_evidence` 消失。模型能看到两个结果正文，却只得到 BETA 顶层
+  call ID 并误认作 ALPHA；连续三次耗尽 4,096 输出 token，Turn 以 `NOMIFUN_TASK_INCOMPLETE` 失败，
+  旧 W75 语义关联缺口得到完整复现。现仅将“当时已可用、exit 0、cleanup 已证明、无省略交互”的
+  命令自身 scope/exit/output 保持为不可变证据；它不延续任何文件或当前工作区状态。新回归首次
+  **0/1**，修复后 **20/20**，Agent Runtime **192/192**。同一 UI 夹具最终 3 步完成、132 条事件，
+  两个 criterion 各只引用匹配 call ID，零截断、2 个 returned effect，独立 31 项断言、工作区和清理
+  均通过。非零/取消/交互进程链、64 项窗口淘汰、压缩恢复、其他 Provider/角色/平台仍开放，不关闭
+  完整 CTRL 或共享阶段。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
