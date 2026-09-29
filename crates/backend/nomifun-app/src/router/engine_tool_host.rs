@@ -369,6 +369,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settlement_loss_persists_one_error_projection_for_cold_reads() {
+        struct SettlementLoss;
+        #[async_trait]
+        impl EngineToolInvoker for SettlementLoss {
+            async fn invoke(
+                &self,
+                _:EngineToolInvocation,
+                _:CancellationToken,
+            ) -> Result<EngineToolResult,EngineToolError> {
+                Err(EngineToolError::CapabilityKernel {
+                    code:"CAPABILITY_UNAVAILABLE".to_owned(),
+                    message:"The workspace owner reported success, but the canonical receipt was not stored. Do not retry automatically. Re-read the affected owner state and reconcile the pending effect.".to_owned(),
+                })
+            }
+        }
+        let owner = tools(Arc::new(SettlementLoss));
+        let invocation = EngineToolInvocation {
+            agent_session_id:"0190f5fe-7c00-7a00-8000-000000000002".into(),
+            principal:PrincipalRef { principal_kind:"user".into(),principal_id:"0190f5fe-7c00-7a00-8000-000000000001".into() },
+            resolved_snapshot_ref:ResolvedSnapshotRef { snapshot_id:"snapshot".into(),snapshot_digest:"b".repeat(64).into() },
+            active_set_generation:1,
+            turn_operation_id:"turn".into(),
+            operation_id:"settlement-operation".into(),
+            idempotency_key:"settlement-key".into(),
+            correlation_id:"settlement-correlation".into(),
+            call:ChatToolCall { call_id:"settlement-call".into(),name:"write_file".into(),arguments:StrictJsonValue(serde_json::json!({})),provider_metadata:Default::default() },
+            binding:serde_json::from_value(serde_json::json!({
+                "model_name":"write_file","definition":{"name":"write_file","description":"fixture","input_schema":{}},
+                "schema_digest":"a".repeat(64),"canonical_input_schema_ref":"fixture","capability_contract_digest":"b".repeat(64),
+                "capability_id":"workspace.files","action_id":"workspace.files/write","resource_binding_ids":[],"effect_class":"managed_effect","parallel_safe":false
+            })).unwrap(),
+        };
+        let (journal,pool) = super::super::engine_journal::test_fixture().await;
+        let session_id = nomifun_agent_contracts::AgentSessionId::from(
+            "0190f5fe-7c00-7a00-8000-000000000002",
+        );
+        owner.bind_turn("turn".into(),journal).unwrap();
+        let error = owner.invoke(invocation,CancellationToken::new()).await.unwrap_err();
+        let EngineToolError::CapabilityKernel { code,message } = error else {
+            panic!("settlement loss changed error class")
+        };
+        assert_eq!(code,"CAPABILITY_UNAVAILABLE");
+        assert!(message.contains("owner reported success"));
+        assert!(message.contains("Do not retry"));
+        owner.mark_observed("settlement-call").unwrap();
+        owner.close_turn().unwrap();
+        owner.join().await.unwrap();
+
+        let projections:Vec<(String,String,String,Option<String>)> = sqlx::query_as(
+            "SELECT kind,inline_json,correlation_id,causation_event_id FROM agent_events WHERE kind IN ('tool/call-started','tool/result-recorded') ORDER BY seq",
+        ).fetch_all(&pool).await.unwrap();
+        assert_eq!(projections.len(),2);
+        assert_eq!(projections[0].0,"tool/call-started");
+        assert_eq!(projections[1].0,"tool/result-recorded");
+        assert_eq!(projections[0].2,projections[1].2);
+        assert_eq!(projections[1].3.as_deref(),Some("tool-call:0190f5fe-7c00-7a00-8000-000000000002:settlement-operation"));
+        let result_payload:Value = serde_json::from_str(&projections[1].1).unwrap();
+        assert_eq!(result_payload["call_id"],"settlement-call");
+        assert!(result_payload["output"].is_null());
+        assert!(result_payload["error"].as_str().unwrap().contains("Do not retry"));
+
+        for _ in 0..2 {
+            let store = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+            let (history,_,_) = store.message_history_before(&session_id,None,50).await.unwrap();
+            let tools = history.iter().filter(|row| row.presentation_intent=="tool").collect::<Vec<_>>();
+            assert_eq!(tools.len(),1);
+            assert_eq!(tools[0].projection["state"],"recorded");
+            assert!(tools[0].projection["tool_summary"]["error"].as_str().unwrap().contains("Do not retry"));
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_loss_survives_database_reopen_and_cursor_reconnect() {
+        struct SettlementLoss;
+        #[async_trait]
+        impl EngineToolInvoker for SettlementLoss {
+            async fn invoke(
+                &self,
+                _:EngineToolInvocation,
+                _:CancellationToken,
+            ) -> Result<EngineToolResult,EngineToolError> {
+                Err(EngineToolError::CapabilityKernel {
+                    code:"CAPABILITY_UNAVAILABLE".to_owned(),
+                    message:"The owner outcome is unknown. Do not retry automatically. Reconcile the external owner.".to_owned(),
+                })
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("agent.db");
+        let (journal,pool) = super::super::engine_journal::test_fixture_at(&database_path).await;
+        let owner = tools(Arc::new(SettlementLoss));
+        owner.bind_turn("turn".into(),journal).unwrap();
+        let invocation = EngineToolInvocation {
+            agent_session_id:"0190f5fe-7c00-7a00-8000-000000000002".into(),
+            principal:PrincipalRef { principal_kind:"user".into(),principal_id:"0190f5fe-7c00-7a00-8000-000000000001".into() },
+            resolved_snapshot_ref:ResolvedSnapshotRef { snapshot_id:"snapshot".into(),snapshot_digest:"b".repeat(64).into() },
+            active_set_generation:1,
+            turn_operation_id:"turn".into(),
+            operation_id:"reopen-settlement-operation".into(),
+            idempotency_key:"reopen-settlement-key".into(),
+            correlation_id:"reopen-settlement-correlation".into(),
+            call:ChatToolCall { call_id:"reopen-settlement-call".into(),name:"write_file".into(),arguments:StrictJsonValue(serde_json::json!({})),provider_metadata:Default::default() },
+            binding:serde_json::from_value(serde_json::json!({
+                "model_name":"write_file","definition":{"name":"write_file","description":"fixture","input_schema":{}},
+                "schema_digest":"a".repeat(64),"canonical_input_schema_ref":"fixture","capability_contract_digest":"b".repeat(64),
+                "capability_id":"workspace.files","action_id":"workspace.files/write","resource_binding_ids":[],"effect_class":"managed_effect","parallel_safe":false
+            })).unwrap(),
+        };
+        let error = owner.invoke(invocation,CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error,EngineToolError::CapabilityKernel { ref code,ref message }
+            if code=="CAPABILITY_UNAVAILABLE" && message.contains("Reconcile")));
+        owner.mark_observed("reopen-settlement-call").unwrap();
+        owner.close_turn().unwrap();
+        owner.join().await.unwrap();
+        drop(owner);
+        pool.close().await;
+
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let session_id = nomifun_agent_contracts::AgentSessionId::from(
+            "0190f5fe-7c00-7a00-8000-000000000002",
+        );
+        let mut before = None;
+        let mut history = Vec::new();
+        let mut expected_total = None;
+        loop {
+            let store = nomifun_agent_session::AgentSessionStore::from_pool(
+                database.pool().clone(),
+            ).await.unwrap();
+            let (page,has_more,total) = store.message_history_before(
+                &session_id,before,1,
+            ).await.unwrap();
+            assert_eq!(*expected_total.get_or_insert(total),total);
+            assert!(!page.is_empty());
+            before = page.last().map(|row| row.first_seq);
+            history.extend(page);
+            if !has_more { break; }
+        }
+        let tool_rows = history.iter().filter(|row| row.presentation_intent=="tool").collect::<Vec<_>>();
+        assert_eq!(tool_rows.len(),1);
+        assert_eq!(tool_rows[0].projection["state"],"recorded");
+        assert!(tool_rows[0].projection["tool_summary"]["error"].as_str().unwrap().contains("Reconcile"));
+        let unique = history.iter().map(|row| row.projection_id.as_str()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(),history.len());
+        let projections:i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_events WHERE kind IN ('tool/call-started','tool/result-recorded')",
+        ).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(projections,2);
+        database.close().await;
+    }
+
+    #[tokio::test]
     async fn tool_panic_permanently_refuses_cleanup_proof() {
         let owner = tools(Arc::new(NeverInvoke));
         let _task = owner
