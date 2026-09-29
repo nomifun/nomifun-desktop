@@ -2302,6 +2302,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   UI。未覆盖正式 Artifact read 请求与 DELETE 真并发、启动恢复 deleting Session 的 live-handle 重试、
   其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE/OBS 或共享阶段。
 
+### deleting Session 的正式启动恢复（W132，基线 `f9e8ad16c`）
+
+- S-D03-58 / ART-007、LIFE-020/028、OBS-004/006、A05/A13/A17/A19：使用磁盘 App、正式
+  `coding.codex` 资源集合和 managed workspace。live Artifact owner 使首进程 DELETE 精确返回 W131
+  的 409 并保留 `deleting`；随后释放 handle，关闭 Router/Services/DB，不再发送 DELETE。
+- 第二进程从同一 data/work 配置启动，`create_router` 在路由发布前自动恢复 deleting Session、删除
+  managed workspace 并写入 `deleted`；启动后同 key DELETE 只重放原 tombstone。
+- 新增场景修正资源夹具后首次及连续 **20/20**；W131 409/retry、删除顺序与 Store delete fence
+  **4/4**，fmt/diff 通过。首个夹具用不消费 workspace 的 `chat.minimal` 被
+  `RESOURCE_SELECTION_UNUSED` 正确拒绝，失败日志保留。生产代码无需修改，无模型/UI。未覆盖
+  cleanup/recovery 进程中途再次强杀、正式 UI 删除、非 Windows live-handle 路径及 N3/100 seed/
+  LONG/99%；不关闭完整 ART/LIFE/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

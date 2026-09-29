@@ -8,6 +8,8 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use nomifun_app::{AppConfig, compatibility::{AppServices, create_router}};
+use nomifun_auth::AuthPolicy;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -3803,6 +3805,90 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "an unknown model cannot silently fall back");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn startup_recovers_a_deleting_managed_workspace_after_live_artifact_release() {
+    const TRUST: &str = "deleting-workspace-startup-recovery";
+    async fn call(
+        router: &axum::Router,
+        method: &str,
+        path: &str,
+        key: Option<&str>,
+        body: Value,
+    ) -> (StatusCode,Value) {
+        let mut request = Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust",TRUST).header("content-type","application/json");
+        if let Some(key) = key { request = request.header("Idempotency-Key",key); }
+        let response = router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(),4 * 1024 * 1024).await.unwrap();
+        (status,serde_json::from_slice(&bytes).unwrap())
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_dir:root.path().join("data"),work_dir:root.path().join("work"),
+        auth_policy:AuthPolicy::TrustLocalToken,local_trust_secret:Some(TRUST.into()),
+        ..Default::default()
+    };
+    fs::create_dir_all(&config.data_dir).unwrap();
+    let database = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let first = AppServices::from_config(database,&config).await.unwrap();
+    let router = create_router(&first).await;
+    let provider = create_chat_provider(&router,TRUST,"Delete recovery provider","delete-recovery-model",0).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"delete-recovery-model"});
+    let (status,preset) = call(&router,"POST","/api/agent-presets/from-template/coding.codex",None,json!({
+        "reuse_existing":false,"display_name":"Delete recovery preset","model":model
+    })).await;
+    assert_eq!(status,StatusCode::OK,"{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status,session) = call(&router,"POST","/api/agent-sessions",None,json!({
+        "preset_id":preset_id,"title":"Delete recovery Session","model":model,
+        "resource_selections":[
+            {"resource_kind":"workspace","resource_id":"default-workspace"},
+            {"resource_kind":"process_session","resource_id":"managed-process-session"},
+            {"resource_kind":"project_memory","resource_id":"default-project-memory"}
+        ]
+    })).await;
+    assert_eq!(status,StatusCode::OK,"{session}");
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap().to_owned();
+    let (status,projection) = call(&router,"GET",&format!("/api/agent-sessions/{session_id}/projection"),None,json!({})).await;
+    assert_eq!(status,StatusCode::OK,"{projection}");
+    let workspace = PathBuf::from(projection["data"]["extra"]["workspace"].as_str().unwrap());
+    fs::write(workspace.join("source.txt"),b"startup recovery artifact").unwrap();
+    let artifact_store = nomifun_file::WorkspaceArtifactStore::new(&workspace).unwrap();
+    let artifact = artifact_store.publish("source.txt",None).unwrap();
+    assert!(artifact_store.read(&artifact.artifact_id,0,1024).unwrap().complete);
+    let delete_path = format!("/api/agent-sessions/{session_id}");
+    let (status,blocked) = call(&router,"DELETE",&delete_path,Some("startup-delete-recovery"),json!({})).await;
+    assert_eq!(status,StatusCode::CONFLICT,"{blocked}");
+    assert_eq!(blocked["code"],"AGENT_SESSION_WORKSPACE_CLEANUP_FAILED");
+    let state:String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id=?")
+        .bind(&session_id).fetch_one(first.database.pool()).await.unwrap();
+    assert_eq!(state,"deleting");
+    assert!(workspace.exists());
+
+    drop(artifact_store);
+    drop(router);
+    first.shutdown_browser_platform().await.unwrap();
+    first.database.close().await;
+    drop(first);
+
+    let reopened = nomifun_db::init_database(&config.database_path()).await.unwrap();
+    let second = AppServices::from_config(reopened,&config).await.unwrap();
+    let restored_router = create_router(&second).await;
+    let state:String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id=?")
+        .bind(&session_id).fetch_one(second.database.pool()).await.unwrap();
+    assert_eq!(state,"deleted","startup recovery must complete the fenced deletion before routes publish");
+    assert!(!workspace.exists());
+    let (status,replayed) = call(&restored_router,"DELETE",&delete_path,Some("startup-delete-recovery"),json!({})).await;
+    assert_eq!(status,StatusCode::OK,"{replayed}");
+    assert_eq!(replayed["data"]["state"],"deleted");
+    drop(restored_router);
+    second.shutdown_browser_platform().await.unwrap();
+    second.database.close().await;
 }
 
 #[tokio::test]
