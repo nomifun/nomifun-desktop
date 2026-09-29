@@ -616,12 +616,30 @@ fn do_invoke(
             })
         }
     };
-    if generation != state.current_gen {
-        return Err(A11yError::Stale(format!(
-            "ref [{r}] is from an older snapshot (the UI may have changed); re-run observe and \
-             use a fresh [ref]"
-        )));
-    }
+    let cached = state.cached.as_ref().ok_or_else(|| {
+        A11yError::Stale(format!(
+            "ref [{r}] has no retained snapshot; re-run observe before acting"
+        ))
+    })?;
+    let frontmost_observation = cached.opts.pid.is_none();
+    let current_frontmost_pid = if frontmost_observation {
+        unsafe {
+            let app = focused_app()?;
+            pid_of(app.ptr())
+        }
+    } else {
+        None
+    };
+    validate_invoke_snapshot(
+        r,
+        generation,
+        state.current_gen,
+        state.dirty.load(Ordering::Relaxed),
+        state.observer.is_some(),
+        frontmost_observation,
+        state.observed_pid,
+        current_frontmost_pid,
+    )?;
     let elem = state
         .registry
         .get(&r)
@@ -656,6 +674,45 @@ fn do_invoke(
             )))
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_invoke_snapshot(
+    r: u32,
+    generation: SnapshotGen,
+    current_generation: SnapshotGen,
+    dirty: bool,
+    observer_active: bool,
+    frontmost_observation: bool,
+    observed_pid: Option<i32>,
+    current_frontmost_pid: Option<i32>,
+) -> Result<(), A11yError> {
+    if generation != current_generation {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] is from an older snapshot (the UI may have changed); re-run observe and \
+             use a fresh [ref]"
+        )));
+    }
+    if dirty {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] was invalidated by an Accessibility window, focus, layout or value change; \
+             re-run observe before acting"
+        )));
+    }
+    if !observer_active {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] has no live Accessibility change observer; re-run observe and do not act \
+             on an unfenced snapshot"
+        )));
+    }
+    if frontmost_observation && current_frontmost_pid != observed_pid {
+        return Err(A11yError::Stale(format!(
+            "ref [{r}] belongs to pid {:?}, but the frontmost application is now pid {:?}; \
+             re-run observe before acting",
+            observed_pid, current_frontmost_pid
+        )));
+    }
+    Ok(())
 }
 
 fn do_focus(pid: i32) -> Result<Effect, A11yError> {
@@ -824,5 +881,75 @@ mod tests {
         ] {
             assert!(!cached.matches(&opts));
         }
+    }
+
+    #[test]
+    fn invoke_rejects_dirty_unobserved_and_replaced_frontmost_snapshots() {
+        let validate = |dirty, observer_active, observed_pid, current_pid| {
+            validate_invoke_snapshot(
+                7,
+                SnapshotGen(3),
+                SnapshotGen(3),
+                dirty,
+                observer_active,
+                true,
+                observed_pid,
+                current_pid,
+            )
+        };
+        assert!(validate(true, true, Some(11), Some(11))
+            .unwrap_err()
+            .to_string()
+            .contains("invalidated"));
+        assert!(validate(false, false, Some(11), Some(11))
+            .unwrap_err()
+            .to_string()
+            .contains("no live Accessibility change observer"));
+        assert!(validate(false, true, Some(11), Some(12))
+            .unwrap_err()
+            .to_string()
+            .contains("frontmost application"));
+        assert!(validate(false, true, Some(11), None)
+            .unwrap_err()
+            .to_string()
+            .contains("frontmost application"));
+        assert!(validate(false, true, Some(11), Some(11)).is_ok());
+    }
+
+    #[test]
+    fn explicit_pid_snapshot_ignores_other_frontmost_app_but_not_generation_or_dirty_state() {
+        assert!(validate_invoke_snapshot(
+            7,
+            SnapshotGen(3),
+            SnapshotGen(3),
+            false,
+            true,
+            false,
+            Some(11),
+            None,
+        )
+        .is_ok());
+        assert!(validate_invoke_snapshot(
+            7,
+            SnapshotGen(2),
+            SnapshotGen(3),
+            false,
+            true,
+            false,
+            Some(11),
+            None,
+        )
+        .is_err());
+        assert!(validate_invoke_snapshot(
+            7,
+            SnapshotGen(3),
+            SnapshotGen(3),
+            true,
+            true,
+            false,
+            Some(11),
+            None,
+        )
+        .is_err());
     }
 }

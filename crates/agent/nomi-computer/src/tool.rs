@@ -27,6 +27,18 @@ use crate::fallback_backend;
 const MAX_WAIT_SECONDS: f64 = 5.0;
 const DEFAULT_SCROLL_AMOUNT: i64 = 3;
 
+/// True only for the exact semantic-ref stale rejection produced before the
+/// Accessibility backend performs an action. The message also proves that the
+/// Computer layer did not use its pixel fallback, so a role owner may settle
+/// the reserved external effect as rejected instead of outcome-unknown.
+pub fn is_proven_stale_input_rejection(result: &ToolResult) -> bool {
+    result.is_error
+        && result.images.is_empty()
+        && result.content.starts_with("Accessibility action on [")
+        && result.content.contains(" failed: stale reference:")
+        && result.content.contains("No pixel fallback was performed;")
+}
+
 /// Example key combo for the platform we are compiled for. The accelerator
 /// modifier differs by OS (Command on macOS, Control on Windows/Linux), so we
 /// steer the model toward the right one instead of always suggesting `cmd`,
@@ -1277,6 +1289,28 @@ mod tests {
                 assert_eq!(result.is_error, expect_error, "{}", result.content);
                 assert_eq!(t.last_snapshot.lock().unwrap().is_none(), expect_error);
             }
+        }
+    }
+
+    #[test]
+    fn only_exact_no_fallback_stale_errors_prove_zero_input_effect() {
+        let stale = ToolResult::error(
+            "Accessibility action on [7] failed: stale reference: focus changed. No pixel \
+             fallback was performed; re-run observe before using element refs.",
+        );
+        assert!(is_proven_stale_input_rejection(&stale));
+        for result in [
+            ToolResult::error(
+                "Accessibility action on [7] failed: accessibility backend error: worker lost. \
+                 No pixel fallback was performed; re-run observe before using element refs.",
+            ),
+            ToolResult::error("stale reference: focus changed"),
+            ToolResult::text(
+                "Accessibility action on [7] failed: stale reference: focus changed. No pixel \
+                 fallback was performed; re-run observe before using element refs.",
+            ),
+        ] {
+            assert!(!is_proven_stale_input_rejection(&result));
         }
     }
 

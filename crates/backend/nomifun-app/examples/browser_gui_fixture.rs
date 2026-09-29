@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -48,6 +48,7 @@ struct Fixture {
     computer_a11y_denied: bool,
     computer_screen_denied: bool,
     computer_input: bool,
+    computer_stale_focus: bool,
     computer_file: Option<PathBuf>,
     a11y_observed: AtomicBool,
     a11y_denied: AtomicBool,
@@ -55,9 +56,12 @@ struct Fixture {
     screen_observed: AtomicBool,
     input_verified: AtomicBool,
     input_initial_plan_unavailable: AtomicBool,
+    stale_observed: AtomicBool,
+    stale_input_rejected: AtomicBool,
     witnesses: Mutex<Vec<Value>>,
     failure: Mutex<Option<String>>,
     finish: Semaphore,
+    stale_continue: Semaphore,
     stop: CancellationToken,
 }
 
@@ -870,6 +874,87 @@ fn computer_input_operation(
     )))
 }
 
+async fn computer_stale_focus_operation(
+    fixture: &Fixture,
+    body: &Value,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    let file = fixture
+        .computer_file
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Computer stale-focus fixture file missing"))?;
+    if computer_tool_result(body, "gui-computer-stale-input").is_some() {
+        let result = computer_result_text(body, "gui-computer-stale-input")?;
+        anyhow::ensure!(
+            result.contains("ROLE_HOST_STALE_OBSERVATION_GENERATION")
+                || result.contains("ROLE_HOST_PROVIDER_FAILURE")
+                || result.contains("stale reference")
+                || result.contains("re-run observe"),
+            "Stale Computer input was not rejected: {result}"
+        );
+        anyhow::ensure!(
+            std::fs::read_to_string(file)? == "seed",
+            "Stale Computer input changed the disposable file"
+        );
+        fixture.stale_input_rejected.store(true, Ordering::SeqCst);
+        return Ok(None);
+    }
+
+    const OBSERVATIONS: [&str; 4] = [
+        "gui-computer-stale-observe-1",
+        "gui-computer-stale-observe-2",
+        "gui-computer-stale-observe-3",
+        "gui-computer-stale-observe-4",
+    ];
+    for (index, call_id) in OBSERVATIONS.iter().enumerate().rev() {
+        if computer_tool_result(body, call_id).is_none() {
+            continue;
+        }
+        let result = computer_result_text(body, call_id)?;
+        let snapshot = accessibility_snapshot_text(result)?;
+        if snapshot.contains("computer-input.txt") {
+            let reference = text_editor_ref(result)?;
+            fixture.stale_observed.store(true, Ordering::SeqCst);
+            tokio::select! {
+                _ = fixture.stop.cancelled() => anyhow::bail!("stale-focus fixture stopped"),
+                permit = fixture.stale_continue.acquire() => {
+                    permit.map_err(|_| anyhow::anyhow!("stale-focus continuation closed"))?.forget();
+                }
+            }
+            return Ok(Some(computer_input_call(
+                body,
+                "gui-computer-stale-input",
+                call_id,
+                "set_element_value",
+                json!({"ref":reference,"text":"STALE_SHOULD_NOT_APPEAR"}),
+            )?));
+        }
+        anyhow::ensure!(
+            index + 1 < OBSERVATIONS.len(),
+            "Disposable TextEdit fixture never became the foreground accessibility window"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+        return Ok(Some((
+            OBSERVATIONS[index + 1].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+
+    if computer_tool_result(body, "gui-computer-stale-launch").is_some() {
+        require_computer_success(body, "gui-computer-stale-launch")?;
+        return Ok(Some((
+            OBSERVATIONS[0].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    Ok(Some((
+        "gui-computer-stale-launch".into(),
+        browser_tool(body, "computer/launch")?,
+        json!({"action":"launch","target":file,"app":"TextEdit"}),
+    )))
+}
+
 async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderMap, Json(mut body): Json<Value>) -> axum::response::Response {
     if let Some(live) = &fixture.live {
         if headers.get("authorization").and_then(|value|value.to_str().ok()) != Some(live.local_token.as_str()) {
@@ -970,6 +1055,14 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
                 return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
             }
         }
+    } else if fixture.computer_stale_focus {
+        match computer_stale_focus_operation(&fixture, &body).await {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
     } else if fixture.computer_input {
         match computer_input_operation(&fixture, &body) {
             Ok(operation) => operation,
@@ -986,6 +1079,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             && !fixture.computer_granted
             && !fixture.computer_a11y_denied
             && !fixture.computer_screen_denied
+            && !fixture.computer_stale_focus
             && !fixture.computer_input
         {
             tokio::select! {
@@ -1001,6 +1095,8 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             "Accessibility 未授权，computer/a11y.observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
         } else if fixture.computer_screen_denied {
             "Screen Recording 未授权，computer/observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
+        } else if fixture.computer_stale_focus {
+            "切换前台窗口后，旧 Accessibility observation 已被拒绝；未向后台 TextEdit 发送输入。"
         } else if fixture.computer_input {
             "已通过正式 Computer Actions 验证 TextEdit 启动、Command/Option/Control 输入与保存。"
         } else {
@@ -1073,6 +1169,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_a11y_denied = mode.as_deref() == Some("--computer-a11y-denied");
     let computer_screen_denied = mode.as_deref() == Some("--computer-screen-denied");
     let computer_input = mode.as_deref() == Some("--computer-input");
+    let computer_stale_focus = mode.as_deref() == Some("--computer-stale-focus");
     anyhow::ensure!(
         mode.is_none()
             || live_mode
@@ -1081,10 +1178,11 @@ async fn main() -> anyhow::Result<()> {
             || computer_granted
             || computer_a11y_denied
             || computer_screen_denied
-            || computer_input,
+            || computer_input
+            || computer_stale_focus,
         "unsupported fixture mode"
     );
-    let computer_file = if computer_input {
+    let computer_file = if computer_input || computer_stale_focus {
         let path = root.join("computer-input.txt");
         std::fs::write(&path, "seed")?;
         Some(path)
@@ -1100,6 +1198,7 @@ async fn main() -> anyhow::Result<()> {
         computer_a11y_denied,
         computer_screen_denied,
         computer_input,
+        computer_stale_focus,
         computer_file,
         a11y_observed: AtomicBool::new(false),
         a11y_denied: AtomicBool::new(false),
@@ -1107,9 +1206,12 @@ async fn main() -> anyhow::Result<()> {
         screen_observed: AtomicBool::new(false),
         input_verified: AtomicBool::new(false),
         input_initial_plan_unavailable: AtomicBool::new(false),
+        stale_observed: AtomicBool::new(false),
+        stale_input_rejected: AtomicBool::new(false),
         witnesses: Mutex::new(Vec::new()),
         failure: Mutex::new(None),
         finish: Semaphore::new(0),
+        stale_continue: Semaphore::new(0),
         stop: CancellationToken::new(),
     });
     let routes = Router::new()
@@ -1135,13 +1237,20 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
             }),
         )
         .route(
             "/finish",
             post(|State(f): State<Arc<Fixture>>| async move {
                 f.finish.add_permits(1);
+                "released"
+            }),
+        )
+        .route(
+            "/continue-stale",
+            post(|State(f): State<Arc<Fixture>>| async move {
+                f.stale_continue.add_permits(1);
                 "released"
             }),
         )
@@ -1198,6 +1307,8 @@ async fn main() -> anyhow::Result<()> {
             "Computer 辅助功能拒绝验收"
         } else if computer_screen_denied {
             "Computer 屏幕录制拒绝验收"
+        } else if computer_stale_focus {
+            "Computer 陈旧焦点拒绝验收"
         } else if computer_input {
             "Computer 物理输入验收"
         } else {
@@ -1225,7 +1336,7 @@ async fn main() -> anyhow::Result<()> {
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/observe"]
             }])
-        } else if computer_input {
+        } else if computer_input || computer_stale_focus {
             json!([{
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/a11y.observe","computer/input","computer/launch"]
@@ -1248,7 +1359,7 @@ async fn main() -> anyhow::Result<()> {
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
         let expected_capabilities=if live_mode {2}else{1};
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input {
+        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else if live_mode {
             json!([
@@ -1272,7 +1383,7 @@ async fn main() -> anyhow::Result<()> {
     let session = prepared?;
     println!(
         "BROWSER_GUI_FIXTURE_READY {}",
-        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_file":fixture.computer_file.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
+        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_file":fixture.computer_file.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
     );
     // Keep only the model/page server alive; the real desktop now owns the DB.
     fixture.stop.cancelled().await;

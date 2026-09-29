@@ -39,7 +39,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
-| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；S-D06-01 修复 A11y/截图媒体耦合；S-D06-02 记录 pure Computer 多步任务的 adaptive plan discoverability 缺口，其他平台与条件资源待走查 |
+| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | S-D06-01 修复 A11y/截图媒体耦合；S-D06-02 保留 Computer plan discoverability；S-D06-03 区分 proven stale rejection 与 uncertain effect，其他平台/资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
@@ -48,6 +48,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D06-03（`COMP-002/010/011`、A07/A08/A13/A17/A20 的共享 Computer stale/settlement 子断言）：
+  macOS AX generation 未因外部窗口/焦点变化前进，旧 semantic ref 可向已退到后台的 TextEdit 输入；
+  首修在 native owner 动作前拒绝 stale，却因共享 role host 把所有 input provider error 归为 uncertain，
+  effect 仍进入 unknown/pause。现 role host 只接受 Computer 内部精确 `stale + no pixel fallback` 零效果
+  证明并映射 `ROLE_HOST_STALE_OBSERVATION_GENERATION`/rejected；其他错误绝不降格。macOS actor 另核对
+  observer dirty/frontmost PID。正式 Tauri 5-step Turn completed，后台 TextEdit/磁盘保持 `seed`；三个核心
+  回归各 **20/20**。Windows/Linux actor、pixel/raw-coordinate、cancel/crash/soak 未由 macOS 代判。
 
 - S-D06-02（`CTRL-001`、`COMP-003`、`AGEN-013` 的共享 adaptive-control 缺口）：Computer 被明确
   排除在 workspace task-ledger 自动激活之外，单个原子动作因此不会强制产生 plan；但纯 Computer
