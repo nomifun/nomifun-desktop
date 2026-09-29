@@ -1189,14 +1189,29 @@ impl ChatCausalityGate for EngineTurnJournal {
 
 #[cfg(test)]
 pub(super) async fn test_fixture() -> (EngineTurnJournal, nomifun_db::SqlitePool) {
+    let database = nomifun_db::init_database_memory().await.unwrap();
+    let pool = database.pool().clone();
+    test_fixture_from_pool(pool).await
+}
+
+#[cfg(test)]
+pub(super) async fn test_fixture_at(
+    path:&std::path::Path,
+) -> (EngineTurnJournal,nomifun_db::SqlitePool) {
+    let database = nomifun_db::init_database(path).await.unwrap();
+    test_fixture_from_pool(database.pool().clone()).await
+}
+
+#[cfg(test)]
+async fn test_fixture_from_pool(
+    pool:nomifun_db::SqlitePool,
+) -> (EngineTurnJournal,nomifun_db::SqlitePool) {
     use nomifun_agent_contracts::{
         AgentBindingValue, AgentPresetId, AgentSessionLiveRecord, AgentSessionMetadata,
         DigestHex, PresetRevisionRef, PrincipalRef, ResolvedSnapshotId,
     };
     use nomifun_agent_session::CreateSessionRequest;
 
-    let database = nomifun_db::init_database_memory().await.unwrap();
-    let pool = database.pool().clone();
     let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
     let session_id = AgentSessionId::from("0190f5fe-7c00-7a00-8000-000000000002");
     let owner = PrincipalRef {
