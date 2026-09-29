@@ -24,7 +24,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 冻结/准入与 M02-02 正式 UI/live 只读 Session 子断言通过；完整领域未验收 |
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
-| D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 与 M03-01 Unix 发布/清理竞态子断言已验证；其余待走查 |
+| D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01 及 M03-05 APFS/权限/发布/ACL 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03 本地 Git 字面路径、commit/local remote/拒绝边界子断言通过；网络/SSH 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
@@ -32,7 +32,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015 的本批子断言已验；其余待走查 |
-| D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02 已验 Seatbelt 与 symlink/mode；M03-04 旧授权/撤权定向通过，原生动态 ACL 仍待验 |
+| D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02 Seatbelt/symlink/mode、M03-04 旧授权与 M03-05 ACL 保留/最终 hook 通过；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
 
 ## 原生接续任务
@@ -271,3 +271,19 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 未覆盖原生文件 ACL 在准入后/最终系统调用前动态变化、TCC/Accessibility/Screen Recording、真实
   secret-bearing owner、应用重启后持久旧 grant、正式 UI 恢复提示及高并发 soak；因此不关闭完整
   AUTH、D11 或 M03。
+
+- **M03-05 macOS extended ACL preservation / dynamic revoke boundary**（`MAC-005`、
+  `FILE-020/022/025/038/039`、`AUTH-006/014` 的本批子断言）：原生探针和首次产品回归证明 APFS 上
+  普通 `rename` 替换 inode 会丢目标 extended ACL；成功 write/patch 均把
+  `group:everyone deny execute` 静默移除。修复在目标 dev/inode、stage identity/bytes 核对后及最终
+  pre-publication hook 之后，通过已持有 descriptor 执行 `fcopyfile(COPYFILE_ACL)` 并 `sync_all`；
+  ACL 复制失败在 rename 前停止，不吞错或扩大权限，Linux/Windows 路径未改。
+- 动态夹具在最终 hook 新增 `group:staff deny execute`，发布后新旧 ACL 均保留；deny-write ACL 下
+  write/patch 保持旧字节与 ACL，并按共享 Unix 安全清理合同保留两个自有 stage、返回 outcome unknown、
+  发送两个无内容对账事件。全组同时保留旧 mode 0444 结果并把过期“立即删 stage”断言收紧为精确
+  retained-stage/reconciliation 断言。首次 ACL 丢失、旧断言失败及中间诊断均独立保留。
+- 最终 ACL 保留、deny-write、动态 hook 各 **20/20**；相邻 Unix 发布 **4/4**；`nomifun-file` lib
+  **308/308**，macOS workspace **6 passed / 1 ignored**，fmt/diff 通过。证据：
+  `2026-09-29/macos/m03-macos-acl/`。未覆盖 ACL copy 后至 rename 的 syscall-sized 竞态、xattr/
+  resource fork/immutable flags、非 APFS 卷、IO fault、正式 UI 变更投影及长期门槛；因此不关闭
+  完整 FILE/AUTH、D03/D11 或 M03。

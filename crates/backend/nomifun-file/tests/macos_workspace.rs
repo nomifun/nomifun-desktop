@@ -5,6 +5,7 @@ use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::Path,
+    process::Command,
     sync::{Arc, Mutex},
 };
 
@@ -96,6 +97,31 @@ fn same_file(left: &Path, right: &Path) -> bool {
     left.dev() == right.dev() && left.ino() == right.ino()
 }
 
+fn add_acl(path: &Path, entry: &str) {
+    let output = Command::new("/bin/chmod")
+        .arg("+a")
+        .arg(entry)
+        .arg(path)
+        .output()
+        .expect("macOS ACL fixture requires /bin/chmod");
+    assert!(
+        output.status.success(),
+        "failed to add ACL to {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn acl_listing(path: &Path) -> String {
+    let output = Command::new("/bin/ls")
+        .arg("-lde")
+        .arg(path)
+        .output()
+        .expect("macOS ACL fixture requires /bin/ls");
+    assert!(output.status.success(), "failed to list ACL for {}", path.display());
+    String::from_utf8(output.stdout).expect("ACL listing is UTF-8")
+}
+
 async fn assert_alias_batch_rejected_before_publication(first: &str, second: &str) {
     let root = tempfile::tempdir().unwrap();
     let probe = root.path().join(first);
@@ -159,14 +185,29 @@ async fn readonly_target_rejects_write_and_patch_without_changing_bytes() {
 
     assert!(write.is_err(), "read-only write unexpectedly succeeded: {write:?}");
     assert!(patch.is_err(), "read-only patch unexpectedly succeeded: {patch:?}");
+    assert!(format!("{:?}", write.unwrap_err()).contains("publication outcome is unknown"));
+    assert!(format!("{:?}", patch.unwrap_err()).contains("publication outcome is unknown"));
     assert_eq!(fs::read(&write_target).unwrap(), b"original");
     assert_eq!(fs::read(&patch_target).unwrap(), b"original");
-    assert!(
-        fs::read_dir(root.path())
-            .unwrap()
-            .all(|entry| !entry.unwrap().file_name().to_string_lossy().starts_with(".nomifun-patch-"))
-    );
-    assert!(events.0.lock().unwrap().is_empty());
+    for target in [&write_target, &patch_target] {
+        assert_eq!(fs::metadata(target).unwrap().permissions().mode() & 0o777, 0o444);
+    }
+    let retained = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".nomifun-patch-"))
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 2, "each denied publication retains one owned stage");
+    for entry in retained {
+        assert_eq!(fs::read(entry.path()).unwrap(), b"wrong");
+    }
+    let events = events.0.lock().unwrap();
+    assert_eq!(events.len(), 2, "each uncertain denial requires one reconciliation event");
+    for event in events.iter() {
+        assert_eq!(event.name, "fileStream.contentUpdate");
+        assert_eq!(event.data["operation"], "write");
+        assert!(event.data.get("content").is_none(), "uncertain failure cannot publish intended bytes");
+    }
 }
 
 #[tokio::test]
@@ -188,6 +229,92 @@ async fn readonly_parent_rejects_create_and_preserves_siblings_without_temporary
     assert!(!parent.join("new.txt").exists());
     assert_eq!(fs::read_dir(&parent).unwrap().count(), 1);
     assert!(events.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn successful_write_and_patch_preserve_extended_acl() {
+    let root = tempfile::tempdir().unwrap();
+    let write_target = root.path().join("write-acl.txt");
+    let patch_target = root.path().join("patch-acl.txt");
+    fs::write(&write_target, b"original").unwrap();
+    fs::write(&patch_target, b"original").unwrap();
+    for target in [&write_target, &patch_target] {
+        add_acl(target, "everyone deny execute");
+        assert!(acl_listing(target).contains("group:everyone deny execute"));
+    }
+    let (service, scope, _) = owner(root.path());
+
+    service
+        .write_file_for_agent_session(&scope, "write-acl.txt", b"replacement")
+        .await
+        .unwrap();
+    service
+        .apply_patch_for_agent_session(
+            &scope,
+            replacement("patch-acl.txt", "original", "replacement"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(fs::read(&write_target).unwrap(), b"replacement");
+    assert_eq!(fs::read(&patch_target).unwrap(), b"replacement");
+    for target in [&write_target, &patch_target] {
+        assert!(
+            acl_listing(target).contains("group:everyone deny execute"),
+            "successful publication dropped the target ACL: {}",
+            target.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn acl_deny_write_rejects_write_and_patch_without_changing_bytes() {
+    let root = tempfile::tempdir().unwrap();
+    let write_target = root.path().join("write-denied.txt");
+    let patch_target = root.path().join("patch-denied.txt");
+    fs::write(&write_target, b"original").unwrap();
+    fs::write(&patch_target, b"original").unwrap();
+    for target in [&write_target, &patch_target] {
+        add_acl(target, "everyone deny write");
+        assert!(acl_listing(target).contains("group:everyone deny write"));
+    }
+    let (service, scope, events) = owner(root.path());
+
+    let write = service
+        .write_file_for_agent_session(&scope, "write-denied.txt", b"wrong")
+        .await;
+    let patch = service
+        .apply_patch_for_agent_session(
+            &scope,
+            replacement("patch-denied.txt", "original", "wrong"),
+        )
+        .await;
+
+    assert!(write.is_err(), "ACL-denied write unexpectedly succeeded: {write:?}");
+    assert!(patch.is_err(), "ACL-denied patch unexpectedly succeeded: {patch:?}");
+    assert!(format!("{:?}", write.unwrap_err()).contains("publication outcome is unknown"));
+    assert!(format!("{:?}", patch.unwrap_err()).contains("publication outcome is unknown"));
+    assert_eq!(fs::read(&write_target).unwrap(), b"original");
+    assert_eq!(fs::read(&patch_target).unwrap(), b"original");
+    for target in [&write_target, &patch_target] {
+        assert!(acl_listing(target).contains("group:everyone deny write"));
+    }
+    let retained = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".nomifun-patch-"))
+        .collect::<Vec<_>>();
+    assert_eq!(retained.len(), 2, "each denied publication retains one owned stage");
+    for entry in retained {
+        assert_eq!(fs::read(entry.path()).unwrap(), b"wrong");
+    }
+    let events = events.0.lock().unwrap();
+    assert_eq!(events.len(), 2, "each uncertain denial requires one reconciliation event");
+    for event in events.iter() {
+        assert_eq!(event.name, "fileStream.contentUpdate");
+        assert_eq!(event.data["operation"], "write");
+        assert!(event.data.get("content").is_none(), "uncertain failure cannot publish intended bytes");
+    }
 }
 
 #[tokio::test]

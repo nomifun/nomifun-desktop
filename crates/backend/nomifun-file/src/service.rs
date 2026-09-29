@@ -1961,6 +1961,20 @@ fn publish_patch_file_with_cleanup_hook(
             };
             #[cfg(not(windows))]
             _after_source_verification();
+            #[cfg(target_os = "macos")]
+            copy_macos_extended_acl(&_writable_target, &staged_file).map_err(|error| {
+                if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    AppError::Forbidden(format!(
+                        "cannot preserve patch target ACL '{}': {error}",
+                        path.display()
+                    ))
+                } else {
+                    AppError::Internal(format!(
+                        "cannot preserve patch target ACL '{}': {error}",
+                        path.display()
+                    ))
+                }
+            })?;
             #[cfg(not(windows))]
             let replacement = replace_file_path(&temporary, path, &mut published, expected, source.expected_identity());
             #[cfg(not(windows))]
@@ -2163,6 +2177,32 @@ fn open_writable_publication_target(
         )));
     }
     Ok(file)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_macos_extended_acl(
+    source: &std::fs::File,
+    target: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // `rename` replaces the target inode and therefore drops its extended
+    // ACL. Copy the exact target ACL onto the verified staging inode before
+    // the atomic publication. Any ACL update injected through the final
+    // pre-publication hook is observed here; a copy failure aborts before the
+    // target name changes.
+    let copied = unsafe {
+        libc::fcopyfile(
+            source.as_raw_fd(),
+            target.as_raw_fd(),
+            std::ptr::null_mut(),
+            libc::COPYFILE_ACL,
+        )
+    };
+    if copied != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    target.sync_all()
 }
 
 #[cfg(not(windows))]
@@ -2392,6 +2432,8 @@ fn open_verified_publication_source(
 ) -> Result<std::fs::File, AppError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
+    #[cfg(target_os = "macos")]
+    options.write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -3237,6 +3279,33 @@ mod tests {
     use super::*;
     use std::fs;
 
+    #[cfg(target_os = "macos")]
+    fn add_macos_acl(path: &Path, entry: &str) {
+        let output = std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg(entry)
+            .arg(path)
+            .output()
+            .expect("macOS ACL fixture requires /bin/chmod");
+        assert!(
+            output.status.success(),
+            "failed to add ACL to {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn macos_acl_listing(path: &Path) -> String {
+        let output = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .output()
+            .expect("macOS ACL fixture requires /bin/ls");
+        assert!(output.status.success(), "failed to list ACL for {}", path.display());
+        String::from_utf8(output.stdout).expect("ACL listing is UTF-8")
+    }
+
     #[cfg(any(windows, unix))]
     fn cleanup_race_fixture() -> tempfile::TempDir {
         let mut builder = tempfile::Builder::new();
@@ -3294,6 +3363,39 @@ mod tests {
             assert!(failure.temporary_cleanup_unconfirmed, "{observed}");
             assert_eq!(fs::read(&temporary).unwrap(), b"tampered", "{observed}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_replacement_copies_acl_after_the_final_prepublication_hook() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        add_macos_acl(&target, "everyone deny execute");
+
+        let result = publish_patch_file_with_cleanup_hook(
+            &target,
+            b"intended",
+            &temporary,
+            PublicationSource::Matching(b"original"),
+            || {},
+            || {},
+            || add_macos_acl(&target, "group:staff deny execute"),
+            || {},
+            || Ok(()),
+        );
+
+        let listing = macos_acl_listing(&target);
+        let observed = format!(
+            "result={result:?}; target={:?}; acl={listing:?}",
+            fs::read(&target)
+        );
+        fs::write(fixture.path().join("observation.txt"), &observed).unwrap();
+        assert!(result.is_ok(), "{observed}");
+        assert_eq!(fs::read(&target).unwrap(), b"intended", "{observed}");
+        assert!(listing.contains("group:everyone deny execute"), "{observed}");
+        assert!(listing.contains("group:staff deny execute"), "{observed}");
     }
 
     #[cfg(unix)]
