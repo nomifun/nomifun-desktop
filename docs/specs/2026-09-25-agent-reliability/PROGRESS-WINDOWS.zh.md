@@ -2083,6 +2083,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   无需修改，无正式 UI/生产 remote。领域级自动对账按现有设计仍未实现；第三方 remote 改写、网络
   remote、UI 核对控制面、其他平台及 N3/100 seed/LONG/99% 仍待验，不关闭完整 VCS/LIFE 或共享阶段。
 
+### 文件发布 receipt 丢失后的 SQLite 重开（W115，基线 `8d8b9bf92`）
+
+- S-D03-51 / FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19：把原有内存 Store/
+  `std::fs::write` 模拟回归升级为独立磁盘 SQLite 和实际 `FileService` owner。Effect reserve 后 owner
+  原子发布 `result.txt=published` 并返回 receipt；夹具故意不写 terminal receipt，释放 host/Store，
+  关闭全部数据库连接，再由用户把目标改成 `user edit after lost receipt`。
+- 从同一路径重开数据库、Store 与 host 后，原 key 由 durable Pending 直接拒绝；换 operation/key 的
+  写入也由同一 workspace resource fence 在 owner 前拒绝。Effect 总数保持 1、状态保持 Pending，
+  用户新字节未被覆盖。升级断言首次及连续 **20/20**；相邻 App 文件动作/fence **2/2**、文件 owner
+  写入 **1/1**，fmt/diff 通过。生产代码无需修改。
+- 首个基线命令因短测试名配 `--exact` 实际执行 0 项，日志保留；随后用完整模块名确认旧基线 1/1，
+  没有把 0 项误记为通过。本批无模型/UI。未覆盖文件 worker/SQLite terminal commit 进程强杀、
+  patch/delete 同类磁盘重开、文件结果人工核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  FILE/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

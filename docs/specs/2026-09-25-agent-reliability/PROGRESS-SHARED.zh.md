@@ -122,6 +122,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无正式 UI/生产 remote。领域级自动对账仍是文档明确未实现的限制；第三方改写、网络 remote、UI
   核对控制面、其他平台及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
 
+- S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
+  W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
+  `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
+  不写 terminal receipt，释放 host/Store 并关闭全部数据库连接；随后用户把目标改成新字节。重新打开
+  数据库与 host 后，原 key 由 durable Pending 直接拒绝，新 key 由同一 workspace resource fence 在
+  owner 前拒绝；数据库仍只有一个 Pending Effect，用户新字节未被覆盖。升级断言首次及连续
+  **20/20**，相邻 App 文件动作/fence **2/2**、文件 owner 写入 **1/1**。最初短名配 `--exact` 导致
+  0 项执行，已保留并用完整模块名纠正，不计通过。生产代码无需修改，无模型/UI。文件 worker 或
+  SQLite terminal commit 中的进程强杀、patch/delete 同类磁盘重开、文件结果人工核对、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
