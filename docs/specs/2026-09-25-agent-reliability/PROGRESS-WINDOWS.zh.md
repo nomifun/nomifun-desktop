@@ -1635,6 +1635,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 真实 Tauri 主进程的正常/强退、Windows ConPTY parent-death、macOS watchdog/session、start
   事务与 shutdown 的真实竞争、其他 Agent/角色及长期压力仍待验；不关闭完整 PROC-040/041 或共享阶段。
 
+### 连续 1,000 个短进程的资源与输出长稳（W90，基线 `c48e31f1d`）
+
+- S-D04-19 / PROC-044、A05/A11/A13/A15/A19：新增 `process_soak` 手工回归，默认标为 ignored，
+  不增加普通套件耗时；显式运行时用容量 8 的公开 supervisor 连续启动 1,000 个真实 pipe helper。
+  每个 helper 必须 exit 0、signal none、`cleanup.reaped=true`，固定 32 字节输出逐字节一致且
+  `dropped_bytes=0`。全部完成后 shutdown report 必须为空，证明自然终态未被误记为 shutdown cancel。
+- 首次编译因夹具把 `start(self: &Arc<Self>)` 写成 `&ProcessSupervisor` 而失败，日志独立保留；改为
+  公开 Arc receiver 后通过。首次和最终两轮在 Windows、WSL2 Linux 均 **1,000/1,000**，共执行
+  4,000 个短进程。最终 Windows 用时 178.25 秒，handle **111→111**、thread **13→10**；Linux
+  用时 171.79 秒，fd **11→11**、thread **8→8**。两端 helper 均为 0，生产逻辑无需修改。
+- 默认运行在两平台均为 0 passed / 1 ignored；显式 `--ignored --exact` 才执行长稳。独立断言首版
+  曾把数值 0 当成布尔 false 而错误退出 1，保留后按布尔与计数分开核对，最终 10/10 通过。
+- 额外 `cargo clippy -D warnings` 被该 crate 现有的 range loop、collapsible if 和两处参数数目 warning
+  阻断；失败日志保留，本批不扩大到无关生产重构。两平台 rustc 编译、workspace fmt 与 diff 检查通过。
+- 并发短进程、PTY/ConPTY、macOS、真实应用/UI、系统级内存采样及更长 soak 仍待验；不关闭完整
+  PROC-044 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
