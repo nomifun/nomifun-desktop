@@ -786,6 +786,64 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shell_sentinel_starts_a_real_login_shell_and_exits_cleanly() {
+        let (program, args) = crate::types::resolve_command(crate::types::SHELL_SENTINEL, &[]);
+        assert_eq!(program, crate::types::default_login_shell());
+        assert_eq!(args.first().map(String::as_str), Some("-l"));
+
+        let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let output = Arc::clone(&captured);
+        let exited = Arc::new(tokio::sync::Notify::new());
+        let exit_signal = Arc::clone(&exited);
+        let handle = PtyHandle::spawn(
+            SpawnParams {
+                program: program.clone(),
+                args,
+                cwd: String::new(),
+                env: HashMap::new(),
+                cols: 80,
+                rows: 24,
+            },
+            0,
+            move |chunk| output.lock().unwrap().extend_from_slice(&chunk),
+            move |exit, _scrollback| {
+                assert!(matches!(exit, PtyExit::Exited(Some(0))));
+                exit_signal.notify_one();
+            },
+        )
+        .await
+        .expect("spawn product login shell");
+        handle.activate();
+        let shell_name = std::path::Path::new(&program)
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or_default();
+        let probe = match shell_name {
+            "zsh" => "printf '\\nNOMIFUN_LOGIN=%s\\n' \"$options[login]\"; exit\n",
+            "bash" => {
+                "if shopt -q login_shell; then v=on; else v=off; fi; printf '\\nNOMIFUN_LOGIN=%s\\n' \"$v\"; exit\n"
+            }
+            _ => {
+                "case \"$(ps -p $$ -o command=)\" in -*) v=on;; *) v=off;; esac; printf '\\nNOMIFUN_LOGIN=%s\\n' \"$v\"; exit\n"
+            }
+        };
+        handle
+            .write(probe.as_bytes())
+            .await
+            .expect("write login-shell probe");
+        tokio::time::timeout(Duration::from_secs(5), exited.notified())
+            .await
+            .expect("login shell should exit");
+        let output = String::from_utf8_lossy(&captured.lock().unwrap()).to_string();
+        let login = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("NOMIFUN_LOGIN="))
+            .expect("shell must print login state");
+        assert_eq!(login, "on", "shell must enable login mode: {output:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn force_kill_reaps_interactive_shell_job_group() {
         let handle = PtyHandle::spawn(
             SpawnParams {

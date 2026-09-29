@@ -274,6 +274,50 @@ mod tests {
     }
 
     #[test]
+    fn process_host_os_mapping_mismatch_is_a_typed_pre_dispatch_result() {
+        let actual = std::env::consts::OS;
+        let mismatched = if actual == "windows" { "macos" } else { "windows" };
+        let definition = |host: &str| ChatToolDefinition {
+            name: "exec_command".into(),
+            description: format!(
+                "{PROCESS_HOST_OS_DESCRIPTION_PREFIX}{host}. Execute a command."
+            ),
+            input_schema: StrictJsonValue(json!({"type":"object"})),
+            deferred: false,
+        };
+        let call_id = ToolCallId::from("host-os-call");
+        assert!(process_host_os_mapping_error(
+            true,
+            "workspace.process/exec",
+            &definition(actual),
+            &call_id,
+        )
+        .is_none());
+        assert!(process_host_os_mapping_error(
+            true,
+            "workspace.process/poll",
+            &definition(mismatched),
+            &call_id,
+        )
+        .is_none());
+
+        let result = process_host_os_mapping_error(
+            true,
+            "workspace.process/exec",
+            &definition(mismatched),
+            &call_id,
+        )
+        .expect("mismatch must fail before owner dispatch");
+        assert!(result.is_error);
+        let output: serde_json::Value = serde_json::from_str(&result.output_text()).unwrap();
+        assert_eq!(output["code"], "HOST_OS_COMMAND_MAPPING_ERROR");
+        assert_eq!(output["advertised_host_os"], mismatched);
+        assert_eq!(output["actual_host_os"], actual);
+        assert_eq!(output["user_code_started"], false);
+        assert_eq!(output["status"], "not_executed");
+    }
+
+    #[test]
     fn process_launch_failure_uses_fixed_model_guidance_without_host_details() {
         let error = KernelError::capability_execution_failed(
             "CAPABILITY_UNAVAILABLE",
