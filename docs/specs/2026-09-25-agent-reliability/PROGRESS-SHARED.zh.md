@@ -43,7 +43,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
-| S-D10 | 15 | PORT-001～015 内部端口、outbox、generation 与外部 grant 隔离 | PORT-012 队列、native rescan、UI 手动/重连对账子断言见 S-D03-21/22/24/25；其余端口及完整恢复待验 |
+| S-D10 | 15 | PORT-001～015 内部端口、outbox、generation 与外部 grant 隔离 | PORT-012 队列、native rescan、UI 手动/重连对账子断言见 S-D03-21/22/24/25，残余丢失信号见 S-D03-52；其余端口及完整恢复待验 |
 | S-D11 | 15 | 权限/资源/旧快照/撤权/secret 负向，验证拒绝前无副作用 | 本轮只验关联静态与资源断言；竞态仍待走查 |
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
@@ -514,6 +514,23 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   修改（正式 Realtime 链路已满足语义），无正式 Tauri renderer。renderer tool row、
   PORT-012 watcher 丢批/乱序对账、该场景的 WS lag/resync 注入、其他平台及 N3/LONG/99%
   仍开放，不关闭完整 PORT/OBS 或共享阶段。
+
+- S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
+  `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
+  path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
+  事件、不计 dropped 也不置 rescan——变化完全消失；现 `record_native` 对零可归因 in-root
+  path 的 change 类事件置 `rescan_required`（`.nomifun` owner 组件、非法名计数 dropped、
+  空 relative→rescan 等已归因路径仍算 handled，不放大信号）。其二：`pre_turn_context`
+  drain 后 `validate`/`serialize` 失败曾直接返回 `None`——已 drain 批次在投递侧丢失且对
+  后续 Turn 零信号，比 overflow 丢弃（保留 dropped 计数）更糟；现 `WatchQueue::take_batch`
+  在投递失败时把 `rescan_required` 滞留回队列，下一批强制全量对账。新增三回归：
+  零 path/全 out-of-root/mixed path 的归因语义；debounce 窗口外的重复与乱序事件按到达
+  顺序原样送达且不产生 dropped（批次不承诺顺序/唯一性，磁盘仍是唯一事实）；注入一个
+  schema 拒绝事件模拟 drain 后投递失败，断言下一 Turn 批次携带空 events+dropped=0+
+  rescan_required=true。首败先保留（仅测试打回旧码两条均失败），修复后 **22/22**、
+  连续 **20/20**，fmt 通过。正式 UI 全量对账、模型是否遵循重读提醒、批次 drain 后未被
+  消费（context contributor 为 fire-and-forget）、macOS、100 seed/LONG/99% 仍开放，
+  不关闭完整 FILE-040、PORT-012 或共享阶段。
 
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
