@@ -259,6 +259,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **2/2**。生产代码无需修改，无模型/UI。owner 已执行后 terminal settlement 遇锁、锁期间取消、
   进程强杀、其他 Action/平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+- S-D09-15（LIFE-006/011/023、FILE-038、CONC-014、A04/A05/A07/A17/A19 终态写锁子断言）：
+  W134 在 canonical Effect 已 reserve、实际 `FileService` 已发布文件并返回 receipt 后，由独立连接持有
+  SQLite writer lock。`finish_wave2_effect` 等待约 5 秒后精确返回 `CAPABILITY_UNAVAILABLE`，数据库
+  仍为 Pending，已发布文件未被回滚或假报失败可重放。释放锁、用户再修改文件并关闭全部连接后，
+  从同一路径重开数据库；原 key 由 durable Pending 拒绝，新 key 由 workspace resource fence 拒绝，
+  用户修改保持且只有一条 Effect。首次产品运行及连续 **20/20**，W133 admission 与 W115 receipt-loss
+  相邻回归 **2/2**。首个证据目录命令因 PowerShell 参数错误未启动 cargo，已单独留痕，不计产品样本。
+  生产代码无需修改，无模型/UI。终态等待期间取消、精确边界强杀、DB 磁盘满/IO fault、其他 Action/
+  平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
