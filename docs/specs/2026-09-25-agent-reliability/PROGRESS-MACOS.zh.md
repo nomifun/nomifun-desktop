@@ -26,7 +26,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
-| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～10 本地 Git 字面路径、commit/local remote、三类提交前 hook/身份、unknown fence 与持久 receipt 重放子断言通过；网络/SSH 条件资源待准备 |
+| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～11 本地 Git 字面路径、commit/local remote、四类 commit hook/身份、unknown fence 与持久 receipt 重放子断言通过；网络/SSH 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
@@ -356,3 +356,17 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `2026-09-29/macos/m03-vcs-message-hooks/`。未覆盖 `post-commit` 通知、discovery→exec hook 文件置换、
   timeout/descendant fault、linked worktree/common Git-dir、非 macOS、正式 UI 与长期门槛；因此不关闭
   完整 VCS/AUTH、D05 或 M03。
+
+- **M03-11 macOS post-commit notification**（`VCS-006/008/009/014`、`AUTH-013` 的本批提交后
+  通知、失败可见性、HEAD observation 与幂等子断言）：首次反例中 libgit2 commit 已成功，但真实
+  可执行 `post-commit` 完全未运行，marker 与 hook 内 HEAD 证据均不存在。修复在 commit ID 创建后才
+  以字面 `/usr/bin/git hook run --ignore-missing post-commit` 执行，复用 default/`core.hooksPath`、
+  supervisor、30 秒 deadline、完整进程树回收和精确 repo Seatbelt。
+- `post-commit` 非零退出不把已经发生的 commit 伪报成失败；成功 effect receipt 内新增有界脱敏的
+  hook status/exit code、`retry_allowed=false` 及独立 hook 后 HEAD 核对。成功 hook 若改写 HEAD，
+  receipt 明确 `head_matches_commit=false`、`requires_reconciliation=true`；同 key 只重放该 receipt，
+  不再次执行 commit 或通知 hook。非零通知失败与 HEAD 改写两条各 **20/20**，相邻 VCS host
+  **22/22**，fmt/diff 通过；证据：`2026-09-29/macos/m03-vcs-post-commit/`。
+- 未覆盖 physical commit 或 post hook 已发生但 terminal receipt 尚未落库的崩溃窗口、hook
+  discovery→exec 置换、timeout/escaped descendant fault、linked worktree/common Git-dir、非 macOS、
+  正式 UI 与长期门槛；因此不关闭完整 VCS/AUTH、D05 或 M03。
