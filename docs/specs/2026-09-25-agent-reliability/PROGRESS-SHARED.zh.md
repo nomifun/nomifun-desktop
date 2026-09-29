@@ -436,6 +436,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无进程重启/API/UI。磁盘重开、cursor 分页/重连、正式 tool row、其他平台及 N3/LONG/99% 仍开放，
   不关闭完整 OBS 或共享阶段。
 
+- S-D09-32（LIFE-011、OBS-014/018/019/020、A03/A08/A09/A15/A17/A19 磁盘重开与 cursor 子断言）：
+  W151 将 W150 的正式 EngineToolHost/Journal 场景改为磁盘 SQLite；写入 settlement error projection 后
+  释放 owner、Journal 和全部旧连接，再从同一路径初始化数据库。`message_history_before(limit=1)` 每页
+  都使用新的 Store，并把上一页最老 `first_seq` 作为 cursor；遍历后恰好一条 `recorded` error tool
+  projection、两个 canonical tool event，total 恒定且 projection ID 无重复。新增场景首次及连续
+  **20/20**；W150 memory projection、AgentSession cursor rebuild 与 cold history **3/3**。生产代码无需
+  修改，仅抽取共用 test fixture。无正式 HTTP/Realtime/UI。分页期间并发新事件、cursor 重连传输、
+  tool row、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
