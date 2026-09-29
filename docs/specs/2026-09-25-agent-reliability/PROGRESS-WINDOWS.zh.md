@@ -2593,6 +2593,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖分页期间并发追加新事件、WS 推送消费方、正式 Tauri renderer tool row、PORT-012
   watcher 丢批/乱序对账、其他平台及 N3/100 seed/LONG/99%；不关闭完整 PORT/OBS 或共享阶段。
 
+### 分页期间并发追加的 cursor 稳定性与正向投影漏读修复（W154，基线 `3bc79657f`）
+
+- S-D09-35 / OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19：复用 W152 正式
+  Axum Router/本地信任 API；同一 Turn 内写入两个 tool call 并乱序结算，再分别以
+  `GET /messages?limit=1` 正向分页与 `GET events?limit=2`、`message-history?page_size=2`
+  走查，翻页间追加新 Turn。
+- **首败已保留**（`phase-2-3\2026-09-27\windows\W154\run-1-first-failure.log`）：`/messages`
+  正向 cursor 按 `last_seq` 过滤却按 `first_seq` 排序，`take(limit)` 截断后以页内
+  `max(last_seq)` 推进游标，使第二个 tool 投影（先结算、`last_seq` 落后）被永久跳过，
+  committed 5 行仅交付 4 行。
+- 修复：`messages_after_tx` 改按 `last_seq ASC` 排序（`last_seq` 每投影唯一且与游标同键），
+  所有调用方均为 find/max_by_key/自行重排，无序敏感。
+- 修复后正向分页完整交付全部投影且中途追加的 Turn 恰好一次；事件 feed 并发追加时 seq 严格
+  连续；history 锚定窗口排除 walk 开始后提交的行，新 Turn 的 turn_summary 与源消息只在下一次
+  fresh 读出现。两场景首次及连续 **20/20**，W153 相邻 **1/1**，`nomifun-agent-session` 库
+  **76/76**，fmt/diff 通过。
+- 未覆盖 WS 推送消费方、正式 Tauri renderer tool row、PORT-012 watcher 丢批/乱序对账、
+  history cursor 与 turn_summary 边界的更大并发矩阵、其他平台及 N3/100 seed/LONG/99%；
+  不关闭完整 PORT/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

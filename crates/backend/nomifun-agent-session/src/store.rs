@@ -2864,12 +2864,16 @@ impl AgentSessionStore {
                 "projection cursor is ahead of the committed AgentSession sequence".to_owned(),
             ));
         }
+        // The forward cursor advances by last_seq, so the page must be ordered
+        // by last_seq: an earlier projection can keep receiving updates after a
+        // later one has stopped, and ordering by first_seq would let a
+        // truncated page skip rows whose last_seq still sits behind the cursor.
         let rows = sqlx::query_as::<_, StoredProjectionRow>(
             "SELECT session_id, projection_id, first_seq, last_seq, presentation_intent, \
                     projection_json, semantic_digest \
              FROM agent_messages \
              WHERE session_id = ? AND last_seq > ? \
-             ORDER BY first_seq ASC, projection_id ASC",
+             ORDER BY last_seq ASC, projection_id ASC",
         )
         .bind(session_id.as_ref())
         .bind(as_i64(after_seq, "after_seq")?)
