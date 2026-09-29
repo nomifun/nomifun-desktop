@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 正式 UI 已拒绝跨前台焦点及同 PID 窗口移动/缩放/切换后的 stale A11y ref；取消/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09 正式 UI 已验 raw move/click/scroll；取消/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -485,8 +485,8 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   tool error；`turn/completed`。fixture `input_verified=true`、failure=null；两 DB `ok`，TextEdit/app/
   fixture/listener 清零。确定性辅助：key **12/12**、launch **6/6**、main-queue/drag 各 **1/1**、
   role-host fence **4/4**。证据：`2026-09-29/macos/m04-computer-input/`。
-- 仍未覆盖 click/move/scroll、长 drag cancel、注入式
-  key/button release failure、用户并发焦点、Unicode/IME/layout、缺失 app、owner crash/result-loss、
+- 仍未覆盖长 drag cancel、注入式 key/button release failure、用户并发焦点、Unicode/IME/layout、
+  缺失 app、owner crash/result-loss、
   撤权、真实 StepFun 与 soak；窗口移动/缩放、same-PID 窗口切换及跨 App 焦点变化后的 stale 拒绝另由
   M04-05～08 覆盖，初始
   optional plan 仍以一次公开错误激活，不满足零工具错误体验。
@@ -528,7 +528,7 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   均精确 `seed`，fixture `stale_input_rejected=true`、failure=null。AX fence / 零效果 classifier /
   typed host mapping 各 **20/20**，相邻 AX **3/3**、Computer host **5/5**；两 DB `ok`，进程/监听清零。
   证据：`2026-09-29/macos/m04-computer-stale/`。
-- 尚未覆盖 raw screenshot 坐标、OCR/pixel-only ref、right/double-click pixel fallback、用户并发输入、
+- 尚未覆盖 OCR/pixel-only ref、right/double-click pixel fallback、用户并发输入、
   held-input cancel、crash/result-loss 与 soak；因此只关闭本批
   `COMP-002` frontmost semantic-ref 子断言，不关闭完整 Computer、D06 或 M04。
 
@@ -578,3 +578,27 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批不新增共享结论或产品代码；上述可审计动作、唯一 PID、两个窗口的独立内容及 typed effect/event
   共同判定，不以 fixture 沿用的旧完成文案代替断言。用户并发输入、held-input cancel、crash/result-loss
   与 soak 仍开放，不关闭完整 `COMP-002`、Computer、D06 或 M04。
+
+- **M04-09 macOS raw pointer input**（`COMP-003` 的 move/click/scroll、`COMP-001` 同窗口
+  A11y/screenshot 坐标关联及 `COMP-013` bounded screenshot 回归子断言）：新增最小
+  `--computer-pointer-input` 确定性夹具模式；仓库外构建 arm64 AppKit 目标，以独立状态文件记录原始
+  NSEvent。每次 raw input 前必须取得 fresh `computer/observe` Screenshot generation，并把
+  **1568×882** screenshot 坐标映射回 **2560×1440** 屏幕；A11y generation 只用于确认目标窗口，不能
+  给 raw pointer 授权。
+- 首轮目标 App 只接受 argv、被 `computer/launch` 无参数启动后退出；修为隔离 Info.plist 状态路径。
+  随后两次错误使用 A11y generation，均由 role host 以 `ROLE_HOST_STALE_OBSERVATION_GENERATION`
+  在动作前拒绝，目标计数全零；另保留 typed screenshot JSON 形态误判、AppKit inactive first-click、
+  launch/前台 settle 窗口不足及 view-only scroll 断言等夹具失败。click/scroll 最终以目标的本地/全局
+  原始 NSEvent 监控判定，未以 tool returned 代替命中事实；所有中间运行、DB 与零残留清理均保留于
+  `2026-09-29/macos/m04-computer-pointer/`。
+- 最终 `run-023-final-ui`（Session `01a0ed44-c5d6-7420-bfd6-a4c1557e873c`）为 **13 model steps /
+  164 events**：5 次 A11y 等待/稳定观察、3 次 bounded screenshot、1 次 launch 及 move/click/scroll
+  各 1 次；4 个 effect 均唯一 returned，零 rejected/pending/unknown。产品映射精确为 move
+  `(177,719) -> screen (289,1174)`、click `(312,643) -> (510,1050)`，scroll 最终光标 `(740,929)`；
+  目标记录 move=2 个 OS motion event、click=1、scroll=1、delta=-3，fixture `pointer_verified=true`、
+  failure=null，Turn completed，正式 UI 明确完成。durable events 中 inline PNG 为 0；运行中/停止后两
+  DB 均 `ok`，最终 target/app/fixture process 和两个 listener 为 0。结合 M04-03 的 key/text/modifier，
+  `COMP-003` 所列 action 集在 macOS 正向路径通过。
+- 本批只扩展确定性夹具，未发现需改共享层或产品输入实现的新根因，故不改 `PROGRESS-SHARED`。尚未覆盖
+  right/middle/double/triple click、drag cancel、OCR/pixel-only refs、多显示器/DPI、用户并发输入、
+  crash/result-loss 与 soak；因此不关闭完整 Computer、D06 或 M04。
