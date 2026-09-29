@@ -2524,6 +2524,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式 tool result/event 持久化、tool row/UI、不同 Action/角色及其他平台、N3/100 seed/
   LONG/99%；不关闭完整 REG/OBS 或共享阶段。
 
+### Runtime ToolResult 与 ToolCompleted 投影（W149，基线 `4f9eaac58`）
+
+- S-D09-30 / OBS-001/006/009/014/015/020、A03/A08/A09/A15/A16/A17/A19：将 success/failed/unknown
+  三类 `CapabilityKernel` typed error 送入正式 `record_tool_result`。
+- 每类均生成同 call ID、`is_error=true`、≤2 KiB 的模型 observation，保留
+  `CAPABILITY_UNAVAILABLE` 与 W147 固定恢复语义；EventSink 各收到唯一、递增 step 的
+  `ToolCompleted`，没有把错误变成 completed success 或丢失 call 关联。
+- 新增场景首次及连续 **20/20**；W148 Runtime Kernel 与正常 effectful ToolResult/Event 相邻回归
+  **2/2**，fmt/diff 通过。生产代码无需修改，无持久 AgentSession Store/API/UI。
+- 未覆盖正式事件落库/重连、tool row、模型后续行为、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
