@@ -5329,6 +5329,96 @@ mod tests {
         assert_eq!(repository.head().unwrap().target(), first.0["commit_id"].as_str().and_then(|id| git2::Oid::from_str(id).ok()));
     }
 
+    #[tokio::test]
+    async fn pending_commit_fences_user_staged_change_after_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let repository = initialize_git_repository(&workspace);
+        configure_git_identity(&repository);
+        let initial_commit = repository.head().unwrap().target().unwrap();
+        std::fs::write(workspace.join("tracked.txt"),b"committed before receipt\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        drop(index);
+
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.vcs");
+        pending.action_id = ActionId::from("workspace.vcs/commit");
+        ensure_test_effect_context(&store,&pending).await;
+        let input = StrictJsonValue(json!({"message":"commit before receipt loss"}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        ).await.unwrap() else {
+            panic!("fresh commit effect must reserve")
+        };
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        let scope = host.workspace_scope(&pending).unwrap();
+        let receipt = host.invoke_vcs_commit(
+            &scope,"workspace.vcs","commit before receipt loss",
+        ).await.unwrap();
+        let committed = git2::Oid::from_str(receipt.0["commit_id"].as_str().unwrap()).unwrap();
+        assert_ne!(committed,initial_commit);
+        assert_eq!(repository.head().unwrap().target(),Some(committed));
+
+        drop(reservation);
+        drop(host);
+        drop(store);
+        drop(repository);
+        database.close().await;
+
+        let repository = git2::Repository::open(&workspace).unwrap();
+        std::fs::write(workspace.join("tracked.txt"),b"user staged after lost receipt\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        drop(index);
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+
+        let same_key = invoke(&restarted,pending.clone(),"workspace.vcs/commit",input.0.clone())
+            .await.unwrap_err();
+        assert_eq!(same_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+
+        let mut different = pending.clone();
+        different.idempotency_key = IdempotencyKey::from("different-commit-key");
+        different.operation_id = OperationId::from("different-commit-operation");
+        let error = invoke(&restarted,different.clone(),"workspace.vcs/commit",json!({
+            "message":"must not commit user staging"
+        })).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_eq!(repository.head().unwrap().target(),Some(committed));
+        let mut walk = repository.revwalk().unwrap();
+        walk.push_head().unwrap();
+        assert_eq!(walk.count(),2);
+        let index = repository.index().unwrap();
+        let entry = index.get_path(Path::new("tracked.txt"),0).unwrap();
+        assert_eq!(repository.find_blob(entry.id).unwrap().content(),b"user staged after lost receipt\n");
+        assert_eq!(std::fs::read(workspace.join("tracked.txt")).unwrap(),b"user staged after lost receipt\n");
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn vcs_commit_result_loss_replays_after_restart_without_running_hook_again() {
