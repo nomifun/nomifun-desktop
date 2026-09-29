@@ -5386,6 +5386,78 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn database_close_during_busy_admission_has_no_orphan_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.files");
+        call.action_id = ActionId::from("workspace.files/write");
+        call.idempotency_key = IdempotencyKey::from("close-during-busy-admission");
+        call.operation_id = OperationId::from("close-during-busy-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"closing.txt","content":"execute only after store restart"
+        }));
+
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let blocked_host = Arc::clone(&host);
+        let blocked_call = call.clone();
+        let blocked_input = input.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_host.invoke(Wave2HostRequest {
+                context:blocked_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:blocked_input },
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!blocked.is_finished());
+        assert!(!workspace.join("closing.txt").exists());
+        let closing = tokio::spawn(async move { database.close().await });
+        let error = tokio::time::timeout(Duration::from_secs(6),blocked).await
+            .expect("in-flight admission must stop at the bounded SQLite busy timeout")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        closing.await.unwrap();
+        assert!(!workspace.join("closing.txt").exists());
+        writer.commit().await.unwrap();
+        drop(host);
+        drop(store);
+        lock_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        assert!(reopened_store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let result = restarted.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("closing.txt")).unwrap(),b"execute only after store restart");
+        let effects = reopened_store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn pending_patch_fences_same_and_new_keys_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();

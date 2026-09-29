@@ -2387,6 +2387,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖真实磁盘满/IO fault、连接池关闭与在途 admission 竞态、正式应用 shutdown、其他 Action/平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE 或共享阶段。
 
+### Store close 与 busy admission 竞态（W139，基线 `c6dda2293`）
+
+- S-D09-20 / LIFE-003/023/024、CONC-014、A04/A11/A17/A19：独立连接持有 SQLite writer lock 后，
+  从生产 Wave2 Host 发起文件写并确认请求卡在 admission，再启动 canonical Store close。请求按约
+  5 秒 busy timeout 返回 `CAPABILITY_UNAVAILABLE`，close 随在途连接归约完成，磁盘零文件。
+- 释放锁并从同一路径重开后，数据库仍为零 Effect；同 operation/key 才首次执行并得到唯一 Returned。
+  首次产品运行及连续 **20/20**，W138 pre-closed Store 与 W133 busy timeout 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖 terminal settlement 与 Store close 竞态、正式应用 shutdown 顺序、真实磁盘/IO fault、其他
+  Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
