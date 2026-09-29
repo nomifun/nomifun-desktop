@@ -1962,15 +1962,15 @@ fn publish_patch_file_with_cleanup_hook(
             #[cfg(not(windows))]
             _after_source_verification();
             #[cfg(target_os = "macos")]
-            copy_macos_extended_acl(&_writable_target, &staged_file).map_err(|error| {
+            copy_macos_publication_metadata(&_writable_target, &staged_file).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::PermissionDenied {
                     AppError::Forbidden(format!(
-                        "cannot preserve patch target ACL '{}': {error}",
+                        "cannot preserve patch target ACL/xattrs '{}': {error}",
                         path.display()
                     ))
                 } else {
                     AppError::Internal(format!(
-                        "cannot preserve patch target ACL '{}': {error}",
+                        "cannot preserve patch target ACL/xattrs '{}': {error}",
                         path.display()
                     ))
                 }
@@ -2180,23 +2180,23 @@ fn open_writable_publication_target(
 }
 
 #[cfg(target_os = "macos")]
-fn copy_macos_extended_acl(
+fn copy_macos_publication_metadata(
     source: &std::fs::File,
     target: &std::fs::File,
 ) -> std::io::Result<()> {
     use std::os::fd::AsRawFd;
 
-    // `rename` replaces the target inode and therefore drops its extended
-    // ACL. Copy the exact target ACL onto the verified staging inode before
-    // the atomic publication. Any ACL update injected through the final
-    // pre-publication hook is observed here; a copy failure aborts before the
-    // target name changes.
+    // `rename` replaces the target inode and therefore drops its extended ACL,
+    // xattrs and resource fork. Copy those exact target metadata classes onto
+    // the verified staging inode before atomic publication. Any ACL/xattr
+    // update injected through the final pre-publication hook is observed here;
+    // a copy or durability failure aborts before the target name changes.
     let copied = unsafe {
         libc::fcopyfile(
             source.as_raw_fd(),
             target.as_raw_fd(),
             std::ptr::null_mut(),
-            libc::COPYFILE_ACL,
+            libc::COPYFILE_ACL | libc::COPYFILE_XATTR,
         )
     };
     if copied != 0 {
@@ -3306,6 +3306,41 @@ mod tests {
         String::from_utf8(output.stdout).expect("ACL listing is UTF-8")
     }
 
+    #[cfg(target_os = "macos")]
+    fn write_macos_xattr(path: &Path, name: &str, value: &str) {
+        let output = std::process::Command::new("/usr/bin/xattr")
+            .arg("-w")
+            .arg(name)
+            .arg(value)
+            .arg(path)
+            .output()
+            .expect("macOS xattr fixture requires /usr/bin/xattr");
+        assert!(
+            output.status.success(),
+            "failed to write xattr on {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read_macos_xattr(path: &Path, name: &str) -> String {
+        let output = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg(name)
+            .arg(path)
+            .output()
+            .expect("macOS xattr fixture requires /usr/bin/xattr");
+        assert!(
+            output.status.success(),
+            "failed to read xattr on {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value = String::from_utf8(output.stdout).expect("xattr value is UTF-8");
+        value.strip_suffix('\n').unwrap_or(&value).to_owned()
+    }
+
     #[cfg(any(windows, unix))]
     fn cleanup_race_fixture() -> tempfile::TempDir {
         let mut builder = tempfile::Builder::new();
@@ -3396,6 +3431,40 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"intended", "{observed}");
         assert!(listing.contains("group:everyone deny execute"), "{observed}");
         assert!(listing.contains("group:staff deny execute"), "{observed}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_replacement_copies_xattrs_after_the_final_prepublication_hook() {
+        let fixture = cleanup_race_fixture();
+        let target = fixture.path().join("target.txt");
+        let temporary = fixture.path().join("stage.tmp");
+        fs::write(&target, b"original").unwrap();
+        write_macos_xattr(&target, "com.nomifun.reliability.before", "before");
+
+        let result = publish_patch_file_with_cleanup_hook(
+            &target,
+            b"intended",
+            &temporary,
+            PublicationSource::Matching(b"original"),
+            || {},
+            || {},
+            || write_macos_xattr(&target, "com.nomifun.reliability.after", "after"),
+            || {},
+            || Ok(()),
+        );
+
+        let before = read_macos_xattr(&target, "com.nomifun.reliability.before");
+        let after = read_macos_xattr(&target, "com.nomifun.reliability.after");
+        let observed = format!(
+            "result={result:?}; target={:?}; before={before:?}; after={after:?}",
+            fs::read(&target)
+        );
+        fs::write(fixture.path().join("observation.txt"), &observed).unwrap();
+        assert!(result.is_ok(), "{observed}");
+        assert_eq!(fs::read(&target).unwrap(), b"intended", "{observed}");
+        assert_eq!(before, "before", "{observed}");
+        assert_eq!(after, "after", "{observed}");
     }
 
     #[cfg(unix)]
