@@ -1652,6 +1652,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 并发短进程、PTY/ConPTY、macOS、真实应用/UI、系统级内存采样及更长 soak 仍待验；不关闭完整
   PROC-044 或共享阶段。
 
+### Unix 启动事务内 setup deadline（W91，基线 `1608e82be`）
+
+- S-D04-20 / PROC-047、A08/A11/A13/A17/A19：在 WSL2 Linux 的确定性 fault hook 中，spawn gate
+  被占用 300 ms 时，新 start 只消费原 100 ms setup deadline，结果在 250 ms 内返回；blocking worker
+  完成退出，watchdog PID 保持 0，用户 marker 未创建。另把 blocking transaction 卡在 fork 前，
+  75 ms deadline 后保守返回 `StartLost`；释放 worker 后 leader/watchdog 仍均为 0，marker 不存在。
+- 第三条在 watchdog 已创建后扣留 ACK。唯一 100 ms setup deadline 内返回 `StartLost`，总耗时小于
+  350 ms，没有重新授予 cleanup budget；用户代码从未执行，exact watchdog 随后只 reap 一次并消失。
+  三项生产实现首次满足，首轮 **3/3**，每项重复 **20/20**，最终残留 owner 进程为 0。
+- 首次内联 WSL 命令因宿主引号损坏而把结果目录解析为空，在任何 Cargo 测试前退出；夹具失败独立
+  保留，改用落盘 Bash 脚本后通过。本批未修改 Unix 启动事务。
+- macOS、PTY setup deadline、fork/exec 临界点的真实调度竞争、正式 Tauri/UI/角色及长期压力仍待验；
+  不关闭完整 PROC-047 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
