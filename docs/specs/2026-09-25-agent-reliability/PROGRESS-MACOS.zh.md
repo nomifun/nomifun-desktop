@@ -189,11 +189,12 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `creative-studio.default` 与确切 Canvas/Asset Library。已选 Skill 的正文/digest/来源进入冻结
   Snapshot 与 system context；未选 Skill 在 provider 调用前拒绝，恢复时必须按冻结内容重水化；
   stale/missing 产品选择不能让新 Canvas Session 继承错误 target。未发现需改产品代码的新根因。
-- 验证：Agent Runtime 计划 **8/8**、完成账本 **4/4**、Turn/Session/Skill **6/6**；Agent Session
+- 验证：Agent Runtime 计划 **8/8**、完成账本 **7/7**、Turn/Session/Skill **6/6**；Agent Session
   冻结/准入 **5/5**；Control Plane Skill/Revision 锁 **4/4**；App canonical Session、模型持久化、
-  官方 Agent 复用及伙伴/画布入口 **9/9**，合计 **36/36**、0 failed、0 ignored。完整日志：
+  官方 Agent 复用及伙伴/画布入口 **9/9**。同步远端 `93b5f58e9` 后，新增 command-failure 完成计数
+  3 项与 active-plan repair 1 项亦通过，当前合计 **40/40**、0 failed、0 ignored。完整日志：
   `2026-09-29/macos/m02-session-core/run-002-deterministic-post-sync/`，首次伙伴/画布三项记录另保留于
-  `m02-bindings-skills/run-001-deterministic/`。
+  `m02-bindings-skills/run-001-deterministic/`；合并后增量见 `m02-session-core/run-003-post-remote-command-failure/`。
 - 正式 Tauri 隔离夹具的两次预检分别因 dataset work-root receipt 与 work-root owner receipt 不一致而
   fail closed，未创建 Session、未消耗模型预算；未放宽保护。成对复制 data/work 身份后的 run-005
   启动、数据库完整性与端口清理通过，但 macOS 锁屏阻断 UI 输入/截图，已停止应用。因此 M02-02 仍须
