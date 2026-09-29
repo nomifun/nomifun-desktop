@@ -53,6 +53,8 @@ pub(crate) struct Wave2ApplicationHost {
     configured_workspace_root: PathBuf,
     #[cfg(test)]
     git_mutation_hook: Option<Arc<GitMutationTestHook>>,
+    #[cfg(test)]
+    effect_settlement_hook: Option<Arc<EffectSettlementTestHook>>,
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +144,8 @@ impl Wave2ApplicationHost {
             configured_workspace_root: workspace_root,
             #[cfg(test)]
             git_mutation_hook: None,
+            #[cfg(test)]
+            effect_settlement_hook: None,
         }
     }
 
@@ -197,9 +201,10 @@ impl Wave2ApplicationHost {
                     Err(error)
                 }
                 Err(error) => {
-                    finish_wave2_effect(
+                    finish_wave2_failed_effect(
                         &reservation,
-                        Wave2EffectCompletion::Failed(&error),
+                        context.action_id.as_ref(),
+                        &error,
                     )
                     .await?;
                     Err(error)
@@ -214,9 +219,28 @@ impl Wave2ApplicationHost {
         self
     }
 
+    #[cfg(test)]
+    fn with_effect_settlement_hook(mut self, hook: Arc<EffectSettlementTestHook>) -> Self {
+        self.effect_settlement_hook = Some(hook);
+        self
+    }
+
     async fn pause_after_git_admission_for_test(&self, action_id: &str) {
         #[cfg(test)]
         if let Some(hook) = &self.git_mutation_hook
+            && hook.action_id == action_id
+            && hook.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            hook.entered.notify_one();
+            hook.release.notified().await;
+        }
+        #[cfg(not(test))]
+        let _ = action_id;
+    }
+
+    async fn pause_before_effect_settlement_for_test(&self, action_id: &str) {
+        #[cfg(test)]
+        if let Some(hook) = &self.effect_settlement_hook
             && hook.action_id == action_id
             && hook.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
         {
@@ -238,6 +262,26 @@ struct GitMutationTestHook {
 
 #[cfg(test)]
 impl GitMutationTestHook {
+    fn new(action_id: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            action_id,
+            armed: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+#[cfg(test)]
+struct EffectSettlementTestHook {
+    action_id: &'static str,
+    armed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl EffectSettlementTestHook {
     fn new(action_id: &'static str) -> Arc<Self> {
         Arc::new(Self {
             action_id,
@@ -701,6 +745,26 @@ pub(crate) async fn finish_wave2_effect(
     Ok(())
 }
 
+async fn finish_wave2_failed_effect(
+    reservation: &Wave2EffectReservation,
+    action_id: &str,
+    owner_error: &Wave2HostPortError,
+) -> Result<(), Wave2HostPortError> {
+    finish_wave2_effect(
+        reservation,
+        Wave2EffectCompletion::Failed(owner_error),
+    )
+    .await
+    .map_err(|settlement_error| {
+        let owner_message = owner_error.message.chars().take(1024).collect::<String>();
+        let settlement_message = settlement_error.message.chars().take(1024).collect::<String>();
+        Wave2HostPortError::unavailable(format!(
+            "{action_id} owner failed with {}: {owner_message}; canonical failure observation could not be committed: {settlement_message}. The durable effect remains unsettled; automatic retry is disabled",
+            owner_error.code,
+        ))
+    })
+}
+
 impl Wave2HostPort for Wave2ApplicationHost {
     fn invoke<'a>(
         &'a self,
@@ -820,11 +884,13 @@ impl Wave2ApplicationHost {
                                     // Retain the durable pending resource fence.
                                     return Err(owner_error);
                                 }
-                                let _ = finish_wave2_effect(
+                                self.pause_before_effect_settlement_for_test(action_id).await;
+                                finish_wave2_failed_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Failed(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
-                                .await;
+                                .await?;
                                 Err(owner_error)
                             }
                         }
@@ -939,11 +1005,12 @@ impl Wave2ApplicationHost {
                                     // subset. Keep the durable resource fence.
                                     return Err(owner_error);
                                 }
-                                let _ = finish_wave2_effect(
+                                finish_wave2_failed_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Failed(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
-                                .await;
+                                .await?;
                                 Err(owner_error)
                             }
                         }
@@ -1054,11 +1121,12 @@ impl Wave2ApplicationHost {
                                 Err(error)
                             }
                             Err(error) => {
-                                let _ = finish_wave2_effect(
+                                finish_wave2_failed_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Failed(&error),
+                                    action_id,
+                                    &error,
                                 )
-                                .await;
+                                .await?;
                                 Err(error)
                             }
                         }
@@ -1120,11 +1188,12 @@ impl Wave2ApplicationHost {
                                 Err(owner_error)
                             }
                             Err(owner_error) => {
-                                let _ = finish_wave2_effect(
+                                finish_wave2_failed_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Failed(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
-                                .await;
+                                .await?;
                                 Err(owner_error)
                             }
                         }
@@ -1187,11 +1256,12 @@ impl Wave2ApplicationHost {
                                 Err(owner_error)
                             }
                             Err(owner_error) => {
-                                let _ = finish_wave2_effect(
+                                finish_wave2_failed_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Failed(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
-                                .await;
+                                .await?;
                                 Err(owner_error)
                             }
                         }
@@ -1280,9 +1350,10 @@ impl Wave2ApplicationHost {
                             }
                             Err(error) => {
                                 let owner_error = vcs_push_error(error);
-                                finish_wave2_effect(
+                                finish_wave2_failed_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Failed(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
                                 .await?;
                                 settlement.confirm();
@@ -5548,6 +5619,113 @@ mod tests {
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn failed_write_with_uncommitted_terminal_reports_the_settlement_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        let blocked_target = workspace.join("blocked");
+        std::fs::create_dir_all(&blocked_target).unwrap();
+        std::fs::write(blocked_target.join("keep.txt"),b"keep").unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let hook = EffectSettlementTestHook::new("workspace.files/write");
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone())
+            .with_effect_settlement_hook(Arc::clone(&hook)));
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.files");
+        call.action_id = ActionId::from("workspace.files/write");
+        call.idempotency_key = IdempotencyKey::from("failed-write-uncommitted-terminal");
+        call.operation_id = OperationId::from("failed-write-uncommitted-terminal-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"blocked","content":"must not replace a directory"
+        }));
+        let invoke_host = Arc::clone(&host);
+        let invoke_call = call.clone();
+        let invoke_input = input.clone();
+        let invocation = tokio::spawn(async move {
+            invoke_host.invoke(Wave2HostRequest {
+                context:invoke_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:invoke_input },
+            }).await
+        });
+        tokio::time::timeout(Duration::from_secs(5),hook.entered.notified()).await
+            .expect("known owner failure must reach terminal settlement");
+        assert_eq!(std::fs::read(blocked_target.join("keep.txt")).unwrap(),b"keep");
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        hook.release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(6),invocation).await
+            .expect("failed-effect settlement must stop at the bounded SQLite busy timeout")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner failed with CAPABILITY_UNAVAILABLE"),"{error:?}");
+        assert!(error.message.contains("terminal observation could not be committed"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(blocked_target.join("keep.txt")).unwrap(),b"keep");
+        writer.commit().await.unwrap();
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let same_key = invoke(&restarted,call.clone(),"workspace.files/write",input.0).await.unwrap_err();
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+        let mut different = call.clone();
+        different.idempotency_key = IdempotencyKey::from("failed-write-different-key");
+        different.operation_id = OperationId::from("failed-write-different-operation");
+        let different_key = invoke(&restarted,different,"workspace.files/write",json!({
+            "path":"other.txt","content":"must not run while failure is unsettled"
+        })).await.unwrap_err();
+        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert!(!workspace.join("other.txt").exists());
+        assert_eq!(reopened_store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+        assert_eq!(std::fs::read(blocked_target.join("keep.txt")).unwrap(),b"keep");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_write_with_committed_terminal_replays_the_owner_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let blocked_target = directory.path().join("blocked");
+        std::fs::create_dir(&blocked_target).unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let mut call = context(directory.path());
+        call.idempotency_key = IdempotencyKey::from("failed-write-committed-terminal");
+        call.operation_id = OperationId::from("failed-write-committed-terminal-operation");
+        let input = json!({"path":"blocked","content":"must not replace a directory"});
+        let first = invoke(&host,call.clone(),"workspace.files/write",input.clone()).await.unwrap_err();
+        assert_eq!(first.code,"CAPABILITY_UNAVAILABLE");
+        assert!(first.message.contains("changed to a non-regular file"),"{first:?}");
+        let effect_id = wave2_effect_id(&call).unwrap();
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Rejected);
+        let replay = invoke(&host,call.clone(),"workspace.files/write",input).await.unwrap_err();
+        assert_eq!(replay.code,first.code);
+        assert_eq!(replay.message,first.message);
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+        assert!(blocked_target.is_dir());
     }
 
     #[tokio::test]
