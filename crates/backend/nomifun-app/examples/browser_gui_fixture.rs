@@ -54,6 +54,7 @@ struct Fixture {
     screen_denied: AtomicBool,
     screen_observed: AtomicBool,
     input_verified: AtomicBool,
+    input_initial_plan_unavailable: AtomicBool,
     witnesses: Mutex<Vec<Value>>,
     failure: Mutex<Option<String>>,
     finish: Semaphore,
@@ -498,7 +499,10 @@ fn require_computer_success(body: &Value, call_id: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         !result.contains("Capability Kernel rejected")
             && !result.contains("plan needs reconsideration")
-            && !result.contains("[tool error]"),
+            && !result.contains("[tool error]")
+            && !result.contains("INVALID_TOOL_ARGUMENTS")
+            && !result.contains("\"status\":\"not_executed\"")
+            && !result.contains(" is not exposed in the current model tool definitions"),
         "Computer action {call_id} failed"
     );
     Ok(())
@@ -569,31 +573,30 @@ fn computer_input_operation(
         .ok_or_else(|| anyhow::anyhow!("Computer input fixture file missing"))?;
     let call = |id| computer_tool_result(body, id).is_some();
     if call("gui-computer-input-report") {
+        require_computer_success(body, "gui-computer-input-report")?;
         return Ok(None);
     }
     if call("gui-computer-input-plan-finish") {
+        let mut report = json!({
+            "summary":"The disposable TextEdit fixture was launched, edited with Command, Option and Control modifiers, and saved. The initial optional plan call was unavailable before the first atomic Computer effect and is disclosed as one tool error.",
+            "criteria":[{
+                "step":"Launch the disposable TextEdit fixture and verify Command, Option and Control input",
+                "disposition":"supported",
+                "evidence_call_ids":["gui-computer-input-observe-after-save"],
+                "rationale":"The latest post-save Accessibility observation proves the disposable TextEdit document is the active target, contains the expected modifier-derived value and has no edited-state marker.",
+                "requirement_ids":["input_0"]
+            }]
+        });
+        if fixture
+            .input_initial_plan_unavailable
+            .load(Ordering::SeqCst)
+        {
+            report["observed_tool_error_count"] = json!(1);
+        }
         return Ok(Some((
             "gui-computer-input-report".into(),
             "report_completion".into(),
-            json!({
-                "summary":"The disposable TextEdit fixture was launched, edited with Command, Option and Control modifiers, and saved.",
-                "criteria":[
-                    {
-                        "step":"Launch the disposable TextEdit fixture",
-                        "disposition":"supported",
-                        "evidence_call_ids":["gui-computer-input-observe-after-save"],
-                        "rationale":"The latest post-save Accessibility observation proves the disposable TextEdit document is the active target.",
-                        "requirement_ids":[]
-                    },
-                    {
-                        "step":"Verify Command, Option and Control input",
-                        "disposition":"supported",
-                        "evidence_call_ids":["gui-computer-input-observe-after-save"],
-                        "rationale":"The same latest observation contains the expected modifier-derived value and no edited-state marker.",
-                        "requirement_ids":["req-computer-input"]
-                    }
-                ]
-            }),
+            report,
         )));
     }
     if call("gui-computer-input-observe-after-save") {
@@ -833,39 +836,37 @@ fn computer_input_operation(
         )));
     }
     if call("gui-computer-input-plan-start") {
+        let result = computer_result_text(body, "gui-computer-input-plan-start")?;
+        if result.contains(
+            "tool \"update_plan\" is not exposed in the current model tool definitions",
+        ) {
+            fixture
+                .input_initial_plan_unavailable
+                .store(true, Ordering::SeqCst);
+        } else {
+            require_computer_success(body, "gui-computer-input-plan-start")?;
+        }
         return Ok(Some((
             "gui-computer-input-launch".into(),
             browser_tool(body, "computer/launch")?,
             json!({"action":"launch","target":file,"app":"TextEdit"}),
         )));
     }
-    if call("gui-computer-input-launch-guard") {
-        anyhow::ensure!(
-            computer_result_text(body, "gui-computer-input-launch-guard")?
-                .contains("update_plan"),
-            "Computer launch did not activate the Engine plan gate"
-        );
-        return Ok(Some((
-            "gui-computer-input-plan-start".into(),
-            "update_plan".into(),
-            json!({
-                "explanation":"Record the exact disposable desktop-control task before retrying the guarded launch effect.",
-                "requirements":[{
-                    "id":"req-computer-input",
-                    "description":"Launch the disposable TextEdit fixture and verify Command, Option and Control modifiers.",
-                    "source":{"input":0,"quote":"verify Command, Option and Control modifiers"}
-                }],
-                "plan":[
-                    {"step":"Launch the disposable TextEdit fixture","status":"in_progress"},
-                    {"step":"Verify Command, Option and Control input","status":"pending"}
-                ]
-            }),
-        )));
-    }
     Ok(Some((
-        "gui-computer-input-launch-guard".into(),
-        browser_tool(body, "computer/launch")?,
-        json!({"action":"launch","target":file,"app":"TextEdit"}),
+        "gui-computer-input-plan-start".into(),
+        "update_plan".into(),
+        json!({
+            "explanation":"Record the exact disposable desktop-control task before the first launch effect.",
+            "requirements":[{
+                "id":"req-computer-input",
+                "description":"Launch the disposable TextEdit fixture and verify Command, Option and Control modifiers.",
+                "source":{"input":0,"quote":"verify Command, Option and Control modifiers"}
+            }],
+            "plan":[
+                {"step":"Launch the disposable TextEdit fixture","status":"in_progress"},
+                {"step":"Verify Command, Option and Control input","status":"pending"}
+            ]
+        }),
     )))
 }
 
@@ -1105,6 +1106,7 @@ async fn main() -> anyhow::Result<()> {
         screen_denied: AtomicBool::new(false),
         screen_observed: AtomicBool::new(false),
         input_verified: AtomicBool::new(false),
+        input_initial_plan_unavailable: AtomicBool::new(false),
         witnesses: Mutex::new(Vec::new()),
         failure: Mutex::new(None),
         finish: Semaphore::new(0),
@@ -1133,7 +1135,7 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
             }),
         )
         .route(
