@@ -169,6 +169,122 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   修改，无模型/UI。两个完整 host invocation 同时停在 owner 前、跨 action 竞态、跨 owner 错配绑定、
   owner 核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/LIFE 或共享阶段。
 
+- S-D09-08（CONC-015、FILE-038、VCS-004/014、LIFE-006、AUTH-009、A05/A13/A17/A19 跨 Action
+  workspace admission 子断言）：W124 用两个独立 SQLite pool/host/Session 同时 reserve 文件写与 Git
+  stage。每轮唯一 workspace fence 恰好放行一个 Effect；随后只调用 winner 对应的实际 FileService 或
+  VCS stage owner。关闭连接再重开后 loser action 仍被 Pending 拒绝；若文件写获胜，Git index 保持
+  base 且只出现新文件；若 stage 获胜，index 为 candidate blob 且新文件不存在，HEAD 始终不变。
+  新增竞态首次及连续 **20/20**，W123 同 action 竞态及两类 owner 正常路径 **3/3**。生产代码无需
+  修改，无模型/UI。两个完整 `invoke` 从入口并发、其他 Action 配对、跨 owner 错配绑定、owner 核对、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/VCS/LIFE 或共享阶段。
+
+- S-D09-09（CONC-002/015、FILE-020/025、A05/A13/A17/A19 完整 patch invocation 竞态子断言）：
+  W125 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发 patch 同一文件；两边
+  都绑定同一 exact source digest，但写入不同结果。每轮恰好一个成功；loser 要么在 winner Pending
+  时无 Effect 拒绝，要么在 winner 已结算后获 admission、再以 stale source Rejected。最终文件只等于
+  winner 内容，无第二次覆盖；winner 为 Returned，loser 为零 Effect 或唯一 Rejected，两 Session 都
+  无 unsettled。关闭数据库再重开后，第三 Session 可正常写新文件，证明 fence 已释放。新增竞态首次及
+  连续 **20/20**；不同路径并发、W116 receipt-loss、FileService 外部变更回滚及 W124 跨 Action
+  **4/4**。生产代码无需修改，无模型/UI。write/delete/Artifact 等其他完整 invocation 配对、正式 App
+  API 多会话、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE 或共享阶段。
+
+- S-D09-10（CONC-002/015、FILE-019/020/023、A05/A13/A17/A19 完整 write invocation 竞态子断言）：
+  W126 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发向同一路径写入两份
+  各 1 MiB 的不同字节。若第二个请求撞到 Pending，则一个成功、一个在 admission 拒绝；若第一个已
+  完成 settlement，则两次按可审计顺序成功。无论顺序，最终文件长度精确 1 MiB，全部为 `L` 或全部
+  为 `R`，没有交错/截断；每个已创建 Effect 都是 Returned，两 Session 无 unsettled。关闭数据库并
+  重开后，第三 Session 可正常覆盖，证明 fence 释放。新增竞态首次及连续 **20/20**；W125 patch
+  竞态、W115 receipt-loss、普通文件动作及 FileService 原子写 **6/6**。生产代码无需修改，无模型/UI。
+  8 MiB 边界并发、原生 replace 中途强杀、write/delete 配对、其他平台及 N3/LONG/99% 仍开放，
+  不关闭完整 CONC/FILE 或共享阶段。
+
+- S-D09-11（CONC-002/015、FILE-019/020/034、A05/A13/A17/A19 write/delete 完整 invocation 竞态
+  子断言）：W127 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发写入和删除
+  同一路径；write 内容为 1 MiB。允许一个请求撞到 Pending 而拒绝，也允许两次按某个串行顺序成功。
+  最终磁盘只可能不存在，或存在精确 1 MiB 全 `W` 文件；不会保留旧 `base`、半写或混合字节。每个
+  已创建 Effect 都是 Returned，两 Session 无 unsettled；数据库重开后第三 Session 可正常写入。
+  新增竞态首次及连续 **20/20**；W126 write/write、W117 receipt-loss、FileService 原子写与删除置换
+  **10/10**。生产代码无需修改，无模型/UI。跨 Session 全局事件顺序投影、8 MiB 边界、目录 write/
+  delete、原生调用中途强杀、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE 或共享阶段。
+
+- S-D09-12（CONC-015、ART-001/003/004、A05/A13/A17/A19 Artifact 完整 invocation 竞态子断言）：
+  W128 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发 publish 同一已观察
+  source/digest。允许一个请求撞到 Pending 而拒绝，也允许两次串行复用同一 content identity；所有
+  成功回执的 artifact ID/sha256 都等于预期 digest，managed 目录始终只有一个 64 位内容对象。每个
+  已创建 Effect 都是 Returned，两 Session 无 unsettled；数据库重开后第三 Session 分页读取仍得到
+  complete/同 digest。新增竞态首次及连续 **20/20**；W119 receipt-loss、App Artifact 正常路径与
+  ArtifactStore 并发 publication gate **4/4**。生产代码无需修改，无模型/UI。不同 source/digest 并发、
+  cleanup/Session 删除与 reader 竞态、大对象边界、其他平台及 N3/LONG/99% 仍开放，不关闭完整
+  CONC/ART 或共享阶段。
+
+- S-D09-13（CONC-015、ART-001/003/004/005、A05/A13/A17/A19 不同 Artifact 内容并发子断言）：
+  W129 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发 publish 两个不同
+  source/digest。允许一个撞 Pending 被拒，也允许两者串行成功；managed 目录中的 64 位对象集合必须
+  与成功回执 digest 集合精确相等，不允许无回执孤儿。每个对象的字节与自身 digest 对应，所有已创建
+  Effect 均 Returned、无 unsettled；数据库重开后逐个成功对象仍能完整读取。新增竞态首次及连续
+  **20/20**；W128 同内容、W119 receipt-loss、ArtifactStore 并发 gate 与 round trip **4/4**。生产代码
+  无需修改，无模型/UI。cleanup/Session 删除与 reader 竞态、不同源大对象、原生 link 中途强杀、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/ART 或共享阶段。
+
+- S-D03-56（ART-005/007、LIFE-028、A05/A13/A17/A19 live reader 与 workspace cleanup 身份子断言）：
+  W130 为 `WorkspaceArtifactStore` 增加 live reader 回归：先发布并缓存原 artifact handle，再尝试把整个
+  workspace 移走并在同路径放入冒用旧 digest 名称的替代字节。若原生系统允许移走，旧 Store 必须因
+  workspace identity 改变而拒绝，新 Store 必须因内容与 digest 不符而拒绝；若原生系统因 pinned
+  handles 拒绝移走，则旧 reader 继续只读原字节且替代 workspace 不出现。Windows 诊断明确走后者，
+  最终形状首次及连续 **20/20**；ArtifactStore 全组 **16/16**、managed workspace cleanup 与 W129
+  **2/2**。生产代码无需修改，无模型/UI。正式 AgentSession delete API 与 in-flight read 真并发、允许
+  rename 平台的原生分支、cleanup task 强杀、其他平台及 N3/LONG/99% 仍开放，不关闭完整 ART/LIFE
+  或共享阶段。
+
+- S-D03-57（ART-007、LIFE-028、OBS-004/006、A05/A13/A17/A19 正式 Session delete + live Artifact
+  子断言）：W131 将既有正式 App managed-workspace 删除测试升级为先发布并缓存 Artifact reader，再以
+  固定 idempotency key 删除 Session。Windows 首次真实返回 **500 / INTERNAL_ERROR**（`os error 32`），
+  虽保留 deleting fence，但把可预期的 live-handle cleanup 冲突误分类为内部故障；首败已保留。正式
+  HTTP 删除流程现把两条 workspace cleanup 分支统一映射为 **409 /
+  AGENT_SESSION_WORKSPACE_CLEANUP_FAILED**，保留底层详情与 deleting 状态。释放 Artifact owner 后，
+  同一 key 重试完成原 tombstone 和 managed workspace 清理；sibling managed workspace 与 user-selected
+  workspace 均保留。修复后首次及连续 **20/20**；删除顺序、managed workspace 边界和 W130 reader
+  **3/3**。首个相邻静态命令因错误 target 执行 0 项，已用 `--lib` 完整名纠正，不计通过。无模型/UI。
+  正式 Artifact read 请求与 DELETE 真并发、启动恢复 deleting Session 的 live-handle 重试、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 ART/LIFE/OBS 或共享阶段。
+
+- S-D03-58（ART-007、LIFE-020/028、OBS-004/006、A05/A13/A17/A19 deleting Session 启动恢复
+  子断言）：W132 使用磁盘 App、正式 `coding.codex` 资源集合和 managed workspace。live Artifact owner
+  使首进程 DELETE 精确返回 W131 的 409 并保留 `deleting`；随后释放 handle、关闭 Router/Services/DB，
+  不再发送 DELETE。第二进程从同一 data/work 配置启动，`create_router` 在路由发布前自动恢复 deleting
+  Session、删除 managed workspace 并写入 `deleted`；启动后同 key DELETE 只重放原 tombstone。
+  新增场景修正资源夹具后首次及连续 **20/20**；W131 409/retry、删除顺序与 Store delete fence
+  **4/4**。首个夹具用不消费 workspace 的 `chat.minimal` 被 `RESOURCE_SELECTION_UNUSED` 正确拒绝，
+  失败已保留。生产代码无需修改，无模型/UI。cleanup/recovery 进程中途再次强杀、正式 UI 删除、
+  非 Windows live-handle 路径及 N3/LONG/99% 仍开放，不关闭完整 ART/LIFE/OBS 或共享阶段。
+
+- S-D09-14（LIFE-023、CONC-014、FILE-038、A05/A13/A17/A19 SQLite busy admission 子断言）：
+  W133 在独立连接持有 SQLite writer lock 时，从生产 Wave2 Host 发起文件写。200 ms 时任务仍等待，
+  文件与 Effect 均不存在；约 5 秒 canonical busy timeout 后返回 `CAPABILITY_UNAVAILABLE`，仍为零物理
+  副作用/零 Effect。释放锁后同 operation/key 重试只执行一次并得到唯一 Returned。首版测试误用会
+  重复写 tool fact 的辅助 `invoke()`，在 writer lock 下由夹具 `.expect` panic；失败已保留，改为直接
+  调用生产 `Wave2HostPort::invoke` 后首次及连续 **20/20**。相邻 Store writer 等待与 W115 写入重开
+  **2/2**。生产代码无需修改，无模型/UI。owner 已执行后 terminal settlement 遇锁、锁期间取消、
+  进程强杀、其他 Action/平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
+- S-D09-15（LIFE-006/011/023、FILE-038、CONC-014、A04/A05/A07/A17/A19 终态写锁子断言）：
+  W134 在 canonical Effect 已 reserve、实际 `FileService` 已发布文件并返回 receipt 后，由独立连接持有
+  SQLite writer lock。`finish_wave2_effect` 等待约 5 秒后精确返回 `CAPABILITY_UNAVAILABLE`，数据库
+  仍为 Pending，已发布文件未被回滚或假报失败可重放。释放锁、用户再修改文件并关闭全部连接后，
+  从同一路径重开数据库；原 key 由 durable Pending 拒绝，新 key 由 workspace resource fence 拒绝，
+  用户修改保持且只有一条 Effect。首次产品运行及连续 **20/20**，W133 admission 与 W115 receipt-loss
+  相邻回归 **2/2**。首个证据目录命令因 PowerShell 参数错误未启动 cargo，已单独留痕，不计产品样本。
+  生产代码无需修改，无模型/UI。终态等待期间取消、精确边界强杀、DB 磁盘满/IO fault、其他 Action/
+  平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
+- S-D09-16（LIFE-023、CONC-014、FILE-038、A04/A10/A11/A19 busy admission future 取消子断言）：
+  W135 在独立连接持有 SQLite writer lock 时，从生产 Wave2 Host 发起文件写；200 ms 时仍为零文件、
+  零 Effect，随后取消并等待 Host task 得到 cancelled。释放锁并留出迟到完成窗口后仍为零副作用、
+  零 Effect；同 operation/key 的显式重试随后成功一次，最终只有一条 Returned Effect。首次运行及
+  连续 **20/20**，W133 busy timeout 与 W134 terminal busy 相邻回归 **2/2**。生产代码无需修改，
+  无模型/UI。正式 Runtime/UI cancel 传播、终态落库等待期间取消、精确边界强杀、其他 Action/平台及
+  N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

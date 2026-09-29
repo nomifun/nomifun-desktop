@@ -6806,7 +6806,16 @@ impl NomiCoreAgentApiState {
                     &session_id,
                     &deleting_session.agent_binding,
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    NomiCoreApiError::new(
+                        StatusCode::CONFLICT,
+                        "AGENT_SESSION_WORKSPACE_CLEANUP_FAILED",
+                        format!(
+                            "Managed Workspace cleanup failed after AgentSession deletion was fenced: {error}"
+                        ),
+                    )
+                })?;
             self.ssh_pool
                 .acknowledge_persisted_agent_session_teardowns(agent_session_id);
             return Ok(());
@@ -6850,7 +6859,16 @@ impl NomiCoreAgentApiState {
                 &session_id,
                 &deleting_session.agent_binding,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                NomiCoreApiError::new(
+                    StatusCode::CONFLICT,
+                    "AGENT_SESSION_WORKSPACE_CLEANUP_FAILED",
+                    format!(
+                        "Managed Workspace cleanup failed after AgentSession deletion was fenced: {error}"
+                    ),
+                )
+            })?;
         Ok(())
     }
 

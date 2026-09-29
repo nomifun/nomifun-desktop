@@ -3300,6 +3300,275 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_session_patch_invocations_preserve_exact_source_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("shared.txt"),b"base\n").unwrap();
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.files");
+        left.action_id = ActionId::from("workspace.files/patch");
+        left.idempotency_key = IdempotencyKey::from("left-patch");
+        left.operation_id = OperationId::from("left-patch-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.files");
+        right.action_id = ActionId::from("workspace.files/patch");
+        right.idempotency_key = IdempotencyKey::from("right-patch");
+        right.operation_id = OperationId::from("right-patch-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let source = nomifun_agent_contracts::digest_bytes(b"base\n");
+        let patch = |replacement: &str| json!({"files":[{
+            "path":"shared.txt",
+            "expected_source":{"kind":"existing","sha256":source.as_ref()},
+            "hunks":[{
+                "old_start":1,"old_lines":1,"new_start":1,"new_lines":1,
+                "lines":[{"kind":"remove","text":"base"},{"kind":"add","text":replacement}]
+            }]
+        }]});
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.files/patch",patch("LEFT")),
+            invoke(&right_host,right.clone(),"workspace.files/patch",patch("RIGHT")),
+        );
+        assert_ne!(left_result.is_ok(),right_result.is_ok(),"exact-source concurrent patches need one winner: left={left_result:?}, right={right_result:?}");
+        let (winner_context,loser_context,winner_bytes,loser_error) = match (left_result,right_result) {
+            (Ok(_),Err(error)) => (&left,&right,b"LEFT\n".as_slice(),error),
+            (Err(error),Ok(_)) => (&right,&left,b"RIGHT\n".as_slice(),error),
+            _ => unreachable!("one winner asserted"),
+        };
+        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),winner_bytes);
+        let winner_effects = left_store.list_effects(&winner_context.agent_session_id).await.unwrap();
+        assert_eq!(winner_effects.len(),1);
+        assert_eq!(winner_effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        let loser_effects = right_store.list_effects(&loser_context.agent_session_id).await.unwrap();
+        match loser_effects.as_slice() {
+            [] => assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}"),
+            [effect] => {
+                assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Rejected);
+                assert!(loser_error.message.contains("source precondition changed"),"{loser_error:?}");
+            }
+            other => panic!("loser Session produced extra effects: {other:?}"),
+        }
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut later = context(&workspace);
+        later.capability_id = CapabilityId::from("workspace.files");
+        later.action_id = ActionId::from("workspace.files/write");
+        let output = invoke(&restarted,later,"workspace.files/write",json!({
+            "path":"after.txt","content":"resource fence released"
+        })).await.unwrap();
+        assert_eq!(output.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),winner_bytes);
+        assert_eq!(std::fs::read(workspace.join("after.txt")).unwrap(),b"resource fence released");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_session_writes_publish_one_complete_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.files");
+        left.action_id = ActionId::from("workspace.files/write");
+        left.idempotency_key = IdempotencyKey::from("left-large-write");
+        left.operation_id = OperationId::from("left-large-write-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.files");
+        right.action_id = ActionId::from("workspace.files/write");
+        right.idempotency_key = IdempotencyKey::from("right-large-write");
+        right.operation_id = OperationId::from("right-large-write-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let left_content = "L".repeat(1024 * 1024);
+        let right_content = "R".repeat(1024 * 1024);
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.files/write",json!({
+                "path":"shared.txt","content":left_content
+            })),
+            invoke(&right_host,right.clone(),"workspace.files/write",json!({
+                "path":"shared.txt","content":right_content
+            })),
+        );
+        let left_ok = left_result.is_ok();
+        let right_ok = right_result.is_ok();
+        assert!(left_ok || right_ok,"both authorized writes failed: left={left_result:?}, right={right_result:?}");
+        for error in [left_result.as_ref().err(),right_result.as_ref().err()].into_iter().flatten() {
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+        }
+        let bytes = std::fs::read(workspace.join("shared.txt")).unwrap();
+        assert_eq!(bytes.len(),1024 * 1024);
+        assert!(bytes.iter().all(|byte|*byte == b'L') || bytes.iter().all(|byte|*byte == b'R'));
+        let left_effects = left_store.list_effects(&left.agent_session_id).await.unwrap();
+        let right_effects = right_store.list_effects(&right.agent_session_id).await.unwrap();
+        assert_eq!(left_effects.len(),if left_ok { 1 } else { 0 });
+        assert_eq!(right_effects.len(),if right_ok { 1 } else { 0 });
+        for effect in left_effects.iter().chain(right_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut later = context(&workspace);
+        later.capability_id = CapabilityId::from("workspace.files");
+        later.action_id = ActionId::from("workspace.files/write");
+        invoke(&restarted,later,"workspace.files/write",json!({
+            "path":"shared.txt","content":"after concurrent writes"
+        })).await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),b"after concurrent writes");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_write_and_delete_have_one_serializable_file_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("shared.txt"),b"base\n").unwrap();
+        let write_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let delete_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let write_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            write_database.pool().clone(),
+        ).await.unwrap();
+        let delete_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            delete_database.pool().clone(),
+        ).await.unwrap();
+        let write_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(write_store.clone());
+        let delete_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(delete_store.clone());
+        let mut write = context(&workspace);
+        write.capability_id = CapabilityId::from("workspace.files");
+        write.action_id = ActionId::from("workspace.files/write");
+        write.idempotency_key = IdempotencyKey::from("concurrent-write");
+        write.operation_id = OperationId::from("concurrent-write-operation");
+        let mut delete = context(&workspace);
+        delete.capability_id = CapabilityId::from("workspace.files");
+        delete.action_id = ActionId::from("workspace.files/delete");
+        delete.idempotency_key = IdempotencyKey::from("concurrent-delete");
+        delete.operation_id = OperationId::from("concurrent-delete-operation");
+        ensure_test_effect_context(&write_store,&write).await;
+        ensure_test_effect_context(&delete_store,&delete).await;
+        let content = "W".repeat(1024 * 1024);
+        let (write_result,delete_result) = tokio::join!(
+            invoke(&write_host,write.clone(),"workspace.files/write",json!({
+                "path":"shared.txt","content":content
+            })),
+            invoke(&delete_host,delete.clone(),"workspace.files/delete",json!({
+                "path":"shared.txt"
+            })),
+        );
+        let write_ok = write_result.is_ok();
+        let delete_ok = delete_result.is_ok();
+        assert!(write_ok || delete_ok,"both authorized operations failed: write={write_result:?}, delete={delete_result:?}");
+        for error in [write_result.as_ref().err(),delete_result.as_ref().err()].into_iter().flatten() {
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+        }
+        match std::fs::read(workspace.join("shared.txt")) {
+            Ok(bytes) => {
+                assert_eq!(bytes.len(),1024 * 1024);
+                assert!(bytes.iter().all(|byte|*byte == b'W'));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("concurrent file state is unreadable: {error}"),
+        }
+        let write_effects = write_store.list_effects(&write.agent_session_id).await.unwrap();
+        let delete_effects = delete_store.list_effects(&delete.agent_session_id).await.unwrap();
+        assert_eq!(write_effects.len(),if write_ok { 1 } else { 0 });
+        assert_eq!(delete_effects.len(),if delete_ok { 1 } else { 0 });
+        for effect in write_effects.iter().chain(delete_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        assert!(!write_store.has_unsettled_effects(&write.agent_session_id).await.unwrap());
+        assert!(!delete_store.has_unsettled_effects(&delete.agent_session_id).await.unwrap());
+
+        drop(write_host);
+        drop(delete_host);
+        drop(write_store);
+        drop(delete_store);
+        write_database.close().await;
+        delete_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut later = context(&workspace);
+        later.capability_id = CapabilityId::from("workspace.files");
+        later.action_id = ActionId::from("workspace.files/write");
+        invoke(&restarted,later,"workspace.files/write",json!({
+            "path":"shared.txt","content":"after write-delete race"
+        })).await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),b"after write-delete race");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn workspace_artifact_publish_and_read_use_the_file_domain_owner() {
         let directory = tempfile::tempdir().unwrap();
@@ -3409,6 +3678,206 @@ mod tests {
                 name.len() == 64 && name.bytes().all(|byte|byte.is_ascii_hexdigit())
             }).count();
         assert_eq!(published,1);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_artifact_publish_invocations_share_one_content_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("shared.txt"),b"shared artifact").unwrap();
+        let expected = nomifun_agent_contracts::digest_bytes(b"shared artifact");
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.artifacts");
+        left.action_id = ActionId::from("workspace.artifacts/publish");
+        left.idempotency_key = IdempotencyKey::from("left-artifact-publish");
+        left.operation_id = OperationId::from("left-artifact-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.artifacts");
+        right.action_id = ActionId::from("workspace.artifacts/publish");
+        right.idempotency_key = IdempotencyKey::from("right-artifact-publish");
+        right.operation_id = OperationId::from("right-artifact-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.artifacts/publish",json!({
+                "path":"shared.txt","expected_sha256":expected.as_ref()
+            })),
+            invoke(&right_host,right.clone(),"workspace.artifacts/publish",json!({
+                "path":"shared.txt","expected_sha256":expected.as_ref()
+            })),
+        );
+        let left_ok = left_result.is_ok();
+        let right_ok = right_result.is_ok();
+        assert!(left_ok || right_ok,"both authorized publications failed: left={left_result:?}, right={right_result:?}");
+        for result in [&left_result,&right_result] {
+            match result {
+                Ok(output) => {
+                    assert_eq!(output.0["artifact_id"],expected.as_ref());
+                    assert_eq!(output.0["sha256"],expected.as_ref());
+                }
+                Err(error) => {
+                    assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+                    assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+                }
+            }
+        }
+        let left_effects = left_store.list_effects(&left.agent_session_id).await.unwrap();
+        let right_effects = right_store.list_effects(&right.agent_session_id).await.unwrap();
+        assert_eq!(left_effects.len(),if left_ok { 1 } else { 0 });
+        assert_eq!(right_effects.len(),if right_ok { 1 } else { 0 });
+        for effect in left_effects.iter().chain(right_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        let artifacts = workspace.join(".nomifun/artifacts");
+        assert_eq!(std::fs::read(artifacts.join(expected.as_ref())).unwrap(),b"shared artifact");
+        let published = std::fs::read_dir(&artifacts).unwrap().filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.len() == 64 && name.bytes().all(|byte|byte.is_ascii_hexdigit())
+            }).count();
+        assert_eq!(published,1);
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let read = invoke(&restarted,context(&workspace),"workspace.artifacts/read",json!({
+            "artifact_id":expected.as_ref(),"offset":0,"limit":1024
+        })).await.unwrap();
+        assert_eq!(read.0["complete"],true);
+        assert_eq!(read.0["sha256"],expected.as_ref());
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_distinct_artifact_publications_match_success_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("left.txt"),b"left artifact").unwrap();
+        std::fs::write(workspace.join("right.txt"),b"right artifact").unwrap();
+        let left_digest = nomifun_agent_contracts::digest_bytes(b"left artifact");
+        let right_digest = nomifun_agent_contracts::digest_bytes(b"right artifact");
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.artifacts");
+        left.action_id = ActionId::from("workspace.artifacts/publish");
+        left.idempotency_key = IdempotencyKey::from("left-distinct-artifact");
+        left.operation_id = OperationId::from("left-distinct-artifact-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.artifacts");
+        right.action_id = ActionId::from("workspace.artifacts/publish");
+        right.idempotency_key = IdempotencyKey::from("right-distinct-artifact");
+        right.operation_id = OperationId::from("right-distinct-artifact-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.artifacts/publish",json!({
+                "path":"left.txt","expected_sha256":left_digest.as_ref()
+            })),
+            invoke(&right_host,right.clone(),"workspace.artifacts/publish",json!({
+                "path":"right.txt","expected_sha256":right_digest.as_ref()
+            })),
+        );
+        assert!(left_result.is_ok() || right_result.is_ok(),"both authorized publications failed: left={left_result:?}, right={right_result:?}");
+        let mut expected_objects = BTreeSet::new();
+        for (result,digest) in [(&left_result,&left_digest),(&right_result,&right_digest)] {
+            match result {
+                Ok(output) => {
+                    assert_eq!(output.0["artifact_id"],digest.as_ref());
+                    assert_eq!(output.0["sha256"],digest.as_ref());
+                    expected_objects.insert(digest.as_ref().to_owned());
+                }
+                Err(error) => {
+                    assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+                    assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+                }
+            }
+        }
+        let left_effects = left_store.list_effects(&left.agent_session_id).await.unwrap();
+        let right_effects = right_store.list_effects(&right.agent_session_id).await.unwrap();
+        assert_eq!(left_effects.len(),if left_result.is_ok() { 1 } else { 0 });
+        assert_eq!(right_effects.len(),if right_result.is_ok() { 1 } else { 0 });
+        for effect in left_effects.iter().chain(right_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        let artifacts = workspace.join(".nomifun/artifacts");
+        let published = std::fs::read_dir(&artifacts).unwrap().filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                (name.len() == 64 && name.bytes().all(|byte|byte.is_ascii_hexdigit())).then(||name.into_owned())
+            }).collect::<BTreeSet<_>>();
+        assert_eq!(published,expected_objects);
+        for id in &published {
+            let expected = if id == left_digest.as_ref() { b"left artifact".as_slice() } else { b"right artifact".as_slice() };
+            assert_eq!(std::fs::read(artifacts.join(id)).unwrap(),expected);
+        }
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let artifact_owner = restarted.artifacts.as_ref().unwrap();
+        for id in &published {
+            let read = artifact_owner.read(id,0,1024).unwrap();
+            assert!(read.complete);
+            assert_eq!(read.sha256,*id);
+        }
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
@@ -4207,6 +4676,119 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_file_and_vcs_effects_share_one_workspace_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let repository = initialize_git_repository(&workspace);
+        let initial_commit = repository.head().unwrap().target().unwrap();
+        std::fs::write(workspace.join("tracked.txt"),b"stage candidate\n").unwrap();
+        drop(repository);
+        let file_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let vcs_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let file_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            file_database.pool().clone(),
+        ).await.unwrap();
+        let vcs_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            vcs_database.pool().clone(),
+        ).await.unwrap();
+        let file_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(file_store.clone());
+        let vcs_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(vcs_store.clone());
+        let mut file = context(&workspace);
+        file.capability_id = CapabilityId::from("workspace.files");
+        file.action_id = ActionId::from("workspace.files/write");
+        file.idempotency_key = IdempotencyKey::from("cross-action-file");
+        file.operation_id = OperationId::from("cross-action-file-operation");
+        let mut vcs = context(&workspace);
+        vcs.capability_id = CapabilityId::from("workspace.vcs");
+        vcs.action_id = ActionId::from("workspace.vcs/stage");
+        vcs.idempotency_key = IdempotencyKey::from("cross-action-vcs");
+        vcs.operation_id = OperationId::from("cross-action-vcs-operation");
+        ensure_test_effect_context(&file_store,&file).await;
+        ensure_test_effect_context(&vcs_store,&vcs).await;
+        let file_input = StrictJsonValue(json!({"path":"file.txt","content":"file winner"}));
+        let vcs_input = StrictJsonValue(json!({"path":"tracked.txt"}));
+        let (file_result,vcs_result) = tokio::join!(
+            begin_wave2_effect(&file_store,&file,workspace_typed_binding(&file).unwrap(),&file_input),
+            begin_wave2_effect(&vcs_store,&vcs,workspace_typed_binding(&vcs).unwrap(),&vcs_input),
+        );
+        let (file_reservation,file_error) = match file_result {
+            Ok(Wave2EffectAdmission::Reserved(reservation)) => (Some(reservation),None),
+            Ok(Wave2EffectAdmission::Replay(_)) => panic!("fresh file effect cannot replay"),
+            Err(error) => (None,Some(error)),
+        };
+        let (vcs_reservation,vcs_error) = match vcs_result {
+            Ok(Wave2EffectAdmission::Reserved(reservation)) => (Some(reservation),None),
+            Ok(Wave2EffectAdmission::Replay(_)) => panic!("fresh VCS effect cannot replay"),
+            Err(error) => (None,Some(error)),
+        };
+        assert_ne!(file_reservation.is_some(),vcs_reservation.is_some());
+        let file_won = file_reservation.is_some();
+        let reservation = file_reservation.or(vcs_reservation).unwrap();
+        let loser_error = file_error.or(vcs_error).unwrap();
+        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
+        if file_won {
+            let scope = file_host.workspace_scope(&file).unwrap();
+            file_host.files.write_file_with_observation_for_agent_session(
+                &scope,"file.txt",b"file winner",
+            ).await.unwrap();
+        } else {
+            let scope = vcs_host.workspace_scope(&vcs).unwrap();
+            vcs_host.invoke_vcs_stage(&scope,"workspace.vcs","tracked.txt").await.unwrap();
+        }
+        let winner_context = if file_won { &file } else { &vcs };
+        let loser_context = if file_won { &vcs } else { &file };
+        let winner_effect_id = wave2_effect_id(winner_context).unwrap();
+
+        drop(reservation);
+        drop(file_host);
+        drop(vcs_host);
+        drop(file_store);
+        drop(vcs_store);
+        file_database.close().await;
+        vcs_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let blocked = if file_won {
+            invoke(&restarted,vcs.clone(),"workspace.vcs/stage",vcs_input.0.clone()).await
+        } else {
+            invoke(&restarted,file.clone(),"workspace.files/write",file_input.0.clone()).await
+        }.unwrap_err();
+        assert_eq!(blocked.code,"CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"),"{blocked:?}");
+        let repository = git2::Repository::open(&workspace).unwrap();
+        assert_eq!(repository.head().unwrap().target(),Some(initial_commit));
+        let index = repository.index().unwrap();
+        let entry = index.get_path(Path::new("tracked.txt"),0).unwrap();
+        let staged = repository.find_blob(entry.id).unwrap();
+        if file_won {
+            assert_eq!(staged.content(),b"base\n");
+            assert_eq!(std::fs::read(workspace.join("file.txt")).unwrap(),b"file winner");
+        } else {
+            assert_eq!(staged.content(),b"stage candidate\n");
+            assert!(!workspace.join("file.txt").exists());
+        }
+        assert_eq!(std::fs::read(workspace.join("tracked.txt")).unwrap(),b"stage candidate\n");
+        assert_eq!(reopened_store.read_effect(&winner_context.agent_session_id,&winner_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.list_effects(&loser_context.agent_session_id).await.unwrap().is_empty());
+        drop(staged);
+        drop(index);
+        drop(repository);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn durable_effect_pending_and_unknown_fences_survive_host_restart() {
         let pending_root = tempfile::tempdir().unwrap();
@@ -4362,6 +4944,221 @@ mod tests {
         assert!(reopened_store.read_effect(&different.agent_session_id, &wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
         assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
         assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after lost receipt");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn database_busy_timeout_prevents_file_effect_before_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.files");
+        call.action_id = ActionId::from("workspace.files/write");
+        call.idempotency_key = IdempotencyKey::from("busy-write");
+        call.operation_id = OperationId::from("busy-write-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let blocked_host = Arc::clone(&host);
+        let blocked_call = call.clone();
+        let input = StrictJsonValue(json!({
+            "path":"busy.txt","content":"must wait for canonical admission"
+        }));
+        let blocked_input = input.clone();
+        let mut blocked = tokio::spawn(async move {
+            blocked_host.invoke(Wave2HostRequest {
+                context:blocked_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:blocked_input },
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!blocked.is_finished(),"the writer must honor SQLite busy_timeout rather than bypassing the journal");
+        assert!(!workspace.join("busy.txt").exists());
+        assert!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        let error = tokio::time::timeout(Duration::from_secs(6),&mut blocked).await
+            .expect("effect admission must stop at the bounded SQLite busy timeout")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(!workspace.join("busy.txt").exists());
+        assert!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+
+        writer.commit().await.unwrap();
+        let result = host.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("busy.txt")).unwrap(),b"must wait for canonical admission");
+        let effects = store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn database_busy_admission_cancellation_has_no_late_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.files");
+        call.action_id = ActionId::from("workspace.files/write");
+        call.idempotency_key = IdempotencyKey::from("cancel-busy-admission");
+        call.operation_id = OperationId::from("cancel-busy-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"cancelled.txt","content":"execute only after explicit retry"
+        }));
+
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let blocked_host = Arc::clone(&host);
+        let blocked_call = call.clone();
+        let blocked_input = input.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_host.invoke(Wave2HostRequest {
+                context:blocked_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:blocked_input },
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!blocked.is_finished());
+        assert!(!workspace.join("cancelled.txt").exists());
+        assert!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        blocked.abort();
+        assert!(blocked.await.unwrap_err().is_cancelled());
+
+        writer.commit().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!workspace.join("cancelled.txt").exists());
+        assert!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none(),
+            "a cancelled SQLite admission must not arrive after its caller is gone");
+
+        let result = host.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("cancelled.txt")).unwrap(),b"execute only after explicit retry");
+        let effects = store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn terminal_database_busy_after_file_write_keeps_pending_fence_after_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.files");
+        pending.action_id = ActionId::from("workspace.files/write");
+        pending.idempotency_key = IdempotencyKey::from("terminal-busy-write");
+        pending.operation_id = OperationId::from("terminal-busy-write-operation");
+        ensure_test_effect_context(&store,&pending).await;
+        let input = StrictJsonValue(json!({
+            "path":"result.txt","content":"published before terminal lock"
+        }));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh file write effect must reserve")
+        };
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        let scope = host.workspace_scope(&pending).unwrap();
+        let receipt = host.files.write_file_with_observation_for_agent_session(
+            &scope,"result.txt",b"published before terminal lock",
+        ).await.unwrap();
+        assert!(receipt.created);
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"published before terminal lock");
+
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let output = StrictJsonValue(json!({"written":true,"path":"result.txt"}));
+        let error = tokio::time::timeout(
+            Duration::from_secs(6),
+            finish_wave2_effect(&reservation,Wave2EffectCompletion::Succeeded(&output)),
+        ).await.expect("terminal settlement must stop at the bounded SQLite busy timeout")
+            .unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("terminal observation could not be committed"),"{error:?}");
+        assert_eq!(store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"published before terminal lock");
+        writer.commit().await.unwrap();
+
+        std::fs::write(workspace.join("result.txt"),b"user edit after terminal timeout").unwrap();
+        drop(reservation);
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let same_key = invoke(&restarted,pending.clone(),"workspace.files/write",json!({
+            "path":"result.txt","content":"published before terminal lock"
+        })).await.unwrap_err();
+        assert_eq!(same_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+        let mut different = pending.clone();
+        different.idempotency_key = IdempotencyKey::from("terminal-busy-different-key");
+        different.operation_id = OperationId::from("terminal-busy-different-operation");
+        let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
+            "path":"result.txt","content":"must not overwrite user edit"
+        })).await.unwrap_err();
+        assert_eq!(different_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal timeout");
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
