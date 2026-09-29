@@ -228,6 +228,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   rename 平台的原生分支、cleanup task 强杀、其他平台及 N3/LONG/99% 仍开放，不关闭完整 ART/LIFE
   或共享阶段。
 
+- S-D03-57（ART-007、LIFE-028、OBS-004/006、A05/A13/A17/A19 正式 Session delete + live Artifact
+  子断言）：W131 将既有正式 App managed-workspace 删除测试升级为先发布并缓存 Artifact reader，再以
+  固定 idempotency key 删除 Session。Windows 首次真实返回 **500 / INTERNAL_ERROR**（`os error 32`），
+  虽保留 deleting fence，但把可预期的 live-handle cleanup 冲突误分类为内部故障；首败已保留。正式
+  HTTP 删除流程现把两条 workspace cleanup 分支统一映射为 **409 /
+  AGENT_SESSION_WORKSPACE_CLEANUP_FAILED**，保留底层详情与 deleting 状态。释放 Artifact owner 后，
+  同一 key 重试完成原 tombstone 和 managed workspace 清理；sibling managed workspace 与 user-selected
+  workspace 均保留。修复后首次及连续 **20/20**；删除顺序、managed workspace 边界和 W130 reader
+  **3/3**。首个相邻静态命令因错误 target 执行 0 项，已用 `--lib` 完整名纠正，不计通过。无模型/UI。
+  正式 Artifact read 请求与 DELETE 真并发、启动恢复 deleting Session 的 live-handle 重试、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 ART/LIFE/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

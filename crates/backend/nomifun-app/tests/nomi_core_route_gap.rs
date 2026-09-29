@@ -3513,6 +3513,14 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
     }
+    async fn delete(router: axum::Router, path: &str, key: &str) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method("DELETE").uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .header("Idempotency-Key", key).body(Body::from("{}")).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
     let (router, services) = common::build_local_trust_app(TRUST).await;
     fs::create_dir_all(&services.work_dir).unwrap();
     fs::write(
@@ -3697,14 +3705,36 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         child_workspace, session_workspaces[1],
         "a fork of a managed Session must receive its own writable workspace",
     );
-    let (status, deleted) = call(
-        router.clone(),
-        "DELETE",
-        &format!("/api/agent-sessions/{}", session_ids[0]),
-        json!({}),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{deleted}");
+    let artifact_source = session_workspaces[0].join("artifact-source.txt");
+    fs::write(&artifact_source,b"managed artifact before delete").unwrap();
+    let artifact_store = nomifun_file::WorkspaceArtifactStore::new(&session_workspaces[0]).unwrap();
+    let artifact = artifact_store.publish("artifact-source.txt",None).unwrap();
+    let cached = artifact_store.read(&artifact.artifact_id,0,1024).unwrap();
+    assert!(cached.complete);
+    assert_eq!(cached.sha256,artifact.artifact_id);
+    let delete_path = format!("/api/agent-sessions/{}",session_ids[0]);
+    let delete_key = "managed-workspace-live-artifact-delete";
+    let (first_status,first_delete) = delete(router.clone(),&delete_path,delete_key).await;
+    if first_status != StatusCode::OK {
+        assert_eq!(first_status,StatusCode::CONFLICT,"{first_delete}");
+        assert_eq!(first_delete["code"],"AGENT_SESSION_WORKSPACE_CLEANUP_FAILED");
+        let state:String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id=?")
+            .bind(&session_ids[0]).fetch_one(services.database.pool()).await.unwrap();
+        assert_eq!(state,"deleting","failed cleanup must retain the delete fence: {first_delete}");
+        if let Ok(read) = artifact_store.read(&artifact.artifact_id,0,1024) {
+            assert_eq!(read.sha256,artifact.artifact_id,"live reader cannot switch identity during failed cleanup");
+        }
+    }
+    drop(artifact_store);
+    let (status,deleted) = delete(router.clone(),&delete_path,delete_key).await;
+    assert_eq!(status,StatusCode::OK,"{deleted}");
+    if first_status == StatusCode::OK {
+        assert_eq!(deleted["data"]["deleted_at"],first_delete["data"]["deleted_at"],
+            "exact delete replay must retain the original tombstone");
+    }
+    let deleted_state:String = sqlx::query_scalar("SELECT state FROM agent_sessions WHERE agent_session_id=?")
+        .bind(&session_ids[0]).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(deleted_state,"deleted");
     assert!(!session_workspaces[0].exists(), "delete must reclaim only its managed workspace");
     assert!(session_workspaces[1].is_dir(), "deleting one Session must preserve its sibling");
     let custom_workspace = services
