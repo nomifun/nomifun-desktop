@@ -4132,6 +4132,89 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test]
+    async fn pending_patch_fences_same_and_new_keys_after_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("first.txt"),b"alpha\n").unwrap();
+        std::fs::write(workspace.join("second.txt"),b"beta\n").unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.files");
+        pending.action_id = ActionId::from("workspace.files/patch");
+        ensure_test_effect_context(&store,&pending).await;
+        let patch = |path: &str, old: &str, new: &str| json!({
+            "path":path,
+            "hunks":[{
+                "old_start":1,"old_lines":1,"new_start":1,"new_lines":1,
+                "lines":[{"kind":"remove","text":old},{"kind":"add","text":new}]
+            }]
+        });
+        let input = StrictJsonValue(json!({"files":[
+            patch("first.txt","alpha","ALPHA"),
+            patch("second.txt","beta","BETA")
+        ]}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh file patch effect must reserve")
+        };
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        let scope = host.workspace_scope(&pending).unwrap();
+        let request: AgentSessionPatchRequest = serde_json::from_value(input.0.clone()).unwrap();
+        let receipt = host.files.apply_patch_with_observation_for_agent_session(&scope,request)
+            .await.unwrap();
+        assert_eq!(receipt.file_count,2);
+        assert_eq!(std::fs::read(workspace.join("first.txt")).unwrap(),b"ALPHA\n");
+        assert_eq!(std::fs::read(workspace.join("second.txt")).unwrap(),b"BETA\n");
+
+        drop(reservation);
+        drop(host);
+        drop(store);
+        database.close().await;
+
+        std::fs::write(workspace.join("first.txt"),b"user first\n").unwrap();
+        std::fs::write(workspace.join("second.txt"),b"user second\n").unwrap();
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+
+        let same_key = invoke(&restarted,pending.clone(),"workspace.files/patch",input.0.clone())
+            .await.unwrap_err();
+        assert_eq!(same_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+
+        let mut different = pending.clone();
+        different.idempotency_key = IdempotencyKey::from("different-patch-key");
+        different.operation_id = OperationId::from("different-patch-operation");
+        let error = invoke(&restarted,different.clone(),"workspace.files/patch",json!({"files":[
+            patch("first.txt","user first","must-not-run-first"),
+            patch("second.txt","user second","must-not-run-second")
+        ]})).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
+        assert_eq!(std::fs::read(workspace.join("first.txt")).unwrap(),b"user first\n");
+        assert_eq!(std::fs::read(workspace.join("second.txt")).unwrap(),b"user second\n");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     fn initialize_git_repository(root: &Path) -> git2::Repository {
         let repository = git2::Repository::init(root).unwrap();
         std::fs::write(root.join("tracked.txt"), "base\n").unwrap();

@@ -133,6 +133,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   SQLite terminal commit 中的进程强杀、patch/delete 同类磁盘重开、文件结果人工核对、其他平台及
   N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE 或共享阶段。
 
+- S-D03-52（FILE-027/031/038、LIFE-006/007、A05/A13/A17/A19 多文件 patch receipt 丢失子断言）：
+  W116 在独立磁盘 SQLite 中 reserve 一个两文件 patch Effect，再由实际 `FileService` owner 原子把
+  `alpha/beta` 发布为 `ALPHA/BETA`；owner 返回两文件 receipt 后，夹具故意不写 canonical terminal。
+  关闭全部数据库连接后，用户把两文件分别改成新的字节；新 host 中原 key 由 durable Pending 拒绝，
+  新 key 使用能合法匹配当前用户文本的 patch，仍由 workspace resource fence 在 owner 前拒绝。
+  Effect 总数保持 1/Pending，两份用户字节均未被覆盖。新增断言首次及连续 **20/20**；App patch
+  正常/并发/全有或全无/权限路径 **4/4**，W115 写入重开 **1/1**，文件 owner patch **2/2**。
+  生产代码无需修改，无模型/UI。文件 worker/SQLite terminal commit 进程强杀、delete 同类磁盘重开、
+  patch 结果人工核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
