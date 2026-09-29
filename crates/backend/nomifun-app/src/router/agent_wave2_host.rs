@@ -4233,6 +4233,107 @@ mod tests {
         assert_eq!(repository.head().unwrap().target(), first.0["commit_id"].as_str().and_then(|id| git2::Oid::from_str(id).ok()));
     }
 
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_result_loss_replays_after_restart_without_running_hook_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "committed\n").unwrap();
+        let hook = repository.path().join("hooks/pre-commit");
+        let marker = directory.path().join("hook-runs.txt");
+        std::fs::write(&hook, "#!/bin/sh\nprintf x >> hook-runs.txt\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        invoke(
+            &host,
+            distinct_context(directory.path(), "stage-before-result-loss"),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let mut commit_context = distinct_context(directory.path(), "commit-result-loss");
+        commit_context.capability_id = CapabilityId::from("workspace.vcs");
+        commit_context.action_id = ActionId::from("workspace.vcs/commit");
+
+        // The transport consumer loses the response after the canonical
+        // receipt is durable. A restarted host must replay that receipt
+        // without entering either the hook or libgit2 commit path again.
+        drop(
+            invoke(
+                &host,
+                commit_context.clone(),
+                "workspace.vcs/commit",
+                json!({"message": "receipt survives response loss"}),
+            )
+            .await
+            .unwrap(),
+        );
+        let effect_id = wave2_effect_id(&commit_context).unwrap();
+        let durable_before_retry = store
+            .read_effect(&commit_context.agent_session_id, &effect_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable_before_retry.state,
+            nomifun_agent_session::AgentEffectState::Returned
+        );
+        let terminal_event_id = durable_before_retry.terminal_event_id.clone();
+        let head_before_retry = repository.head().unwrap().peel_to_commit().unwrap();
+        let commit_id = head_before_retry.id();
+        let tree_id = head_before_retry.tree_id();
+        let commit_count = repository.revwalk().unwrap().count();
+        let tree = head_before_retry.tree().unwrap();
+        let tracked = repository
+            .find_blob(tree.get_path(Path::new("tracked.txt")).unwrap().id())
+            .unwrap();
+        assert_eq!(tracked.content(), b"committed\n");
+        drop(tree);
+        drop(head_before_retry);
+
+        std::fs::write(
+            directory.path().join("tracked.txt"),
+            "local edit after response loss\n",
+        )
+        .unwrap();
+        drop(host);
+        let restarted = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let replay = invoke(
+            &restarted,
+            commit_context.clone(),
+            "workspace.vcs/commit",
+            json!({"message": "receipt survives response loss"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(replay.0["commit_id"], commit_id.to_string());
+        assert_eq!(replay.0["paths"], json!(["tracked.txt"]));
+        assert_eq!(std::fs::read(&marker).unwrap(), b"x");
+        let head_after_retry = repository.head().unwrap().peel_to_commit().unwrap();
+        assert_eq!(head_after_retry.id(), commit_id);
+        assert_eq!(head_after_retry.tree_id(), tree_id);
+        assert_eq!(repository.revwalk().unwrap().count(), commit_count);
+        assert_eq!(
+            std::fs::read(directory.path().join("tracked.txt")).unwrap(),
+            b"local edit after response loss\n"
+        );
+        let durable_after_retry = store
+            .read_effect(&commit_context.agent_session_id, &effect_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable_after_retry.terminal_event_id, terminal_event_id);
+    }
+
     #[tokio::test]
     async fn vcs_push_updates_a_real_bare_remote_and_replays_the_receipt() {
         let directory = tempfile::tempdir().unwrap();

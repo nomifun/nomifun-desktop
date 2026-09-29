@@ -38,7 +38,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
-| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径与 macOS pre-commit/身份/unknown fence 已有定向回归；其余 hook、remote/host 条件资源准备后继续，禁止共享生产 remote |
+| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径与 macOS pre-commit/身份/unknown fence、持久 commit receipt 重放已有定向回归；其余 hook、remote/host 条件资源准备后继续，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
@@ -251,6 +251,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   为 JSON 字符串，UI 保留 1 项可见异常，第二步修成数组后才完成（3 个模型步、87 条事件），因此
   不计零失败 CMD PASS。收紧撤销短语后的正式重建 `baec5c5f06e2…` 通过。opaque process 的内核级
   只读隔离、正式撤销 UI、参数字符串失败、其他 Agent/平台及 N3/100 seed/LONG/99% 仍开放。
+
+- S-D05-03（`VCS-009/014` 的持久 commit receipt、HEAD/tree 与用户本地编辑隔离子断言）：macOS
+  真实成功 `pre-commit` 后创建 commit，消费端故意丢弃返回；确认 effect 已持久为 `returned` 后销毁
+  host，追加用户 worktree 修改并以原 Session Store 重建。同 key 调用只返回原 receipt，不再执行
+  hook 或 libgit2 commit；HEAD OID、tree OID、commit count、committed blob 和 terminal event identity
+  均保持，后写本地修改未被覆盖。首次即通过，精确回归 **20/20**，相邻 VCS **16/16**，无需产品
+  代码修复。physical commit 与 terminal receipt 之间的崩溃/存储失败窗口仍只有 pending fence，尚缺
+  commit-intent 对账；push result-loss、正式 UI、其他平台及长期门槛仍开放，不关闭完整 VCS-009/014
+  或共享 D05。
 
 - S-D05-02（`VCS-006/008`，以及 `VCS-009/014`、`AUTH-009/013` 的 hook/unknown/scope/脱敏
   子断言）：macOS 首败确认 libgit2 commit 绕过可执行 `pre-commit`，hook `exit 7` 后仍创建提交。
