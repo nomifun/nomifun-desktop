@@ -128,6 +128,7 @@ pub(crate) enum RoleHostError {
     StaleObservationGeneration,
     ProviderUnavailable,
     ProviderFailure(String),
+    EffectSettlementFailure(String),
 }
 
 impl RoleHostError {
@@ -144,6 +145,7 @@ impl RoleHostError {
             Self::StaleObservationGeneration => "ROLE_HOST_STALE_OBSERVATION_GENERATION",
             Self::ProviderUnavailable => "ROLE_HOST_PROVIDER_UNAVAILABLE",
             Self::ProviderFailure(_) => "ROLE_HOST_PROVIDER_FAILURE",
+            Self::EffectSettlementFailure(_) => "CAPABILITY_UNAVAILABLE",
         }
     }
 }
@@ -180,6 +182,9 @@ impl fmt::Display for RoleHostError {
             }
             Self::ProviderUnavailable => formatter.write_str("role provider is unavailable"),
             Self::ProviderFailure(message) => write!(formatter, "role provider failed: {message}"),
+            Self::EffectSettlementFailure(message) => {
+                write!(formatter, "role effect settlement failed: {message}")
+            }
         }
     }
 }
@@ -845,7 +850,7 @@ impl RoleHostInvoker for ComputerRoleInvoker {
                 strategy,
             )
             .await
-            .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?
+            .map_err(|error| RoleHostError::EffectSettlementFailure(error.to_string()))?
             {
                 super::agent_wave2_host::Wave2EffectAdmission::Replay(result) => return Ok(result),
                 super::agent_wave2_host::Wave2EffectAdmission::Reserved(reservation) => {
@@ -859,16 +864,24 @@ impl RoleHostInvoker for ComputerRoleInvoker {
             Err(error) => {
                 if let Some((reservation, strategy)) = reservation.as_ref() {
                     let effect_error = Wave2HostPortError::new(error.code(), error.to_string());
-                    let completion = if strategy.is_external_uncertain()
+                    if strategy.is_external_uncertain()
                         && matches!(error, RoleHostError::ProviderFailure(_))
                     {
-                        super::agent_wave2_host::Wave2EffectCompletion::Uncertain(&effect_error)
-                    } else {
-                        super::agent_wave2_host::Wave2EffectCompletion::Failed(&effect_error)
-                    };
-                    super::agent_wave2_host::finish_wave2_effect(reservation, completion)
+                        super::agent_wave2_host::finish_wave2_effect(
+                            reservation,
+                            super::agent_wave2_host::Wave2EffectCompletion::Uncertain(&effect_error),
+                        )
                         .await
-                        .map_err(|terminal| RoleHostError::ProviderFailure(terminal.to_string()))?;
+                        .map_err(|terminal| RoleHostError::EffectSettlementFailure(terminal.to_string()))?;
+                    } else {
+                        super::agent_wave2_host::finish_wave2_failed_effect(
+                            reservation,
+                            effect_context.action_id.as_ref(),
+                            &effect_error,
+                        )
+                        .await
+                        .map_err(|terminal| RoleHostError::EffectSettlementFailure(terminal.to_string()))?;
+                    }
                 }
                 return Err(error);
             }
@@ -883,7 +896,7 @@ impl RoleHostInvoker for ComputerRoleInvoker {
                 super::agent_wave2_host::Wave2EffectCompletion::Succeeded(&output),
             )
             .await
-            .map_err(|error| RoleHostError::ProviderFailure(error.to_string()))?;
+            .map_err(|error| RoleHostError::EffectSettlementFailure(error.to_string()))?;
         }
         Ok(output)
     }
@@ -1058,6 +1071,16 @@ mod tests {
             .code(),
             "ROLE_HOST_RESOURCE_CARDINALITY"
         );
+    }
+
+    #[test]
+    fn effect_settlement_failure_is_not_projected_as_a_provider_failure() {
+        let error = RoleHostError::EffectSettlementFailure(
+            "canonical terminal observation is uncommitted".to_owned(),
+        );
+        assert_eq!(error.code(),"CAPABILITY_UNAVAILABLE");
+        assert!(error.to_string().contains("role effect settlement failed"));
+        assert!(!error.to_string().contains("role provider failed"));
     }
 
     #[cfg(feature = "computer-use")]

@@ -53,7 +53,7 @@ use crate::{
 
 use super::agent_wave2_host::{
     Wave2EffectAdmission, Wave2EffectCompletion, begin_wave2_exclusive_effect,
-    finish_wave2_effect,
+    finish_wave2_effect, finish_wave2_failed_effect,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -484,14 +484,20 @@ impl BrowserRoleOwner {
             }
             Err(error) => {
                 let host_error = Wave2HostPortError::from(error);
-                let completion = if strategy.is_external_uncertain()
+                if strategy.is_external_uncertain()
                     && browser_outcome_may_be_unknown(&host_error.code)
                 {
-                    Wave2EffectCompletion::Uncertain(&host_error)
+                    finish_wave2_effect(
+                        &reservation,
+                        Wave2EffectCompletion::Uncertain(&host_error),
+                    ).await?;
                 } else {
-                    Wave2EffectCompletion::Failed(&host_error)
-                };
-                finish_wave2_effect(&reservation, completion).await?;
+                    finish_wave2_failed_effect(
+                        &reservation,
+                        action.action_id(),
+                        &host_error,
+                    ).await?;
+                }
                 Err(host_error)
             }
         }
