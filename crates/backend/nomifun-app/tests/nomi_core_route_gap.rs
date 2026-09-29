@@ -418,6 +418,128 @@ async fn canonical_session_turn_dispatches_and_projects_without_legacy_rows() {
 }
 
 #[tokio::test]
+async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
+    const TRUST:&str = "settlement-history-cursor";
+    async fn call(
+        router:axum::Router,
+        method:&str,
+        path:&str,
+        body:Value,
+    ) -> (StatusCode,Value) {
+        let response = router.oneshot(
+            Request::builder().method(method).uri(path)
+                .header("x-nomi-local-trust",TRUST)
+                .header("content-type","application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap(),
+        ).await.unwrap();
+        let status=response.status();
+        let bytes=axum::body::to_bytes(response.into_body(),4*1024*1024).await.unwrap();
+        let value=if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() };
+        (status,value)
+    }
+    let (router,services)=common::build_local_trust_app(TRUST).await;
+    let provider=create_chat_provider(&router,TRUST,"Settlement history","step-3.7-flash",1).await;
+    let model=json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
+    let (status,preset)=call(router.clone(),"POST","/api/agent-presets/from-template/chat.minimal",json!({
+        "display_name":"Settlement history","reuse_existing":true,"model_route_refs":{},"chat_route_records":{},"model":model
+    })).await;
+    assert_eq!(status,StatusCode::OK,"{preset}");
+    let preset_id=preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status,session)=call(router.clone(),"POST","/api/agent-sessions",json!({
+        "preset_id":preset_id,"model":model,"title":"Settlement history"
+    })).await;
+    assert_eq!(status,StatusCode::OK,"{session}");
+    let session_id=session["data"]["agent_session_id"].as_str().unwrap().to_owned();
+    let typed_session=nomifun_agent_contracts::AgentSessionId::from(session_id.clone());
+    let store=nomifun_agent_session::AgentSessionStore::from_pool(
+        services.database.pool().clone(),
+    ).await.unwrap();
+    let (_,turn)=store.start_turn(
+        &typed_session,
+        nomifun_agent_contracts::EventProducerId::from("session_api"),
+        nomifun_agent_contracts::IdempotencyKey::from("settlement-http-turn"),
+        nomifun_agent_contracts::OperationId::from("settlement-http-turn"),
+        nomifun_agent_contracts::StrictJsonValue(json!({"content":"exercise settlement projection"})),
+    ).await.unwrap();
+    let turn_started=turn.record.unwrap().event_id;
+    let projection_id=uuid::Uuid::now_v7().to_string();
+    let tool=nomifun_agent_contracts::SessionEventAppend {
+        agent_session_id:typed_session.clone(),
+        event_id:nomifun_agent_contracts::EventId::from("settlement-http-tool-call"),
+        producer_id:nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+        idempotency_key:nomifun_agent_contracts::IdempotencyKey::from("settlement-http-tool-call"),
+        runtime_binding_id:None,
+        runtime_producer_seq:None,
+        semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
+            kind:nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
+            kind_version:1,
+            correlation_id:nomifun_agent_contracts::CorrelationId::from(projection_id.clone()),
+            causation_event_id:Some(turn_started),
+            payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                nomifun_agent_contracts::StrictJsonValue(json!({
+                    "operation_id":"settlement-http-operation","call_id":"settlement-http-call",
+                    "capability_id":"workspace.files","action_id":"workspace.files/write","name":"write_file"
+                })),
+            ),
+        },
+    };
+    let tool_ack=store.append_event(&tool).await.unwrap().ack.unwrap();
+    let result=nomifun_agent_contracts::SessionEventAppend {
+        agent_session_id:typed_session.clone(),
+        event_id:nomifun_agent_contracts::EventId::from("settlement-http-tool-result"),
+        producer_id:nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+        idempotency_key:nomifun_agent_contracts::IdempotencyKey::from("settlement-http-tool-result"),
+        runtime_binding_id:None,
+        runtime_producer_seq:None,
+        semantic_event:nomifun_agent_contracts::SemanticSessionEventDraft {
+            kind:nomifun_agent_contracts::SessionEventKind("tool/result-recorded".to_owned()),
+            kind_version:1,
+            correlation_id:nomifun_agent_contracts::CorrelationId::from(projection_id),
+            causation_event_id:Some(tool_ack.event_id),
+            payload:nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                nomifun_agent_contracts::StrictJsonValue(json!({
+                    "operation_id":"settlement-http-operation","call_id":"settlement-http-call","output":null,
+                    "error":"Capability Kernel rejected Agent Runtime Tool (CAPABILITY_UNAVAILABLE): The workspace owner reported success. Do not retry automatically. Re-read the affected owner state."
+                })),
+            ),
+        },
+    };
+    store.append_event(&result).await.unwrap();
+
+    let mut cursor:Option<String>=None;
+    let mut items=Vec::new();
+    let mut total=None;
+    loop {
+        let path=cursor.as_ref().map_or_else(
+            || format!("/api/agent-sessions/{session_id}/message-history?page_size=1"),
+            |cursor| format!("/api/agent-sessions/{session_id}/message-history?page_size=1&cursor={cursor}"),
+        );
+        let (status,page)=call(router.clone(),"GET",&path,json!({})).await;
+        assert_eq!(status,StatusCode::OK,"{page}");
+        let data=&page["data"];
+        let page_items=data["items"].as_array().unwrap();
+        assert_eq!(page_items.len(),1,"{page}");
+        let page_total=data["total"].as_u64().unwrap();
+        assert_eq!(*total.get_or_insert(page_total),page_total);
+        let item=page_items[0].clone();
+        cursor=Some(format!("{}:{}",item["created_at"].as_i64().unwrap(),item["message_id"].as_str().unwrap()));
+        items.push(item);
+        if !data["has_more"].as_bool().unwrap() { break; }
+        assert!(items.len()<10,"history cursor did not converge");
+    }
+    assert_eq!(items.len() as u64,total.unwrap());
+    let unique=items.iter().map(|item| item["message_id"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(),items.len());
+    let tools=items.iter().filter(|item| item["type"]=="tool_call").collect::<Vec<_>>();
+    assert_eq!(tools.len(),1,"{}",serde_json::to_string_pretty(&items).unwrap());
+    assert_eq!(tools[0]["status"],"error");
+    assert_eq!(tools[0]["content"]["status"],"error");
+    assert!(tools[0]["content"]["output"].as_str().unwrap().contains("Do not retry"));
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn started_agent_session_switches_model_then_agent_in_place_with_segmented_history() {
     const TRUST: &str = "started-session-model-switch";
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";

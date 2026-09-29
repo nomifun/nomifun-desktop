@@ -445,6 +445,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   修改，仅抽取共用 test fixture。无正式 HTTP/Realtime/UI。分页期间并发新事件、cursor 重连传输、
   tool row、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/OBS 或共享阶段。
 
+- S-D09-33（OBS-014/018/020、PORT-012、A03/A08/A09/A15/A17/A19 HTTP history cursor 子断言）：
+  W152 通过正式 Axum Router、本地信任认证和产品 API 创建 Provider/Preset/AgentSession，再由 canonical
+  Store 写入已验证的 settlement error tool call/result。`GET message-history?page_size=1` 逐页返回稳定
+  total/has_more；客户端按正式 `<created_at>:<message_id>` 生成 cursor 后完整收敛，所有 message ID
+  唯一，恰好一条 `type=tool_call`、顶层与 content 均为 error，output 保留 “Do not retry” 指引。
+  新增场景首次及连续 **20/20**；W151 磁盘/cursor 下层相邻回归 **1/1**。生产代码无需修改，无
+  Realtime/UI。分页期间并发新事件、Realtime 重连、正式 renderer tool row、其他平台及 N3/LONG/99%
+  仍开放，不关闭完整 PORT/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

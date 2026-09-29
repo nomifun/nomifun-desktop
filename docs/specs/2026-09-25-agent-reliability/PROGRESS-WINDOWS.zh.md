@@ -2562,6 +2562,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖分页期间并发新事件、cursor 重连传输、tool row、其他平台及 N3/100 seed/LONG/99%；不关闭
   完整 LIFE/OBS 或共享阶段。
 
+### HTTP message-history cursor 传输（W152，基线 `68bfe029d`）
+
+- S-D09-33 / OBS-014/018/020、PORT-012、A03/A08/A09/A15/A17/A19：通过正式 Axum Router、本地信任
+  认证和产品 API 创建 Provider/Preset/AgentSession，再由 canonical Store 写入已验证的 settlement
+  error tool call/result。
+- `GET message-history?page_size=1` 逐页返回稳定 total/has_more；按正式
+  `<created_at>:<message_id>` 生成 cursor 后完整收敛，所有 message ID 唯一，恰好一条
+  `type=tool_call`，顶层与 content 均为 error，output 保留 “Do not retry” 指引。
+- 新增场景首次及连续 **20/20**；W151 磁盘/cursor 下层相邻回归 **1/1**，fmt/diff 通过。生产代码
+  无需修改，无 Realtime/UI。
+- 未覆盖分页期间并发新事件、Realtime 重连、正式 renderer tool row、其他平台及 N3/100 seed/
+  LONG/99%；不关闭完整 PORT/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
