@@ -2364,6 +2364,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式 Runtime/UI cancel 与 Turn 终态的事务顺序、精确边界强杀、DB 磁盘满/IO fault、其他
   Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+### 文件发布后的 terminal Store 不可用（W137，基线 `40fc56863`）
+
+- S-D09-18 / LIFE-006/011/024、FILE-038、A04/A07/A17/A19：canonical Effect reserve 且实际
+  `FileService` 已发布文件并取得 receipt 后关闭数据库连接池。`finish_wave2_effect` 精确返回
+  `CAPABILITY_UNAVAILABLE`，已发布文件保持。
+- 用户修改文件后重新打开同一路径数据库，原 Effect 仍为 Pending；原 key 由 durable Pending 拒绝，
+  新 key 由 workspace resource fence 拒绝，用户内容保持且只有一条 Effect。首次产品运行及连续
+  **20/20**，W115 receipt-loss 与 W134 terminal busy 相邻回归 **2/2**，fmt/diff 通过。生产代码
+  无需修改，无模型/UI。
+- 未覆盖真实磁盘满/写入 IO fault、WAL/fsync 故障、正式应用 shutdown 竞态、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
