@@ -4051,6 +4051,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_workspace_effect_fences_another_session_after_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut first = context(&workspace);
+        first.capability_id = CapabilityId::from("workspace.files");
+        first.action_id = ActionId::from("workspace.files/write");
+        ensure_test_effect_context(&store,&first).await;
+        let input = StrictJsonValue(json!({"path":"first.txt","content":"first session published"}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_effect(
+            &store,&first,workspace_typed_binding(&first).unwrap(),&input,
+        ).await.unwrap() else {
+            panic!("first Session effect must reserve")
+        };
+        let first_effect_id = wave2_effect_id(&first).unwrap();
+        let scope = host.workspace_scope(&first).unwrap();
+        host.files.write_file_with_observation_for_agent_session(
+            &scope,"first.txt",b"first session published",
+        ).await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("first.txt")).unwrap(),b"first session published");
+
+        drop(reservation);
+        drop(host);
+        drop(store);
+        database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut second = context(&workspace);
+        second.capability_id = CapabilityId::from("workspace.files");
+        second.action_id = ActionId::from("workspace.files/write");
+        second.idempotency_key = IdempotencyKey::from("second-session-write");
+        second.operation_id = OperationId::from("second-session-operation");
+        let blocked = invoke(&restarted,second.clone(),"workspace.files/write",json!({
+            "path":"second.txt","content":"must not run"
+        })).await.unwrap_err();
+        assert_eq!(blocked.code,"CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"),"{blocked:?}");
+        assert_ne!(first.agent_session_id,second.agent_session_id);
+        assert_eq!(reopened_store.read_effect(&first.agent_session_id,&first_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.read_effect(&second.agent_session_id,&wave2_effect_id(&second).unwrap()).await.unwrap().is_none());
+        assert_eq!(reopened_store.list_effects(&first.agent_session_id).await.unwrap().len(),1);
+        assert!(reopened_store.list_effects(&second.agent_session_id).await.unwrap().is_empty());
+        assert_eq!(std::fs::read(workspace.join("first.txt")).unwrap(),b"first session published");
+        assert!(!workspace.join("second.txt").exists());
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test]
     async fn durable_effect_pending_and_unknown_fences_survive_host_restart() {
         let pending_root = tempfile::tempdir().unwrap();
         let store = test_effect_store().await;

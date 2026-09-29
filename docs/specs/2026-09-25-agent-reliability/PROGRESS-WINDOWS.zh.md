@@ -2176,6 +2176,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   commit 进程强杀、stage 结果人工核对、linked worktree/submodule、其他平台及 N3/100 seed/LONG/99%；
   不关闭完整 VCS/LIFE 或共享阶段。
 
+### 跨 Session workspace Pending fence（W122，基线 `fd0b71a98`）
+
+- S-D09-06 / CONC-015、FILE-038、LIFE-006/007、AUTH-009、A05/A13/A17/A19：Session A 在独立
+  磁盘 SQLite 中 reserve Effect 并由实际 `FileService` 发布 `first.txt`；夹具故意丢失 terminal receipt，
+  关闭 host、Store 与全部数据库连接。
+- 重开后创建同一认证 owner、同一物理 workspace 的独立 Session B。B 的不同 operation/key 在文件
+  owner 前被全局 unsettled-resource 索引拒绝，未创建 B Effect 或 `second.txt`；A 仍只有一个 Pending，
+  已发布字节不变。
+- 新增断言首次及连续 **20/20**；既有 owner-scoped/跨模块 fence、W115 写入重开及 Store external
+  uncertainty **3/3**，fmt/diff 通过。生产代码无需修改，无模型/UI。本批只证明同一 owner；正式 App
+  多会话入口、真正同时竞争、跨 owner 错配同一路径绑定、owner 核对、其他平台及 N3/100 seed/
+  LONG/99% 仍待验，不关闭完整 CONC/FILE/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
