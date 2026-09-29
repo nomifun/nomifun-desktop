@@ -614,6 +614,9 @@ mod computer {
                         )
                         .await;
                     if result.is_error {
+                        if nomi_computer::tool::is_proven_stale_input_rejection(&result) {
+                            return Err(RoleHostError::StaleObservationGeneration);
+                        }
                         return Err(RoleHostError::ProviderFailure(result.content));
                     }
                     Ok(ComputerRoleResult {
@@ -899,6 +902,7 @@ mod tests {
         active: std::sync::atomic::AtomicUsize,
         max_active: std::sync::atomic::AtomicUsize,
         calls: std::sync::atomic::AtomicUsize,
+        stale_input: std::sync::atomic::AtomicBool,
     }
 
     #[cfg(feature = "computer-use")]
@@ -916,6 +920,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             self.active.fetch_sub(1, Ordering::SeqCst);
+            if self.stale_input.load(Ordering::SeqCst)
+                && input.get("action").and_then(serde_json::Value::as_str) != Some("observe")
+            {
+                return nomi_types::tool::ToolResult::error(
+                    "Accessibility action on [7] failed: stale reference: focus changed. No \
+                     pixel fallback was performed; re-run observe before using element refs.",
+                );
+            }
             nomi_types::tool::ToolResult::text(
                 input
                     .get("action")
@@ -1120,6 +1132,37 @@ mod tests {
                     action: "wait".to_owned(),
                     parameters: serde_json::json!({ "seconds": 0 }),
                     expected_generation: first.generation,
+                }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, RoleHostError::StaleObservationGeneration);
+        assert_eq!(error.code(), "ROLE_HOST_STALE_OBSERVATION_GENERATION");
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "computer-use")]
+    #[tokio::test]
+    async fn computer_provider_stale_rejection_keeps_the_typed_no_effect_error() {
+        use std::sync::atomic::Ordering;
+
+        let tool = Arc::new(FakeComputerToolPort::default());
+        tool.stale_input.store(true, Ordering::SeqCst);
+        let (host, context) = computer_host(tool.clone());
+        let observed = host
+            .invoke(
+                context.clone(),
+                ComputerRoleOperation::Observe(computer_observe()),
+            )
+            .await
+            .unwrap();
+        let error = host
+            .invoke(
+                context,
+                ComputerRoleOperation::Input(ComputerInput {
+                    action: "set_element_value".to_owned(),
+                    parameters: serde_json::json!({ "ref": 7, "text": "forbidden" }),
+                    expected_generation: observed.generation,
                 }),
             )
             .await
