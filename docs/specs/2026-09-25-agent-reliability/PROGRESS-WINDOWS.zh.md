@@ -2002,20 +2002,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 本批只补必要回归，没有新产品失败、模型调用或正式 UI。文件/VCS/Artifact、其他 Wave/动态工具
   Schema 及单一生成源仍未覆盖，不关闭完整 REG/G0 或共享阶段。
 
-### 全 workspace 模型工具与 canonical Schema 同构（W109，基线 `8f4fa17b6`）
+### 全 workspace standard exposure 与 canonical Schema 同构（W109，基线 `8f4fa17b6`）
 
 - S-D01-08 / REG-008、G0-027、FILE-017/024/032、ART-004、VCS-011：把 W108 守卫扩到
   Wave2 workspace 的文件、VCS、进程和 Artifact 全部 19 个工具。首次 **0/1** 精确落在
-  `read_file.path` 缺少 canonical `\\S`；完整走查又发现其他文件/Artifact 路径、search query、
+  Runtime 候选 `read_file.path` 缺少 canonical `\\S`；完整走查又发现其他文件/Artifact 路径、search query、
   Artifact page default 与 VCS push refspec/force 的同类漂移。首败日志保留。
-- 模型 Schema 现对路径/查询应用 canonical 非空白约束；Artifact read 默认 limit 从 65536 对齐
+- Runtime 候选 Schema 现对路径/查询应用 canonical 非空白约束；Artifact read 默认 limit 从 65536 对齐
   16384；push refspec 收窄到 1024 和 `HEAD|refs/heads/...:refs/heads/...` pattern，force 固定 false。
   patch 行改用与 owner 相同的 kind enum，仍只接受 context/add/remove 和无 CR/LF/NUL 的精确文本；
-  status/diff 的空 required 显式化，不改变 admission。
-- 递归同构回归覆盖属性、required、type、union、pattern、const/default 及数值范围；模型可有安全
+  status/diff 的空 required 显式化，不改变 admission。正式 App 在 Snapshot 编译时会以 canonical
+  替换候选 Schema，本批未观察到正式 UI dispatch 失败；该修复收紧测试与未来直接集成的边界。
+- 递归同构回归覆盖属性、required、type、union、pattern、const/default 及数值范围；候选可有安全
   收窄，不能比 canonical 更宽。修复后 **20/20**，Agent Runtime **197/197**，标准工具组 11/11、
   同步远端 `d4dcae8a3` 后复验及 fmt/diff 通过。本批没有模型调用或正式 UI。
-- 未覆盖其他 Wave、动态/MCP/Plugin Schema、真实 provider 对新约束的选择质量及单一生成源；
+- 未覆盖其他 Wave、动态/MCP/Plugin Schema 及单一生成源；
   不关闭完整 REG/G0 或共享阶段。
 
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
