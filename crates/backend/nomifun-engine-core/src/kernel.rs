@@ -401,6 +401,14 @@ fn kernel_error(error: KernelError) -> EngineToolError {
 /// for the common process launch failures seen by coding Agents. The raw
 /// command, cwd, environment and owner error never cross the model boundary.
 fn kernel_error_for_action(error: KernelError, is_process: bool, is_file_write: bool) -> EngineToolError {
+    if let Some(failure) = error.capability_execution_failure()
+        && let Some(message) = settlement_loss_feedback(&failure.message)
+    {
+        return EngineToolError::CapabilityKernel {
+            code: error.canonical_code().0,
+            message: message.to_owned(),
+        };
+    }
     if is_file_write && let Some(failure) = error.capability_execution_failure() {
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
@@ -425,6 +433,25 @@ fn kernel_error_for_action(error: KernelError, is_process: bool, is_file_write: 
         };
     }
     kernel_error(error)
+}
+
+fn settlement_loss_feedback(detail: &str) -> Option<&'static str> {
+    if detail.contains("owner reported success")
+        && detail.contains("canonical terminal observation could not be committed")
+    {
+        return Some("The workspace owner reported success, but the canonical receipt was not stored. The requested effect may already be present. Do not retry automatically or report that nothing changed. Re-read the affected owner state and reconcile the pending effect before continuing.");
+    }
+    if detail.contains("owner failed with")
+        && detail.contains("canonical failure observation could not be committed")
+    {
+        return Some("The owner reported failure, but the canonical failure receipt was not stored. The effect remains pending because recovery cannot replay the failure safely. Do not retry automatically. Inspect current owner state and reconcile the pending effect before a changed request.");
+    }
+    if detail.contains("owner outcome is unknown")
+        && detail.contains("canonical uncertain observation could not be committed")
+    {
+        return Some("The owner outcome is unknown, and the canonical uncertainty receipt was not stored. The effect remains pending. Do not retry automatically. Reconcile the external owner and re-read affected state before continuing.");
+    }
+    None
 }
 
 /// Return bounded repair guidance, never raw host paths or file contents. Patch

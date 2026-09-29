@@ -356,6 +356,78 @@ mod tests {
     }
 
     #[test]
+    fn settlement_loss_feedback_preserves_distinct_owner_outcomes() {
+        let cases = [
+            (
+                "workspace.files/write owner reported success (result digest abc), but the canonical terminal observation could not be committed: PRIVATE_PATH secret=NEVER_EMIT. The durable effect remains pending; automatic retry is disabled; re-read the owner state before resuming",
+                ["owner reported success","Do not retry","Re-read"],
+            ),
+            (
+                "workspace.files/write owner failed with INVALID_PAYLOAD: target changed at PRIVATE_PATH secret=NEVER_EMIT; canonical failure observation could not be committed. The durable effect remains unsettled; automatic retry is disabled",
+                ["owner reported failure","Do not retry","Inspect"],
+            ),
+            (
+                "workspace.files/write owner outcome is unknown (EFFECT_OUTCOME_UNKNOWN): transport disconnected at PRIVATE_PATH secret=NEVER_EMIT; canonical uncertain observation could not be committed. The durable effect remains pending; automatic retry is disabled; reconcile the external owner before resuming",
+                ["owner outcome is unknown","Do not retry","Reconcile"],
+            ),
+        ];
+        for (detail, expected) in cases {
+            let mapped = kernel_error_for_action(
+                KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
+                false,
+                true,
+            );
+            let EngineToolError::CapabilityKernel { code,message } = mapped else {
+                panic!("settlement loss changed error class")
+            };
+            assert_eq!(code,"CAPABILITY_UNAVAILABLE");
+            for fragment in expected {
+                assert!(message.contains(fragment),"{message}");
+            }
+            assert!(message.len() <= 2048);
+            assert!(!message.contains("PRIVATE_PATH"));
+            assert!(!message.contains("NEVER_EMIT"));
+        }
+    }
+
+    #[test]
+    fn settlement_loss_feedback_survives_process_and_generic_projection() {
+        let cases = [
+            (
+                "workspace.process/start owner reported success (result digest abc), but the canonical terminal observation could not be committed: PRIVATE_PATH secret=NEVER_EMIT",
+                true,
+                ["owner reported success","Do not retry","Re-read"],
+            ),
+            (
+                "browser/navigate owner failed with BROWSER_PROVIDER_UNAVAILABLE: PRIVATE_PATH secret=NEVER_EMIT; canonical failure observation could not be committed",
+                false,
+                ["owner reported failure","Do not retry","Inspect"],
+            ),
+            (
+                "ssh/exec owner outcome is unknown (EFFECT_OUTCOME_UNKNOWN): PRIVATE_PATH secret=NEVER_EMIT; canonical uncertain observation could not be committed",
+                false,
+                ["owner outcome is unknown","Do not retry","Reconcile"],
+            ),
+        ];
+        for (detail,is_process,expected) in cases {
+            let mapped = kernel_error_for_action(
+                KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
+                is_process,
+                false,
+            );
+            let EngineToolError::CapabilityKernel { code,message } = mapped else {
+                panic!("settlement loss changed error class")
+            };
+            assert_eq!(code,"CAPABILITY_UNAVAILABLE");
+            for fragment in expected {
+                assert!(message.contains(fragment),"{message}");
+            }
+            assert!(!message.contains("PRIVATE_PATH"));
+            assert!(!message.contains("NEVER_EMIT"));
+        }
+    }
+
+    #[test]
     fn patch_failure_feedback_reports_partial_effect_counts_and_unverified_indices() {
         let detail = json!({
             "kind":"workspace_patch_failed", "version":1, "journal_settlement":"settled",
