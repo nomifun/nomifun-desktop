@@ -49,7 +49,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
-- S-D04-18（`CMD-139`、`PROC-014/034～037/046`、A01/A02/A11/A13/A17/A19 托管进程
+- S-D04-21（`CMD-139`、`PROC-014/034～037/046`、A01/A02/A11/A13/A17/A19 托管进程
   生命周期子断言）：macOS 正式 Tauri 连续保留了 planner 拆分 handle、阻塞 start、跳过 poll、
   shell/raw PID 替代、取消终态误报，以及模型在合法启动前调用 File/`exec_command` 探查的首次失败；
   后者把字面 `ls -la` 当 executable，虽随后恢复，正向 Case 仍失败。现由 planner 在同一 Agent step
