@@ -1933,6 +1933,33 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   均通过。本批无源码修改。PTY/stdin/resize、失败 poll/cancel、其他 Provider/角色/平台及 N3/100 seed/
   LONG/99% 仍待验；不关闭完整 CMD/PROC/CTRL 或共享阶段。
 
+### stdin 原始字节、显式游标与完整链证据（W105，基线 `36b0ab836`）
+
+- S-D02-21 / CTRL-006/007、PROC-025/027、REAL-005、A02/A05/A09/A13/A17/A18/A19：首次正式
+  Tauri Session `01a0ebfe-9b61-7c02-bc02-bab0cf3402d3` 精确执行 start→input→close→poll→completion，
+  但 canonical poll Schema 与 App host 没有 `cursor`，close 消费回显后 terminal poll 只返回空文本；
+  completion 又因 epoch 只允许 close/poll 两个顶层 ID，遗漏 start/input。首次夹具编译错误及修正后的
+  产品断言 **0/1** 均保留，未覆盖首次失败。
+- poll canonical Schema 现与模型工具一致地暴露非负 `cursor`、默认 0；App host 调用新增的
+  `ManagedEngineProcessOwner::poll_from`，即使 terminal 已缓存也从请求游标重读。完成账本仅在同一
+  process、连续 provenance、零省略交互且 cleanup 已证明时，将该精确 start/input/close/poll 链延续
+  到终态 epoch；不恢复同 epoch 的无关旧观察。精确链回归 **20/20**。
+- 两次修复中间 Session `01a0ec19-1637-7fe2-8e66-8f5769fad276`、
+  `01a0ec21-7692-7373-b25a-72c1df0565ee` 已证明 cursor=0 与四 ID 引用，但模型仍裁掉夹具要求的尾随
+  LF；强化原始字节 Session `01a0ec25-d1b3-7eb2-b138-533240a5552c` 明确回报 12 字节、无 `0A`，
+  随后 3 次输出截断并以 `NOMIFUN_TASK_INCOMPLETE` 失败。三份失败均保留，不以等价 Trim 输出记通过。
+- `write_process_stdin` 新增兼容的可选 `append_newline`，默认 false；true 时在未经 trim/normalize 的
+  UTF-8 input 后追加且只追加一个 LF byte，预算在 dispatch 前包含该字节。最终二进制
+  `af99bde37234cdeaa2c2083fef0555f626032cc32ee1c56f9ae49dcfb467effb`、全新 data/work/profile 和
+  StepFun Coding Plan / `step-3.7-flash` 的 Session `01a0ec31-7baa-7842-a743-51323ae79e1f` 首次精确发送
+  `input=W105-PAYLOAD, append_newline=true`；poll(cursor=0, wait_ms=5000) 返回完整
+  `...-41-44-0A` 与 `W105-LEN:13`，exit 0、`cleanup.reaped=true`。唯一 supported criterion 按顺序引用
+  四个顶层 call ID；5 步、177 条事件、零截断，3 个 managed effect returned。独立 **34 项**断言、
+  Runtime **195/195**、Wave2 **22/22**、Engine **29 通过 / 1 ignored**、App host **3/3**、正式构建、
+  工作区不变、匹配进程及应用/profile/Vite 清零、正式备份均通过。
+- 未覆盖 PTY/resize、大块与 1 MiB 边界正式 UI、close/input/poll 并发、retained-base loss、其他
+  Provider/角色/平台及 N3/100 seed/LONG/99%；不关闭完整 CTRL/PROC/REAL 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

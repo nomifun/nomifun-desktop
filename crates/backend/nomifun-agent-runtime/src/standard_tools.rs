@@ -144,7 +144,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "write_process_stdin",
         capability_id: "workspace.process",
         action_id: "workspace.process/input",
-        description: "Write bounded input to a turn-owned process. This is an effect and invalidates older workspace evidence.",
+        description: "Write bounded input to a turn-owned process. The input text is sent exactly without trimming or normalization. When the request requires one trailing line feed, set append_newline=true to append exactly one LF byte (0x0A) after input. This is an effect and invalidates older workspace evidence.",
         schema: process_input_schema,
     },
     StandardTool {
@@ -447,7 +447,10 @@ fn process_poll_schema() -> Value {
 fn process_input_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
-        "input":{"type":"string","maxLength":1048576}
+        "input":{"type":"string","maxLength":1048576,
+            "description":"Exact UTF-8 text to write without trimming or normalization."},
+        "append_newline":{"type":"boolean","default":false,
+            "description":"When true, append exactly one LF byte (0x0A) after input. Use this for a requested trailing line feed."}
     },"required":["process_id","input"]})
 }
 
@@ -675,6 +678,28 @@ mod tests {
         assert!(description("start_process").contains("Do not run ls"));
         assert!(description("poll_process").contains("expected output"));
         assert!(description("poll_process").contains("not a tool failure"));
+        assert!(description("write_process_stdin").contains("append_newline=true"));
+        assert!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "write_process_stdin")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["input"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("without trimming or normalization"))
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "write_process_stdin")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["append_newline"]["default"],
+            false
+        );
         assert!(description("cancel_process").contains("cleanup.reaped=true"));
         assert_eq!(
             tools

@@ -342,6 +342,17 @@ impl ManagedEngineProcessOwner {
         wait: Duration,
         cancellation: CancellationToken,
     ) -> Result<EngineProcessPoll, EngineProcessError> {
+        self.poll_from(session, session.cursor(), wait, cancellation)
+            .await
+    }
+
+    pub async fn poll_from(
+        &self,
+        session: &mut EngineProcessSession,
+        cursor: u64,
+        wait: Duration,
+        cancellation: CancellationToken,
+    ) -> Result<EngineProcessPoll, EngineProcessError> {
         if cancellation.is_cancelled() {
             return self.cancel(session).await;
         }
@@ -349,7 +360,7 @@ impl ManagedEngineProcessOwner {
         let poll = self.supervisor.poll_until_activity(
             &session.owner,
             &session.session_id,
-            session.cursor,
+            OutputCursor::new(cursor),
             Instant::now() + wait,
         );
         let result = tokio::select! {
@@ -1013,6 +1024,48 @@ mod tests {
             panic!("stdin fixture should exit normally");
         };
         assert!(output.text.contains("from-stdin"));
+    }
+
+    #[tokio::test]
+    async fn explicit_poll_cursor_replays_retained_terminal_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner =
+            ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let mut session = owner
+            .start(echo_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        let first = owner
+            .wait(&mut session, CancellationToken::new())
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            output: first_output,
+            ..
+        } = first
+        else {
+            panic!("echo command should exit normally");
+        };
+        assert!(session.cursor() > 0);
+
+        let replay = owner
+            .poll_from(
+                &mut session,
+                0,
+                Duration::ZERO,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            output: replayed_output,
+            ..
+        } = replay
+        else {
+            panic!("a terminal poll from cursor zero should replay the outcome");
+        };
+        assert_eq!(replayed_output.text, first_output.text);
+        assert_eq!(replayed_output.next_cursor, first_output.next_cursor);
     }
 
     #[tokio::test]

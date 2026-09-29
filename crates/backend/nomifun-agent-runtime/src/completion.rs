@@ -405,8 +405,17 @@ impl CompletionTracker {
                 if chain.contains(&observation.call_id)
                     && observation.invocation_attempted
                     && observation.successful
-                    && observation.workspace_epoch == work.workspace_observation_epoch
+                    && command.launch_workspace_epoch.is_some_and(|launch_epoch| {
+                        observation.workspace_epoch >= launch_epoch
+                    })
+                    && command.provenance_workspace_epoch.is_some_and(
+                        |provenance_epoch| observation.workspace_epoch <= provenance_epoch,
+                    )
                 {
+                    // The command tracker only marks this terminal current when every
+                    // interaction advanced the same owned process lineage without a
+                    // gap. Preserve those exact calls across their expected epoch
+                    // advances; do not revive other observations from those epochs.
                     self.valid_through.insert(
                         observation.call_id.clone(),
                         work.workspace_observation_epoch,
@@ -920,6 +929,151 @@ mod tests {
                 "rationale":"The explicit cancellation returned cancelled with cleanup.reaped=true"
             }]
         })));
+    }
+
+    #[test]
+    fn terminal_stdin_chain_keeps_every_exact_interaction_evidence() {
+        let process_id = "stdin-process";
+        let call = |id: &str, name: &str, arguments| ChatToolCall {
+            call_id: id.into(),
+            name: name.into(),
+            arguments: StrictJsonValue(arguments),
+            provider_metadata: None,
+        };
+        let running = |call: &ChatToolCall, text: &str, cursor: u64| {
+            AgentToolResult::text(
+                call.call_id.clone(),
+                serde_json::json!({
+                    "state":"running","pid":1234,"process_id":process_id,"success":null,
+                    "output":{"text":text,"next_cursor":cursor,"retained_bytes":cursor,"dropped_bytes":0,
+                        "source_encoding":"utf-8","decode_errors":0}
+                })
+                .to_string(),
+                false,
+            )
+        };
+        let mut tracker = CompletionTracker::default();
+        let mut observe_running = |id: &str,
+                                   name: &str,
+                                   action: &str,
+                                   arguments: serde_json::Value,
+                                   epoch: u32,
+                                   text: &str,
+                                   cursor: u64| {
+            let call = call(id, name, arguments);
+            let mut binding = process_binding(action);
+            binding.model_name = name.into();
+            binding.definition.name = name.into();
+            tracker.observe(
+                &AgentWorkStatus {
+                    running_processes: [process_id.to_owned()].into_iter().collect(),
+                    workspace_observation_epoch: epoch,
+                    ..Default::default()
+                },
+                &binding,
+                &call,
+                &running(&call, text, cursor),
+                true,
+            );
+        };
+        observe_running(
+            "start-call",
+            "start_process",
+            "workspace.process/start",
+            serde_json::json!({"command":"reader"}),
+            1,
+            "",
+            0,
+        );
+        observe_running(
+            "input-call",
+            "write_process_stdin",
+            "workspace.process/input",
+            serde_json::json!({"process_id":process_id,"input":"payload"}),
+            2,
+            "",
+            0,
+        );
+        observe_running(
+            "close-call",
+            "close_process_stdin",
+            "workspace.process/close_stdin",
+            serde_json::json!({"process_id":process_id}),
+            3,
+            "ECHO:payload\n",
+            13,
+        );
+        drop(observe_running);
+        let poll = call(
+            "poll-call",
+            "poll_process",
+            serde_json::json!({"process_id":process_id,"cursor":0,"wait_ms":5000}),
+        );
+        let command = crate::AgentCommandObservation {
+            process_id: process_id.into(),
+            launch_call_id: Some("start-call".into()),
+            observation_call_id: "poll-call".into(),
+            state: "exited".into(),
+            exit_code: Some(0),
+            cleanup_proven: true,
+            launch_workspace_epoch: Some(1),
+            provenance_workspace_epoch: Some(3),
+            interaction_call_ids: vec![
+                "input-call".into(),
+                "close-call".into(),
+                "poll-call".into(),
+            ],
+            omitted_interactions: 0,
+            observed_workspace_epoch: 3,
+            was_current_at_observation: true,
+        };
+        let work = AgentWorkStatus {
+            workspace_observation_epoch: 3,
+            recent_commands: vec![command],
+            ..Default::default()
+        };
+        let mut poll_binding = process_binding("workspace.process/poll");
+        poll_binding.model_name = "poll_process".into();
+        poll_binding.definition.name = "poll_process".into();
+        tracker.observe(
+            &work,
+            &poll_binding,
+            &poll,
+            &AgentToolResult::text(
+                poll.call_id.clone(),
+                serde_json::json!({
+                    "state":"exited","exit_code":0,"signal":null,"process_id":process_id,"success":true,
+                    "output":{"text":"ECHO:payload\n","next_cursor":13,"retained_bytes":13,"dropped_bytes":0,
+                        "source_encoding":"utf-8","decode_errors":0},
+                    "cleanup":{"interrupt_attempted":false,"terminate_attempted":false,
+                        "force_kill_attempted":false,"reaped":true,"elapsed_ms":0,"errors":[]}
+                })
+                .to_string(),
+                false,
+            ),
+            true,
+        );
+        assert!(
+            tracker
+                .observations
+                .iter()
+                .all(|observation| tracker.is_usable(observation, 3)),
+            "terminal cleanup must preserve the exact start/input/close/poll chain"
+        );
+        let definition = tracker.definition_with_evidence(&AgentPlan::default(), &work, false);
+        let actual = definition.input_schema.0["properties"]["criteria"]["items"]
+            ["properties"]["evidence_call_ids"]["items"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        let expected = ["start-call", "input-call", "close-call", "poll-call"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(actual, expected);
     }
 
     #[test]
