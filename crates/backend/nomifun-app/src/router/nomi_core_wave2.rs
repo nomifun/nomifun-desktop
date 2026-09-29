@@ -833,10 +833,12 @@ impl WatchQueue {
         let Some(kind) = watch_operation(&event.kind) else {
             return;
         };
+        let mut handled = false;
         for path in event.paths {
             let Ok(relative) = path.strip_prefix(root) else {
                 continue;
             };
+            handled = true;
             if relative.components().next().is_some_and(|component| {
                 nomifun_file::is_workspace_owner_component(component.as_os_str())
             }) {
@@ -859,6 +861,13 @@ impl WatchQueue {
             };
             let path = parts.join("/");
             self.push(WorkspaceFileChangedEvent { path, kind });
+        }
+        // A change notification that names no path inside the watched root —
+        // an empty path list or only out-of-root paths — cannot identify what
+        // changed. It may be the tail of a rename that crossed the boundary;
+        // unknown loss must force reconciliation rather than going silent.
+        if !handled {
+            self.rescan_required = true;
         }
     }
 
@@ -901,6 +910,32 @@ impl WatchQueue {
         // must remain observable after the consumer has drained the earlier one.
         self.debounce.clear();
         (events, dropped, rescan_required)
+    }
+
+    /// Drain and render one canonical batch. If the drained batch fails
+    /// validation or serialization it cannot reach the prompt, so the loss is
+    /// retained as `rescan_required` for the next drain instead of vanishing.
+    fn take_batch(&mut self) -> Option<(WorkspaceFilesChangedBatch, String)> {
+        let (events, dropped, rescan_required) = self.drain();
+        if events.is_empty() && dropped == 0 && !rescan_required {
+            return None;
+        }
+        let mut batch = WorkspaceFilesChangedBatch::new(events, dropped);
+        batch.rescan_required = rescan_required;
+        let payload = batch
+            .validate()
+            .ok()
+            .and_then(|()| serde_json::to_string(&batch).ok());
+        let Some(payload) = payload else {
+            self.rescan_required = true;
+            tracing::warn!(
+                event_count = batch.events.len(),
+                dropped_event_count = batch.dropped_event_count,
+                "workspace notification batch could not be delivered; rescan required"
+            );
+            return None;
+        };
+        Some((batch, payload))
     }
 }
 
@@ -971,17 +1006,11 @@ impl Drop for NomiWorkspaceWatchContext {
 #[async_trait::async_trait]
 impl ContextContributor for NomiWorkspaceWatchContext {
     async fn pre_turn_context(&self) -> Option<String> {
-        let (events, dropped, rescan_required) = self
+        let (batch, payload) = self
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain();
-        if events.is_empty() && dropped == 0 && !rescan_required {
-            return None;
-        }
-        let mut batch = WorkspaceFilesChangedBatch::new(events, dropped);
-        batch.rescan_required = rescan_required;
-        batch.validate().ok()?;
+            .take_batch()?;
         let requires_reconciliation = batch.requires_reconciliation();
         tracing::info!(
             workspace_event_count = batch.events.len(),
@@ -995,13 +1024,9 @@ impl ContextContributor for NomiWorkspaceWatchContext {
         } else {
             ""
         };
-        serde_json::to_string(&batch)
-        .ok()
-        .map(|payload| {
-            format!(
-                "<nomifun_workspace_events format=\"canonical-json\">\n{payload}\n</nomifun_workspace_events>{recovery}"
-            )
-        })
+        Some(format!(
+            "<nomifun_workspace_events format=\"canonical-json\">\n{payload}\n</nomifun_workspace_events>{recovery}"
+        ))
     }
 
     fn label(&self) -> &str {
@@ -1296,6 +1321,87 @@ mod tests {
         WorkspaceFilesChangedBatch::new(events, dropped).validate().unwrap();
         assert!(queue.debounce.is_empty());
         assert_eq!(queue.dropped, 0);
+    }
+
+    #[test]
+    fn watch_unattributable_native_changes_force_rescan_instead_of_silent_loss() {
+        let root = std::env::temp_dir().join("workspace-events-native-unattributable");
+        let outside = root.with_file_name("workspace-events-unattributable-outside");
+        let mut queue = WatchQueue::default();
+        // A change notification carrying no path cannot identify what changed.
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))));
+        // Neither can one whose every path lies outside the watched root.
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Create(
+            notify::event::CreateKind::File,
+        )).add_path(outside.join("lost.txt"))));
+        let (events, dropped, rescan) = queue.drain();
+        assert!(events.is_empty());
+        assert_eq!(dropped, 0, "unattributable changes are unknown loss, not a counted discard");
+        assert!(rescan, "unattributable changes must force reconciliation");
+        // A mixed event stays attributable through its in-root path and does
+        // not over-report unknown loss.
+        queue.record_native(&root, Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(outside.join("ignored.txt"))
+            .add_path(root.join("visible.txt"))));
+        let (events, dropped, rescan) = queue.drain();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "visible.txt");
+        assert_eq!((dropped, rescan), (0, false));
+    }
+
+    #[test]
+    fn watch_queue_keeps_duplicate_and_out_of_order_notifications_verbatim() {
+        let mut queue = WatchQueue::default();
+        let base = Instant::now();
+        let injection = [
+            ("src/lib.rs", WorkspaceFileChangeKind::Modified),
+            // A scrambled lifecycle order for one path stays in arrival order.
+            ("src/lib.rs", WorkspaceFileChangeKind::Created),
+            ("docs/a.md", WorkspaceFileChangeKind::Removed),
+            // A repeated notification outside the debounce window is a
+            // duplicate the consumer must tolerate; it is not a loss.
+            ("src/lib.rs", WorkspaceFileChangeKind::Modified),
+        ];
+        for (index, (path, kind)) in injection.iter().enumerate() {
+            queue.push_at(
+                WorkspaceFileChangedEvent { path: (*path).to_owned(), kind: *kind },
+                base + Duration::from_millis(300 * index as u64),
+            );
+        }
+        let (events, dropped, rescan) = queue.drain();
+        assert_eq!((dropped, rescan), (0, false));
+        assert_eq!(
+            events.iter().map(|event| (event.path.as_str(), event.kind)).collect::<Vec<_>>(),
+            injection.iter().map(|(path, kind)| (*path, *kind)).collect::<Vec<_>>(),
+        );
+    }
+
+    #[tokio::test]
+    async fn undeliverable_watch_batch_marks_rescan_for_the_next_turn() {
+        let fixture = event_fixture();
+        let watch = NomiWorkspaceWatchContext::start(fixture.path()).unwrap();
+        watch.push_for_test("visible.txt", WorkspaceFileChangeKind::Modified);
+        // A drained batch that fails the canonical schema cannot reach the
+        // prompt. Inject one rejected event to exercise that delivery loss.
+        watch.queue.lock().unwrap().events.push_back(WorkspaceFileChangedEvent {
+            path: "a/../b".into(),
+            kind: WorkspaceFileChangeKind::Removed,
+        });
+        assert!(watch.pre_turn_context().await.is_none());
+        let context = watch.pre_turn_context().await;
+        let payload = context
+            .as_ref()
+            .and_then(|context| serde_json::from_str::<serde_json::Value>(context.lines().nth(1).unwrap()).ok());
+        if !payload.as_ref().is_some_and(|payload|
+            payload["rescan_required"] == true
+                && payload["dropped_event_count"] == 0
+                && payload["events"].as_array().is_some_and(Vec::is_empty))
+        {
+            std::fs::write(fixture.path().join("observation.json"), serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+            panic!("an undeliverable batch went silent instead of forcing reconciliation; retained fixture: {}", fixture.keep().display());
+        }
+        assert!(context.unwrap().contains("Workspace notifications are incomplete"));
+        assert!(watch.pre_turn_context().await.is_none());
     }
 
     fn session_id() -> AgentSessionId {
