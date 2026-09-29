@@ -64,6 +64,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   reuse、multipart fixture 与 plan guard 失败全部保留在 macOS M04-02 证据。Windows/其他平台未由此
   代判；live 单项 grant、撤权竞态、input/launch、长期/99% 与完整 Computer Case 仍开放。
 
+- S-D05-08（VCS-013、A05/A13/A17/A19 push 成功后 settlement 丢失子断言）：W110 用隔离
+  worktree 与 bare local remote 补物理 push→durable receipt 之间的故障窗口。首次即通过：remote ref
+  已更新到第一提交后丢弃未确认 settlement，owner 固定进入 outcome unknown；本地再创建第二提交并
+  重试时在接触 remote 前拒绝，remote ref 仍为第一提交。等待原 worker 结束不能清除 durable
+  settlement 丢失。新回归 **20/20**，push owner **10/10**；相邻 host 已有“成功 receipt 持久后同 key
+  只重放原回执”和 not-applied failure 重放 **2/2**。生产代码无需修改，无模型/UI/生产 remote。
+  应用崩溃后 exact pending effect 的 push 专项恢复、主动 remote-ref 对账、远端删除/重写并发及
+  N3/LONG/99% 仍开放，不关闭完整 VCS-013 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个

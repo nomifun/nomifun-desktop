@@ -2019,6 +2019,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖其他 Wave、动态/MCP/Plugin Schema 及单一生成源；
   不关闭完整 REG/G0 或共享阶段。
 
+### local push 成功后的 settlement 丢失（W110，基线 `9d1de5fcb`）
+
+- S-D05-08 / VCS-013、A05/A13/A17/A19：在隔离 worktree 与 bare local remote 中先完成真实
+  push，确认 remote main 指向第一提交；随后故意丢弃尚未确认的 durable settlement，并在本地创建
+  第二提交。首次结果即符合合同：owner 固定进入 `OutcomeUnknown`，第二次 push 在接触 remote 前
+  拒绝，remote main 保持第一提交；`ensure_settled` 等待 worker 后仍不能自行清除未知 fence。
+- 新故障窗口 **20/20**，push owner 全组 **10/10**。host 现有成功 receipt 同 key 重放与
+  not-applied failure 重放 **2/2**，共同覆盖持久化前后两侧的当前进程行为。生产代码无需修改；
+  临时仓库全在外部证据目录，无模型调用、正式 UI、网络 remote 或凭据。
+- 未覆盖应用强退后 push pending effect 的专项恢复、主动 remote-ref 对账、远端 ref 被第三方并发
+  删除/重写、其他平台及 N3/100 seed/LONG/99%；不关闭完整 VCS-013 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
