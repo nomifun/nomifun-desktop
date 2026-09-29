@@ -2854,6 +2854,52 @@ mod tests {
         assert!(established.needs_replan);
     }
 
+    #[tokio::test]
+    async fn settlement_loss_becomes_an_error_tool_result_and_completed_event() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent) -> Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let sink = Sink::default();
+        let cases = [
+            ("success","The workspace owner reported success. Do not retry automatically. Re-read the affected owner state."),
+            ("failed","The owner reported failure. Do not retry automatically. Inspect current owner state."),
+            ("unknown","The owner outcome is unknown. Do not retry automatically. Reconcile the external owner."),
+        ];
+        for (step,(name,message)) in cases.into_iter().enumerate() {
+            let call_id = ToolCallId::from(format!("settlement-{name}"));
+            let (_,result) = record_tool_result(
+                call_id.clone(),
+                Err(AgentEngineError::CapabilityKernel {
+                    code:"CAPABILITY_UNAVAILABLE".to_owned(),
+                    message:message.to_owned(),
+                }),
+                &sink,
+                (step+1) as u16,
+            ).await.unwrap();
+            assert_eq!(result.call_id,call_id);
+            assert!(result.is_error);
+            assert!(result.output_text().contains(message));
+            assert!(result.output_text().contains("CAPABILITY_UNAVAILABLE"));
+            assert!(result.output_text().len() <= 2048);
+        }
+        let events = sink.0.lock().unwrap();
+        assert_eq!(events.len(),3);
+        for (index,event) in events.iter().enumerate() {
+            let AgentEngineEvent::ToolCompleted { step,result } = event else {
+                panic!("settlement loss emitted a non-tool event")
+            };
+            assert_eq!(*step,(index+1) as u16);
+            assert!(result.is_error);
+            assert_eq!(result.call_id.as_ref(),format!("settlement-{}",cases[index].0));
+        }
+    }
+
     fn request() -> ChatModelRequest {
         ChatModelRequest {
             contract_version: VersionString::from(
