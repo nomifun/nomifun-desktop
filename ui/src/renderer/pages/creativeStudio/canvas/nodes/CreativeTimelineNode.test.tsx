@@ -54,6 +54,31 @@ const assets = new Map<string, CreativeTimelineAssetPresentation>([[
 afterEach(cleanup);
 
 describe('CreativeTimelineNode interactions', () => {
+  test('exposes non-interactive chrome for node dragging while isolating timeline controls', () => {
+    let pointerStarts = 0;
+    const view = render(withCanvasTestI18n(
+      <CreativeTimelineNode
+        node={timelineNode()}
+        assets={assets}
+        placement='contained'
+        onPointerDown={() => { pointerStarts += 1; }}
+      />
+    ));
+
+    const dragSurface = view.container.querySelector<HTMLElement>(
+      '[data-timeline-node-drag-surface]'
+    );
+    if (!dragSurface) throw new Error('timeline node drag surface missing');
+    fireEvent.pointerDown(dragSurface, { button: 0, pointerId: 1 });
+    expect(pointerStarts).toBe(1);
+
+    fireEvent.pointerDown(view.getByRole('button', { name: '播放' }), {
+      button: 0,
+      pointerId: 2,
+    });
+    expect(pointerStarts).toBe(1);
+  });
+
   test('renders real clip media, duration, controls, and a movable playhead', () => {
     const view = render(withCanvasTestI18n(
       <CreativeTimelineNode node={timelineNode()} assets={assets} placement='contained' />

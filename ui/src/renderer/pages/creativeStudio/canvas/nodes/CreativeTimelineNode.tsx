@@ -100,6 +100,18 @@ const hasDraggedFiles = (dataTransfer: DataTransfer): boolean =>
 
 const TIMELINE_ASSET_DRAG_TYPE = 'application/x-nomifun-timeline-asset';
 
+const TIMELINE_INTERACTIVE_SELECTOR = [
+  'a',
+  'button',
+  'input',
+  'select',
+  'textarea',
+  'video',
+  '[contenteditable="true"]',
+  '[role="button"]',
+  '[role="slider"]',
+].join(',');
+
 const hasDraggedTimelineAsset = (dataTransfer: DataTransfer): boolean =>
   Array.from(dataTransfer.types).includes(TIMELINE_ASSET_DRAG_TYPE);
 
@@ -578,15 +590,21 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
         data-timeline-node
         tabIndex={0}
         onPointerDown={(event) => {
-          event.stopPropagation();
+          const target = event.target instanceof Element ? event.target : null;
           if (
             addMenuOpen &&
-            event.target instanceof Element &&
-            !event.target.closest('[data-timeline-add-surface]')
+            target &&
+            !target.closest('[data-timeline-add-surface]')
           ) {
             setAddMenuOpen(false);
           }
-          onActivate?.(node);
+          if (
+            document.fullscreenElement === rootRef.current ||
+            target?.closest(TIMELINE_INTERACTIVE_SELECTOR)
+          ) {
+            event.stopPropagation();
+            onActivate?.(node);
+          }
         }}
         onClick={(event) => event.stopPropagation()}
         onDoubleClick={(event) => event.stopPropagation()}
@@ -828,7 +846,7 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
           ) : null}
         </div>
 
-        <div className={styles.controls}>
+        <div className={styles.controls} data-timeline-node-drag-surface>
           <div className={styles.playbackControls}>
             <button
               type='button'

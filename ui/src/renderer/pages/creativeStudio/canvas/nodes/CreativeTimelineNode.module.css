@@ -82,6 +82,16 @@
   gap: 3px;
   padding: 0 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--color-border-2) 72%, transparent);
+  cursor: grab;
+}
+
+.controls:active {
+  cursor: grabbing;
+}
+
+:global([data-node-locked='true']) .controls,
+.timeline:fullscreen .controls {
+  cursor: default;
 }
 
 .playbackControls,
