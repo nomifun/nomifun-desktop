@@ -38,7 +38,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
-| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径与 macOS 三类提交前 hook/身份/unknown fence、持久 commit receipt 重放已有定向回归；post-commit、remote/host 条件资源准备后继续，禁止共享生产 remote |
+| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径与 macOS 四类 commit hook/身份/unknown fence、持久 commit receipt 重放已有定向回归；remote/host 条件资源准备后继续，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
@@ -264,6 +264,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   为 JSON 字符串，UI 保留 1 项可见异常，第二步修成数组后才完成（3 个模型步、87 条事件），因此
   不计零失败 CMD PASS。收紧撤销短语后的正式重建 `baec5c5f06e2…` 通过。opaque process 的内核级
   只读隔离、正式撤销 UI、参数字符串失败、其他 Agent/平台及 N3/100 seed/LONG/99% 仍开放。
+
+- S-D05-05（`VCS-006/008/009/014`、`AUTH-013` 的 `post-commit` 通知子断言）：macOS 首败确认
+  libgit2 commit 成功但真实 `post-commit` 完全未运行。现仅在 commit ID 创建后以字面
+  `/usr/bin/git hook run --ignore-missing post-commit` 执行，沿用 hooksPath、supervisor、30 秒 deadline、
+  完整进程树回收与精确 repo Seatbelt。非零通知退出不反转已发生 commit；成功 receipt 携带有界脱敏
+  的 status/exit、`retry_allowed=false` 和独立 HEAD observation。hook 成功但改写 HEAD 时明确
+  `head_matches_commit=false`、`requires_reconciliation=true`；同 key 只重放 receipt，不重复 commit/hook。
+  非零失败与 HEAD 改写各 **20/20**，相邻 VCS **22/22**。commit/post hook 至 receipt 的崩溃窗口、
+  hook 文件置换/fault injection、linked worktree、非 macOS 与正式 UI 仍开放，不关闭完整 VCS/AUTH
+  或共享 D05。
 
 - S-D05-04（`VCS-006/008/014`、`AUTH-009/013` 的 commit message hook 子断言）：macOS 首败确认
   仅配置的可执行 `commit-msg` 被 libgit2 commit 完全绕过。现按 `pre-commit → prepare-commit-msg →

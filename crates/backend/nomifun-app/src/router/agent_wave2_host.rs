@@ -1532,27 +1532,33 @@ impl Wave2ApplicationHost {
         let worker_capability_id = capability_id.clone();
         let message = message.to_owned();
         #[cfg(target_os = "macos")]
-        let (message, hook_inspection) = if let Some(hook_plan) = tokio::task::spawn_blocking({
-            let workspace = workspace.clone();
-            move || macos_commit_hook_plan(&workspace)
-        })
-        .await
-        .map_err(|error| {
-            Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("{capability_id} hook preflight worker failed: {error}"),
-            )
-        })??
-        {
-            let message = run_macos_commit_hooks(&hook_plan, &message).await?;
-            (message, Some(hook_plan.inspection))
-        } else {
-            (message, None)
-        };
+        let (message, hook_inspection, post_commit_plan) =
+            if let Some(hook_plan) = tokio::task::spawn_blocking({
+                let workspace = workspace.clone();
+                move || macos_commit_hook_plan(&workspace)
+            })
+            .await
+            .map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!("{capability_id} hook preflight worker failed: {error}"),
+                )
+            })??
+            {
+                let message = run_macos_commit_hooks(&hook_plan, &message).await?;
+                let commit_hooks_ran = hook_plan.pre_commit
+                    || hook_plan.prepare_commit_msg
+                    || hook_plan.commit_msg;
+                let hook_inspection = commit_hooks_ran.then(|| hook_plan.inspection.clone());
+                let post_commit_plan = hook_plan.post_commit.then_some(hook_plan);
+                (message, hook_inspection, post_commit_plan)
+            } else {
+                (message, None, None)
+            };
         #[cfg(not(target_os = "macos"))]
         let hook_inspection: Option<VcsCommitInspection> = None;
         let hooks_ran = hook_inspection.is_some();
-        tokio::task::spawn_blocking(move || {
+        let output = tokio::task::spawn_blocking(move || {
             let (repository, workspace_prefix) = scoped_repository(&workspace)?;
             let inspection = inspect_vcs_commit(&repository, &workspace_prefix)?;
             if let Some(expected) = hook_inspection
@@ -1657,7 +1663,26 @@ impl Wave2ApplicationHost {
             } else {
                 error
             }
-        })
+        })?;
+        #[cfg(target_os = "macos")]
+        let output = if let Some(post_commit_plan) = post_commit_plan {
+            let commit_id = output.0["commit_id"]
+                .as_str()
+                .expect("workspace.vcs/commit output has a commit_id")
+                .to_owned();
+            let observation =
+                run_macos_post_commit_observation(&post_commit_plan, &commit_id).await;
+            let mut output = output;
+            output
+                .0
+                .as_object_mut()
+                .expect("workspace.vcs/commit output is an object")
+                .insert("post_commit_hook".to_owned(), observation);
+            output
+        } else {
+            output
+        };
+        Ok(output)
     }
 }
 
@@ -1887,6 +1912,7 @@ struct MacosCommitHookPlan {
     pre_commit: bool,
     prepare_commit_msg: bool,
     commit_msg: bool,
+    post_commit: bool,
     inspection: VcsCommitInspection,
 }
 
@@ -1936,7 +1962,8 @@ fn macos_commit_hook_plan(
     let prepare_commit_msg =
         macos_executable_hook(&hooks_root.join("prepare-commit-msg"), "prepare-commit-msg")?;
     let commit_msg = macos_executable_hook(&hooks_root.join("commit-msg"), "commit-msg")?;
-    if !pre_commit && !prepare_commit_msg && !commit_msg {
+    let post_commit = macos_executable_hook(&hooks_root.join("post-commit"), "post-commit")?;
+    if !pre_commit && !prepare_commit_msg && !commit_msg && !post_commit {
         return Ok(None);
     }
     let canonical_workspace = std::fs::canonicalize(workspace).map_err(|error| {
@@ -1980,6 +2007,7 @@ fn macos_commit_hook_plan(
         pre_commit,
         prepare_commit_msg,
         commit_msg,
+        post_commit,
         inspection,
     }))
 }
@@ -2237,6 +2265,93 @@ async fn run_macos_commit_hooks(
             ),
         )
     })?
+}
+
+#[cfg(target_os = "macos")]
+async fn run_macos_post_commit_observation(
+    plan: &MacosCommitHookPlan,
+    commit_id: &str,
+) -> Value {
+    let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone_macos_confined(
+        plan.repository_root.clone(),
+    );
+    let mut observation = match shell
+        .output_program(
+            OsString::from("/usr/bin/git"),
+            ["hook", "run", "--ignore-missing", "post-commit"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            &plan.repository_root,
+            &HashMap::new(),
+            Some(Duration::from_secs(30)),
+        )
+        .await
+    {
+        Ok(output) => {
+            let combined = match (output.stdout.is_empty(), output.stderr.is_empty()) {
+                (false, false) => format!("{}\n{}", output.stdout, output.stderr),
+                (false, true) => output.stdout,
+                (true, false) => output.stderr,
+                (true, true) => String::new(),
+            };
+            let diagnostic = bounded_vcs_diagnostic(&combined, 1024);
+            let mut value = json!({
+                "status": if output.success { "succeeded" } else { "failed" },
+                "exit_code": output.code,
+                "retry_allowed": false,
+            });
+            if !diagnostic.trim().is_empty() {
+                value["message"] = json!(diagnostic.trim());
+            }
+            value
+        }
+        Err(error) => json!({
+            "status": "outcome_unknown",
+            "exit_code": null,
+            "retry_allowed": false,
+            "message": bounded_vcs_diagnostic(&error.to_string(), 1024),
+        }),
+    };
+
+    let repository_root = plan.repository_root.clone();
+    let expected = git2::Oid::from_str(commit_id);
+    let head_check = tokio::task::spawn_blocking(move || {
+        let expected = expected.map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("post-commit receipt has an invalid commit id: {error}"),
+            )
+        })?;
+        let (repository, _) = scoped_repository(&repository_root)?;
+        let observed = repository.head().map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("post-commit HEAD observation is unavailable: {error}"),
+            )
+        })?;
+        Ok::<_, Wave2HostPortError>(observed.target() == Some(expected))
+    })
+    .await;
+    match head_check {
+        Ok(Ok(matches)) => {
+            observation["head_matches_commit"] = json!(matches);
+            observation["requires_reconciliation"] = json!(!matches);
+        }
+        Ok(Err(error)) => {
+            observation["head_matches_commit"] = Value::Null;
+            observation["requires_reconciliation"] = json!(true);
+            observation["head_check_error"] =
+                json!(bounded_vcs_diagnostic(&error.message, 512));
+        }
+        Err(error) => {
+            observation["head_matches_commit"] = Value::Null;
+            observation["requires_reconciliation"] = json!(true);
+            observation["head_check_error"] =
+                json!(bounded_vcs_diagnostic(&error.to_string(), 512));
+        }
+    }
+    observation
 }
 
 fn scoped_repository_if_present(workspace: &Path)
@@ -4576,6 +4691,137 @@ mod tests {
         .expect_err("unknown hook side effects must fence automatic replay");
         assert_eq!(replay.code, "CAPABILITY_UNAVAILABLE");
         assert!(replay.message.contains("durable unknown outcome"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_runs_post_commit_once_and_reports_nonblocking_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = repository.path().join("hooks/post-commit");
+        let marker = directory.path().join("post-commit-runs.txt");
+        let observed_head = directory.path().join("post-commit-head.txt");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf x >> post-commit-runs.txt\ngit rev-parse HEAD > post-commit-head.txt\nprintf 'post-notification-failed sk-ABCDEFGHIJ0123456789xyz' >&2\nexit 17\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let committed = invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/commit",
+            json!({"message": "post commit notification"}),
+        )
+        .await
+        .unwrap();
+
+        assert!(marker.exists(), "post-commit hook was bypassed");
+        assert_eq!(committed.0["committed"], true);
+        assert_eq!(committed.0["post_commit_hook"]["status"], "failed");
+        assert!(
+            committed.0["post_commit_hook"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("[REDACTED_SECRET]")
+        );
+        assert!(!committed.0["post_commit_hook"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sk-ABCDEFGHIJ0123456789xyz"));
+        assert_eq!(
+            std::fs::read_to_string(observed_head).unwrap().trim(),
+            committed.0["commit_id"].as_str().unwrap()
+        );
+        let replay = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "post commit notification"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay, committed);
+        assert_eq!(std::fs::read(marker).unwrap(), b"x");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_post_commit_head_change_is_visible_and_not_replayed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let original_head = repository.head().unwrap().target().unwrap();
+        let hook = repository.path().join("hooks/post-commit");
+        let marker = directory.path().join("post-commit-head-change-runs.txt");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf x >> post-commit-head-change-runs.txt\ngit update-ref HEAD HEAD^\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let committed = invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/commit",
+            json!({"message": "post hook changes head"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(committed.0["committed"], true);
+        assert_eq!(committed.0["post_commit_hook"]["status"], "succeeded");
+        assert_eq!(committed.0["post_commit_hook"]["head_matches_commit"], false);
+        assert_eq!(
+            committed.0["post_commit_hook"]["requires_reconciliation"],
+            true
+        );
+        assert_eq!(committed.0["post_commit_hook"]["retry_allowed"], false);
+        assert_eq!(repository.head().unwrap().target(), Some(original_head));
+        assert_ne!(
+            committed.0["commit_id"].as_str().unwrap(),
+            original_head.to_string()
+        );
+        let replay = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "post hook changes head"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replay, committed);
+        assert_eq!(std::fs::read(marker).unwrap(), b"x");
+        assert_eq!(repository.head().unwrap().target(), Some(original_head));
     }
 
     #[tokio::test]
