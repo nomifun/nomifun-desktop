@@ -2315,6 +2315,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   cleanup/recovery 进程中途再次强杀、正式 UI 删除、非 Windows live-handle 路径及 N3/100 seed/
   LONG/99%；不关闭完整 ART/LIFE/OBS 或共享阶段。
 
+### SQLite busy effect admission（W133，基线 `d03df57ed`）
+
+- S-D09-14 / LIFE-023、CONC-014、FILE-038、A05/A13/A17/A19：独立连接持有 SQLite writer lock
+  时，从生产 Wave2 Host 发起文件写。200 ms 时任务仍等待，文件与 Effect 均不存在；约 5 秒 canonical
+  busy timeout 后返回 `CAPABILITY_UNAVAILABLE`，仍为零物理副作用/零 Effect。释放锁后同
+  operation/key 重试只执行一次并得到唯一 Returned。
+- 首版测试误用会重复写 tool fact 的辅助 `invoke()`，在 writer lock 下由夹具 `.expect` panic；失败日志
+  保留。改为直接调用生产 `Wave2HostPort::invoke` 后首次及连续 **20/20**；每轮实际等待 busy timeout，
+  相邻 Store writer 等待与 W115 写入重开 **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖 owner 已执行后 terminal settlement 遇锁、锁期间取消、进程强杀、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
