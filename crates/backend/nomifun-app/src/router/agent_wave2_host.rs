@@ -5139,10 +5139,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vcs_push_pending_receipt_fences_replay_after_host_restart() {
+    async fn vcs_push_pending_receipt_fences_replay_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let worktree = directory.path().join("worktree");
         let remote_path = directory.path().join("remote.git");
+        let database_path = directory.path().join("agent.db");
         std::fs::create_dir(&worktree).unwrap();
         let repository = initialize_git_repository(&worktree);
         git2::Repository::init_bare(&remote_path).unwrap();
@@ -5150,7 +5151,10 @@ mod tests {
             .remote("origin", remote_path.to_str().unwrap())
             .unwrap();
         let first_commit = repository.head().unwrap().target().unwrap();
-        let store = test_effect_store().await;
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
         let first_host = Wave2ApplicationHost::for_workspace_root(&worktree)
             .with_effect_store(store.clone());
         let mut call = context(&worktree);
@@ -5162,7 +5166,7 @@ mod tests {
         let effect_input = StrictJsonValue(json!({
             "remote":"origin", "refspec":"HEAD:refs/heads/main", "force":false
         }));
-        let Wave2EffectAdmission::Reserved(_reservation) = begin_wave2_exclusive_effect(
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
             &store,
             &call,
             workspace_typed_binding(&call).unwrap(),
@@ -5220,10 +5224,19 @@ mod tests {
         drop(tree);
         drop(parent);
         drop(owner);
+        drop(reservation);
         drop(first_host);
+        drop(store);
+        database.close().await;
 
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        )
+        .await
+        .unwrap();
         let restarted = Wave2ApplicationHost::for_workspace_root(&worktree)
-            .with_effect_store(store.clone());
+            .with_effect_store(reopened_store.clone());
         let error = invoke(
             &restarted,
             call.clone(),
@@ -5244,7 +5257,7 @@ mod tests {
         );
         assert_ne!(Some(second_commit), Some(first_commit));
         assert_eq!(
-            store
+            reopened_store
                 .read_effect(&call.agent_session_id, &wave2_effect_id(&call).unwrap())
                 .await
                 .unwrap()
@@ -5252,6 +5265,9 @@ mod tests {
                 .state,
             nomifun_agent_session::AgentEffectState::Pending
         );
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
     }
 
     #[tokio::test]

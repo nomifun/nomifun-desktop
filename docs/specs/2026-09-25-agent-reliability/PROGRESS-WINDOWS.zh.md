@@ -2042,6 +2042,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 本批复用了同一内存 Store，尚未覆盖数据库连接关闭后重开、应用/进程强退、启动时 pending→unknown
   归约、主动 remote-ref 对账、第三方并发改写及 N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE。
 
+### local push pending receipt 的 SQLite 重开（W112，基线 `e06f84e06`）
+
+- S-D05-10 / VCS-013、LIFE-006/007、A05/A13/A17/A19：把 W111 改为独立磁盘 SQLite。
+  在 remote main 已更新、exact external Effect 仍为 Pending 时释放 reservation、host 和 Store，关闭
+  所有数据库连接，再从同一路径重新打开数据库、Store 与 host；本地第二提交在关闭前已创建。
+- 首次及 **20/20** 均由重开后的 durable pending 在新 owner 物理调用前拒绝；remote main 保持第一
+  提交、第二提交只在本地，Effect ID 与 Pending 状态未改。相邻 host push **3/3**，fmt/diff 通过；
+  生产代码无需修改，无模型/正式 UI/网络 remote 或凭据。
+- 未覆盖 Git worker 或 SQLite terminal commit 中的真实进程强杀、完整 App startup pending→unknown
+  归约、主动 remote-ref 对账、第三方并发改写、其他平台及 N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
