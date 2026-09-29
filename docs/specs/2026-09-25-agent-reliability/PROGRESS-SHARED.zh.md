@@ -417,6 +417,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   Store/API/UI。正式 tool result/event 持久化、tool row/UI、不同 Action/角色及其他平台、N3/LONG/99%
   仍开放，不关闭完整 REG/OBS 或共享阶段。
 
+- S-D09-30（OBS-001/006/009/014/015/020、A03/A08/A09/A15/A16/A17/A19 Runtime ToolResult/Event
+  子断言）：W149 将 success/failed/unknown 三类 `CapabilityKernel` typed error 送入正式
+  `record_tool_result`。每类均生成同 call ID、`is_error=true`、≤2 KiB 的模型 observation，保留
+  `CAPABILITY_UNAVAILABLE` 与 W147 固定恢复语义；EventSink 各收到唯一、递增 step 的
+  `ToolCompleted`，没有把错误变成 completed success 或丢失 call 关联。新增场景首次及连续
+  **20/20**；W148 Runtime Kernel 与正常 effectful ToolResult/Event 相邻回归 **2/2**。生产代码无需修改，
+  无持久 AgentSession Store/API/UI。正式事件落库/重连、tool row、模型后续行为、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
