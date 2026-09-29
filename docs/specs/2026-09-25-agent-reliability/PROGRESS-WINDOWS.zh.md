@@ -2275,6 +2275,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   竞态、不同源大对象、原生 link 中途强杀、其他平台及 N3/100 seed/LONG/99%；不关闭完整
   CONC/ART 或共享阶段。
 
+### live Artifact reader 与 workspace cleanup 身份（W130，基线 `dec45aeda`）
+
+- S-D03-56 / ART-005/007、LIFE-028、A05/A13/A17/A19：先由 `WorkspaceArtifactStore` 发布并缓存
+  原 artifact handle，再尝试移走整个 workspace 并在同路径放入冒用旧 digest 名称的替代字节。回归
+  同时定义两种安全平台结果：允许移走时旧 Store 因 root identity 改变而拒绝、新 Store 因 digest
+  不符而拒绝；拒绝移走时旧 reader 只能继续读取原字节，替代 workspace 不出现。
+- Windows 临时诊断明确走 `native-denied`：live pinned workspace/artifact handles 阻止目录移走；诊断
+  输出随后移除。最终测试形状首次及连续 **20/20**，ArtifactStore 全组 **16/16**、managed workspace
+  cleanup 与 W129 **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖正式 AgentSession delete API 与 in-flight read 真并发、允许 rename 平台的原生分支、cleanup
+  task 强杀、其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
