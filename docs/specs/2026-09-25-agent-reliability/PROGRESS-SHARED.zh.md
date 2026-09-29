@@ -240,6 +240,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   正式 Artifact read 请求与 DELETE 真并发、启动恢复 deleting Session 的 live-handle 重试、其他平台及
   N3/LONG/99% 仍开放，不关闭完整 ART/LIFE/OBS 或共享阶段。
 
+- S-D03-58（ART-007、LIFE-020/028、OBS-004/006、A05/A13/A17/A19 deleting Session 启动恢复
+  子断言）：W132 使用磁盘 App、正式 `coding.codex` 资源集合和 managed workspace。live Artifact owner
+  使首进程 DELETE 精确返回 W131 的 409 并保留 `deleting`；随后释放 handle、关闭 Router/Services/DB，
+  不再发送 DELETE。第二进程从同一 data/work 配置启动，`create_router` 在路由发布前自动恢复 deleting
+  Session、删除 managed workspace 并写入 `deleted`；启动后同 key DELETE 只重放原 tombstone。
+  新增场景修正资源夹具后首次及连续 **20/20**；W131 409/retry、删除顺序与 Store delete fence
+  **4/4**。首个夹具用不消费 workspace 的 `chat.minimal` 被 `RESOURCE_SELECTION_UNUSED` 正确拒绝，
+  失败已保留。生产代码无需修改，无模型/UI。cleanup/recovery 进程中途再次强杀、正式 UI 删除、
+  非 Windows live-handle 路径及 N3/LONG/99% 仍开放，不关闭完整 ART/LIFE/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
