@@ -2638,6 +2638,28 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   lag/resync 额外注入（桥接 coalesce 已有独立测试）、其他平台及 N3/100 seed/LONG/99%；
   不关闭完整 PORT/OBS 或共享阶段。
 
-下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
+### `workspace.files/changed` 残余丢失信号（W156，基线 `9ffbb3787`）
+
+- S-D03-52 / FILE-040、PORT-012、A05/A15/A17/A19：补齐 watcher 后端两处静默丢失。
+- 发现一：native change 类事件若不带任何 path、或全部 path 落在 watched root 之外
+  （可能是跨越边界的 rename 尾部），原先在 `record_native` 中不产生事件、不计
+  `dropped_event_count` 也不置 `rescan_required`——变化完全消失。修复后零可归因
+  in-root path 的 change 事件统一置 `rescan_required`；`.nomifun` owner 组件过滤、
+  非法名（计 dropped）、空 relative（root 自身变化→rescan）仍算 handled，不放大信号。
+- 发现二：`pre_turn_context` 先 drain 再 `batch.validate().ok()?`/`to_string().ok()`，
+  drain 批次在投递侧失败时返回 `None`，对后续 Turn 零信号（比 overflow 丢弃更差）。
+  修复后 `WatchQueue::take_batch` 在投递失败时把 `rescan_required` 滞留回队列，
+  下一批强制全量对账。
+- 重复/乱序语义锁定为新回归：debounce 窗口外的重复事件与同路径乱序事件按到达顺序
+  原样送达、`dropped` 保持 0——批次不承诺顺序或唯一性，真实磁盘仍是唯一事实。
+- **首败已保留**（`phase-2-3\2026-09-29\windows\W156\run-1-first-failure.log`）：
+  仅把新测试打到旧码上运行，两条均失败（不可归因 native change 无 rescan；
+  投递失败批次静默消失）；乱序/重复测试在旧码上即通过（记录既有正确语义）。
+- 修复后 `nomi_core_wave2::tests` **22/22**、连续 **20/20**，`cargo fmt --check` 通过。
+- 未覆盖正式 UI 全量对账、模型是否遵循重读提醒、drain 后未被消费的批次
+  （contributor 为 fire-and-forget）、macOS 及 N3/100 seed/LONG/99%；不关闭完整
+  FILE-040、PORT-012 或共享阶段。
+
+下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
