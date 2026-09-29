@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01 native CEF/Tauri 34 项连续 4 次通过但保留 1 次 storage timeout；M04-02 正式签名 Tauri 已验 Computer granted/新身份 denied 与 typed screenshot，撤权/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01 native CEF/Tauri 保留 1 次 storage timeout；M04-02 已验 Computer 权限/typed screenshot；M04-03 正式 UI 已验 TextEdit launch/A11y/input/save 与 modifier 释放，撤权/取消/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -449,3 +449,29 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   可注入 permission 回归、两项 fresh-denied 正式 UI 和 granted 正向。撤权/热变更、真实 input/launch、
   stale window、多显示器/scale、held-input cancel、100-cycle/soak、release、真实 StepFun 及完整
   `AGEN-013` 仍开放，因此不关闭完整 `COMP-008/009`、`MAC-011/012`、D06 或 M04。
+
+- **M04-03 macOS Computer launch/input**（`COMP-002/003/006`、`MAC-011`、`AGEN-013` 的本批
+  正向子断言）：使用同一 exact-source Developer ID-signed `com.nomifun.desktop.dev`，每次 fresh
+  data/Session、loopback fixture 和唯一 `computer-input.txt`。Mac 锁屏连续三轮时未绕过 UI：fixture
+  保持 0 model call、文件 `seed`、DB 完整并清零进程；解锁后才由正式 Tauri 工作台选择仅允许
+  A11y/input/launch 的 Agent 并发送验收请求。
+- 首个解锁运行错误假设 atomic `computer/launch` 必须先被 plan gate 拒绝；Runtime 合同明确 Computer
+  原子动作不自动激活 workspace ledger，故一次 launch 正确以 returned `managed_effect` 结算，fixture
+  独立失败且零 input。第二次运行 8 个 effect 已正确执行并保存 `alpha XbetaY`，但 fixture 未校验被
+  schema 拒绝的 `report_completion`，UI 正确显示 `NOMIFUN_TASK_INCOMPLETE`；两个首败均原样保留。
+- fixture 修正为区分 optional plan 未暴露与产品权限错误，最终使用 Runtime canonical `input_0`、一个
+  evidence-backed criterion 及 `observed_tool_error_count=1`，并在输出最终文本前验证 completion，拒绝
+  `INVALID_TOOL_ARGUMENTS`/`not_executed`/unexposed-tool 假成功；未改产品 Action、权限、effect 或 planning
+  policy。
+- 最终 `run-008-final-ui`（Session `01a0ec7b-2f2d-7c30-86e3-8fbfe9aa9186`）为 20 model steps /
+  299 events：1 次 launch、9 次 fresh A11y observe、7 次 input；依次 set `alpha beta`、`cmd+right`、
+  `option+left`、type `X`、`ctrl+e`、type `Y`、`cmd+s`。8 个唯一 effect 全为 returned，未重放；
+  TextEdit AX 与磁盘均为 `alpha XbetaY` 且无 edited marker，后续普通 X/Y 输入也证明 modifier 已释放。
+  `completion_reported` 为 plan revision 1 / observation revision 19，覆盖 `input_0` 并公开唯一初始 plan
+  tool error；`turn/completed`。fixture `input_verified=true`、failure=null；两 DB `ok`，TextEdit/app/
+  fixture/listener 清零。确定性辅助：key **12/12**、launch **6/6**、main-queue/drag 各 **1/1**、
+  role-host fence **4/4**。证据：`2026-09-29/macos/m04-computer-input/`。
+- 仍未覆盖真实窗口移动/缩放/焦点切换后的 stale 拒绝、click/move/scroll、长 drag cancel、注入式
+  key/button release failure、用户并发焦点、Unicode/IME/layout、缺失 app、owner crash/result-loss、
+  撤权、真实 StepFun 与 soak；初始 optional plan 仍以一次公开错误激活，不满足零工具错误体验。
+  因此不关闭完整 `COMP-002～006/010～014`、`MAC-011`、`AGEN-013`、D06 或 M04。
