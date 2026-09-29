@@ -104,6 +104,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   通过。timeout/cancel/交互终态、其他 Provider/角色/平台与长期矩阵仍开放，不关闭完整
   CTRL/PROC/REAL 或共享阶段。
 
+- S-D02-19（CTRL-006/007、G0-023、PROC-048、REAL-023、A05/A08/A09/A11/A13/A17/A18/A19
+  timeout 终态证据子断言）：W103 后续审计发现 W96 的 timeout criterion 与 recovery criterion 都引用
+  恢复命令 call ID；原 35 项断言只证明计数/清理，未证明语义关联，因此该子断言追记失败。新回归
+  首次 **0/1**，确认 `timed_out + cleanup.reaped=true` 仍不在证据枚举。现让同一 launch call 的已回收
+  timeout 保留为自身 scope/terminal/output 事实；不把 timeout 变成成功，也不延续文件状态。修复后
+  **20/20**，Agent Runtime **194/194**。正式 Tauri 只执行一次 250 ms timeout，随后一次计划、一次
+  supported completion，共 3 步/101 事件；criterion 精确引用 timeout call，tool/command 计数均 1，
+  零恢复命令/历史检索/截断，独立 29 项断言、工作区和清理通过。cancelled/lost/force-kill、其他
+  Provider/角色/平台及长期矩阵仍开放，不关闭完整 CTRL/PROC/REAL 或共享阶段。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
@@ -637,6 +647,8 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   1,174 ms 内 `reaped=true`，未使用 force kill。模型随后单独更新计划、执行恢复命令，并在第 4 步
   首次 completion 同时提交 tool/command 计数 1；最终 UI 固定披露两种失败均未被恢复成功抹除。
   单回合 completed、147 条 canonical 事件、2 个 returned process effect，独立 35 项断言通过；
+  W103 后续审计发现 timeout 与 recovery 两个 criterion 都误引 recovery call ID，因此上述通过不含
+  证据语义关联，该子断言改由 S-D02-19 追记失败并闭环；计数、终态和清理结论仍成立。
   工作区不变，ping/cmd、应用和 profile 进程清零并正式备份。生产代码无需再改。本批未制造外部
   文件部分效果；持续写入、force-kill/lost、其他命令/Provider/角色/平台与长期矩阵仍开放，不关闭
   完整 PROC-048/REAL 或共享阶段。
