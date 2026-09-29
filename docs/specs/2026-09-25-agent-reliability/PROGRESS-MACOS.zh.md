@@ -26,7 +26,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139` 子断言完成；M02-01 计划/完成账本定向通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 与 M03-01 Unix 发布/清理竞态子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
-| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | 条件资源待准备 |
+| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02 本地 Git 字面路径/index 隔离子断言通过；remote/SSH 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
@@ -214,3 +214,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 未覆盖真实磁盘满/IO fault、immutable flags、准入后的动态 ACL 撤权与最后系统调用竞态、正式
   Tauri/model/UI 文件变更投影、其他 Unix fallback、100 seed/LONG 门槛；因此不关闭完整 FILE、
   AUTH、D03 或 M03。
+
+- **M03-02 macOS VCS literal path / index isolation**（`VCS-004/005` 及 A05/A14/A17 的本批
+  子断言）：在原生 arm64 / APFS 的独立临时 repo 中复核共享 S-D05-01。首次 **4/4**：stage、
+  unstage、discard、reset 对 `[]`、`!`、`*`、`?` 与 Unix 反斜杠文件名均按字面处理，不改相似邻居；
+  不存在的字面路径和目录请求保持 index/worktree digest；反斜杠命名 executable 恢复原字节与执行位，
+  symlink 恢复链接自身和 target text，不修改目标文件；冲突/index metadata 未被单文件操作抹除。
+- 综合字面路径操作与 executable/symlink mode 恢复分别 **20/20**，隔离 TMP fixture 最终为 0；
+  未访问网络 remote、SSH host 或凭据，未发现需改产品代码的新根因。证据：
+  `2026-09-29/macos/m03-vcs-literal/`。
+- 未覆盖非 UTF-8 Git path、Git index 的 macOS case-fold alias、并发父目录置换、submodule/worktree、
+  commit/hook/identity、local/file remote push、non-fast-forward/unknown result、真实 SSH 与正式 UI；
+  因此不关闭完整 VCS、SSH、D05 或 M03。
