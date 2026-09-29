@@ -7,6 +7,7 @@ use nomifun_agent_contracts::{
     ActionId, AgentSessionId, CapabilityId, CorrelationId, DigestHex, EventId,
     EventProducerId, IdempotencyKey, OperationId, SemanticSessionEventDraft,
     SessionEventAppend, SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
+    digest_payload,
 };
 use nomifun_agent_session::{AgentSessionStore, EffectEventRequest, EffectStrategy};
 use serde_json::{Value, json};
@@ -155,6 +156,45 @@ async fn seed_pending_external_push(
     .unwrap();
     assert_eq!(state, "pending");
     effect_id
+}
+
+fn push_answer_to_local_remote(project: &std::path::Path, remote_path: &std::path::Path) -> String {
+    let repository = git2::Repository::init(project).unwrap();
+    let mut index = repository.index().unwrap();
+    index.add_path(std::path::Path::new("answer.txt")).unwrap();
+    index.write().unwrap();
+    let tree_id = index.write_tree().unwrap();
+    let tree = repository.find_tree(tree_id).unwrap();
+    let signature = git2::Signature::now("NomiFun test", "test@nomifun.invalid").unwrap();
+    let commit = repository
+        .commit(
+            Some("refs/heads/main"),
+            &signature,
+            &signature,
+            "recovery fixture push",
+            &tree,
+            &[],
+        )
+        .unwrap();
+    drop(tree);
+    repository.set_head("refs/heads/main").unwrap();
+    git2::Repository::init_bare(remote_path).unwrap();
+    repository
+        .remote("origin", remote_path.to_str().unwrap())
+        .unwrap();
+    repository
+        .find_remote("origin")
+        .unwrap()
+        .push(&["refs/heads/main:refs/heads/main"], None)
+        .unwrap();
+    let remote_commit = git2::Repository::open_bare(remote_path)
+        .unwrap()
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .target()
+        .unwrap();
+    assert_eq!(remote_commit, commit);
+    commit.to_string()
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
@@ -546,15 +586,24 @@ async fn cancelled_turn_is_never_selected_by_startup_recovery() {
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn startup_resumes_crash_image_without_repeating_the_completed_write() {
-    startup_recovery_scenario(false).await;
+    startup_recovery_scenario(false, false).await;
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
 async fn startup_quarantines_a_pending_external_effect_without_replay() {
-    startup_recovery_scenario(true).await;
+    startup_recovery_scenario(true, false).await;
 }
 
-async fn startup_recovery_scenario(reconciliation_required: bool) {
+#[tokio::test(flavor="multi_thread", worker_threads=4)]
+async fn owner_reconciles_unknown_push_from_independent_remote_ref_before_resume() {
+    startup_recovery_scenario(true, true).await;
+}
+
+async fn startup_recovery_scenario(
+    reconciliation_required: bool,
+    reconcile_external_effect: bool,
+) {
+    assert!(!reconcile_external_effect || reconciliation_required);
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
     std::fs::create_dir_all(&project).unwrap();
@@ -598,11 +647,17 @@ async fn startup_recovery_scenario(reconciliation_required: bool) {
     let session = call(&router,"POST","/api/agent-sessions",json!({"preset_id":preset["preset"]["preset_id"],"model":model,"workspace":project,
         "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"},{"resource_kind":"process_session","resource_id":"managed-process-session"},{"resource_kind":"project_memory","resource_id":"default-project-memory"}]})).await;
     let id = session["agent_session_id"].as_str().unwrap().to_owned();
+    let execution = format!("/api/agent-sessions/{id}/execution");
     call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"recovery-turn","input":{"content":"Create answer.txt containing CHECKPOINT_RECOVERY_OK, verify it, then report the result."}})).await;
     tokio::time::timeout(Duration::from_secs(30), async {
         while !pending.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(20)).await; }
     }).await.unwrap();
     assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(), "CHECKPOINT_RECOVERY_OK");
+    let external_push = if reconcile_external_effect {
+        let remote_path = root.path().join("remote.git");
+        let source_commit = push_answer_to_local_remote(&project, &remote_path);
+        Some((remote_path, source_commit))
+    } else { None };
     let inspection = call(&router, "GET", &format!("/api/agent-sessions/{id}/execution"), Value::Null).await;
     assert_eq!(inspection["state"], "running");
     assert_eq!(inspection["checkpoint_retained"], true);
@@ -675,6 +730,105 @@ async fn startup_recovery_scenario(reconciliation_required: bool) {
         })).await;
         assert!(new_turn_status.is_client_error());
         assert_eq!(resumed.load(Ordering::SeqCst),0,"startup quarantine cannot replay the model or effect");
+
+        if reconcile_external_effect {
+            let operation_id = inspection["operation_id"].as_str().unwrap();
+            let candidates = call(
+                &restored_router,
+                "GET",
+                &format!("{execution}/effects?operation_id={operation_id}"),
+                Value::Null,
+            ).await;
+            assert_eq!(candidates["items"].as_array().unwrap().len(),1);
+            assert_eq!(candidates["items"][0]["effect_id"],effect_id.as_str());
+            assert_eq!(candidates["items"][0]["action_id"],"workspace.vcs/push");
+            assert_eq!(candidates["items"][0]["state"],"unknown");
+            assert_eq!(candidates["automatic_replay_authorized"],false);
+
+            let (remote_path, source_commit) = external_push.as_ref().unwrap();
+            let observed_commit = git2::Repository::open_bare(remote_path)
+                .unwrap()
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string();
+            assert_eq!(&observed_commit,source_commit);
+            let evidence_observation = json!({
+                "remote":"origin",
+                "destination_ref":"refs/heads/main",
+                "remote_commit":observed_commit,
+            });
+            let evidence_digest = digest_payload(&evidence_observation).unwrap();
+            let evidence = json!({
+                "verified":true,
+                "evidence_digest":evidence_digest.as_ref(),
+                "reference":format!("workspace.vcs/push:origin:refs/heads/main@{source_commit}"),
+            });
+            let reconcile_request = json!({
+                "operation_id":operation_id,
+                "expected_pause_revision":inspection["pause"]["revision"],
+                "idempotency_key":"verify-push-remote-ref",
+                "effect_id":effect_id,
+                "expected_input_digest":candidates["items"][0]["input_digest"],
+                "outcome":"confirmed_succeeded",
+                "evidence":evidence,
+            });
+            let mut wrong_digest = reconcile_request.clone();
+            wrong_digest["idempotency_key"] = json!("reject-wrong-push-digest");
+            wrong_digest["expected_input_digest"] = json!("8".repeat(64));
+            assert!(response(&restored_router,"POST",&format!("{execution}/reconcile"),wrong_digest).await.0.is_client_error());
+            let still_unknown:String = sqlx::query_scalar("SELECT state FROM agent_effects WHERE session_id=? AND effect_id=?")
+                .bind(&id).bind(effect_id).fetch_one(second.database.pool()).await.unwrap();
+            assert_eq!(still_unknown,"unknown");
+
+            let reconciled = call(&restored_router,"POST",&format!("{execution}/reconcile"),reconcile_request.clone()).await;
+            assert_eq!(call(&restored_router,"POST",&format!("{execution}/reconcile"),reconcile_request).await,reconciled);
+            let after = call(
+                &restored_router,
+                "GET",
+                &format!("{execution}/effects?operation_id={operation_id}"),
+                Value::Null,
+            ).await;
+            assert!(after["items"].as_array().unwrap().is_empty());
+            let (settled, reconciled_events, attestation_events):(String,i64,i64) = sqlx::query_as(
+                "SELECT e.state, \
+                 (SELECT COUNT(*) FROM agent_events WHERE session_id=e.session_id AND correlation_id=e.effect_id AND kind='effect/reconciled'), \
+                 (SELECT COUNT(*) FROM agent_events WHERE session_id=e.session_id AND correlation_id=e.turn_id AND kind='runtime/effect-reconciliation-attested') \
+                 FROM agent_effects e WHERE e.session_id=? AND e.effect_id=?",
+            ).bind(&id).bind(effect_id).fetch_one(second.database.pool()).await.unwrap();
+            assert_eq!(settled,"returned");
+            assert_eq!(reconciled_events,1);
+            assert_eq!(attestation_events,1);
+
+            call(&restored_router,"POST",&format!("{execution}/resume"),json!({
+                "operation_id":operation_id,
+                "idempotency_key":"resume-after-push-reconciliation",
+                "expected_pause_revision":inspection["pause"]["revision"],
+                "expected_checkpoint_revision":inspection["checkpoint_revision"],
+                "expected_checkpoint_digest":inspection["checkpoint_digest"],
+                "budget":{},
+                "cleanup_attestation":evidence,
+            })).await;
+            let completed = tokio::time::timeout(Duration::from_secs(30),async {
+                loop {
+                    let state = call(&restored_router,"GET",&execution,Value::Null).await;
+                    if state["state"] == "completed" { break state; }
+                    assert_eq!(state["state"],"running","owner reconciliation resume failed: {state}");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.unwrap();
+            assert_eq!(completed["checkpoint_retained"],false);
+            assert_eq!(completed["pending_effects"],0);
+            assert_eq!(completed["unknown_effects"],0);
+            assert_eq!(resumed.load(Ordering::SeqCst),4);
+            let remote_after = git2::Repository::open_bare(remote_path)
+                .unwrap().find_reference("refs/heads/main").unwrap().target().unwrap().to_string();
+            assert_eq!(remote_after,*source_commit,"effect reconciliation and resume cannot repeat the push");
+            drop(restored_router);
+            second.shutdown_browser_platform().await.unwrap(); second.database.close().await;
+            return;
+        }
 
         drop(restored_router);
         second.shutdown_browser_platform().await.unwrap(); second.database.close().await;

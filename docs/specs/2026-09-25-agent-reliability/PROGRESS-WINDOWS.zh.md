@@ -2069,6 +2069,72 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   remote-ref 对账、第三方并发改写、正式 UI/模型、其他平台及 N3/100 seed/LONG/99%；不关闭完整
   VCS/LIFE 或共享阶段。
 
+### owner remote-ref 核对后恢复（W114，基线 `b96426178`）
+
+- S-D05-12 / VCS-013、CTRL-009、LIFE-006/007/016/017、OBS-008/014、A05/A13/A17/A19：
+  在 W113 的完整 App crash image 上增加真实 local bare remote。夹具先独立推送并读取精确
+  `refs/heads/main`，再通过正式 `execution/effects` 读取唯一 Unknown push；返回不含自动重放许可。
+- 错误 input digest 的核对请求被拒且 Effect 保持 Unknown。认证 owner 使用 exact digest、pause
+  revision 和有界 remote-ref evidence 调用 `execution/reconcile` 后，只产生一个 attestation 与一个
+  `effect/reconciled`；同 key 重送返回原回执，记录明确不是原始 push receipt。带 cleanup attestation
+  恢复同一 Turn 后，checkpoint 正常完成、Pending/Unknown 清零，bare remote ref 仍为原提交。
+- 新夹具首次因漏定义 execution API path 编译失败，日志保留；修正夹具后首次产品运行及连续
+  **20/20** 通过，完整 App 恢复 **7/7**、Store pause/reconcile **11/11**，fmt/diff 通过。生产代码
+  无需修改，无正式 UI/生产 remote。领域级自动对账按现有设计仍未实现；第三方 remote 改写、网络
+  remote、UI 核对控制面、其他平台及 N3/100 seed/LONG/99% 仍待验，不关闭完整 VCS/LIFE 或共享阶段。
+
+### 文件发布 receipt 丢失后的 SQLite 重开（W115，基线 `8d8b9bf92`）
+
+- S-D03-51 / FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19：把原有内存 Store/
+  `std::fs::write` 模拟回归升级为独立磁盘 SQLite 和实际 `FileService` owner。Effect reserve 后 owner
+  原子发布 `result.txt=published` 并返回 receipt；夹具故意不写 terminal receipt，释放 host/Store，
+  关闭全部数据库连接，再由用户把目标改成 `user edit after lost receipt`。
+- 从同一路径重开数据库、Store 与 host 后，原 key 由 durable Pending 直接拒绝；换 operation/key 的
+  写入也由同一 workspace resource fence 在 owner 前拒绝。Effect 总数保持 1、状态保持 Pending，
+  用户新字节未被覆盖。升级断言首次及连续 **20/20**；相邻 App 文件动作/fence **2/2**、文件 owner
+  写入 **1/1**，fmt/diff 通过。生产代码无需修改。
+- 首个基线命令因短测试名配 `--exact` 实际执行 0 项，日志保留；随后用完整模块名确认旧基线 1/1，
+  没有把 0 项误记为通过。本批无模型/UI。未覆盖文件 worker/SQLite terminal commit 进程强杀、
+  patch/delete 同类磁盘重开、文件结果人工核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  FILE/LIFE 或共享阶段。
+
+### 多文件 patch receipt 丢失后的 SQLite 重开（W116，基线 `d3a1ae36f`）
+
+- S-D03-52 / FILE-027/031/038、LIFE-006/007、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  两文件 patch Effect，由实际 `FileService` owner 原子把 `alpha/beta` 发布为 `ALPHA/BETA`；owner
+  返回两文件 receipt 后故意不写 canonical terminal，并关闭 host、Store 与全部数据库连接。
+- 用户随后把两文件分别改为 `user first/user second`。重开数据库与 host 后，原 key 被 durable
+  Pending 拒绝；新 operation/key 使用能合法匹配当前用户文本的 patch，仍在 owner 前被同一 workspace
+  resource fence 拒绝。Effect 总数保持 1/Pending，两份用户字节均未被覆盖。
+- 新增断言首次及连续 **20/20**；App patch 正常/并发/全有或全无/权限路径 **4/4**，W115 写入重开
+  **1/1**，文件 owner patch **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖文件
+  worker/SQLite terminal commit 进程强杀、delete 同类磁盘重开、patch 结果人工核对、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 FILE/LIFE 或共享阶段。
+
+### delete receipt 丢失后的同名重建保护（W117，基线 `51aeea7bf`）
+
+- S-D03-53 / FILE-034/038、LIFE-006/007、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  文件 delete Effect，实际 `FileService` owner 删除旧 `victim.txt` 并返回路径 observation；夹具故意
+  不写 canonical terminal，关闭 host、Store 与全部数据库连接，再由用户按同名重建不同字节。
+- 从同一路径重开后，原 key 被 durable Pending 拒绝；新 operation/key 也在 delete owner 前被同一
+  workspace resource fence 拒绝。Effect 总数保持 1/Pending，`user recreated` 字节完整保留。
+- 新增断言首次及连续 **20/20**；App 普通/部分递归删除 **2/2**，FileService 删除、名称置换与
+  Windows ACL **8/8**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖文件 worker/SQLite
+  terminal commit 进程强杀、目录树成功删除后的同名重建磁盘重开、delete 结果人工核对、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 FILE/LIFE 或共享阶段。
+
+### 非空目录 delete receipt 丢失后的重建保护（W118，基线 `2cbe721a5`）
+
+- S-D03-54 / FILE-034/037/038、LIFE-006/007、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  非空目录 delete Effect，实际 `FileService` owner 成功删除含 `nested/old.txt` 的旧树并返回路径
+  observation；夹具故意不写 canonical terminal，关闭 host、Store 与全部数据库连接。
+- 用户随后重建同名 `tree/recreated/user.txt`。从同一路径重开后，原 key 与新 operation/key 均在
+  delete owner 前被 durable workspace fence 拒绝；Effect 总数保持 1/Pending，重建树字节完整保留。
+- 新增断言首次及连续 **20/20**；W117 文件重建/部分递归删除 **2/2**，FileService 目录置换与
+  Windows 空目录路径 **3/3**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖文件 worker/
+  SQLite terminal commit 进程强杀、目录结果人工核对、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 FILE/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
