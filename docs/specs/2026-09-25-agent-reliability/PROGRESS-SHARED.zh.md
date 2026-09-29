@@ -285,6 +285,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无模型/UI。正式 Runtime/UI cancel 传播、终态落库等待期间取消、精确边界强杀、其他 Action/平台及
   N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+- S-D09-17（LIFE-006/011/019/023、FILE-038、CONC-014、A04/A07/A10/A11/A17/A19 终态 future
+  取消子断言）：W136 在 Effect 已 reserve、实际 `FileService` 已发布文件后，以独立 SQLite writer
+  lock 阻塞 terminal settlement；确认仍为 Pending 后取消并等待 settlement task 得到 cancelled。
+  用户随后修改文件，释放数据库锁并留出迟到完成窗口，Effect 仍为 Pending、用户内容保持；关闭并
+  重开数据库后原 key 与新 key 均被 durable/resource fence 拒绝，只有一条 Effect。首次运行及连续
+  **20/20**，W134 terminal timeout 与 W135 admission cancel 相邻回归 **2/2**。生产代码无需修改，
+  无模型/UI。正式 Runtime/UI cancel 与 Turn 终态的事务顺序、精确边界强杀、DB 磁盘满/IO fault、
+  其他 Action/平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
