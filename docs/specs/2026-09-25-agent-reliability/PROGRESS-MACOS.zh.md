@@ -22,14 +22,14 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
-| D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | 已导入部分历史验证；新构建待原生复验 |
-| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139` 子断言完成；完整 Case 未验收 |
+| D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 新 Session 冻结/准入定向通过；正式 UI/live 待验 |
+| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139` 子断言完成；M02-01 计划/完成账本定向通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
-| D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | 引用共享修复，新 Session 复验 |
-| D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | 原生全矩阵待走查 |
+| D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
+| D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015 的本批子断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02 已验 Seatbelt 与文件 symlink/mode；ACL/旧授权待验 |
@@ -178,3 +178,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `com.apple.quarantine`，未实际触发 Gatekeeper/App Translocation；x86_64 仍未运行。证据：
   `2026-09-29/macos/m01-host-os/`、`m01-terminal-login/`、`m01-mac013/`。因此不关闭完整
   `CMD-149/150`、`MAC-013/016` 或 20 次正式 UI 门槛；`TERM-012` 仅关闭本批原生主 lane 子断言。
+
+- **M02-01 Session freeze / plan-completion / official binding / Skill lock**（`AGEN-001`、`ACOD-001`、
+  `APAL-001`、`AMUL-001` 及 `EXT-006/012` 的本批子断言）：同步到 `a3a2b4f96` 后在 Darwin
+  25.6.0 / arm64 原生 runner 定向验证。新 Session 创建/初始 Turn/Checkpoint 准入保持原子、幂等且
+  冻结 Snapshot 与资源 owner；同一官方配置可创建不同 Session，但 binding 不漂移。可选计划保留
+  原始义务并正确区分幂等重放/真实 replan；`report_completion` 只接受当前证据，关闭计划后不能被
+  模型重开，且累计 tool error 不能被抹除。
+- 伙伴入口固定 `companion.default` 与确切 Companion/Memory/Scheduler；创作入口固定
+  `creative-studio.default` 与确切 Canvas/Asset Library。已选 Skill 的正文/digest/来源进入冻结
+  Snapshot 与 system context；未选 Skill 在 provider 调用前拒绝，恢复时必须按冻结内容重水化；
+  stale/missing 产品选择不能让新 Canvas Session 继承错误 target。未发现需改产品代码的新根因。
+- 验证：Agent Runtime 计划 **8/8**、完成账本 **4/4**、Turn/Session/Skill **6/6**；Agent Session
+  冻结/准入 **5/5**；Control Plane Skill/Revision 锁 **4/4**；App canonical Session、模型持久化、
+  官方 Agent 复用及伙伴/画布入口 **9/9**，合计 **36/36**、0 failed、0 ignored。完整日志：
+  `2026-09-29/macos/m02-session-core/run-002-deterministic-post-sync/`，首次伙伴/画布三项记录另保留于
+  `m02-bindings-skills/run-001-deterministic/`。
+- 正式 Tauri 隔离夹具的两次预检分别因 dataset work-root receipt 与 work-root owner receipt 不一致而
+  fail closed，未创建 Session、未消耗模型预算；未放宽保护。成对复制 data/work 身份后的 run-005
+  启动、数据库完整性与端口清理通过，但 macOS 锁屏阻断 UI 输入/截图，已停止应用。因此 M02-02 仍须
+  在解锁后用 StepFun Coding Plan / `step-3.7-flash` 新 Session 首发验证一次精确 `read_file`、计划、
+  完成账本和 UI 绿色投影；本批不关闭完整 `AGEN/ACOD/APAL/AMUL/EXT` Case。
