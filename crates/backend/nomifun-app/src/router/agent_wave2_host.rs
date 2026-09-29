@@ -1532,9 +1532,9 @@ impl Wave2ApplicationHost {
         let worker_capability_id = capability_id.clone();
         let message = message.to_owned();
         #[cfg(target_os = "macos")]
-        if let Some(repository_root) = tokio::task::spawn_blocking({
+        let (message, hook_inspection) = if let Some(hook_plan) = tokio::task::spawn_blocking({
             let workspace = workspace.clone();
-            move || macos_pre_commit_hook_root(&workspace)
+            move || macos_commit_hook_plan(&workspace)
         })
         .await
         .map_err(|error| {
@@ -1544,11 +1544,26 @@ impl Wave2ApplicationHost {
             )
         })??
         {
-            run_macos_pre_commit_hook(&repository_root).await?;
-        }
+            let message = run_macos_commit_hooks(&hook_plan, &message).await?;
+            (message, Some(hook_plan.inspection))
+        } else {
+            (message, None)
+        };
+        #[cfg(not(target_os = "macos"))]
+        let hook_inspection: Option<VcsCommitInspection> = None;
+        let hooks_ran = hook_inspection.is_some();
         tokio::task::spawn_blocking(move || {
             let (repository, workspace_prefix) = scoped_repository(&workspace)?;
             let inspection = inspect_vcs_commit(&repository, &workspace_prefix)?;
+            if let Some(expected) = hook_inspection
+                && (inspection.parent_id != expected.parent_id
+                    || inspection.scoped_paths != expected.scoped_paths)
+            {
+                return Err(Wave2HostPortError::new(
+                    "EFFECT_OUTCOME_UNKNOWN",
+                    "workspace.vcs/commit hook changed HEAD or the staged path set; inspect workspace status/diff before any retry",
+                ));
+            }
             let signature = repository.signature().map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
@@ -1614,10 +1629,35 @@ impl Wave2ApplicationHost {
         .await
         .map_err(|error| {
             Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("{capability_id} commit worker failed: {error}"),
+                if hooks_ran {
+                    "EFFECT_OUTCOME_UNKNOWN"
+                } else {
+                    "CAPABILITY_UNAVAILABLE"
+                },
+                if hooks_ran {
+                    format!(
+                        "{capability_id} commit worker failed after repository hooks ran: {error}; inspect workspace status/diff before any retry"
+                    )
+                } else {
+                    format!("{capability_id} commit worker failed: {error}")
+                },
             )
         })?
+        .map_err(|error| {
+            if hooks_ran && error.code != "EFFECT_OUTCOME_UNKNOWN" {
+                let diagnostic = bounded_vcs_diagnostic(&error.message, 512);
+                Wave2HostPortError::new(
+                    "EFFECT_OUTCOME_UNKNOWN",
+                    format!(
+                        "{capability_id} commit could not settle after repository hooks ran ({}): {}; inspect workspace status/diff before any retry",
+                        error.code,
+                        diagnostic.trim()
+                    ),
+                )
+            } else {
+                error
+            }
+        })
     }
 }
 
@@ -1720,6 +1760,7 @@ fn scoped_repository(
         Wave2HostPortError::new("RESOURCE_NOT_FOUND","workspace is not a Git repository"))
 }
 
+#[derive(Clone, Debug)]
 struct VcsCommitInspection {
     parent_id: Option<git2::Oid>,
     scoped_paths: Vec<String>,
@@ -1839,11 +1880,34 @@ fn inspect_vcs_commit(
 }
 
 #[cfg(target_os = "macos")]
-fn macos_pre_commit_hook_root(
-    workspace: &Path,
-) -> Result<Option<PathBuf>, Wave2HostPortError> {
+#[derive(Clone, Debug)]
+struct MacosCommitHookPlan {
+    repository_root: PathBuf,
+    git_directory: PathBuf,
+    pre_commit: bool,
+    prepare_commit_msg: bool,
+    commit_msg: bool,
+    inspection: VcsCommitInspection,
+}
+
+#[cfg(target_os = "macos")]
+fn macos_executable_hook(path: &Path, hook_name: &str) -> Result<bool, Wave2HostPortError> {
     use std::os::unix::fs::PermissionsExt;
 
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && metadata.permissions().mode() & 0o111 != 0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("workspace.vcs/commit could not inspect {hook_name} hook: {error}"),
+        )),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_commit_hook_plan(
+    workspace: &Path,
+) -> Result<Option<MacosCommitHookPlan>, Wave2HostPortError> {
     let (repository, workspace_prefix) = scoped_repository(workspace)?;
     let repository_root = std::fs::canonicalize(repository.workdir().ok_or_else(|| {
         Wave2HostPortError::new(
@@ -1868,17 +1932,12 @@ fn macos_pre_commit_hook_root(
             ));
         }
     };
-    let hook = hooks_root.join("pre-commit");
-    match std::fs::metadata(&hook) {
-        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {},
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(Wave2HostPortError::new(
-                "CAPABILITY_UNAVAILABLE",
-                format!("workspace.vcs/commit could not inspect pre-commit hook: {error}"),
-            ));
-        }
+    let pre_commit = macos_executable_hook(&hooks_root.join("pre-commit"), "pre-commit")?;
+    let prepare_commit_msg =
+        macos_executable_hook(&hooks_root.join("prepare-commit-msg"), "prepare-commit-msg")?;
+    let commit_msg = macos_executable_hook(&hooks_root.join("commit-msg"), "commit-msg")?;
+    if !pre_commit && !prepare_commit_msg && !commit_msg {
+        return Ok(None);
     }
     let canonical_workspace = std::fs::canonicalize(workspace).map_err(|error| {
         Wave2HostPortError::new(
@@ -1892,35 +1951,61 @@ fn macos_pre_commit_hook_root(
             "workspace.vcs/commit refuses to run repository hooks outside the exact bound workspace",
         ));
     }
+    let git_directory = std::fs::canonicalize(repository.path()).map_err(|error| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("Git repository metadata directory is unavailable: {error}"),
+        )
+    })?;
+    if !git_directory.starts_with(&repository_root) {
+        return Err(Wave2HostPortError::new(
+            "PRESET_RESOURCE_NOT_BOUND",
+            "workspace.vcs/commit refuses message hooks whose Git metadata directory is outside the exact bound workspace",
+        ));
+    }
 
     // Reject invalid scope or identity before executing repository code.
     // `invoke_vcs_commit` repeats the inspection after the hook, so a hook
     // cannot smuggle an out-of-scope path into the commit.
-    let _inspection = inspect_vcs_commit(&repository, &workspace_prefix)?;
+    let inspection = inspect_vcs_commit(&repository, &workspace_prefix)?;
     repository.signature().map_err(|error| {
         Wave2HostPortError::new(
             "CAPABILITY_UNAVAILABLE",
             format!("workspace.vcs/commit requires configured Git user.name/user.email: {error}"),
         )
     })?;
-    Ok(Some(repository_root))
+    Ok(Some(MacosCommitHookPlan {
+        repository_root,
+        git_directory,
+        pre_commit,
+        prepare_commit_msg,
+        commit_msg,
+        inspection,
+    }))
 }
 
 #[cfg(target_os = "macos")]
-async fn run_macos_pre_commit_hook(
-    repository_root: &Path,
+async fn run_macos_git_hook(
+    plan: &MacosCommitHookPlan,
+    hook_name: &str,
+    hook_args: Vec<OsString>,
 ) -> Result<(), Wave2HostPortError> {
     let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone_macos_confined(
-        repository_root.to_path_buf(),
+        plan.repository_root.clone(),
     );
+    let mut args = ["hook", "run", "--ignore-missing", hook_name]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    if !hook_args.is_empty() {
+        args.push(OsString::from("--"));
+        args.extend(hook_args);
+    }
     let output = shell
         .output_program(
             OsString::from("/usr/bin/git"),
-            ["hook", "run", "--ignore-missing", "pre-commit"]
-                .into_iter()
-                .map(OsString::from)
-                .collect(),
-            repository_root,
+            args,
+            &plan.repository_root,
             &HashMap::new(),
             Some(Duration::from_secs(30)),
         )
@@ -1929,7 +2014,7 @@ async fn run_macos_pre_commit_hook(
             Wave2HostPortError::new(
                 "EFFECT_OUTCOME_UNKNOWN",
                 format!(
-                    "workspace.vcs/commit pre-commit hook could not complete safely: {error}; inspect workspace status/diff before any retry"
+                    "workspace.vcs/commit {hook_name} hook could not complete safely: {error}; inspect workspace status/diff before any retry"
                 ),
             )
         })?;
@@ -1942,20 +2027,216 @@ async fn run_macos_pre_commit_hook(
         (true, false) => output.stderr,
         (true, true) => "hook returned no diagnostic output".to_owned(),
     };
-    let redacted = nomi_redact::redact_secrets(&combined);
-    let diagnostic = redacted
-        .chars()
-        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
-        .take(1024)
-        .collect::<String>();
+    let diagnostic = bounded_vcs_diagnostic(&combined, 1024);
     Err(Wave2HostPortError::new(
         "EFFECT_OUTCOME_UNKNOWN",
         format!(
-            "workspace.vcs/commit pre-commit hook rejected the commit (exit {:?}): {}; the hook may have changed the bound workspace, so inspect status/diff before any retry",
+            "workspace.vcs/commit {hook_name} hook rejected the commit (exit {:?}): {}; the hook may have changed the bound workspace, so inspect status/diff before any retry",
             output.code,
             diagnostic.trim()
         ),
     ))
+}
+
+fn bounded_vcs_diagnostic(value: &str, max_chars: usize) -> String {
+    nomi_redact::redact_secrets(value)
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(max_chars)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn create_macos_commit_message_file(
+    git_directory: &Path,
+    message: &str,
+) -> Result<(tempfile::NamedTempFile, u64, u64), Wave2HostPortError> {
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+
+    let mut file = tempfile::Builder::new()
+        .prefix("NOMIFUN_COMMIT_EDITMSG.")
+        .tempfile_in(git_directory)
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not create the bounded hook message: {error}"),
+            )
+        })?;
+    file.write_all(message.as_bytes()).map_err(|error| {
+        Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("workspace.vcs/commit could not write the bounded hook message: {error}"),
+        )
+    })?;
+    file.as_file().sync_all().map_err(|error| {
+        Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("workspace.vcs/commit could not sync the bounded hook message: {error}"),
+        )
+    })?;
+    let metadata = file.as_file().metadata().map_err(|error| {
+        Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("workspace.vcs/commit could not identify the bounded hook message: {error}"),
+        )
+    })?;
+    Ok((file, metadata.dev(), metadata.ino()))
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_commit_message_file(
+    mut file: tempfile::NamedTempFile,
+    expected_dev: u64,
+    expected_ino: u64,
+) -> Result<String, Wave2HostPortError> {
+    use std::io::{Read, Seek};
+    use std::os::unix::fs::MetadataExt;
+
+    let path_metadata = std::fs::symlink_metadata(file.path()).map_err(|error| {
+        Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            format!(
+                "workspace.vcs/commit hook message identity is unavailable after hook execution: {error}; inspect workspace status/diff before any retry"
+            ),
+        )
+    })?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.dev() != expected_dev
+        || path_metadata.ino() != expected_ino
+    {
+        return Err(Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            "workspace.vcs/commit hook replaced the bounded message identity; inspect workspace status/diff before any retry",
+        ));
+    }
+    if path_metadata.len() > 64 * 1024 {
+        return Err(Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            "workspace.vcs/commit hook message exceeds the 64 KiB safety bound; inspect workspace status/diff before any retry",
+        ));
+    }
+    file.as_file_mut()
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "EFFECT_OUTCOME_UNKNOWN",
+                format!(
+                    "workspace.vcs/commit hook message could not be rewound safely: {error}; inspect workspace status/diff before any retry"
+                ),
+            )
+        })?;
+    let mut bytes = Vec::with_capacity(path_metadata.len() as usize);
+    file.as_file_mut().read_to_end(&mut bytes).map_err(|error| {
+        Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            format!(
+                "workspace.vcs/commit hook message could not be read safely: {error}; inspect workspace status/diff before any retry"
+            ),
+        )
+    })?;
+    file.close().map_err(|error| {
+        Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            format!(
+                "workspace.vcs/commit hook message cleanup is unconfirmed: {error}; inspect workspace status/diff before any retry"
+            ),
+        )
+    })?;
+    let message = String::from_utf8(bytes).map_err(|_| {
+        Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            "workspace.vcs/commit hook produced a non-UTF-8 message; inspect workspace status/diff before any retry",
+        )
+    })?;
+    if message.trim().is_empty() {
+        return Err(Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            "workspace.vcs/commit hook produced an empty message; inspect workspace status/diff before any retry",
+        ));
+    }
+    if message.chars().count() > 512 {
+        return Err(Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            "workspace.vcs/commit hook message exceeds 512 characters; inspect workspace status/diff before any retry",
+        ));
+    }
+    Ok(message)
+}
+
+#[cfg(target_os = "macos")]
+async fn run_macos_commit_hooks(
+    plan: &MacosCommitHookPlan,
+    message: &str,
+) -> Result<String, Wave2HostPortError> {
+    if plan.pre_commit {
+        run_macos_git_hook(plan, "pre-commit", Vec::new()).await?;
+    }
+    if !plan.prepare_commit_msg && !plan.commit_msg {
+        return Ok(message.to_owned());
+    }
+
+    let message_file_result = tokio::task::spawn_blocking({
+        let git_directory = plan.git_directory.clone();
+        let message = message.to_owned();
+        move || create_macos_commit_message_file(&git_directory, &message)
+    })
+    .await
+    .map_err(|error| {
+        Wave2HostPortError::new(
+            if plan.pre_commit {
+                "EFFECT_OUTCOME_UNKNOWN"
+            } else {
+                "CAPABILITY_UNAVAILABLE"
+            },
+            if plan.pre_commit {
+                format!(
+                    "workspace.vcs/commit message-file worker failed after pre-commit ran: {error}; inspect workspace status/diff before any retry"
+                )
+            } else {
+                format!("workspace.vcs/commit message-file worker failed: {error}")
+            },
+        )
+    })?;
+    let (message_file, message_dev, message_ino) = message_file_result.map_err(|error| {
+        if plan.pre_commit {
+            let diagnostic = bounded_vcs_diagnostic(&error.message, 512);
+            Wave2HostPortError::new(
+                "EFFECT_OUTCOME_UNKNOWN",
+                format!(
+                    "workspace.vcs/commit could not prepare the message after pre-commit ran ({}): {}; inspect workspace status/diff before any retry",
+                    error.code,
+                    diagnostic.trim()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
+    let message_path = message_file.path().as_os_str().to_owned();
+    if plan.prepare_commit_msg {
+        run_macos_git_hook(
+            plan,
+            "prepare-commit-msg",
+            vec![message_path.clone(), OsString::from("message")],
+        )
+        .await?;
+    }
+    if plan.commit_msg {
+        run_macos_git_hook(plan, "commit-msg", vec![message_path]).await?;
+    }
+    tokio::task::spawn_blocking(move || {
+        read_macos_commit_message_file(message_file, message_dev, message_ino)
+    })
+    .await
+    .map_err(|error| {
+        Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            format!(
+                "workspace.vcs/commit message-file verification worker failed: {error}; inspect workspace status/diff before any retry"
+            ),
+        )
+    })?
 }
 
 fn scoped_repository_if_present(workspace: &Path)
@@ -4060,6 +4341,241 @@ mod tests {
         assert_eq!(repository.head().unwrap().target(), Some(before));
         let status = repository.status_file(Path::new("tracked.txt")).unwrap();
         assert!(status.contains(git2::Status::INDEX_MODIFIED));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_honors_a_rejecting_commit_msg_hook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = repository.path().join("hooks/commit-msg");
+        let seen_message = directory.path().join("commit-msg-seen.txt");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ncat \"$1\" > commit-msg-seen.txt\nprintf 'rejecting-commit-msg sk-ABCDEFGHIJ0123456789xyz' >&2\nexit 9\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = repository.head().unwrap().target().unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let error = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "must be checked by commit-msg"}),
+        )
+        .await
+        .expect_err("rejecting commit-msg hook must block commit");
+
+        assert_eq!(error.code, "EFFECT_OUTCOME_UNKNOWN");
+        assert!(error.message.contains("commit-msg"), "{error:?}");
+        assert!(error.message.contains("[REDACTED_SECRET]"), "{error:?}");
+        assert!(!error.message.contains("sk-ABCDEFGHIJ0123456789xyz"), "{error:?}");
+        assert_eq!(
+            std::fs::read_to_string(seen_message).unwrap(),
+            "must be checked by commit-msg"
+        );
+        assert_eq!(repository.head().unwrap().target(), Some(before));
+        let status = repository.status_file(Path::new("tracked.txt")).unwrap();
+        assert!(status.contains(git2::Status::INDEX_MODIFIED));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_runs_message_hooks_in_order_and_commits_their_bounded_message() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hooks_root = directory.path().join(".nomifun-hooks");
+        std::fs::create_dir(&hooks_root).unwrap();
+        repository
+            .config()
+            .unwrap()
+            .set_str("core.hooksPath", ".nomifun-hooks")
+            .unwrap();
+        let prepare_hook = hooks_root.join("prepare-commit-msg");
+        std::fs::write(
+            &prepare_hook,
+            "#!/bin/sh\ntest \"$2\" = message || exit 21\nprintf p >> hook-order.txt\nprintf 'prepared by hook' > \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &prepare_hook,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let commit_msg_hook = hooks_root.join("commit-msg");
+        std::fs::write(
+            &commit_msg_hook,
+            "#!/bin/sh\ntest \"$(cat \"$1\")\" = 'prepared by hook' || exit 22\nprintf c >> hook-order.txt\nprintf 'prepared by hook [checked]' > \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &commit_msg_hook,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let committed = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "original message"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(committed.0["message"], "prepared by hook [checked]");
+        assert_eq!(std::fs::read(directory.path().join("hook-order.txt")).unwrap(), b"pc");
+        assert_eq!(
+            repository.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("prepared by hook [checked]")
+        );
+        assert!(
+            std::fs::read_dir(repository.path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("NOMIFUN_COMMIT_EDITMSG."))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_rejects_a_hook_replaced_message_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = repository.path().join("hooks/commit-msg");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nrm \"$1\"\nln -s ../tracked.txt \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = repository.head().unwrap().target().unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let error = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "identity must remain stable"}),
+        )
+        .await
+        .expect_err("hook message identity replacement must fail closed");
+
+        assert_eq!(error.code, "EFFECT_OUTCOME_UNKNOWN");
+        assert!(error.message.contains("replaced the bounded message identity"));
+        assert_eq!(repository.head().unwrap().target(), Some(before));
+        assert_eq!(
+            std::fs::read(directory.path().join("tracked.txt")).unwrap(),
+            b"changed\n"
+        );
+        assert!(
+            std::fs::read_dir(repository.path())
+                .unwrap()
+                .all(|entry| !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("NOMIFUN_COMMIT_EDITMSG."))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_treats_successful_hook_index_drift_as_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = repository.path().join("hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\ngit reset --quiet HEAD -- tracked.txt\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = repository.head().unwrap().target().unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let error = invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/commit",
+            json!({"message": "hook changes index"}),
+        )
+        .await
+        .expect_err("post-hook index drift must not be reported as a known safe failure");
+
+        assert_eq!(error.code, "EFFECT_OUTCOME_UNKNOWN");
+        assert_eq!(repository.head().unwrap().target(), Some(before));
+        let status = repository.status_file(Path::new("tracked.txt")).unwrap();
+        assert!(!status.contains(git2::Status::INDEX_MODIFIED));
+        assert!(status.contains(git2::Status::WT_MODIFIED));
+        let replay = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "hook changes index"}),
+        )
+        .await
+        .expect_err("unknown hook side effects must fence automatic replay");
+        assert_eq!(replay.code, "CAPABILITY_UNAVAILABLE");
+        assert!(replay.message.contains("durable unknown outcome"));
     }
 
     #[tokio::test]
