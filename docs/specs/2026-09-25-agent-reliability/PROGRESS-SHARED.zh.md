@@ -352,6 +352,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   正式 Runtime process owner、cancel/kill 与 terminal 的事务顺序、API/UI 投影、其他平台及
   N3/LONG/99% 仍开放，不关闭完整 LIFE/PROC/OBS 或共享阶段。
 
+- S-D09-24（LIFE-011/024、BROW-011/012、COMP-010、SSH-003/008、OBS-009/015/016、A08/A15/
+  A16/A17/A19 跨 owner 失败结算投影子断言）：W143 以 secret 开头、随后 2,000 个 emoji 的 owner
+  错误触发 W141 helper 的 terminal Store failure；旧聚合消息达到 **4,291 bytes**，超过 Kernel 2 KiB
+  投影上限且未在聚合边界再次脱敏，首次 FAIL 已保留。现对 action/code/owner/settlement 分别先脱敏、
+  过滤控制字符并按 UTF-8 字节预算截断，最终消息 ≤2,048 bytes，仍保留原 code、脱敏标记和禁止自动
+  重试结论。共享 helper 现覆盖 Browser、Computer Role 与 SSH 的确定失败分支；Role 新增独立
+  `EffectSettlementFailure/CAPABILITY_UNAVAILABLE`，canonical Store/admission/terminal 错误不再误标
+  provider failure。修复后首次及连续 **20/20**；settlement **8/8**、Browser feature **1/1**、Computer
+  feature **1/1**、W142 与 push 相邻 **2/2**。Browser 首个未启 feature 的过滤命令执行 0 项，纠正后
+  不计通过。无真实 Browser/Computer/SSH、模型/UI。三类 owner 的逐入口 fault injection、uncertain
+  settlement、外部依赖与其他平台、N3/LONG/99% 仍开放，不关闭完整 LIFE/BROW/COMP/SSH/OBS。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

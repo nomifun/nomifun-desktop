@@ -37,7 +37,7 @@ use serde_json::json;
 
 use super::agent_wave2_host::{
     Wave2ApplicationHost, Wave2EffectAdmission, Wave2EffectCompletion,
-    begin_wave2_exclusive_effect, finish_wave2_effect,
+    begin_wave2_exclusive_effect, finish_wave2_effect, finish_wave2_failed_effect,
 };
 
 const WORKSPACE_FILES: &str = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
@@ -435,6 +435,7 @@ impl NomiCoreWave2Host {
             agent_session_id: typed.context.agent_session_id.as_ref().to_owned(),
             operation_id: typed.context.operation_id.as_ref().to_owned(),
         };
+        let action_id = typed.context.action_id.as_ref().to_owned();
         let dispatch = async {
             let value = match typed.operation {
                 nomifun_agent_domain_wave2::Wave2TypedCapabilityOperation::SshFsRead { input } => {
@@ -463,7 +464,7 @@ impl NomiCoreWave2Host {
             Ok::<_, nomifun_ssh::SshActionError>(StrictJsonValue(value))
         };
 
-        if typed.context.action_id.as_ref() == nomifun_ssh::SSH_FS_READ_ACTION_ID {
+        if action_id == nomifun_ssh::SSH_FS_READ_ACTION_ID {
             return dispatch.await.map_err(ssh_action_error);
         }
         let store = self.effect_store.as_ref().ok_or_else(|| {
@@ -493,15 +494,18 @@ impl NomiCoreWave2Host {
                 Err(error) => {
                     let unknown = matches!(error, nomifun_ssh::SshActionError::OutcomeUnknown(_));
                     let error = ssh_action_error(error);
-                    finish_wave2_effect(
-                        &reservation,
-                        if unknown {
+                    if unknown {
+                        finish_wave2_effect(
+                            &reservation,
                             Wave2EffectCompletion::Uncertain(&error)
-                        } else {
-                            Wave2EffectCompletion::Failed(&error)
-                        },
-                    )
-                    .await?;
+                        ).await?;
+                    } else {
+                        finish_wave2_failed_effect(
+                            &reservation,
+                            &action_id,
+                            &error,
+                        ).await?;
+                    }
                     Err(error)
                 }
             },

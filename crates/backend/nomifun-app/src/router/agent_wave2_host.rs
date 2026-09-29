@@ -745,7 +745,25 @@ pub(crate) async fn finish_wave2_effect(
     Ok(())
 }
 
-async fn finish_wave2_failed_effect(
+fn bounded_wave2_failure_component(value: &str, max_bytes: usize) -> String {
+    const TRUNCATED: &str = " [truncated]";
+    let mut value = nomi_redact::redact_secrets(value)
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .collect::<String>();
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut boundary = max_bytes.saturating_sub(TRUNCATED.len()).min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    value.push_str(TRUNCATED);
+    value
+}
+
+pub(crate) async fn finish_wave2_failed_effect(
     reservation: &Wave2EffectReservation,
     action_id: &str,
     owner_error: &Wave2HostPortError,
@@ -756,11 +774,12 @@ async fn finish_wave2_failed_effect(
     )
     .await
     .map_err(|settlement_error| {
-        let owner_message = owner_error.message.chars().take(1024).collect::<String>();
-        let settlement_message = settlement_error.message.chars().take(1024).collect::<String>();
+        let action_id = bounded_wave2_failure_component(action_id,128);
+        let owner_code = bounded_wave2_failure_component(&owner_error.code,96);
+        let owner_message = bounded_wave2_failure_component(&owner_error.message,640);
+        let settlement_message = bounded_wave2_failure_component(&settlement_error.message,640);
         Wave2HostPortError::unavailable(format!(
-            "{action_id} owner failed with {}: {owner_message}; canonical failure observation could not be committed: {settlement_message}. The durable effect remains unsettled; automatic retry is disabled",
-            owner_error.code,
+            "{action_id} owner failed with {owner_code}: {owner_message}; canonical failure observation could not be committed: {settlement_message}. The durable effect remains unsettled; automatic retry is disabled",
         ))
     })
 }
@@ -5828,6 +5847,44 @@ mod tests {
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
+    }
+
+    #[tokio::test]
+    async fn failed_effect_settlement_error_is_redacted_and_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("agent.db");
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let mut call = context(directory.path());
+        call.idempotency_key = IdempotencyKey::from("bounded-failed-effect-settlement");
+        call.operation_id = OperationId::from("bounded-failed-effect-settlement-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let input = StrictJsonValue(json!({"path":"bounded.txt","content":"fixture"}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh bounded failure effect must reserve")
+        };
+        database.close().await;
+        let secret = "sk-ABCDEFGHIJ0123456789xyz";
+        let owner_error = Wave2HostPortError::new(
+            "FIXTURE_OWNER_FAILURE",
+            format!("owner exposed {secret} {}", "😀".repeat(2000)),
+        );
+        let error = finish_wave2_failed_effect(
+            &reservation,"workspace.files/write",&owner_error,
+        ).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.len() <= 2048,"{} bytes",error.message.len());
+        assert!(!error.message.contains(secret),"{error:?}");
+        assert!(error.message.contains("[REDACTED_SECRET]"),"{error:?}");
+        assert!(error.message.contains("FIXTURE_OWNER_FAILURE"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        drop(reservation);
+        drop(store);
     }
 
     #[tokio::test]
