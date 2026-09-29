@@ -945,6 +945,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   Provider 样本，未保留脱敏原始 frame，也未走正式 UI/owner dispatch；其他协议/模型、N3/100 seed/
   failover 与 LONG/99% 仍开放，不关闭完整 MODEL Case 或共享阶段。
 
+- S-D01-06（MODEL-002/003/029/034/035、A01/A02/A09/A16/A17/A19 精确 wire N3 子断言）：
+  W100 在两个新的隔离 App/capture server 中重复 W99 的只读 StepFun probe，与 W99 合计三个独立样本。
+  3 次 streaming 和 3 次 non-streaming 请求全部 HTTP 200、`finish_reason=tool_calls`，每次恰好一个
+  原生 `exec_command`，arguments 均为有效 JSON，零文本伪调用、零普通 content、零工具执行；共 54 项
+  独立断言通过。streaming 耗时 1,398/1,302/1,407 ms（中位 1,398），non-streaming 为
+  992/1,587/1,712 ms（中位 1,587）。**该精确 route/model/function 的只读 wire 场景 N3 通过**；
+  不外推到 owner 执行、其他工具/协议/模型、原始 frame、正式 UI 或完整 MODEL Case，共享阶段未完成。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session
