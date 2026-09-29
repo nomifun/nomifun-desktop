@@ -2469,6 +2469,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖各 owner 的逐入口 terminal fault injection、正式 reconcile/UI 投影、外部依赖与其他平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/VCS/BROW/COMP/SSH/OBS 或共享阶段。
 
+### success terminal 未提交时明确效果已发生（W145，基线 `0aeea5cac`）
+
+- S-D09-26 / LIFE-006/011/024、FILE-038、VCS-013、BROW-012、COMP-010、SSH-005、OBS-006/015/020、
+  A04/A05/A07/A17/A19：从正式 `workspace.files/write` handler 发布完整文件后暂停在 terminal
+  settlement，并以 SQLite writer lock 令落库超时。旧路径只返回 `database is locked`，调用方无法
+  判断物理效果已发生，Effect 实际为 Pending；首次 FAIL 保留。
+- 新增 `finish_wave2_succeeded_effect`：只记录 canonical result digest，不复制潜在敏感结果正文；落库
+  失败时明确 owner 已报告成功、terminal observation 未提交、durable Effect 仍 Pending、禁止自动
+  重试并要求重读 owner 状态。helper 覆盖 managed effect、write/delete/artifact/stage/commit/push、
+  Browser、Computer Role 与 SSH 成功分支；patch 保留更强的逐文件重读诊断。
+- 修复后首次及连续 **20/20**；managed success/replay、workspace replay、bare push replay 与 busy
+  fence **4/4**，Browser feature **1/1**、Computer feature **1/1**，fmt/diff 通过。无正式 UI/真实
+  外部 owner。
+- 未覆盖各 Action 的逐入口 terminal fault、API/UI 投影、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 LIFE/FILE/VCS/BROW/COMP/SSH/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

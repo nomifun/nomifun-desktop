@@ -187,9 +187,10 @@ impl Wave2ApplicationHost {
             Wave2EffectAdmission::Replay(output) => Ok(output),
             Wave2EffectAdmission::Reserved(reservation) => match invoke_owner().await {
                 Ok(output) => {
-                    finish_wave2_effect(
+                    finish_wave2_succeeded_effect(
                         &reservation,
-                        Wave2EffectCompletion::Succeeded(&output),
+                        context.action_id.as_ref(),
+                        &output,
                     )
                     .await?;
                     Ok(output)
@@ -805,6 +806,28 @@ pub(crate) async fn finish_wave2_uncertain_effect(
     })
 }
 
+pub(crate) async fn finish_wave2_succeeded_effect(
+    reservation: &Wave2EffectReservation,
+    action_id: &str,
+    output: &StrictJsonValue,
+) -> Result<(), Wave2HostPortError> {
+    finish_wave2_effect(
+        reservation,
+        Wave2EffectCompletion::Succeeded(output),
+    )
+    .await
+    .map_err(|settlement_error| {
+        let action_id = bounded_wave2_failure_component(action_id,128);
+        let result_digest = digest_payload(&output.0)
+            .map(|digest| digest.as_ref().to_owned())
+            .unwrap_or_else(|_| "unavailable".to_owned());
+        let settlement_message = bounded_wave2_failure_component(&settlement_error.message,896);
+        Wave2HostPortError::unavailable(format!(
+            "{action_id} owner reported success (result digest {result_digest}), but the canonical terminal observation could not be committed: {settlement_message}. The durable effect remains pending; automatic retry is disabled; re-read the owner state before resuming",
+        ))
+    })
+}
+
 impl Wave2HostPort for Wave2ApplicationHost {
     fn invoke<'a>(
         &'a self,
@@ -909,9 +932,11 @@ impl Wave2ApplicationHost {
                                     "line_count": params.content.lines().count(),
                                     "sha256": nomifun_agent_contracts::digest_bytes(params.content.as_bytes()),
                                 }));
-                                finish_wave2_effect(
+                                self.pause_before_effect_settlement_for_test(action_id).await;
+                                finish_wave2_succeeded_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Succeeded(&output),
+                                    action_id,
+                                    &output,
                                 )
                                 .await?;
                                 Ok(output)
@@ -1031,9 +1056,10 @@ impl Wave2ApplicationHost {
                                     "deleted": true,
                                     "workspace_path": workspace_path
                                 }));
-                                finish_wave2_effect(
+                                finish_wave2_succeeded_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Succeeded(&output),
+                                    action_id,
+                                    &output,
                                 )
                                 .await?;
                                 Ok(output)
@@ -1146,9 +1172,10 @@ impl Wave2ApplicationHost {
                                         ))
                                     })?,
                                 );
-                                finish_wave2_effect(
+                                finish_wave2_succeeded_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Succeeded(&output),
+                                    action_id,
+                                    &output,
                                 )
                                 .await?;
                                 Ok(output)
@@ -1212,9 +1239,10 @@ impl Wave2ApplicationHost {
                             .await
                         {
                             Ok(output) => {
-                                finish_wave2_effect(
+                                finish_wave2_succeeded_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Succeeded(&output),
+                                    action_id,
+                                    &output,
                                 )
                                 .await?;
                                 Ok(output)
@@ -1273,9 +1301,10 @@ impl Wave2ApplicationHost {
                             .await
                         {
                             Ok(output) => {
-                                finish_wave2_effect(
+                                finish_wave2_succeeded_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Succeeded(&output),
+                                    action_id,
+                                    &output,
                                 )
                                 .await?;
                                 Ok(output)
@@ -1365,9 +1394,10 @@ impl Wave2ApplicationHost {
                                         )
                                     })?,
                                 );
-                                finish_wave2_effect(
+                                finish_wave2_succeeded_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Succeeded(&output),
+                                    action_id,
+                                    &output,
                                 )
                                 .await?;
                                 settlement.confirm();
@@ -5743,6 +5773,99 @@ mod tests {
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn successful_write_with_uncommitted_terminal_reports_owner_success() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let hook = EffectSettlementTestHook::new("workspace.files/write");
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone())
+            .with_effect_settlement_hook(Arc::clone(&hook)));
+        let mut call = context(&workspace);
+        call.idempotency_key = IdempotencyKey::from("successful-write-uncommitted-terminal");
+        call.operation_id = OperationId::from("successful-write-uncommitted-terminal-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"result.txt","content":"published before receipt loss"
+        }));
+        let invoke_host = Arc::clone(&host);
+        let invoke_call = call.clone();
+        let invocation = tokio::spawn(async move {
+            invoke_host.invoke(Wave2HostRequest {
+                context:invoke_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+            }).await
+        });
+        tokio::time::timeout(Duration::from_secs(5),hook.entered.notified()).await
+            .expect("successful owner must reach terminal settlement");
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"published before receipt loss");
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        hook.release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(6),invocation).await
+            .expect("successful-effect settlement must stop at the bounded SQLite busy timeout")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner reported success"),"{error:?}");
+        assert!(error.message.contains("result digest"),"{error:?}");
+        assert!(error.message.contains("terminal observation could not be committed"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"published before receipt loss");
+        writer.commit().await.unwrap();
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+    }
+
+    #[tokio::test]
+    async fn successful_managed_effect_commits_and_replays_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = test_effect_store().await;
+        let host = Wave2ApplicationHost::for_workspace_root(directory.path())
+            .with_effect_store(store.clone());
+        let mut call = context(directory.path());
+        call.capability_id = CapabilityId::from("workspace.process");
+        call.action_id = ActionId::from("workspace.process/start");
+        call.idempotency_key = IdempotencyKey::from("successful-managed-effect");
+        call.operation_id = OperationId::from("successful-managed-effect-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let input = StrictJsonValue(json!({"command":"fixture-success"}));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_calls = Arc::clone(&calls);
+        let first = host.invoke_managed_effect(
+            &call,workspace_typed_binding(&call).unwrap(),&input,
+            move || async move {
+                first_calls.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+                Ok(StrictJsonValue(json!({"process_id":"fixture-process","started":true})))
+            },
+        ).await.unwrap();
+        let replay_calls = Arc::clone(&calls);
+        let replay = host.invoke_managed_effect(
+            &call,workspace_typed_binding(&call).unwrap(),&input,
+            move || async move {
+                replay_calls.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
+                Ok(StrictJsonValue(json!({"must_not":"run"})))
+            },
+        ).await.unwrap();
+        assert_eq!(replay.0,first.0);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire),1);
+        let effect_id = wave2_effect_id(&call).unwrap();
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Returned);
     }
 
     #[tokio::test]

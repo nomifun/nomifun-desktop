@@ -52,8 +52,8 @@ use crate::{
 };
 
 use super::agent_wave2_host::{
-    Wave2EffectAdmission, Wave2EffectCompletion, begin_wave2_exclusive_effect,
-    finish_wave2_effect, finish_wave2_failed_effect, finish_wave2_uncertain_effect,
+    Wave2EffectAdmission, begin_wave2_exclusive_effect, finish_wave2_failed_effect,
+    finish_wave2_succeeded_effect, finish_wave2_uncertain_effect,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -475,9 +475,10 @@ impl BrowserRoleOwner {
         };
         match self.dispatch(&admission, request.operation).await {
             Ok(output) => {
-                finish_wave2_effect(
+                finish_wave2_succeeded_effect(
                     &reservation,
-                    Wave2EffectCompletion::Succeeded(&output),
+                    action.action_id(),
+                    &output,
                 )
                 .await?;
                 Ok(output)

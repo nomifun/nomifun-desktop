@@ -892,9 +892,10 @@ impl RoleHostInvoker for ComputerRoleInvoker {
             "result": result.result
         }));
         if let Some((reservation, _)) = reservation.as_ref() {
-            super::agent_wave2_host::finish_wave2_effect(
+            super::agent_wave2_host::finish_wave2_succeeded_effect(
                 reservation,
-                super::agent_wave2_host::Wave2EffectCompletion::Succeeded(&output),
+                effect_context.action_id.as_ref(),
+                &output,
             )
             .await
             .map_err(|error| RoleHostError::EffectSettlementFailure(error.to_string()))?;

@@ -36,9 +36,8 @@ use notify::{event::ModifyKind, EventKind, RecommendedWatcher, RecursiveMode, Wa
 use serde_json::json;
 
 use super::agent_wave2_host::{
-    Wave2ApplicationHost, Wave2EffectAdmission, Wave2EffectCompletion,
-    begin_wave2_exclusive_effect, finish_wave2_effect, finish_wave2_failed_effect,
-    finish_wave2_uncertain_effect,
+    Wave2ApplicationHost, Wave2EffectAdmission, begin_wave2_exclusive_effect,
+    finish_wave2_failed_effect, finish_wave2_succeeded_effect, finish_wave2_uncertain_effect,
 };
 
 const WORKSPACE_FILES: &str = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
@@ -485,9 +484,10 @@ impl NomiCoreWave2Host {
             Wave2EffectAdmission::Replay(output) => Ok(output),
             Wave2EffectAdmission::Reserved(reservation) => match dispatch.await {
                 Ok(output) => {
-                    finish_wave2_effect(
+                    finish_wave2_succeeded_effect(
                         &reservation,
-                        Wave2EffectCompletion::Succeeded(&output),
+                        &action_id,
+                        &output,
                     )
                     .await?;
                     Ok(output)
