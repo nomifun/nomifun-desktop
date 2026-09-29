@@ -2215,6 +2215,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   错配绑定、owner 核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整 CONC/FILE/VCS/LIFE
   或共享阶段。
 
+### 两个完整 patch invocation 的同源竞态（W125，基线 `f886756bb`）
+
+- S-D09-09 / CONC-002/015、FILE-020/025、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发 patch 同一文件；两边绑定相同 exact source digest，
+  分别尝试写入 `LEFT` 与 `RIGHT`。
+- 每轮恰好一个成功。loser 若撞到 winner Pending 则无 Effect；若在 winner 结算后获 admission，则因
+  source digest 陈旧以唯一 Rejected 终结。最终文件只等于 winner 内容，无第二次覆盖；两 Session 均
+  无 unsettled。关闭数据库再重开后，第三 Session 可正常写新文件，证明 fence 已释放。
+- 新增竞态首次及连续 **20/20**；不同路径并发、W116 receipt-loss、FileService 外部变更回滚及 W124
+  跨 Action **4/4**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 write/delete/Artifact 等
+  其他完整 invocation 配对、正式 App API 多会话、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  CONC/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
