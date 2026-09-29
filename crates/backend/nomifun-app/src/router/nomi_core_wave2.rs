@@ -38,6 +38,7 @@ use serde_json::json;
 use super::agent_wave2_host::{
     Wave2ApplicationHost, Wave2EffectAdmission, Wave2EffectCompletion,
     begin_wave2_exclusive_effect, finish_wave2_effect, finish_wave2_failed_effect,
+    finish_wave2_uncertain_effect,
 };
 
 const WORKSPACE_FILES: &str = nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID;
@@ -495,9 +496,10 @@ impl NomiCoreWave2Host {
                     let unknown = matches!(error, nomifun_ssh::SshActionError::OutcomeUnknown(_));
                     let error = ssh_action_error(error);
                     if unknown {
-                        finish_wave2_effect(
+                        finish_wave2_uncertain_effect(
                             &reservation,
-                            Wave2EffectCompletion::Uncertain(&error)
+                            &action_id,
+                            &error,
                         ).await?;
                     } else {
                         finish_wave2_failed_effect(

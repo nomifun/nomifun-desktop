@@ -784,6 +784,27 @@ pub(crate) async fn finish_wave2_failed_effect(
     })
 }
 
+pub(crate) async fn finish_wave2_uncertain_effect(
+    reservation: &Wave2EffectReservation,
+    action_id: &str,
+    owner_error: &Wave2HostPortError,
+) -> Result<(), Wave2HostPortError> {
+    finish_wave2_effect(
+        reservation,
+        Wave2EffectCompletion::Uncertain(owner_error),
+    )
+    .await
+    .map_err(|settlement_error| {
+        let action_id = bounded_wave2_failure_component(action_id,128);
+        let owner_code = bounded_wave2_failure_component(&owner_error.code,96);
+        let owner_message = bounded_wave2_failure_component(&owner_error.message,640);
+        let settlement_message = bounded_wave2_failure_component(&settlement_error.message,640);
+        Wave2HostPortError::unavailable(format!(
+            "{action_id} owner outcome is unknown ({owner_code}): {owner_message}; canonical uncertain observation could not be committed: {settlement_message}. The durable effect remains pending; automatic retry is disabled; reconcile the external owner before resuming",
+        ))
+    })
+}
+
 impl Wave2HostPort for Wave2ApplicationHost {
     fn invoke<'a>(
         &'a self,
@@ -1267,9 +1288,10 @@ impl Wave2ApplicationHost {
                                 // process tree is already reaped, so persist a
                                 // terminal unknown fact while retaining the
                                 // resource fence against any blind replay.
-                                finish_wave2_effect(
+                                finish_wave2_uncertain_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Uncertain(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
                                 .await?;
                                 Err(owner_error)
@@ -1360,9 +1382,10 @@ impl Wave2ApplicationHost {
                                 // Store retains the unsettled resource fence across
                                 // process restarts; the local settlement guard remains
                                 // unconfirmed as a second current-process fence.
-                                finish_wave2_effect(
+                                finish_wave2_uncertain_effect(
                                     &reservation,
-                                    Wave2EffectCompletion::Uncertain(&owner_error),
+                                    action_id,
+                                    &owner_error,
                                 )
                                 .await?;
                                 Err(owner_error)
@@ -5885,6 +5908,55 @@ mod tests {
         assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
         drop(reservation);
         drop(store);
+    }
+
+    #[tokio::test]
+    async fn uncertain_effect_with_uncommitted_terminal_retains_the_owner_cause() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("agent.db");
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let mut call = context(directory.path());
+        call.capability_id = CapabilityId::from("workspace.vcs");
+        call.action_id = ActionId::from("workspace.vcs/push");
+        call.idempotency_key = IdempotencyKey::from("uncommitted-uncertain-effect");
+        call.operation_id = OperationId::from("uncommitted-uncertain-effect-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({"remote":"origin","refspec":"HEAD:refs/heads/main"}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        ).await.unwrap() else {
+            panic!("fresh uncertain effect must reserve")
+        };
+        database.close().await;
+        let owner_error = Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            "remote accepted bytes before the transport disconnected",
+        );
+        let error = finish_wave2_uncertain_effect(
+            &reservation,"workspace.vcs/push",&owner_error,
+        ).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner outcome is unknown"),"{error:?}");
+        assert!(error.message.contains("EFFECT_OUTCOME_UNKNOWN"),"{error:?}");
+        assert!(error.message.contains("remote accepted bytes before the transport disconnected"),"{error:?}");
+        assert!(error.message.contains("uncertain observation could not be committed"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        drop(reservation);
+        drop(store);
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        assert_eq!(reopened_store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        drop(reopened_store);
+        reopened_database.close().await;
     }
 
     #[tokio::test]
