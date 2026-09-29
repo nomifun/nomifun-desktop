@@ -1417,6 +1417,7 @@ pub(crate) async fn run_turn(
                         let mut delivery = if output_text.is_empty() { report.summary.clone() }
                             else { format!("\n\n{}",report.summary) };
                         if let Some(disclosure)=report.unverified_disclosure() { delivery.push_str(&disclosure); }
+                        if let Some(disclosure)=report.tool_error_disclosure() { delivery.push_str(&disclosure); }
                         output_text.push_str(&delivery);
                         event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
                         if report.is_blocked() {
@@ -1574,6 +1575,10 @@ pub(crate) async fn run_turn(
                 )
             }) {
                 if let Some(disclosure) = report.unverified_disclosure() {
+                    output_text.push_str(&disclosure);
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                }
+                if let Some(disclosure) = report.tool_error_disclosure() {
                     output_text.push_str(&disclosure);
                     event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
                 }
@@ -3542,6 +3547,21 @@ mod tests {
         ]
     }
 
+    fn completion_steps_after_tool_errors(
+        quote: &str,
+        evidence: &[&str],
+        supported: bool,
+        observed_tool_error_count: u32,
+    ) -> Vec<Vec<Result<ChatModelEvent, ChatModelError>>> {
+        let mut steps = completion_steps(quote, evidence, supported);
+        let call = steps[1].iter_mut().find_map(|event| match event {
+            Ok(ChatModelEvent::ToolCallCompleted { call }) => Some(call),
+            _ => None,
+        }).expect("completion fixture must contain one completed tool call");
+        call.arguments.0["observed_tool_error_count"] = json!(observed_tool_error_count);
+        steps
+    }
+
     #[async_trait]
     impl AgentToolInvoker for EchoTool {
         async fn invoke(
@@ -4993,6 +5013,7 @@ mod tests {
             control_step("patch-once", "apply_patch", json!({"files":[{"path":"a"},{"path":"b"}]})),
             control_step("blocked", "report_completion", json!({
                 "summary":"Partial publication for a and b failed; stopped after the error as requested. Current files remain unverified.",
+                "observed_tool_error_count":1,
                 "criteria":[{"disposition":"blocked","rationale":"A patch failed and the user forbids further operations"}]
             })),
             text_step("must not request another model response"),
@@ -5207,7 +5228,8 @@ mod tests {
             control_step("plan","update_plan",json!({"plan":[{"step":"Patch both files","status":"completed"}]})),
             control_step("report","report_completion",json!({"summary":"Only a changed; b remains before","criteria":[
                 {"disposition":"supported","evidence_call_ids":["read-a"],"rationale":"a is after"},
-                {"disposition":"supported","evidence_call_ids":["read-b"],"rationale":"b is still before"}]})),
+                {"disposition":"supported","evidence_call_ids":["read-b"],"rationale":"b is still before"}],
+                "observed_tool_error_count":1})),
             text_step("Partial result; the original two-file task is not complete."),
             text_step("must not reopen"),
         ]),requests:Default::default()});
@@ -5235,8 +5257,9 @@ mod tests {
             control_step("write-b","write_file",json!({"path":"b","content":"after"})),
             two_file_reads("verify"),
             control_step("done-plan","update_plan",json!({"plan":[{"step":"Repair b","status":"completed"}]})),
-            control_step("done","report_completion",json!({"summary":"Both targets repaired and reread","criteria":[
-                {"disposition":"supported","evidence_call_ids":["verify-a","verify-b"],"rationale":"fresh current reads"}]})),
+            control_step("done","report_completion",json!({"summary":"Both targets repaired and reread after one tool error","criteria":[
+                {"disposition":"supported","evidence_call_ids":["verify-a","verify-b"],"rationale":"fresh current reads"}],
+                "observed_tool_error_count":1})),
             text_step("must not continue"),
         ]),requests:Default::default()});
         let tools=Arc::new(PartialPatchOwner {patches:AtomicUsize::new(0),writes:AtomicUsize::new(0)});
@@ -5297,7 +5320,7 @@ mod tests {
             control_step("write", "write_file", json!({"path":"a", "content":"fixed"})),
             control_step("verify", "read_file", json!({"path":"a"})),
         ];
-        steps.extend(completion_steps("inspect", &["verify"], true));
+        steps.extend(completion_steps_after_tool_errors("inspect", &["verify"], true, 1));
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -5306,6 +5329,7 @@ mod tests {
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert!(result.output_text.contains("Tool-call errors observed in this turn: 1"));
         assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
         assert_eq!(result.model_steps, 8);
     }
@@ -5331,7 +5355,7 @@ mod tests {
             batch("corrected-one", "corrected-two", json!("b")),
             control_step("verify", "read_file", json!({"path":"a"})),
         ];
-        steps.extend(completion_steps("inspect", &["verify"], true));
+        steps.extend(completion_steps_after_tool_errors("inspect", &["verify"], true, 2));
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
@@ -5340,6 +5364,7 @@ mod tests {
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert!(result.output_text.contains("Tool-call errors observed in this turn: 2"));
         assert_eq!(tools.writes.load(Ordering::SeqCst), 2, "the valid prefix of the rejected batch must not execute");
         let requests = model.requests.lock().unwrap();
         for id in ["held-valid", "held-invalid"] {
@@ -5489,7 +5514,7 @@ mod tests {
         }
         let mut steps = vec![control_step("write-once", "write_file", json!({"path":"a","content":"preserve"})),
             plan_step("in_progress", "inspect"), control_step("fresh-read", "read_file", json!({"path":"a"}))];
-        steps.extend(completion_steps("inspect", &["fresh-read"], true));
+        steps.extend(completion_steps_after_tool_errors("inspect", &["fresh-read"], true, 1));
         let model = Arc::new(ObservingModel { steps: std::sync::Mutex::new(steps), requests: Default::default() });
         let tools = Arc::new(RecoverableReadTool { writes: AtomicUsize::new(0) });
         let journal = Arc::new(Journal::default());

@@ -50,6 +50,10 @@ pub struct AgentCompletionReport {
     pub workspace_epoch: u32,
     pub summary: String,
     pub criteria: Vec<AgentCompletionCriterion>,
+    /// Cumulative tool result errors observed in this turn. Later recovery
+    /// never erases an earlier user-visible failure.
+    #[serde(default)]
+    pub observed_tool_error_count: u32,
     #[serde(default)]
     pub requirements: Vec<crate::AgentTaskRequirement>,
 }
@@ -156,17 +160,20 @@ impl WorkspacePathObservation {
 struct Submission {
     summary: String,
     criteria: Vec<AgentCompletionCriterion>,
+    #[serde(default)]
+    observed_tool_error_count: Option<u32>,
 }
 
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Every criterion MUST include a nonempty rationale string, including supported criteria that cite evidence. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
+        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Every criterion MUST include a nonempty rationale string, including supported criteria that cite evidence. When observed_tool_error_count is required, copy its exact runtime-supplied value and disclose it in the summary; later successful calls do not erase earlier errors. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
             "properties":{
                 "summary":{"type":"string","minLength":1,"maxLength":2048,"description":"The complete final answer delivered verbatim to the user. This is the ONLY final reply: criteria rationales are internal and are not shown. Include every requested delivery detail, such as paths, artifact IDs, readback contents and deletion results, while following the user's requested language and output format. There is no later assistant reply after an accepted report."},
+                "observed_tool_error_count":{"type":"integer","minimum":0,"maximum":4294967295_u64,"description":"Cumulative Runtime count of tool result errors in this turn, including calls rejected before dispatch. When required, copy the exact const value. Later successful calls do not reduce this count, and the summary must disclose it."},
                 "criteria":{"type":"array","minItems":1,"maxItems":16,"description":"An actual JSON array value; never a JSON-encoded string.","items":{
                     "type":"object","additionalProperties":false,"required":["disposition","rationale"],
                     "allOf":[{
@@ -201,6 +208,16 @@ impl CompletionTracker {
         unresolved_patch: bool,
     ) -> ChatToolDefinition {
         let mut tool = definition();
+        tool.input_schema.0["properties"]["observed_tool_error_count"]["const"] =
+            serde_json::json!(work.failed_tools);
+        if work.failed_tools > 0 {
+            tool.input_schema.0["required"].as_array_mut()
+                .expect("completion required fields are an array")
+                .push(serde_json::json!("observed_tool_error_count"));
+            tool.description = format!(
+                "This turn has recorded exactly {} tool result error(s), including validation or admission failures. Include observed_tool_error_count={} and disclose that count in the user summary; later recovery does not erase it. {}",
+                work.failed_tools, work.failed_tools, tool.description);
+        }
         if unresolved_patch {
             tool.description = format!(
                 "A failed patch has targets that still require observation or a successful owner receipt. Fresh reads report current state but do not by themselves prove an unpublished requested mutation completed. To honor an error-stop/no-retry request, provide the actual partial-result summary and a blocked criterion. Repair exact unresolved targets only when authorized, or use scope_changed with an exact later accepted-input citation. Do not report the original task supported from reads alone. {}",
@@ -427,6 +444,7 @@ impl CompletionTracker {
                 && report.observation_revision == self.revision
                 && report.input_revision == input_revision
                 && report.workspace_epoch == work.workspace_observation_epoch
+                && report.observed_tool_error_count == work.failed_tools
                 && !plan.is_open()
                 && work.running_processes.is_empty()
                 && report.requirements == plan.requirements
@@ -456,6 +474,9 @@ impl CompletionTracker {
             .collect::<BTreeSet<_>>().into_iter().take(8).collect::<Vec<_>>();
         let value = serde_json::json!({"plan_revision":plan.revision,"observation_revision":self.revision,
             "input_revision":input_revision,"workspace_epoch":work.workspace_observation_epoch,
+            "successful_command_observations":work.successful_commands,
+            "failed_command_observations":work.failed_commands,
+            "observed_tool_error_count":work.failed_tools,
             "available_evidence":self.observations.iter().filter(|item| self.is_usable(item, work.workspace_observation_epoch))
                 .map(|item| serde_json::json!({"call_id":item.call_id,"tool":item.tool_name,"path":item.path,
                     "artifact_id":self.artifacts.get(&item.call_id).map(|artifact| &artifact.artifact_id),
@@ -550,6 +571,13 @@ impl CompletionTracker {
         crate::requirements::require_input_coverage(&plan.requirements, inputs.len())?;
         let submission: Submission = serde_json::from_value(self.resolve_submission(call, plan, work)?)
             .map_err(|error| format!("Invalid completion report: {error}"))?;
+        if submission.observed_tool_error_count.unwrap_or(0) != work.failed_tools
+            || (work.failed_tools > 0 && submission.observed_tool_error_count.is_none())
+        {
+            return Err(format!(
+                "Completion must include observed_tool_error_count={} and disclose that exact cumulative count; later successful calls do not erase earlier tool errors",
+                work.failed_tools));
+        }
         if submission.summary.trim().is_empty()
             || submission.summary.chars().count() > 2048
             || submission.criteria.is_empty()
@@ -649,6 +677,7 @@ impl CompletionTracker {
             workspace_epoch: work.workspace_observation_epoch,
             summary: submission.summary,
             criteria: submission.criteria,
+            observed_tool_error_count: work.failed_tools,
             requirements: plan.requirements.clone(),
         })
     }
@@ -888,6 +917,98 @@ mod tests {
         assert!(!validator.is_valid(&serde_json::json!({"summary":"No IDs advertised","criteria":[
             {"disposition":"unverified","rationale":"No observation available","requirement_ids":[]}
         ]})));
+    }
+
+    #[test]
+    fn completion_schema_requires_the_exact_cumulative_tool_error_count() {
+        let tracker = CompletionTracker::default();
+        let work = AgentWorkStatus {
+            successful_commands: 50,
+            failed_commands: 0,
+            failed_tools: 5,
+            ..Default::default()
+        };
+        let definition = tracker.definition_with_evidence(&AgentPlan::default(), &work, false);
+        assert!(definition.description.contains("exactly 5 tool result error(s)"));
+        let schema = definition.input_schema.0;
+        assert_eq!(schema["properties"]["observed_tool_error_count"]["const"], 5);
+        assert!(schema["required"].as_array().unwrap().contains(
+            &serde_json::json!("observed_tool_error_count")));
+        let validator = jsonschema::options().build(&schema).unwrap();
+        let report = |count: Option<u32>| {
+            let mut value = serde_json::json!({
+                "summary":"Recovered after five visible tool errors",
+                "criteria":[{"disposition":"unverified","rationale":"Earlier command evidence is outside the bounded window"}]
+            });
+            if let Some(count) = count {
+                value["observed_tool_error_count"] = serde_json::json!(count);
+            }
+            value
+        };
+        assert!(!validator.is_valid(&report(None)));
+        assert!(!validator.is_valid(&report(Some(0))));
+        assert!(validator.is_valid(&report(Some(5))));
+
+        let context = tracker.context(&AgentPlan::default(), &work, 1).unwrap();
+        assert!(context.contains("\"successful_command_observations\":50"));
+        assert!(context.contains("\"failed_command_observations\":0"));
+        assert!(context.contains("\"observed_tool_error_count\":5"));
+    }
+
+    #[test]
+    fn legacy_completion_reports_default_the_tool_error_count_to_zero() {
+        let report: AgentCompletionReport = serde_json::from_value(serde_json::json!({
+            "plan_revision":1,
+            "observation_revision":2,
+            "input_revision":1,
+            "workspace_epoch":3,
+            "summary":"legacy report",
+            "criteria":[],
+            "requirements":[]
+        })).unwrap();
+        assert_eq!(report.observed_tool_error_count, 0);
+    }
+
+    #[tokio::test]
+    async fn completion_rejects_erasing_recovered_tool_errors_and_discloses_the_exact_count() {
+        let inputs = vec![crate::context_lifecycle::text_message(
+            nomifun_chat_model_broker::ChatRole::User,
+            "Run a sequence and report visible failures".into(),
+        )];
+        let mut plan = AgentPlan::default();
+        let mut tracker = CompletionTracker::default();
+        let work = AgentWorkStatus { failed_tools: 2, ..Default::default() };
+        let call = |id: &str, count: Option<u32>| {
+            let mut arguments = serde_json::json!({
+                "summary":"Two tool calls failed before recovery",
+                "criteria":[{"disposition":"unverified","rationale":"No current observation proves the whole sequence"}]
+            });
+            if let Some(count) = count {
+                arguments["observed_tool_error_count"] = serde_json::json!(count);
+            }
+            ChatToolCall { call_id:id.into(), name:TOOL_NAME.into(),
+                arguments:StrictJsonValue(arguments), provider_metadata:None }
+        };
+
+        for (id, count) in [("missing", None), ("wrong", Some(0))] {
+            let result = tracker.submit(&call(id, count), &mut plan, &work, &inputs,
+                false, None, &crate::NoopAgentEventSink).await.unwrap();
+            assert!(result.is_error);
+            assert!(result.output_text().contains("observed_tool_error_count=2"));
+            assert!(tracker.current(&plan, &work, 1).is_none());
+        }
+
+        let result = tracker.submit(&call("correct", Some(2)), &mut plan, &work, &inputs,
+            false, None, &crate::NoopAgentEventSink).await.unwrap();
+        assert!(!result.is_error, "{}", result.output_text());
+        let report = tracker.current(&plan, &work, 1).unwrap();
+        assert_eq!(report.observed_tool_error_count, 2);
+        assert!(report.tool_error_disclosure().unwrap().contains("turn: 2"));
+
+        let mut changed = work.clone();
+        changed.failed_tools = 3;
+        assert!(tracker.current(&plan, &changed, 1).is_none(),
+            "a later tool error must invalidate an older completion account");
     }
 
     #[test]
@@ -1284,6 +1405,13 @@ impl AgentCompletionReport {
         (!items.is_empty()).then(|| {
             format!("\n\n{}",items.join("\n"))
         })
+    }
+
+    pub(crate) fn tool_error_disclosure(&self) -> Option<String> {
+        (self.observed_tool_error_count > 0).then(|| format!(
+            "\n\n- ⚠ Tool-call errors observed in this turn: {}. Later successful calls did not erase these errors.",
+            self.observed_tool_error_count
+        ))
     }
 }
 

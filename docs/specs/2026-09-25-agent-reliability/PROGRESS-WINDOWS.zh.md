@@ -1666,6 +1666,35 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - macOS、PTY setup deadline、fork/exec 临界点的真实调度竞争、正式 Tauri/UI/角色及长期压力仍待验；
   不关闭完整 PROC-047 或共享阶段。
 
+### 同一回合连续 50 个基础命令（W92，基线 `68658614a`）
+
+- S-D04-22 / CMD-143、A02/A08/A17/A18/A19：首个隔离启动直接复制旧 data，因复制了数据集/work-root
+  身份而被正式冲突检查拒绝，模型调用为 0；停机和备份失败均保留。改用官方 backup restore 轮换
+  storage generation 后，首次有效正式 Tauri 回合完成 W92-001～050，但用了 56 个模型步骤和 55 次
+  `exec_command` 提案。step 1/18/34/36 使用无效 `cmd + args`，step 17 提交空对象；五次都在 Schema
+  预检被拒且零 dispatch，实际 process effect 恰为 50。最终 completion 仍宣称“可见失败数 0”。
+  Session `01a0eb2b-9768-7e01-8d08-b0a74d232b15`、2,499 条事件、截图、数据库与轨迹完整保留；50 个
+  成功 marker 仍精确有序，工作区不变，cmd 残留 0，应用/profile 清零并正式备份。
+- 根因有两层：`exec_command` 的严格 union 已区分 shell-script `cmd` 和 executable `command + args`，
+  但字段说明缺少两个完整 JSON 形状的就地对照，step-3.7-flash 在长历史中反复回退；Runtime 已累计
+  `failed_tools=5`，completion 上下文、Schema 和报告却没有该计数，恢复后可以错误写成 0。现把 args
+  明确限定为 command 专属，并给出 `command=cmd.exe` 示例；completion 动态暴露并在非零时强制 exact
+  const `observed_tool_error_count`，检查后持久化。最终交付由 Runtime 固定追加错误数，后续成功不抹除。
+- 新增/调整六项精确回归各重复 **20/20**。Agent Runtime 首次全量因旧失败夹具未带新计数而
+  **176/182**，现场保留；夹具改为披露真实累计错误并补旧报告兼容，合并远端后 **187/187**。workspace fmt、diff 与正式
+  Tauri 构建通过；构建仅有既有 dead-code warning。
+- 额外 `native_coding_reliability` 为 **1/2**：coding fixture 把无 tools 的压缩请求误判成 Provider 故障；
+  在纯远端 `e7d6a85d0` 上同一 Case 同样失败且 Schema 更大，确认不是 W92 回归，原日志保留并继续开放。
+- 合并远端并重跑 187 项后，最终二进制 `712cf9457e11f2b9f3a6295bf961d5e451c5d3ee250e6049ee52fde26dca2408` 使用
+  新 data/work/profile 和 StepFun Plan / `step-3.7-flash`。Session
+  `01a0eb51-96ab-7062-a108-520f33641f3f` 单回合 completed、51 个模型步骤、2,454 条 canonical 事件；
+  step 1～50 各有且只有一个 `exec_command`，均为 `command=cmd.exe` 与实际 JSON args，W92-001～050
+  逐项 exit 0、`reaped=true`、零 dropped，step 51 一次 completion。工具/UI 错误为 0、50 个 effect
+  均 returned、completion 显式记录错误数 0、工作区 tree hash 前后同为 `23e5afef…c308`、cmd 残留 0，
+  应用/profile 清零并正式备份。
+- 其他基础命令语义、其他 Provider/模型/Agent、macOS、50 个独立用户回合、N3/100 seed/LONG/99%
+  仍待验；不关闭完整 CMD-143/144 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
