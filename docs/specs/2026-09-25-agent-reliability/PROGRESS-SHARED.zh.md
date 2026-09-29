@@ -81,6 +81,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无模型/UI/网络 remote。当前仅重建 host 并复用同一内存 Store；真实数据库关闭/重开、进程强退、
   pending→unknown 启动归约、主动 remote-ref 对账与其他平台仍待验，不关闭完整 VCS/LIFE。
 
+- S-D05-10（VCS-013、LIFE-006/007、A05/A13/A17/A19 push pending 跨数据库重开子断言）：W112
+  将 W111 同一物理故障窗口改为独立磁盘 SQLite；remote 更新、Effect 保持 Pending 后释放 reservation、
+  host 与 Store，关闭全部数据库连接并从同一路径重新初始化 Store。首次及 **20/20** 均在新 host/
+  新 owner 调用 remote 前返回 durable pending，第二提交仍只在本地，remote 与 effect identity/state
+  不变；相邻 host push **3/3**。生产代码无需修改，无模型/UI/网络 remote。尚未覆盖进程在 Git worker
+  或 SQLite terminal commit 中被强杀、完整 App startup 的 pending→unknown 归约、主动 remote 对账及
+  其他平台，不关闭完整 VCS/LIFE。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
