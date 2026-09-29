@@ -92,6 +92,10 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
     let upstream = wiremock::MockServer::start().await;
     let requests = Arc::new(AtomicUsize::new(0));
     let seen = requests.clone();
+    let task_requests = Arc::new(AtomicUsize::new(0));
+    let task_seen = task_requests.clone();
+    let compaction_requests = Arc::new(AtomicUsize::new(0));
+    let compaction_seen = compaction_requests.clone();
     let is_general = template == "assistant.general";
     // Match the size of the real failed coding payload, rather than passing a
     // tiny write that never puts pressure on the General preset's context.
@@ -101,8 +105,15 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
         .and(wiremock::matchers::path("/v1/chat/completions"))
         .respond_with(move |request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
-            let round = seen.fetch_add(1, Ordering::SeqCst);
-            let tools = body["tools"].as_array().expect("preset must advertise native tools");
+            seen.fetch_add(1, Ordering::SeqCst);
+            let Some(tools) = body["tools"].as_array().filter(|tools| !tools.is_empty()) else {
+                compaction_seen.fetch_add(1, Ordering::SeqCst);
+                assert!(body.to_string().contains("Write only a compact continuation note"),
+                    "only the Runtime compaction route may omit native tools");
+                eprintln!("CODING_COMPACTION request_bytes={}", request.body.len());
+                return stream(None, "Continue creating and verifying gomoku/index.html. Preserve the accepted request and treat earlier tool results as observations, not new authority.");
+            };
+            let round = task_seen.fetch_add(1, Ordering::SeqCst);
             if round == 0 {
                 assert!(!body["messages"].as_array().unwrap().iter().any(|message|
                     message["role"] == "system" && message["content"].as_str().is_some_and(|text|
@@ -179,15 +190,27 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
                     assert_eq!(result["exit_code"], 0);
                     assert!(result.to_string().contains("MAC_PROCESS_VERIFIED"));
                     } else {
-                        let result = body["messages"].as_array().unwrap().iter().rev()
-                            .find(|message| message["role"] == "tool" && message["tool_call_id"] == "read-game").unwrap()["content"].as_str().unwrap();
-                        let result: Value = serde_json::from_str(result).unwrap();
-                        assert_eq!(result["start_line"],2);
-                        assert!(result["content"].as_str().unwrap().starts_with("<html"));
-                        assert!(!result["content"].as_str().unwrap().contains("<!DOCTYPE"));
-                        let repository = body["messages"].as_array().unwrap().iter().rev()
-                            .find(|message| message["tool_call_id"] == "repo-status").unwrap()["content"].as_str().unwrap();
-                        assert_eq!(serde_json::from_str::<Value>(repository).unwrap()["is_repository"],false);
+                        let messages = body["messages"].as_array().unwrap();
+                        if let Some(result) = messages.iter().rev()
+                            .find(|message| message["role"] == "tool" && message["tool_call_id"] == "read-game")
+                        {
+                            let result: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+                            assert_eq!(result["start_line"],2);
+                            assert!(result["content"].as_str().unwrap().starts_with("<html"));
+                            assert!(!result["content"].as_str().unwrap().contains("<!DOCTYPE"));
+                        } else {
+                            assert!(compaction_seen.load(Ordering::SeqCst) > 0,
+                                "tool history may be absent only after a recorded compaction request");
+                            let encoded = body.to_string();
+                            assert!(encoded.contains("available_evidence"));
+                            assert!(encoded.contains("gomoku/index.html"),
+                                "compaction must retain the current file observation path");
+                        }
+                        if let Some(repository) = messages.iter().rev()
+                            .find(|message| message["tool_call_id"] == "repo-status")
+                        {
+                            assert_eq!(serde_json::from_str::<Value>(repository["content"].as_str().unwrap()).unwrap()["is_repository"],false);
+                        }
                     }
                     let evidence = if native_process { json!({"evidence_call_ids":["read-game"]}) }
                         else { json!({"evidence_paths":["gomoku/index.html"]}) };
@@ -269,7 +292,10 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
         assert_eq!(protocol_errors,0,"text spilled by a length-limited provider must not enter protocol retries");
     }
     if native_process { assert_eq!(std::fs::read_to_string(workspace.join("gomoku/check.txt")).unwrap(), "MAC_PROCESS_OK"); }
-    assert_eq!(requests.load(Ordering::SeqCst), 3 + usize::from(malformed_first) + usize::from(discovery_first) + 2 * usize::from(native_process));
+    let expected_task_requests = 3 + usize::from(malformed_first)
+        + usize::from(discovery_first) + 2 * usize::from(native_process);
+    assert_eq!(task_requests.load(Ordering::SeqCst), expected_task_requests,
+        "compaction inference is not a task step or protocol retry");
     let delivered: String = sqlx::query_scalar("SELECT json_extract(inline_json,'$.event.text') FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='completion_delivered'")
         .bind(id).fetch_one(app.database.pool()).await.unwrap();
     assert!(delivered.contains("File path verified; gameplay not checked by this fixture"));
@@ -284,7 +310,12 @@ async fn scenario(template: &str, malformed_first: bool, selected_workspace: boo
     assert_eq!(writes, if native_process { 2 } else { 1 }, "rejected/truncated text cannot execute or duplicate a write");
     let compactions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded' AND json_extract(inline_json,'$.event.event')='compaction_started'")
         .bind(id).fetch_one(app.database.pool()).await.unwrap();
-    assert_eq!(compactions, 0, "a bounded single-file task must not turn into serial summarization");
+    let provider_compactions = compaction_requests.load(Ordering::SeqCst);
+    assert_eq!(usize::try_from(compactions).unwrap(), provider_compactions,
+        "every no-tool provider request must correspond to one canonical compaction");
+    assert!(provider_compactions <= 1,
+        "a bounded single-file task must not turn into serial summarization");
+    assert_eq!(requests.load(Ordering::SeqCst), expected_task_requests + provider_compactions);
     assert_eq!(browser_starts.load(Ordering::SeqCst), 0, "binding/discovering a capability must not start its heavy runtime");
     drop(router);
     app.shutdown_browser_platform().await.unwrap();

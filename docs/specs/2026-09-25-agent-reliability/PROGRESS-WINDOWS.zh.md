@@ -1739,6 +1739,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   diff 和正式 Tauri 构建通过；仅有既有 warning。其他非零码/信号、timeout/lost、多个失败、其他
   Provider/模型/角色、macOS 与 N3/100 seed/LONG/99% 仍待验；不关闭完整 PROC/REAL/OBS 或共享阶段。
 
+### 原生 Coding 回归中的压缩请求分类（W95，基线 `93b5f58e9`）
+
+- S-D01-03 / LONG-008、ACOD-017、A05/A09/A15/A17/A19：重跑 W92 开放的
+  `native_coding_reliability`，当前基线仍为 **1/2**。Coding Case 首个任务请求有 22 个工具、Schema
+  26,518 bytes；写入后的合法 compaction 请求按设计不带工具，旧 scripted provider 在取
+  `body.tools` 时 panic，三次 provider 重试后 Turn 暂停为 `EXECUTION_MODEL_PROVIDER_UNAVAILABLE`。
+  首次失败日志完整保留。
+- 夹具现只在请求含压缩专用提示且工具面为空时走摘要响应，并把 task request 与 compaction request
+  分开计数。首版修补进一步暴露压缩后原始 `read-game` tool message 已被移出当前窗口；该中间
+  `FAIL` 及一次测试编译 typo 均保留。最终逻辑优先核对原 tool message；若已压缩，则要求确有压缩
+  请求且完成上下文仍列出 `available_evidence` 和 `gomoku/index.html`。既有磁盘全文、单次写入、
+  非 Git 工作区、completion、unverified 披露、effect/Turn 终态和 Browser 零启动断言没有移除。
+- 最终 no-capture 轨迹为 3 个任务请求 + 1 个 24,559-byte compaction 请求；Provider 压缩计数与
+  canonical `compaction_started` 精确相等且不超过 1。完整测试文件 **2/2**，原失败 Coding Case
+  **20/20**，workspace fmt 与 diff 检查通过；仅有既有 warning。本批未修改生产代码、未调用真实
+  模型或 UI。20 次连续压缩、真实 Provider、pause/restart、其他 Agent/平台及 LONG/99% 仍待验，
+  不关闭完整 LONG-008/ACOD-017 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

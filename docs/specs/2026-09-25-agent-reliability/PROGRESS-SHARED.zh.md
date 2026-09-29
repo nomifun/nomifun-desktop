@@ -894,6 +894,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   数组形状子断言，精确 evidence 语义关联另转后续 CTRL 批次。其他数组字段/Provider、N3/100 seed/
   LONG/99% 仍开放，不关闭完整 REG/CTRL/PROC 或共享阶段。
 
+- S-D01-03（LONG-008、ACOD-017、A05/A09/A15/A17/A19 压缩夹具子断言）：W92 额外
+  `native_coding_reliability` 长度压力回归为 **1/2**；W95 在当前基线原样复现。产品发出合法的
+  no-tools compaction 请求，scripted provider 却要求每个请求都有原生工具并 panic，重试后将
+  Execution 错误暂停为 provider unavailable。夹具现按压缩专用提示和空工具面区分请求，用独立
+  task/compaction 计数响应有界摘要；压缩后原始 tool message 已移出当前窗口时，要求
+  `available_evidence` 仍含当前 `gomoku/index.html` 路径，磁盘、effect、完成和未验证范围断言均保留。
+  最终一次请求轨迹精确为 3 个任务请求 + 1 个 canonical compaction，请求数与事件数相等，写入只
+  执行一次且 Turn completed；完整文件 **2/2**，原失败 Case **20/20**。生产 Runtime/Provider
+  编码无需修改。本批只修验证夹具并证明一次压缩；20 次连续压缩、真实 Provider/UI、pause/restart、
+  其他 Agent/平台及 LONG 统计仍开放，不关闭完整 LONG-008/ACOD-017 或共享阶段。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session
