@@ -123,6 +123,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   工作区、进程和应用清理及正式备份通过。生产代码无需修改。PTY/stdin/resize、失败 poll/cancel、N3、
   其他 Provider/角色/平台与长期矩阵仍开放，不关闭完整 CMD/PROC/CTRL 或共享阶段。
 
+- S-D02-21（CTRL-006/007、PROC-025/027、REAL-005、A02/A05/A09/A13/A17/A18/A19 stdin 链、
+  游标与完成证据子断言）：W105 首次正式 Tauri 的 start→input→close→poll 已退出 0/reaped，但 canonical
+  poll Schema/宿主丢掉模型侧已有的 `cursor`，close 先消费回显后 poll 得到空输出；完成账本又只延续
+  当前 epoch，导致 start/input 两个精确链调用不在顶层证据。现 canonical poll 贯通非负 cursor，核心
+  owner 支持从显式 cursor 重放保留输出，终态缓存也按请求游标重读；只有同一 process 的完整、连续、
+  零省略 provenance 链可跨自身 interaction epoch 延续，其他旧观察不恢复。另将单行输入建模为可选
+  `append_newline=true`，宿主在原始 input 后只追加一个 `0x0A`，默认 false 且 1 MiB 上限含追加字节。
+  原始及强化字节夹具保留三次模型省略 LF 的失败，其中原始 12 字节被宿主如实回报，证明传输没有
+  隐式补齐；最终正式 Tauri 由 `step-3.7-flash` 精确发送 flag，poll(cursor=0) 返回末尾 `0A`、长度 13，
+  completion 按顺序引用 start/input/close/poll 四个顶层 call ID。精确链回归 **20/20**，Runtime
+  **195/195**、Wave2 **22/22**、Engine **29 通过 / 1 ignored**、App host **3/3**；正式 Session
+  5 步/177 事件、独立 34 项断言、工作区/进程/应用清理与备份通过。PTY/resize、并发 close/poll、
+  retained-base loss、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 Case 或共享阶段。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
