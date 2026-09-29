@@ -1590,6 +1590,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 其他 package manager、语言、仓库布局、失败目标/超时、其他 Agent/平台，以及 N3/100 seed/
   LONG/99% 仍待验；不关闭完整 CMD-138 或共享阶段。
 
+### session lease 到期、续期与精确回收（W87，基线 `87e7de6f3`）
+
+- S-D04-16 / PROC-043、A03/A08/A11/A13/A19：复核公开 supervisor 的现有 lease 合同。真实进程
+  即使无人 poll，持续输出也会续期；owner 认证的 poll、write、status 各自在原始 lease 过期后仍
+  保持 Session。无活动 Session 到期后先转入 retirement，完成 cancel 与 exact reap 后才从 registry
+  移除；进行中的动作阻止 reaper claim，未 reap 的 retirement 不释放容量。
+- 生产实现首次满足，本批未修改 lease、信号或 registry 逻辑。Windows 与 WSL2 Linux 对输出续期、
+  三种 owner 动作续期、到期回收、动作/回收互斥及 reap 前容量保留六项分别重复 **20/20**，每平台
+  共 120 次；两平台 `session_registry` 均 **12/12**。独立日志计数确认零失败，测试结束后两平台
+  `process_test_helper` 数均为 0。
+- 首次 WSL 内联脚本被宿主引号解析损坏，在任何产品测试前退出；失败摘要独立保留，改用仓库外
+  落盘 Bash 脚本和 Linux 专用 target cache 后通过，未把夹具失败记成产品结果。
+- PTY/resize/close-stdin 的显式续期、lease 边界的真实 OS 调度竞争、macOS、应用强退、PROC-044
+  的连续 1,000 个短进程、正式 UI/角色及长期统计仍待验；不关闭完整 PROC-043/044 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
