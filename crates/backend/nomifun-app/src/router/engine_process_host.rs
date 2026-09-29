@@ -13,7 +13,7 @@ use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave2::Wave2HostPortError;
 use nomifun_engine_core::{
     EngineProcessPoll, EngineProcessRequest, EngineProcessSession, EngineProcessTransport,
-    ManagedEngineProcessOwner,
+    MAX_PTY_DIMENSION, ManagedEngineProcessOwner,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
@@ -89,6 +89,15 @@ fn stdin_input_exceeds_budget(params: &Params) -> bool {
     })
 }
 
+fn pty_dimension_out_of_range(params: &Params) -> bool {
+    params
+        .cols
+        .is_some_and(|value| !(1..=MAX_PTY_DIMENSION).contains(&value))
+        || params
+            .rows
+            .is_some_and(|value| !(1..=MAX_PTY_DIMENSION).contains(&value))
+}
+
 pub(crate) struct EngineProcessScope {
     owner: ManagedEngineProcessOwner,
     state: Mutex<ProcessState>,
@@ -161,8 +170,9 @@ impl EngineProcessScope {
             .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
         if params.wait_ms.is_some_and(|wait| wait > 30_000)
             || stdin_input_exceeds_budget(&params)
+            || pty_dimension_out_of_range(&params)
         {
-            return Err(error("process wait/input budget exceeded"));
+            return Err(error("process wait/input/PTY dimension budget exceeded"));
         }
         let mut state = self.state.lock().await;
         if self.closed.load(Ordering::Acquire) || state.unregistered_start || state.cleanup_panicked
@@ -546,6 +556,23 @@ mod tests {
             MAX_STDIN_WRITE_BYTES + 1,
             Some(false)
         )));
+    }
+
+    #[test]
+    fn pty_dimensions_use_the_portable_predispatch_limit() {
+        let mut params: Params = serde_json::from_value(serde_json::json!({
+            "operation": "resize",
+            "process_id": "process-1",
+            "cols": 32767,
+            "rows": 32767
+        }))
+        .unwrap();
+        assert!(!pty_dimension_out_of_range(&params));
+        params.cols = Some(32768);
+        assert!(pty_dimension_out_of_range(&params));
+        params.cols = Some(120);
+        params.rows = Some(0);
+        assert!(pty_dimension_out_of_range(&params));
     }
 
     #[test]

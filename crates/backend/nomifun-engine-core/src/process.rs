@@ -13,9 +13,9 @@ use std::time::{Duration, Instant};
 
 use nomi_process_runtime::{
     CapabilityPolicy, CleanupReport, CommandSpec, EncodingMetadata, NormalizedProcessRequest,
-    OutputCursor, OutputSnapshot, PollResult, ProcessError, ProcessOutcome, ProcessOwner,
-    ProcessPolicy, ProcessRequest, ProcessSupervisor, SandboxPolicy, SessionId, SupervisorConfig,
-    Transport, ShellKind, normalize_request,
+    MAX_PTY_DIMENSION, OutputCursor, OutputSnapshot, PollResult, ProcessError, ProcessOutcome,
+    ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, SandboxPolicy, SessionId,
+    SupervisorConfig, Transport, ShellKind, normalize_request,
 };
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -126,14 +126,13 @@ impl EngineProcessRequest {
                 "output_limit_bytes must be between 1 and {MAX_OUTPUT_LIMIT_BYTES}"
             )));
         }
-        if matches!(
-            self.transport,
-            EngineProcessTransport::Pty { cols: 0, .. }
-                | EngineProcessTransport::Pty { rows: 0, .. }
-        ) {
-            return Err(EngineProcessError::Process(
-                "PTY dimensions must be non-zero".to_owned(),
-            ));
+        if let EngineProcessTransport::Pty { cols, rows } = self.transport
+            && (!(1..=MAX_PTY_DIMENSION).contains(&cols)
+                || !(1..=MAX_PTY_DIMENSION).contains(&rows))
+        {
+            return Err(EngineProcessError::Process(format!(
+                "PTY dimensions must be between 1 and {MAX_PTY_DIMENSION}"
+            )));
         }
         if self.cwd.as_deref().is_some_and(invalid_relative_path) {
             return Err(EngineProcessError::Process(
@@ -727,6 +726,19 @@ mod tests {
             output_limit_bytes: 64 * 1024,
             transport: EngineProcessTransport::Pipe,
         }
+    }
+
+    #[test]
+    fn pty_dimensions_above_the_portable_signed_limit_are_rejected() {
+        let mut request = echo_request();
+        request.transport = EngineProcessTransport::Pty {
+            cols: 32768,
+            rows: 40,
+        };
+        let error = request
+            .validate()
+            .expect_err("dimensions above the Windows COORD limit must fail before spawn");
+        assert!(error.to_string().contains("between 1 and 32767"));
     }
 
     fn sleeper_request() -> EngineProcessRequest {

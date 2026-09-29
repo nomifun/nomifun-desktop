@@ -412,8 +412,8 @@ fn process_launch(include_wait: bool) -> Value {
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
         "tty":{"type":"boolean","default":false},
-        "cols":{"type":"integer","minimum":1,"maximum":65535},
-        "rows":{"type":"integer","minimum":1,"maximum":65535}
+        "cols":{"type":"integer","minimum":1,"maximum":32767},
+        "rows":{"type":"integer","minimum":1,"maximum":32767}
     });
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
@@ -463,8 +463,8 @@ fn process_id_schema() -> Value {
 fn process_resize_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
-        "cols":{"type":"integer","minimum":1,"maximum":65535},
-        "rows":{"type":"integer","minimum":1,"maximum":65535}
+        "cols":{"type":"integer","minimum":1,"maximum":32767},
+        "rows":{"type":"integer","minimum":1,"maximum":32767}
     },"required":["process_id","cols","rows"]})
 }
 
@@ -710,6 +710,16 @@ mod tests {
                 .input_schema
                 .0["properties"]["wait_ms"]["maximum"],
             0
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "resize_process")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["cols"]["maximum"],
+            32767
         );
     }
 

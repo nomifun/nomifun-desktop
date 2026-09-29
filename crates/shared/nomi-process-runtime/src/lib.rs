@@ -32,7 +32,7 @@ pub use recovery::{
 };
 pub use request::{
     CommandSpec, ProcessError, ProcessOwner, ProcessPolicy, ProcessRequest,
-    NormalizedProcessRequest, ShellKind, Transport, normalize_request,
+    MAX_PTY_DIMENSION, NormalizedProcessRequest, ShellKind, Transport, normalize_request,
 };
 pub use supervisor::{
     ProcessHandle, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,

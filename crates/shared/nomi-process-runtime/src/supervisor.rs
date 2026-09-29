@@ -516,9 +516,14 @@ impl ProcessSupervisor {
         cols: u16,
         rows: u16,
     ) -> Result<(), ProcessError> {
-        if cols == 0 || rows == 0 {
+        if !(1..=crate::MAX_PTY_DIMENSION).contains(&cols)
+            || !(1..=crate::MAX_PTY_DIMENSION).contains(&rows)
+        {
             return Err(ProcessError::InvalidTransport {
-                reason: "PTY dimensions must be non-zero".to_owned(),
+                reason: format!(
+                    "PTY dimensions must be between 1 and {}",
+                    crate::MAX_PTY_DIMENSION
+                ),
             });
         }
         let action = self.session(owner, session_id)?;
@@ -2231,14 +2236,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resize_rejects_zero_dimensions_before_calling_the_owner() {
+    async fn resize_rejects_out_of_range_dimensions_before_calling_the_owner() {
         let (supervisor, handle, fake, _output) = register_fake(FakeOwner::pending()).await;
 
-        for (cols, rows) in [(0, 24), (80, 0)] {
+        for (cols, rows) in [
+            (0, 24),
+            (80, 0),
+            (crate::MAX_PTY_DIMENSION + 1, 24),
+            (80, crate::MAX_PTY_DIMENSION + 1),
+        ] {
             let error = supervisor
                 .resize(&handle.owner, &handle.session_id, cols, rows)
                 .await
-                .expect_err("zero PTY dimensions should be rejected");
+                .expect_err("out-of-range PTY dimensions should be rejected");
             assert_eq!(error.code(), "invalid_transport");
         }
 

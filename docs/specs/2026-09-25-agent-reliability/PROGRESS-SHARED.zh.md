@@ -712,6 +712,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   通过。本批只补最小回归并提取等价预算判断；未调用模型或正式 UI。多次分块累计上限、并发
   input/close、终态错误的正式 UI 呈现、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
 
+- S-D04-29（PROC-032、A11/A13/A17/A19 PTY resize 上限子断言）：W107 首次反例确认标准工具与
+  canonical Schema 均允许 65535，Engine 启动校验也接受 32768；Windows ConPTY 的 Win32 `COORD`
+  实际只支持 signed 16-bit，越界值因此越过预检后才成为 I/O/unknown。三个首次失败独立保留。
+  现以共享 `MAX_PTY_DIMENSION=32767` 统一 Runtime、Engine、App pre-journal 校验和 start/resize 两套
+  模型 Schema；0、32768 及以上在 owner/dispatch 前返回稳定 invalid transport，合法 132×43 仍真实
+  resize 并可取消/reap。ConPTY 合法与越界组合 **40/40**，process Runtime **125/125**、PTY
+  **8/8**、Runtime **195/195**、Wave2 **22/22**、Engine **33 通过 / 1 ignored**、App host **5/5**。
+  本批未调用模型或正式 UI。Windows 通用 ConPTY close 仍明确不声称可证明 generic EOF，PROC-028、
+  尺寸实际生效的应用级观测、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
