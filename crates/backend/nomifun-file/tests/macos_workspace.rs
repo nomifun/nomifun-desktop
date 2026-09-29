@@ -155,6 +155,34 @@ fn read_xattr(path: &Path, name: &str) -> String {
     value.strip_suffix('\n').unwrap_or(&value).to_owned()
 }
 
+fn set_file_flag(path: &Path, flag: &str) {
+    let output = Command::new("/usr/bin/chflags")
+        .arg(flag)
+        .arg(path)
+        .output()
+        .expect("macOS flag fixture requires /usr/bin/chflags");
+    assert!(
+        output.status.success(),
+        "failed to set {flag} on {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn file_flags(path: &Path) -> String {
+    let output = Command::new("/usr/bin/stat")
+        .arg("-f")
+        .arg("%Sf")
+        .arg(path)
+        .output()
+        .expect("macOS flag fixture requires /usr/bin/stat");
+    assert!(output.status.success(), "failed to read flags for {}", path.display());
+    String::from_utf8(output.stdout)
+        .expect("flag listing is UTF-8")
+        .trim()
+        .to_owned()
+}
+
 async fn assert_alias_batch_rejected_before_publication(first: &str, second: &str) {
     let root = tempfile::tempdir().unwrap();
     let probe = root.path().join(first);
@@ -384,6 +412,63 @@ async fn acl_deny_write_rejects_write_and_patch_without_changing_bytes() {
     let events = events.0.lock().unwrap();
     assert_eq!(events.len(), 2, "each uncertain denial requires one reconciliation event");
     for event in events.iter() {
+        assert_eq!(event.name, "fileStream.contentUpdate");
+        assert_eq!(event.data["operation"], "write");
+        assert!(event.data.get("content").is_none(), "uncertain failure cannot publish intended bytes");
+    }
+}
+
+#[tokio::test]
+async fn immutable_targets_reject_write_and_patch_without_losing_flags() {
+    let root = tempfile::tempdir().unwrap();
+    let write_target = root.path().join("write-immutable.txt");
+    let patch_target = root.path().join("patch-immutable.txt");
+    fs::write(&write_target, b"original").unwrap();
+    fs::write(&patch_target, b"original").unwrap();
+    for target in [&write_target, &patch_target] {
+        set_file_flag(target, "uchg");
+        assert!(file_flags(target).contains("uchg"));
+    }
+    let (service, scope, events) = owner(root.path());
+
+    let write = service
+        .write_file_for_agent_session(&scope, "write-immutable.txt", b"wrong")
+        .await;
+    let patch = service
+        .apply_patch_for_agent_session(
+            &scope,
+            replacement("patch-immutable.txt", "original", "wrong"),
+        )
+        .await;
+
+    let write_bytes = fs::read(&write_target).unwrap();
+    let patch_bytes = fs::read(&patch_target).unwrap();
+    let write_flags = file_flags(&write_target);
+    let patch_flags = file_flags(&patch_target);
+    let retained = fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".nomifun-patch-"))
+        .collect::<Vec<_>>();
+    let events = events.0.lock().unwrap().clone();
+    for target in [&write_target, &patch_target] {
+        set_file_flag(target, "nouchg");
+    }
+
+    assert!(write.is_err(), "immutable write unexpectedly succeeded: {write:?}");
+    assert!(patch.is_err(), "immutable patch unexpectedly succeeded: {patch:?}");
+    assert!(format!("{:?}", write.unwrap_err()).contains("publication outcome is unknown"));
+    assert!(format!("{:?}", patch.unwrap_err()).contains("publication outcome is unknown"));
+    assert_eq!(write_bytes, b"original");
+    assert_eq!(patch_bytes, b"original");
+    assert!(write_flags.contains("uchg"));
+    assert!(patch_flags.contains("uchg"));
+    assert_eq!(retained.len(), 2, "each immutable denial retains one owned stage");
+    for entry in retained {
+        assert_eq!(fs::read(entry.path()).unwrap(), b"wrong");
+    }
+    assert_eq!(events.len(), 2, "each uncertain denial requires one reconciliation event");
+    for event in events {
         assert_eq!(event.name, "fileStream.contentUpdate");
         assert_eq!(event.data["operation"], "write");
         assert!(event.data.get("content").is_none(), "uncertain failure cannot publish intended bytes");
