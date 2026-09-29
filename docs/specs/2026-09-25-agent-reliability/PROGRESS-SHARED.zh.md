@@ -143,6 +143,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   生产代码无需修改，无模型/UI。文件 worker/SQLite terminal commit 进程强杀、delete 同类磁盘重开、
   patch 结果人工核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE 或共享阶段。
 
+- S-D03-53（FILE-034/038、LIFE-006/007、A05/A13/A17/A19 delete receipt 丢失子断言）：W117
+  在磁盘 SQLite 中 reserve 文件 delete Effect，再由实际 `FileService` owner 删除旧 `victim.txt`；owner
+  返回路径 observation 后故意不写 terminal receipt，并关闭全部数据库连接。用户随后按同名重建不同
+  字节。新 Store/host 中，原 key 由 durable Pending 拒绝，新 operation/key 也在 delete owner 前由
+  workspace resource fence 拒绝；Effect 保持唯一 Pending，同名重建文件完整保留。新增断言首次及
+  连续 **20/20**；App 普通/部分递归删除 **2/2**，FileService 删除、名称置换及 Windows ACL **8/8**。
+  生产代码无需修改，无模型/UI。文件 worker/SQLite terminal commit 进程强杀、目录树成功删除后的
+  同名重建磁盘重开、delete 结果人工核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE
+  或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
