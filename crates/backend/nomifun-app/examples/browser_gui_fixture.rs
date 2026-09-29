@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-pointer-input <target-app> <target-status>]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -49,7 +49,10 @@ struct Fixture {
     computer_screen_denied: bool,
     computer_input: bool,
     computer_stale_focus: bool,
+    computer_pointer_input: bool,
     computer_file: Option<PathBuf>,
+    computer_pointer_target: Option<PathBuf>,
+    computer_pointer_status: Option<PathBuf>,
     a11y_observed: AtomicBool,
     a11y_denied: AtomicBool,
     screen_denied: AtomicBool,
@@ -58,11 +61,20 @@ struct Fixture {
     input_initial_plan_unavailable: AtomicBool,
     stale_observed: AtomicBool,
     stale_input_rejected: AtomicBool,
+    pointer_verified: AtomicBool,
+    pointer_baseline: Mutex<Option<PointerCounts>>,
     witnesses: Mutex<Vec<Value>>,
     failure: Mutex<Option<String>>,
     finish: Semaphore,
     stale_continue: Semaphore,
     stop: CancellationToken,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PointerCounts {
+    moves: u64,
+    clicks: u64,
+    scrolls: u64,
 }
 
 /// Declares the native Browser provider while the disposable dataset is being
@@ -955,6 +967,292 @@ async fn computer_stale_focus_operation(
     )))
 }
 
+fn pointer_status(fixture: &Fixture) -> anyhow::Result<Value> {
+    let path = fixture
+        .computer_pointer_status
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Computer pointer status path missing"))?;
+    let mut last_error = None;
+    for _ in 0..40 {
+        match std::fs::read(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(Into::into))
+        {
+            Ok(status) if status["ready"].as_bool() == Some(true) => return Ok(status),
+            Ok(_) => last_error = Some(anyhow::anyhow!("pointer target is not ready")),
+            Err(error) => last_error = Some(error),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("pointer target status unavailable")))
+}
+
+fn pointer_counts(status: &Value) -> anyhow::Result<PointerCounts> {
+    let count = |name: &str| {
+        status[name]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("pointer target status missing {name}"))
+    };
+    Ok(PointerCounts {
+        moves: count("move_events")?,
+        clicks: count("click_events")?,
+        scrolls: count("scroll_events")?,
+    })
+}
+
+fn pointer_xy(status: &Value, name: &str) -> anyhow::Result<(i32, i32)> {
+    let coordinate = |axis: &str| {
+        let key = format!("{name}_{axis}");
+        let value = status[&key]
+            .as_i64()
+            .ok_or_else(|| anyhow::anyhow!("pointer target status missing {key}"))?;
+        i32::try_from(value).map_err(|_| anyhow::anyhow!("pointer coordinate {key} out of range"))
+    };
+    Ok((coordinate("x")?, coordinate("y")?))
+}
+
+fn pointer_screenshot_xy(
+    body: &Value,
+    call_id: &str,
+    status: &Value,
+    name: &str,
+) -> anyhow::Result<(i32, i32)> {
+    let content = computer_result_text(body, call_id)?;
+    let result: Value = serde_json::from_str(content)?;
+    let text = result["text"]
+        .as_str()
+        .or_else(|| result["result"]["text"].as_str())
+        .ok_or_else(|| anyhow::anyhow!("Computer screenshot text missing for {call_id}"))?;
+    let dimensions = text
+        .split_once("Screenshot captured: ")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|token| token.split_once('x'))
+        .ok_or_else(|| anyhow::anyhow!("Computer screenshot dimensions missing for {call_id}"))?;
+    let image_width: i64 = dimensions.0.parse()?;
+    let image_height: i64 = dimensions.1.parse()?;
+    let screen_width = status["screen_width"]
+        .as_i64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow::anyhow!("pointer target screen_width missing"))?;
+    let screen_height = status["screen_height"]
+        .as_i64()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| anyhow::anyhow!("pointer target screen_height missing"))?;
+    let (screen_x, screen_y) = pointer_xy(status, name)?;
+    let map = |coordinate: i32, image: i64, screen: i64| {
+        (((f64::from(coordinate) + 0.5) * image as f64 / screen as f64).floor() as i64)
+            .clamp(0, image - 1) as i32
+    };
+    Ok((
+        map(screen_x, image_width, screen_width),
+        map(screen_y, image_height, screen_height),
+    ))
+}
+
+fn wait_pointer_advance(
+    fixture: &Fixture,
+    field: &str,
+    baseline: u64,
+) -> anyhow::Result<(Value, PointerCounts)> {
+    let mut last = None;
+    for _ in 0..40 {
+        let status = pointer_status(fixture)?;
+        let counts = pointer_counts(&status)?;
+        let current = match field {
+            "move_events" => counts.moves,
+            "click_events" => counts.clicks,
+            "scroll_events" => counts.scrolls,
+            _ => anyhow::bail!("unknown pointer counter {field}"),
+        };
+        if current > baseline {
+            return Ok((status, counts));
+        }
+        last = Some(current);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!(
+        "pointer target {field} did not advance beyond {baseline}; last={:?}",
+        last
+    )
+}
+
+fn computer_pointer_input_operation(
+    fixture: &Fixture,
+    body: &Value,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    let call = |id| computer_tool_result(body, id).is_some();
+    if call("gui-computer-pointer-scroll") {
+        require_computer_success(body, "gui-computer-pointer-scroll")?;
+        let baseline = fixture
+            .pointer_baseline
+            .lock()
+            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("pointer baseline missing before scroll"))?;
+        let (status, counts) = wait_pointer_advance(fixture, "scroll_events", baseline.scrolls)?;
+        anyhow::ensure!(
+            status["scroll_delta_y"].as_f64().is_some_and(|delta| delta != 0.0),
+            "pointer target recorded no vertical scroll delta"
+        );
+        *fixture.pointer_baseline.lock().unwrap() = Some(counts);
+        fixture.pointer_verified.store(true, Ordering::SeqCst);
+        return Ok(None);
+    }
+    if call("gui-computer-pointer-observe-after-click") {
+        let status = pointer_status(fixture)?;
+        let (x, y) = pointer_screenshot_xy(
+            body,
+            "gui-computer-pointer-observe-after-click",
+            &status,
+            "scroll",
+        )?;
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-pointer-scroll",
+            "gui-computer-pointer-observe-after-click",
+            "scroll",
+            json!({"x":x,"y":y,"direction":"down","amount":3}),
+        )?));
+    }
+    if call("gui-computer-pointer-click") {
+        require_computer_success(body, "gui-computer-pointer-click")?;
+        let baseline = fixture
+            .pointer_baseline
+            .lock()
+            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("pointer baseline missing before click"))?;
+        let (_, counts) = wait_pointer_advance(fixture, "click_events", baseline.clicks)?;
+        anyhow::ensure!(
+            counts.clicks == baseline.clicks + 1,
+            "pointer target click count advanced by more than one"
+        );
+        *fixture.pointer_baseline.lock().unwrap() = Some(counts);
+        return Ok(Some((
+            "gui-computer-pointer-observe-after-click".into(),
+            browser_tool(body, "computer/observe")?,
+            json!({"action":"screenshot"}),
+        )));
+    }
+    if call("gui-computer-pointer-observe-after-move") {
+        let status = pointer_status(fixture)?;
+        let (x, y) = pointer_screenshot_xy(
+            body,
+            "gui-computer-pointer-observe-after-move",
+            &status,
+            "click",
+        )?;
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-pointer-click",
+            "gui-computer-pointer-observe-after-move",
+            "left_click",
+            json!({"x":x,"y":y}),
+        )?));
+    }
+    if call("gui-computer-pointer-move") {
+        require_computer_success(body, "gui-computer-pointer-move")?;
+        let baseline = fixture
+            .pointer_baseline
+            .lock()
+            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("pointer baseline missing before move"))?;
+        let (_, counts) = wait_pointer_advance(fixture, "move_events", baseline.moves)?;
+        *fixture.pointer_baseline.lock().unwrap() = Some(counts);
+        return Ok(Some((
+            "gui-computer-pointer-observe-after-move".into(),
+            browser_tool(body, "computer/observe")?,
+            json!({"action":"screenshot"}),
+        )));
+    }
+    if call("gui-computer-pointer-screen-initial") {
+        let status = pointer_status(fixture)?;
+        let counts = pointer_counts(&status)?;
+        let (x, y) = pointer_screenshot_xy(
+            body,
+            "gui-computer-pointer-screen-initial",
+            &status,
+            "move",
+        )?;
+        *fixture.pointer_baseline.lock().unwrap() = Some(counts);
+        fixture.a11y_observed.store(true, Ordering::SeqCst);
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-pointer-move",
+            "gui-computer-pointer-screen-initial",
+            "mouse_move",
+            json!({"x":x,"y":y}),
+        )?));
+    }
+    if call("gui-computer-pointer-observe-stable") {
+        let result = computer_result_text(body, "gui-computer-pointer-observe-stable")?;
+        anyhow::ensure!(
+            accessibility_snapshot_text(result)?.contains("Nomi Pointer Target"),
+            "Stable Computer observation lost the pointer target"
+        );
+        pointer_status(fixture)?;
+        return Ok(Some((
+            "gui-computer-pointer-screen-initial".into(),
+            browser_tool(body, "computer/observe")?,
+            json!({"action":"screenshot"}),
+        )));
+    }
+
+    const OBSERVATIONS: [&str; 8] = [
+        "gui-computer-pointer-observe-1",
+        "gui-computer-pointer-observe-2",
+        "gui-computer-pointer-observe-3",
+        "gui-computer-pointer-observe-4",
+        "gui-computer-pointer-observe-5",
+        "gui-computer-pointer-observe-6",
+        "gui-computer-pointer-observe-7",
+        "gui-computer-pointer-observe-8",
+    ];
+    for (index, call_id) in OBSERVATIONS.iter().enumerate().rev() {
+        if computer_tool_result(body, call_id).is_none() {
+            continue;
+        }
+        let result = computer_result_text(body, call_id)?;
+        let snapshot = accessibility_snapshot_text(result)?;
+        if snapshot.contains("Nomi Pointer Target") {
+            pointer_status(fixture)?;
+            std::thread::sleep(Duration::from_millis(750));
+            return Ok(Some((
+                "gui-computer-pointer-observe-stable".into(),
+                browser_tool(body, "computer/a11y.observe")?,
+                json!({"action":"observe"}),
+            )));
+        }
+        anyhow::ensure!(
+            index + 1 < OBSERVATIONS.len(),
+            "Computer pointer target never became the foreground accessibility window"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+        return Ok(Some((
+            OBSERVATIONS[index + 1].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+
+    if call("gui-computer-pointer-launch") {
+        require_computer_success(body, "gui-computer-pointer-launch")?;
+        return Ok(Some((
+            OBSERVATIONS[0].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    let target = fixture
+        .computer_pointer_target
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Computer pointer target app missing"))?;
+    Ok(Some((
+        "gui-computer-pointer-launch".into(),
+        browser_tool(body, "computer/launch")?,
+        json!({"action":"launch","target":target.to_string_lossy()}),
+    )))
+}
+
 async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderMap, Json(mut body): Json<Value>) -> axum::response::Response {
     if let Some(live) = &fixture.live {
         if headers.get("authorization").and_then(|value|value.to_str().ok()) != Some(live.local_token.as_str()) {
@@ -1063,6 +1361,14 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
                 return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
             }
         }
+    } else if fixture.computer_pointer_input {
+        match computer_pointer_input_operation(&fixture, &body) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
     } else if fixture.computer_input {
         match computer_input_operation(&fixture, &body) {
             Ok(operation) => operation,
@@ -1080,6 +1386,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             && !fixture.computer_a11y_denied
             && !fixture.computer_screen_denied
             && !fixture.computer_stale_focus
+            && !fixture.computer_pointer_input
             && !fixture.computer_input
         {
             tokio::select! {
@@ -1097,6 +1404,8 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             "Screen Recording 未授权，computer/observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
         } else if fixture.computer_stale_focus {
             "切换前台窗口后，旧 Accessibility observation 已被拒绝；未向后台 TextEdit 发送输入。"
+        } else if fixture.computer_pointer_input {
+            "已通过正式 Computer Actions 验证鼠标移动、单击和滚轮输入。"
         } else if fixture.computer_input {
             "已通过正式 Computer Actions 验证 TextEdit 启动、Command/Option/Control 输入与保存。"
         } else {
@@ -1170,6 +1479,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_screen_denied = mode.as_deref() == Some("--computer-screen-denied");
     let computer_input = mode.as_deref() == Some("--computer-input");
     let computer_stale_focus = mode.as_deref() == Some("--computer-stale-focus");
+    let computer_pointer_input = mode.as_deref() == Some("--computer-pointer-input");
     anyhow::ensure!(
         mode.is_none()
             || live_mode
@@ -1179,9 +1489,34 @@ async fn main() -> anyhow::Result<()> {
             || computer_a11y_denied
             || computer_screen_denied
             || computer_input
-            || computer_stale_focus,
+            || computer_stale_focus
+            || computer_pointer_input,
         "unsupported fixture mode"
     );
+    let computer_pointer_target = computer_pointer_input
+        .then(|| std::env::args().nth(3))
+        .flatten()
+        .map(PathBuf::from);
+    let computer_pointer_status = computer_pointer_input
+        .then(|| std::env::args().nth(4))
+        .flatten()
+        .map(PathBuf::from);
+    if computer_pointer_input {
+        let target = computer_pointer_target
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("computer pointer target app path required"))?;
+        let status = computer_pointer_status
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("computer pointer target status path required"))?;
+        anyhow::ensure!(
+            target.is_absolute() && target.exists(),
+            "computer pointer target app must be an existing absolute path"
+        );
+        anyhow::ensure!(
+            status.is_absolute() && !status.exists(),
+            "computer pointer target status must be a new absolute path"
+        );
+    }
     let computer_file = if computer_input || computer_stale_focus {
         let path = root.join("computer-input.txt");
         std::fs::write(&path, "seed")?;
@@ -1199,7 +1534,10 @@ async fn main() -> anyhow::Result<()> {
         computer_screen_denied,
         computer_input,
         computer_stale_focus,
+        computer_pointer_input,
         computer_file,
+        computer_pointer_target,
+        computer_pointer_status,
         a11y_observed: AtomicBool::new(false),
         a11y_denied: AtomicBool::new(false),
         screen_denied: AtomicBool::new(false),
@@ -1208,6 +1546,8 @@ async fn main() -> anyhow::Result<()> {
         input_initial_plan_unavailable: AtomicBool::new(false),
         stale_observed: AtomicBool::new(false),
         stale_input_rejected: AtomicBool::new(false),
+        pointer_verified: AtomicBool::new(false),
+        pointer_baseline: Mutex::new(None),
         witnesses: Mutex::new(Vec::new()),
         failure: Mutex::new(None),
         finish: Semaphore::new(0),
@@ -1237,7 +1577,7 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,"computer_pointer_input":f.computer_pointer_input,"computer_file":f.computer_file.as_ref(),"computer_pointer_target":f.computer_pointer_target.as_ref(),"computer_pointer_status":f.computer_pointer_status.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),"pointer_verified":f.pointer_verified.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
             }),
         )
         .route(
@@ -1296,7 +1636,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let prepared = async {
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
-        let model_traits = if computer_granted || computer_screen_denied { json!(["vision_input"]) } else { json!([]) };
+        let model_traits = if computer_granted || computer_screen_denied || computer_pointer_input { json!(["vision_input"]) } else { json!([]) };
         let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
         let display_name = if computer_denied {
@@ -1309,6 +1649,8 @@ async fn main() -> anyhow::Result<()> {
             "Computer 屏幕录制拒绝验收"
         } else if computer_stale_focus {
             "Computer 陈旧焦点拒绝验收"
+        } else if computer_pointer_input {
+            "Computer 指针输入验收"
         } else if computer_input {
             "Computer 物理输入验收"
         } else {
@@ -1336,6 +1678,11 @@ async fn main() -> anyhow::Result<()> {
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/observe"]
             }])
+        } else if computer_pointer_input {
+            json!([{
+                "capability":{"id":"computer"},
+                "action_allowlist":["computer/observe","computer/a11y.observe","computer/input","computer/launch"]
+            }])
         } else if computer_input || computer_stale_focus {
             json!([{
                 "capability":{"id":"computer"},
@@ -1359,7 +1706,7 @@ async fn main() -> anyhow::Result<()> {
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
         let expected_capabilities=if live_mode {2}else{1};
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus {
+        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_pointer_input {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else if live_mode {
             json!([
@@ -1383,7 +1730,7 @@ async fn main() -> anyhow::Result<()> {
     let session = prepared?;
     println!(
         "BROWSER_GUI_FIXTURE_READY {}",
-        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_file":fixture.computer_file.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
+        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_pointer_input":computer_pointer_input,"computer_file":fixture.computer_file.as_ref(),"computer_pointer_target":fixture.computer_pointer_target.as_ref(),"computer_pointer_status":fixture.computer_pointer_status.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
     );
     // Keep only the model/page server alive; the real desktop now owns the DB.
     fixture.stop.cancelled().await;
