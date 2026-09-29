@@ -236,6 +236,7 @@ mod tests {
             needs_long_context: false,
             needs_high_reasoning,
             bulk,
+            managed_process_only: false,
         }
     }
 

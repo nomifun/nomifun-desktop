@@ -17,7 +17,7 @@ use nomifun_agent_kernel::{
 use nomifun_ai_agent::engine_effect_scope::guard_effect_settlement;
 use nomifun_ai_agent::context_contributor::ContextContributor;
 use nomifun_api_types::{ExecutionConstraints, RuntimeBuildBinding};
-use nomifun_common::{AgentToolPolicy, AppError};
+use nomifun_common::AppError;
 use nomifun_engine_core::{EngineToolExposure, EngineToolPlan, KernelEngineToolInvoker};
 
 use super::engine_journal::EngineTurnJournal;
@@ -91,25 +91,7 @@ fn constraints_allow_action(
     if constraints.exclude_delegation && capability_id == "agent.collaboration" {
         return false;
     }
-    match capability_id {
-        nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID => match constraints.tool_scope {
-            AgentToolPolicy::Full => true,
-            AgentToolPolicy::ReadOnly | AgentToolPolicy::ReadShell => matches!(
-                action_id,
-                "workspace.files/read" | "workspace.files/search"
-            ),
-        },
-        nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID => match constraints.tool_scope {
-            AgentToolPolicy::Full => true,
-            AgentToolPolicy::ReadShell => action_id == "workspace.process/exec",
-            AgentToolPolicy::ReadOnly => false,
-        },
-        nomifun_agent_domain_wave2::WORKSPACE_VCS_MODULE_ID
-        | nomifun_agent_domain_wave2::WORKSPACE_ARTIFACTS_MODULE_ID => {
-            constraints.tool_scope == AgentToolPolicy::Full
-        }
-        _ => constraints.tool_scope == AgentToolPolicy::Full,
-    }
+    constraints.allows_workspace_action(capability_id, action_id)
 }
 
 #[path = "engine_mcp_resources.rs"]
@@ -1362,12 +1344,14 @@ impl EngineKernelSession {
 #[cfg(test)]
 mod workspace_module_tests {
     use super::*;
+    use nomifun_common::AgentToolPolicy;
 
     fn constraints(tool_scope: AgentToolPolicy) -> ExecutionConstraints {
         ExecutionConstraints {
             version: 1,
             tool_scope,
             exclude_delegation: false,
+            managed_process_only: false,
         }
     }
 
@@ -1412,6 +1396,35 @@ mod workspace_module_tests {
                 action,
             ));
         }
+
+        let managed = ExecutionConstraints {
+            managed_process_only: true,
+            ..constraints(AgentToolPolicy::Full)
+        };
+        for action in [
+            "workspace.process/start",
+            "workspace.process/poll",
+            "workspace.process/input",
+            "workspace.process/close_stdin",
+            "workspace.process/resize",
+            "workspace.process/cancel",
+        ] {
+            assert!(constraints_allow_action(
+                managed,
+                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+                action,
+            ));
+        }
+        assert!(!constraints_allow_action(
+            managed,
+            nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+            "workspace.process/exec",
+        ));
+        assert!(!constraints_allow_action(
+            managed,
+            nomifun_agent_domain_wave2::WORKSPACE_FILES_MODULE_ID,
+            "workspace.files/read",
+        ));
     }
 
     #[test]

@@ -5700,10 +5700,11 @@ mod session_boundary_tests {
     fn history_projects_confirmed_process_cancellation_without_hiding_other_errors() {
         let session_id = AgentSessionId::from(SESSION_ID);
         let message_id = "0190f5fe-7c00-7a00-8abc-012345678912";
-        for (capability, reaped, expected) in [
-            ("workspace.process", true, "canceled"),
-            ("workspace.process", false, "error"),
-            ("workspace.files", true, "error"),
+        for (capability, reaped, is_error, expected) in [
+            ("workspace.process", true, true, "canceled"),
+            ("workspace.process", true, false, "canceled"),
+            ("workspace.process", false, true, "error"),
+            ("workspace.files", true, true, "error"),
         ] {
             let output = json!({"state":"cancelled","cleanup":{"reaped":reaped},"output":{"text":"STARTED"}}).to_string();
             let message = canonical_message_response_with_observation(&session_id, 1000,
@@ -5713,7 +5714,7 @@ mod session_boundary_tests {
                     projection:json!({"correlation_id":message_id,"state":"recorded",
                         "tool_summary":{"call_id":"call-1","name":"exec_command","capability_id":capability}}),
                     semantic_digest:"digest".into(),
-                }, Some(&HistoricalToolObservation { turn_id:None,args:None,output:Some(output.clone()),is_error:Some(true) })
+                }, Some(&HistoricalToolObservation { turn_id:None,args:None,output:Some(output.clone()),is_error:Some(is_error) })
             ).unwrap().unwrap();
             assert_eq!(message.content["status"], expected);
             assert_eq!(message.content["output"], output);

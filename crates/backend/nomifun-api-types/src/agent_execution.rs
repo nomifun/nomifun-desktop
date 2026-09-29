@@ -372,6 +372,12 @@ pub struct ExecutionStepProfile {
     pub needs_long_context: bool,
     pub needs_high_reasoning: bool,
     pub bulk: bool,
+    /// Host-owned subtractive ceiling for a turn-scoped managed process
+    /// lifecycle. It never grants process authority; when true, an Attempt
+    /// may see only start/poll/input/close/resize/cancel from the process
+    /// capability it already inherited.
+    #[serde(default)]
+    pub managed_process_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

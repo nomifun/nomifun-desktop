@@ -1842,6 +1842,9 @@ impl ExecutionScheduler {
                 detail.execution.work_dir.as_deref(),
                 &step.title,
                 step.tool_policy,
+                step.profile
+                    .as_ref()
+                    .is_some_and(|profile| profile.managed_process_only),
                 detail.execution.delegation_policy,
                 delegation_depth,
                 detail.execution.decision_policy,
@@ -4036,6 +4039,7 @@ mod tests {
             workspace_dir: Option<&str>,
             step_title: &str,
             _tool_policy: AgentToolPolicy,
+            _managed_process_only: bool,
             _delegation_policy: DelegationPolicy,
             _delegation_depth: i64,
             _decision_policy: DecisionPolicy,

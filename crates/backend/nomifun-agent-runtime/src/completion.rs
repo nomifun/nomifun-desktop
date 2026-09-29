@@ -161,7 +161,7 @@ struct Submission {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
+        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Every criterion MUST include a nonempty rationale string, including supported criteria that cite evidence. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
@@ -183,7 +183,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
                         "scope_change":crate::requirements::citation_schema(),
                         "evidence_call_ids":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":256},"description":"Actual JSON array of exact call_id entries currently listed in available_evidence, never a JSON-encoded string. For separate process results, cite the matching call ID only when listed; if it is absent, use unverified with no evidence instead of copying the newest command ID, loading history or repeating work without authorization. This includes deletion or artifact observations. A call remembered from an earlier step may no longer be eligible."},
                         "evidence_paths":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Actual JSON array of non-null path entries currently listed in available_evidence, never a JSON-encoded string. Do not guess a path from prior writes, deletions or artifact source_path. Re-read a needed stale file when authorized before reporting. This does not claim functional verification."},
-                        "rationale":{"type":"string","minLength":1,"maxLength":1024}
+                        "rationale":{"type":"string","minLength":1,"maxLength":1024,"description":"REQUIRED for every criterion. Briefly explain what the cited evidence supports or why the item is unverified/blocked."}
                     }
                 }}
             }
@@ -194,7 +194,12 @@ pub(crate) fn definition() -> ChatToolDefinition {
 impl CompletionTracker {
     /// Runtime control citations are turn-local data, not Kernel grants. The
     /// same exposed schema is used by the whole-batch argument preflight.
-    pub(crate) fn definition_with_evidence(&self, work: &AgentWorkStatus, unresolved_patch: bool) -> ChatToolDefinition {
+    pub(crate) fn definition_with_evidence(
+        &self,
+        plan: &AgentPlan,
+        work: &AgentWorkStatus,
+        unresolved_patch: bool,
+    ) -> ChatToolDefinition {
         let mut tool = definition();
         if unresolved_patch {
             tool.description = format!(
@@ -207,7 +212,28 @@ impl CompletionTracker {
         let paths = usable.iter().filter_map(|item| item.path.as_ref())
             .cloned().collect::<BTreeSet<_>>();
         let calls = usable.iter().map(|item| item.call_id.clone()).collect::<BTreeSet<_>>();
-        let fields = &mut tool.input_schema.0["properties"]["criteria"]["items"]["properties"];
+        let fields = tool.input_schema.0["properties"]["criteria"]["items"]["properties"]
+            .as_object_mut()
+            .expect("report_completion criterion properties are an object");
+        if plan.requirements.is_empty() {
+            // The engine will create the implicit full-input requirement while
+            // closing the plan. Do not advertise an optional array for which
+            // the model has no valid IDs yet: weak tool callers otherwise tend
+            // to emit `requirement_ids: []`, which is neither an ID selection
+            // nor the documented omission meaning "all accepted input".
+            fields.remove("requirement_ids");
+            tool.description = format!(
+                "No requirement IDs are currently advertised. Omit requirement_ids entirely; never send an empty array. {}",
+                tool.description
+            );
+        } else {
+            fields["requirement_ids"]["items"]["enum"] = serde_json::json!(
+                plan.requirements
+                    .iter()
+                    .map(|requirement| &requirement.id)
+                    .collect::<Vec<_>>()
+            );
+        }
         for (name, values) in [("evidence_paths", paths), ("evidence_call_ids", calls)] {
             if values.is_empty() {
                 // Empty enum is invalid JSON Schema. Only omission or an
@@ -305,6 +331,35 @@ impl CompletionTracker {
         let command = work.recent_commands.iter().find(|command| {
             invocation_attempted && command.observation_call_id == call.call_id.as_ref()
         });
+        if let Some(command) = command.filter(|command| {
+            command.cleanup_proven
+                && command.omitted_interactions == 0
+                && ((command.was_current_at_observation
+                    && command.state == "exited"
+                    && command.exit_code == Some(0))
+                    || (binding.action_id.as_ref() == "workspace.process/cancel"
+                        && command.state == "cancelled"
+                        && command.provenance_workspace_epoch
+                            == Some(work.workspace_observation_epoch)))
+        }) {
+            let chain = command
+                .launch_call_id
+                .iter()
+                .chain(command.interaction_call_ids.iter())
+                .collect::<BTreeSet<_>>();
+            for observation in &self.observations {
+                if chain.contains(&observation.call_id)
+                    && observation.invocation_attempted
+                    && observation.successful
+                    && observation.workspace_epoch == work.workspace_observation_epoch
+                {
+                    self.valid_through.insert(
+                        observation.call_id.clone(),
+                        work.workspace_observation_epoch,
+                    );
+                }
+            }
+        }
         let usable = invocation_attempted
             && !result.is_error
             && work.running_processes.is_empty()
@@ -625,10 +680,10 @@ impl CompletionTracker {
     }
 
     fn is_usable(&self, observation: &AgentCompletionObservation, epoch: u32) -> bool {
-        observation.invocation_attempted && observation.successful && observation.usable_at_observation
-            && (observation.workspace_epoch == epoch
-                || ((self.owner_paths.contains_key(&observation.call_id) || self.artifacts.contains_key(&observation.call_id))
-                    && self.valid_through.get(&observation.call_id) == Some(&epoch)))
+        observation.invocation_attempted
+            && observation.successful
+            && ((observation.usable_at_observation && observation.workspace_epoch == epoch)
+                || self.valid_through.get(&observation.call_id) == Some(&epoch))
     }
 
 fn stale_evidence_guidance(&self, epoch: u32) -> String {
@@ -734,7 +789,10 @@ mod tests {
             ["poll-1"]
         );
 
-        let schema = tracker.definition_with_evidence(&work, false).input_schema.0;
+        let schema = tracker
+            .definition_with_evidence(&AgentPlan::default(), &work, false)
+            .input_schema
+            .0;
         let validator = jsonschema::options().build(&schema).unwrap();
         assert!(validator.is_valid(&serde_json::json!({
             "summary":"Cancelled and reaped the managed process",
@@ -754,7 +812,19 @@ mod tests {
             file_observation("current", "current.txt", 2), failed,
         ], ..Default::default() };
         let work = AgentWorkStatus { workspace_observation_epoch: 2, ..Default::default() };
-        let definition = tracker.definition_with_evidence(&work,false);
+        let plan = AgentPlan {
+            requirements: vec![crate::AgentTaskRequirement {
+                id: "input_0".into(),
+                description: "Complete the accepted input".into(),
+                source: crate::AgentInputCitation {
+                    input: 0,
+                    quote: "accepted input".into(),
+                },
+                origin: None,
+            }],
+            ..Default::default()
+        };
+        let definition = tracker.definition_with_evidence(&plan, &work, false);
         assert!(definition.description.contains("prefer one supported criterion"));
         assert!(definition.description.contains("never create an evidence-free supported criterion"));
         assert!(definition.description.contains("separate process calls"));
@@ -762,6 +832,10 @@ mod tests {
         assert!(definition.description.contains("absent from available_evidence"));
         assert!(definition.description.contains("use unverified"));
         assert!(definition.description.contains("do not cite launch_call_id"));
+        assert!(definition.input_schema.0["properties"]["criteria"]["items"]["properties"]
+            ["rationale"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("REQUIRED")));
         let schema = definition.input_schema.0;
         assert!(schema["properties"]["criteria"]["items"]["properties"]["requirement_ids"]
             ["description"]
@@ -782,6 +856,9 @@ mod tests {
         let mut empty_requirements = report("evidence_call_ids", "current");
         empty_requirements["criteria"][0]["requirement_ids"] = serde_json::json!([]);
         assert!(!validator.is_valid(&empty_requirements));
+        let mut unknown_requirement = report("evidence_call_ids", "current");
+        unknown_requirement["criteria"][0]["requirement_ids"] = serde_json::json!(["unknown"]);
+        assert!(!validator.is_valid(&unknown_requirement));
         for (path, call) in [("old.txt", "stale"), ("missing.txt", "missing"), ("failed.txt", "failed")] {
             assert!(!validator.is_valid(&report("evidence_paths", path)));
             assert!(!validator.is_valid(&report("evidence_call_ids", call)));
@@ -789,7 +866,16 @@ mod tests {
         assert!(!validator.is_valid(&serde_json::json!({"summary":"Unsupported claim","criteria":[
             {"disposition":"supported","rationale":"No observation was cited"}
         ]})));
-        let empty = CompletionTracker::default().definition_with_evidence(&work,false).input_schema.0;
+        let empty_definition = CompletionTracker::default()
+            .definition_with_evidence(&AgentPlan::default(), &work, false);
+        assert!(empty_definition
+            .description
+            .contains("Omit requirement_ids entirely"));
+        assert!(empty_definition.input_schema.0["properties"]["criteria"]["items"]
+            ["properties"]
+            .get("requirement_ids")
+            .is_none());
+        let empty = empty_definition.input_schema.0;
         let validator = jsonschema::options().build(&empty).unwrap();
         assert!(!validator.is_valid(&report("evidence_paths", "current.txt")));
         assert!(!validator.is_valid(&report("evidence_call_ids", "current")));
@@ -798,6 +884,9 @@ mod tests {
         ]})));
         assert!(!validator.is_valid(&serde_json::json!({"summary":"Unsupported claim","criteria":[
             {"disposition":"supported","rationale":"No observation was cited"}
+        ]})));
+        assert!(!validator.is_valid(&serde_json::json!({"summary":"No IDs advertised","criteria":[
+            {"disposition":"unverified","rationale":"No observation available","requirement_ids":[]}
         ]})));
     }
 

@@ -49,6 +49,26 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
+- S-D04-18（`CMD-139`、`PROC-014/034～037/046`、A01/A02/A11/A13/A17/A19 托管进程
+  生命周期子断言）：macOS 正式 Tauri 连续保留了 planner 拆分 handle、阻塞 start、跳过 poll、
+  shell/raw PID 替代、取消终态误报，以及模型在合法启动前调用 File/`exec_command` 探查的首次失败；
+  后者把字面 `ls -la` 当 executable，虽随后恢复，正向 Case 仍失败。现由 planner 在同一 Agent step
+  spec 同时包含 start/poll/cancel-or-close 时持久化 `managed_process_only` 减权标记；Session 只物化
+  已继承的 start/poll/input/close/resize/cancel Action，File、exec、VCS、Artifact、发现和委派均不进入
+  工具面。Kernel 与 Runtime policy 对 reaped cancellation/terminal poll 使用相同 action-specific
+  语义，不再把 `success=false` 的“已不运行”事实误算成命令失败或强制重规划。四层减权回归及
+  Runtime/Engine 全组通过；macOS 新 Session 精确 start→poll READY→cancel/reaped、零工具错误、
+  2 effects、UI 1/1。Windows、交互 stdin/PTY、20 次/N3、100 seed 与 LONG/99% 仍开放，不关闭共享 D04。
+
+- S-D02-16（`CTRL-006/007`、`CMD-139`、A02/A05/A17/A18/A19 process-chain 完成证据子断言）：
+  macOS 首次完成链先因 start/poll 在 cancel 时已不位于顶层可用证据而反复失败，后又把尚无合法 ID 的
+  可选 `requirement_ids` 发送为空数组；严格 Schema 正确拒绝，但形成正向 UI bad case。现仅在同一
+  process、同一 workspace epoch、零省略交互且 terminal cancel 明确 `cleanup.reaped=true` 时延续该
+  chain 的精确 observation；其他旧/失败/跨 epoch 证据仍失效。动态完成 Schema 在尚无 requirement
+  ID 时移除该属性，由 owner 收尾时生成完整输入义务；已有 ID 时只暴露精确 enum，显式空数组、未知
+  ID、错误类型仍拒绝。Runtime **184/184**；macOS 修复后一次 completion report 成功、4 模型 step、
+  零 control error。其他多命令/并发链、Provider/角色/平台及完整 CTRL 矩阵仍开放，不关闭共享 D02。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同

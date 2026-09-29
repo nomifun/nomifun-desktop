@@ -247,6 +247,7 @@ impl KernelEngineToolInvoker {
             &invocation.binding.capability_id,
             &invocation.binding.action_id,
         );
+        let process_action_id = invocation.binding.action_id.clone();
         let is_file_write = invocation.binding.capability_id.as_ref() == "workspace.files"
             && matches!(invocation.binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch");
         let request = CapabilityInvocationRequest {
@@ -279,7 +280,7 @@ impl KernelEngineToolInvoker {
             })?,
             // A successfully dispatched command is not necessarily a
             // successful command. Preserve nonzero exit as model feedback.
-            process_result_is_error(is_process, &output.0),
+            process_result_is_error(is_process, process_action_id.as_ref(), &output.0),
         ))
     }
 }
@@ -290,10 +291,27 @@ fn is_workspace_process_action(capability_id: &CapabilityId, action_id: &ActionI
             .contains(&action_id.as_ref())
 }
 
-fn process_result_is_error(is_process: bool, output: &serde_json::Value) -> bool {
-    is_process
-        && output.get("state").and_then(serde_json::Value::as_str) != Some("running")
-        && output.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+fn process_result_is_error(
+    is_process: bool,
+    action_id: &str,
+    output: &serde_json::Value,
+) -> bool {
+    if !is_process || output.get("state").and_then(serde_json::Value::as_str) == Some("running") {
+        return false;
+    }
+    // `success=false` on a Cancelled process describes user-code exit, not
+    // whether the cancel/control observation succeeded. Exact owner proof that
+    // the tree was reaped fulfills `cancel_process` and a later `poll_process`.
+    if matches!(action_id, "workspace.process/cancel" | "workspace.process/poll")
+        && output.get("state").and_then(serde_json::Value::as_str) == Some("cancelled")
+        && output
+            .pointer("/cleanup/reaped")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    {
+        return false;
+    }
+    output.get("success").and_then(serde_json::Value::as_bool) != Some(true)
 }
 
 #[async_trait]

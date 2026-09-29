@@ -2938,6 +2938,7 @@ impl AgentExecutionEngine {
                     needs_long_context: false,
                     needs_high_reasoning: false,
                     bulk: true,
+                    managed_process_only: false,
                 }),
                 kind: ExecutionStepKind::Agent,
                 agent_mode: Some(nomifun_common::AgentStepMode::Normal),
