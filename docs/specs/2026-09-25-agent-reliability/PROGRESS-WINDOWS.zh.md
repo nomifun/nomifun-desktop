@@ -2455,6 +2455,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖三类 owner 的逐入口 fault injection、uncertain settlement、外部依赖与其他平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/BROW/COMP/SSH/OBS 或共享阶段。
 
+### uncertain terminal 未提交时保留 owner 原因（W144，基线 `fd7657d5c`）
+
+- S-D09-25 / LIFE-007/011/024、VCS-013、BROW-012/013、COMP-010、SSH-005/008、OBS-006/015/016、
+  A07/A08/A15/A16/A17/A19：reserve external Effect 后模拟 owner 已判定 `EFFECT_OUTCOME_UNKNOWN`，
+  再关闭 terminal Store。旧路径只返回 closed-pool 错误，丢失 remote 已收字节后断连的未知结果原因；
+  数据库实际仍为 Pending，首次 FAIL 保留。
+- 新增有界脱敏的 `finish_wave2_uncertain_effect`；uncertain terminal 无法提交时同时保留 action、原
+  error code/message 和落库失败原因，并明确 durable Effect 仍 Pending、禁止自动重试、恢复前必须
+  核对 external owner。helper 覆盖 VCS commit/push、Browser、Computer Role 与 SSH uncertain 分支。
+- 修复后首次及连续 **20/20**；Pending/Unknown 与 push **2/2**、Browser feature **1/1**、Computer
+  feature **1/1**，fmt/diff 通过。无真实 remote/Browser/Computer/SSH、模型/UI。
+- 未覆盖各 owner 的逐入口 terminal fault injection、正式 reconcile/UI 投影、外部依赖与其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/VCS/BROW/COMP/SSH/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

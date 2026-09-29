@@ -53,7 +53,7 @@ use crate::{
 
 use super::agent_wave2_host::{
     Wave2EffectAdmission, Wave2EffectCompletion, begin_wave2_exclusive_effect,
-    finish_wave2_effect, finish_wave2_failed_effect,
+    finish_wave2_effect, finish_wave2_failed_effect, finish_wave2_uncertain_effect,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -487,9 +487,10 @@ impl BrowserRoleOwner {
                 if strategy.is_external_uncertain()
                     && browser_outcome_may_be_unknown(&host_error.code)
                 {
-                    finish_wave2_effect(
+                    finish_wave2_uncertain_effect(
                         &reservation,
-                        Wave2EffectCompletion::Uncertain(&host_error),
+                        action.action_id(),
+                        &host_error,
                     ).await?;
                 } else {
                     finish_wave2_failed_effect(

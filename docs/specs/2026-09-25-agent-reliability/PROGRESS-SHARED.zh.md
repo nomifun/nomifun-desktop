@@ -364,6 +364,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   不计通过。无真实 Browser/Computer/SSH、模型/UI。三类 owner 的逐入口 fault injection、uncertain
   settlement、外部依赖与其他平台、N3/LONG/99% 仍开放，不关闭完整 LIFE/BROW/COMP/SSH/OBS。
 
+- S-D09-25（LIFE-007/011/024、VCS-013、BROW-012/013、COMP-010、SSH-005/008、OBS-006/015/016、
+  A07/A08/A15/A16/A17/A19 uncertain settlement 子断言）：W144 reserve external Effect 后模拟 owner
+  已判定 `EFFECT_OUTCOME_UNKNOWN`，再关闭 terminal Store。旧路径只返回 closed-pool 错误，丢失 remote
+  已收字节后断连的未知结果原因；数据库实际仍为 Pending，首次 FAIL 已保留。新增有界脱敏的
+  `finish_wave2_uncertain_effect`，在 uncertain terminal 无法提交时同时保留 action、原 error code/
+  message、落库失败原因，并明确 durable Effect 仍 Pending、禁止自动重试、恢复前必须核对 external
+  owner。该 helper 覆盖 VCS commit/push、Browser、Computer Role 与 SSH 的 uncertain 分支。修复后
+  首次及连续 **20/20**；Pending/Unknown 与 push **2/2**、Browser feature **1/1**、Computer feature
+  **1/1**。无真实 remote/Browser/Computer/SSH、模型/UI。各 owner 的逐入口 terminal fault injection、
+  正式 reconcile/UI 投影、外部依赖与其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/VCS/BROW/
+  COMP/SSH/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

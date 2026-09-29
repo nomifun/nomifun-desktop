@@ -867,9 +867,10 @@ impl RoleHostInvoker for ComputerRoleInvoker {
                     if strategy.is_external_uncertain()
                         && matches!(error, RoleHostError::ProviderFailure(_))
                     {
-                        super::agent_wave2_host::finish_wave2_effect(
+                        super::agent_wave2_host::finish_wave2_uncertain_effect(
                             reservation,
-                            super::agent_wave2_host::Wave2EffectCompletion::Uncertain(&effect_error),
+                            effect_context.action_id.as_ref(),
+                            &effect_error,
                         )
                         .await
                         .map_err(|terminal| RoleHostError::EffectSettlementFailure(terminal.to_string()))?;
