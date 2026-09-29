@@ -1697,7 +1697,7 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 
 ### 参数预检失败后的恢复与错误披露（W93，基线 `a1b4f965e`）
 
-- S-D04-23 / OBS-002、REAL-021～024、A02/A08/A17/A18/A19：复用 W92 最终二进制
+- S-D04-24 / OBS-002、REAL-021～024、A02/A08/A17/A18/A19：复用 W92 最终二进制
   `712cf9457e11f2b9f3a6295bf961d5e451c5d3ee250e6049ee52fde26dca2408`，以新的正式 Tauri
   data/work/profile 和 StepFun Coding Plan / `step-3.7-flash` 执行负向协议。step 1 提交规定的
   `exec_command {cmd:"cmd.exe",args:[...]}`，得到 `INVALID_TOOL_ARGUMENTS` 与

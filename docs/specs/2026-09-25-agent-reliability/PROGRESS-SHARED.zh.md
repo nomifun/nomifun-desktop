@@ -517,7 +517,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   canonical 错误均为 0；工作区不变，进程与 profile 清零并正式备份。其他命令语义、Provider/模型/
   角色/平台、50 个独立用户回合及 N3/100 seed/LONG/99% 仍开放，不关闭完整 CMD-143 或共享阶段。
 
-- S-D04-23（OBS-002、REAL-021～024、A02/A08/A17/A18/A19 工具错误披露子断言）：W93 使用
+- S-D04-24（OBS-002、REAL-021～024、A02/A08/A17/A18/A19 工具错误披露子断言）：W93 使用
   W92 最终二进制和新的正式 Tauri 隔离 data/work/profile，按负向协议先提交一次无效
   `exec_command {cmd,args}`，再提交合法 `{command,args}` 恢复调用。首次调用以
   `INVALID_TOOL_ARGUMENTS`、`status=not_executed` 在 dispatch 前拒绝，零 process effect；第二次
