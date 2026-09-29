@@ -1829,6 +1829,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   其他协议/模型、正式 UI/owner、N3/100 seed/failover 与 LONG/99% 仍待验；不关闭完整 MODEL Case
   或共享阶段。
 
+### StepFun 原生工具 wire N3（W100，基线 `474a95ef6`）
+
+- S-D01-06 / MODEL-002/003/029/034/035、A01/A02/A09/A16/A17/A19：以两个新的隔离 App、
+  capture server 和输出目录重复 W99 的 exact `step-3.7-flash` / `exec_command` 只读 probe。每个样本
+  仍分别发送 streaming 与 non-streaming 请求，源数据库只读、凭据仅在进程内解密，所有返回工具
+  只解析而不进入 Kernel/owner。
+- 连同 W99 共 **3/3** 独立样本、6 个真实 Provider 请求：全部 HTTP 200、
+  `finish_reason=tool_calls`、每次一个原生 `exec_command`、arguments JSON 合法、
+  `text_tool_markup=false`、`content_bytes=0`、`tools_executed=0`，共 **54 项**断言通过。streaming
+  用时 1,398/1,302/1,407 ms（中位 1,398），non-streaming 为 992/1,587/1,712 ms（中位 1,587）。
+- **仅该精确 route/model/function 的 wire-only 场景达到 N3**。未覆盖 owner 工具执行、其他工具/
+  Provider/协议/模型、脱敏原始 frame、正式 UI、100 seed/failover/LONG/99%；不关闭完整 MODEL Case
+  或共享阶段。本批无源码修改。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
