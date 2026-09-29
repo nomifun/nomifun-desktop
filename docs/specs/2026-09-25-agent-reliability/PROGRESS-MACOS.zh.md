@@ -32,7 +32,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015 的本批子断言已验；其余待走查 |
-| D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02 已验 Seatbelt 与文件 symlink/mode；ACL/旧授权待验 |
+| D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02 已验 Seatbelt 与 symlink/mode；M03-04 旧授权/撤权定向通过，原生动态 ACL 仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
 
 ## 原生接续任务
@@ -258,3 +258,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 未覆盖 identity 缺失、hook 拒绝、commit/push 后 result-loss 注入、外部本地编辑并发、
   submodule/worktree、HTTPS/SSH transport、host key/SFTP/远端 shell、正式 UI 授权旅程及长期门槛；
   因此不关闭完整 VCS、SSH、AUTH、D05 或 M03。
+
+- **M03-04 authorization lease / stale Snapshot / exact resource**（`AUTH-001/002/004～008/014/015`
+  的本批子断言）：macOS 原生 runner 上 Common scoped authority **8/8**、Agent Kernel
+  authority/preflight **8/8**。expired/future/cross-Session claim、错误 Principal/owner/resource/action、
+  active-set drift 及 stale dependency graph 均在 owner dispatch 前 fail closed；explicit revoke 从任意
+  clone 立即撤销共享 lease，replacement issuance 撤销同 Session 旧 lease，root rotation 后不能续期。
+  child/dependency 关系不隐式扩权，冻结 Snapshot 不受无关 registry publication 漂移且拒绝 foreign ID。
+- revoke、replacement、cross-Session rejection 与 owner/action/resource/active-set drift preflight 四条
+  竞态边界各 **20/20**；撤权/重发及 replacement lease 均不能重置仍存活的共享 request budget。
+  未发现需改产品代码的新根因。证据：`2026-09-29/macos/m03-auth-revocation/`。
+- 未覆盖原生文件 ACL 在准入后/最终系统调用前动态变化、TCC/Accessibility/Screen Recording、真实
+  secret-bearing owner、应用重启后持久旧 grant、正式 UI 恢复提示及高并发 soak；因此不关闭完整
+  AUTH、D11 或 M03。
