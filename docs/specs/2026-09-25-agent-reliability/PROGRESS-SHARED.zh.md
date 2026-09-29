@@ -36,7 +36,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
-| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源、来源读取、指令目录、搜索规则、主动清单刷新和按句柄删除有定向回归；其他平台及完整入口待验 |
+| S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径已有定向回归；remote/host 条件资源准备后继续，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
@@ -411,6 +411,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   继续使用 handle 绑定删除。修复后精确反例 **20/20**，Linux service **127/127**，Windows
   `nomifun-file` lib **362/362**。保留暂存的后续 owner 对账/清理、macOS 原生执行、其他 Unix
   portable fallback、磁盘/IO fault、完整 UI/角色和长期统计仍开放，不关闭完整 FILE Case 或共享阶段。
+
+- S-D03-51（`FILE-020/022/025/038/039`、`AUTH-006/014`、`MAC-005` 既有目标扩展 ACL 子断言）：
+  macOS APFS 原生探针与产品首败确认普通 `rename` 替换 inode，会让成功的 write/patch 丢失目标
+  extended ACL；旧实现只复制 POSIX mode，因此 `group:everyone deny execute` 在返回成功后消失。
+  现于目标 dev/inode 与 stage identity/bytes 均核对后、最终 pre-publication hook 之后，使用目标/stage
+  descriptor 调用 `fcopyfile(COPYFILE_ACL)` 并 `sync_all`，复制失败在 rename 前按权限/内部错误停止，
+  不忽略 ACL 错误；Linux/Windows 路径不变。hook 中后加的 `group:staff deny execute` 与原 ACL 一并
+  保留。deny-write ACL 保持旧字节/ACL，按 S-D03-50 精确保留两个自有 stage、返回 unknown 并发两个
+  无内容对账事件；macOS 旧“必须立即删 stage”断言据此收紧而非放宽。
+- 修复后 ACL 成功保留、deny-write、最终 hook 动态 ACL 各 **20/20**；`nomifun-file` lib **308/308**，
+  macOS workspace **6 passed / 1 ignored**（既有 opt-in case-sensitive APFS），fmt/diff 通过。APFS 在
+  ACL copy 后至 rename 的最后系统调用窗口、xattr/resource fork/flags、非 APFS 卷、IO fault、正式
+  UI/角色和长期门槛仍开放，不关闭完整 FILE/AUTH Case 或共享 D03。
 
 - S-D04-11（PROC-047、A08/A11/A13/A17/A19 Windows pre-resume deadline 子断言）：W82 用真实
   Windows suspended process，把 Job assignment 延迟 200 ms，并把共享 process deadline 固定为
