@@ -525,7 +525,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled successful command remains eligible after later commands only for its own exact scope, exit and output; it never proves current workspace state. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -757,9 +757,24 @@ impl CompletionTracker {
     }
 
     fn is_usable(&self, observation: &AgentCompletionObservation, epoch: u32) -> bool {
+        // A later opaque command can change the workspace, but it cannot make
+        // an earlier settled zero-exit command un-run. Keep that command's own
+        // scope/exit/output citeable without extending any file/path evidence.
+        let immutable_command_result = observation.usable_at_observation
+            && observation.command_exit_code == Some(0)
+            && observation.command.as_ref().is_some_and(|command| {
+                command.observation_call_id == observation.call_id
+                    && command.state == "exited"
+                    && command.exit_code == Some(0)
+                    && command.cleanup_proven
+                    && command.omitted_interactions == 0
+                    && command.was_current_at_observation
+                    && command.observed_workspace_epoch == observation.workspace_epoch
+            });
         observation.invocation_attempted
             && observation.successful
-            && ((observation.usable_at_observation && observation.workspace_epoch == epoch)
+            && (immutable_command_result
+                || (observation.usable_at_observation && observation.workspace_epoch == epoch)
                 || self.valid_through.get(&observation.call_id) == Some(&epoch))
     }
 
@@ -813,6 +828,23 @@ mod tests {
         binding.definition.name = "cancel_process".into();
         binding.capability_id = "workspace.process".into();
         binding
+    }
+
+    fn settled_command(call_id: &str, process_id: &str, epoch: u32) -> crate::AgentCommandObservation {
+        crate::AgentCommandObservation {
+            process_id: process_id.into(),
+            launch_call_id: Some(call_id.into()),
+            observation_call_id: call_id.into(),
+            state: "exited".into(),
+            exit_code: Some(0),
+            cleanup_proven: true,
+            launch_workspace_epoch: Some(epoch),
+            provenance_workspace_epoch: Some(epoch),
+            interaction_call_ids: Vec::new(),
+            omitted_interactions: 0,
+            observed_workspace_epoch: epoch,
+            was_current_at_observation: true,
+        }
     }
 
     #[test]
@@ -878,6 +910,90 @@ mod tests {
                 "rationale":"The explicit cancellation returned cancelled with cleanup.reaped=true"
             }]
         })));
+    }
+
+    #[test]
+    fn settled_successful_commands_keep_distinct_evidence_after_later_commands() {
+        let mut binding = process_binding("workspace.process/exec");
+        binding.model_name = "exec_command".into();
+        binding.definition.name = "exec_command".into();
+        let alpha = ChatToolCall {
+            call_id: "alpha-call".into(),
+            name: "exec_command".into(),
+            arguments: StrictJsonValue(serde_json::json!({"command":"echo-alpha"})),
+            provider_metadata: None,
+        };
+        let beta = ChatToolCall {
+            call_id: "beta-call".into(),
+            name: "exec_command".into(),
+            arguments: StrictJsonValue(serde_json::json!({"command":"echo-beta"})),
+            provider_metadata: None,
+        };
+        let alpha_command = settled_command("alpha-call", "process-alpha", 1);
+        let beta_command = settled_command("beta-call", "process-beta", 2);
+        let result = |call: &ChatToolCall, command: &crate::AgentCommandObservation| {
+            AgentToolResult::text(
+                call.call_id.clone(),
+                serde_json::json!({
+                    "process_id":command.process_id,
+                    "state":"exited",
+                    "exit_code":0,
+                    "cleanup":{"reaped":true},
+                    "success":true
+                })
+                .to_string(),
+                false,
+            )
+        };
+        let mut tracker = CompletionTracker::default();
+        tracker.observe(
+            &AgentWorkStatus {
+                workspace_observation_epoch: 1,
+                recent_commands: vec![alpha_command.clone()],
+                ..Default::default()
+            },
+            &binding,
+            &alpha,
+            &result(&alpha, &alpha_command),
+            true,
+        );
+        assert!(tracker.is_usable(&tracker.observations[0], 1));
+        let work = AgentWorkStatus {
+            workspace_observation_epoch: 2,
+            recent_commands: vec![alpha_command, beta_command.clone()],
+            ..Default::default()
+        };
+        tracker.observe(
+            &work,
+            &binding,
+            &beta,
+            &result(&beta, &beta_command),
+            true,
+        );
+        assert!(
+            tracker.is_usable(&tracker.observations[0], 2),
+            "a later command must not erase the settled ALPHA exit/output fact"
+        );
+        assert!(tracker.is_usable(&tracker.observations[1], 2));
+        let definition = tracker.definition_with_evidence(&AgentPlan::default(), &work, false);
+        let ids = definition.input_schema.0["properties"]["criteria"]["items"]
+            ["properties"]["evidence_call_ids"]["items"]["enum"]
+            .as_array()
+            .unwrap();
+        assert_eq!(ids, &[serde_json::json!("alpha-call"), serde_json::json!("beta-call")]);
+        let validator = jsonschema::options()
+            .build(&definition.input_schema.0)
+            .unwrap();
+        assert!(validator.is_valid(&serde_json::json!({
+            "summary":"ALPHA and BETA each use their matching command observation",
+            "criteria":[
+                {"disposition":"supported","evidence_call_ids":["alpha-call"],"rationale":"ALPHA command output"},
+                {"disposition":"supported","evidence_call_ids":["beta-call"],"rationale":"BETA command output"}
+            ]
+        })));
+        let context = tracker.context(&AgentPlan::default(), &work, 1).unwrap();
+        assert!(context.contains("\"call_id\":\"alpha-call\""));
+        assert!(context.contains("\"call_id\":\"beta-call\""));
     }
 
     #[test]
