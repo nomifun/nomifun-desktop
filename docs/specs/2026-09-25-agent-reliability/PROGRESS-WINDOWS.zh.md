@@ -2162,6 +2162,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   libgit2 worker/SQLite terminal commit 进程强杀、post-commit 故障窗口的 Windows 运行、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE 或共享阶段。
 
+### stage receipt 丢失后的 index/worktree 保护（W121，基线 `09bbb6887`）
+
+- S-D05-14 / VCS-004/014、LIFE-006、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  `workspace.vcs/stage` Effect，实际 `WorkspaceVcsStageOwner` 把新 worktree 字节写入 Git index；
+  owner 返回 staged receipt 后故意不写 canonical terminal，并关闭 host、Store 与全部数据库连接。
+- 用户随后把 index 恢复到 HEAD，同时保留新的 unstaged worktree 字节。重开后原 key 与新
+  operation/key 均在 stage owner 前被 workspace fence 拒绝；HEAD/index 仍为 base，worktree 保留
+  `user unstaged after lost receipt`，Effect 总数保持 1/Pending。
+- 首次新增断言用早先打开的独立 `git2::Repository` 读到缓存 index，失败日志保留；改用重开仓库的
+  磁盘 oracle 后首次及连续 **20/20**。相邻 App stage/commit **3/3**、VCS stage owner 锁/scope/删除/
+  置换 **7/7**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 index replace/SQLite terminal
+  commit 进程强杀、stage 结果人工核对、linked worktree/submodule、其他平台及 N3/100 seed/LONG/99%；
+  不关闭完整 VCS/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
