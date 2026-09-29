@@ -1775,6 +1775,30 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   force-kill/lost、其他命令/Provider/模型/角色、macOS 与 N3/100 seed/LONG/99%；不关闭完整
   PROC-048/REAL 或共享阶段。
 
+### typed non-start 后的控制可见性与失败披露（W97，基线 `45aef48b3`）
+
+- S-D04-27 / PROC-011/012、CTRL-006/007、REAL-011/021～024、A02/A05/A08/A17/A18/A19：首次
+  正式 Tauri 中，`w97-command-does-not-exist.exe` 返回
+  `nomifun.process-start-observation.v1`、`state=not_started`、`user_code_started=false`，没有 shell
+  fallback。该事实按设计不失效工作区证据、也不要求 replan，但 TaskLedger 同时保持隐藏；模型在
+  step 3/5 分别用 ToolSearch 查找 `update_plan`/`report_completion`，均得到无匹配。第一次恢复命令
+  已 exit 0 后，模型仍在 step 6 重放 non-start，随后才得到控制工具并又执行一次恢复。
+- 失败 Session `01a0eb90-ce3d-72a0-a6f9-62891bc6e8eb` 最终 completed，但用了 9 个模型步骤、
+  252 条 canonical 事件和 4 个 process effect；non-start 与恢复各执行两次。完成报告的机器字段正确
+  为 tool error=2、command failure=0，模型摘要仍写 1，Runtime 固定披露纠正为 2。完整截图、事件、
+  数据库、两组相同 input digest、工作区和零进程残留均保留，分类 `FAIL_RECOVERED`。
+- 根因是 `failed_process_observation` 有意排除可证明 non-start，后续 ledger 激活也因此被跳过。现只在
+  typed non-start owner result 后激活 Ledger/Completion 控制；不设置 `needs_replan`，不把它计为
+  command terminal，也不改变权限、effect 或证据失效规则。新回归首次 **0/1**，修复后 **20/20**，
+  Agent Runtime **191/191**，workspace fmt、diff 和正式 Tauri 构建通过；仅有既有 warning。
+- 修复后二进制 `ec25c3407f810cb5d7252d2d72d6adaecb5be38ffef1f622e04fb92955093abb`
+  使用完全相同的 AGENTS/prompt、全新 data/work/profile 和 `step-3.7-flash`。Session
+  `01a0eb99-c4f9-70f3-9411-becab7ea0c13` 首次精确执行 non-start→`update_plan`→一次恢复→一次
+  completion，共 4 个模型步骤、137 条事件、2 个 returned effect；报告和 UI 一致显示 tool error=1、
+  command failure=0。独立 **31 项**断言、工作区 tree hash `c19cd9c3…7a5b`、应用/profile/Vite 与
+  匹配进程清零、正式备份均通过。其他 spawn permission/format/cwd、Provider/模型/角色、macOS 与
+  N3/100 seed/LONG/99% 仍待验；不关闭完整 PROC/REAL 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

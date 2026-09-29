@@ -1259,6 +1259,8 @@ pub(crate) async fn run_turn(
                         let attempted = dispatch.attempted(&expected_call_id)?;
                         let failed_process = attempted
                             && crate::execution_policy::failed_process_observation(binding, &result);
+                        let process_nonstart = attempted
+                            && crate::execution_policy::process_did_not_start(binding, &result);
                         terminal_collaboration_accepted |= single_call_batch
                             && attempted
                             && !result.is_error
@@ -1295,6 +1297,22 @@ pub(crate) async fn run_turn(
                             if state.execution_plan.revision == 0 {
                                 state.execution_plan.needs_replan = true;
                             }
+                            state.completion.invalidate();
+                        }
+                        if process_nonstart {
+                            // A typed non-start proves user code did not run,
+                            // so it neither invalidates workspace evidence nor
+                            // forces replanning. It is still a visible tool
+                            // failure that needs an exact completion account.
+                            // Expose plan/completion controls before the model
+                            // can search for them or replay the failed launch.
+                            adaptive
+                                .activate(
+                                    crate::adaptive::LEDGER_MODULES,
+                                    crate::AgentRuntimeActivationReason::ToolCall,
+                                    event_sink.as_ref(),
+                                )
+                                .await?;
                             state.completion.invalidate();
                         }
                         if attempted && binding.action_id.as_ref() == "workspace.files/read" && state.work_status.running_processes.is_empty() {
@@ -3416,6 +3434,8 @@ mod tests {
         calls: std::sync::Mutex<Vec<String>>,
     }
 
+    struct NonStartProcessTool;
+
     struct ProcessThenWriteTool {
         writes: AtomicUsize,
     }
@@ -3458,6 +3478,35 @@ mod tests {
                 json!({"process_id":"failed-process","state":"exited",
                     "exit_code":1,"cleanup":{"reaped":true},"success":false}).to_string(),
                 false,
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolInvoker for NonStartProcessTool {
+        async fn invoke(
+            &self,
+            invocation: AgentToolInvocation,
+            _cancellation: CancellationToken,
+        ) -> Result<AgentToolResult, AgentEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            assert_eq!(
+                invocation.binding.action_id.as_ref(),
+                "workspace.process/exec"
+            );
+            Ok(AgentToolResult::text(
+                invocation.call.call_id,
+                json!({
+                    "schema":"nomifun.process-start-observation.v1",
+                    "state":"not_started",
+                    "success":false,
+                    "user_code_started":false,
+                    "code":"PROCESS_NOT_STARTED"
+                })
+                .to_string(),
+                true,
             ))
         }
     }
@@ -4219,6 +4268,77 @@ mod tests {
         assert_eq!(requests.len(), 3, "the first attempted final reply must receive a completion review");
         assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
         assert!(requests[1].input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME));
+    }
+
+    #[tokio::test]
+    async fn proven_process_nonstart_exposes_completion_controls_before_recovery() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step(
+                    "not-started",
+                    "exec_command",
+                    json!({"command":"missing-program","args":[]}),
+                ),
+                text_step("All done"),
+                text_step("Still done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let plan = AgentToolPlan::new([
+            tool_binding(
+                "read_file",
+                "workspace.files",
+                "workspace.files/read",
+                AgentEffectClass::ReadOnly,
+                true,
+            ),
+            tool_binding(
+                "exec_command",
+                "workspace.process",
+                "workspace.process/exec",
+                AgentEffectClass::ExternalUncertainEffect,
+                false,
+            ),
+        ])
+        .unwrap();
+        let result = open_session(model.clone(), Arc::new(NonStartProcessTool))
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0))
+            .await;
+        assert!(matches!(result, Err(AgentEngineError::TurnFailed(_))));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "the first attempted final reply must receive a completion review"
+        );
+        assert!(
+            requests[1]
+                .input
+                .tools
+                .iter()
+                .any(|tool| tool.name == crate::planning::TOOL_NAME)
+        );
+        let completion = requests[1]
+            .input
+            .tools
+            .iter()
+            .find(|tool| tool.name == crate::completion::TOOL_NAME)
+            .expect("a proven non-start still needs truthful completion accounting");
+        assert_eq!(
+            completion.input_schema.0["properties"]["observed_tool_error_count"]["const"],
+            1
+        );
+        assert_eq!(
+            completion.input_schema.0["properties"]["observed_command_failure_count"]["const"],
+            0
+        );
+        assert!(
+            completion.input_schema.0["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("observed_tool_error_count"))
+        );
+        assert!(requests[1].input.tools.iter().any(|tool| tool.name == "exec_command"));
     }
 
     #[tokio::test]

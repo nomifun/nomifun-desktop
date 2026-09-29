@@ -551,6 +551,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   文件部分效果；持续写入、force-kill/lost、其他命令/Provider/角色/平台与长期矩阵仍开放，不关闭
   完整 PROC-048/REAL 或共享阶段。
 
+- S-D04-27（PROC-011/012、CTRL-006/007、REAL-011/021～024、A02/A05/A08/A17/A18/A19
+  进程 non-start 控制子断言）：W97 首次正式 Tauri 中，typed `PROCESS_NOT_STARTED` 正确证明用户代码
+  零执行且不要求 replan，却也没有激活 TaskLedger；下一步看不到 `update_plan`/`report_completion`，
+  模型两次 ToolSearch 均无结果，随后重放一次 non-start 和一次恢复命令才完成。9 个模型步骤、4 个
+  process effect 及“摘要称工具错误 1、Runtime 实际披露 2”的 `FAIL_RECOVERED` 全部保留。现让 typed
+  non-start 仅激活 Ledger/Completion 控制，不改变无需 replan、工作区证据不失效和用户代码零执行
+  语义。新回归首次 **0/1**，修复后 **20/20**，Agent Runtime **191/191**。同一正式 UI 夹具随后
+  精确 4 步完成：一次 non-start、一次计划、一次恢复、一次报告；tool error=1、command failure=0，
+  137 条事件、2 个 returned effect，独立 31 项断言通过，工作区和进程清理一致。其他 spawn
+  permission/format/cwd、其他 Provider/角色/平台及长期矩阵仍开放，不关闭完整 PROC/REAL 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
