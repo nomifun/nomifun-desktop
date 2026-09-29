@@ -269,6 +269,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   生产代码无需修改，无模型/UI。终态等待期间取消、精确边界强杀、DB 磁盘满/IO fault、其他 Action/
   平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+- S-D09-16（LIFE-023、CONC-014、FILE-038、A04/A10/A11/A19 busy admission future 取消子断言）：
+  W135 在独立连接持有 SQLite writer lock 时，从生产 Wave2 Host 发起文件写；200 ms 时仍为零文件、
+  零 Effect，随后取消并等待 Host task 得到 cancelled。释放锁并留出迟到完成窗口后仍为零副作用、
+  零 Effect；同 operation/key 的显式重试随后成功一次，最终只有一条 Returned Effect。首次运行及
+  连续 **20/20**，W133 busy timeout 与 W134 terminal busy 相邻回归 **2/2**。生产代码无需修改，
+  无模型/UI。正式 Runtime/UI cancel 传播、终态落库等待期间取消、精确边界强杀、其他 Action/平台及
+  N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

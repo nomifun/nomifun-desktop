@@ -5013,6 +5013,70 @@ mod tests {
     }
 
     #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn database_busy_admission_cancellation_has_no_late_effect() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.files");
+        call.action_id = ActionId::from("workspace.files/write");
+        call.idempotency_key = IdempotencyKey::from("cancel-busy-admission");
+        call.operation_id = OperationId::from("cancel-busy-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"cancelled.txt","content":"execute only after explicit retry"
+        }));
+
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let blocked_host = Arc::clone(&host);
+        let blocked_call = call.clone();
+        let blocked_input = input.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_host.invoke(Wave2HostRequest {
+                context:blocked_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:blocked_input },
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!blocked.is_finished());
+        assert!(!workspace.join("cancelled.txt").exists());
+        assert!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        blocked.abort();
+        assert!(blocked.await.unwrap_err().is_cancelled());
+
+        writer.commit().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!workspace.join("cancelled.txt").exists());
+        assert!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none(),
+            "a cancelled SQLite admission must not arrive after its caller is gone");
+
+        let result = host.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("cancelled.txt")).unwrap(),b"execute only after explicit retry");
+        let effects = store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
     async fn terminal_database_busy_after_file_write_keeps_pending_fence_after_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
