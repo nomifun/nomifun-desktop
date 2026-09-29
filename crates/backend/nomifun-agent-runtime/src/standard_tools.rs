@@ -64,7 +64,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "read_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/read",
-        description: "Read a workspace file or inspect instruction scope. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. In every successful text result, sha256 always identifies the entire source and total_bytes is its full size, even when content is only one line/byte page and eof=false; do not read the whole file only to obtain its digest. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
+        description: "Read a workspace file or inspect instruction scope. Repository instructions are not ordinary text: never use the default text format for AGENTS.md or AGENTS.override.md. Their applicable bodies are injected separately after instruction discovery. Before reading a source file in any scope not already discovered, call read_file alone on its directory with format=instruction_scope (path=. for the workspace root; recursive=true only when needed); after that result, reconsider and send source reads with fresh call IDs. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. In every successful text result, sha256 always identifies the entire source and total_bytes is its full size, even when content is only one line/byte page and eof=false; do not read the whole file only to obtain its digest. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
         schema: read_schema,
     },
     StandardTool {
@@ -550,6 +550,19 @@ mod tests {
             ["description"]
             .as_str()
             .is_some_and(|description| description.contains("whole-source SHA-256")));
+    }
+
+    #[test]
+    fn read_tool_explains_instruction_discovery_before_source_reads() {
+        let read = standard_agent_tool_exposures()
+            .into_iter()
+            .find(|tool| tool.definition.name == "read_file")
+            .unwrap();
+        let description = &read.definition.description;
+        assert!(description.contains("never use the default text format for AGENTS.md"));
+        assert!(description.contains("call read_file alone on its directory"));
+        assert!(description.contains("format=instruction_scope"));
+        assert!(description.contains("source reads with fresh call IDs"));
     }
 
     #[test]

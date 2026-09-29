@@ -1567,6 +1567,29 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   **12/12**，Linux **13/13**，workspace fmt 通过。start/shutdown 竞争、Lost/quarantine 占额、PTY、
   macOS、不同 owner 混合及 1,000 次长稳仍待验；不关闭完整 PROC-042 或共享阶段。
 
+### 最小定向测试与首步仓库指令（W86，基线 `634508f0d`）
+
+- S-D04-15 / CMD-138、A02/A08/A17/A19：隔离 Bun 仓库的 `AGENTS.md` 要求只运行
+  `bun test tests/sum.test.ts`，目标测试输出 `W86_TARGET_PASS` 并通过；完整 suite 会运行带
+  `W86_UNRELATED_TOUCHED` 哨兵的无关失败测试。首次正式 Tauri 虽最终只启动正确命令，但模型先把
+  `AGENTS.md` 与源码作为普通读取提交；Runtime 此时才发现 scope，只能原子延迟整批，UI 出现一次
+  异常。增强 read 工具说明后第二次仍复现；再补 system instruction 后第三次仍复现，且首次完成
+  报告的 `requirement_ids=[]` 被严格 Schema 拒绝。三个首次失败及中间编译失败均独立保留在仓库外。
+- 根因是 `ScopedInstructions::new` 已登记根目录，却以 `dirty=false` 开始，第一次 `before_model`
+  因此不物化根指令。现让已知根在首个模型请求前经正式 `instruction_scope` 入口装载，首批源码读取
+  直接复用该 observation；工具与 system 说明继续明确 scope 文件不作普通读取。completion Schema
+  同时要求显式 `requirement_ids` 至少一项，覆盖全部接受需求时省略字段，不接受空数组。
+- 根预载、completion Schema、system 合同与 read 工具说明四项分别重复 **20/20**，Agent Runtime
+  **180/180**。最终正式二进制 `b982a32a93d69bdacb982714cbdf65139403fdb6d536e9c49e7117d7990eb6bf`
+  使用全新 data/work/profile 和 StepFun Plan / `step-3.7-flash`；单回合 completed、4 个模型步、
+  137 条 canonical 事件，调用精确为 `read_file(format=instruction_scope)`、一次目标
+  `start_process`、一次 `poll_process`、`report_completion`，全部成功且 UI 零异常。实际测试
+  **1 pass/0 fail**，无无关文件名或哨兵，进程 `reaped=true`；工作区前后 tree hash 均为
+  `ad6833dc5643e0a3586a8e8bc04fa65463468286be5f1104c12e258fd68fa911`，helper、应用与 profile
+  进程清零，独立断言通过并完成正式备份。
+- 其他 package manager、语言、仓库布局、失败目标/超时、其他 Agent/平台，以及 N3/100 seed/
+  LONG/99% 仍待验；不关闭完整 CMD-138 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

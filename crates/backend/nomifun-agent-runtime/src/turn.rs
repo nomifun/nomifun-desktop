@@ -4129,10 +4129,13 @@ mod tests {
             arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
             provider_metadata: None,
         };
+        instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
+        let loaded = tool.instruction_reads.load(Ordering::SeqCst);
+        assert!(loaded > 0, "the first model boundary must load applicable instructions");
         instructions.before_calls(std::slice::from_ref(&call), &tool, &sink,
             CancellationToken::new()).await.unwrap();
-        let loaded = tool.instruction_reads.load(Ordering::SeqCst);
-        assert!(loaded > 0, "the first read must load applicable instructions");
+        assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
+            "the first source read must reuse the pre-model instruction observation");
         instructions.before_calls(std::slice::from_ref(&call), &tool, &sink,
             CancellationToken::new()).await.unwrap();
         assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
@@ -4141,6 +4144,29 @@ mod tests {
         instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap();
         assert!(tool.instruction_reads.load(Ordering::SeqCst) > loaded,
             "effects must force a fresh instruction observation");
+    }
+
+    #[tokio::test]
+    async fn root_instructions_are_materialized_before_the_first_model_step() {
+        let request = AgentTurnRequest::new(request(), tool_plan(), principal(), 0);
+        let mut instructions = crate::workspace_context::ScopedInstructions::new(&request);
+        let tool = CountingInstructionTool { instruction_reads: AtomicUsize::new(0) };
+        let sink = NoopAgentEventSink;
+
+        assert!(!instructions.before_model(&tool, &sink, CancellationToken::new()).await.unwrap());
+        let loaded = tool.instruction_reads.load(Ordering::SeqCst);
+        assert!(loaded > 0, "the workspace root must be inspected before the first model request");
+        let call = ChatToolCall {
+            call_id: "first-source-read".into(),
+            name: "read_file".into(),
+            arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
+            provider_metadata: None,
+        };
+        assert!(instructions.before_calls(std::slice::from_ref(&call), &tool, &sink,
+            CancellationToken::new()).await.unwrap().is_none(),
+            "a root source read must not be deferred by instructions that should already be loaded");
+        assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
+            "the first source read must reuse the pre-model root instruction observation");
     }
 
     #[tokio::test]

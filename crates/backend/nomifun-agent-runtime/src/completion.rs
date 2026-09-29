@@ -179,7 +179,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
                     "properties":{
                         "step":{"type":"string","minLength":1,"maxLength":512,"description":"Optional display label; omission uses an indexed delivery label."},
                         "disposition":{"type":"string","enum":["supported","unverified","blocked","scope_changed"]},
-                        "requirement_ids":{"type":"array","maxItems":32,"items":{"type":"string","minLength":1,"maxLength":64},"description":"Optional actual JSON array value; never a JSON-encoded string. If omitted, this criterion addresses all accepted requirements. Requirements can be shared across criteria."},
+                        "requirement_ids":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","minLength":1,"maxLength":64},"description":"Optional actual JSON array value; never a JSON-encoded string. Omit this field entirely to address all accepted requirements; an explicit empty array is invalid. Requirements can be shared across criteria."},
                         "scope_change":crate::requirements::citation_schema(),
                         "evidence_call_ids":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":256},"description":"Actual JSON array of exact call_id entries currently listed in available_evidence, never a JSON-encoded string. For separate process results, cite the matching call ID only when listed; if it is absent, use unverified with no evidence instead of copying the newest command ID, loading history or repeating work without authorization. This includes deletion or artifact observations. A call remembered from an earlier step may no longer be eligible."},
                         "evidence_paths":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":4096},"description":"Actual JSON array of non-null path entries currently listed in available_evidence, never a JSON-encoded string. Do not guess a path from prior writes, deletions or artifact source_path. Re-read a needed stale file when authorized before reporting. This does not claim functional verification."},
@@ -767,7 +767,8 @@ mod tests {
             ["description"]
             .as_str()
             .is_some_and(|description| description.contains("JSON array value")
-                && description.contains("never a JSON-encoded string")));
+                && description.contains("never a JSON-encoded string")
+                && description.contains("empty array is invalid")));
         let validator = jsonschema::options().build(&schema).unwrap();
         let report = |field: &str, reference: &str| {
             let mut value = serde_json::json!({"summary":"Finished","criteria":[
@@ -778,6 +779,9 @@ mod tests {
         };
         assert!(validator.is_valid(&report("evidence_paths", "current.txt")));
         assert!(validator.is_valid(&report("evidence_call_ids", "current")));
+        let mut empty_requirements = report("evidence_call_ids", "current");
+        empty_requirements["criteria"][0]["requirement_ids"] = serde_json::json!([]);
+        assert!(!validator.is_valid(&empty_requirements));
         for (path, call) in [("old.txt", "stale"), ("missing.txt", "missing"), ("failed.txt", "failed")] {
             assert!(!validator.is_valid(&report("evidence_paths", path)));
             assert!(!validator.is_valid(&report("evidence_call_ids", call)));

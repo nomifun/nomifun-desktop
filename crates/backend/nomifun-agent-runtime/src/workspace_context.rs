@@ -421,7 +421,11 @@ impl ScopedInstructions {
             sequence: AtomicU32::new(100),
             directories: BTreeSet::from([String::new()]),
             recursive_scopes: BTreeSet::new(),
-            dirty: false,
+            // Materialize the bound workspace root before the first model
+            // request. Otherwise the first legitimate source read discovers
+            // AGENTS.md only after the model has already proposed its batch,
+            // forcing a visible deferral before any work can begin.
+            dirty: true,
             loaded: false,
             layers: BTreeMap::new(),
         }
