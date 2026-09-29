@@ -2613,6 +2613,31 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   history cursor 与 turn_summary 边界的更大并发矩阵、其他平台及 N3/100 seed/LONG/99%；
   不关闭完整 PORT/OBS 或共享阶段。
 
+### 正式 Realtime/WebSocket 消费方的 settlement error 断连恢复（W155，基线 `10ae42f3c`）
+
+- S-D09-36 / OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19：在真实 TCP 上启动完整
+  产品 Router（`create_router` 内含正式 `forward_user_events` 桥接），TrustLocalToken
+  认证；owner 走桌面 webview 握手（`tauri.localhost` Origin + `Sec-WebSocket-Protocol`
+  密钥）连 `/ws`，第二用户持不同 user_id 的 JWT Bearer 连接。经正式 `POST /turns`
+  admission 派发到注入的 Runtime mock，由 canonical Store 提交 tool/call-started →
+  tool/result-recorded（CAPABILITY_UNAVAILABLE + “Do not retry”）→ turn/failed，并经
+  stream relay 发对应 ToolCall/Error 帧。
+- Turn 1 在 tool_call running 帧送达后断开 socket：settlement 在 owner 零连接期间落库；
+  重连后 socket 无任何补推（易失总线不重放），消费方改由 `GET events?after_seq` 逐页
+  replay——call/result/terminal 各恰一条、seq 严格递增无重复，`GET messages` 与
+  `message-history` 各恰一条 error tool row 并保留完整恢复指引；event cursor 与
+  history cursor 双向混用均 400 fail-closed。
+- Turn 2 验证重连后的实时投递：同一 socket 实时收到 turn.started、tool_call running、
+  含 CAPABILITY_UNAVAILABLE 与 “Do not retry” 的 tool_call error、stream error 与
+  turn.completed state=error；同 idempotency key 重放返回 replayed/completed 及同一
+  terminal 事实，不再推帧、不新增 canonical 事件。第二用户全程静默。
+- 新增场景首次通过并连续 **20/20**；`websocket_e2e` **18/18**，W152～W154 cursor 相邻
+  回归 **4/4**，fmt/diff 通过。生产代码无需修改（正式 Realtime 链路已满足语义），无正式
+  Tauri renderer。
+- 未覆盖正式 Tauri renderer tool row、PORT-012 watcher 丢批/乱序对账、该场景的 WS
+  lag/resync 额外注入（桥接 coalesce 已有独立测试）、其他平台及 N3/100 seed/LONG/99%；
+  不关闭完整 PORT/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
