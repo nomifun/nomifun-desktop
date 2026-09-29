@@ -517,6 +517,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   canonical 错误均为 0；工作区不变，进程与 profile 清零并正式备份。其他命令语义、Provider/模型/
   角色/平台、50 个独立用户回合及 N3/100 seed/LONG/99% 仍开放，不关闭完整 CMD-143 或共享阶段。
 
+- S-D04-23（OBS-002、REAL-021～024、A02/A08/A17/A18/A19 工具错误披露子断言）：W93 使用
+  W92 最终二进制和新的正式 Tauri 隔离 data/work/profile，按负向协议先提交一次无效
+  `exec_command {cmd,args}`，再提交合法 `{command,args}` 恢复调用。首次调用以
+  `INVALID_TOOL_ARGUMENTS`、`status=not_executed` 在 dispatch 前拒绝，零 process effect；第二次
+  输出精确为 `W93-RECOVERED`、exit 0、`reaped=true`，唯一 process effect 为 returned。模型在第
+  3 步一次 `report_completion`，显式提交 `observed_tool_error_count=1`；最终交付保留模型说明并由
+  Runtime 固定追加“本回合观察到 1 次工具错误，后续成功未抹除”。单回合 completed、3 个模型步骤、
+  98 条 canonical 事件，独立 24 项断言通过；工作区 tree hash 不变，cmd、应用和 profile 进程清零，
+  正式备份完成。生产代码无需再改。本批只验证一种参数预检错误及 StepFun Coding Plan /
+  `step-3.7-flash`；业务错误、权限/超时/unknown、其他 Provider/模型/角色/平台与长期矩阵仍开放，
+  不关闭完整 REAL/OBS 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
