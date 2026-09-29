@@ -180,6 +180,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **4/4**。生产代码无需修改，无模型/UI。write/delete/Artifact 等其他完整 invocation 配对、正式 App
   API 多会话、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE 或共享阶段。
 
+- S-D09-10（CONC-002/015、FILE-019/020/023、A05/A13/A17/A19 完整 write invocation 竞态子断言）：
+  W126 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发向同一路径写入两份
+  各 1 MiB 的不同字节。若第二个请求撞到 Pending，则一个成功、一个在 admission 拒绝；若第一个已
+  完成 settlement，则两次按可审计顺序成功。无论顺序，最终文件长度精确 1 MiB，全部为 `L` 或全部
+  为 `R`，没有交错/截断；每个已创建 Effect 都是 Returned，两 Session 无 unsettled。关闭数据库并
+  重开后，第三 Session 可正常覆盖，证明 fence 释放。新增竞态首次及连续 **20/20**；W125 patch
+  竞态、W115 receipt-loss、普通文件动作及 FileService 原子写 **6/6**。生产代码无需修改，无模型/UI。
+  8 MiB 边界并发、原生 replace 中途强杀、write/delete 配对、其他平台及 N3/LONG/99% 仍开放，
+  不关闭完整 CONC/FILE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
