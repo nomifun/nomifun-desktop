@@ -1713,6 +1713,32 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 只覆盖一种参数预检错误及该模型/Agent；业务工具错误、权限/超时/取消/unknown、其他 Provider/
   模型/角色、macOS 与 N3/100 seed/LONG/99% 仍待验；不关闭完整 REAL/OBS 或共享阶段。
 
+### 非零命令恢复后的失败披露（W94，基线 `a3a2b4f96`）
+
+- S-D04-25 / PROC-015、OBS-004、REAL-004/021～024、A05/A08/A17/A18/A19：`AgentWorkStatus`
+  原已把非零、timeout/lost 等终态计入 `failed_commands`，completion 上下文虽显示该数，Schema、
+  持久报告和最终交付却只约束 `failed_tools`；恢复成功后可遗漏早先命令失败。新增精确回归首次
+  **0/1**，确认 `failed_commands=2` 时没有强制字段。现加入动态 exact const
+  `observed_command_failure_count`，非零时必填并校验，旧报告缺字段按 0 兼容；报告新鲜度同时绑定
+  两种计数，Runtime 固定追加命令失败披露。多个计数同时必填时，工具说明给出含全部字段的单个
+  精确 JSON 对象，避免模型只复制其中一项。
+- 首个正式二进制 `743ec8da509eb24016d3b234f6075d9e0d2c562d6d36b5c8acf6dbd4a172862c`
+  使用相同隔离夹具：step 1 的真实 `cmd.exe /d /c exit /b 7` 返回 exit 7、`reaped=true`；step 2
+  更新计划，step 3 恢复命令输出精确 `W94-RECOVERED`。step 4 首次 completion 只带
+  `observed_command_failure_count=1`，漏掉同时必填的工具错误数，被 Schema 在执行前拒绝；step 5
+  补齐后完成。Session `01a0eb76-5f90-7fa2-9167-1e2135cb96f2`、158 条事件和两次报告完整保留，
+  分类 `FAIL_RECOVERED`，不以最终成功覆盖。
+- 合并计数提示后的二进制 `32d59edc3f352f6b324ffa7f4374e512530c788048a081fcb3f50f2a0affedd7`
+  使用完全相同的 AGENTS/prompt、全新 data/work/profile 和 StepFun Coding Plan / `step-3.7-flash`。
+  Session `01a0eb7c-64ac-7ac2-8aa4-f590a215cdcf` 单回合 completed、4 个模型步骤、147 条 canonical
+  事件；调用精确为失败命令、一次 `update_plan`、恢复命令和一次 `report_completion`。首次报告即
+  同时提交 tool/command 两个计数 1；最终 UI 固定显示两种失败均未被后续成功抹除。两个 process
+  effect 均 returned，工作区前后 tree hash 同为 `3175c7dc…99ef`，cmd、应用和 profile 进程清零，
+  两次运行均正式备份；最终独立 **28 项**断言通过。
+- 三项新增精确回归各 **20/20**（60 次断言执行），Agent Runtime **190/190**，workspace fmt、
+  diff 和正式 Tauri 构建通过；仅有既有 warning。其他非零码/信号、timeout/lost、多个失败、其他
+  Provider/模型/角色、macOS 与 N3/100 seed/LONG/99% 仍待验；不关闭完整 PROC/REAL/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

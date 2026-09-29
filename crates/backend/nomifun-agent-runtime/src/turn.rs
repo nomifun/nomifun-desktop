@@ -1418,6 +1418,7 @@ pub(crate) async fn run_turn(
                             else { format!("\n\n{}",report.summary) };
                         if let Some(disclosure)=report.unverified_disclosure() { delivery.push_str(&disclosure); }
                         if let Some(disclosure)=report.tool_error_disclosure() { delivery.push_str(&disclosure); }
+                        if let Some(disclosure)=report.command_failure_disclosure() { delivery.push_str(&disclosure); }
                         output_text.push_str(&delivery);
                         event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
                         if report.is_blocked() {
@@ -1579,6 +1580,10 @@ pub(crate) async fn run_turn(
                     event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
                 }
                 if let Some(disclosure) = report.tool_error_disclosure() {
+                    output_text.push_str(&disclosure);
+                    event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                }
+                if let Some(disclosure) = report.command_failure_disclosure() {
                     output_text.push_str(&disclosure);
                     event_sink.emit(AgentEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
                 }
