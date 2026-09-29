@@ -495,6 +495,26 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   row、PORT-012 watcher 丢批/乱序对账、history cursor 与 turn_summary 边界的更大并发矩阵、
   其他平台及 N3/LONG/99% 仍开放，不关闭完整 PORT/OBS 或共享阶段。
 
+- S-D09-36（OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19 正式 Realtime/WebSocket
+  消费方子断言）：W155 在真实 TCP 上启动完整产品 Router（含正式 `forward_user_events`
+  桥接），owner 以桌面 webview 握手（`tauri.localhost` Origin + `Sec-WebSocket-Protocol`
+  本地信任密钥）连接 `/ws`，第二用户持不同 user_id 的 JWT Bearer 连接。经正式
+  `POST /turns` admission 派发注入的 Runtime mock，由 canonical Store 依次提交
+  tool/call-started、含 CAPABILITY_UNAVAILABLE 的 tool/result-recorded 与 turn/failed，
+  并经 stream relay 发对应 ToolCall/Error 帧。Turn 1 在 running 帧送达后断开 socket：
+  settlement 在 owner 零连接期间落库，重连后 socket 无任何补推，消费方改由
+  `GET events?after_seq` 逐页 replay——call/result/terminal 各恰一条且 seq 严格递增，
+  `GET messages` 与 `message-history` 各恰一条保留 CAPABILITY_UNAVAILABLE 与
+  “Do not retry” 指引的 error tool row；event cursor 与 history cursor 混用仍 400。
+  Turn 2 验证重连后的实时投递：同一 socket 依次收到 turn.started、tool_call running、
+  携带完整指引的 tool_call error、stream error 与 turn.completed state=error；同
+  idempotency key 重放返回 replayed/completed 及同一 terminal 事实，不再推帧、不新增
+  canonical 事件。第二用户连接全程静默。新增场景首次通过并连续 **20/20**；
+  `websocket_e2e` **18/18**，W152～W154 cursor 相邻回归 **4/4**，fmt 通过。生产代码无需
+  修改（正式 Realtime 链路已满足语义），无正式 Tauri renderer。renderer tool row、
+  PORT-012 watcher 丢批/乱序对账、该场景的 WS lag/resync 注入、其他平台及 N3/LONG/99%
+  仍开放，不关闭完整 PORT/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
