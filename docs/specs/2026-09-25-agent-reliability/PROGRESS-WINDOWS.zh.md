@@ -2536,6 +2536,45 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式事件落库/重连、tool row、模型后续行为、其他平台及 N3/100 seed/LONG/99%；不关闭
   完整 OBS 或共享阶段。
 
+### canonical Store 的 ToolResult 冷读投影（W150，基线 `dd319c5b6`）
+
+- S-D09-31 / OBS-001/006/009/014/015/018/020、A03/A08/A09/A15/A16/A17/A19：让正式
+  `EngineToolHost` 的 inner Kernel 返回 success settlement loss，经 `host_tool_dispatch/settled` 与生产
+  `EngineTurnJournal` 写入 canonical AgentSession Store。
+- 数据库中恰好一条 `tool/call-started` 和一条 `tool/result-recorded`，共享 correlation、result 因果
+  指向 call；output 为 null、error 保留 `CAPABILITY_UNAVAILABLE` 安全指引。两个独立 Store 冷读均
+  只重建一条 `state=recorded` tool projection，无重复 row。
+- 新增场景首次及连续 **20/20**；取消后 owner settlement、history 排序、AgentSession projector
+  **3/3**，fmt/diff 通过。生产代码无需修改，使用内存 SQLite，无进程重启/API/UI。
+- 未覆盖磁盘重开、cursor 分页/重连、正式 tool row、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  OBS 或共享阶段。
+
+### 磁盘重开后的跨 Store cursor 分页（W151，基线 `083de4d32`）
+
+- S-D09-32 / LIFE-011、OBS-014/018/019/020、A03/A08/A09/A15/A17/A19：把 W150 的正式
+  EngineToolHost/Journal 场景改为磁盘 SQLite；写入 settlement error projection 后释放 owner、Journal
+  和全部旧连接，再从同一路径初始化数据库。
+- `message_history_before(limit=1)` 每页使用新的 Store，并以上一页最老 `first_seq` 为 cursor；完整遍历
+  后恰好一条 `recorded` error tool projection、两个 canonical tool event，total 恒定且 projection ID
+  无重复。
+- 新增场景首次及连续 **20/20**；W150 memory projection、AgentSession cursor rebuild 与 cold history
+  **3/3**，fmt/diff 通过。生产代码无需修改，仅抽取共用 test fixture，无正式 HTTP/Realtime/UI。
+- 未覆盖分页期间并发新事件、cursor 重连传输、tool row、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 LIFE/OBS 或共享阶段。
+
+### HTTP message-history cursor 传输（W152，基线 `68bfe029d`）
+
+- S-D09-33 / OBS-014/018/020、PORT-012、A03/A08/A09/A15/A17/A19：通过正式 Axum Router、本地信任
+  认证和产品 API 创建 Provider/Preset/AgentSession，再由 canonical Store 写入已验证的 settlement
+  error tool call/result。
+- `GET message-history?page_size=1` 逐页返回稳定 total/has_more；按正式
+  `<created_at>:<message_id>` 生成 cursor 后完整收敛，所有 message ID 唯一，恰好一条
+  `type=tool_call`，顶层与 content 均为 error，output 保留 “Do not retry” 指引。
+- 新增场景首次及连续 **20/20**；W151 磁盘/cursor 下层相邻回归 **1/1**，fmt/diff 通过。生产代码
+  无需修改，无 Realtime/UI。
+- 未覆盖分页期间并发新事件、Realtime 重连、正式 renderer tool row、其他平台及 N3/100 seed/
+  LONG/99%；不关闭完整 PORT/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
