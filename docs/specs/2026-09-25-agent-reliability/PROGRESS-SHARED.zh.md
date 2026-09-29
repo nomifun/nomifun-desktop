@@ -39,7 +39,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
-| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
+| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；S-D06-01 修复 canonical A11y/截图媒体耦合并由 macOS 正式入口验证，其他平台与条件资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
@@ -48,6 +48,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D06-01（`AUTH-012`、`COMP-008/009`、`MAC-011/012` 的公共 Computer contract 子断言）：
+  canonical `computer/a11y.observe` 仍复用旧组合 observe，机会性 screenshot 既把 Accessibility 与
+  Screen Recording authority 错误耦合，也会用 base64 文本触发无意义 compaction；单独的
+  `computer/observe` 又没有把原生 JSON 内 pixels 恢复为模型 typed image。现 A11y canonical action
+  固定 AX-only 并清除旧 capture；截图 adapter 只接受精确 platform-builtin Action、当前
+  generation/Snapshot 与 ImageInput route，移除 JSON base64 后返回一个 bounded typed PNG，durable
+  observation 只留文本描述。canonical PNG 在 Kernel JSON hop 前压到 1.5 MiB，并拒绝非法 PNG，避免
+  5 MiB native 上限与 4 MiB Engine result 上限错配；没有扩大 Action、TCC、资源或默认权限。
+- macOS Developer ID-signed 正式 Tauri granted Session 已让 AX-only 109-element tree 与 typed screenshot
+  各执行一次并完成；fresh denied identity 的 A11y-only、screenshot-only Session 均精确
+  `ROLE_HOST_PROVIDER_FAILURE`、无 fallback。确定性回归为 `nomi-computer` 94 passed / 7 ignored、两项
+  核心断言各 **20/20**、typed-media 3 项 **20/20 批**及 role-host **4/4**。首次 compaction、call ID
+  reuse、multipart fixture 与 plan guard 失败全部保留在 macOS M04-02 证据。Windows/其他平台未由此
+  代判；live 单项 grant、撤权竞态、input/launch、长期/99% 与完整 Computer Case 仍开放。
 
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前

@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-input]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -44,10 +44,15 @@ struct Fixture {
     calls: AtomicUsize,
     native_url: Option<String>,
     computer_denied: bool,
+    computer_granted: bool,
+    computer_a11y_denied: bool,
+    computer_screen_denied: bool,
     computer_input: bool,
     computer_file: Option<PathBuf>,
     a11y_observed: AtomicBool,
+    a11y_denied: AtomicBool,
     screen_denied: AtomicBool,
+    screen_observed: AtomicBool,
     input_verified: AtomicBool,
     witnesses: Mutex<Vec<Value>>,
     failure: Mutex<Option<String>>,
@@ -181,10 +186,56 @@ fn native_operation(
     Ok(Some((browser_tool(body, action)?, operation)))
 }
 
-fn computer_operation(
+fn contains_inline_png(value: &Value) -> bool {
+    match value {
+        Value::String(value) => value.starts_with("data:image/png;base64,"),
+        Value::Array(values) => values.iter().any(contains_inline_png),
+        Value::Object(values) => values.values().any(contains_inline_png),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn observe_computer_permission_results(fixture: &Fixture, body: &Value) -> anyhow::Result<()> {
+    if computer_tool_result(body, "gui-computer-a11y").is_some() {
+        let result = computer_result_text(body, "gui-computer-a11y")?;
+        anyhow::ensure!(
+            result.contains("Accessibility snapshot") && !result.contains("[tool error]"),
+            "Accessibility observation failed"
+        );
+        fixture.a11y_observed.store(true, Ordering::SeqCst);
+    }
+    if computer_tool_result(body, "gui-computer-screen").is_some() {
+        let result = computer_result_text(body, "gui-computer-screen")?;
+        if fixture.computer_denied {
+            anyhow::ensure!(
+                result.starts_with(
+                    "Capability Kernel rejected Agent Runtime Tool (ROLE_HOST_PROVIDER_FAILURE)"
+                ),
+                "Computer provider failure was not projected through its canonical model error"
+            );
+            fixture.screen_denied.store(true, Ordering::SeqCst);
+        } else if fixture.computer_granted {
+            require_computer_success(body, "gui-computer-screen")?;
+            let value: Value = serde_json::from_str(result)?;
+            anyhow::ensure!(
+                value["text"]
+                    .as_str()
+                    .or_else(|| value["result"]["text"].as_str())
+                    .is_some_and(|text| text.contains("Screenshot captured"))
+                    && contains_inline_png(body),
+                "Screen Recording result has no bounded screenshot evidence"
+            );
+            fixture.screen_observed.store(true, Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+fn computer_denied_operation(
     fixture: &Fixture,
     body: &Value,
 ) -> anyhow::Result<Option<(String, String, Value)>> {
+    observe_computer_permission_results(fixture, body)?;
     let result = |call_id: &str| {
         body["messages"].as_array().and_then(|messages| {
             messages.iter().find(|message| {
@@ -221,17 +272,7 @@ fn computer_operation(
             }),
         )));
     }
-    if let Some(message) = result("gui-computer-screen") {
-        let result = message["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Computer denial result missing"))?;
-        anyhow::ensure!(
-            result.starts_with(
-                "Capability Kernel rejected Agent Runtime Tool (ROLE_HOST_PROVIDER_FAILURE)"
-            ),
-            "Computer provider failure was not projected through its canonical model error"
-        );
-        fixture.screen_denied.store(true, Ordering::SeqCst);
+    if fixture.screen_denied.load(Ordering::SeqCst) {
         return Ok(Some((
             "gui-computer-plan".into(),
             "update_plan".into(),
@@ -256,15 +297,7 @@ fn computer_operation(
             }),
         )));
     }
-    if let Some(message) = result("gui-computer-a11y") {
-        let result = message["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Accessibility result missing"))?;
-        anyhow::ensure!(
-            result.contains("Accessibility snapshot") && !result.contains("[tool error]"),
-            "Accessibility observation failed"
-        );
-        fixture.a11y_observed.store(true, Ordering::SeqCst);
+    if fixture.a11y_observed.load(Ordering::SeqCst) {
         return Ok(Some((
             "gui-computer-screen".into(),
             browser_tool(body, "computer/observe")?,
@@ -278,6 +311,142 @@ fn computer_operation(
     )))
 }
 
+fn computer_granted_operation(
+    fixture: &Fixture,
+    body: &Value,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    observe_computer_permission_results(fixture, body)?;
+    let result = |call_id: &str| computer_tool_result(body, call_id);
+    let plan = || {
+        json!({
+            "explanation":"Record the independently successful Accessibility and Screen Recording observations.",
+            "requirements":[
+                {
+                    "id":"req-computer-a11y",
+                    "description":"Obtain an Accessibility snapshot.",
+                    "source":{"input":0,"quote":"obtain an accessibility snapshot"}
+                },
+                {
+                    "id":"req-computer-screen",
+                    "description":"Capture one Screen Recording screenshot.",
+                    "source":{"input":0,"quote":"capture one screenshot"}
+                }
+            ],
+            "plan":[
+                {"step":"Obtain an Accessibility snapshot","status":"completed"},
+                {"step":"Capture one Screen Recording screenshot","status":"completed"}
+            ]
+        })
+    };
+    let report = |observed_tool_error_count: usize| {
+        json!({
+            "summary":"Accessibility observation and Screen Recording screenshot both succeeded through the canonical signed product.",
+            "observed_tool_error_count":observed_tool_error_count,
+            "criteria":[
+                {
+                    "step":"Obtain an Accessibility snapshot",
+                    "disposition":"supported",
+                    "evidence_call_ids":["gui-computer-a11y"],
+                    "evidence_paths":[],
+                    "rationale":"The signed product returned an actionable Accessibility snapshot."
+                },
+                {
+                    "step":"Capture one Screen Recording screenshot",
+                    "disposition":"supported",
+                    "evidence_call_ids":["gui-computer-screen"],
+                    "evidence_paths":[],
+                    "rationale":"The signed product returned bounded screenshot text and typed image evidence."
+                }
+            ]
+        })
+    };
+    if result("gui-computer-report").is_some()
+        || result("gui-computer-report-retry").is_some()
+    {
+        return Ok(None);
+    }
+    if result("gui-computer-plan-retry").is_some() {
+        require_computer_success(body, "gui-computer-plan-retry")?;
+        return Ok(Some((
+            "gui-computer-report".into(),
+            "report_completion".into(),
+            report(1),
+        )));
+    }
+    if result("gui-computer-plan").is_some() {
+        let first = computer_result_text(body, "gui-computer-plan")?;
+        if first.contains("not exposed") || first.contains("[tool error]") {
+            return Ok(Some((
+                "gui-computer-plan-retry".into(),
+                "update_plan".into(),
+                plan(),
+            )));
+        }
+        return Ok(Some((
+            "gui-computer-report".into(),
+            "report_completion".into(),
+            report(0),
+        )));
+    }
+    if fixture.screen_observed.load(Ordering::SeqCst) {
+        return Ok(Some((
+            "gui-computer-plan".into(),
+            "update_plan".into(),
+            plan(),
+        )));
+    }
+    if fixture.a11y_observed.load(Ordering::SeqCst) {
+        return Ok(Some((
+            "gui-computer-screen".into(),
+            browser_tool(body, "computer/observe")?,
+            json!({"action":"screenshot"}),
+        )));
+    }
+    Ok(Some((
+        "gui-computer-a11y".into(),
+        browser_tool(body, "computer/a11y.observe")?,
+        json!({"action":"observe"}),
+    )))
+}
+
+fn computer_single_denied_operation(
+    fixture: &Fixture,
+    body: &Value,
+    accessibility: bool,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    let call_id = if accessibility {
+        "gui-computer-a11y-denied"
+    } else {
+        "gui-computer-screen-denied"
+    };
+    if computer_tool_result(body, call_id).is_some() {
+        let result = computer_result_text(body, call_id)?;
+        anyhow::ensure!(
+            result.starts_with(
+                "Capability Kernel rejected Agent Runtime Tool (ROLE_HOST_PROVIDER_FAILURE)"
+            ),
+            "Computer permission denial was not projected through ROLE_HOST_PROVIDER_FAILURE"
+        );
+        if accessibility {
+            fixture.a11y_denied.store(true, Ordering::SeqCst);
+        } else {
+            fixture.screen_denied.store(true, Ordering::SeqCst);
+        }
+        return Ok(None);
+    }
+    let action = if accessibility {
+        "computer/a11y.observe"
+    } else {
+        "computer/observe"
+    };
+    let native = if accessibility { "observe" } else { "screenshot" };
+    Ok(Some((
+        call_id.into(),
+        browser_tool(body, action)?,
+        json!({"action":native}),
+    )))
+}
+
 fn computer_tool_result<'a>(body: &'a Value, call_id: &str) -> Option<&'a Value> {
     body["messages"].as_array().and_then(|messages| {
         messages.iter().find(|message| {
@@ -287,9 +456,20 @@ fn computer_tool_result<'a>(body: &'a Value, call_id: &str) -> Option<&'a Value>
 }
 
 fn computer_result_text<'a>(body: &'a Value, call_id: &str) -> anyhow::Result<&'a str> {
-    computer_tool_result(body, call_id)
-        .and_then(|message| message["content"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("Computer result missing for {call_id}"))
+    let message = computer_tool_result(body, call_id)
+        .ok_or_else(|| anyhow::anyhow!("Computer result missing for {call_id}"))?;
+    message["content"]
+        .as_str()
+        .or_else(|| {
+            message["content"].as_array().and_then(|parts| {
+                parts.iter().find_map(|part| {
+                    (part["type"].as_str() == Some("text"))
+                        .then(|| part["text"].as_str())
+                        .flatten()
+                })
+            })
+        })
+        .ok_or_else(|| anyhow::anyhow!("Computer text result missing for {call_id}"))
 }
 
 fn accessibility_snapshot_text(content: &str) -> anyhow::Result<String> {
@@ -719,6 +899,30 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
         };
     }
     fixture.calls.fetch_add(1, Ordering::SeqCst);
+    if !body["tools"].is_array() {
+        let observed = if fixture.computer_denied || fixture.computer_granted {
+            observe_computer_permission_results(&fixture, &body)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = observed {
+            *fixture.failure.lock().unwrap() = Some(error.to_string());
+            return (axum::http::StatusCode::BAD_REQUEST, Json(json!({
+                "error":{"message":error.to_string(),"type":"fixture_compaction_error"}
+            }))).into_response();
+        }
+        let chunk = |delta: Value, finish: Option<&str>| {
+            json!({"id":"gui-fixture-compact","object":"chat.completion.chunk","created":1,"model":"browser-gui-fixture","choices":[{"index":0,"delta":delta,"finish_reason":finish}]}).to_string()
+        };
+        return (
+            [("content-type", "text/event-stream")],
+            format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                chunk(json!({"role":"assistant","content":"The latest canonical Computer observation settled. Preserve its call identity and continue the requested permission check without replaying it."}), None),
+                chunk(json!({}), Some("stop"))
+            ),
+        ).into_response();
+    }
     // Each user turn starts a new sequence; never replay a prior turn's refs.
     let step = body["messages"].as_array().map(|messages| messages.iter().rev()
         .take_while(|message| message["role"] != "user")
@@ -734,7 +938,31 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             }
         }
     } else if fixture.computer_denied {
-        match computer_operation(&fixture, &body) {
+        match computer_denied_operation(&fixture, &body) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
+    } else if fixture.computer_granted {
+        match computer_granted_operation(&fixture, &body) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
+    } else if fixture.computer_a11y_denied {
+        match computer_single_denied_operation(&fixture, &body, true) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
+    } else if fixture.computer_screen_denied {
+        match computer_single_denied_operation(&fixture, &body, false) {
             Ok(operation) => operation,
             Err(error) => {
                 *fixture.failure.lock().unwrap() = Some(error.to_string());
@@ -753,7 +981,12 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
     let (delta, reason) = if let Some((call_id, tool, operation)) = operation {
         (json!({"role":"assistant","tool_calls":[{"index":0,"id":call_id,"type":"function","function":{"name":tool,"arguments":operation.to_string()}}]}), "tool_calls")
     } else {
-        if !fixture.computer_denied && !fixture.computer_input {
+        if !fixture.computer_denied
+            && !fixture.computer_granted
+            && !fixture.computer_a11y_denied
+            && !fixture.computer_screen_denied
+            && !fixture.computer_input
+        {
             tokio::select! {
                 _=fixture.stop.cancelled()=>{},
                 permit=fixture.finish.acquire()=>{ if let Ok(permit)=permit { permit.forget(); } },
@@ -761,6 +994,12 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
         }
         let content = if fixture.computer_denied {
             "Accessibility 已授权；Screen Recording 被 macOS 拒绝（ROLE_HOST_PROVIDER_FAILURE）。"
+        } else if fixture.computer_granted {
+            "Accessibility 与 Screen Recording 均已通过签名产品的正式 Computer Actions 验证。"
+        } else if fixture.computer_a11y_denied {
+            "Accessibility 未授权，computer/a11y.observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
+        } else if fixture.computer_screen_denied {
+            "Screen Recording 未授权，computer/observe 已通过 canonical ROLE_HOST_PROVIDER_FAILURE 明确拒绝。"
         } else if fixture.computer_input {
             "已通过正式 Computer Actions 验证 TextEdit 启动、Command/Option/Control 输入与保存。"
         } else {
@@ -829,9 +1068,19 @@ async fn main() -> anyhow::Result<()> {
     let mode = std::env::args().nth(2);
     let native_actions = mode.as_deref() == Some("--native-actions");
     let computer_denied = mode.as_deref() == Some("--computer-denied");
+    let computer_granted = mode.as_deref() == Some("--computer-granted");
+    let computer_a11y_denied = mode.as_deref() == Some("--computer-a11y-denied");
+    let computer_screen_denied = mode.as_deref() == Some("--computer-screen-denied");
     let computer_input = mode.as_deref() == Some("--computer-input");
     anyhow::ensure!(
-        mode.is_none() || live_mode || native_actions || computer_denied || computer_input,
+        mode.is_none()
+            || live_mode
+            || native_actions
+            || computer_denied
+            || computer_granted
+            || computer_a11y_denied
+            || computer_screen_denied
+            || computer_input,
         "unsupported fixture mode"
     );
     let computer_file = if computer_input {
@@ -846,10 +1095,15 @@ async fn main() -> anyhow::Result<()> {
         calls: AtomicUsize::new(0),
         native_url: native_actions.then(|| format!("http://{address}/")),
         computer_denied,
+        computer_granted,
+        computer_a11y_denied,
+        computer_screen_denied,
         computer_input,
         computer_file,
         a11y_observed: AtomicBool::new(false),
+        a11y_denied: AtomicBool::new(false),
         screen_denied: AtomicBool::new(false),
+        screen_observed: AtomicBool::new(false),
         input_verified: AtomicBool::new(false),
         witnesses: Mutex::new(Vec::new()),
         failure: Mutex::new(None),
@@ -879,7 +1133,7 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_input":f.computer_input,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_file":f.computer_file.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
             }),
         )
         .route(
@@ -931,10 +1185,17 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let prepared = async {
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
-        let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
+        let model_traits = if computer_granted || computer_screen_denied { json!(["vision_input"]) } else { json!([]) };
+        let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
         let display_name = if computer_denied {
             "Computer 权限拒绝验收"
+        } else if computer_granted {
+            "Computer 权限已授权验收"
+        } else if computer_a11y_denied {
+            "Computer 辅助功能拒绝验收"
+        } else if computer_screen_denied {
+            "Computer 屏幕录制拒绝验收"
         } else if computer_input {
             "Computer 物理输入验收"
         } else {
@@ -947,10 +1208,20 @@ async fn main() -> anyhow::Result<()> {
             draft["document"]["persona"] = json!("You are a precise local Browser repair acceptance agent.");
             draft["document"]["instructions"] = json!("Use only the selected real Browser and Workspace Actions. For browser/act click, send exactly {\"action\":\"click\",\"element\":ELEMENT}, where ELEMENT is the complete {reference, role, name, focused} object copied unchanged from the latest browser/observe result. Do not add top-level reference, role, name, focused, or target fields, and do not stringify nested objects. Use the selected Workspace read and patch Actions for source changes inside the bound workspace; do not try to edit source through the page.");
         }
-        draft["document"]["enabled_capabilities"] = if computer_denied {
+        draft["document"]["enabled_capabilities"] = if computer_denied || computer_granted {
             json!([{
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/observe","computer/a11y.observe"]
+            }])
+        } else if computer_a11y_denied {
+            json!([{
+                "capability":{"id":"computer"},
+                "action_allowlist":["computer/a11y.observe"]
+            }])
+        } else if computer_screen_denied {
+            json!([{
+                "capability":{"id":"computer"},
+                "action_allowlist":["computer/observe"]
             }])
         } else if computer_input {
             json!([{
@@ -975,7 +1246,7 @@ async fn main() -> anyhow::Result<()> {
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
         let expected_capabilities=if live_mode {2}else{1};
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied || computer_input {
+        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else if live_mode {
             json!([
@@ -999,7 +1270,7 @@ async fn main() -> anyhow::Result<()> {
     let session = prepared?;
     println!(
         "BROWSER_GUI_FIXTURE_READY {}",
-        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_input":computer_input,"computer_file":fixture.computer_file.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
+        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_file":fixture.computer_file.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
     );
     // Keep only the model/page server alive; the real desktop now owns the DB.
     fixture.stop.cancelled().await;

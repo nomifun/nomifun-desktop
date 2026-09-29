@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01 current-source native CEF/Tauri 34 项连续 4 次通过但保留 1 次 storage timeout；正式产品入口与 TCC/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01 native CEF/Tauri 34 项连续 4 次通过但保留 1 次 storage timeout；M04-02 正式签名 Tauri 已验 Computer granted/新身份 denied 与 typed screenshot，撤权/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -416,3 +416,36 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   继续开放。尚未覆盖正式 packaged NomiFun Browser Resource/Agent Session、Tauri window close/reopen 后
   新 surface identity 与旧 frame/session fence、真实模型、release signing/artifact 或 soak；因此不关闭
   完整 `BROW-017`、`MAC-017`、D06 或 M04。
+
+- **M04-02 macOS Computer permission/media**（`AUTH-012`、`COMP-008/009`、`MAC-011/012` 及
+  `AGEN-013` observe-only 子断言）：在 Darwin 25.6.0 / macOS 26.6.2 arm64、APFS/owners enabled
+  主机上，以 Developer ID 签名正式 Tauri app、每次独立 `NOMIFUN_DATA_DIR` 和独立 loopback vision
+  断言执行。首次稳定 dev identity 已有 Screen Recording grant，旧 `--computer-denied` 假设失效；
+  随后的 A11y 成功结果又夹带约 857 KiB screenshot，触发无工具压缩，而夹具拒绝。后续还依次保留
+  压缩重用 call ID、typed multipart 解析缺失，以及当前 plan/completion guard 首次拒绝等失败，均未
+  以放宽断言覆盖；证据：`2026-09-29/macos/m04-computer-permissions/run-003～009-*`。
+- 根因一是 canonical `computer/a11y.observe` 复用旧组合 observe 并机会性采屏，把 Accessibility 与
+  Screen Recording TCC、上下文预算错误耦合；现 canonical A11y 只返回 AX tree/ref cache、清除旧
+  capture geometry，像素必须显式走 `computer/observe`，旧组合工具仍保留 overlay。根因二是原生
+  screenshot 以 base64 JSON 文本穿过 Kernel；现只对精确 platform-builtin `computer/observe +
+  screenshot`、当前 generation/Snapshot 及 ImageInput route 恢复单一 typed PNG，文本/持久 history
+  不再携带像素。正式 canonical PNG 在 JSON hop 前压到 1.5 MiB（base64 ≤2 MiB），拒绝空、超限、
+  非法 base64/PNG；避免旧 5 MiB 上限先被通用 4 MiB result 截成坏 JSON，旧 direct 路径不变。
+- granted 正向 `run-010-final-ui`（Session `01a0ec40-9fb5-7603-8e8e-3920b1c01d88`）中设置 UI 明确
+  两项已授权；5 个模型步精确调用一次 A11y（109 elements、零 pixels）和一次 screenshot，typed PNG
+  到达 vision fixture，67-event durable projection 无 base64，`turn/completed`、fixture failure=null。
+  UI/最终完成仍公开记有初次 plan guard 的 1 个工具错误。fresh bundle
+  `com.nomifun.desktop.reliability.denied` 未点击授权：`run-012-denied-a11y` 和
+  `run-013-denied-screen` 各自只启用一个 Action，工作台分别只列 Accessibility / Screen Recording
+  缺口；两次精确调用均以 `ROLE_HOST_PROVIDER_FAILURE` 结束、无输入/截图 fallback，普通会话仍可开始，
+  各 2 个模型步并 `turn/completed`。
+- `nomi-computer` **94 passed / 7 ignored**；A11y no-pixels 与 macOS 权限维度各 **20/20**，Computer
+  typed-media 3 项 **20/20 批**，role-host fence **4/4**，高熵截图 transport bound、正式 fixture
+  `browser-use,computer-use` check、UARC boundary、fmt/diff 通过。三份 backend/companion DB 共六次
+  immutable integrity 均 `ok`，最终 app/fixture process/listener 为 0；凭据前缀扫描为 0。最终证据与
+  verdict：`2026-09-29/macos/m04-computer-permissions/run-010-final-ui/`、`run-012-denied-a11y/`、
+  `run-013-denied-screen/`、`run-015-transport-hardening/`、`verdict.md`。
+- 尚未通过 System Settings 人为制造“一项已授予、另一项拒绝”的 live TCC 组合；当前独立性来自
+  可注入 permission 回归、两项 fresh-denied 正式 UI 和 granted 正向。撤权/热变更、真实 input/launch、
+  stale window、多显示器/scale、held-input cancel、100-cycle/soak、release、真实 StepFun 及完整
+  `AGEN-013` 仍开放，因此不关闭完整 `COMP-008/009`、`MAC-011/012`、D06 或 M04。

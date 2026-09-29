@@ -259,6 +259,7 @@ pub(crate) fn descriptor() -> RuntimeBuildDescriptor {
                     include_str!("engine_mcp_resources.rs"),
                     include_str!("engine_mcp_media.rs"),
                     include_str!("engine_workspace_media.rs"),
+                    include_str!("engine_computer_media.rs"),
                     include_str!("engine_creation_tools.rs"),
                     include_str!("automatic_creation_route.rs"),
                     include_str!("workspace_file_read.rs"),
