@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01 current-source native CEF/Tauri 34 项连续 4 次通过但保留 1 次 storage timeout；正式产品入口与 TCC/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -399,3 +399,20 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   --no-default-features` 通过，相邻 VCS host **22/22**、fmt/diff 通过；证据：同批
   `run-002-prod-dependency-fix/`。该结果只修复产品构建门槛，CEF native conformance 尚未在本批执行，
   不关闭 BROW/M04。
+
+- **M04-01 native CEF/Tauri conformance prerequisite**（`BROW-017`、`MAC-017` 的本批 native
+  child-surface/lifecycle 前置子断言）：current source 构建 arm64 Tauri example、固定 CEF 152.0.6 /
+  Chromium 152.0.7977.83 与五类独立 helper，并以 fresh bundle/profile 运行。修复 M03-13 的 production
+  dependency 后，首个真实 native run 已到 `renderer_crash_settled`，随后 storage context A 的
+  `Page.navigate` 30 秒 settlement timeout；结果 `passed=false`、`shutdown_error=null`，main/helper 均
+  清零，首败独立保留，未放宽 timeout/assertion。
+- 后续四个独立 bundle/profile 连续 **34/34**、`shutdown_complete=true`：覆盖 native child、trusted
+  Unicode/click/drag/wheel、input gate、dialog、frame input/geometry/upload、stale chooser、file picker
+  cancel、download/cancel、permission deny、semantic observation/viewport capture、RunGuard stop、popup/profile、
+  download publication、renderer crash、Conversation storage isolation/tab recreation/clear 与跨 context 保留。
+  最终 owned process/listener 为 0，harness 未改工作区。证据：
+  `2026-09-29/macos/m04-cef-native/`。
+- 脚本明确 `productAcceptance=false`；当前保留的 **1/5** storage navigation timeout 也使长期/99% 门槛
+  继续开放。尚未覆盖正式 packaged NomiFun Browser Resource/Agent Session、Tauri window close/reopen 后
+  新 surface identity 与旧 frame/session fence、真实模型、release signing/artifact 或 soak；因此不关闭
+  完整 `BROW-017`、`MAC-017`、D06 或 M04。
