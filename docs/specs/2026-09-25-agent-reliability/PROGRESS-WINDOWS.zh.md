@@ -2263,6 +2263,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   并发、cleanup/Session 删除与 reader 竞态、大对象边界、其他平台及 N3/100 seed/LONG/99%；
   不关闭完整 CONC/ART 或共享阶段。
 
+### 两个完整 Artifact publish invocation 的不同内容竞态（W129，基线 `979cb8298`）
+
+- S-D09-13 / CONC-015、ART-001/003/004/005、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发 publish 两个不同 source/digest。
+- 允许一个撞 Pending 被拒，也允许两者串行成功；managed 目录中的 64 位对象集合与成功回执 digest
+  集合精确相等，不存在无回执孤儿。每个对象字节与自身 digest 对应，所有已创建 Effect 均 Returned、
+  无 unsettled；数据库重开后逐个成功对象仍能完整读取。
+- 新增竞态首次及连续 **20/20**；W128 同内容、W119 receipt-loss、ArtifactStore 并发 gate 与 round
+  trip **4/4**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 cleanup/Session 删除与 reader
+  竞态、不同源大对象、原生 link 中途强杀、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  CONC/ART 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

@@ -3780,6 +3780,109 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_distinct_artifact_publications_match_success_receipts() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("left.txt"),b"left artifact").unwrap();
+        std::fs::write(workspace.join("right.txt"),b"right artifact").unwrap();
+        let left_digest = nomifun_agent_contracts::digest_bytes(b"left artifact");
+        let right_digest = nomifun_agent_contracts::digest_bytes(b"right artifact");
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.artifacts");
+        left.action_id = ActionId::from("workspace.artifacts/publish");
+        left.idempotency_key = IdempotencyKey::from("left-distinct-artifact");
+        left.operation_id = OperationId::from("left-distinct-artifact-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.artifacts");
+        right.action_id = ActionId::from("workspace.artifacts/publish");
+        right.idempotency_key = IdempotencyKey::from("right-distinct-artifact");
+        right.operation_id = OperationId::from("right-distinct-artifact-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.artifacts/publish",json!({
+                "path":"left.txt","expected_sha256":left_digest.as_ref()
+            })),
+            invoke(&right_host,right.clone(),"workspace.artifacts/publish",json!({
+                "path":"right.txt","expected_sha256":right_digest.as_ref()
+            })),
+        );
+        assert!(left_result.is_ok() || right_result.is_ok(),"both authorized publications failed: left={left_result:?}, right={right_result:?}");
+        let mut expected_objects = BTreeSet::new();
+        for (result,digest) in [(&left_result,&left_digest),(&right_result,&right_digest)] {
+            match result {
+                Ok(output) => {
+                    assert_eq!(output.0["artifact_id"],digest.as_ref());
+                    assert_eq!(output.0["sha256"],digest.as_ref());
+                    expected_objects.insert(digest.as_ref().to_owned());
+                }
+                Err(error) => {
+                    assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+                    assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+                }
+            }
+        }
+        let left_effects = left_store.list_effects(&left.agent_session_id).await.unwrap();
+        let right_effects = right_store.list_effects(&right.agent_session_id).await.unwrap();
+        assert_eq!(left_effects.len(),if left_result.is_ok() { 1 } else { 0 });
+        assert_eq!(right_effects.len(),if right_result.is_ok() { 1 } else { 0 });
+        for effect in left_effects.iter().chain(right_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        let artifacts = workspace.join(".nomifun/artifacts");
+        let published = std::fs::read_dir(&artifacts).unwrap().filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                (name.len() == 64 && name.bytes().all(|byte|byte.is_ascii_hexdigit())).then(||name.into_owned())
+            }).collect::<BTreeSet<_>>();
+        assert_eq!(published,expected_objects);
+        for id in &published {
+            let expected = if id == left_digest.as_ref() { b"left artifact".as_slice() } else { b"right artifact".as_slice() };
+            assert_eq!(std::fs::read(artifacts.join(id)).unwrap(),expected);
+        }
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let artifact_owner = restarted.artifacts.as_ref().unwrap();
+        for id in &published {
+            let read = artifact_owner.read(id,0,1024).unwrap();
+            assert!(read.complete);
+            assert_eq!(read.sha256,*id);
+        }
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[test]
     fn workspace_io_failure_is_execution_failure_not_platform_absence() {
         let failure = operation_error("workspace.files", AppError::Internal("cannot open replacement target: sharing violation".into()));

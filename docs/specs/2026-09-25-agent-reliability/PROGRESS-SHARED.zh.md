@@ -209,6 +209,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   cleanup/Session 删除与 reader 竞态、大对象边界、其他平台及 N3/LONG/99% 仍开放，不关闭完整
   CONC/ART 或共享阶段。
 
+- S-D09-13（CONC-015、ART-001/003/004/005、A05/A13/A17/A19 不同 Artifact 内容并发子断言）：
+  W129 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发 publish 两个不同
+  source/digest。允许一个撞 Pending 被拒，也允许两者串行成功；managed 目录中的 64 位对象集合必须
+  与成功回执 digest 集合精确相等，不允许无回执孤儿。每个对象的字节与自身 digest 对应，所有已创建
+  Effect 均 Returned、无 unsettled；数据库重开后逐个成功对象仍能完整读取。新增竞态首次及连续
+  **20/20**；W128 同内容、W119 receipt-loss、ArtifactStore 并发 gate 与 round trip **4/4**。生产代码
+  无需修改，无模型/UI。cleanup/Session 删除与 reader 竞态、不同源大对象、原生 link 中途强杀、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/ART 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
