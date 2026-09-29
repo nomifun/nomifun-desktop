@@ -426,6 +426,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   不变，进程与 profile 清零并正式备份。其他 package manager/语言/仓库、其他 Agent/平台、N3/
   100 seed/LONG/99% 仍开放，不关闭完整 CMD-138 或共享阶段。
 
+- S-D04-16（PROC-043、A03/A08/A11/A13/A19 session lease 子断言）：W87 复核 supervisor 已有
+  到期与续期合同。无人 poll 的真实进程输出会续期；owner 认证的 poll、write、status 各自跨过
+  原始 lease 后仍保持 Session。无活动 Session 到期后先进入单一 retirement，执行 cancel 并取得
+  exact reap，再从 registry 移除；进行中的动作阻止 reaper claim，未 reap 的 retirement 继续占用
+  容量。生产实现首次满足，本批未改 lease/清理逻辑。Windows 与 WSL2 Linux 六项精确场景各
+  **20/20**（每平台 120 次），`session_registry` 各 **12/12**，两平台 helper 均为 0。首次 WSL
+  内联脚本因宿主引号损坏而在测试前退出，作为夹具失败独立保留后改为落盘脚本。PTY/resize/
+  close-stdin 的显式续期、macOS、应用强退、1,000 进程长稳与正式 UI/角色仍开放，不关闭完整
+  PROC-043/044 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
