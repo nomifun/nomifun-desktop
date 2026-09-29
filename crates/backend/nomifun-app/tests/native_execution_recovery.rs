@@ -3,6 +3,12 @@
 use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
 use std::time::Duration;
 use axum::{Router, body::Body, http::{Request, StatusCode}};
+use nomifun_agent_contracts::{
+    ActionId, AgentSessionId, CapabilityId, CorrelationId, DigestHex, EventId,
+    EventProducerId, IdempotencyKey, OperationId, SemanticSessionEventDraft,
+    SessionEventAppend, SessionEventKind, SessionEventPayloadRef, StrictJsonValue,
+};
+use nomifun_agent_session::{AgentSessionStore, EffectEventRequest, EffectStrategy};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use nomifun_app::{AppConfig, compatibility::{AppServices, create_router}};
@@ -68,6 +74,87 @@ fn process_exists(pid: u32) -> bool {
         ProcessRefreshKind::nothing(),
     );
     system.process(sysinfo::Pid::from_u32(pid)).is_some()
+}
+
+async fn seed_pending_external_push(
+    pool: &sqlx::SqlitePool,
+    session_id: &str,
+) -> String {
+    let (turn_id, turn_started_event_id): (String, String) = sqlx::query_as(
+        "SELECT operation_id,started_event_id FROM agent_turns \
+         WHERE session_id=? AND state='running' ORDER BY accepted_at DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    let store = AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+    let agent_session_id = AgentSessionId::from(session_id.to_owned());
+    let operation_id = OperationId::from("startup-pending-push-operation");
+    let tool_event_id = EventId::from(format!("startup-pending-push-tool:{session_id}"));
+    let tool = SessionEventAppend {
+        agent_session_id: agent_session_id.clone(),
+        event_id: tool_event_id.clone(),
+        producer_id: EventProducerId::from("capability_host"),
+        idempotency_key: IdempotencyKey::from(format!(
+            "startup-pending-push-tool:{session_id}"
+        )),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: SemanticSessionEventDraft {
+            kind: SessionEventKind("tool/call-started".to_owned()),
+            kind_version: 1,
+            correlation_id: CorrelationId::from(operation_id.as_ref().to_owned()),
+            causation_event_id: Some(EventId::from(turn_started_event_id)),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "operation_id": operation_id.as_ref(),
+                "capability_id": "workspace.vcs",
+                "action_id": "workspace.vcs/push",
+            }))),
+        },
+    };
+    store.append_event(&tool).await.unwrap();
+
+    let effect_id = format!("startup-pending-push-effect:{session_id}");
+    store
+        .record_effect_started(EffectEventRequest {
+            agent_session_id,
+            effect_id: effect_id.clone(),
+            turn_id: OperationId::from(turn_id),
+            operation_id,
+            owner_domain: "workspace".to_owned(),
+            capability_module: CapabilityId::from("workspace.vcs"),
+            action_id: ActionId::from("workspace.vcs/push"),
+            resource_binding_id: None,
+            resource_key: Some("workspace.vcs:origin:refs/heads/main".to_owned()),
+            input_digest: DigestHex::from("7".repeat(64)),
+            recorded_at: 1_788_000_000_010,
+            event_id: EventId::from(format!("startup-pending-push-started:{session_id}")),
+            producer_id: EventProducerId::from("capability_host"),
+            idempotency_key: IdempotencyKey::from(format!(
+                "startup-pending-push:{session_id}"
+            )),
+            correlation_id: CorrelationId::from(effect_id.clone()),
+            strategy: EffectStrategy::ExternalUncertainEffect,
+            causation_event_id: Some(tool_event_id),
+            payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
+                "remote": "origin",
+                "refspec": "HEAD:refs/heads/main",
+                "force": false,
+            }))),
+        })
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM agent_effects WHERE session_id=? AND effect_id=?",
+    )
+    .bind(session_id)
+    .bind(&effect_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "pending");
+    effect_id
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
@@ -463,7 +550,7 @@ async fn startup_resumes_crash_image_without_repeating_the_completed_write() {
 }
 
 #[tokio::test(flavor="multi_thread", worker_threads=4)]
-async fn startup_quarantines_a_reconciliation_head_without_starting_a_model() {
+async fn startup_quarantines_a_pending_external_effect_without_replay() {
     startup_recovery_scenario(true).await;
 }
 
@@ -531,12 +618,14 @@ async fn startup_recovery_scenario(reconciliation_required: bool) {
     mode.store(1, Ordering::SeqCst);
     let recovered_db = nomifun_db::init_database(&snapshot).await.unwrap();
     sqlx::query("UPDATE agent_turns SET execution_lease_until=0 WHERE state='running'").execute(recovered_db.pool()).await.unwrap();
-    if reconciliation_required {
+    let pending_effect_id = if reconciliation_required {
+        let effect_id = seed_pending_external_push(recovered_db.pool(), &id).await;
         // This isolated crash image models the head preserved by migration
         // 007 or effect uncertainty. No user database is modified.
         sqlx::query("UPDATE agent_session_heads SET status='reconciliation' WHERE session_id=?")
             .bind(&id).execute(recovered_db.pool()).await.unwrap();
-    }
+        Some(effect_id)
+    } else { None };
     let second = AppServices::from_config(recovered_db, &config).await.unwrap();
     let restored_router = create_router(&second).await;
     if reconciliation_required {
@@ -552,10 +641,57 @@ async fn startup_recovery_scenario(reconciliation_required: bool) {
         assert_eq!(inspection["pause"]["cleanup_proven"],false);
         assert_eq!(inspection["checkpoint_retained"],true);
         assert_eq!(inspection["turn_state"],"running");
+        assert_eq!(inspection["pending_effects"],0);
+        assert_eq!(inspection["unknown_effects"],1);
         assert_eq!(resumed.load(Ordering::SeqCst),0);
         assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(),"CHECKPOINT_RECOVERY_OK");
+
+        let effect_id = pending_effect_id.as_ref().unwrap();
+        let (effect_state, strategy, action_id, terminal_event_id): (String, String, String, Option<String>) =
+            sqlx::query_as("SELECT state,strategy,action_id,terminal_event_id FROM agent_effects WHERE session_id=? AND effect_id=?")
+                .bind(&id).bind(effect_id).fetch_one(second.database.pool()).await.unwrap();
+        assert_eq!(effect_state,"unknown");
+        assert_eq!(strategy,"external_uncertain_effect");
+        assert_eq!(action_id,"workspace.vcs/push");
+        let terminal_event_id = terminal_event_id.expect("startup quarantine must commit an uncertainty receipt");
+        let (terminal_kind, terminal_payload): (String, String) = sqlx::query_as(
+            "SELECT kind,inline_json FROM agent_events WHERE session_id=? AND event_id=?",
+        ).bind(&id).bind(&terminal_event_id).fetch_one(second.database.pool()).await.unwrap();
+        assert_eq!(terminal_kind,"effect/uncertain");
+        let terminal_payload: Value = serde_json::from_str(&terminal_payload).unwrap();
+        assert_eq!(terminal_payload["outcome"],"unknown");
+        assert_eq!(terminal_payload["recovery"],"process_restart_external_reconciliation_required");
+        for (kind,count) in [("effect/uncertain",1i64),("effect/succeeded",0),("effect/failed",0),("effect/reconciled",0)] {
+            let actual:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND correlation_id=? AND kind=?")
+                .bind(&id).bind(effect_id).bind(kind).fetch_one(second.database.pool()).await.unwrap();
+            assert_eq!(actual,count,"{kind}");
+        }
+        let blocked:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/execution-recovery-blocked'")
+            .bind(&id).fetch_one(second.database.pool()).await.unwrap();
+        assert_eq!(blocked,1);
+        let (new_turn_status,_) = response(&restored_router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({
+            "idempotency_key":"must-not-run-after-unknown-effect",
+            "input":{"content":"Try the push again."}
+        })).await;
+        assert!(new_turn_status.is_client_error());
+        assert_eq!(resumed.load(Ordering::SeqCst),0,"startup quarantine cannot replay the model or effect");
+
         drop(restored_router);
         second.shutdown_browser_platform().await.unwrap(); second.database.close().await;
+
+        let reopened_again = nomifun_db::init_database(&snapshot).await.unwrap();
+        let third = AppServices::from_config(reopened_again, &config).await.unwrap();
+        let third_router = create_router(&third).await;
+        let persisted = call(&third_router,"GET",&format!("/api/agent-sessions/{id}/execution"),Value::Null).await;
+        assert_eq!(persisted["state"],"paused");
+        assert_eq!(persisted["pending_effects"],0);
+        assert_eq!(persisted["unknown_effects"],1);
+        let repeated:i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/execution-recovery-blocked'")
+            .bind(&id).fetch_one(third.database.pool()).await.unwrap();
+        assert_eq!(repeated,1,"a later startup cannot quarantine the same effect twice");
+        assert_eq!(resumed.load(Ordering::SeqCst),0);
+        drop(third_router);
+        third.shutdown_browser_platform().await.unwrap(); third.database.close().await;
         return;
     }
     tokio::time::timeout(Duration::from_secs(30), async {
