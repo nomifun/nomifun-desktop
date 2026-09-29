@@ -3300,6 +3300,100 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_session_patch_invocations_preserve_exact_source_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("shared.txt"),b"base\n").unwrap();
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.files");
+        left.action_id = ActionId::from("workspace.files/patch");
+        left.idempotency_key = IdempotencyKey::from("left-patch");
+        left.operation_id = OperationId::from("left-patch-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.files");
+        right.action_id = ActionId::from("workspace.files/patch");
+        right.idempotency_key = IdempotencyKey::from("right-patch");
+        right.operation_id = OperationId::from("right-patch-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let source = nomifun_agent_contracts::digest_bytes(b"base\n");
+        let patch = |replacement: &str| json!({"files":[{
+            "path":"shared.txt",
+            "expected_source":{"kind":"existing","sha256":source.as_ref()},
+            "hunks":[{
+                "old_start":1,"old_lines":1,"new_start":1,"new_lines":1,
+                "lines":[{"kind":"remove","text":"base"},{"kind":"add","text":replacement}]
+            }]
+        }]});
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.files/patch",patch("LEFT")),
+            invoke(&right_host,right.clone(),"workspace.files/patch",patch("RIGHT")),
+        );
+        assert_ne!(left_result.is_ok(),right_result.is_ok(),"exact-source concurrent patches need one winner: left={left_result:?}, right={right_result:?}");
+        let (winner_context,loser_context,winner_bytes,loser_error) = match (left_result,right_result) {
+            (Ok(_),Err(error)) => (&left,&right,b"LEFT\n".as_slice(),error),
+            (Err(error),Ok(_)) => (&right,&left,b"RIGHT\n".as_slice(),error),
+            _ => unreachable!("one winner asserted"),
+        };
+        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),winner_bytes);
+        let winner_effects = left_store.list_effects(&winner_context.agent_session_id).await.unwrap();
+        assert_eq!(winner_effects.len(),1);
+        assert_eq!(winner_effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        let loser_effects = right_store.list_effects(&loser_context.agent_session_id).await.unwrap();
+        match loser_effects.as_slice() {
+            [] => assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}"),
+            [effect] => {
+                assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Rejected);
+                assert!(loser_error.message.contains("source precondition changed"),"{loser_error:?}");
+            }
+            other => panic!("loser Session produced extra effects: {other:?}"),
+        }
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut later = context(&workspace);
+        later.capability_id = CapabilityId::from("workspace.files");
+        later.action_id = ActionId::from("workspace.files/write");
+        let output = invoke(&restarted,later,"workspace.files/write",json!({
+            "path":"after.txt","content":"resource fence released"
+        })).await.unwrap();
+        assert_eq!(output.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),winner_bytes);
+        assert_eq!(std::fs::read(workspace.join("after.txt")).unwrap(),b"resource fence released");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn workspace_artifact_publish_and_read_use_the_file_domain_owner() {
         let directory = tempfile::tempdir().unwrap();

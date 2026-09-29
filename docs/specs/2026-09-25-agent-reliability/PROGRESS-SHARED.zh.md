@@ -170,6 +170,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   修改，无模型/UI。两个完整 `invoke` 从入口并发、其他 Action 配对、跨 owner 错配绑定、owner 核对、
   其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/VCS/LIFE 或共享阶段。
 
+- S-D09-09（CONC-002/015、FILE-020/025、A05/A13/A17/A19 完整 patch invocation 竞态子断言）：
+  W125 用两个独立 SQLite pool/host/AgentSession 从正式 Wave2 `invoke` 入口并发 patch 同一文件；两边
+  都绑定同一 exact source digest，但写入不同结果。每轮恰好一个成功；loser 要么在 winner Pending
+  时无 Effect 拒绝，要么在 winner 已结算后获 admission、再以 stale source Rejected。最终文件只等于
+  winner 内容，无第二次覆盖；winner 为 Returned，loser 为零 Effect 或唯一 Rejected，两 Session 都
+  无 unsettled。关闭数据库再重开后，第三 Session 可正常写新文件，证明 fence 已释放。新增竞态首次及
+  连续 **20/20**；不同路径并发、W116 receipt-loss、FileService 外部变更回滚及 W124 跨 Action
+  **4/4**。生产代码无需修改，无模型/UI。write/delete/Artifact 等其他完整 invocation 配对、正式 App
+  API 多会话、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
