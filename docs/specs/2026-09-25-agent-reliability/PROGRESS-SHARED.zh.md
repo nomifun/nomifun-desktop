@@ -414,6 +414,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **13/13**。start/shutdown 竞争、Lost/quarantine 占额、PTY、macOS 与 1,000 次长稳仍开放，不关闭
   完整 PROC-042 或共享阶段。
 
+- S-D04-15（CMD-138、A02/A08/A17/A19 最小定向测试子断言）：W86 的隔离 Bun 仓库规定只运行
+  `bun test tests/sum.test.ts`；目标测试通过，无关测试带独立失败哨兵。前三次正式 UI 均选对命令，
+  但首次模型请求前未装载根 `AGENTS.md`，模型把它与源码当普通读取，Runtime 只能在 dispatch 前
+  延迟整批并形成可见异常；只补工具说明及 system instruction 仍复现，第三次另保留显式空
+  `requirement_ids` 被拒现场。根因是新 `ScopedInstructions` 初始 `dirty=false`，首个 model boundary
+  无法物化已知根 scope。现初始标记为 dirty，在第一次模型请求前注入根指令；说明仍明确 scope
+  读取合同，completion 的显式 requirement 数组至少一项，覆盖全部需求时必须省略字段。四项精确
+  回归各 **20/20**，Agent Runtime **180/180**。最终正式 Tauri `b982a32a93d6…` 只有 scope 读取、
+  一次目标 start、一次 poll 和完成报告，目标 **1 pass/0 fail**、无关哨兵未触发、UI 零异常；工作区
+  不变，进程与 profile 清零并正式备份。其他 package manager/语言/仓库、其他 Agent/平台、N3/
+  100 seed/LONG/99% 仍开放，不关闭完整 CMD-138 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

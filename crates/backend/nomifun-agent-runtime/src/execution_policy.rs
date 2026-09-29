@@ -149,6 +149,20 @@ mod tests {
     }
 
     #[test]
+    fn system_execution_policy_requires_instruction_scope_before_source_reads() {
+        assert!(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.contains(
+            "AGENTS.md and AGENTS.override.md bodies are already supplied in system context"
+        ));
+        assert!(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.contains(
+            "never read those files with the default text format"
+        ));
+        assert!(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.contains(
+            "call read_file alone on the directory with format=instruction_scope"
+        ));
+        assert!(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.contains("use fresh call IDs"));
+    }
+
+    #[test]
     fn workspace_keeps_long_horizon_accounting_but_delegation_owns_its_plan() {
         let workspace = binding("workspace.files", "workspace.files/write");
         assert!(requires_task_ledger(&workspace));
