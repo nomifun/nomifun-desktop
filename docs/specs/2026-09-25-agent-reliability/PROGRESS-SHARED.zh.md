@@ -465,6 +465,33 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   各 **20/20**；共 120 次且两平台 helper 为 0。ConPTY/PTY、强制 kill 级升级、macOS watchdog/
   session、父进程死亡、应用入口及长期压力仍开放，不关闭完整 PROC-034～041 或共享阶段。
 
+- S-D04-18（PROC-040/041、A03/A11/A13/A17/A19 shutdown/parent-death 子断言）：W89 的真实
+  supervisor shutdown 先关闭 start gate，清理两条活动 Session 并按原 owner/session 报告终态，
+  shutdown 后的 marker 命令在 spawn 前被拒；Windows 和 WSL2 Linux 各 **20/20**。宿主直接退出
+  时，Windows `KILL_ON_JOB_CLOSE` 回收 leader + grandchild，Linux process-group watchdog 与外部
+  PTY-session watchdog 均由 subreaper 精确观察并回收；Windows 一项 **20/20**，Linux 两项各
+  **20/20**。生产实现首次满足，本批未改 start gate、Job/watchdog 或报告逻辑；共 100 次且两平台
+  helper/harness 为 0。真实 Tauri 主进程正常/强退、Windows ConPTY parent-death、macOS、启动事务
+  与 shutdown 竞争及长期压力仍开放，不关闭完整 PROC-040/041 或共享阶段。
+
+- S-D04-19（PROC-044、A05/A11/A13/A15/A19 1,000 短进程子断言）：W90 新增默认忽略、显式
+  运行的共享 soak 回归；普通套件不承担长耗时。每轮以容量 8 的公开 supervisor 连续启动 1,000
+  个真实 helper，逐个要求 exit 0、exact reap、固定 32 字节输出且 dropped=0，最后 shutdown report
+  为空并比较宿主资源。首个夹具因 `start` receiver 类型错误编译失败，独立保留后修正为公开
+  `Arc<ProcessSupervisor>` 合同。Windows 与 WSL2 Linux 均连续两轮 1,000/1,000 通过；最终 Windows
+  178.25 秒，handle 111→111、thread 13→10，Linux 171.79 秒，fd 11→11、thread 8→8，helper
+  均为 0。生产逻辑无需修改。并发短进程、PTY/ConPTY、macOS、真实应用/UI 与更长 soak 仍开放，
+  不关闭完整 PROC-044 或共享阶段。
+
+- S-D04-20（PROC-047、A08/A11/A13/A17/A19 Unix setup deadline 子断言）：W91 在 WSL2 Linux
+  固定三条 pre-exec 窗口。spawn gate 排队 300 ms 时只使用原 100 ms setup budget，返回前 worker
+  停止、watchdog 未 fork、用户 marker 不存在；blocking worker 卡在事务入口并越过 75 ms 后，
+  保守返回 `StartLost`，释放后仍不能 fork leader/watchdog；watchdog 已建但 ACK 被扣留时，100 ms
+  deadline 不叠加第二轮 setup/cleanup，用户代码零执行，exact watchdog 最终只 reap 一次。生产实现
+  首次满足，本批未改 Unix 启动逻辑；首轮 **3/3**，三项各重复 **20/20**，残留 owner 进程为 0。
+  首次内联 WSL 脚本引号失败发生在测试前并独立保留。macOS、PTY setup、exec 临界点、真实 UI/角色
+  与长期调度压力仍开放，不关闭完整 PROC-047 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
