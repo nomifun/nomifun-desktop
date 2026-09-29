@@ -294,6 +294,23 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无模型/UI。正式 Runtime/UI cancel 与 Turn 终态的事务顺序、精确边界强杀、DB 磁盘满/IO fault、
   其他 Action/平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+- S-D09-18（LIFE-006/011/024、FILE-038、A04/A07/A17/A19 terminal Store unavailable 子断言）：
+  W137 在 canonical Effect 已 reserve、实际 `FileService` 已发布文件并取得 receipt 后关闭数据库连接池；
+  `finish_wave2_effect` 精确返回 `CAPABILITY_UNAVAILABLE`，已发布文件保持。用户随后修改文件，重新打开
+  同一路径数据库后原 Effect 仍为 Pending；原 key 由 durable Pending 拒绝，新 key 由 workspace
+  resource fence 拒绝，用户内容保持且只有一条 Effect。首次运行及连续 **20/20**，W115 receipt-loss
+  与 W134 terminal busy 相邻回归 **2/2**。生产代码无需修改，无模型/UI。真实磁盘满/写入 IO fault、
+  WAL/fsync 故障、正式应用 shutdown 竞态、其他 Action/平台及 N3/LONG/99% 仍开放，不关闭完整
+  LIFE/FILE 或共享阶段。
+
+- S-D09-19（LIFE-003/024、A04/A05/A17/A19 admission Store unavailable 子断言）：W138 在创建
+  Session/Turn/tool causation fact 后关闭 canonical Store，再从生产 Wave2 Host 发起文件写；Host 在
+  Effect ledger read/admission 边界精确返回 `CAPABILITY_UNAVAILABLE`，磁盘零文件、数据库零 Effect。
+  从同一路径重开 Store 与 Host 后，同 operation/key 才首次执行并得到唯一 Returned Effect。首次运行及
+  连续 **20/20**，W137 terminal Store close 与 W133 busy admission 相邻回归 **2/2**。生产代码无需
+  修改，无模型/UI。真实磁盘满/IO fault、连接池关闭与在途 admission 竞态、正式应用 shutdown、其他
+  Action/平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
