@@ -26,7 +26,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
-| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～11 本地 Git 字面路径、commit/local remote、四类 commit hook/身份、unknown fence 与持久 receipt 重放子断言通过；网络/SSH 条件资源待准备 |
+| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～12 本地 Git/四类 hook/receipt 与隔离 loopback sshd 的连接、权限、生命周期及搜索子断言通过；外部 host/UI 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
@@ -370,3 +370,22 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 未覆盖 physical commit 或 post hook 已发生但 terminal receipt 尚未落库的崩溃窗口、hook
   discovery→exec 置换、timeout/escaped descendant fault、linked worktree/common Git-dir、非 macOS、
   正式 UI 与长期门槛；因此不关闭完整 VCS/AUTH、D05 或 M03。
+
+- **M03-12 macOS native SSH / BSD grep fallback**（`SSH-001～012` 的本批 transport/owner 子断言，
+  其中 connect/auth/host-key/SFTP/shell/sudo/reconnect/cancel/concurrency 为真实 loopback sshd）：本机
+  `/usr/sbin/sshd` 夹具使用随机高位端口、每测独立 host/client key、authorized_keys/known_hosts、内存
+  host book 与加密凭据，不读写 `~/.ssh` 或生产 host。首次 backend 全组在 39/41 时稳定出现两项
+  macOS BSD grep 失败：单文件 fallback 带出 `./-:`、`a'b:` 文件名前缀，破坏既有 `line:content`
+  结果合同。
+- 修复在无 `rg` 时按远端实际类型选 argv：目录继续 `grep -rnE` 保留递归路径，单文件改为
+  `grep -nEh`，在 BSD/GNU 都抑制单文件名前缀；扩展 regex、leading dash、shell quote、no-match=1、
+  invalid-regex status、timeout 与“不换另一引擎重试”均保持。另加真实 sshd 的 `-`、`a'b` 与递归目录
+  旅程。首个 live 断言误把本地 raw stdout 的尾换行用于持久 RemoteShell，既有合同正确去掉一个尾
+  换行；该夹具失败独立保留，断言按正式 shell 形状校正，内容/路径要求未放宽。
+- shared `nomi-ssh` **83/83**、backend `nomifun-ssh` **96/96**（含真实 pool lifecycle **19/19**），
+  全部零 SKIP；三条本地 grep 形状各 **20/20**，真实 sshd grep **20/20**。最终远端 fixture、sshd
+  进程与 listener 均为 0；首次失败遗留的一个精确 `/private/tmp/nomifun-ssh-grep-*` 目录检查后移入
+  macOS Trash，可恢复。fmt/diff 通过；证据：`2026-09-29/macos/m03-ssh-native/`。
+- 未覆盖独立管理的非 loopback host、正式 Tauri/model/UI 授权旅程、真实应用进程重启下的 remote
+  in-flight、远端 write 发布后断线的独立 digest 对账、escaped remote descendant 及 LONG/flood 门槛；
+  因此不关闭完整 SSH、D05/D11 或 M03。

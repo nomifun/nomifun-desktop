@@ -38,7 +38,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
-| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径与 macOS 四类 commit hook/身份/unknown fence、持久 commit receipt 重放已有定向回归；remote/host 条件资源准备后继续，禁止共享生产 remote |
+| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
@@ -274,6 +274,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   为 JSON 字符串，UI 保留 1 项可见异常，第二步修成数组后才完成（3 个模型步、87 条事件），因此
   不计零失败 CMD PASS。收紧撤销短语后的正式重建 `baec5c5f06e2…` 通过。opaque process 的内核级
   只读隔离、正式撤销 UI、参数字符串失败、其他 Agent/平台及 N3/100 seed/LONG/99% 仍开放。
+
+- S-D05-06（`SSH-001～012` 的本批 transport/owner 子断言）：macOS 原生用完全隔离的 loopback sshd
+  建立随机端口、临时 host/client keys、known_hosts 与加密 host book，不读取生产 SSH 配置。真实连接池
+  18/18、shared transport 83/83 首次均零 SKIP；backend 首轮 39/41 时确认 BSD grep 对单文件仍输出
+  filename prefix，导致 literal `-` 和 quoted `a'b` 的结果偏离 `line:content`。fallback 现仅在目录使用
+  `grep -rnE` 保留路径，单文件使用 `grep -nEh`；rg/no-match/error/quote/timeout 单引擎合同不变。
+  三条命令形状各 **20/20**，真实 sshd grep **20/20**，最终 backend **96/96**（pool **19/19**）、
+  shared transport **83/83**，零 SKIP、fixture/process/listener 清零。非 loopback host、正式 UI、应用重启
+  remote in-flight、write 后断线 digest 对账及 LONG/flood 仍开放，不关闭完整 SSH 或共享 D05/D11。
 
 - S-D05-05（`VCS-006/008/009/014`、`AUTH-013` 的 `post-commit` 通知子断言）：macOS 首败确认
   libgit2 commit 成功但真实 `post-commit` 完全未运行。现仅在 commit ID 创建后以字面
