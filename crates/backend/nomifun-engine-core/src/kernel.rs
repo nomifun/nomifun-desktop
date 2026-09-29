@@ -261,6 +261,8 @@ impl KernelEngineToolInvoker {
         let process_action_id = invocation.binding.action_id.clone();
         let is_file_write = invocation.binding.capability_id.as_ref() == "workspace.files"
             && matches!(invocation.binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch");
+        let is_computer_launch = invocation.binding.capability_id.as_ref() == "computer"
+            && invocation.binding.action_id.as_ref() == "computer/launch";
         let request = CapabilityInvocationRequest {
             principal: invocation.principal,
             session_owner: self.session_owner.clone(),
@@ -281,7 +283,9 @@ impl KernelEngineToolInvoker {
             .registry
             .invoke(&self.snapshot, &active, request)
             .await
-            .map_err(|error| kernel_error_for_action(error, is_process, is_file_write))?;
+            .map_err(|error| {
+                kernel_error_for_action(error, is_process, is_file_write, is_computer_launch)
+            })?;
         Ok(EngineToolResult::text(
             invocation.call.call_id,
             serde_json::to_string(&output.0).map_err(|error| {
@@ -400,7 +404,12 @@ fn kernel_error(error: KernelError) -> EngineToolError {
 /// Keep host diagnostics private while returning actionable, fixed guidance
 /// for the common process launch failures seen by coding Agents. The raw
 /// command, cwd, environment and owner error never cross the model boundary.
-fn kernel_error_for_action(error: KernelError, is_process: bool, is_file_write: bool) -> EngineToolError {
+fn kernel_error_for_action(
+    error: KernelError,
+    is_process: bool,
+    is_file_write: bool,
+    is_computer_launch: bool,
+) -> EngineToolError {
     if let Some(failure) = error.capability_execution_failure()
         && let Some(message) = settlement_loss_feedback(&failure.message)
     {
@@ -413,6 +422,12 @@ fn kernel_error_for_action(error: KernelError, is_process: bool, is_file_write: 
         return EngineToolError::CapabilityKernel {
             code: error.canonical_code().0,
             message: workspace_write_feedback(&failure.message),
+        };
+    }
+    if is_computer_launch && let Some(failure) = error.capability_execution_failure() {
+        return EngineToolError::CapabilityKernel {
+            code: error.canonical_code().0,
+            message: computer_launch_feedback(&failure.message).to_owned(),
         };
     }
     if is_process && error.canonical_code().as_ref() == "CAPABILITY_UNAVAILABLE" {
@@ -433,6 +448,14 @@ fn kernel_error_for_action(error: KernelError, is_process: bool, is_file_write: 
         };
     }
     kernel_error(error)
+}
+
+fn computer_launch_feedback(detail: &str) -> &'static str {
+    if detail.contains("does not exist") {
+        "Computer launch target path does not exist. Use the exact installed application or an existing file/folder path. Do not guess an alternative or retry the same path. No successful launch was reported."
+    } else {
+        "The Computer launch owner rejected this target. Verify the exact installed application or existing file/folder path before a changed retry. Do not guess an alternative. No successful launch was reported."
+    }
 }
 
 fn settlement_loss_feedback(detail: &str) -> Option<&'static str> {

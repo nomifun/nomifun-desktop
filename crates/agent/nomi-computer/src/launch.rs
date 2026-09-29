@@ -33,6 +33,14 @@ pub fn validate_launch_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_absolute_launch_path(value: &str, label: &str) -> Result<(), String> {
+    let path = std::path::Path::new(value);
+    if path.is_absolute() && !path.exists() {
+        return Err(format!("{label} path {value:?} does not exist"));
+    }
+    Ok(())
+}
+
 /// Fail closed on Agent-initiated web-page opens through the operating-system
 /// browser. Every caller of [`launch`] is an Agent surface (the in-process
 /// Computer tool, the computer/open MCP servers, and Gateway capabilities), so
@@ -165,9 +173,11 @@ fn is_url(target: &str) -> bool {
 /// specific `app`. Detached. Returns a human-readable success message.
 pub async fn launch(target: &str, app: Option<&str>) -> Result<String, String> {
     validate_launch_target(target)?;
+    validate_absolute_launch_path(target, "launch target")?;
     validate_agent_web_target(target)?;
     if let Some(app) = app {
         validate_agent_launch_app(app)?;
+        validate_absolute_launch_path(app, "launch application")?;
     }
     let target = target.to_string();
     let app = app.map(|s| s.to_string());
@@ -428,6 +438,25 @@ mod tests {
         assert!(validate_launch_target("C:\\Windows\\notepad.exe").is_ok());
         assert!(validate_launch_target("msedge").is_ok());
         assert!(validate_launch_target("/home/user/file.txt").is_ok());
+    }
+
+    #[test]
+    fn missing_absolute_target_and_application_paths_fail_before_os_launch() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let missing = std::env::temp_dir()
+            .join(format!("nomifun-computer-launch-missing-{}-{nonce}", std::process::id()))
+            .join("NomiDefinitelyMissing.app");
+        let missing = missing.to_string_lossy();
+        assert!(!std::path::Path::new(missing.as_ref()).exists());
+        let target_error = validate_absolute_launch_path(&missing, "launch target").unwrap_err();
+        assert!(target_error.contains("does not exist"), "{target_error}");
+        let app_error =
+            validate_absolute_launch_path(&missing, "launch application").unwrap_err();
+        assert!(app_error.contains("does not exist"), "{app_error}");
+        assert!(validate_absolute_launch_path("TextEdit", "launch application").is_ok());
     }
 
     #[test]
