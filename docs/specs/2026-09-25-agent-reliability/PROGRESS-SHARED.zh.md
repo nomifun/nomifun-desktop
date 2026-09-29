@@ -138,6 +138,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   工作区、进程和应用清理及正式备份通过。生产代码无需修改。PTY/stdin/resize、失败 poll/cancel、N3、
   其他 Provider/角色/平台与长期矩阵仍开放，不关闭完整 CMD/PROC/CTRL 或共享阶段。
 
+- S-D02-21（CTRL-006/007、PROC-025/027、REAL-005、A02/A05/A09/A13/A17/A18/A19 stdin 链、
+  游标与完成证据子断言）：W105 首次正式 Tauri 的 start→input→close→poll 已退出 0/reaped，但 canonical
+  poll Schema/宿主丢掉模型侧已有的 `cursor`，close 先消费回显后 poll 得到空输出；完成账本又只延续
+  当前 epoch，导致 start/input 两个精确链调用不在顶层证据。现 canonical poll 贯通非负 cursor，核心
+  owner 支持从显式 cursor 重放保留输出，终态缓存也按请求游标重读；只有同一 process 的完整、连续、
+  零省略 provenance 链可跨自身 interaction epoch 延续，其他旧观察不恢复。另将单行输入建模为可选
+  `append_newline=true`，宿主在原始 input 后只追加一个 `0x0A`，默认 false 且 1 MiB 上限含追加字节。
+  原始及强化字节夹具保留三次模型省略 LF 的失败，其中原始 12 字节被宿主如实回报，证明传输没有
+  隐式补齐；最终正式 Tauri 由 `step-3.7-flash` 精确发送 flag，poll(cursor=0) 返回末尾 `0A`、长度 13，
+  completion 按顺序引用 start/input/close/poll 四个顶层 call ID。精确链回归 **20/20**，Runtime
+  **195/195**、Wave2 **22/22**、Engine **29 通过 / 1 ignored**、App host **3/3**；正式 Session
+  5 步/177 事件、独立 34 项断言、工作区/进程/应用清理与备份通过。PTY/resize、并发 close/poll、
+  retained-base loss、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 Case 或共享阶段。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
@@ -703,6 +717,26 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   137 条事件、2 个 returned effect，独立 31 项断言通过，工作区和进程清理一致。其他 spawn
   permission/format/cwd、其他 Provider/角色/平台及长期矩阵仍开放，不关闭完整 PROC/REAL 或共享阶段。
 
+- S-D04-28（PROC-029/030/031、A11/A13/A17/A19 stdin 大小、owner 与终态边界子断言）：W106
+  首轮新反例全部通过，没有产品首次失败。Engine owner 接受精确 1 MiB 单次写入；1 MiB+1 在进入
+  transport 前拒绝，随后同一进程只收到允许的 4 字节，证明无部分写。已结算进程拒绝迟到 stdin，
+  再从 cursor 0 重放仍保持原 exited 终态和输出。App host 将 W105 新增的结构化 LF 一并计入 1 MiB
+  预算，精确上限加 LF 同样在 journal/dispatch 前拒绝。既有 Runtime 回归另确认未知 Session 与错误
+  invocation/call owner 使用稳定拒绝码且零写入，终态 PTY resize 失败而不复活。三项新 Engine 反例
+  **60/60**，Engine **32 通过 / 1 ignored**、App host **4/4**，Runtime 三项 owner/terminal 定向检查
+  通过。本批只补最小回归并提取等价预算判断；未调用模型或正式 UI。多次分块累计上限、并发
+  input/close、终态错误的正式 UI 呈现、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
+
+- S-D04-29（PROC-032、A11/A13/A17/A19 PTY resize 上限子断言）：W107 首次反例确认标准工具与
+  canonical Schema 均允许 65535，Engine 启动校验也接受 32768；Windows ConPTY 的 Win32 `COORD`
+  实际只支持 signed 16-bit，越界值因此越过预检后才成为 I/O/unknown。三个首次失败独立保留。
+  现以共享 `MAX_PTY_DIMENSION=32767` 统一 Runtime、Engine、App pre-journal 校验和 start/resize 两套
+  模型 Schema；0、32768 及以上在 owner/dispatch 前返回稳定 invalid transport，合法 132×43 仍真实
+  resize 并可取消/reap。ConPTY 合法与越界组合 **40/40**，process Runtime **125/125**、PTY
+  **8/8**、Runtime **195/195**、Wave2 **22/22**、Engine **33 通过 / 1 ignored**、App host **5/5**。
+  本批未调用模型或正式 UI。Windows 通用 ConPTY close 仍明确不声称可证明 generic EOF，PROC-028、
+  尺寸实际生效的应用级观测、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
@@ -1093,6 +1127,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   独立断言通过。streaming 耗时 1,398/1,302/1,407 ms（中位 1,398），non-streaming 为
   992/1,587/1,712 ms（中位 1,587）。**该精确 route/model/function 的只读 wire 场景 N3 通过**；
   不外推到 owner 执行、其他工具/协议/模型、原始 frame、正式 UI 或完整 MODEL Case，共享阶段未完成。
+
+- S-D01-07（REG-008、G0-027、PROC-001～032 进程工具 Schema 同构子断言）：W105 的 model
+  `poll_process.cursor` 在 canonical Schema 缺失、W107 的两侧 PTY 上限又同时宽于实际 owner，说明原
+  `full_surface` 只核对 Action 名称与 object 外壳，不能阻止两份 Schema 漂移。新增逐 Action 回归，
+  从正式 Wave2 workspace registration 的 schema ref 解析 canonical exec/start/poll/input/close/
+  resize/cancel，并与 7 个模型工具递归比较属性集合、必填字段、类型、union 及约束。模型侧只允许
+  有意收窄数值范围，例如 start 的 wait_ms=0；缺字段、放宽 max/min 或结构变化直接失败。当前修复
+  基线首次 **20/20**，Agent Runtime **196/196**。本批只补防漂移回归，无新产品失败、模型调用或
+  正式 UI；文件/VCS/Artifact 及其他 Wave Schema、生成时跨 crate 单一来源仍待后续，不关闭完整 REG。
 
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原

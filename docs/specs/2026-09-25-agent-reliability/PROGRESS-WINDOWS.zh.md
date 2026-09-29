@@ -1933,6 +1933,75 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   均通过。本批无源码修改。PTY/stdin/resize、失败 poll/cancel、其他 Provider/角色/平台及 N3/100 seed/
   LONG/99% 仍待验；不关闭完整 CMD/PROC/CTRL 或共享阶段。
 
+### stdin 原始字节、显式游标与完整链证据（W105，基线 `36b0ab836`）
+
+- S-D02-21 / CTRL-006/007、PROC-025/027、REAL-005、A02/A05/A09/A13/A17/A18/A19：首次正式
+  Tauri Session `01a0ebfe-9b61-7c02-bc02-bab0cf3402d3` 精确执行 start→input→close→poll→completion，
+  但 canonical poll Schema 与 App host 没有 `cursor`，close 消费回显后 terminal poll 只返回空文本；
+  completion 又因 epoch 只允许 close/poll 两个顶层 ID，遗漏 start/input。首次夹具编译错误及修正后的
+  产品断言 **0/1** 均保留，未覆盖首次失败。
+- poll canonical Schema 现与模型工具一致地暴露非负 `cursor`、默认 0；App host 调用新增的
+  `ManagedEngineProcessOwner::poll_from`，即使 terminal 已缓存也从请求游标重读。完成账本仅在同一
+  process、连续 provenance、零省略交互且 cleanup 已证明时，将该精确 start/input/close/poll 链延续
+  到终态 epoch；不恢复同 epoch 的无关旧观察。精确链回归 **20/20**。
+- 两次修复中间 Session `01a0ec19-1637-7fe2-8e66-8f5769fad276`、
+  `01a0ec21-7692-7373-b25a-72c1df0565ee` 已证明 cursor=0 与四 ID 引用，但模型仍裁掉夹具要求的尾随
+  LF；强化原始字节 Session `01a0ec25-d1b3-7eb2-b138-533240a5552c` 明确回报 12 字节、无 `0A`，
+  随后 3 次输出截断并以 `NOMIFUN_TASK_INCOMPLETE` 失败。三份失败均保留，不以等价 Trim 输出记通过。
+- `write_process_stdin` 新增兼容的可选 `append_newline`，默认 false；true 时在未经 trim/normalize 的
+  UTF-8 input 后追加且只追加一个 LF byte，预算在 dispatch 前包含该字节。最终二进制
+  `af99bde37234cdeaa2c2083fef0555f626032cc32ee1c56f9ae49dcfb467effb`、全新 data/work/profile 和
+  StepFun Coding Plan / `step-3.7-flash` 的 Session `01a0ec31-7baa-7842-a743-51323ae79e1f` 首次精确发送
+  `input=W105-PAYLOAD, append_newline=true`；poll(cursor=0, wait_ms=5000) 返回完整
+  `...-41-44-0A` 与 `W105-LEN:13`，exit 0、`cleanup.reaped=true`。唯一 supported criterion 按顺序引用
+  四个顶层 call ID；5 步、177 条事件、零截断，3 个 managed effect returned。独立 **34 项**断言、
+  Runtime **195/195**、Wave2 **22/22**、Engine **29 通过 / 1 ignored**、App host **3/3**、正式构建、
+  工作区不变、匹配进程及应用/profile/Vite 清零、正式备份均通过。
+- 未覆盖 PTY/resize、大块与 1 MiB 边界正式 UI、close/input/poll 并发、retained-base loss、其他
+  Provider/角色/平台及 N3/100 seed/LONG/99%；不关闭完整 CTRL/PROC/REAL 或共享阶段。
+
+### stdin 大小、owner 与终态拒绝边界（W106，基线 `a3e810c00`）
+
+- S-D04-28 / PROC-029/030/031、A11/A13/A17/A19：新增 Engine 真实 pipe 反例直接跨过 owner。
+  精确 1 MiB 单次 stdin 写入正常结算并由独立计数进程回报 `1048576`；1 MiB+1 返回稳定上限错误，
+  随后同一进程只回报允许的 `safe` 4 字节，确认超限在 transport 前拒绝且没有部分交付。
+- 已自然退出并 reaped 的 Session 拒绝迟到 stdin；拒绝后 `poll_from(cursor=0)` 仍重放相同 exited
+  终态与原输出，没有复活或污染。App host 另将 `append_newline=true` 的一个 LF 纳入 dispatch 前预算：
+  精确 1 MiB input 可写，精确上限再追加 LF 与 1 MiB+1 均拒绝。
+- 三项新 Engine 反例重复 **60/60**；Engine 完整 **32 通过 / 1 ignored**、App process host
+  **4/4**。既有 process Runtime 的未知 Session/错误双 owner 与终态 PTY resize 三项定向检查通过，
+  均无 owner 写入或 Session 状态改变。首次即通过，无失败可保留；本批没有模型调用或正式 UI。
+- 未覆盖多次分块累计流量策略、input/close 并发、终态拒绝的完整 UI/错误披露、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 PROC 或共享阶段。
+
+### PTY resize 的跨平台可执行上限（W107，基线 `b90ddb060`）
+
+- S-D04-29 / PROC-032、A11/A13/A17/A19：标准工具和 canonical start/resize Schema 的
+  `cols/rows` 上限为 65535，Engine request 也只拒绝 0；但 Windows ConPTY 使用 signed 16-bit
+  `COORD`，32768 会通过 Schema 与 App journal 后才在平台 owner 中变成 I/O/unknown。领域 Schema、
+  模型 Schema 和 Engine 校验三项首次反例均 **0/1**，日志独立保留。
+- process Runtime 新增共享 `MAX_PTY_DIMENSION=32767`，resize 在调用平台 owner 前拒绝 0/32768；
+  Engine start 校验、App journal/dispatch 前校验和两套模型 Schema 使用同一上限。合法 132×43
+  ConPTY 仍完成 poll/write/resize/cancel，cancel 得到 cleanup/reaped；越界后 Session 保持运行且 owner
+  resize 调用数为零，终态 resize 仍明确失败而不复活。
+- 合法/越界 ConPTY 组合重复 **40/40**；process Runtime **125/125**、PTY contract **8/8**、
+  Agent Runtime **195/195**、Wave2 **22/22**、Engine **33 通过 / 1 ignored**、App host **5/5**，
+  fmt/diff 通过。本批没有模型调用或正式 UI。
+- Windows ConPTY generic `close_stdin` 仍按既有合同返回“无法证明通用 EOF”，未把该错误伪装为
+  成功；PROC-028、resize 后真实尺寸的应用级观测、其他平台及 N3/100 seed/LONG/99% 仍待验。
+
+### 进程模型工具与 canonical Schema 同构守卫（W108，基线 `df8a580ec`）
+
+- S-D01-07 / REG-008、G0-027、PROC-001～032 Schema 子断言：W105/W107 已分别证明缺失
+  `poll.cursor` 和 PTY 上限漂移可以越过旧 `full_surface` 测试；旧测试只核对 Action ID、object 根与
+  `additionalProperties=false`，没有比较真正的参数合同。
+- 新回归从正式 Wave2 workspace registration 解析每个 canonical schema ref，逐一覆盖模型侧
+  exec/start/poll/input/close_stdin/resize/cancel 七个工具。属性集合、required、type、oneOf、const/
+  enum/default 必须一致；模型最小值不得更小、最大值不得更大，保留 `start_process.wait_ms=0` 这种
+  明确减权。当前基线首次 **20/20**，Agent Runtime **196/196**，fmt/diff 通过。
+- 本批只补必要回归，没有新产品失败、模型调用或正式 UI。文件/VCS/Artifact、其他 Wave/动态工具
+  Schema 及单一生成源仍未覆盖，不关闭完整 REG/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

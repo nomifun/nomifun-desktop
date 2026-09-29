@@ -13,11 +13,13 @@ use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave2::Wave2HostPortError;
 use nomifun_engine_core::{
     EngineProcessPoll, EngineProcessRequest, EngineProcessSession, EngineProcessTransport,
-    ManagedEngineProcessOwner,
+    MAX_PTY_DIMENSION, ManagedEngineProcessOwner,
 };
 use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
+const MAX_STDIN_WRITE_BYTES: usize = 1024 * 1024;
 
 fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("CAPABILITY_UNAVAILABLE", value.to_string())
@@ -55,6 +57,8 @@ struct Params {
     timeout_ms: Option<u64>,
     process_id: Option<String>,
     input: Option<String>,
+    append_newline: Option<bool>,
+    cursor: Option<u64>,
     wait_ms: Option<u64>,
     #[serde(default)]
     tty: bool,
@@ -64,6 +68,34 @@ struct Params {
 
 fn poll_wait(params: &Params) -> Duration {
     Duration::from_millis(params.wait_ms.unwrap_or(0))
+}
+
+fn stdin_bytes(
+    input: Option<&str>,
+    append_newline: bool,
+) -> Result<Vec<u8>, Wave2HostPortError> {
+    let input = input.ok_or_else(|| error("stdin requires input"))?;
+    let mut bytes = input.as_bytes().to_vec();
+    if append_newline {
+        bytes.push(b'\n');
+    }
+    Ok(bytes)
+}
+
+fn stdin_input_exceeds_budget(params: &Params) -> bool {
+    params.input.as_ref().is_some_and(|text| {
+        text.len() > MAX_STDIN_WRITE_BYTES
+            || (params.append_newline == Some(true) && text.len() == MAX_STDIN_WRITE_BYTES)
+    })
+}
+
+fn pty_dimension_out_of_range(params: &Params) -> bool {
+    params
+        .cols
+        .is_some_and(|value| !(1..=MAX_PTY_DIMENSION).contains(&value))
+        || params
+            .rows
+            .is_some_and(|value| !(1..=MAX_PTY_DIMENSION).contains(&value))
 }
 
 pub(crate) struct EngineProcessScope {
@@ -137,12 +169,10 @@ impl EngineProcessScope {
         let params: Params = serde_json::from_value(input.0)
             .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
         if params.wait_ms.is_some_and(|wait| wait > 30_000)
-            || params
-                .input
-                .as_ref()
-                .is_some_and(|text| text.len() > 1024 * 1024)
+            || stdin_input_exceeds_budget(&params)
+            || pty_dimension_out_of_range(&params)
         {
-            return Err(error("process wait/input budget exceeded"));
+            return Err(error("process wait/input/PTY dimension budget exceeded"));
         }
         let mut state = self.state.lock().await;
         if self.closed.load(Ordering::Acquire) || state.unregistered_start || state.cleanup_panicked
@@ -201,6 +231,12 @@ impl EngineProcessScope {
         let poll_delay = poll_wait(&params);
         let sessions = &mut state.sessions;
         let launch = matches!(params.operation, Operation::Exec | Operation::Start);
+        if params.cursor.is_some() && params.operation != Operation::Poll {
+            return Err(error("cursor is only valid for poll"));
+        }
+        if params.append_newline.is_some() && params.operation != Operation::Stdin {
+            return Err(error("append_newline is only valid for stdin"));
+        }
         let id = if launch {
             if sessions.len() >= 64 {
                 return Err(error("turn process limit reached (64 launches)"));
@@ -290,28 +326,30 @@ impl EngineProcessScope {
             .get_mut(&id)
             .ok_or_else(|| error("process_id is not owned by this exact turn"))?;
         if let Some(poll) = &entry.terminal {
-            if matches!(params.operation, Operation::Poll | Operation::Cancel) {
+            if params.operation == Operation::Cancel {
                 return process_output(&id, poll, params.operation);
             }
-            return Err(error(
-                "process already terminated; stdin/resize cannot restart it",
-            ));
+            if params.operation == Operation::Poll {
+                // Re-poll the retained terminal session so the caller's output
+                // cursor is honored even when another interaction observed exit.
+            } else {
+                return Err(error(
+                    "process already terminated; stdin/resize cannot restart it",
+                ));
+            }
         }
         let session = &mut entry.session;
         match params.operation {
-            Operation::Stdin => self
-                .owner
-                .write_stdin(
-                    session,
-                    params
-                        .input
-                        .as_deref()
-                        .ok_or_else(|| error("stdin requires input"))?
-                        .as_bytes(),
-                    self.cancellation.clone(),
-                )
-                .await
-                .map_err(outcome_unknown)?,
+            Operation::Stdin => {
+                let bytes = stdin_bytes(
+                    params.input.as_deref(),
+                    params.append_newline.unwrap_or(false),
+                )?;
+                self.owner
+                    .write_stdin(session, &bytes, self.cancellation.clone())
+                    .await
+                    .map_err(outcome_unknown)?
+            }
             Operation::CloseStdin => self
                 .owner
                 .close_stdin(session)
@@ -337,6 +375,16 @@ impl EngineProcessScope {
         let poll = match params.operation {
             Operation::Exec => self.owner.wait(session, self.cancellation.clone()).await,
             Operation::Cancel => self.owner.cancel(session).await,
+            Operation::Poll => {
+                self.owner
+                    .poll_from(
+                        session,
+                        params.cursor.unwrap_or(0),
+                        poll_delay,
+                        self.cancellation.clone(),
+                    )
+                    .await
+            }
             _ => {
                 self.owner
                     .poll(
@@ -429,7 +477,7 @@ mod tests {
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
 
     #[test]
-    fn omitted_wait_matches_explicit_zero_wire_contract() {
+    fn omitted_wait_and_cursor_match_explicit_zero_wire_contract() {
         let omitted: Params = serde_json::from_value(serde_json::json!({
             "operation": "poll",
             "process_id": "process-1"
@@ -438,11 +486,93 @@ mod tests {
         let explicit: Params = serde_json::from_value(serde_json::json!({
             "operation": "poll",
             "process_id": "process-1",
+            "cursor": 0,
             "wait_ms": 0
         }))
         .unwrap();
         assert_eq!(poll_wait(&omitted), Duration::ZERO);
         assert_eq!(poll_wait(&explicit), Duration::ZERO);
+        assert_eq!(omitted.cursor.unwrap_or(0), 0);
+        assert_eq!(explicit.cursor.unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn stdin_append_newline_adds_one_lf_without_normalizing_input() {
+        let exact: Params = serde_json::from_value(serde_json::json!({
+            "operation": "stdin",
+            "process_id": "process-1",
+            "input": " payload\r",
+            "append_newline": true
+        }))
+        .unwrap();
+        let unchanged: Params = serde_json::from_value(serde_json::json!({
+            "operation": "stdin",
+            "process_id": "process-1",
+            "input": " payload\r"
+        }))
+        .unwrap();
+        assert_eq!(
+            stdin_bytes(exact.input.as_deref(), exact.append_newline.unwrap_or(false)).unwrap(),
+            b" payload\r\n"
+        );
+        assert_eq!(
+            stdin_bytes(
+                unchanged.input.as_deref(),
+                unchanged.append_newline.unwrap_or(false)
+            )
+            .unwrap(),
+            b" payload\r"
+        );
+    }
+
+    #[test]
+    fn stdin_budget_counts_the_structured_newline_before_dispatch() {
+        let params = |bytes: usize, append_newline: Option<bool>| Params {
+            operation: Operation::Stdin,
+            command: None,
+            cmd: None,
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            process_id: Some("process-1".to_owned()),
+            input: Some("x".repeat(bytes)),
+            append_newline,
+            cursor: None,
+            wait_ms: None,
+            tty: false,
+            cols: None,
+            rows: None,
+        };
+        assert!(!stdin_input_exceeds_budget(&params(
+            MAX_STDIN_WRITE_BYTES,
+            None
+        )));
+        assert!(stdin_input_exceeds_budget(&params(
+            MAX_STDIN_WRITE_BYTES,
+            Some(true)
+        )));
+        assert!(stdin_input_exceeds_budget(&params(
+            MAX_STDIN_WRITE_BYTES + 1,
+            Some(false)
+        )));
+    }
+
+    #[test]
+    fn pty_dimensions_use_the_portable_predispatch_limit() {
+        let mut params: Params = serde_json::from_value(serde_json::json!({
+            "operation": "resize",
+            "process_id": "process-1",
+            "cols": 32767,
+            "rows": 32767
+        }))
+        .unwrap();
+        assert!(!pty_dimension_out_of_range(&params));
+        params.cols = Some(32768);
+        assert!(pty_dimension_out_of_range(&params));
+        params.cols = Some(120);
+        params.rows = Some(0);
+        assert!(pty_dimension_out_of_range(&params));
     }
 
     #[test]
