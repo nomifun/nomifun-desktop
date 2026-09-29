@@ -2398,6 +2398,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 terminal settlement 与 Store close 竞态、正式应用 shutdown 顺序、真实磁盘/IO fault、其他
   Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC 或共享阶段。
 
+### Store close 与 busy terminal 竞态（W140，基线 `cd7f56002`）
+
+- S-D09-21 / LIFE-006/011/023/024、FILE-038、CONC-014、A04/A07/A11/A17/A19：Effect reserve 与
+  实际 `FileService` 发布完成后，由独立连接持有 SQLite writer lock 阻塞 terminal settlement，再启动
+  canonical Store close。settlement 按约 5 秒 busy timeout 返回 `CAPABILITY_UNAVAILABLE`，close
+  随在途连接归约完成；文件保持已发布。
+- 释放锁、用户修改文件并从同一路径重开后，Effect 仍为 Pending，原 key 与新 key 均被 durable/
+  resource fence 拒绝，用户内容保持且只有一条 Effect。首次产品运行及连续 **20/20**，W139
+  close-admission 与 W134 busy-terminal 相邻回归 **2/2**，fmt/diff 通过。生产代码无需修改，
+  无模型/UI。
+- 未覆盖正式应用 shutdown 的 Runtime/Store/owner 顺序、close 与 cancel 组合、真实磁盘/IO fault、
+  其他 Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
