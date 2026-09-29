@@ -5458,6 +5458,98 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn database_close_during_busy_terminal_keeps_pending_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.files");
+        pending.action_id = ActionId::from("workspace.files/write");
+        pending.idempotency_key = IdempotencyKey::from("close-during-busy-terminal");
+        pending.operation_id = OperationId::from("close-during-busy-terminal-operation");
+        ensure_test_effect_context(&store,&pending).await;
+        let input = StrictJsonValue(json!({
+            "path":"result.txt","content":"published before terminal store close"
+        }));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh file write effect must reserve")
+        };
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        let scope = host.workspace_scope(&pending).unwrap();
+        let receipt = host.files.write_file_with_observation_for_agent_session(
+            &scope,"result.txt",b"published before terminal store close",
+        ).await.unwrap();
+        assert!(receipt.created);
+
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let settle_reservation = reservation.clone();
+        let settle_output = StrictJsonValue(json!({"written":true,"path":"result.txt"}));
+        let settlement = tokio::spawn(async move {
+            finish_wave2_effect(
+                &settle_reservation,
+                Wave2EffectCompletion::Succeeded(&settle_output),
+            ).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!settlement.is_finished());
+        assert_eq!(store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        let closing = tokio::spawn(async move { database.close().await });
+        let error = tokio::time::timeout(Duration::from_secs(6),settlement).await
+            .expect("terminal settlement must stop at the bounded SQLite busy timeout")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        closing.await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"published before terminal store close");
+        writer.commit().await.unwrap();
+        std::fs::write(workspace.join("result.txt"),b"user edit after terminal store close").unwrap();
+        drop(reservation);
+        drop(host);
+        drop(store);
+        lock_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let same_key = invoke(&restarted,pending.clone(),"workspace.files/write",json!({
+            "path":"result.txt","content":"published before terminal store close"
+        })).await.unwrap_err();
+        assert_eq!(same_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+        let mut different = pending.clone();
+        different.idempotency_key = IdempotencyKey::from("close-during-busy-terminal-different-key");
+        different.operation_id = OperationId::from("close-during-busy-terminal-different-operation");
+        let different_key = invoke(&restarted,different.clone(),"workspace.files/write",json!({
+            "path":"result.txt","content":"must not overwrite user edit"
+        })).await.unwrap_err();
+        assert_eq!(different_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(different_key.message.contains("unsettled"),"{different_key:?}");
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(),b"user edit after terminal store close");
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn pending_patch_fences_same_and_new_keys_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();
