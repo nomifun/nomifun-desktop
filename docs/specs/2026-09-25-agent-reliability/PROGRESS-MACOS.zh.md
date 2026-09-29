@@ -24,7 +24,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 冻结/准入与 M02-02 正式 UI/live 只读 Session 子断言通过；完整领域未验收 |
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
-| D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05/06 APFS/发布/ACL/xattr 子断言已验证；其余待走查 |
+| D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03 本地 Git 字面路径、commit/local remote/拒绝边界子断言通过；网络/SSH 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
@@ -32,7 +32,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015 的本批子断言已验；其余待走查 |
-| D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～06 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr；末端竞态仍待验 |
+| D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
 
 ## 原生接续任务
@@ -299,3 +299,13 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `2026-09-29/macos/m03-macos-xattr/`。
 - 未覆盖 metadata copy 后至 rename 的最后窗口、copyfile 故障注入、超大 resource fork、immutable
   flags、非 APFS 卷、正式 UI 变更投影、100 seed/LONG；因此不关闭完整 FILE、D03/D11 或 M03。
+
+- **M03-07 macOS immutable target refusal**（`MAC-005`、`FILE-020/022/025/038/039` 的本批
+  子断言）：首次夹具把 `chflags` 写成不存在的 `/bin/chflags`，在产品调用前失败并保留；改用本机
+  权威 `/usr/bin/chflags` 后，`uchg` 目标的 write/patch 首次即拒绝，旧字节与 `uchg` 均保持到测试
+  明确恢复 flag。两个自有 stage 各保留拟写字节并返回 outcome unknown，两个无内容事件要求对账，
+  未把拟写字节投影成成功或尝试提权/移除系统保护。
+- immutable 精确回归 **20/20**；最终 macOS workspace **8 passed / 1 ignored**，fmt/diff 通过。
+  证据：`2026-09-29/macos/m03-macos-immutable/`。未覆盖需提权的 `schg`（不设置、不绕过）、最终窗口
+  内 flag 变化、成功替换时非阻断 flags、非 APFS、正式 UI 与长期门槛；因此不关闭完整 FILE、
+  D03/D11 或 M03。
