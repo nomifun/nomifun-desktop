@@ -492,6 +492,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   首次内联 WSL 脚本引号失败发生在测试前并独立保留。macOS、PTY setup、exec 临界点、真实 UI/角色
   与长期调度压力仍开放，不关闭完整 PROC-047 或共享阶段。
 
+- S-D04-22（CMD-143、A02/A08/A17/A18/A19 长历史命令子断言）：W92 首次正式 Tauri 回合最终
+  执行了 W92-001～050，但 56 个模型步骤中共有 55 次 `exec_command` 提案；step 1/18/34/36 把
+  executable 的 `args` 错挂到 shell-script `cmd` 分支，step 17 又提交空对象。五次均由 Schema 在
+  dispatch 前拒绝，实际 effect 仍恰为 50；最终 completion 却把可见失败数写成 0。失败 Session、
+  2,499 条事件、截图、数据库与轨迹独立保留。根因是两个输入分支虽严格互斥，模型可见说明缺少
+  紧邻字段的完整 JSON 对照；Runtime 又未把已累计的 `failed_tools` 放进 completion 上下文/报告。
+  现明确 `{command,args}` 与 `{cmd}` 两种形状，args 只属于 command；有错误的回合必须提交动态
+  const `observed_tool_error_count`，Runtime 校验、持久化并固定追加披露，后续成功不能抹掉错误。
+  六项精确回归各 **20/20**，合并远端后 Agent Runtime **187/187**；旧夹具首次 **176/182** 失败后按真实累计
+  数修正，不放宽合同。合并远端后的最终正式 Tauri `712cf9457e11…` 单回合 51 步、2,454 条事件：前 50 步均为
+  独立 `command=cmd.exe` + JSON args，50/50 exit 0/reaped、marker 精确有序，第 51 步完成报告，UI/
+  canonical 错误均为 0；工作区不变，进程与 profile 清零并正式备份。其他命令语义、Provider/模型/
+  角色/平台、50 个独立用户回合及 N3/100 seed/LONG/99% 仍开放，不关闭完整 CMD-143 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
