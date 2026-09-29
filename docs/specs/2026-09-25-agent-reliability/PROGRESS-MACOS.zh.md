@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09/10 已验 raw pointer 与缺失绝对 launch；取消/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；取消/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -623,3 +623,28 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批公共根因另记 `S-D06-04`。相对缺失 app 名、安装后又删除的 TOCTOU、显式 opener 异步失败、撤权、
   Windows/Linux 原生 opener 与 soak 仍开放，因此只关闭 macOS 缺失绝对路径子断言，不关闭完整
   `COMP-006`、Computer、D06 或 M04。
+
+- **M04-11 macOS user/Agent concurrent input**（`COMP-011` 焦点/内容变化检测、零争抢循环及
+  `COMP-010` 零盲目重放的本批子断言）：新增最小 `--computer-concurrent-user` 确定性夹具模式，复用
+  M04-05 已交付的 macOS AX observer dirty / generation fence；正式 Tauri 使用 Developer ID-signed
+  arm64 app、隔离 data/Agent/Session `01a0ed96-3270-7ac1-8235-06082022ddcd`。Runtime 在 TextEdit
+  `textarea="seed"` 上取得旧 ref 后暂停；外部用户动作只通过原生 TextEdit AX 把前台值改成精确
+  `USER_OWNED`，释放旧 ref 前磁盘仍为 4-byte `seed`，未用磁盘写入冒充 UI 并发。
+- 两个夹具首败独立保留：`run-002-final-ui`（Session
+  `01a0ed8a-226b-7530-9719-97b614b136a4`）把 AX `setValue` 与 `cmd+s` 合并后，TextEdit 阻塞于
+  `_NSDocumentSerializationSemaphore wait`，未释放 input effect；`run-003-final-ui`（Session
+  `01a0ed90-8831-70a3-ad76-b56db2753ec7`）又被外部文件写入附加换行污染，触发 TextEdit 冲突提示及
+  夹具 exact-byte 失败，虽产品已拒绝旧 input，仍不计通过。两次均保留事件/样本/DB，并完成精确清理。
+- 最终 `run-005-final-ui` 为 **5 model steps / 69 events**：唯一 launch effect returned；用户值变化使
+  observer dirty，旧 `set_element_value("STALE_SHOULD_NOT_APPEAR")` 在任何输入前以
+  `ROLE_HOST_STALE_OBSERVATION_GENERATION` rejected，零 pending/unknown/重试循环，Turn completed。
+  夹具只在结算时重新读取磁盘仍为 exact `seed` 后才置
+  `stale_input_rejected=true`、`concurrent_user_preserved=true`；随后 TextEdit 正常 autosave 于 effect
+  结算约 15 秒后把磁盘变为 exact 10-byte `USER_OWNED`，最终 AX/截图与磁盘一致，且均无 stale 文本。
+  正式 UI 明确显示用户内容保持；运行中 DB `ok`，停止后以 immutable 只读方式复核两项均 `ok`，最终
+  TextEdit/app/fixture process 和两个 listener 为 0。证据：
+  `2026-09-29/macos/m04-computer-concurrent/`。
+- 本批未发现新的共享或产品根因，只提交可重复的正式 UI 夹具与本页结论，故不改
+  `PROGRESS-SHARED`。`COMP-012` 的 held drag/key cancel 与 release cleanup、`COMP-010` owner crash/result
+  loss、right/middle/multi-click、OCR/pixel-only、多显示器/DPI 和 soak 仍开放；因此只关闭
+  `COMP-011` 本批 macOS 子断言，不关闭完整 Computer、D06 或 M04。
