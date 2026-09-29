@@ -107,6 +107,7 @@ mod tests {
 
     struct RecordingHost {
         seen: Arc<Mutex<Vec<SeenInvocation>>>,
+        failure: Option<(String,String)>,
     }
 
     impl Wave2HostPort for RecordingHost {
@@ -128,6 +129,9 @@ mod tests {
                         .map(|binding| binding.binding_id.as_ref().to_owned())
                         .collect(),
                 ));
+                if let Some((code,message)) = &self.failure {
+                    return Err(Wave2HostPortError::new(code.clone(),message.clone()));
+                }
                 Ok(StrictJsonValue(json!({
                     "path": request.operation_input().0["path"],
                     "content": "owner-result"
@@ -167,7 +171,7 @@ mod tests {
         seen: Arc<Mutex<Vec<SeenInvocation>>>,
     }
 
-    fn kernel_fixture() -> KernelFixture {
+    fn kernel_fixture_with_failure(failure: Option<(String,String)>) -> KernelFixture {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let registry = Arc::new(
             KernelRegistry::new(
@@ -180,6 +184,7 @@ mod tests {
             .replace_all(
                 registrations_with_host_port(Arc::new(RecordingHost {
                     seen: Arc::clone(&seen),
+                    failure,
                 }))
                 .unwrap(),
             )
@@ -282,6 +287,10 @@ mod tests {
         }
     }
 
+    fn kernel_fixture() -> KernelFixture {
+        kernel_fixture_with_failure(None)
+    }
+
     fn read_exposure(capability_id: CapabilityId, action_id: ActionId) -> AgentToolExposure {
         AgentToolExposure {
             definition: ChatToolDefinition {
@@ -371,6 +380,75 @@ mod tests {
                 vec!["workspace-binding".to_owned()]
             )]
         );
+    }
+
+    #[tokio::test]
+    async fn settlement_loss_guidance_survives_the_runtime_kernel_invoker() {
+        let cases = [
+            (
+                "workspace.files/read owner reported success (result digest abc), but the canonical terminal observation could not be committed: PRIVATE_PATH secret=NEVER_EMIT",
+                ["owner reported success","Do not retry","Re-read"],
+            ),
+            (
+                "workspace.files/read owner failed with RESOURCE_NOT_FOUND: PRIVATE_PATH secret=NEVER_EMIT; canonical failure observation could not be committed",
+                ["owner reported failure","Do not retry","Inspect"],
+            ),
+            (
+                "workspace.files/read owner outcome is unknown (EFFECT_OUTCOME_UNKNOWN): PRIVATE_PATH secret=NEVER_EMIT; canonical uncertain observation could not be committed",
+                ["owner outcome is unknown","Do not retry","Reconcile"],
+            ),
+        ];
+        for (index,(detail,expected)) in cases.into_iter().enumerate() {
+            let fixture = kernel_fixture_with_failure(Some((
+                "CAPABILITY_UNAVAILABLE".to_owned(),detail.to_owned(),
+            )));
+            let active = fixture.active.snapshot().unwrap();
+            let plan = compile_agent_tool_plan(
+                &fixture.snapshot,
+                &active,
+                &fixture.materialized,
+                [read_exposure(fixture.capability_id.clone(),fixture.action_id.clone())],
+            ).unwrap();
+            let binding = plan.binding("read_file").unwrap().clone();
+            let invoker = KernelAgentToolInvoker::new(
+                Arc::clone(&fixture.registry),
+                Arc::clone(&fixture.snapshot),
+                Arc::clone(&fixture.active),
+                fixture.principal.clone(),
+                ScopeKey::from(format!("session:settlement-loss-{index}")),
+            );
+            let error = invoker.invoke(
+                AgentToolInvocation {
+                    agent_session_id:AgentSessionId::from(format!("settlement-session-{index}")),
+                    principal:fixture.principal,
+                    resolved_snapshot_ref:fixture.snapshot.snapshot_ref().clone(),
+                    active_set_generation:active.generation,
+                    turn_operation_id:OperationId::from(format!("turn-{index}")),
+                    operation_id:OperationId::from(format!("turn-{index}:tool")),
+                    idempotency_key:IdempotencyKey::from(format!("settlement-{index}")),
+                    correlation_id:CorrelationId::from(format!("settlement-{index}")),
+                    call:ChatToolCall {
+                        call_id:ToolCallId::from(format!("call-{index}")),
+                        name:"read_file".to_owned(),
+                        arguments:StrictJsonValue(json!({"path":"README.md"})),
+                        provider_metadata:None,
+                    },
+                    binding,
+                },
+                CancellationToken::new(),
+            ).await.unwrap_err();
+            let AgentEngineError::CapabilityKernel { code,message } = error else {
+                panic!("Runtime changed settlement loss error class")
+            };
+            assert_eq!(code,"CAPABILITY_UNAVAILABLE");
+            for fragment in expected {
+                assert!(message.contains(fragment),"{message}");
+            }
+            assert!(message.len() <= 2048);
+            assert!(!message.contains("PRIVATE_PATH"));
+            assert!(!message.contains("NEVER_EMIT"));
+            assert_eq!(fixture.seen.lock().unwrap().len(),1);
+        }
     }
 
     #[test]

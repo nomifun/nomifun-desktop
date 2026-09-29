@@ -2512,6 +2512,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式 tool result/event/UI、Browser/SSH/Computer 真实入口、其他平台及 N3/100 seed/LONG/99%；
   不关闭完整 LIFE/PROC/BROW/SSH/OBS 或共享阶段。
 
+### Runtime Kernel 完整投影三类 settlement loss（W148，基线 `ea34983cd`）
+
+- S-D09-29 / OBS-001/006/009/015/016/020、REG-004/007、A01/A03/A08/A15/A16/A17/A19：使用三套
+  真实编译 Snapshot/ActiveSet/ToolPlan 和正式 `KernelAgentToolInvoker`，分别注入 success/failed/
+  unknown settlement loss。
+- 三次均只 dispatch 一次；Runtime typed error 保持 `CAPABILITY_UNAVAILABLE`，W147 固定恢复语义、
+  ≤2 KiB 上限和 host 路径/secret 隔离完整穿过 Kernel 与 Agent Runtime 适配。
+- 新增场景首次及连续 **20/20**；正常 Kernel invocation、未选择 capability 的 plan 拒绝及 W147
+  Engine 投影 **3/3**，fmt/diff 通过。生产代码无需修改，无事件 Store/API/UI。
+- 未覆盖正式 tool result/event 持久化、tool row/UI、不同 Action/角色及其他平台、N3/100 seed/
+  LONG/99%；不关闭完整 REG/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
