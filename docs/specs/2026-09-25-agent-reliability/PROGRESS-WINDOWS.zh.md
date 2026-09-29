@@ -2485,6 +2485,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖各 Action 的逐入口 terminal fault、API/UI 投影、其他平台及 N3/100 seed/LONG/99%；不关闭
   完整 LIFE/FILE/VCS/BROW/COMP/SSH/OBS 或共享阶段。
 
+### Kernel 区分三类 settlement loss（W146，基线 `ead23eb2d`）
+
+- S-D09-27 / LIFE-006/007/011/024、FILE-038、OBS-006/009/015/016/020、A05/A07/A08/A15/A16/A17/A19：
+  将 success/failed/unknown 三类内部 settlement 错误送入正式 `kernel_error_for_action` 文件写投影。
+  旧路径全部压成普通 “Workspace file operation failed”；success 丢失“效果已发生/不可重试”，known
+  failure 还可能因 `changed` 被误判为 source precondition，首次 FAIL 保留。
+- Kernel 现先识别三组稳定内部 marker，再返回固定、≤2 KiB 且不含 host 路径/secret 的恢复指引：
+  success 要求不得声称未变并重读；failed 明确 failure receipt 未落库且仍 Pending；unknown 要求核对
+  external owner。
+- 修复后首次及连续 **20/20**；既有普通 file、结构化 patch、process 指引 **3/3**，fmt/diff 通过。
+  无完整 Runtime invocation/API/UI。
+- 未覆盖非文件 Action 的模型安全投影、正式 tool row/UI、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 LIFE/FILE/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

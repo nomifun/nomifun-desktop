@@ -388,6 +388,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **1/1**、Computer feature **1/1**。无正式 UI/真实外部 owner。各 Action 的逐入口 terminal fault、
   API/UI 投影、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/FILE/VCS/BROW/COMP/SSH/OBS。
 
+- S-D09-27（LIFE-006/007/011/024、FILE-038、OBS-006/009/015/016/020、A05/A07/A08/A15/A16/A17/A19
+  Kernel settlement 投影子断言）：W146 将 W141/W144/W145 的 success/failed/unknown 三类内部错误送入
+  正式 `kernel_error_for_action` 文件写投影。旧路径把三者都压成普通 “Workspace file operation failed”；
+  success 丢失“效果已发生/不可重试”，known failure 还会因诊断中的 `changed` 被误判为 source
+  precondition，首次 FAIL 已保留。现先识别三组稳定内部 marker，再返回固定、≤2 KiB 且不含 host
+  路径/secret 的独立恢复指引：success 要求不得声称未变并重读；failed 明确 failure receipt 未落库且
+  仍 Pending；unknown 要求核对 external owner。修复后首次及连续 **20/20**；既有普通 file、结构化
+  patch、process 指引 **3/3**。无完整 Runtime invocation/API/UI。非文件 Action 的模型安全投影、正式
+  tool row/UI、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/FILE/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

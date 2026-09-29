@@ -431,6 +431,21 @@ fn kernel_error_for_action(error: KernelError, is_process: bool, is_file_write: 
 /// publication indices are safe structured owner observations and must survive
 /// the Kernel's otherwise deliberately opaque capability failure projection.
 fn workspace_write_feedback(detail: &str) -> String {
+    if detail.contains("owner reported success")
+        && detail.contains("canonical terminal observation could not be committed")
+    {
+        return "The workspace owner reported success, but the canonical receipt was not stored. The requested file change may already be present. Do not retry automatically or report that nothing changed. Re-read every affected target and reconcile the pending effect before continuing.".to_owned();
+    }
+    if detail.contains("owner failed with")
+        && detail.contains("canonical failure observation could not be committed")
+    {
+        return "The workspace owner reported failure, but the canonical failure receipt was not stored. The effect remains pending because recovery cannot replay the failure safely. Do not retry automatically. Inspect current workspace state and reconcile the pending effect before a changed request.".to_owned();
+    }
+    if detail.contains("owner outcome is unknown")
+        && detail.contains("canonical uncertain observation could not be committed")
+    {
+        return "The workspace owner outcome is unknown, and the canonical uncertainty receipt was not stored. The effect remains pending. Do not retry automatically. Reconcile the external owner and re-read affected workspace state before continuing.".to_owned();
+    }
     let report = serde_json::from_str::<serde_json::Value>(detail).ok();
     let cause = report.as_ref().and_then(|value| value["cause"].as_str()).unwrap_or(detail);
     let guidance = if cause.contains("parent") || cause.contains("ancestor") {
