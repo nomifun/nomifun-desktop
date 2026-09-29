@@ -5332,6 +5332,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closed_database_prevents_effect_admission_until_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.files");
+        call.action_id = ActionId::from("workspace.files/write");
+        call.idempotency_key = IdempotencyKey::from("closed-admission-store");
+        call.operation_id = OperationId::from("closed-admission-store-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"closed.txt","content":"execute after canonical store reopens"
+        }));
+        database.close().await;
+
+        let error = host.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input.clone() },
+        }).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("canonical Agent Effect ledger could not be read"),"{error:?}");
+        assert!(!workspace.join("closed.txt").exists());
+        drop(host);
+        drop(store);
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        assert!(reopened_store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let result = restarted.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("closed.txt")).unwrap(),b"execute after canonical store reopens");
+        let effects = reopened_store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    #[tokio::test]
     async fn pending_patch_fences_same_and_new_keys_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("workspace");
