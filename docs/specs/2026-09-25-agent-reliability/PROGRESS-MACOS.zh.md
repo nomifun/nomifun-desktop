@@ -24,7 +24,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 新 Session 冻结/准入定向通过；正式 UI/live 待验 |
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139` 子断言完成；M02-01 计划/完成账本定向通过；完整 Case 未验收 |
-| D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 子断言已验证；其余待走查 |
+| D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 与 M03-01 Unix 发布/清理竞态子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | 条件资源待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
@@ -199,3 +199,18 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   启动、数据库完整性与端口清理通过，但 macOS 锁屏阻断 UI 输入/截图，已停止应用。因此 M02-02 仍须
   在解锁后用 StepFun Coding Plan / `step-3.7-flash` 新 Session 首发验证一次精确 `read_file`、计划、
   完成账本和 UI 绿色投影；本批不关闭完整 `AGEN/ACOD/APAL/AMUL/EXT` Case。
+
+- **M03-01 macOS Unix publication / cleanup race**（`FILE-019/020/028/031/038/039` 及
+  A05/A07/A13/A17/A19 的本批子断言）：在 Darwin 25.6.0、原生 arm64、APFS Data 卷上复核共享
+  S-D03-45/46/50。首次 6 个精确竞态均通过：macOS 新建发布由
+  `renamex_np(RENAME_EXCL)` 原子消费自有 stage，未进入独立的 check→unlink 窗口；同字节或已修改的
+  外来 staging 名均被保留。既有目标发布在核对后发生源换名时返回
+  `FILE_WRITE_OUTCOME_UNKNOWN`，不生成 publication identity，并保留
+  `temporary_cleanup_unconfirmed=true`；发布前目标消失时同样保留自有 stage 供显式对账。
+- 三条核心原生边界各重复 **20/20**：60 份保留 observation 精确分为原子新建 20、替换 unknown 20、
+  失败 stage 保留 20，额外 cleanup window 为 0。上层 uncertainty/error projection、缓存撤销及
+  same-bytes foreign rollback 隔离另 **4/4**。未发现需改产品代码的新根因；完整日志和现场位于
+  `2026-09-29/macos/m03-unix-publication/`。
+- 未覆盖真实磁盘满/IO fault、immutable flags、准入后的动态 ACL 撤权与最后系统调用竞态、正式
+  Tauri/model/UI 文件变更投影、其他 Unix fallback、100 seed/LONG 门槛；因此不关闭完整 FILE、
+  AUTH、D03 或 M03。
