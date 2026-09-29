@@ -2202,6 +2202,156 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   竞态、跨 owner 错配绑定、owner 核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整
   CONC/FILE/LIFE 或共享阶段。
 
+### 文件写与 VCS stage 跨 Action 并发 admission（W124，基线 `d72ce3704`）
+
+- S-D09-08 / CONC-015、FILE-038、VCS-004/014、LIFE-006、AUTH-009、A05/A13/A17/A19：两个
+  独立 SQLite pool/host/Session 同时 reserve 文件写与 Git stage。每轮唯一 workspace fence 恰好放行
+  一个 Effect，随后只调用 winner 对应的实际 FileService 或 VCS stage owner。
+- 关闭连接再重开后 loser action 仍被 Pending 拒绝。文件写获胜时，Git index 保持 base 且只出现
+  新文件；stage 获胜时，index 为 candidate blob 且新文件不存在；HEAD 始终不变。磁盘状态只体现
+  winner，没有 loser Effect。
+- 新增竞态首次及连续 **20/20**，W123 同 action 竞态及两类 owner 正常路径 **3/3**，fmt/diff 通过。
+  生产代码无需修改，无模型/UI。未覆盖两个完整 `invoke` 从入口并发、其他 Action 配对、跨 owner
+  错配绑定、owner 核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整 CONC/FILE/VCS/LIFE
+  或共享阶段。
+
+### 两个完整 patch invocation 的同源竞态（W125，基线 `f886756bb`）
+
+- S-D09-09 / CONC-002/015、FILE-020/025、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发 patch 同一文件；两边绑定相同 exact source digest，
+  分别尝试写入 `LEFT` 与 `RIGHT`。
+- 每轮恰好一个成功。loser 若撞到 winner Pending 则无 Effect；若在 winner 结算后获 admission，则因
+  source digest 陈旧以唯一 Rejected 终结。最终文件只等于 winner 内容，无第二次覆盖；两 Session 均
+  无 unsettled。关闭数据库再重开后，第三 Session 可正常写新文件，证明 fence 已释放。
+- 新增竞态首次及连续 **20/20**；不同路径并发、W116 receipt-loss、FileService 外部变更回滚及 W124
+  跨 Action **4/4**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 write/delete/Artifact 等
+  其他完整 invocation 配对、正式 App API 多会话、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  CONC/FILE 或共享阶段。
+
+### 两个完整 write invocation 的同路径竞态（W126，基线 `83031021b`）
+
+- S-D09-10 / CONC-002/015、FILE-019/020/023、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发向同一路径写入两份各 1 MiB 的不同字节。
+- 第二请求撞到 Pending 时只有一个成功；若第一请求已完成 settlement，则两次按顺序成功。最终文件
+  长度始终精确 1 MiB，全部为 `L` 或全部为 `R`，没有交错/截断；所有已创建 Effect 都是 Returned，
+  两 Session 无 unsettled。关闭数据库再重开后，第三 Session 可正常覆盖，证明 fence 已释放。
+- 新增竞态首次及连续 **20/20**；W125 patch 竞态、W115 receipt-loss、普通文件动作及 FileService
+  原子写 **6/6**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 8 MiB 边界并发、原生 replace
+  中途强杀、write/delete 配对、其他平台及 N3/100 seed/LONG/99%；不关闭完整 CONC/FILE 或共享阶段。
+
+### 完整 write/delete invocation 的同路径竞态（W127，基线 `02099af04`）
+
+- S-D09-11 / CONC-002/015、FILE-019/020/034、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发写入和删除同一路径；write 内容为 1 MiB。
+- 允许一个请求撞到 Pending 被拒，也允许两次按某个串行顺序成功。最终磁盘只可能不存在，或存在
+  精确 1 MiB 全 `W` 文件；不会保留旧 `base`、半写或混合字节。所有已创建 Effect 均 Returned，
+  两 Session 无 unsettled；数据库重开后第三 Session 可正常写入。
+- 新增竞态首次及连续 **20/20**；W126 write/write、W117 receipt-loss、FileService 原子写与删除置换
+  **10/10**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖跨 Session 全局事件顺序投影、
+  8 MiB 边界、目录 write/delete、原生调用中途强杀、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 CONC/FILE 或共享阶段。
+
+### 两个完整 Artifact publish invocation 的同内容竞态（W128，基线 `8f30b536e`）
+
+- S-D09-12 / CONC-015、ART-001/003/004、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发 publish 同一已观察 source/digest。
+- 允许一个请求撞到 Pending 被拒，也允许两次串行复用同一 content identity。所有成功回执的 artifact
+  ID/sha256 均等于预期 digest，managed 目录始终只有一个 64 位内容对象；所有已创建 Effect 均
+  Returned，两 Session 无 unsettled。数据库重开后第三 Session 分页读取仍为 complete/同 digest。
+- 新增竞态首次及连续 **20/20**；W119 receipt-loss、App Artifact 正常路径与 ArtifactStore 并发
+  publication gate **4/4**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖不同 source/digest
+  并发、cleanup/Session 删除与 reader 竞态、大对象边界、其他平台及 N3/100 seed/LONG/99%；
+  不关闭完整 CONC/ART 或共享阶段。
+
+### 两个完整 Artifact publish invocation 的不同内容竞态（W129，基线 `979cb8298`）
+
+- S-D09-13 / CONC-015、ART-001/003/004/005、A05/A13/A17/A19：两个独立 SQLite pool/host/
+  AgentSession 从正式 Wave2 `invoke` 入口并发 publish 两个不同 source/digest。
+- 允许一个撞 Pending 被拒，也允许两者串行成功；managed 目录中的 64 位对象集合与成功回执 digest
+  集合精确相等，不存在无回执孤儿。每个对象字节与自身 digest 对应，所有已创建 Effect 均 Returned、
+  无 unsettled；数据库重开后逐个成功对象仍能完整读取。
+- 新增竞态首次及连续 **20/20**；W128 同内容、W119 receipt-loss、ArtifactStore 并发 gate 与 round
+  trip **4/4**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 cleanup/Session 删除与 reader
+  竞态、不同源大对象、原生 link 中途强杀、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  CONC/ART 或共享阶段。
+
+### live Artifact reader 与 workspace cleanup 身份（W130，基线 `dec45aeda`）
+
+- S-D03-56 / ART-005/007、LIFE-028、A05/A13/A17/A19：先由 `WorkspaceArtifactStore` 发布并缓存
+  原 artifact handle，再尝试移走整个 workspace 并在同路径放入冒用旧 digest 名称的替代字节。回归
+  同时定义两种安全平台结果：允许移走时旧 Store 因 root identity 改变而拒绝、新 Store 因 digest
+  不符而拒绝；拒绝移走时旧 reader 只能继续读取原字节，替代 workspace 不出现。
+- Windows 临时诊断明确走 `native-denied`：live pinned workspace/artifact handles 阻止目录移走；诊断
+  输出随后移除。最终测试形状首次及连续 **20/20**，ArtifactStore 全组 **16/16**、managed workspace
+  cleanup 与 W129 **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖正式 AgentSession delete API 与 in-flight read 真并发、允许 rename 平台的原生分支、cleanup
+  task 强杀、其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE 或共享阶段。
+
+### 正式 Session delete 与 live Artifact owner（W131，基线 `fd7626a52`）
+
+- S-D03-57 / ART-007、LIFE-028、OBS-004/006、A05/A13/A17/A19：既有正式 App managed-workspace
+  删除测试先发布并缓存 Artifact reader，再以固定 idempotency key 删除 Session。Windows 首次返回
+  **500 / INTERNAL_ERROR**（`os error 32`）；canonical Session 已正确保留 deleting fence，但错误分类
+  不准确，首败日志已保留。
+- 正式 HTTP 删除流程现把两条 workspace cleanup 分支统一映射为 **409 /
+  AGENT_SESSION_WORKSPACE_CLEANUP_FAILED**，保留底层详情与 deleting 状态。释放 Artifact owner 后，
+  同一 key 重试完成原 tombstone 和 managed workspace 清理；sibling managed workspace 和 user-selected
+  workspace 均保持。
+- 修复后首次及连续 **20/20**；删除顺序、managed workspace 边界与 W130 reader **3/3**，fmt/diff
+  通过。首个相邻静态命令因错误 test target 执行 0 项，已用 `--lib` 完整名纠正，不计通过。无模型/
+  UI。未覆盖正式 Artifact read 请求与 DELETE 真并发、启动恢复 deleting Session 的 live-handle 重试、
+  其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE/OBS 或共享阶段。
+
+### deleting Session 的正式启动恢复（W132，基线 `f9e8ad16c`）
+
+- S-D03-58 / ART-007、LIFE-020/028、OBS-004/006、A05/A13/A17/A19：使用磁盘 App、正式
+  `coding.codex` 资源集合和 managed workspace。live Artifact owner 使首进程 DELETE 精确返回 W131
+  的 409 并保留 `deleting`；随后释放 handle，关闭 Router/Services/DB，不再发送 DELETE。
+- 第二进程从同一 data/work 配置启动，`create_router` 在路由发布前自动恢复 deleting Session、删除
+  managed workspace 并写入 `deleted`；启动后同 key DELETE 只重放原 tombstone。
+- 新增场景修正资源夹具后首次及连续 **20/20**；W131 409/retry、删除顺序与 Store delete fence
+  **4/4**，fmt/diff 通过。首个夹具用不消费 workspace 的 `chat.minimal` 被
+  `RESOURCE_SELECTION_UNUSED` 正确拒绝，失败日志保留。生产代码无需修改，无模型/UI。未覆盖
+  cleanup/recovery 进程中途再次强杀、正式 UI 删除、非 Windows live-handle 路径及 N3/100 seed/
+  LONG/99%；不关闭完整 ART/LIFE/OBS 或共享阶段。
+
+### SQLite busy effect admission（W133，基线 `d03df57ed`）
+
+- S-D09-14 / LIFE-023、CONC-014、FILE-038、A05/A13/A17/A19：独立连接持有 SQLite writer lock
+  时，从生产 Wave2 Host 发起文件写。200 ms 时任务仍等待，文件与 Effect 均不存在；约 5 秒 canonical
+  busy timeout 后返回 `CAPABILITY_UNAVAILABLE`，仍为零物理副作用/零 Effect。释放锁后同
+  operation/key 重试只执行一次并得到唯一 Returned。
+- 首版测试误用会重复写 tool fact 的辅助 `invoke()`，在 writer lock 下由夹具 `.expect` panic；失败日志
+  保留。改为直接调用生产 `Wave2HostPort::invoke` 后首次及连续 **20/20**；每轮实际等待 busy timeout，
+  相邻 Store writer 等待与 W115 写入重开 **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖 owner 已执行后 terminal settlement 遇锁、锁期间取消、进程强杀、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
+### 文件发布后的 SQLite busy 终态落库（W134，基线 `880425da3`）
+
+- S-D09-15 / LIFE-006/011/023、FILE-038、CONC-014、A04/A05/A07/A17/A19：canonical Effect
+  reserve 后由实际 `FileService` 发布文件并取得 receipt，再由独立连接持有 SQLite writer lock。
+  `finish_wave2_effect` 等待约 5 秒后精确返回 `CAPABILITY_UNAVAILABLE`；数据库仍为 Pending，文件
+  保持已发布，未回滚或假报可安全重放。
+- 释放锁后用户修改文件，关闭并从同一路径重开数据库。原 key 由 durable Pending 拒绝，新 key 由
+  workspace resource fence 拒绝；用户修改保持，数据库只有一条 Effect。首次产品运行及连续
+  **20/20**，W133 admission 与 W115 receipt-loss 相邻回归 **2/2**，fmt/diff 通过。首个证据目录
+  命令因 PowerShell 参数错误未启动 cargo，已在 metadata 留痕，不计产品样本。生产代码无需修改，
+  无模型/UI。
+- 未覆盖终态等待期间取消、精确边界强杀、DB 磁盘满/IO fault、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
+### SQLite busy admission 等待期间取消（W135，基线 `f462b1ea4`）
+
+- S-D09-16 / LIFE-023、CONC-014、FILE-038、A04/A10/A11/A19：独立连接持有 SQLite writer lock
+  时，从生产 Wave2 Host 发起文件写；200 ms 时仍为零文件、零 Effect，随后取消并等待 Host task
+  得到 cancelled。释放锁并留出迟到完成窗口后仍为零副作用、零 Effect；同 operation/key 的显式
+  重试成功一次，最终只有一条 Returned Effect。
+- 首次产品运行及连续 **20/20**，W133 busy timeout 与 W134 terminal busy 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖正式 Runtime/UI cancel 传播、终态落库等待期间取消、精确边界强杀、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
