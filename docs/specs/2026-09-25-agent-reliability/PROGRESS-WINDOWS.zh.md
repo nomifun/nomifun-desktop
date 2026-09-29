@@ -2499,6 +2499,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖非文件 Action 的模型安全投影、正式 tool row/UI、其他平台及 N3/100 seed/LONG/99%；不关闭
   完整 LIFE/FILE/OBS 或共享阶段。
 
+### 非文件 Action 保留三类 settlement loss（W147，基线 `0815291d4`）
+
+- S-D09-28 / LIFE-006/007/011/024、PROC-039、BROW-012、SSH-008、OBS-006/009/015/016/020、A07/A08/
+  A15/A16/A17/A19：将 success settlement loss 送入 process 投影，failed/unknown 分别送入普通
+  Browser/SSH 类投影。旧 process 文案把已成功效果改写为“owner 未完成、可能不确定”，普通 capability
+  则只剩 `handler failed with CAPABILITY_UNAVAILABLE`；首次 FAIL 保留。
+- 三类稳定 marker 识别提升到 Action 特判之前，统一返回固定、无 host 路径/secret 的 success/failed/
+  unknown 指引；普通 process spawn/cwd/control 指引和其他 typed error 保持原顺序。
+- 修复后首次及连续 **20/20**；W146 文件三态、process launch 与 active-execution 安全投影 **3/3**，
+  fmt/diff 通过。无完整 Runtime invocation/API/UI。
+- 未覆盖正式 tool result/event/UI、Browser/SSH/Computer 真实入口、其他平台及 N3/100 seed/LONG/99%；
+  不关闭完整 LIFE/PROC/BROW/SSH/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

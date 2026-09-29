@@ -398,6 +398,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   patch、process 指引 **3/3**。无完整 Runtime invocation/API/UI。非文件 Action 的模型安全投影、正式
   tool row/UI、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/FILE/OBS 或共享阶段。
 
+- S-D09-28（LIFE-006/007/011/024、PROC-039、BROW-012、SSH-008、OBS-006/009/015/016/020、A07/A08/
+  A15/A16/A17/A19 非文件 settlement 投影子断言）：W147 将 success settlement loss 送入 process
+  投影、failed/unknown 分别送入普通 Browser/SSH 类投影。旧 process 文案把已成功效果改写为“owner
+  未完成、可能不确定”，普通 capability 则只剩 `handler failed with CAPABILITY_UNAVAILABLE`，首次
+  FAIL 已保留。三类稳定 marker 识别现提升到 Action 特判之前，统一返回固定、无 host 路径/secret 的
+  success/failed/unknown 指引；普通 process spawn/cwd/control 指引和其他 typed error 保持原顺序。
+  修复后首次及连续 **20/20**，W146 文件三态、process launch 与 active-execution 安全投影 **3/3**。
+  无完整 Runtime invocation/API/UI。正式 tool result/event/UI、Browser/SSH/Computer 真实入口、其他
+  平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/PROC/BROW/SSH/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
