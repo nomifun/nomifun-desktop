@@ -3336,6 +3336,84 @@ mod tests {
         assert_eq!(read.0["sha256"], artifact_id);
     }
 
+    #[tokio::test]
+    async fn pending_artifact_publish_fences_changed_source_after_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("result.txt"),b"original artifact").unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.artifacts");
+        pending.action_id = ActionId::from("workspace.artifacts/publish");
+        ensure_test_effect_context(&store,&pending).await;
+        let input = StrictJsonValue(json!({"path":"result.txt","expected_sha256":null}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh artifact publication effect must reserve")
+        };
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        let artifact_owner = host.artifacts.as_ref().unwrap().clone();
+        let receipt = artifact_owner.publish("result.txt",None).unwrap();
+        let original_artifact_id = receipt.artifact_id;
+        assert_eq!(original_artifact_id,nomifun_agent_contracts::digest_bytes(b"original artifact").as_ref());
+        assert_eq!(std::fs::read(workspace.join(&receipt.relative_path)).unwrap(),b"original artifact");
+
+        drop(reservation);
+        drop(artifact_owner);
+        drop(host);
+        drop(store);
+        database.close().await;
+
+        std::fs::write(workspace.join("result.txt"),b"later source").unwrap();
+        let later_artifact_id = nomifun_agent_contracts::digest_bytes(b"later source");
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+
+        let same_key = invoke(&restarted,pending.clone(),"workspace.artifacts/publish",input.0.clone())
+            .await.unwrap_err();
+        assert_eq!(same_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+
+        let mut different = pending.clone();
+        different.idempotency_key = IdempotencyKey::from("different-artifact-key");
+        different.operation_id = OperationId::from("different-artifact-operation");
+        let error = invoke(&restarted,different.clone(),"workspace.artifacts/publish",json!({
+            "path":"result.txt","expected_sha256":later_artifact_id.as_ref()
+        })).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
+        let artifacts = workspace.join(".nomifun/artifacts");
+        assert_eq!(std::fs::read(artifacts.join(&original_artifact_id)).unwrap(),b"original artifact");
+        assert!(!artifacts.join(later_artifact_id.as_ref()).exists());
+        let published = std::fs::read_dir(&artifacts).unwrap().filter_map(Result::ok)
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.len() == 64 && name.bytes().all(|byte|byte.is_ascii_hexdigit())
+            }).count();
+        assert_eq!(published,1);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[test]
     fn workspace_io_failure_is_execution_failure_not_platform_absence() {
         let failure = operation_error("workspace.files", AppError::Internal("cannot open replacement target: sharing violation".into()));

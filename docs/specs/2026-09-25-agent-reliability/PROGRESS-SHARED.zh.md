@@ -162,6 +162,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **3/3**。生产代码无需修改，无模型/UI。文件 worker/SQLite terminal commit 进程强杀、目录结果
   人工核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE 或共享阶段。
 
+- S-D03-55（ART-001/003/005、LIFE-006/007、A05/A13/A17/A19 Artifact publish receipt 丢失
+  子断言）：W119 在磁盘 SQLite 中 reserve publish Effect，由实际 `WorkspaceArtifactStore` 把源文件
+  发布为 content-addressed blob；owner 返回 artifact ID 后故意不写 terminal receipt，并关闭全部数据库
+  连接。源文件随后改成不同内容。重开后原 key 与携带新 digest 的新 operation/key 均在 Artifact owner
+  前被 workspace fence 拒绝；原 artifact 字节/ID 保持且目录只有一个 64 位内容对象，新 digest 对象
+  不存在，Effect 保持唯一 Pending。首个新增断言因夹具 reserve 未使用生产规范化的 optional-null input
+  而得到正确 `IDEMPOTENCY_CONFLICT`，失败已保留；修正夹具后首次及连续 **20/20**。App Artifact
+  **2/2**、ArtifactStore 发布/读取/篡改/清理/并发 **15/15**。生产代码无需修改，无模型/UI。Artifact
+  worker/SQLite terminal commit 进程强杀、owner 核对/恢复、Session 删除与 reader 并发、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 ART/LIFE 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
