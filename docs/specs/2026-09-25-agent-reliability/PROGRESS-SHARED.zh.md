@@ -91,6 +91,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   均通过。非零/取消/交互进程链、64 项窗口淘汰、压缩恢复、其他 Provider/角色/平台仍开放，不关闭
   完整 CTRL 或共享阶段。
 
+- S-D02-18（CTRL-006/007、PROC-015、OBS-004、REAL-004、A05/A08/A09/A17/A18/A19 失败命令
+  证据子断言）：W94/W96 的非零/timeout 只能用 unverified 描述，因为 CompletionTracker 把
+  `is_error=true` 与“不是证据”混为一体。W102 新回归首次 **0/1**；首版修复虽在合成夹具通过，正式
+  Tauri 的真实非零命令没有 workspace-current provenance，动态 Schema 仍给 evidence IDs
+  `maxItems=0`。模型一次 report 被拒后进行 4 次只读历史检索、7 次输出截断，并在 step 12 重跑命令；
+  为控制用量在 step 17 从正式 UI 取消，完整 `FAIL_CANCELLED` 保留。最终按同一 launch call identity、
+  已知 exit 和 `cleanup.reaped=true` 认定结构化终态事实；非零只证明该失败，不证明任务成功或当前文件
+  状态。修正后的真实形状回归 **20/20**，Agent Runtime **193/193**。最终 UI 一次 exit 7、一次计划、
+  一次 supported completion，共 3 步/100 事件，criterion 精确引用失败 call，tool/command 计数均 1；
+  合并远端共享 host 改动后以另一隔离 Session 重跑得到相同结果。独立 27 项断言、工作区和清理
+  通过。timeout/cancel/交互终态、其他 Provider/角色/平台与长期矩阵仍开放，不关闭完整
+  CTRL/PROC/REAL 或共享阶段。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
