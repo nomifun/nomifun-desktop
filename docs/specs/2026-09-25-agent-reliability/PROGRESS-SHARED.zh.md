@@ -466,6 +466,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   Realtime/UI。分页期间并发新事件、Realtime 重连、正式 renderer tool row、其他平台及 N3/LONG/99%
   仍开放，不关闭完整 PORT/OBS 或共享阶段。
 
+- S-D09-34（OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19 events cursor 重连子断言）：
+  W153 复用 W152 正式 Axum Router/本地信任 API 与 W151 磁盘 SQLite 模式；canonical Store 依次
+  写入 turn/started、tool/call-started、含 CAPABILITY_UNAVAILABLE 的 tool/result-recorded 与
+  turn/failed。消费方只读完第一页后，Router/Services/数据库连接全部关闭并按同一磁盘路径重建，
+  模拟断连后的独立重连。按 `after_seq` 续读到空页时 seq 严格连续递增、event_id 全部唯一，tool
+  call/result 与 turn/failed 各恰好一条，result payload 保留 CAPABILITY_UNAVAILABLE 与
+  “Do not retry” 指引；相同 append 的写侧重放只回 duplicate，事件行数不变。事件 `after_seq`
+  与 `<created_at>:<message_id>` history cursor 双向混用均被 400 拒绝，超前 cursor 同样 400
+  fail-closed；重连后 `message-history?page_size=1` 收敛仍恰好一条 error tool row。新增场景
+  首次及连续 **20/20**；W152 history cursor 相邻回归 **1/1**，fmt/diff 通过。生产代码无需修改，
+  无正式 Realtime 传输/renderer UI。分页期间并发追加新事件、WS 推送消费方、正式 Tauri renderer
+  tool row、PORT-012 watcher 丢批/乱序对账、其他平台及 N3/LONG/99% 仍开放，不关闭完整
+  PORT/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

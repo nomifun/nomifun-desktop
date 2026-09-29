@@ -2575,6 +2575,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖分页期间并发新事件、Realtime 重连、正式 renderer tool row、其他平台及 N3/100 seed/
   LONG/99%；不关闭完整 PORT/OBS 或共享阶段。
 
+### 正式 events cursor 断连重放与游标隔离（W153，基线 `40e0e286e`）
+
+- S-D09-34 / OBS-014/018/020、PORT-012、A03/A06/A08/A09/A17/A19：复用 W152 正式 Axum
+  Router/本地信任 API 与 W151 磁盘 SQLite 模式；canonical Store 依次写入 turn/started、
+  tool/call-started、含 CAPABILITY_UNAVAILABLE 的 tool/result-recorded 与 turn/failed。
+- 消费方只读完第一页 `GET events?limit=1` 后，Router/Services/数据库连接全部关闭并按同一
+  磁盘路径重建，模拟断连后独立重连。按 `after_seq` 续读到空页：seq 严格连续递增、event_id
+  全部唯一，tool call/result 与 turn/failed 各恰好一条，result payload 保留
+  CAPABILITY_UNAVAILABLE 与 “Do not retry” 指引；相同 append 的写侧重放只回 duplicate，
+  事件行数不变。
+- 事件 `after_seq` 与 `<created_at>:<message_id>` history cursor 双向混用均被 400 拒绝，
+  超前 cursor 同样 400 fail-closed；重连后 `message-history?page_size=1` 收敛仍恰好一条
+  error tool row。
+- 新增场景首次及连续 **20/20**；W152 history cursor 相邻回归 **1/1**，fmt/diff 通过。生产
+  代码无需修改，无正式 Realtime 传输/renderer UI。
+- 未覆盖分页期间并发追加新事件、WS 推送消费方、正式 Tauri renderer tool row、PORT-012
+  watcher 丢批/乱序对账、其他平台及 N3/100 seed/LONG/99%；不关闭完整 PORT/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

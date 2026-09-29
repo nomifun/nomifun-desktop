@@ -540,6 +540,387 @@ async fn message_history_http_cursor_preserves_one_settlement_error_tool_row() {
 }
 
 #[tokio::test]
+async fn settlement_error_survives_event_cursor_reconnect_after_backend_restart() {
+    const TRUST: &str = "settlement-events-reconnect";
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("x-nomi-local-trust", TRUST)
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+        };
+        (status, value)
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_dir: root.path().join("data"),
+        work_dir: root.path().join("work"),
+        auth_policy: AuthPolicy::TrustLocalToken,
+        local_trust_secret: Some(TRUST.into()),
+        ..Default::default()
+    };
+    fs::create_dir_all(&config.data_dir).unwrap();
+    let database = nomifun_db::init_database(&config.database_path())
+        .await
+        .unwrap();
+    let first = AppServices::from_config(database, &config).await.unwrap();
+    let router = create_router(&first).await;
+    let provider =
+        create_chat_provider(&router, TRUST, "Settlement events", "step-3.7-flash", 1).await;
+    let model = json!({"provider_id":provider["provider_id"],"model":"step-3.7-flash"});
+    let (status, preset) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-presets/from-template/chat.minimal",
+        json!({
+            "display_name":"Settlement events","reuse_existing":true,
+            "model_route_refs":{},"chat_route_records":{},"model":model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{preset}");
+    let preset_id = preset["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, session) = call(
+        router.clone(),
+        "POST",
+        "/api/agent-sessions",
+        json!({"preset_id":preset_id,"model":model,"title":"Settlement events"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap().to_owned();
+    let typed_session = nomifun_agent_contracts::AgentSessionId::from(session_id.clone());
+    let store =
+        nomifun_agent_session::AgentSessionStore::from_pool(first.database.pool().clone())
+            .await
+            .unwrap();
+    let (_, turn) = store
+        .start_turn(
+            &typed_session,
+            nomifun_agent_contracts::EventProducerId::from("session_api"),
+            nomifun_agent_contracts::IdempotencyKey::from("settlement-events-turn"),
+            nomifun_agent_contracts::OperationId::from("settlement-events-turn"),
+            nomifun_agent_contracts::StrictJsonValue(
+                json!({"content":"exercise event reconnect"}),
+            ),
+        )
+        .await
+        .unwrap();
+    let turn_started = turn.record.unwrap().event_id;
+    let projection_id = uuid::Uuid::now_v7().to_string();
+    let call_append = nomifun_agent_contracts::SessionEventAppend {
+        agent_session_id: typed_session.clone(),
+        event_id: nomifun_agent_contracts::EventId::from("settlement-events-tool-call"),
+        producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+        idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(
+            "settlement-events-tool-call",
+        ),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+            kind: nomifun_agent_contracts::SessionEventKind("tool/call-started".to_owned()),
+            kind_version: 1,
+            correlation_id: nomifun_agent_contracts::CorrelationId::from(projection_id.clone()),
+            causation_event_id: Some(turn_started),
+            payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                nomifun_agent_contracts::StrictJsonValue(json!({
+                    "operation_id":"settlement-events-operation","call_id":"settlement-events-call",
+                    "capability_id":"workspace.files","action_id":"workspace.files/write","name":"write_file"
+                })),
+            ),
+        },
+    };
+    let call_ack = store.append_event(&call_append).await.unwrap().ack.unwrap();
+    let result_append = nomifun_agent_contracts::SessionEventAppend {
+        agent_session_id: typed_session.clone(),
+        event_id: nomifun_agent_contracts::EventId::from("settlement-events-tool-result"),
+        producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+        idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(
+            "settlement-events-tool-result",
+        ),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+            kind: nomifun_agent_contracts::SessionEventKind("tool/result-recorded".to_owned()),
+            kind_version: 1,
+            correlation_id: nomifun_agent_contracts::CorrelationId::from(projection_id),
+            causation_event_id: Some(call_ack.event_id.clone()),
+            payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                nomifun_agent_contracts::StrictJsonValue(json!({
+                    "operation_id":"settlement-events-operation","call_id":"settlement-events-call","output":null,
+                    "error":"Capability Kernel rejected Agent Runtime Tool (CAPABILITY_UNAVAILABLE): The workspace owner reported success. Do not retry automatically. Re-read the affected owner state."
+                })),
+            ),
+        },
+    };
+    let result_ack = store.append_event(&result_append).await.unwrap().ack.unwrap();
+    let turn_terminal = nomifun_agent_contracts::SessionEventAppend {
+        agent_session_id: typed_session.clone(),
+        event_id: nomifun_agent_contracts::EventId::from("settlement-events-turn-failed"),
+        producer_id: nomifun_agent_contracts::EventProducerId::from("runtime_supervisor"),
+        idempotency_key: nomifun_agent_contracts::IdempotencyKey::from(
+            "settlement-events-turn-failed",
+        ),
+        runtime_binding_id: None,
+        runtime_producer_seq: None,
+        semantic_event: nomifun_agent_contracts::SemanticSessionEventDraft {
+            kind: nomifun_agent_contracts::SessionEventKind("turn/failed".to_owned()),
+            kind_version: 1,
+            correlation_id: nomifun_agent_contracts::CorrelationId::from("settlement-events-turn"),
+            causation_event_id: Some(result_ack.event_id.clone()),
+            payload: nomifun_agent_contracts::SessionEventPayloadRef::InlineJson(
+                nomifun_agent_contracts::StrictJsonValue(json!({
+                    "model_steps":0,
+                    "message":"tool settlement could not be persisted",
+                    "error":{"code":"CAPABILITY_UNAVAILABLE","retryable":false},
+                    "finished_at_ms":0
+                })),
+            ),
+        },
+    };
+    store
+        .append_turn_terminal(
+            &turn_terminal,
+            &nomifun_agent_contracts::OperationId::from("settlement-events-turn"),
+        )
+        .await
+        .unwrap();
+
+    // The consumer drops after one page; the event cursor is all it keeps.
+    let (status, page) = call(
+        router.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/events?limit=1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(
+        page["data"]["next_cursor"]["agent_session_id"].as_str().unwrap(),
+        session_id
+    );
+    let mut after_seq = page["data"]["next_cursor"]["seq"].as_u64().unwrap();
+    let mut seen = page["data"]["events"].as_array().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{page}");
+    drop(router);
+    first.shutdown_browser_platform().await.unwrap();
+    first.database.close().await;
+    drop(first);
+
+    let reopened = nomifun_db::init_database(&config.database_path())
+        .await
+        .unwrap();
+    let second = AppServices::from_config(reopened, &config).await.unwrap();
+    let restored = create_router(&second).await;
+
+    loop {
+        let (status, page) = call(
+            restored.clone(),
+            "GET",
+            &format!("/api/agent-sessions/{session_id}/events?after_seq={after_seq}&limit=1"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let data = &page["data"];
+        assert_eq!(data["agent_session_id"].as_str().unwrap(), session_id);
+        assert_eq!(
+            data["next_cursor"]["agent_session_id"].as_str().unwrap(),
+            session_id
+        );
+        match data["events"].as_array().unwrap().as_slice() {
+            [] => {
+                assert_eq!(data["next_cursor"]["seq"].as_u64().unwrap(), after_seq);
+                break;
+            }
+            [event] => {
+                let seq = event["seq"].as_u64().unwrap();
+                assert_eq!(seq, after_seq + 1, "reconnect must not skip or repeat seq");
+                assert_eq!(data["next_cursor"]["seq"].as_u64().unwrap(), seq);
+                after_seq = seq;
+                seen.push(event.clone());
+            }
+            _ => panic!("limit=1 returned more than one event"),
+        }
+        assert!(seen.len() < 32, "event cursor did not converge");
+    }
+    let unique_ids = seen
+        .iter()
+        .map(|event| event["event_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique_ids.len(), seen.len(), "event replay must be exactly once");
+    let committed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_events WHERE session_id = ?",
+    )
+    .bind(&session_id)
+    .fetch_one(second.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        seen.len() as i64,
+        committed,
+        "cursor reconnect must deliver every committed event exactly once"
+    );
+    let count_kind = |kind: &str| seen.iter().filter(|event| event["kind"] == kind).count();
+    assert_eq!(count_kind("tool/call-started"), 1);
+    assert_eq!(count_kind("tool/result-recorded"), 1);
+    assert_eq!(count_kind("turn/failed"), 1, "terminal event must not be lost");
+    let result = seen
+        .iter()
+        .find(|event| event["kind"] == "tool/result-recorded")
+        .unwrap();
+    let error = result["payload"]["value"]["error"].as_str().unwrap();
+    assert!(error.contains("CAPABILITY_UNAVAILABLE"), "{error}");
+    assert!(error.contains("Do not retry"), "{error}");
+    assert_eq!(
+        result["payload"]["value"]["call_id"].as_str().unwrap(),
+        "settlement-events-call"
+    );
+
+    // A write-path replay of the same settlement facts stays idempotent and
+    // cannot create a second canonical event after reconnect.
+    let reopened_store =
+        nomifun_agent_session::AgentSessionStore::from_pool(second.database.pool().clone())
+            .await
+            .unwrap();
+    for append in [&call_append, &result_append, &turn_terminal] {
+        let replay = reopened_store.append_event(append).await.unwrap();
+        assert!(replay.duplicate, "{replay:?}");
+        assert!(replay.record.is_some(), "{replay:?}");
+    }
+    let replay_result = reopened_store.append_event(&result_append).await.unwrap();
+    assert_eq!(replay_result.record.unwrap().seq, result_ack.seq);
+    let still: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_events WHERE session_id = ?",
+    )
+    .bind(&session_id)
+    .fetch_one(second.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(still, committed);
+
+    // Event and message-history cursors stay on independent axes: each rejects
+    // the other's wire form, and a forward cursor fails closed instead of
+    // silently returning an empty page.
+    let (status, mixed) = call(
+        restored.clone(),
+        "GET",
+        &format!(
+            "/api/agent-sessions/{session_id}/events?after_seq=1700000000000:0190f5fe-7c00-7a00-8abc-0123456789ab"
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{mixed}");
+    assert!(
+        mixed.as_str().is_some_and(|body| body.contains("after_seq")),
+        "events endpoint must reject a message-history cursor, got {mixed}"
+    );
+    let (status, mixed) = call(
+        restored.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/message-history?cursor={after_seq}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{mixed}");
+    assert!(
+        mixed.as_str().is_some_and(|body| body.contains("cursor")),
+        "history endpoint must reject an event-seq cursor, got {mixed}"
+    );
+    let (status, ahead) = call(
+        restored.clone(),
+        "GET",
+        &format!("/api/agent-sessions/{session_id}/events?after_seq={}", after_seq + 1000),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{ahead}");
+
+    // The projection rebuilt from the canonical stream still owns exactly one
+    // error tool row after reconnect; history pages stay strictly monotone.
+    let mut cursor: Option<String> = None;
+    let mut items = Vec::new();
+    let mut total = None;
+    loop {
+        let path = cursor.as_ref().map_or_else(
+            || format!("/api/agent-sessions/{session_id}/message-history?page_size=1"),
+            |cursor| {
+                format!("/api/agent-sessions/{session_id}/message-history?page_size=1&cursor={cursor}")
+            },
+        );
+        let (status, page) = call(restored.clone(), "GET", &path, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let data = &page["data"];
+        let page_items = data["items"].as_array().unwrap();
+        assert_eq!(page_items.len(), 1, "{page}");
+        let page_total = data["total"].as_u64().unwrap();
+        assert_eq!(*total.get_or_insert(page_total), page_total);
+        let item = page_items[0].clone();
+        cursor = Some(format!(
+            "{}:{}",
+            item["created_at"].as_i64().unwrap(),
+            item["message_id"].as_str().unwrap()
+        ));
+        items.push(item);
+        if !data["has_more"].as_bool().unwrap() {
+            break;
+        }
+        assert!(items.len() < 16, "history cursor did not converge");
+    }
+    assert_eq!(items.len() as u64, total.unwrap());
+    let created = items
+        .iter()
+        .map(|item| item["created_at"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        created.windows(2).all(|pair| pair[0] > pair[1]),
+        "message-history cursor must move strictly backwards: {created:?}"
+    );
+    let unique = items
+        .iter()
+        .map(|item| item["message_id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(unique.len(), items.len());
+    let tools = items
+        .iter()
+        .filter(|item| item["type"] == "tool_call")
+        .collect::<Vec<_>>();
+    assert_eq!(tools.len(), 1, "{}", serde_json::to_string_pretty(&items).unwrap());
+    assert_eq!(tools[0]["status"], "error");
+    assert_eq!(tools[0]["content"]["status"], "error");
+    let output = tools[0]["content"]["output"].as_str().unwrap();
+    assert!(output.contains("Do not retry"), "{output}");
+    assert!(output.contains("CAPABILITY_UNAVAILABLE"), "{output}");
+
+    drop(restored);
+    second.shutdown_browser_platform().await.unwrap();
+    second.database.close().await;
+}
+
+#[tokio::test]
 async fn started_agent_session_switches_model_then_agent_in_place_with_segmented_history() {
     const TRUST: &str = "started-session-model-switch";
     const FIRST_REPLY: &str = "FIRST_MODEL_REPLY";
