@@ -935,6 +935,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   80 个非忽略测试执行零失败。生产代码无需修改。本批没有运行被忽略的真实 Provider、真实 Browser/
   Computer 动作或正式 UI；多次压缩、其他角色/平台及 LONG/99% 仍开放，不关闭完整 Case 或共享阶段。
 
+- S-D01-05（MODEL-002/003/029/034/035、A01/A02/A09/A16/A17/A19 真实 Provider wire 子断言）：
+  W99 从既有加密 StepFun 配置和已固定 Session 只读复制 route，先以正式 App 编码器把生产请求送入
+  本地 capture server，再将同一请求分别以 streaming/non-streaming 方式直连 `step-3.7-flash`；工具面
+  收窄到精确 `exec_command`，所有返回工具仅解析、不执行。两种请求均 HTTP 200、
+  `finish_reason=tool_calls`，各恰好一个原生 `exec_command`；arguments 均为有效 JSON，文本 tool markup
+  为 false、普通 content 为 0 bytes、实际执行工具数为 0。独立 18 项断言通过，streaming/non-streaming
+  分别约 1,398/992 ms；凭据和原始模型正文未写入制品或日志。生产代码无需修改。本批仅一次真实
+  Provider 样本，未保留脱敏原始 frame，也未走正式 UI/owner dispatch；其他协议/模型、N3/100 seed/
+  failover 与 LONG/99% 仍开放，不关闭完整 MODEL Case 或共享阶段。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session

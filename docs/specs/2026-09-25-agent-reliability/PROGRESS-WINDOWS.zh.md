@@ -1813,6 +1813,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   被忽略的真实 Provider wire/live Case、真实 Browser/Computer Action、正式 UI、多次压缩、其他
   Agent/平台与 N3/100 seed/LONG/99% 仍待验；不关闭完整 Case 或共享阶段。
 
+### StepFun streaming/non-streaming 原生工具 wire（W99，基线 `cfb4cfbd0`）
+
+- S-D01-05 / MODEL-002/003/029/034/035、A01/A02/A09/A16/A17/A19：使用 W97 修复后隔离数据中的
+  加密 StepFun connection 和 Session binding。read-only probe 通过正式 App 路由/Provider 编码器先把
+  原请求发到本地 capture server，再把完全相同的 body 收窄为唯一 `exec_command`，分别用
+  streaming 与 non-streaming 直连 `step-3.7-flash`。测试代码只解析返回 wire，不把 tool-call 送入
+  Kernel/owner，避免任何命令副作用。
+- 两种请求均 HTTP 200、`finish_reason=tool_calls`，各恰好返回一个原生 `exec_command`；函数参数均为
+  可解析 JSON，`text_tool_markup=false`、`content_bytes=0`、`tools_executed=0`。streaming 用时约
+  1,398 ms，non-streaming 约 992 ms，独立 **18 项**断言通过；`wire-shapes.json` SHA-256 为
+  `4ec3314323456c28ba3fc16f96e53fdd5037fc53e9b87d285bc6ae8379391fdb`。
+- 凭据只从源数据的加密配置在进程内解密，没有进入环境变量、命令行、日志或制品；输出仅含脱敏
+  形状统计。本批无源码修复或 UI/工具执行。仅一次真实 Provider 样本，未保留脱敏原始 frame，
+  其他协议/模型、正式 UI/owner、N3/100 seed/failover 与 LONG/99% 仍待验；不关闭完整 MODEL Case
+  或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
