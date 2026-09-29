@@ -1843,6 +1843,29 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   Provider/协议/模型、脱敏原始 frame、正式 UI、100 seed/failover/LONG/99%；不关闭完整 MODEL Case
   或共享阶段。本批无源码修改。
 
+### 连续命令的精确完成证据关联（W101，基线 `cbe731f1f`）
+
+- S-D02-17 / CTRL-006/007、A05/A09/A15/A17/A18/A19：正式 Tauri 依次执行
+  `echo W101-ALPHA` 与 `echo W101-BETA`，两者均首次 exit 0、`reaped=true`。首次二进制中第二个
+  command 推进 workspace epoch 后，第一条已结算命令不再进入 `available_evidence`；模型虽保留两段
+  结果正文，却只能看到 BETA 的顶层 call ID，并在推理中把它误认成 ALPHA。step 3/4/5 各耗尽
+  4,096 output tokens，最终 `NOMIFUN_TASK_INCOMPLETE`，没有 completion delivery。
+- 失败 Session `01a0ebaa-07d6-7ee1-95ff-01bc10cefd80` 共 5 个模型步骤、142 条 canonical 事件、
+  3 次 `model_output_truncated`；两条命令各只执行一次、2 个 effect 均 returned，工作区和进程清理
+  正确，但产品 Case 仍为 `FAIL`。截图、数据库、reasoning/事件轨迹和正式备份均独立保留。
+- 根因是 `CompletionTracker::is_usable` 将所有 command observation 与当前 workspace epoch 绑定。
+  现只让当时已经可用、exit 0、cleanup 已证明、无省略交互且 identity/epoch 自洽的命令结果跨后续
+  command 保持可引用；该引用仅证明自身 scope/exit/output，不延续文件或当前 workspace 状态，也不
+  复活旧 completion。新增回归首次 **0/1**，修复后 **20/20**，Agent Runtime **192/192**，workspace
+  fmt、diff 及合并远端 macOS 文件修复后的正式 Tauri 构建通过；仅有既有 warning。
+- 修复后二进制 `4df5759d4b921e43332f089c1224f5b8a5aaf74fc20680d88ca79ae9a57b2918`
+  使用完全相同的 AGENTS/prompt、全新 data/work/profile 和 `step-3.7-flash`。Session
+  `01a0ebbf-60c1-7c71-9e8a-4b6a149565ec` 精确 3 步：ALPHA、BETA、一次 completion；ALPHA criterion
+  只引用 `chatcmpl-tool-b8eb8d9d75106d28`，BETA 只引用 `chatcmpl-tool-af6387d3195fe2e9`，未交换、
+  合并或复用。132 条事件、零截断/错误、2 个 returned effect，独立 **31 项**断言，工作区 tree hash
+  `2c0f7ae0…fdf1`、应用/profile/Vite 与匹配进程清零、正式备份均通过。非零/取消/交互链、64 项淘汰、
+  压缩恢复、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验；不关闭完整 CTRL 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
