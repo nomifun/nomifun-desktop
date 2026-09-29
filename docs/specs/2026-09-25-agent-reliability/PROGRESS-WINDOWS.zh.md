@@ -2352,6 +2352,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式 Runtime/UI cancel 传播、终态落库等待期间取消、精确边界强杀、其他 Action/平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+### SQLite busy 终态落库等待期间取消（W136，基线 `120341f63`）
+
+- S-D09-17 / LIFE-006/011/019/023、FILE-038、CONC-014、A04/A07/A10/A11/A17/A19：Effect
+  reserve 且实际 `FileService` 已发布文件后，以独立 SQLite writer lock 阻塞 terminal settlement；
+  确认仍为 Pending 后取消并等待 settlement task 得到 cancelled。
+- 用户修改文件后释放数据库锁并留出迟到完成窗口，Effect 仍为 Pending、用户内容保持；关闭并从同一
+  路径重开数据库后，原 key 与新 key 均被 durable/resource fence 拒绝，只有一条 Effect。首次产品
+  运行及连续 **20/20**，W134 terminal timeout 与 W135 admission cancel 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖正式 Runtime/UI cancel 与 Turn 终态的事务顺序、精确边界强杀、DB 磁盘满/IO fault、其他
+  Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
