@@ -1,9 +1,13 @@
 //! Deterministic acceptance through the real desktop, Runtime, tools and history.
-//! cargo run -p nomifun-app --example conversation_gui_fixture -- <new-data-dir>
+//! cargo run -p nomifun-app --example conversation_gui_fixture -- <new-data-dir> [--creative-failure]
 //! Launch NomiFun with that NOMIFUN_DATA_DIR; send a normal request, inspect the
 //! live journal, POST /finish to release the final response, then reload. Send
 //! "格式异常" in a second turn to exercise split pseudo-tool-call rejection.
-use axum::{Json, Router, extract::State, routing::{get, post}};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use nomifun_app::{DesktopHostServices, DesktopServer};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
@@ -12,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 struct Fixture {
     calls: AtomicUsize,
+    creative_failure: bool,
     finish: Semaphore,
     stop: CancellationToken,
 }
@@ -25,6 +30,28 @@ fn frame(delta: Value, finish: Option<&str>) -> String {
 
 async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> axum::response::Response {
     fixture.calls.fetch_add(1, Ordering::SeqCst);
+    if fixture.creative_failure {
+        let frames = vec![
+            frame(
+                json!({"role":"assistant","content":"MM_HISTORY_FAILURE_FIXTURE"}),
+                None,
+            ),
+            // The accepted stream terminates with an impossible tool-call
+            // reason and no calls. Runtime must settle the canonical Turn as
+            // failed so a later cold load observes history, not a pending retry.
+            frame(json!({}), Some("tool_calls")),
+            "data: [DONE]\n\n".into(),
+        ];
+        let stream = futures_util::stream::unfold(frames.into_iter(), |mut frames| async move {
+            let frame = frames.next()?;
+            tokio::time::sleep(Duration::from_millis(180)).await;
+            Some((Ok::<_, std::io::Error>(frame), frames))
+        });
+        return axum::response::Response::builder()
+            .header("content-type", "text/event-stream")
+            .body(axum::body::Body::from_stream(stream))
+            .unwrap();
+    }
     let messages = body["messages"].as_array().cloned().unwrap_or_default();
     let malformed = messages.iter().rev().find(|message| message["role"] == "user")
         .is_some_and(|message| message["content"].to_string().contains("格式异常"));
@@ -82,13 +109,21 @@ async fn api(app: &DesktopServer, path: &str, body: Value) -> anyhow::Result<Val
 async fn main() -> anyhow::Result<()> {
     let root = PathBuf::from(std::env::args().nth(1).ok_or_else(|| anyhow::anyhow!("new absolute data directory required"))?);
     anyhow::ensure!(root.is_absolute() && !root.exists(), "refusing an existing data directory");
+    let mode = std::env::args().nth(2);
+    let creative_failure = mode.as_deref() == Some("--creative-failure");
+    anyhow::ensure!(mode.is_none() || creative_failure, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
-    let fixture = Arc::new(Fixture { calls: AtomicUsize::new(0), finish: Semaphore::new(0), stop: CancellationToken::new() });
+    let fixture = Arc::new(Fixture {
+        calls: AtomicUsize::new(0),
+        creative_failure,
+        finish: Semaphore::new(0),
+        stop: CancellationToken::new(),
+    });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let routes = Router::new().route("/v1/chat/completions", post(model))
         .route("/finish", post(|State(f): State<Arc<Fixture>>| async move { f.finish.add_permits(1); "released" }))
-        .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst)})) }))
+        .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),"creative_failure":f.creative_failure})) }))
         .route("/shutdown", post(|State(f): State<Arc<Fixture>>| async move { f.stop.cancel(); "stopped" }))
         .with_state(fixture.clone());
     let stop = fixture.stop.clone();
@@ -102,18 +137,35 @@ async fn main() -> anyhow::Result<()> {
     let prepared = async {
         let provider = api(&app,"/api/providers",json!({"platform":"custom","name":"会话回归测试模型","base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":["local-fixture-not-a-secret"]},"enabled":true,"initial_model":{"model":"journal-fixture","enabled":true,"capabilities":[{"task":"chat","traits":[],"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(||anyhow::anyhow!("provider missing"))?;
-        let editor = api(&app,"/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"会话内容回归","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
-        let preset = editor["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("preset missing"))?;
-        let mut draft = editor["draft"].clone();
-        draft["document"]["enabled_capabilities"] = json!([{"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]}]);
-        api(&app,&format!("/api/agent-presets/{preset}/revisions"),json!({"expected_current_revision":draft["current_revision"],"draft":draft,"reason":"real desktop conversation regression fixture"})).await?;
-        let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"会话内容回归 · 正常与异常","resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
-        Ok::<_,anyhow::Error>(session["agent_session_id"].clone())
+        if creative_failure {
+            let canvas = api(&app,"/api/creative-studio/canvases",json!({
+                "title":"MM 旧失败重试验收",
+                "agentKickoff":{
+                    "prompt":"请为这个空画布提出一个创作方案。",
+                    "model":{"providerId":provider,"model":"journal-fixture"}
+                }
+            })).await?;
+            let canvas_id = canvas["canvas"]["canvasId"].as_str()
+                .ok_or_else(||anyhow::anyhow!("creative failure canvas missing"))?;
+            Ok::<_,anyhow::Error>(json!({"canvas_id":canvas_id}))
+        } else {
+            let editor = api(&app,"/api/agent-presets/from-template/chat.minimal",json!({"reuse_existing":false,"display_name":"会话内容回归","model_route_refs":{},"chat_route_records":{},"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
+            let preset = editor["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("preset missing"))?;
+            let mut draft = editor["draft"].clone();
+            draft["document"]["enabled_capabilities"] = json!([{"capability":{"id":"workspace.files"},"action_allowlist":["workspace.files/read","workspace.files/write"]}]);
+            api(&app,&format!("/api/agent-presets/{preset}/revisions"),json!({"expected_current_revision":draft["current_revision"],"draft":draft,"reason":"real desktop conversation regression fixture"})).await?;
+            let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":"会话内容回归 · 正常与异常","resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],"model":{"provider_id":provider,"model":"journal-fixture"}})).await?;
+            Ok::<_,anyhow::Error>(json!({"session_id":session["agent_session_id"].clone()}))
+        }
     }.await;
     app.shutdown_all().await?;
     drop(app); drop(keep_alive);
-    let session = prepared?;
-    println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({"data_dir":root,"control":format!("http://{address}"),"session_id":session}));
+    let prepared = prepared?;
+    println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({
+        "data_dir":root,"control":format!("http://{address}"),
+        "session_id":prepared.get("session_id"),"canvas_id":prepared.get("canvas_id"),
+        "creative_failure":creative_failure
+    }));
     fixture.stop.cancelled().await;
     Ok(())
 }

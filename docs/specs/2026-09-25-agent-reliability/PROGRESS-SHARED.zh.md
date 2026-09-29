@@ -1244,6 +1244,8 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   Windows 59 项定向测试及原旧会话 Tauri 冷加载/刷新通过；原 Snapshot/绑定、canonical 行及
   画布图未变，0 新模型步/效果。旧“spinner”实际复现为静态重试图标与空白错误卡片，历史失败
   保留；只关闭该展示/无效入口问题，其他恢复与 macOS 未验。证据见 Windows W04。
+  macOS M04-04 新建隔离 MM 失败样本已证明 terminal `turn/failed`、Canvas `pendingTurn=null` 及冷启动
+  数据不变、模型调用不增加；锁屏阻断最终失败卡片/无 retry 的正式 UI 断言，故仍不代判 macOS PASS。
 
 - S-D03-03（FILE-032/039、OBS-005/016）：W03 复现路径中的标识文本触发错误 unknown 分类，
   以及文件/其子文件同批创建时先发布再失败。前者改为识别 owner 错误前缀，后者准备期检查

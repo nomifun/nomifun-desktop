@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01 native CEF/Tauri 保留 1 次 storage timeout；M04-02 已验 Computer 权限/typed screenshot；M04-03 正式 UI 已验 TextEdit launch/A11y/input/save 与 modifier 释放，撤权/取消/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～03 已验 native CEF、Computer 权限/media/input；M04-04 已造 canonical MM failed 冷启动样本但锁屏阻断最终 UI 无重试断言；撤权/取消/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -45,6 +45,19 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | M04 UI/Browser/Computer/扩展 | BROW-017；COMP-008/009；REAL-016～019；MAC-011/012/017；D06 | 验原生 surface 生命周期/权限与取消，MM retry 需单独按钮/事件复现 |
 | M05 条件业务 | ACSR、媒体、Channel/Robot、D07/D08 剩余 | 逐项建正式资源与安全测试账户；缺资源记阻断，能力缺项进入共享问题簇 |
 | M06 生命周期与长稳 | LIFE/CONC/LONG；MAC-014/018；PORT | sleep/wake、主进程死亡、故障窗口、恢复 fence 与幂等；然后长稳统计 |
+
+## 阶段性 P0 收尾（2026-09-29）
+
+用户因当前算力额度要求先做阶段性 P0 收尾，余项等待后续安排。本轮按已交付证据结算，不把未跑槽
+降级为通过：M01 已完成 process/APFS/argv/shell/PTY/group/Seatbelt 与正式 Tauri 关键子断言；M02
+完成 Session 冻结、计划/完成、精确伙伴/Canvas/Skill 和一次正式 StepFun 新 Session；M03 完成
+macOS 文件发布、ACL/xattr/immutable、Git local/remote/四类 hooks/receipt 与隔离 loopback SSH；
+M04-01～03 完成 native CEF 前置、Computer 权限/media 及 TextEdit launch/input 正向。
+
+P0 收尾保留：CEF storage timeout **1/5**、Computer optional plan discoverability 1 个公开 tool error，
+以及 M04-04 MM cold-read UI 锁屏缺口。M04 其余 stale/cancel/reopen/extension、全部 M05 条件业务与
+M06 LIFE/CONC/LONG/soak 均明确延期；真实 Provider N3/20/99%、release signing/notarization、x86_64
+也未达门槛。因此本页只表示阶段性交付点，绝不声明 2,366 槽、任一完整领域或阶段二/三全部完成。
 
 ## 已导入的 macOS 历史证据
 
@@ -475,3 +488,20 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   key/button release failure、用户并发焦点、Unicode/IME/layout、缺失 app、owner crash/result-loss、
   撤权、真实 StepFun 与 soak；初始 optional plan 仍以一次公开错误激活，不满足零工具错误体验。
   因此不关闭完整 `COMP-002～006/010～014`、`MAC-011`、`AGEN-013`、D06 或 M04。
+
+- **M04-04 old MM failure/retry cold-history**（`AMUL-001`、`OBS-008/014`、`MGMT-013` 的 macOS
+  历史恢复子断言）：只读扫描本机 10 个 NomiFun 数据库，未发现 Windows 原
+  `WIN-MM-PROVISION-01` 或等价多模/创意失败 Session，故未冒充同一历史。新增隔离
+  `--creative-failure` fixture，经正式 Tauri `creative-studio.default` Canvas 产生真实失败，再冷启动
+  同一安装；不以成功首发替代失败历史。
+- 首个 HTTP 400 夹具失败得太早，UI 显示静态 retry，但 Canvas `pendingTurn` 尚在、canonical Session
+  已 ready，属于合法的提交未确认重试而非目标旧失败，完整保留于 `run-003-failure-ui/`。随后改为已
+  接纳 SSE 的确定性协议终态；`run-005-terminal-failure-ui/` 精确产生 1 个 model call、1-step
+  `turn/failed`，错误为 tool-call finish without Tool Calls，Session 回到 ready、Canvas
+  `pendingTurn=null`，两 DB `ok`。停止并冷启动后相同 Turn/event/Canvas terminal state 不变，未产生
+  第二个模型请求，owned process/listener 清零。
+- macOS 在冷启动后的最终画布 UI 读取前再次锁屏；用户随后要求 P0 收尾，故没有取得“失败卡片可见、
+  无 running spinner、无重试按钮”的正式视觉断言，也未点击任何重试入口。确定性前后端回归仍复核
+  canonical failed/stopped history 清除 settled pending fence；fixture 仅为后续续验入口，未改产品
+  retry/persistence 实现。证据：`2026-09-29/macos/m04-mm-retry/`。因此该 Case **PARTIAL / UI BLOCKED**，
+  不关闭 macOS 旧 MM retry、完整 AMUL/OBS/MGMT、D06 或 M04。
