@@ -247,6 +247,17 @@ impl KernelEngineToolInvoker {
             &invocation.binding.capability_id,
             &invocation.binding.action_id,
         );
+        if let Some(result) = process_host_os_mapping_error(
+            is_process,
+            invocation.binding.action_id.as_ref(),
+            &invocation.binding.definition,
+            &invocation.call.call_id,
+        ) {
+            // This check deliberately follows full Snapshot/binding validation
+            // but precedes registry/owner invocation. A stale command mapping
+            // is an observed non-dispatch, never a reason to try both OSes.
+            return Ok(result);
+        }
         let process_action_id = invocation.binding.action_id.clone();
         let is_file_write = invocation.binding.capability_id.as_ref() == "workspace.files"
             && matches!(invocation.binding.action_id.as_ref(), "workspace.files/write" | "workspace.files/patch");
@@ -312,6 +323,49 @@ fn process_result_is_error(
         return false;
     }
     output.get("success").and_then(serde_json::Value::as_bool) != Some(true)
+}
+
+const PROCESS_HOST_OS_DESCRIPTION_PREFIX: &str = "Workspace process host OS: ";
+
+fn process_host_os_mapping_error(
+    is_process: bool,
+    action_id: &str,
+    definition: &ChatToolDefinition,
+    call_id: &nomifun_chat_model_broker::ToolCallId,
+) -> Option<EngineToolResult> {
+    if !is_process
+        || !matches!(
+            action_id,
+            "workspace.process/exec" | "workspace.process/start"
+        )
+    {
+        return None;
+    }
+    let advertised = definition
+        .description
+        .strip_prefix(PROCESS_HOST_OS_DESCRIPTION_PREFIX)?
+        .split_once('.')?
+        .0;
+    let actual = std::env::consts::OS;
+    if advertised == actual {
+        return None;
+    }
+    Some(EngineToolResult::text(
+        call_id.clone(),
+        serde_json::json!({
+            "schema":"nomifun.process-start-observation.v1",
+            "status":"not_executed",
+            "state":"not_started",
+            "code":"HOST_OS_COMMAND_MAPPING_ERROR",
+            "advertised_host_os":advertised,
+            "actual_host_os":actual,
+            "user_code_started":false,
+            "success":false,
+            "message":"The process tool's advertised host OS differs from its executing owner. No owner dispatch occurred. Do not try another platform command; refresh the Session/tool surface."
+        })
+        .to_string(),
+        true,
+    ))
 }
 
 #[async_trait]

@@ -30,7 +30,10 @@ struct StandardTool {
 
 impl StandardTool {
     fn exposure(&self) -> AgentToolExposure {
-        let description = if self.action_id == "workspace.process/exec" {
+        let description = if matches!(
+            self.action_id,
+            "workspace.process/exec" | "workspace.process/start"
+        ) {
             let shell = if cfg!(target_os = "windows") {
                 "cmd invokes the supplied script directly through Windows PowerShell 5.1 on this host; do not prefix cmd with powershell.exe or pwsh. command plus args remains literal program invocation."
             } else {
@@ -590,10 +593,19 @@ mod tests {
 
     #[test]
     fn process_cmd_schema_names_the_actual_host_shell() {
-        let process = standard_agent_tool_exposures()
-            .into_iter()
+        let tools = standard_agent_tool_exposures();
+        let process = tools
+            .iter()
             .find(|tool| tool.definition.name == "exec_command")
             .unwrap();
+        let start = tools
+            .iter()
+            .find(|tool| tool.definition.name == "start_process")
+            .unwrap();
+        let expected_prefix = format!("Workspace process host OS: {}.", std::env::consts::OS);
+        assert!(process.definition.description.starts_with(&expected_prefix));
+        assert!(start.definition.description.starts_with(&expected_prefix));
+        assert!(!process.definition.description.contains("UI client host OS"));
         let description = process.definition.input_schema.0["properties"]["cmd"]["description"]
             .as_str()
             .unwrap();
