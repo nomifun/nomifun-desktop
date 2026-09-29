@@ -26,7 +26,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
-| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～12 本地 Git/四类 hook/receipt 与隔离 loopback sshd 的连接、权限、生命周期及搜索子断言通过；外部 host/UI 条件资源待准备 |
+| D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | 需 macOS 权限/设备夹具，不从 Windows 外推 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
@@ -389,3 +389,13 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 未覆盖独立管理的非 loopback host、正式 Tauri/model/UI 授权旅程、真实应用进程重启下的 remote
   in-flight、远端 write 发布后断线的独立 digest 对账、escaped remote descendant 及 LONG/flood 门槛；
   因此不关闭完整 SSH、D05/D11 或 M03。
+
+- **M03-13 message-hook production dependency gate**（`VCS-006/008` 的正式产品构建子断言）：进入
+  M04 原生 CEF smoke 的首次 current-source desktop example build 在启动前失败；M03-10 使用的
+  `tempfile::NamedTempFile` 只存在于 `nomifun-app` dev-dependencies，故 unit tests 可编译而 production
+  dependency build 无法解析 crate。完整首败保留于 `2026-09-29/macos/m04-cef-native/run-001/`。
+- 将同一 workspace-pinned `tempfile` 从 dev-only 移至 normal dependency，不新增版本或 lock 漂移，
+  保留原有安全临时文件实现。随后正式 `cargo build -p nomifun-desktop --example browser_cef_smoke
+  --no-default-features` 通过，相邻 VCS host **22/22**、fmt/diff 通过；证据：同批
+  `run-002-prod-dependency-fix/`。该结果只修复产品构建门槛，CEF native conformance 尚未在本批执行，
+  不关闭 BROW/M04。

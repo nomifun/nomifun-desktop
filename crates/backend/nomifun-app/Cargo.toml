@@ -176,6 +176,7 @@ browser-conformance = ["browser-use", "computer-use", "nomi-browser-engine/confo
 
 [dependencies]
 nomifun-common.workspace = true
+tempfile.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-control-plane.workspace = true
 nomifun-agent-domain-support.workspace = true
@@ -308,7 +309,6 @@ reqwest.workspace = true
 nomifun-ai-agent = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
 http-body-util.workspace = true
-tempfile = "3"
 sysinfo.workspace = true
 tower = { workspace = true, features = ["util"] }
 tokio-tungstenite.workspace = true

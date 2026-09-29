@@ -284,6 +284,12 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   不计零失败 CMD PASS。收紧撤销短语后的正式重建 `baec5c5f06e2…` 通过。opaque process 的内核级
   只读隔离、正式撤销 UI、参数字符串失败、其他 Agent/平台及 N3/100 seed/LONG/99% 仍开放。
 
+- S-D05-07（`VCS-006/008` message-hook production build 子断言）：M04 首次 current-source desktop
+  example build 暴露 M03-10 的 `tempfile` 仅声明在 `nomifun-app` dev-dependencies，形成“测试通过、产品
+  dependency 编译失败”。现把同一 workspace-pinned dependency 移入 normal dependencies，无版本/lock
+  变化；正式 desktop CEF example build 通过，相邻 VCS **22/22**。CEF native 行为另批验收，本项只
+  关闭 production compile 缺口，不关闭完整 VCS/BROW 或共享 D05/D06。
+
 - S-D05-06（`SSH-001～012` 的本批 transport/owner 子断言）：macOS 原生用完全隔离的 loopback sshd
   建立随机端口、临时 host/client keys、known_hosts 与加密 host book，不读取生产 SSH 配置。真实连接池
   18/18、shared transport 83/83 首次均零 SKIP；backend 首轮 39/41 时确认 BSD grep 对单文件仍输出
