@@ -89,6 +89,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   或 SQLite terminal commit 中被强杀、完整 App startup 的 pending→unknown 归约、主动 remote 对账及
   其他平台，不关闭完整 VCS/LIFE。
 
+- S-D05-11（VCS-013、LIFE-006/007、OBS-005/016、A05/A13/A17/A19 完整 App 启动归约子断言）：
+  W113 在 `native_execution_recovery` 的磁盘 crash image 中，通过 canonical Store 给当前原生 Turn
+  写入 `workspace.vcs/push` 的 `ExternalUncertainEffect` Pending 事实，再关闭并从正式
+  `AppServices`/`create_router` 启动入口恢复。启动调度经过既有 fenced recovery 后原子写入
+  `effect/uncertain`，将 Pending 升级为 Unknown，写入唯一 `runtime/execution-recovery-blocked`，暂停
+  原 Turn 并保留 checkpoint；模型请求数保持 0，新 Turn 被拒。再次关闭数据库并完整启动后仍只有
+  一个 Unknown 和一个 blocked 事件，没有重复隔离或重放。新增断言首次及连续 **20/20**，完整 App
+  恢复夹具 **6/6**，相邻 Store 原子隔离 **2/2**、host fence **1/1**。生产代码无需修改，无正式 UI/
+  模型/生产 remote；W110～W112 已提供真实 bare remote push 与 receipt 丢失现场，本批只补正式启动
+  归约。Git worker/SQLite terminal commit 中的进程强杀、主动 remote-ref 对账、第三方改写、其他平台
+  及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个

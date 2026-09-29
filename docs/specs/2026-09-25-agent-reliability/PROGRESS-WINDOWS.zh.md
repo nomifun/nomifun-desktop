@@ -2053,6 +2053,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 Git worker 或 SQLite terminal commit 中的真实进程强杀、完整 App startup pending→unknown
   归约、主动 remote-ref 对账、第三方并发改写、其他平台及 N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE。
 
+### 完整 App startup 的 Pending→Unknown 归约（W113，基线 `f73e6af30`）
+
+- S-D05-11 / VCS-013、LIFE-006/007、OBS-005/016、A05/A13/A17/A19：在现有
+  `native_execution_recovery` 磁盘 crash image 中，通过 canonical Store 给当前 running Turn 写入
+  `workspace.vcs/push` 的 `ExternalUncertainEffect` Pending 事实；随后令旧 lease 过期并保留
+  reconciliation head，从正式 `AppServices`/`create_router` 启动入口执行恢复。
+- 启动恢复原子写入 `effect/uncertain`，Pending 变为 Unknown，同时只写一个
+  `runtime/execution-recovery-blocked`，暂停原 Turn、保留 checkpoint，不启动模型；新 Turn 被明确拒绝。
+  再次关闭数据库并完整启动后仍为一个 Unknown/一个 blocked 事件，没有重复隔离或重放。新增断言
+  首次及连续 **20/20**；完整 App 恢复夹具 **6/6**，Store 原子隔离两项 **2/2**，相邻 host fence
+  **1/1**，fmt/diff 通过。生产代码无需修改。
+- W110～W112 已保留真实 bare remote push、settlement 丢失和 SQLite 重开现场；本批只补正式 App
+  startup 归约，不重复物理 push。未覆盖 Git worker/SQLite terminal commit 中的真实进程强杀、主动
+  remote-ref 对账、第三方并发改写、正式 UI/模型、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  VCS/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
