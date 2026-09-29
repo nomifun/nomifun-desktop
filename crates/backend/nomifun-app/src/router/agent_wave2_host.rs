@@ -4282,6 +4282,73 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test]
+    async fn pending_directory_delete_preserves_recreated_tree_after_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir_all(workspace.join("tree/nested")).unwrap();
+        std::fs::write(workspace.join("tree/nested/old.txt"),b"old tree\n").unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.files");
+        pending.action_id = ActionId::from("workspace.files/delete");
+        ensure_test_effect_context(&store,&pending).await;
+        let input = StrictJsonValue(json!({"path":"tree"}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+        ).await.unwrap() else {
+            panic!("fresh directory delete effect must reserve")
+        };
+        let pending_effect_id = wave2_effect_id(&pending).unwrap();
+        let scope = host.workspace_scope(&pending).unwrap();
+        let observation = host.files.remove_entry_with_observation_for_agent_session(&scope,"tree")
+            .await.unwrap();
+        assert!(observation.is_some());
+        assert!(!workspace.join("tree").exists());
+
+        drop(reservation);
+        drop(host);
+        drop(store);
+        database.close().await;
+
+        std::fs::create_dir_all(workspace.join("tree/recreated")).unwrap();
+        std::fs::write(workspace.join("tree/recreated/user.txt"),b"user tree\n").unwrap();
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+
+        let same_key = invoke(&restarted,pending.clone(),"workspace.files/delete",input.0.clone())
+            .await.unwrap_err();
+        assert_eq!(same_key.code,"CAPABILITY_UNAVAILABLE");
+        assert!(same_key.message.contains("durable pending"),"{same_key:?}");
+
+        let mut different = pending.clone();
+        different.idempotency_key = IdempotencyKey::from("different-directory-delete-key");
+        different.operation_id = OperationId::from("different-directory-delete-operation");
+        let error = invoke(&restarted,different.clone(),"workspace.files/delete",json!({
+            "path":"tree"
+        })).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("unsettled"),"{error:?}");
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id,&pending_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.read_effect(&different.agent_session_id,&wave2_effect_id(&different).unwrap()).await.unwrap().is_none());
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
+        assert_eq!(std::fs::read(workspace.join("tree/recreated/user.txt")).unwrap(),b"user tree\n");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     fn initialize_git_repository(root: &Path) -> git2::Repository {
         let repository = git2::Repository::init(root).unwrap();
         std::fs::write(root.join("tracked.txt"), "base\n").unwrap();

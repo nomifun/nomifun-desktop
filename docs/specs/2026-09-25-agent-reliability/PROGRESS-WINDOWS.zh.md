@@ -2123,6 +2123,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   terminal commit 进程强杀、目录树成功删除后的同名重建磁盘重开、delete 结果人工核对、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 FILE/LIFE 或共享阶段。
 
+### 非空目录 delete receipt 丢失后的重建保护（W118，基线 `2cbe721a5`）
+
+- S-D03-54 / FILE-034/037/038、LIFE-006/007、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  非空目录 delete Effect，实际 `FileService` owner 成功删除含 `nested/old.txt` 的旧树并返回路径
+  observation；夹具故意不写 canonical terminal，关闭 host、Store 与全部数据库连接。
+- 用户随后重建同名 `tree/recreated/user.txt`。从同一路径重开后，原 key 与新 operation/key 均在
+  delete owner 前被 durable workspace fence 拒绝；Effect 总数保持 1/Pending，重建树字节完整保留。
+- 新增断言首次及连续 **20/20**；W117 文件重建/部分递归删除 **2/2**，FileService 目录置换与
+  Windows 空目录路径 **3/3**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖文件 worker/
+  SQLite terminal commit 进程强杀、目录结果人工核对、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 FILE/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
