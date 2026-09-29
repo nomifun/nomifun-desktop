@@ -2341,6 +2341,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖终态等待期间取消、精确边界强杀、DB 磁盘满/IO fault、其他 Action/平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+### SQLite busy admission 等待期间取消（W135，基线 `f462b1ea4`）
+
+- S-D09-16 / LIFE-023、CONC-014、FILE-038、A04/A10/A11/A19：独立连接持有 SQLite writer lock
+  时，从生产 Wave2 Host 发起文件写；200 ms 时仍为零文件、零 Effect，随后取消并等待 Host task
+  得到 cancelled。释放锁并留出迟到完成窗口后仍为零副作用、零 Effect；同 operation/key 的显式
+  重试成功一次，最终只有一条 Returned Effect。
+- 首次产品运行及连续 **20/20**，W133 busy timeout 与 W134 terminal busy 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖正式 Runtime/UI cancel 传播、终态落库等待期间取消、精确边界强杀、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
