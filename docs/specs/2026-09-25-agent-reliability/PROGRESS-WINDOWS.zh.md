@@ -1866,6 +1866,33 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   `2c0f7ae0…fdf1`、应用/profile/Vite 与匹配进程清零、正式备份均通过。非零/取消/交互链、64 项淘汰、
   压缩恢复、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验；不关闭完整 CTRL 或共享阶段。
 
+### 预期非零命令作为精确完成证据（W102，基线 `c46c4a8cb`）
+
+- S-D02-18 / CTRL-006/007、PROC-015、OBS-004、REAL-004、A05/A08/A09/A17/A18/A19：Completion
+  原只允许 `successful=true` observation 进入引用集合，结构化 exit 7 即使 `cleanup.reaped=true` 也只能
+  标成 unverified。新回归首次 **0/1**。首版按“已结算命令”开放后，合成夹具 **20/20**、Runtime
+  **193/193**，但真实正式 Tauri 揭示 `is_error=true` 的 launch 不取得 workspace-current provenance；
+  `report_completion.evidence_call_ids` 仍被动态 Schema 设为 `maxItems=0`。
+- 中间二进制 `5e863ad2d73e54330b3bd74df9b3375a57aa9c9b3bde5478977a242d1e1716e1` 的 Session
+  `01a0ebc9-f3cd-7bb0-9678-f79c6335842b` 首次 report 正确引用 exit 7 call，却在预检拒绝。模型随后
+  4 次只读 `search_tool_history`、7 次 4,096-token 截断，并在 step 12 违反“不重试”再次执行 exit 7；
+  为控制模型用量在 step 17 从正式 UI 停止。289 条事件、2 个相同 input digest effect、截图/数据库/
+  轨迹和取消终态均保留，分类 `FAIL_CANCELLED`；首次停应用时 1 个 WebView 短暂残留也保留，3 秒后
+  精确清零并正式备份。
+- 最终以同一 launch call ID、结构化已知 exit、`cleanup.reaped=true` 和无省略交互认定命令终态事实，
+  不再要求 workspace-current 标记。该证据只支持命令自身 scope/exit/output；非零不变成成功，也不
+  延续文件状态。修正后的生产形状回归 **20/20**，Agent Runtime **193/193**，workspace fmt、diff 与
+  正式 Tauri 构建通过；仅有既有 warning。
+- 修正后首个二进制 `a21c1ac9…e50` 的 Session `01a0ebd5-c7f3-7173-9c21-251f0d202bd0` 已精确
+  通过。随后同步远端 macOS supervised hook 的共享 host 改动并重建；最终二进制
+  `5942c2a581421d25c4d3a08a9805101e6f35712f51cdde6e1588192c50a4718e` 使用相同 AGENTS/prompt、
+  另一套全新 data/work/profile 和 `step-3.7-flash`，Session
+  `01a0ebe1-e458-70c2-b161-e66f2a4685d2` 仍精确为一次 exit 7→一次 `update_plan`→一次 supported
+  completion，共 3 个模型步骤、100 条事件、1 个 returned effect；criterion 只引用失败 command call，
+  tool/command 失败计数均为 1，零历史检索/截断/重试。独立 **27 项**断言、工作区 tree hash
+  `f45956b6…a90d`、应用/profile/Vite 与匹配进程清零、正式备份均通过。timeout/cancel/交互终态、
+  其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验；不关闭完整 CTRL/PROC/REAL 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
