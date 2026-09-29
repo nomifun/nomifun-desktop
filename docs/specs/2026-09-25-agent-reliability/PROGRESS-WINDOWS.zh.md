@@ -2149,6 +2149,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   未覆盖 Artifact worker/SQLite terminal commit 进程强杀、owner 核对/恢复、Session 删除与 reader
   并发、其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE 或共享阶段。
 
+### commit receipt 丢失后的 SQLite 重开（W120，基线 `b1335ee69`）
+
+- S-D05-13 / VCS-006/009/014、LIFE-006/007、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  `workspace.vcs/commit` external Effect，经生产 `invoke_vcs_commit` 创建真实 commit；owner 返回
+  commit ID 后故意不写 canonical terminal，并关闭 host、Store 与全部数据库连接。
+- 用户随后修改并 stage 新字节。从同一路径重开后，原 key 与新 operation/key 均在 commit owner/hook
+  前被 workspace fence 拒绝；HEAD 保持首个新 commit，历史仍只有 initial+该 commit，index blob 与
+  worktree 都保留 `user staged after lost receipt`，Effect 总数保持 1/Pending。
+- 新增断言首次及连续 **20/20**；相邻 commit replay/identity/scope **4/4**、stage/commit 共享门与
+  并发 commit **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖 commit-intent 主动核对、
+  libgit2 worker/SQLite terminal commit 进程强杀、post-commit 故障窗口的 Windows 运行、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

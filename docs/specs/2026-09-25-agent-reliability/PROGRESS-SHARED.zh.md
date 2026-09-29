@@ -122,6 +122,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无正式 UI/生产 remote。领域级自动对账仍是文档明确未实现的限制；第三方改写、网络 remote、UI
   核对控制面、其他平台及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
 
+- S-D05-13（VCS-006/009/014、LIFE-006/007、A05/A13/A17/A19 commit receipt 丢失子断言）：
+  W120 在磁盘 SQLite 中 reserve `workspace.vcs/commit` external Effect，再经生产
+  `invoke_vcs_commit` 创建真实 commit；owner 返回 commit ID 后故意不写 terminal receipt，并关闭全部
+  数据库连接。用户随后修改并 stage 新字节。重开后原 key 与新 operation/key 均在 commit owner/hook
+  前被 workspace fence 拒绝；HEAD 保持首个新 commit、历史仍只有 initial+该 commit，index blob 与
+  worktree 都保留用户后写字节，Effect 保持唯一 Pending。新增断言首次及连续 **20/20**；相邻 commit
+  replay/identity/scope **4/4**、stage/commit 共享门及并发 commit **2/2**。生产代码无需修改，无模型/
+  UI。commit-intent 主动核对、libgit2 worker/SQLite terminal commit 进程强杀、post-commit 故障窗口的
+  Windows 运行、其他平台及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
