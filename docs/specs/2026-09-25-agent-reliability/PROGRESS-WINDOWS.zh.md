@@ -2536,6 +2536,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式事件落库/重连、tool row、模型后续行为、其他平台及 N3/100 seed/LONG/99%；不关闭
   完整 OBS 或共享阶段。
 
+### canonical Store 的 ToolResult 冷读投影（W150，基线 `dd319c5b6`）
+
+- S-D09-31 / OBS-001/006/009/014/015/018/020、A03/A08/A09/A15/A16/A17/A19：让正式
+  `EngineToolHost` 的 inner Kernel 返回 success settlement loss，经 `host_tool_dispatch/settled` 与生产
+  `EngineTurnJournal` 写入 canonical AgentSession Store。
+- 数据库中恰好一条 `tool/call-started` 和一条 `tool/result-recorded`，共享 correlation、result 因果
+  指向 call；output 为 null、error 保留 `CAPABILITY_UNAVAILABLE` 安全指引。两个独立 Store 冷读均
+  只重建一条 `state=recorded` tool projection，无重复 row。
+- 新增场景首次及连续 **20/20**；取消后 owner settlement、history 排序、AgentSession projector
+  **3/3**，fmt/diff 通过。生产代码无需修改，使用内存 SQLite，无进程重启/API/UI。
+- 未覆盖磁盘重开、cursor 分页/重连、正式 tool row、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
