@@ -33,7 +33,7 @@ use nomifun_agent_kernel::{
     KernelError, KernelRegistry,
     MaterializedCapability, MaterializedRegistry, SessionCapabilityState,
 };
-use nomifun_common::{AgentToolPolicy, AppError};
+use nomifun_common::AppError;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -79,29 +79,11 @@ fn has_function_tool_action(manifest: &CapabilityManifest) -> bool {
 }
 
 fn restricted_workspace_action_allowed(
-    policy: AgentToolPolicy,
+    constraints: nomifun_api_types::ExecutionConstraints,
     capability_id: &CapabilityId,
     action_id: &ActionId,
 ) -> bool {
-    match policy {
-        AgentToolPolicy::Full => true,
-        AgentToolPolicy::ReadOnly => {
-            capability_id.as_ref() == "workspace.files"
-                && matches!(
-                    action_id.as_ref(),
-                    "workspace.files/read" | "workspace.files/search"
-                )
-        }
-        AgentToolPolicy::ReadShell => {
-            (capability_id.as_ref() == "workspace.files"
-                && matches!(
-                    action_id.as_ref(),
-                    "workspace.files/read" | "workspace.files/search"
-                ))
-                || (capability_id.as_ref() == "workspace.process"
-                    && action_id.as_ref() == "workspace.process/exec")
-        }
-    }
+    constraints.allows_workspace_action(capability_id.as_ref(), action_id.as_ref())
 }
 
 fn middleware_phase(manifest: &CapabilityManifest) -> Option<&'static str> {
@@ -2023,7 +2005,7 @@ impl KernelNomiPluginToolSession {
                 if !policy.allowed_actions.contains(&action.action_id)
                     || (constraints.restricted()
                         && !restricted_workspace_action_allowed(
-                            constraints.tool_scope,
+                            constraints,
                             &manifest.id,
                             &action.action_id,
                         ))
@@ -3248,6 +3230,16 @@ fn push_unique(values: &mut Vec<String>, value: &str) {
 #[cfg(test)]
 mod dynamic_error_tests {
     use super::*;
+    use nomifun_common::AgentToolPolicy;
+
+    fn constraints(tool_scope: AgentToolPolicy) -> nomifun_api_types::ExecutionConstraints {
+        nomifun_api_types::ExecutionConstraints {
+            version: 1,
+            tool_scope,
+            exclude_delegation: false,
+            managed_process_only: false,
+        }
+    }
 
     #[test]
     fn restricted_workspace_policy_grants_exact_actions_not_whole_modules() {
@@ -3255,12 +3247,12 @@ mod dynamic_error_tests {
         let process = CapabilityId::from("workspace.process");
         for action in ["workspace.files/read", "workspace.files/search"] {
             assert!(restricted_workspace_action_allowed(
-                AgentToolPolicy::ReadOnly,
+                constraints(AgentToolPolicy::ReadOnly),
                 &files,
                 &ActionId::from(action),
             ));
             assert!(restricted_workspace_action_allowed(
-                AgentToolPolicy::ReadShell,
+                constraints(AgentToolPolicy::ReadShell),
                 &files,
                 &ActionId::from(action),
             ));
@@ -3271,18 +3263,18 @@ mod dynamic_error_tests {
             "workspace.files/delete",
         ] {
             assert!(!restricted_workspace_action_allowed(
-                AgentToolPolicy::ReadOnly,
+                constraints(AgentToolPolicy::ReadOnly),
                 &files,
                 &ActionId::from(action),
             ));
             assert!(!restricted_workspace_action_allowed(
-                AgentToolPolicy::ReadShell,
+                constraints(AgentToolPolicy::ReadShell),
                 &files,
                 &ActionId::from(action),
             ));
         }
         assert!(restricted_workspace_action_allowed(
-            AgentToolPolicy::ReadShell,
+            constraints(AgentToolPolicy::ReadShell),
             &process,
             &ActionId::from("workspace.process/exec"),
         ));
@@ -3292,11 +3284,40 @@ mod dynamic_error_tests {
             "workspace.process/cancel",
         ] {
             assert!(!restricted_workspace_action_allowed(
-                AgentToolPolicy::ReadShell,
+                constraints(AgentToolPolicy::ReadShell),
                 &process,
                 &ActionId::from(action),
             ));
         }
+
+        let managed = nomifun_api_types::ExecutionConstraints {
+            managed_process_only: true,
+            ..constraints(AgentToolPolicy::Full)
+        };
+        for action in [
+            "workspace.process/start",
+            "workspace.process/poll",
+            "workspace.process/input",
+            "workspace.process/close_stdin",
+            "workspace.process/resize",
+            "workspace.process/cancel",
+        ] {
+            assert!(restricted_workspace_action_allowed(
+                managed,
+                &process,
+                &ActionId::from(action),
+            ));
+        }
+        assert!(!restricted_workspace_action_allowed(
+            managed,
+            &process,
+            &ActionId::from("workspace.process/exec"),
+        ));
+        assert!(!restricted_workspace_action_allowed(
+            managed,
+            &files,
+            &ActionId::from("workspace.files/read"),
+        ));
     }
 
     #[tokio::test]

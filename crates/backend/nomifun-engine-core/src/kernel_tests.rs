@@ -238,15 +238,38 @@ mod tests {
         ));
         assert!(process_result_is_error(
             true,
+            "workspace.process/exec",
             &json!({"state":"exited", "success":false, "exit_code":7}),
         ));
         assert!(!process_result_is_error(
             true,
+            "workspace.process/start",
             &json!({"state":"running", "success":null}),
         ));
         assert!(!process_result_is_error(
             true,
+            "workspace.process/poll",
             &json!({"state":"exited", "success":true, "exit_code":0}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            "workspace.process/cancel",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
+        ));
+        assert!(!process_result_is_error(
+            true,
+            "workspace.process/poll",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
+        ));
+        assert!(process_result_is_error(
+            true,
+            "workspace.process/poll",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":false}}),
+        ));
+        assert!(process_result_is_error(
+            true,
+            "workspace.process/exec",
+            &json!({"state":"cancelled", "success":false, "cleanup":{"reaped":true}}),
         ));
     }
 

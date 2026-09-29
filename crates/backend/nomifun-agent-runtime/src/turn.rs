@@ -1841,8 +1841,11 @@ fn synchronize_adaptive_context(
         let completion_tool = request.input.tools.iter_mut()
             .find(|tool| tool.name == crate::completion::TOOL_NAME)
             .ok_or_else(|| AgentEngineError::InvalidContract("active task ledger has no completion tool".into()))?;
-        *completion_tool = state.completion.definition_with_evidence(&state.work_status,
-            patch_recovery.pending() || patch_recovery.unresolved());
+        *completion_tool = state.completion.definition_with_evidence(
+            &state.execution_plan,
+            &state.work_status,
+            patch_recovery.pending() || patch_recovery.unresolved(),
+        );
         // Temporary workflow gates do not revoke tools from the frozen
         // capability surface. Removing schemas made repairable command errors
         // look like lost shell permission and forced needless tool discovery.

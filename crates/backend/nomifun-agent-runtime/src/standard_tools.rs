@@ -64,7 +64,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "read_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/read",
-        description: "Read a workspace file or inspect instruction scope. Repository instructions are not ordinary text: never use the default text format for AGENTS.md or AGENTS.override.md. Their applicable bodies are injected separately after instruction discovery. Before reading a source file in any scope not already discovered, call read_file alone on its directory with format=instruction_scope (path=. for the workspace root; recursive=true only when needed); after that result, reconsider and send source reads with fresh call IDs. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. In every successful text result, sha256 always identifies the entire source and total_bytes is its full size, even when content is only one line/byte page and eof=false; do not read the whole file only to obtain its digest. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
+        description: "Read a workspace file or inspect instruction scope. Repository instructions are not ordinary text: never use the default text format for AGENTS.md or AGENTS.override.md. Their applicable bodies are injected separately after instruction discovery. Before reading a source file in any scope not already discovered, call read_file alone on its directory with format=instruction_scope (path=. for the workspace root; recursive=true only when needed); after that result, reconsider and send source reads with fresh call IDs. For format=instruction_scope, recursive is the only optional mode field; NEVER include missing_ok, offset, limit, start_line, line_count, or expected_sha256. Default format=text. For source inspection use start_line (1-based) and line_count (default 200), without offset/limit. A small file can be read with just path. Byte pagination remains available: bounded UTF-8 pages, source at most 8 MiB; offset reads are independent current-version observations. In every successful text result, sha256 always identifies the entire source and total_bytes is its full size, even when content is only one line/byte page and eof=false; do not read the whole file only to obtain its digest. To assemble consistent pages, follow next_offset with the prior expected_sha256 until eof; explicit hash mismatches still fail. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires an image-capable exact model route. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root). Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
         schema: read_schema,
     },
     StandardTool {
@@ -127,14 +127,14 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "start_process",
         capability_id: "workspace.process",
         action_id: "workspace.process/start",
-        description: "Start a turn-owned background or interactive process. Use the returned process_id with the exact process actions; no process survives turn cleanup.",
+        description: "Start one turn-owned background or interactive process. For a start/wait/stop lifecycle, call start_process once with wait_ms=0, then make at least one distinct poll_process call until the expected output, then cancel_process with the exact returned process_id, all in the same Turn. Even when a start receipt already contains output, do not skip poll_process. Do not pre-read a user-specified existing executable or manually probe instruction files solely to launch it; the host injects applicable workspace instructions. Do not run ls, pwd, test -x, or another process preflight solely for that launch; the owner validates executable and cwd. Never use shell backgrounding, raw PID or temporary-log indirection, or split the lifecycle across AgentExecution steps. No process survives turn cleanup.",
         schema: process_start_schema,
     },
     StandardTool {
         model_name: "poll_process",
         capability_id: "workspace.process",
         action_id: "workspace.process/poll",
-        description: "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence.",
+        description: "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
         schema: process_poll_schema,
     },
     StandardTool {
@@ -162,7 +162,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "cancel_process",
         capability_id: "workspace.process",
         action_id: "workspace.process/cancel",
-        description: "Cancel a turn-owned process and obtain cleanup evidence; cancellation is not rollback.",
+        description: "Cancel a turn-owned process and obtain cleanup evidence. For an explicit stop request, state=cancelled with cleanup.reaped=true is successful stop evidence, not a task failure; cancellation is not rollback.",
         schema: process_id_schema,
     },
     StandardTool {
@@ -425,7 +425,12 @@ fn process_launch_schema() -> Value {
 }
 
 fn process_start_schema() -> Value {
-    process_launch(true)
+    let mut schema = process_launch(true);
+    schema["properties"]["wait_ms"]["maximum"] = json!(0);
+    schema["properties"]["wait_ms"]["description"] = json!(
+        "Must be 0. Starting only establishes the turn-owned handle; use poll_process with its exact process_id for every output wait."
+    );
+    schema
 }
 
 fn process_poll_schema() -> Value {
@@ -550,6 +555,10 @@ mod tests {
             ["description"]
             .as_str()
             .is_some_and(|description| description.contains("whole-source SHA-256")));
+        assert!(read
+            .definition
+            .description
+            .contains("NEVER include missing_ok"));
     }
 
     #[test]
@@ -630,6 +639,37 @@ mod tests {
             .as_str()
             .is_some_and(|description| description.contains("JSON array value")
                 && description.contains("never a JSON-encoded string")));
+    }
+
+    #[test]
+    fn process_lifecycle_tools_keep_one_turn_owned_handle() {
+        let tools = standard_agent_tool_exposures();
+        let description = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == name)
+                .unwrap()
+                .definition
+                .description
+                .as_str()
+        };
+        assert!(description("start_process").contains("same Turn"));
+        assert!(description("start_process").contains("Never use shell backgrounding"));
+        assert!(description("start_process").contains("Do not pre-read"));
+        assert!(description("start_process").contains("Do not run ls"));
+        assert!(description("poll_process").contains("expected output"));
+        assert!(description("poll_process").contains("not a tool failure"));
+        assert!(description("cancel_process").contains("cleanup.reaped=true"));
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "start_process")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["wait_ms"]["maximum"],
+            0
+        );
     }
 
     #[test]

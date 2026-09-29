@@ -105,6 +105,7 @@ pub(crate) trait AttemptRunner: Send + Sync {
         workspace_dir: Option<&str>,
         step_title: &str,
         tool_policy: AgentToolPolicy,
+        managed_process_only: bool,
         delegation_policy: DelegationPolicy,
         delegation_depth: i64,
         decision_policy: DecisionPolicy,
@@ -483,6 +484,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         workspace_dir: Option<&str>,
         step_title: &str,
         tool_policy: AgentToolPolicy,
+        managed_process_only: bool,
         delegation_policy: DelegationPolicy,
         delegation_depth: i64,
         decision_policy: DecisionPolicy,
@@ -524,6 +526,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
                 version: 1,
                 tool_scope: tool_policy,
                 exclude_delegation: delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
+                managed_process_only,
             };
             let mut extra = json!({ nomifun_api_types::EXECUTION_CONSTRAINTS_KEY: constraints });
             if let Some(workspace) = workspace_dir.map(str::trim).filter(|value| !value.is_empty()) {
@@ -537,6 +540,7 @@ impl AttemptRunner for AgentSessionAttemptRunner {
             &participant.enabled_skills,
             &participant.disabled_builtin_skills,
             tool_policy,
+            managed_process_only,
             delegation_depth >= MAX_AGENT_DELEGATION_DEPTH,
         ) };
         if let Some(snapshot) = participant.agent_snapshot.as_ref() {
@@ -738,10 +742,31 @@ fn build_agent_extra(
     enabled_skills: &[String],
     disabled_builtin_skills: &[String],
     tool_policy: AgentToolPolicy,
+    managed_process_only: bool,
     exclude_delegation: bool,
 ) -> Value {
-    let restricted = tool_policy_allowed_tools(tool_policy);
-    let system_prompt = restricted
+    let restricted = managed_process_only
+        .then(managed_process_allowed_tools)
+        .or_else(|| tool_policy_allowed_tools(tool_policy));
+    let system_prompt = if managed_process_only {
+        format!(
+            "{brief}\n\n\
+             ## Managed process lifecycle authority (strict)\n\
+             The only workspace action tools available for this Attempt are: {}. \
+             Start the requested process exactly once, carry its exact process_id through \
+             observation and cleanup, and do not call file, search, exec_command/Bash, VCS, \
+             Artifact, delegation, or discovery tools. Runtime control tools such as \
+             report_completion remain available but grant no workspace authority.",
+            restricted
+                .as_ref()
+                .expect("managed process tools are present")
+                .iter()
+                .map(|tool| format!("`{tool}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        restricted
         .as_ref()
         .map(|tools| {
             format!(
@@ -759,7 +784,8 @@ fn build_agent_extra(
                     .join(", ")
             )
         })
-        .unwrap_or_else(|| brief.to_owned());
+        .unwrap_or_else(|| brief.to_owned())
+    };
     let mut extra = json!({
         "system_prompt": system_prompt,
         "preset_enabled_skills": enabled_skills,
@@ -788,6 +814,17 @@ fn tool_policy_allowed_tools(policy: AgentToolPolicy) -> Option<Vec<&'static str
         AgentToolPolicy::ReadOnly => Some(vec!["Read", "Grep", "Glob"]),
         AgentToolPolicy::ReadShell => Some(vec!["Read", "Grep", "Glob", "Bash"]),
     }
+}
+
+fn managed_process_allowed_tools() -> Vec<&'static str> {
+    vec![
+        "start_process",
+        "poll_process",
+        "write_process_stdin",
+        "close_process_stdin",
+        "resize_process",
+        "cancel_process",
+    ]
 }
 
 fn latest_assistant_text(value: &Value) -> Option<String> {
@@ -1464,6 +1501,7 @@ mod tests {
                 None,
                 "Requirement",
                 AgentToolPolicy::Full,
+                false,
                 DelegationPolicy::Automatic,
                 0,
                 DecisionPolicy::Automatic,
@@ -1505,6 +1543,7 @@ mod tests {
             &[],
             AgentToolPolicy::Full,
             false,
+            false,
         );
         assert!(extra.get("execution_id").is_none());
         assert!(extra.get("step_id").is_none());
@@ -1521,6 +1560,7 @@ mod tests {
             &[],
             &[],
             AgentToolPolicy::Full,
+            false,
             true,
         );
         assert_eq!(extra["gateway_excluded_tools"], json!(["nomi_delegate"]));
@@ -1550,11 +1590,41 @@ mod tests {
             &[],
             AgentToolPolicy::ReadOnly,
             false,
+            false,
         );
         let prompt = extra["system_prompt"].as_str().unwrap();
         assert!(prompt.contains("`Read`, `Grep`, `Glob`"));
         assert!(prompt.contains("Do not call, preview, or emit progress for Bash"));
         assert!(prompt.contains("unless its exact name appears in that list"));
+    }
+
+    #[test]
+    fn managed_process_attempt_exposes_only_lifecycle_actions() {
+        let extra = build_agent_extra(
+            "start and stop helper",
+            None,
+            None,
+            &[],
+            &[],
+            AgentToolPolicy::Full,
+            true,
+            false,
+        );
+        assert_eq!(
+            extra["allowed_tools"],
+            json!([
+                "start_process",
+                "poll_process",
+                "write_process_stdin",
+                "close_process_stdin",
+                "resize_process",
+                "cancel_process"
+            ])
+        );
+        let prompt = extra["system_prompt"].as_str().unwrap();
+        assert!(prompt.contains("Managed process lifecycle authority"));
+        assert!(prompt.contains("do not call file, search, exec_command/Bash"));
+        assert!(prompt.contains("report_completion remain available"));
     }
 
     #[test]

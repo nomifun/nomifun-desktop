@@ -52,9 +52,28 @@ pub(crate) fn failed_process_observation(
     if binding.capability_id.as_ref() != "workspace.process" || process_did_not_start(binding, result) {
         return false;
     }
-    serde_json::from_str::<serde_json::Value>(&result.output_text())
-        .ok()
-        .and_then(|value| value.get("success").and_then(serde_json::Value::as_bool))
+    let Some(value) = serde_json::from_str::<serde_json::Value>(&result.output_text()).ok() else {
+        return false;
+    };
+    let reaped_cancellation = matches!(
+        binding.action_id.as_ref(),
+        "workspace.process/cancel" | "workspace.process/poll"
+    ) && !result.is_error
+        && value.get("state").and_then(serde_json::Value::as_str) == Some("cancelled")
+        && value
+            .pointer("/cleanup/reaped")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    if reaped_cancellation {
+        // A terminal poll reports success=false because the process is no
+        // longer running. The action-specific contract and Kernel both treat
+        // a proven reaped cancellation as a successful lifecycle observation,
+        // so it must not reopen an otherwise optional runtime plan.
+        return false;
+    }
+    value
+        .get("success")
+        .and_then(serde_json::Value::as_bool)
         == Some(false)
 }
 
@@ -227,6 +246,51 @@ mod tests {
         assert!(!failed_process_observation(&process, &successful));
         assert!(!failed_process_observation(&process, &invalid_arguments));
         assert!(!failed_process_observation(&binding("workspace.files", "workspace.files/read"), &failed));
+    }
+
+    #[test]
+    fn reaped_cancel_and_terminal_poll_do_not_force_replanning() {
+        let cancelled = crate::AgentToolResult::text(
+            "call".into(),
+            serde_json::json!({
+                "state":"cancelled",
+                "success":false,
+                "cleanup":{"reaped":true,"errors":[]}
+            })
+            .to_string(),
+            false,
+        );
+        for action in ["workspace.process/cancel", "workspace.process/poll"] {
+            let process = binding_with_effect(
+                "workspace.process",
+                action,
+                EngineEffectClass::ReadOnly,
+            );
+            assert!(!failed_process_observation(&process, &cancelled));
+            assert!(!requires_replanning_after_result(
+                &process,
+                &cancelled,
+                true,
+                0,
+            ));
+        }
+
+        let unreaped = crate::AgentToolResult::text(
+            "call".into(),
+            serde_json::json!({
+                "state":"cancelled",
+                "success":false,
+                "cleanup":{"reaped":false,"errors":["still running"]}
+            })
+            .to_string(),
+            false,
+        );
+        let poll = binding_with_effect(
+            "workspace.process",
+            "workspace.process/poll",
+            EngineEffectClass::ReadOnly,
+        );
+        assert!(failed_process_observation(&poll, &unreaped));
     }
 
     #[test]
