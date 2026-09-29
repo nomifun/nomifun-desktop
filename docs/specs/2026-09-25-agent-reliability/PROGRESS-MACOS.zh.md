@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05 正式 UI 已拒绝跨前台焦点 stale A11y ref；取消/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05/06 正式 UI 已拒绝跨前台焦点及同 PID 窗口移动后的 stale A11y ref；取消/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -58,6 +58,7 @@ P0 收尾保留：CEF storage timeout **1/5**、Computer optional plan discovera
 M04 其余 stale/cancel/reopen/extension、全部 M05 条件业务与
 M06 LIFE/CONC/LONG/soak 均明确延期；真实 Provider N3/20/99%、release signing/notarization、x86_64
 也未达门槛。因此本页只表示阶段性交付点，绝不声明 2,366 槽、任一完整领域或阶段二/三全部完成。
+用户后续已恢复 macOS 工作；新增批次逐项记录在下文，不倒改此处当时的 P0 结算边界。
 
 ## 已导入的 macOS 历史证据
 
@@ -484,9 +485,10 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   tool error；`turn/completed`。fixture `input_verified=true`、failure=null；两 DB `ok`，TextEdit/app/
   fixture/listener 清零。确定性辅助：key **12/12**、launch **6/6**、main-queue/drag 各 **1/1**、
   role-host fence **4/4**。证据：`2026-09-29/macos/m04-computer-input/`。
-- 仍未覆盖真实窗口移动/缩放/焦点切换后的 stale 拒绝、click/move/scroll、长 drag cancel、注入式
+- 仍未覆盖真实窗口缩放、same-PID 多窗口身份、click/move/scroll、长 drag cancel、注入式
   key/button release failure、用户并发焦点、Unicode/IME/layout、缺失 app、owner crash/result-loss、
-  撤权、真实 StepFun 与 soak；初始 optional plan 仍以一次公开错误激活，不满足零工具错误体验。
+  撤权、真实 StepFun 与 soak；窗口移动及跨 App 焦点变化后的 stale 拒绝另由 M04-05/06 覆盖，初始
+  optional plan 仍以一次公开错误激活，不满足零工具错误体验。
   因此不关闭完整 `COMP-002～006/010～014`、`MAC-011`、`AGEN-013`、D06 或 M04。
 
 - **M04-04 old MM failure/retry cold-history**（`AMUL-001`、`OBS-008/014`、`MGMT-013` 的 macOS
@@ -526,5 +528,22 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   typed host mapping 各 **20/20**，相邻 AX **3/3**、Computer host **5/5**；两 DB `ok`，进程/监听清零。
   证据：`2026-09-29/macos/m04-computer-stale/`。
 - 尚未覆盖 same-PID 多窗口、raw screenshot 坐标、OCR/pixel-only ref、right/double-click pixel fallback、
-  move/resize 实际注入、用户并发输入、held-input cancel、crash/result-loss 与 soak；因此只关闭本批
+  resize 实际注入、用户并发输入、held-input cancel、crash/result-loss 与 soak；因此只关闭本批
   `COMP-002` frontmost semantic-ref 子断言，不关闭完整 Computer、D06 或 M04。
+
+- **M04-06 macOS same-PID window-move stale observation**（`COMP-002` 窗口移动子断言）：复用
+  M04-05 的 exact-source Developer ID-signed 正式 Tauri app，但使用新的隔离 data/Agent/Session
+  `01a0ed01-31b1-7ae0-b47d-8bcdce884dd0` 和一次性 TextEdit 文件。Runtime 在 TextEdit 同一 PID、同一
+  前台窗口中取得 generation 2 / `textarea="seed"` 后暂停；随后只通过原生标题栏 drag 移动该窗口，
+  TextEdit 在移动前后均保持前台和 focused，未切回 NomiFun，再释放旧 ref input。
+- macOS observer 已订阅 `AXWindowMoved`；本次 generation 与 frontmost PID 均未改变，窗口移动通知使
+  Snapshot dirty，旧 ref 在任何 AX/pixel 动作前以 `ROLE_HOST_STALE_OBSERVATION_GENERATION` 被拒绝。
+  1 个 launch effect returned、1 个 input effect rejected，零 pending/unknown/pixel fallback；Turn
+  **5 model steps / 69 events** completed。正式 UI 显示旧 observation 已拒绝；TextEdit AX 与磁盘均为
+  `seed`，fixture `stale_observed=true`、`stale_input_rejected=true`、failure=null；两 DB `ok`，最终
+  TextEdit/app/fixture process 与两个 listener 均为 0。证据：
+  `2026-09-29/macos/m04-computer-stale/run-014-window-move-ui/`。
+- 本批未发现新的共享或产品根因，故不改 `PROGRESS-SHARED`；fixture 完成文案仍沿用“切换前台窗口”的
+  M04-05 描述，判定依据为独立 UI 动作、typed error/effect、事件、AX/磁盘与清理证据，不用该文案代替
+  断言。窗口 resize、same-PID 多窗口及上述其余 Computer 边界仍开放，因此不关闭完整 `COMP-002`、
+  Computer、D06 或 M04。
