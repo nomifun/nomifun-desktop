@@ -1620,6 +1620,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - ConPTY/PTY、SIGTERM 也被忽略后的 force-kill 级升级、macOS watchdog/session、父进程死亡、
   正式应用入口、其他 Agent/角色及长期压力仍待验；不关闭完整 PROC-034～041 或共享阶段。
 
+### shutdown start gate 与父宿主死亡清理（W89，基线 `5c485e3f7`）
+
+- S-D04-18 / PROC-040/041、A03/A11/A13/A17/A19：公开 supervisor 的正常 shutdown 先关闭
+  start gate，清理两条真实活动 Session；报告逐一保留原 owner/session 和 Cancelled/Lost 终态，
+  两个 PID 均消失。随后尝试启动写 marker 的 helper，在物理 spawn 前返回
+  `supervisor_shutting_down`，marker 不存在。Windows 与 WSL2 Linux 分别重复 **20/20**。
+- 父宿主直接退出的独立 harness 中，Windows 关闭带 `KILL_ON_JOB_CLOSE` 的实际 process Job 后，
+  leader 与 grandchild 都终止，外层 fallback Job 变空；重复 **20/20**。Linux pipe process-group
+  watchdog 与外部 PTY-session watchdog 各重复 **20/20**，subreaper 精确回收 leader、grandchild
+  和 watchdog；PTY leader 只接受 SIGHUP/SIGKILL，其他 owned member 为 SIGKILL。
+- 生产实现首次满足，本批未修改 start gate、Job/watchdog 或 shutdown report。独立日志计数共
+  100 次零失败，结束后两平台 `process_test_helper` 与 `parent_death_harness` 均为 0。
+- 真实 Tauri 主进程的正常/强退、Windows ConPTY parent-death、macOS watchdog/session、start
+  事务与 shutdown 的真实竞争、其他 Agent/角色及长期压力仍待验；不关闭完整 PROC-040/041 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

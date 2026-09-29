@@ -445,6 +445,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   各 **20/20**；共 120 次且两平台 helper 为 0。ConPTY/PTY、强制 kill 级升级、macOS watchdog/
   session、父进程死亡、应用入口及长期压力仍开放，不关闭完整 PROC-034～041 或共享阶段。
 
+- S-D04-18（PROC-040/041、A03/A11/A13/A17/A19 shutdown/parent-death 子断言）：W89 的真实
+  supervisor shutdown 先关闭 start gate，清理两条活动 Session 并按原 owner/session 报告终态，
+  shutdown 后的 marker 命令在 spawn 前被拒；Windows 和 WSL2 Linux 各 **20/20**。宿主直接退出
+  时，Windows `KILL_ON_JOB_CLOSE` 回收 leader + grandchild，Linux process-group watchdog 与外部
+  PTY-session watchdog 均由 subreaper 精确观察并回收；Windows 一项 **20/20**，Linux 两项各
+  **20/20**。生产实现首次满足，本批未改 start gate、Job/watchdog 或报告逻辑；共 100 次且两平台
+  helper/harness 为 0。真实 Tauri 主进程正常/强退、Windows ConPTY parent-death、macOS、启动事务
+  与 shutdown 竞争及长期压力仍开放，不关闭完整 PROC-040/041 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
