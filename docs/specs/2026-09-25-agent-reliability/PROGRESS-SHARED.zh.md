@@ -426,6 +426,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无持久 AgentSession Store/API/UI。正式事件落库/重连、tool row、模型后续行为、其他平台及
   N3/LONG/99% 仍开放，不关闭完整 OBS 或共享阶段。
 
+- S-D09-31（OBS-001/006/009/014/015/018/020、A03/A08/A09/A15/A16/A17/A19 canonical tool
+  projection 子断言）：W150 让正式 `EngineToolHost` 的 inner Kernel 返回 success settlement loss，经过
+  `host_tool_dispatch/settled` 与生产 `EngineTurnJournal` 写入 canonical AgentSession Store。数据库中
+  恰好一条 `tool/call-started` 和一条 `tool/result-recorded`，共享 correlation、result 精确因果指向
+  call；output 为 null、error 保留 `CAPABILITY_UNAVAILABLE` 安全指引。两个独立 Store 冷读均只重建
+  一条 `state=recorded` tool projection，无重复 row。新增场景首次及连续 **20/20**；取消后 owner
+  settlement、history 排序、AgentSession projector **3/3**。生产代码无需修改，使用内存 SQLite，
+  无进程重启/API/UI。磁盘重开、cursor 分页/重连、正式 tool row、其他平台及 N3/LONG/99% 仍开放，
+  不关闭完整 OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
