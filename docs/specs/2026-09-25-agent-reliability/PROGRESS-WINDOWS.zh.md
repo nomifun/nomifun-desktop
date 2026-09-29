@@ -1915,6 +1915,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - cancelled/lost/force-kill、外部部分效果、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验；
   不关闭完整 CTRL/PROC/REAL 或共享阶段。
 
+### 托管进程 start/poll/cancel 的精确链证据（W104，基线 `034896f29`）
+
+- S-D02-20 / CTRL-006/007、CMD-139、PROC-033、A02/A05/A09/A13/A17/A18/A19：正式 Tauri
+  以 StepFun Coding Plan / `step-3.7-flash` 首次精确调用 `start_process`，启动
+  `cmd.exe /d /c "echo W104-READY & ping -n 30 127.0.0.1 >nul"`；start 返回 running 和 exact
+  process ID。下一步仅一次 `poll_process(wait_ms=2000)`，同一 ID 返回 running，输出去除行尾空白后
+  精确为 `W104-READY`；再仅一次 `cancel_process`，返回 cancelled、`cleanup.reaped=true`。
+- Windows CREATE_NO_WINDOW pipe 无可信 console interrupt，cancel 在 1,160 ms 内升级 terminate，未
+  force kill。一次 `report_completion` 的唯一 supported criterion 按顺序且只引用 start、poll、cancel
+  三个顶层 call ID，并在 rationale 中绑定同一 process ID、READY、cancelled 和 reap；零 ToolSearch/
+  update_plan/exec、零截断和零工具错误。
+- Session `01a0ebf7-12a4-7e62-abc8-456dc676bc14` 单回合 completed、4 个模型步骤、143 条
+  canonical 事件；`workspace.process/start` 与 `/cancel` 两个 effect returned，poll 不制造 effect。
+  二进制 `c11540bd33ae194588f8aa9ee9c625c6bf2e8e54b3cb13d81253f065a052034f`，独立
+  **30 项**断言、工作区 tree hash `28cb3214…6c30`、应用/profile/Vite、leader/ping/cmd 清零和正式备份
+  均通过。本批无源码修改。PTY/stdin/resize、失败 poll/cancel、其他 Provider/角色/平台及 N3/100 seed/
+  LONG/99% 仍待验；不关闭完整 CMD/PROC/CTRL 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
