@@ -1990,6 +1990,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - Windows ConPTY generic `close_stdin` 仍按既有合同返回“无法证明通用 EOF”，未把该错误伪装为
   成功；PROC-028、resize 后真实尺寸的应用级观测、其他平台及 N3/100 seed/LONG/99% 仍待验。
 
+### 进程模型工具与 canonical Schema 同构守卫（W108，基线 `df8a580ec`）
+
+- S-D01-07 / REG-008、G0-027、PROC-001～032 Schema 子断言：W105/W107 已分别证明缺失
+  `poll.cursor` 和 PTY 上限漂移可以越过旧 `full_surface` 测试；旧测试只核对 Action ID、object 根与
+  `additionalProperties=false`，没有比较真正的参数合同。
+- 新回归从正式 Wave2 workspace registration 解析每个 canonical schema ref，逐一覆盖模型侧
+  exec/start/poll/input/close_stdin/resize/cancel 七个工具。属性集合、required、type、oneOf、const/
+  enum/default 必须一致；模型最小值不得更小、最大值不得更大，保留 `start_process.wait_ms=0` 这种
+  明确减权。当前基线首次 **20/20**，Agent Runtime **196/196**，fmt/diff 通过。
+- 本批只补必要回归，没有新产品失败、模型调用或正式 UI。文件/VCS/Artifact、其他 Wave/动态工具
+  Schema 及单一生成源仍未覆盖，不关闭完整 REG/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

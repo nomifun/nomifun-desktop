@@ -525,7 +525,7 @@ fn push_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
 
@@ -731,6 +731,128 @@ mod tests {
             .map(|tool| tool.definition.name.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), tools.len());
+    }
+
+    fn assert_model_schema_is_canonical_subset(
+        model: &serde_json::Value,
+        canonical: &serde_json::Value,
+        path: &str,
+    ) {
+        match (model, canonical) {
+            (serde_json::Value::Object(model), serde_json::Value::Object(canonical)) => {
+                let model = model
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "description")
+                    .collect::<BTreeMap<_, _>>();
+                let canonical = canonical
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "description")
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    model.keys().collect::<BTreeSet<_>>(),
+                    canonical.keys().collect::<BTreeSet<_>>(),
+                    "schema keys drifted at {path}"
+                );
+                for (key, model_value) in model {
+                    let canonical_value = canonical[key];
+                    let child = format!("{path}/{key}");
+                    match key.as_str() {
+                        "maximum" | "maxItems" | "maxLength" | "maxProperties" => {
+                            assert!(
+                                model_value.as_u64().unwrap() <= canonical_value.as_u64().unwrap(),
+                                "model schema widened {child}"
+                            );
+                        }
+                        "minimum" | "minItems" | "minLength" | "minProperties" => {
+                            assert!(
+                                model_value.as_u64().unwrap() >= canonical_value.as_u64().unwrap(),
+                                "model schema widened {child}"
+                            );
+                        }
+                        "required" => {
+                            let model = model_value
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<BTreeSet<_>>();
+                            let canonical = canonical_value
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<BTreeSet<_>>();
+                            assert!(
+                                canonical.is_subset(&model),
+                                "model schema omitted canonical required fields at {child}"
+                            );
+                        }
+                        _ => assert_model_schema_is_canonical_subset(
+                            model_value,
+                            canonical_value,
+                            &child,
+                        ),
+                    }
+                }
+            }
+            (serde_json::Value::Array(model), serde_json::Value::Array(canonical)) => {
+                assert_eq!(model.len(), canonical.len(), "schema array drifted at {path}");
+                for (index, (model, canonical)) in
+                    model.iter().zip(canonical.iter()).enumerate()
+                {
+                    assert_model_schema_is_canonical_subset(
+                        model,
+                        canonical,
+                        &format!("{path}/{index}"),
+                    );
+                }
+            }
+            _ => assert_eq!(model, canonical, "schema value drifted at {path}"),
+        }
+    }
+
+    #[test]
+    fn every_model_process_schema_is_an_admission_subset_of_canonical_wave2() {
+        let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+        let process = registration
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities
+            .into_iter()
+            .find(|capability| {
+                capability.id.as_ref()
+                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+            })
+            .unwrap();
+        let canonical_refs = process
+            .contributions
+            .actions
+            .into_iter()
+            .map(|action| (action.action_id, action.input_schema))
+            .collect::<BTreeMap<_, _>>();
+        let process_tools = standard_agent_tool_exposures()
+            .into_iter()
+            .filter(|tool| {
+                tool.capability_id.as_ref()
+                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(process_tools.len(), 7);
+        for tool in process_tools {
+            let reference = &canonical_refs[&tool.action_id];
+            let canonical = nomifun_agent_domain_wave2::resolve_action_schema(
+                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+                reference,
+            )
+            .unwrap();
+            assert_model_schema_is_canonical_subset(
+                &tool.definition.input_schema.0,
+                &canonical.0,
+                tool.action_id.as_ref(),
+            );
+        }
     }
 
     #[test]
