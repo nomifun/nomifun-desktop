@@ -330,6 +330,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   owner 顺序、close 与 cancel 组合、真实磁盘/IO fault、其他 Action/平台及 N3/LONG/99% 仍开放，
   不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+- S-D09-22（LIFE-011/024、FILE-038、OBS-006/015、A04/A07/A08/A17/A19 已知 owner 失败的
+  terminal settlement 子断言）：W141 从正式 `workspace.files/write` handler 把“目标为目录”的确定
+  owner 失败暂停在 terminal settlement 前，再以独立 SQLite writer lock 令落库超时。旧代码丢弃
+  settlement 错误并只返回普通 owner 错误，数据库却保持 Pending；首次 FAIL 已保留。现新增统一
+  `finish_wave2_failed_effect`，覆盖通用 managed effect 及 write/delete/artifact/stage/commit/push 的
+  已知失败分支：落库成功仍返回并重放原 owner 错误；落库失败则有界返回 `CAPABILITY_UNAVAILABLE`，
+  同时保留原错误 code/message、明确 terminal observation 未提交、durable effect 未决且禁止自动重试。
+  修复后首次及连续 **20/20**，健康 write Rejected/replay、patch、delete、commit、push 与成功后
+  terminal-busy 相邻回归 **6/6**。首个 macOS 专属 commit 过滤命令执行 0 项，已用 Windows 可执行反例
+  纠正，不计通过。无模型/UI。其他 Action 的逐分支 fault injection、正式 API/UI 投影、真实磁盘/IO
+  fault、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/FILE/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

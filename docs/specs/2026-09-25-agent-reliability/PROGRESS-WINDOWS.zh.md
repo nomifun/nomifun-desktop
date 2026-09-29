@@ -2411,6 +2411,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式应用 shutdown 的 Runtime/Store/owner 顺序、close 与 cancel 组合、真实磁盘/IO fault、
   其他 Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+### 已知 owner 失败的 terminal settlement（W141，基线 `44633a0cf`）
+
+- S-D09-22 / LIFE-011/024、FILE-038、OBS-006/015、A04/A07/A08/A17/A19：从正式
+  `workspace.files/write` handler 把“目标为目录”的确定 owner 失败暂停在 terminal settlement 前，再
+  以独立 SQLite writer lock 令落库超时。旧代码丢弃 settlement 错误并只返回普通 owner 错误，数据库
+  却保持 Pending；首次 FAIL 日志保留。
+- 新增统一 `finish_wave2_failed_effect`，覆盖通用 managed effect 及 write/delete/artifact/stage/commit/
+  push 的已知失败分支。落库成功仍返回并重放原 owner 错误；落库失败则有界返回
+  `CAPABILITY_UNAVAILABLE`，保留原错误 code/message，并明确 terminal observation 未提交、durable
+  effect 未决且禁止自动重试。
+- 修复后首次及连续 **20/20**；健康 write Rejected/replay、patch、delete、commit、push 与成功后
+  terminal-busy 相邻回归 **6/6**，fmt/diff 通过。首个 macOS 专属 commit 过滤命令执行 0 项，已用
+  Windows 可执行反例纠正，不计通过。无模型/UI。
+- 未覆盖其他 Action 的逐分支 fault injection、正式 API/UI 投影、真实磁盘/IO fault、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/FILE/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
