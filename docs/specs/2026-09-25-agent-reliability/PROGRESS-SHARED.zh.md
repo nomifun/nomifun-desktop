@@ -1,6 +1,6 @@
 # 跨平台共享 Case 处理进度
 
-更新：2026-09-29。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-09-30。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 本表管理 675 个 Both Case 的公共根因；Windows/macOS 产品验收分别记在各自文档。
 本轮 S-P0-01～05 已完成共享子断言的走查、修复与回归；不等于 675 条完整 Case 全部通过。
 当前优先共享队列，相关 Windows 修复一并完成；共享阶段结算后通知并交付 macOS 接续 prompt，
@@ -39,7 +39,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
-| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | S-D06-01 修复 A11y/截图媒体耦合；S-D06-02 保留 Computer plan discoverability；S-D06-03 区分 proven stale rejection 与 uncertain effect；S-D06-04 缺失绝对 launch 路径 fail closed，其他平台/资源待走查 |
+| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | S-D06-01 修复 A11y/截图媒体耦合；S-D06-02 保留 Computer plan discoverability；S-D06-03 区分 proven stale rejection 与 uncertain effect；S-D06-04 缺失绝对 launch 路径 fail closed；S-D06-05 修复 input timeout 脱管及 release 义务，本批 live cancel 仍开放 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
@@ -48,6 +48,22 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D06-05（`COMP-012` 及 A08/A13/A17/A20 的共享 input cleanup 子断言，**部分完成**）：
+  `nomi-computer` 原先以 `timeout(INPUT_TIMEOUT, spawn_blocking_handle)` 包住原生输入；timeout 丢弃
+  `JoinHandle` 后，已准入任务仍可在后台继续按键/拖拽，上层却已收到失败并可能过早结算 cleanup。
+  新失败回归在 timeout 返回时精确观察到 `pressed=true`，完整保留于 macOS
+  `m04-computer-cancel/run-004-first-failure/`。
+- 现 timeout 只停止等待预算，不脱管已开始的 native worker：必须 join 同一任务后才返回明确 uncertain
+  错误，说明可能已产生效果、禁止自动重试并要求重新观察。drag/key 统一用 recorded obligation guard，
+  press 前先记录，按逆序释放；首次 release 失败只重试精确剩余项，连续失败继续保留 obligation 并公开
+  cleanup unproven，panic/unwind 亦做 best-effort release，不吞错或伪造成功。Engine Tool Host 原有“调用方
+  取消后继续持有 effect 至 owner settlement”回归复核 **1/1**。
+- 最终 `nomi-computer` **99 passed / 7 ignored**，新增 timeout join、release-retry、连续失败保留三项均
+  通过；fixture build、fmt/diff 通过。macOS signed Tauri 探索运行均证明真实 drag 最终
+  `pressed=false` 且 mouse-up 到达，并保留 timeout unknown/cleanup pause 与本机 UI Stop 在 held mouse
+  期间不可自动操作的首败；但没有得到“取消事件确实发生于 pressed=true”的最终正式样本。因此本项只
+  关闭共享组件清理缺陷，不关闭 `COMP-012`、平台验收或共享阶段；Windows/Linux 亦未代判。
 
 - S-D06-04（`COMP-006`、`OBS-005/016` 的共享 Computer launch 缺失绝对路径子断言）：macOS 正式
   Tauri 首败对明确不存在的 `.app` 绝对路径调用 `computer/launch`；`open::that_detached` 只确认成功
