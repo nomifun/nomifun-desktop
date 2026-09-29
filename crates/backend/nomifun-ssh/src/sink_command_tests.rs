@@ -216,6 +216,25 @@ fn unavailable_ripgrep_uses_extended_grep_and_literal_dash_file() {
 }
 
 #[test]
+fn grep_fallback_keeps_file_names_for_recursive_directory_search() {
+    let Some(shell) = shell() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    std::fs::write(dir.path().join("nested/match.txt"), "needle\n").unwrap();
+    let script = format!(
+        "PATH=/fixture-no-executables; grep() {{ /usr/bin/grep \"$@\"; }}; {}",
+        grep_command("needle", ".")
+    );
+    let output = execute(&shell, dir.path(), &script);
+    assert!(
+        output.ends_with("nested/match.txt:1:needle\n"),
+        "recursive fallback lost the matching path: {output:?}"
+    );
+}
+
+#[test]
 fn missing_search_tools_preserve_failure_and_diagnostics() {
     let Some(shell) = shell() else {
         return;

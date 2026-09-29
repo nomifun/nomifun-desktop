@@ -514,7 +514,7 @@ fn validate_backend_path(path: &str) -> Result<(), String> {
 fn grep_command(pattern: &str, path: &str) -> String {
     let path = if path == "-" { "./-" } else { path };
     format!(
-        "(if command -v rg >/dev/null 2>&1; then set -- rg --color=never -n; else set -- grep --color=never -rnE; fi; if \"$@\" -- {p} {d}; then :; else _nomi_search_status=$?; [ \"$_nomi_search_status\" -eq 1 ] || exit \"$_nomi_search_status\"; fi)",
+        "(if command -v rg >/dev/null 2>&1; then set -- rg --color=never -n; elif [ -d {d} ]; then set -- grep --color=never -rnE; else set -- grep --color=never -nEh; fi; if \"$@\" -- {p} {d}; then :; else _nomi_search_status=$?; [ \"$_nomi_search_status\" -eq 1 ] || exit \"$_nomi_search_status\"; fi)",
         p = sh_quote(pattern),
         d = sh_quote(path),
     )

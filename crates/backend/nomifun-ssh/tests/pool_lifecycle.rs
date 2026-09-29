@@ -211,6 +211,44 @@ async fn reconnect_replays_the_last_proven_cwd() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_macos_grep_fallback_keeps_single_file_and_recursive_shapes() {
+    const NAME: &str = "real_macos_grep_fallback_keeps_single_file_and_recursive_shapes";
+    let sshd = sshd_or_skip!(NAME);
+    let harness = support::harness(sshd.known_hosts_path(), support::brisk_tuning()).await;
+    let id = harness.add_fixture_host(&sshd).await;
+    let Some(link) = harness.open_or_skip(NAME, "grep-shape", &id, "/tmp").await else {
+        return;
+    };
+    let backend = harness.pool.backend_for(&link);
+    let fixture = format!("/tmp/nomifun-ssh-grep-{}", nomifun_common::generate_id());
+    let setup = format!(
+        "mkdir -p {root}/nested && cd {root} && export PATH=/usr/bin:/bin && printf 'first\\nsecond\\nthird\\n' > ./- && printf \"it's here\\n\" > {quoted} && printf 'needle\\n' > nested/match.txt",
+        root = shell_path(&fixture),
+        quoted = shell_path("a'b"),
+    );
+    let setup_result = backend.run_command(&setup, 15_000).await;
+    let dash = backend.grep("first|second", "-").await;
+    let quoted = backend.grep("it's", "a'b").await;
+    let recursive = backend.grep("needle", ".").await;
+    // Clean before assertions so a shape mismatch leaves no remote fixture.
+    let cleanup = format!("cd /tmp && rm -rf -- {}", shell_path(&fixture));
+    let cleanup_result = backend.run_command(&cleanup, 15_000).await;
+    harness.pool.shutdown_all().await;
+
+    setup_result.expect("create isolated remote grep fixture");
+    cleanup_result.expect("remove isolated remote grep fixture");
+    assert_eq!(dash.expect("grep literal dash file"), "1:first\n2:second");
+    assert_eq!(quoted.expect("grep quoted file"), "1:it's here");
+    let recursive = recursive.expect("grep recursive directory");
+    assert!(
+        recursive
+            .lines()
+            .any(|line| line.ends_with("nested/match.txt:1:needle")),
+        "recursive fallback lost the path: {recursive:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_unrecoverable_shell_is_recycled_without_redialling() {
     const NAME: &str = "an_unrecoverable_shell_is_recycled_without_redialling";
     let sshd = sshd_or_skip!(NAME);
