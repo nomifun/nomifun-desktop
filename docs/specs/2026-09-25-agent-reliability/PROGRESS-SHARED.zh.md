@@ -38,7 +38,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
-| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径已有定向回归；remote/host 条件资源准备后继续，禁止共享生产 remote |
+| S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix snapshot 字面路径与 macOS pre-commit/身份/unknown fence 已有定向回归；其余 hook、remote/host 条件资源准备后继续，禁止共享生产 remote |
 | S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | Skill 本轮；其余条件资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
@@ -240,6 +240,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   为 JSON 字符串，UI 保留 1 项可见异常，第二步修成数组后才完成（3 个模型步、87 条事件），因此
   不计零失败 CMD PASS。收紧撤销短语后的正式重建 `baec5c5f06e2…` 通过。opaque process 的内核级
   只读隔离、正式撤销 UI、参数字符串失败、其他 Agent/平台及 N3/100 seed/LONG/99% 仍开放。
+
+- S-D05-02（`VCS-006/008`，以及 `VCS-009/014`、`AUTH-009/013` 的 hook/unknown/scope/脱敏
+  子断言）：macOS 首败确认 libgit2 commit 绕过可执行 `pre-commit`，hook `exit 7` 后仍创建提交。
+  现仅在 macOS 检出 default/`core.hooksPath` 的可执行 hook，执行前核对 exact repo、staged scope 与
+  identity，再以字面 `/usr/bin/git hook run --ignore-missing pre-commit` argv 交给共享进程 supervisor；
+  30 秒 deadline、完整进程树回收和精确 repo Seatbelt 写根同时生效，返回后再次核对 index/scope。
+  repo 根不等于绑定 workspace 时拒绝执行 hook；输出有界且 secret 脱敏。
+- hook 拒绝/启动失败/超时可能已修改 workspace，故 commit effect 使用既有
+  `ExternalUncertainEffect`：写入 terminal unknown 后保留唯一资源 fence，同 key 与新 key 均不能
+  自动物理重放。拒绝/脱敏/fence、Seatbelt 越界拒绝、identity 拒绝各 **20/20**，相邻 VCS
+  **15/15**、direct-program/shell **3/3**。首次误用信任 TMPDIR 的隔离夹具及 ManagedEffect 不允许
+  uncertain 结算的中间失败均保留。其他三类 commit hook、commit 成功后 result-loss 对账、hook
+  fault injection、非 macOS 平台和正式 UI 仍开放，不关闭完整 VCS/AUTH 或共享 D05。
 
 - S-D05-01（VCS-004/005、A05/A14/A17 snapshot 字面路径子断言）：W62 Linux 全组在
   `file\\1.txt` 的 discard 稳定失败；libgit2 checkout 即使禁用 pathspec 匹配，仍把反斜杠按路径

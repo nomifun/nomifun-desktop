@@ -8,7 +8,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
-#[cfg(test)]
+#[cfg(target_os = "macos")]
+use std::{collections::HashMap, ffi::OsString};
+#[cfg(any(test, target_os = "macos"))]
 use std::time::Duration;
 
 use nomifun_agent_contracts::{
@@ -1146,7 +1148,15 @@ impl Wave2ApplicationHost {
                 let _effect_guard = self.workspace_write_lock.lock().await;
                 let _git_guard = self.git_mutation_lock.lock().await;
                 self.pause_after_git_admission_for_test(action_id).await;
-                match begin_wave2_effect(self.effect_store()?, context, binding, &effect_input).await? {
+                match begin_wave2_exclusive_effect(
+                    self.effect_store()?,
+                    context,
+                    binding,
+                    &effect_input,
+                    nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+                )
+                .await?
+                {
                     Wave2EffectAdmission::Replay(output) => Ok(output),
                     Wave2EffectAdmission::Reserved(reservation) => {
                         match self
@@ -1160,6 +1170,21 @@ impl Wave2ApplicationHost {
                                 )
                                 .await?;
                                 Ok(output)
+                            }
+                            Err(owner_error)
+                                if owner_error.code == "EFFECT_OUTCOME_UNKNOWN" =>
+                            {
+                                // A hook may have changed the bound workspace
+                                // before rejecting or timing out. The managed
+                                // process tree is already reaped, so persist a
+                                // terminal unknown fact while retaining the
+                                // resource fence against any blind replay.
+                                finish_wave2_effect(
+                                    &reservation,
+                                    Wave2EffectCompletion::Uncertain(&owner_error),
+                                )
+                                .await?;
+                                Err(owner_error)
                             }
                             Err(owner_error) => {
                                 let _ = finish_wave2_effect(
@@ -1506,110 +1531,38 @@ impl Wave2ApplicationHost {
         let capability_id = capability_id.to_owned();
         let worker_capability_id = capability_id.clone();
         let message = message.to_owned();
+        #[cfg(target_os = "macos")]
+        if let Some(repository_root) = tokio::task::spawn_blocking({
+            let workspace = workspace.clone();
+            move || macos_pre_commit_hook_root(&workspace)
+        })
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("{capability_id} hook preflight worker failed: {error}"),
+            )
+        })??
+        {
+            run_macos_pre_commit_hook(&repository_root).await?;
+        }
         tokio::task::spawn_blocking(move || {
             let (repository, workspace_prefix) = scoped_repository(&workspace)?;
+            let inspection = inspect_vcs_commit(&repository, &workspace_prefix)?;
+            let signature = repository.signature().map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!(
+                        "workspace.vcs/commit requires configured Git user.name/user.email: {error}"
+                    ),
+                )
+            })?;
             let mut index = repository.index().map_err(|error| {
                 Wave2HostPortError::new(
                     "CAPABILITY_UNAVAILABLE",
                     format!("workspace.vcs/commit could not open the Git index: {error}"),
                 )
             })?;
-
-            let parent = match repository.head() {
-                Ok(head) if head.target().is_none() => {
-                    if repository.is_empty().map_err(|error| {
-                        Wave2HostPortError::new(
-                            "CAPABILITY_UNAVAILABLE",
-                            format!("workspace.vcs/commit could not inspect repository emptiness: {error}"),
-                        )
-                    })? {
-                        None
-                    } else {
-                        return Err(Wave2HostPortError::new(
-                            "CAPABILITY_UNAVAILABLE",
-                            "workspace.vcs/commit found an unborn HEAD in a non-empty repository",
-                        ));
-                    }
-                }
-                Ok(head) => Some(head.peel_to_commit().map_err(|error| {
-                    Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!("workspace.vcs/commit could not peel the repository HEAD: {error}"),
-                    )
-                })?),
-                Err(error)
-                    if matches!(
-                        error.code(),
-                        git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
-                    ) && repository.is_empty().map_err(|inspect_error| {
-                        Wave2HostPortError::new(
-                            "CAPABILITY_UNAVAILABLE",
-                            format!(
-                                "workspace.vcs/commit could not inspect repository emptiness: {inspect_error}"
-                            ),
-                        )
-                    })? =>
-                {
-                    None
-                }
-                Err(error) => {
-                    return Err(Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!("workspace.vcs/commit could not read the repository HEAD: {error}"),
-                    ));
-                }
-            };
-            let parent_tree = parent.as_ref().map(|commit| commit.tree()).transpose().map_err(
-                |error| {
-                    Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!("workspace.vcs/commit could not load the parent tree: {error}"),
-                    )
-                },
-            )?;
-            let staged_diff = repository
-                .diff_tree_to_index(parent_tree.as_ref(), Some(&index), None)
-                .map_err(|error| {
-                    Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        format!("workspace.vcs/commit could not inspect staged changes: {error}"),
-                    )
-                })?;
-            let mut scoped_paths = Vec::new();
-            for delta in staged_diff.deltas() {
-                let old_path = delta.old_file().path().map(git_path_to_string).transpose()?;
-                let new_path = delta.new_file().path().map(git_path_to_string).transpose()?;
-                let paths = [old_path.as_deref(), new_path.as_deref()];
-                if paths.iter().all(Option::is_none) {
-                    return Err(Wave2HostPortError::new(
-                        "CAPABILITY_UNAVAILABLE",
-                        "workspace.vcs/commit encountered a staged change without a path",
-                    ));
-                }
-                for path in paths.into_iter().flatten() {
-                    let Some(relative) = path_relative_to_workspace(path, &workspace_prefix) else {
-                        return Err(Wave2HostPortError::new(
-                            "PRESET_RESOURCE_NOT_BOUND",
-                            "workspace.vcs/commit refuses to commit staged paths outside the bound workspace",
-                        ));
-                    };
-                    if is_workspace_owner_relative(&relative) {
-                        return Err(Wave2HostPortError::new(
-                            "PRESET_RESOURCE_NOT_BOUND",
-                            "workspace.vcs/commit refuses to commit the workspace owner directory",
-                        ));
-                    }
-                    scoped_paths.push(relative);
-                }
-            }
-            if scoped_paths.is_empty() {
-                return Err(Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    "workspace.vcs/commit has no staged changes in the bound workspace",
-                ));
-            }
-            scoped_paths.sort();
-            scoped_paths.dedup();
 
             let tree_id = index.write_tree().map_err(|error| {
                 Wave2HostPortError::new(
@@ -1623,14 +1576,16 @@ impl Wave2ApplicationHost {
                     format!("workspace.vcs/commit could not load the Git tree: {error}"),
                 )
             })?;
-            let signature = repository.signature().map_err(|error| {
-                Wave2HostPortError::new(
-                    "CAPABILITY_UNAVAILABLE",
-                    format!(
-                        "workspace.vcs/commit requires configured Git user.name/user.email: {error}"
-                    ),
-                )
-            })?;
+            let parent = inspection
+                .parent_id
+                .map(|parent_id| repository.find_commit(parent_id))
+                .transpose()
+                .map_err(|error| {
+                    Wave2HostPortError::new(
+                        "CAPABILITY_UNAVAILABLE",
+                        format!("workspace.vcs/commit could not reload the parent commit: {error}"),
+                    )
+                })?;
             let parents = parent.iter().collect::<Vec<_>>();
             let commit_id = repository
                 .commit(
@@ -1653,7 +1608,7 @@ impl Wave2ApplicationHost {
                 "committed": true,
                 "commit_id": commit_id.to_string(),
                 "message": message,
-                "paths": scoped_paths
+                "paths": inspection.scoped_paths
             })))
         })
         .await
@@ -1763,6 +1718,244 @@ fn scoped_repository(
 ) -> Result<(git2::Repository, String), Wave2HostPortError> {
     scoped_repository_if_present(workspace)?.ok_or_else(||
         Wave2HostPortError::new("RESOURCE_NOT_FOUND","workspace is not a Git repository"))
+}
+
+struct VcsCommitInspection {
+    parent_id: Option<git2::Oid>,
+    scoped_paths: Vec<String>,
+}
+
+fn inspect_vcs_commit(
+    repository: &git2::Repository,
+    workspace_prefix: &str,
+) -> Result<VcsCommitInspection, Wave2HostPortError> {
+    let index = repository.index().map_err(|error| {
+        Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("workspace.vcs/commit could not open the Git index: {error}"),
+        )
+    })?;
+    let parent = match repository.head() {
+        Ok(head) if head.target().is_none() => {
+            if repository.is_empty().map_err(|error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!("workspace.vcs/commit could not inspect repository emptiness: {error}"),
+                )
+            })? {
+                None
+            } else {
+                return Err(Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    "workspace.vcs/commit found an unborn HEAD in a non-empty repository",
+                ));
+            }
+        }
+        Ok(head) => Some(head.peel_to_commit().map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not peel the repository HEAD: {error}"),
+            )
+        })?),
+        Err(error)
+            if matches!(
+                error.code(),
+                git2::ErrorCode::UnbornBranch | git2::ErrorCode::NotFound
+            ) && repository.is_empty().map_err(|inspect_error| {
+                Wave2HostPortError::new(
+                    "CAPABILITY_UNAVAILABLE",
+                    format!(
+                        "workspace.vcs/commit could not inspect repository emptiness: {inspect_error}"
+                    ),
+                )
+            })? =>
+        {
+            None
+        }
+        Err(error) => {
+            return Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not read the repository HEAD: {error}"),
+            ));
+        }
+    };
+    let parent_tree = parent
+        .as_ref()
+        .map(|commit| commit.tree())
+        .transpose()
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not load the parent tree: {error}"),
+            )
+        })?;
+    let staged_diff = repository
+        .diff_tree_to_index(parent_tree.as_ref(), Some(&index), None)
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not inspect staged changes: {error}"),
+            )
+        })?;
+    let mut scoped_paths = Vec::new();
+    for delta in staged_diff.deltas() {
+        let old_path = delta.old_file().path().map(git_path_to_string).transpose()?;
+        let new_path = delta.new_file().path().map(git_path_to_string).transpose()?;
+        let paths = [old_path.as_deref(), new_path.as_deref()];
+        if paths.iter().all(Option::is_none) {
+            return Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                "workspace.vcs/commit encountered a staged change without a path",
+            ));
+        }
+        for path in paths.into_iter().flatten() {
+            let Some(relative) = path_relative_to_workspace(path, workspace_prefix) else {
+                return Err(Wave2HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    "workspace.vcs/commit refuses to commit staged paths outside the bound workspace",
+                ));
+            };
+            if is_workspace_owner_relative(&relative) {
+                return Err(Wave2HostPortError::new(
+                    "PRESET_RESOURCE_NOT_BOUND",
+                    "workspace.vcs/commit refuses to commit the workspace owner directory",
+                ));
+            }
+            scoped_paths.push(relative);
+        }
+    }
+    if scoped_paths.is_empty() {
+        return Err(Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            "workspace.vcs/commit has no staged changes in the bound workspace",
+        ));
+    }
+    scoped_paths.sort();
+    scoped_paths.dedup();
+    Ok(VcsCommitInspection {
+        parent_id: parent.as_ref().map(git2::Commit::id),
+        scoped_paths,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pre_commit_hook_root(
+    workspace: &Path,
+) -> Result<Option<PathBuf>, Wave2HostPortError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (repository, workspace_prefix) = scoped_repository(workspace)?;
+    let repository_root = std::fs::canonicalize(repository.workdir().ok_or_else(|| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            "Git repository has no working directory",
+        )
+    })?)
+    .map_err(|error| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("Git repository working directory is unavailable: {error}"),
+        )
+    })?;
+    let hooks_root = match repository.config().and_then(|config| config.get_path("core.hooksPath")) {
+        Ok(path) if path.is_absolute() => path,
+        Ok(path) => repository_root.join(path),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => repository.path().join("hooks"),
+        Err(error) => {
+            return Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not resolve core.hooksPath: {error}"),
+            ));
+        }
+    };
+    let hook = hooks_root.join("pre-commit");
+    match std::fs::metadata(&hook) {
+        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {},
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(Wave2HostPortError::new(
+                "CAPABILITY_UNAVAILABLE",
+                format!("workspace.vcs/commit could not inspect pre-commit hook: {error}"),
+            ));
+        }
+    }
+    let canonical_workspace = std::fs::canonicalize(workspace).map_err(|error| {
+        Wave2HostPortError::new(
+            "RESOURCE_NOT_FOUND",
+            format!("workspace is unavailable: {error}"),
+        )
+    })?;
+    if canonical_workspace != repository_root {
+        return Err(Wave2HostPortError::new(
+            "PRESET_RESOURCE_NOT_BOUND",
+            "workspace.vcs/commit refuses to run repository hooks outside the exact bound workspace",
+        ));
+    }
+
+    // Reject invalid scope or identity before executing repository code.
+    // `invoke_vcs_commit` repeats the inspection after the hook, so a hook
+    // cannot smuggle an out-of-scope path into the commit.
+    let _inspection = inspect_vcs_commit(&repository, &workspace_prefix)?;
+    repository.signature().map_err(|error| {
+        Wave2HostPortError::new(
+            "CAPABILITY_UNAVAILABLE",
+            format!("workspace.vcs/commit requires configured Git user.name/user.email: {error}"),
+        )
+    })?;
+    Ok(Some(repository_root))
+}
+
+#[cfg(target_os = "macos")]
+async fn run_macos_pre_commit_hook(
+    repository_root: &Path,
+) -> Result<(), Wave2HostPortError> {
+    let shell = nomifun_ai_agent::nomi_config::shell::SupervisedShell::standalone_macos_confined(
+        repository_root.to_path_buf(),
+    );
+    let output = shell
+        .output_program(
+            OsString::from("/usr/bin/git"),
+            ["hook", "run", "--ignore-missing", "pre-commit"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+            repository_root,
+            &HashMap::new(),
+            Some(Duration::from_secs(30)),
+        )
+        .await
+        .map_err(|error| {
+            Wave2HostPortError::new(
+                "EFFECT_OUTCOME_UNKNOWN",
+                format!(
+                    "workspace.vcs/commit pre-commit hook could not complete safely: {error}; inspect workspace status/diff before any retry"
+                ),
+            )
+        })?;
+    if output.success {
+        return Ok(());
+    }
+    let combined = match (output.stdout.is_empty(), output.stderr.is_empty()) {
+        (false, false) => format!("{}\n{}", output.stdout, output.stderr),
+        (false, true) => output.stdout,
+        (true, false) => output.stderr,
+        (true, true) => "hook returned no diagnostic output".to_owned(),
+    };
+    let redacted = nomi_redact::redact_secrets(&combined);
+    let diagnostic = redacted
+        .chars()
+        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+        .take(1024)
+        .collect::<String>();
+    Err(Wave2HostPortError::new(
+        "EFFECT_OUTCOME_UNKNOWN",
+        format!(
+            "workspace.vcs/commit pre-commit hook rejected the commit (exit {:?}): {}; the hook may have changed the bound workspace, so inspect status/diff before any retry",
+            output.code,
+            diagnostic.trim()
+        ),
+    ))
 }
 
 fn scoped_repository_if_present(workspace: &Path)
@@ -3795,6 +3988,209 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_honors_a_rejecting_pre_commit_hook() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let hook = repository.path().join("hooks/pre-commit");
+        let marker = directory.path().join("hook-runs.txt");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf x >> hook-runs.txt\nprintf 'rejecting-hook sk-ABCDEFGHIJ0123456789xyz' >&2\nexit 7\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = repository.head().unwrap().target().unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let result = invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/commit",
+            json!({"message": "must be rejected"}),
+        )
+        .await;
+
+        let error = result.expect_err("rejecting pre-commit hook must block commit");
+        assert_eq!(error.code, "EFFECT_OUTCOME_UNKNOWN");
+        assert!(error.message.contains("rejecting-hook"), "{error:?}");
+        assert!(error.message.contains("[REDACTED_SECRET]"), "{error:?}");
+        assert!(!error.message.contains("sk-ABCDEFGHIJ0123456789xyz"), "{error:?}");
+        assert!(marker.exists(), "pre-commit hook did not run");
+        let replay = invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/commit",
+            json!({"message": "must be rejected"}),
+        )
+        .await
+        .expect_err("pending hook effects must fence automatic replay");
+        assert_eq!(replay.code, "CAPABILITY_UNAVAILABLE");
+        assert!(replay.message.contains("durable unknown outcome"), "{replay:?}");
+        let mut new_key = context;
+        new_key.idempotency_key = IdempotencyKey::from("rejected-hook-new-key");
+        new_key.operation_id = OperationId::from("rejected-hook-new-operation");
+        let fenced = invoke(
+            &host,
+            new_key,
+            "workspace.vcs/commit",
+            json!({"message": "must be rejected"}),
+        )
+        .await
+        .expect_err("unsettled hook effects must fence a new idempotency key");
+        assert_eq!(fenced.code, "CAPABILITY_UNAVAILABLE");
+        assert!(fenced.message.contains("another Wave 2 effect is unsettled"), "{fenced:?}");
+        assert_eq!(std::fs::read(&marker).unwrap(), b"x", "hook ran more than once");
+        assert_eq!(repository.head().unwrap().target(), Some(before));
+        let status = repository.status_file(Path::new("tracked.txt")).unwrap();
+        assert!(status.contains(git2::Status::INDEX_MODIFIED));
+    }
+
+    #[tokio::test]
+    async fn vcs_commit_rejects_invalid_repository_identity_without_mutating_head() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        {
+            let mut config = repository.config().unwrap();
+            config.set_str("user.name", "").unwrap();
+            config.set_str("user.email", "").unwrap();
+        }
+        std::fs::write(directory.path().join("tracked.txt"), "changed\n").unwrap();
+        let before = repository.head().unwrap().target().unwrap();
+        let host = test_host(directory.path()).await;
+        let context = context(directory.path());
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let error = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "identity must be configured"}),
+        )
+        .await
+        .expect_err("invalid repository identity must block commit");
+
+        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("user.name/user.email"), "{error:?}");
+        assert_eq!(repository.head().unwrap().target(), Some(before));
+        let status = repository.status_file(Path::new("tracked.txt")).unwrap();
+        assert!(status.contains(git2::Status::INDEX_MODIFIED));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_pre_commit_hook_cannot_write_outside_the_bound_workspace() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture_parent = std::env::var_os("NOMIFUN_RELIABILITY_FIXTURE_PARENT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap().join("target"));
+        std::fs::create_dir_all(&fixture_parent).unwrap();
+        let directory = tempfile::tempdir_in(fixture_parent).unwrap();
+        let workspace = directory.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let repository = initialize_git_repository(&workspace);
+        configure_git_identity(&repository);
+        std::fs::write(workspace.join("tracked.txt"), "changed\n").unwrap();
+        let hook = repository.path().join("hooks/pre-commit");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nif printf escape > ../outside.txt; then\n  printf escaped >&2\n  exit 9\nfi\nprintf confined > hook-ran.txt\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let host = test_host(&workspace).await;
+        let context = context(&workspace);
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "tracked.txt"}),
+        )
+        .await
+        .unwrap();
+        let committed = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "confined hook"}),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(committed.0["committed"], true);
+        assert!(workspace.join("hook-ran.txt").exists());
+        assert!(!directory.path().join("outside.txt").exists());
+        assert_eq!(
+            repository.head().unwrap().peel_to_commit().unwrap().message(),
+            Some("confined hook")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn vcs_commit_does_not_run_repository_hook_outside_a_nested_binding() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        configure_git_identity(&repository);
+        let nested = directory.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(nested.join("inside.txt"), "inside\n").unwrap();
+        let hook = repository.path().join("hooks/pre-commit");
+        let marker = directory.path().join("hook-ran.txt");
+        std::fs::write(&hook, "#!/bin/sh\nprintf ran > hook-ran.txt\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let before = repository.head().unwrap().target().unwrap();
+        let host = test_host(&nested).await;
+        let context = context(&nested);
+
+        invoke(
+            &host,
+            context.clone(),
+            "workspace.vcs/stage",
+            json!({"path": "inside.txt"}),
+        )
+        .await
+        .unwrap();
+        let error = invoke(
+            &host,
+            context,
+            "workspace.vcs/commit",
+            json!({"message": "nested hook must not run"}),
+        )
+        .await
+        .expect_err("nested binding must not execute repository-root hook");
+
+        assert_eq!(error.code, "PRESET_RESOURCE_NOT_BOUND");
+        assert!(error.message.contains("outside the exact bound workspace"));
+        assert!(!marker.exists());
+        assert_eq!(repository.head().unwrap().target(), Some(before));
     }
 
     #[tokio::test]

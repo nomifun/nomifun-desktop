@@ -11,8 +11,9 @@ use nomi_process_runtime::{
     ProcessOutcome, ProcessOwner, ProcessPolicy, ProcessRequest, ProcessSupervisor, ShellKind,
     Transport, normalize_request,
 };
+#[cfg(target_os = "macos")]
+use nomi_process_runtime::SandboxPolicy;
 use uuid::Uuid;
-
 
 #[derive(Clone)]
 pub struct SupervisedShell {
@@ -59,6 +60,20 @@ impl SupervisedShell {
         )
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn standalone_macos_confined(cwd_root: PathBuf) -> Self {
+        let supervisor = ProcessSupervisor::new(nomi_process_runtime::SupervisorConfig::default());
+        Self {
+            supervisor,
+            capability: CapabilityPolicy {
+                cwd_roots: vec![cwd_root.clone()],
+                sandbox: SandboxPolicy::MacSeatbelt {
+                    write_roots: vec![cwd_root],
+                },
+            },
+            invocation_id: Uuid::now_v7(),
+        }
+    }
 
     /// Execute one shell command under the shared exact process-tree
     /// supervisor. A returned success/error is emitted only after the complete
@@ -72,11 +87,8 @@ impl SupervisedShell {
         env: &HashMap<String, String>,
         timeout: Option<Duration>,
     ) -> Result<SupervisedShellOutput, SupervisedShellError> {
-        let started_at = Instant::now();
-        let deadline = timeout.and_then(|duration| started_at.checked_add(duration));
-        let request = ProcessRequest {
-            owner: ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
-            command: CommandSpec::Shell {
+        self.output_command(
+            CommandSpec::Shell {
                 shell: if cfg!(windows) {
                     ShellKind::PowerShell
                 } else {
@@ -84,6 +96,39 @@ impl SupervisedShell {
                 },
                 script: command.to_owned(),
             },
+            cwd,
+            env,
+            timeout,
+        )
+        .await
+    }
+
+    /// Execute one exact program/argv vector under the same process-tree
+    /// ownership and timeout contract as [`Self::output`], without a shell.
+    pub async fn output_program(
+        &self,
+        program: OsString,
+        args: Vec<OsString>,
+        cwd: &Path,
+        env: &HashMap<String, String>,
+        timeout: Option<Duration>,
+    ) -> Result<SupervisedShellOutput, SupervisedShellError> {
+        self.output_command(CommandSpec::Program { program, args }, cwd, env, timeout)
+            .await
+    }
+
+    async fn output_command(
+        &self,
+        command: CommandSpec,
+        cwd: &Path,
+        env: &HashMap<String, String>,
+        timeout: Option<Duration>,
+    ) -> Result<SupervisedShellOutput, SupervisedShellError> {
+        let started_at = Instant::now();
+        let deadline = timeout.and_then(|duration| started_at.checked_add(duration));
+        let request = ProcessRequest {
+            owner: ProcessOwner::new(self.invocation_id, Uuid::now_v7()),
+            command,
             cwd: cwd.to_path_buf(),
             env: env
                 .iter()
@@ -191,6 +236,31 @@ mod tests {
         assert!(output.success, "{}", output.stderr);
         assert!(output.stdout.contains("test-value"));
         assert!(output.stdout.contains("local-file"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervised_program_preserves_literal_argv() {
+        let directory = tempfile::tempdir().unwrap();
+        let shell = SupervisedShell::standalone(directory.path().to_path_buf());
+        let literal = "literal ; $(touch must-not-exist) space";
+        let output = shell
+            .output_program(
+                OsString::from("/bin/sh"),
+                ["-c", "printf '%s' \"$1\"", "nomi-hook", literal]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+                directory.path(),
+                &HashMap::new(),
+                Some(Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.success, "{output:?}");
+        assert_eq!(output.stdout, literal);
+        assert!(!directory.path().join("must-not-exist").exists());
     }
 
     #[cfg(windows)]
