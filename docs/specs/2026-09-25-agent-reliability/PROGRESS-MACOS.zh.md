@@ -601,4 +601,5 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `COMP-003` 所列 action 集在 macOS 正向路径通过。
 - 本批只扩展确定性夹具，未发现需改共享层或产品输入实现的新根因，故不改 `PROGRESS-SHARED`。尚未覆盖
   right/middle/double/triple click、drag cancel、OCR/pixel-only refs、多显示器/DPI、用户并发输入、
-  crash/result-loss 与 soak；因此不关闭完整 Computer、D06 或 M04。
+  crash/result-loss 与 soak；因此不关闭完整 Computer、D06 或 M04。合并并发共享 settlement 修复后，
+  macOS post-merge Computer role-host **9/9**、owner-success settlement **1/1**、fixture build 与 fmt 通过。
