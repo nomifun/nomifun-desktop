@@ -3394,6 +3394,91 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_session_writes_publish_one_complete_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.files");
+        left.action_id = ActionId::from("workspace.files/write");
+        left.idempotency_key = IdempotencyKey::from("left-large-write");
+        left.operation_id = OperationId::from("left-large-write-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.files");
+        right.action_id = ActionId::from("workspace.files/write");
+        right.idempotency_key = IdempotencyKey::from("right-large-write");
+        right.operation_id = OperationId::from("right-large-write-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let left_content = "L".repeat(1024 * 1024);
+        let right_content = "R".repeat(1024 * 1024);
+        let (left_result,right_result) = tokio::join!(
+            invoke(&left_host,left.clone(),"workspace.files/write",json!({
+                "path":"shared.txt","content":left_content
+            })),
+            invoke(&right_host,right.clone(),"workspace.files/write",json!({
+                "path":"shared.txt","content":right_content
+            })),
+        );
+        let left_ok = left_result.is_ok();
+        let right_ok = right_result.is_ok();
+        assert!(left_ok || right_ok,"both authorized writes failed: left={left_result:?}, right={right_result:?}");
+        for error in [left_result.as_ref().err(),right_result.as_ref().err()].into_iter().flatten() {
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+        }
+        let bytes = std::fs::read(workspace.join("shared.txt")).unwrap();
+        assert_eq!(bytes.len(),1024 * 1024);
+        assert!(bytes.iter().all(|byte|*byte == b'L') || bytes.iter().all(|byte|*byte == b'R'));
+        let left_effects = left_store.list_effects(&left.agent_session_id).await.unwrap();
+        let right_effects = right_store.list_effects(&right.agent_session_id).await.unwrap();
+        assert_eq!(left_effects.len(),if left_ok { 1 } else { 0 });
+        assert_eq!(right_effects.len(),if right_ok { 1 } else { 0 });
+        for effect in left_effects.iter().chain(right_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        assert!(!left_store.has_unsettled_effects(&left.agent_session_id).await.unwrap());
+        assert!(!right_store.has_unsettled_effects(&right.agent_session_id).await.unwrap());
+
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut later = context(&workspace);
+        later.capability_id = CapabilityId::from("workspace.files");
+        later.action_id = ActionId::from("workspace.files/write");
+        invoke(&restarted,later,"workspace.files/write",json!({
+            "path":"shared.txt","content":"after concurrent writes"
+        })).await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),b"after concurrent writes");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn workspace_artifact_publish_and_read_use_the_file_domain_owner() {
         let directory = tempfile::tempdir().unwrap();
