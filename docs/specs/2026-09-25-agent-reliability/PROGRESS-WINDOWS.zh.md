@@ -2411,6 +2411,119 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式应用 shutdown 的 Runtime/Store/owner 顺序、close 与 cancel 组合、真实磁盘/IO fault、
   其他 Action/平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/FILE 或共享阶段。
 
+### 已知 owner 失败的 terminal settlement（W141，基线 `44633a0cf`）
+
+- S-D09-22 / LIFE-011/024、FILE-038、OBS-006/015、A04/A07/A08/A17/A19：从正式
+  `workspace.files/write` handler 把“目标为目录”的确定 owner 失败暂停在 terminal settlement 前，再
+  以独立 SQLite writer lock 令落库超时。旧代码丢弃 settlement 错误并只返回普通 owner 错误，数据库
+  却保持 Pending；首次 FAIL 日志保留。
+- 新增统一 `finish_wave2_failed_effect`，覆盖通用 managed effect 及 write/delete/artifact/stage/commit/
+  push 的已知失败分支。落库成功仍返回并重放原 owner 错误；落库失败则有界返回
+  `CAPABILITY_UNAVAILABLE`，保留原错误 code/message，并明确 terminal observation 未提交、durable
+  effect 未决且禁止自动重试。
+- 修复后首次及连续 **20/20**；健康 write Rejected/replay、patch、delete、commit、push 与成功后
+  terminal-busy 相邻回归 **6/6**，fmt/diff 通过。首个 macOS 专属 commit 过滤命令执行 0 项，已用
+  Windows 可执行反例纠正，不计通过。无模型/UI。
+- 未覆盖其他 Action 的逐分支 fault injection、正式 API/UI 投影、真实磁盘/IO fault、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/FILE/OBS 或共享阶段。
+
+### managed-effect owner 失败的 terminal settlement（W142，基线 `1f24c27f0`）
+
+- S-D09-23 / LIFE-011/024、PROC-014/039、OBS-004/006/015、A04/A08/A11/A17/A19：从生产
+  `invoke_managed_effect` 入口 reserve `workspace.process/start` Effect，夹具 owner 返回确定
+  `PROCESS_EXIT_NON_ZERO`，同时由独立 SQLite writer lock 阻塞 terminal settlement。
+- W141 的统一 helper 有界返回 `CAPABILITY_UNAVAILABLE`，完整保留原 error code 与 exit 原因并明确
+  terminal observation 未提交；Effect 保持 Pending。关闭并重开数据库后，同 key 与新 key 均在 owner
+  closure 前被 durable/resource fence 拒绝，两个独立调用计数保持 0。
+- 首次产品运行及连续 **20/20**，W141 write 未结算与健康 Rejected/replay 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无真实进程/模型/UI。
+- 未覆盖正式 Runtime process owner、cancel/kill 与 terminal 的事务顺序、API/UI 投影、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/PROC/OBS 或共享阶段。
+
+### 跨 owner 失败结算的有界脱敏投影（W143，基线 `ff12a1887`）
+
+- S-D09-24 / LIFE-011/024、BROW-011/012、COMP-010、SSH-003/008、OBS-009/015/016、A08/A15/
+  A16/A17/A19：以 secret 开头、随后 2,000 个 emoji 的 owner 错误触发 terminal Store failure。旧聚合
+  消息达到 **4,291 bytes**，超过 Kernel 2 KiB 投影上限且未在聚合边界再次脱敏；首次 FAIL 保留。
+- action/code/owner/settlement 现分别先脱敏、过滤控制字符并按 UTF-8 字节预算截断；最终消息
+  ≤2,048 bytes，仍保留原 code、脱敏标记和禁止自动重试结论。共享 helper 覆盖 Browser、Computer
+  Role 与 SSH 的确定失败；Role 新增 `EffectSettlementFailure/CAPABILITY_UNAVAILABLE`，Store/
+  admission/terminal 错误不再误标 provider failure。
+- 修复后首次及连续 **20/20**；settlement **8/8**、Browser feature **1/1**、Computer feature **1/1**、
+  W142 与 push 相邻 **2/2**，fmt/diff 通过。Browser 首个未启 feature 的过滤命令执行 0 项，纠正后
+  不计通过。无真实 Browser/Computer/SSH、模型/UI。
+- 未覆盖三类 owner 的逐入口 fault injection、uncertain settlement、外部依赖与其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/BROW/COMP/SSH/OBS 或共享阶段。
+
+### uncertain terminal 未提交时保留 owner 原因（W144，基线 `fd7657d5c`）
+
+- S-D09-25 / LIFE-007/011/024、VCS-013、BROW-012/013、COMP-010、SSH-005/008、OBS-006/015/016、
+  A07/A08/A15/A16/A17/A19：reserve external Effect 后模拟 owner 已判定 `EFFECT_OUTCOME_UNKNOWN`，
+  再关闭 terminal Store。旧路径只返回 closed-pool 错误，丢失 remote 已收字节后断连的未知结果原因；
+  数据库实际仍为 Pending，首次 FAIL 保留。
+- 新增有界脱敏的 `finish_wave2_uncertain_effect`；uncertain terminal 无法提交时同时保留 action、原
+  error code/message 和落库失败原因，并明确 durable Effect 仍 Pending、禁止自动重试、恢复前必须
+  核对 external owner。helper 覆盖 VCS commit/push、Browser、Computer Role 与 SSH uncertain 分支。
+- 修复后首次及连续 **20/20**；Pending/Unknown 与 push **2/2**、Browser feature **1/1**、Computer
+  feature **1/1**，fmt/diff 通过。无真实 remote/Browser/Computer/SSH、模型/UI。
+- 未覆盖各 owner 的逐入口 terminal fault injection、正式 reconcile/UI 投影、外部依赖与其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/VCS/BROW/COMP/SSH/OBS 或共享阶段。
+
+### success terminal 未提交时明确效果已发生（W145，基线 `0aeea5cac`）
+
+- S-D09-26 / LIFE-006/011/024、FILE-038、VCS-013、BROW-012、COMP-010、SSH-005、OBS-006/015/020、
+  A04/A05/A07/A17/A19：从正式 `workspace.files/write` handler 发布完整文件后暂停在 terminal
+  settlement，并以 SQLite writer lock 令落库超时。旧路径只返回 `database is locked`，调用方无法
+  判断物理效果已发生，Effect 实际为 Pending；首次 FAIL 保留。
+- 新增 `finish_wave2_succeeded_effect`：只记录 canonical result digest，不复制潜在敏感结果正文；落库
+  失败时明确 owner 已报告成功、terminal observation 未提交、durable Effect 仍 Pending、禁止自动
+  重试并要求重读 owner 状态。helper 覆盖 managed effect、write/delete/artifact/stage/commit/push、
+  Browser、Computer Role 与 SSH 成功分支；patch 保留更强的逐文件重读诊断。
+- 修复后首次及连续 **20/20**；managed success/replay、workspace replay、bare push replay 与 busy
+  fence **4/4**，Browser feature **1/1**、Computer feature **1/1**，fmt/diff 通过。无正式 UI/真实
+  外部 owner。
+- 未覆盖各 Action 的逐入口 terminal fault、API/UI 投影、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 LIFE/FILE/VCS/BROW/COMP/SSH/OBS 或共享阶段。
+
+### Kernel 区分三类 settlement loss（W146，基线 `ead23eb2d`）
+
+- S-D09-27 / LIFE-006/007/011/024、FILE-038、OBS-006/009/015/016/020、A05/A07/A08/A15/A16/A17/A19：
+  将 success/failed/unknown 三类内部 settlement 错误送入正式 `kernel_error_for_action` 文件写投影。
+  旧路径全部压成普通 “Workspace file operation failed”；success 丢失“效果已发生/不可重试”，known
+  failure 还可能因 `changed` 被误判为 source precondition，首次 FAIL 保留。
+- Kernel 现先识别三组稳定内部 marker，再返回固定、≤2 KiB 且不含 host 路径/secret 的恢复指引：
+  success 要求不得声称未变并重读；failed 明确 failure receipt 未落库且仍 Pending；unknown 要求核对
+  external owner。
+- 修复后首次及连续 **20/20**；既有普通 file、结构化 patch、process 指引 **3/3**，fmt/diff 通过。
+  无完整 Runtime invocation/API/UI。
+- 未覆盖非文件 Action 的模型安全投影、正式 tool row/UI、其他平台及 N3/100 seed/LONG/99%；不关闭
+  完整 LIFE/FILE/OBS 或共享阶段。
+
+### 非文件 Action 保留三类 settlement loss（W147，基线 `0815291d4`）
+
+- S-D09-28 / LIFE-006/007/011/024、PROC-039、BROW-012、SSH-008、OBS-006/009/015/016/020、A07/A08/
+  A15/A16/A17/A19：将 success settlement loss 送入 process 投影，failed/unknown 分别送入普通
+  Browser/SSH 类投影。旧 process 文案把已成功效果改写为“owner 未完成、可能不确定”，普通 capability
+  则只剩 `handler failed with CAPABILITY_UNAVAILABLE`；首次 FAIL 保留。
+- 三类稳定 marker 识别提升到 Action 特判之前，统一返回固定、无 host 路径/secret 的 success/failed/
+  unknown 指引；普通 process spawn/cwd/control 指引和其他 typed error 保持原顺序。
+- 修复后首次及连续 **20/20**；W146 文件三态、process launch 与 active-execution 安全投影 **3/3**，
+  fmt/diff 通过。无完整 Runtime invocation/API/UI。
+- 未覆盖正式 tool result/event/UI、Browser/SSH/Computer 真实入口、其他平台及 N3/100 seed/LONG/99%；
+  不关闭完整 LIFE/PROC/BROW/SSH/OBS 或共享阶段。
+
+### Runtime Kernel 完整投影三类 settlement loss（W148，基线 `ea34983cd`）
+
+- S-D09-29 / OBS-001/006/009/015/016/020、REG-004/007、A01/A03/A08/A15/A16/A17/A19：使用三套
+  真实编译 Snapshot/ActiveSet/ToolPlan 和正式 `KernelAgentToolInvoker`，分别注入 success/failed/
+  unknown settlement loss。
+- 三次均只 dispatch 一次；Runtime typed error 保持 `CAPABILITY_UNAVAILABLE`，W147 固定恢复语义、
+  ≤2 KiB 上限和 host 路径/secret 隔离完整穿过 Kernel 与 Agent Runtime 适配。
+- 新增场景首次及连续 **20/20**；正常 Kernel invocation、未选择 capability 的 plan 拒绝及 W147
+  Engine 投影 **3/3**，fmt/diff 通过。生产代码无需修改，无事件 Store/API/UI。
+- 未覆盖正式 tool result/event 持久化、tool row/UI、不同 Action/角色及其他平台、N3/100 seed/
+  LONG/99%；不关闭完整 REG/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

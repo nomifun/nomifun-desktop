@@ -52,8 +52,8 @@ use crate::{
 };
 
 use super::agent_wave2_host::{
-    Wave2EffectAdmission, Wave2EffectCompletion, begin_wave2_exclusive_effect,
-    finish_wave2_effect,
+    Wave2EffectAdmission, begin_wave2_exclusive_effect, finish_wave2_failed_effect,
+    finish_wave2_succeeded_effect, finish_wave2_uncertain_effect,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -475,23 +475,31 @@ impl BrowserRoleOwner {
         };
         match self.dispatch(&admission, request.operation).await {
             Ok(output) => {
-                finish_wave2_effect(
+                finish_wave2_succeeded_effect(
                     &reservation,
-                    Wave2EffectCompletion::Succeeded(&output),
+                    action.action_id(),
+                    &output,
                 )
                 .await?;
                 Ok(output)
             }
             Err(error) => {
                 let host_error = Wave2HostPortError::from(error);
-                let completion = if strategy.is_external_uncertain()
+                if strategy.is_external_uncertain()
                     && browser_outcome_may_be_unknown(&host_error.code)
                 {
-                    Wave2EffectCompletion::Uncertain(&host_error)
+                    finish_wave2_uncertain_effect(
+                        &reservation,
+                        action.action_id(),
+                        &host_error,
+                    ).await?;
                 } else {
-                    Wave2EffectCompletion::Failed(&host_error)
-                };
-                finish_wave2_effect(&reservation, completion).await?;
+                    finish_wave2_failed_effect(
+                        &reservation,
+                        action.action_id(),
+                        &host_error,
+                    ).await?;
+                }
                 Err(host_error)
             }
         }
