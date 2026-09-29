@@ -114,6 +114,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   零恢复命令/历史检索/截断，独立 29 项断言、工作区和清理通过。cancelled/lost/force-kill、其他
   Provider/角色/平台及长期矩阵仍开放，不关闭完整 CTRL/PROC/REAL 或共享阶段。
 
+- S-D02-20（CTRL-006/007、CMD-139、PROC-033、A02/A05/A09/A13/A17/A18/A19 Windows 托管进程链
+  子断言）：W104 用正式 Tauri 和 `step-3.7-flash` 补 S-D02-16 的 Windows 路径。模型首次精确执行
+  `start_process`→`poll_process`→`cancel_process`→`report_completion`；同一 process ID 的 poll 输出
+  `W104-READY`，cancel 返回 `state=cancelled`、`cleanup.reaped=true`。唯一 supported criterion 按顺序
+  引用 start/poll/cancel 三个顶层 call ID，没有复制最新 ID、搜索历史或重复清理。单回合 4 步、143 条
+  canonical 事件，start/cancel 两个 managed effect returned，poll 不制造 effect；独立 30 项断言、
+  工作区、进程和应用清理及正式备份通过。生产代码无需修改。PTY/stdin/resize、失败 poll/cancel、N3、
+  其他 Provider/角色/平台与长期矩阵仍开放，不关闭完整 CMD/PROC/CTRL 或共享阶段。
+
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但
   step spec 的“捕获完整输出…业务文件列表”和“在输出中…业务文件”均被旧词法合同
