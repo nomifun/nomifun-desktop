@@ -1774,6 +1774,8 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   应用、profile 和 Vite 进程清零，正式备份完成。本批无需产品代码修改。未覆盖外部文件部分效果、
   force-kill/lost、其他命令/Provider/模型/角色、macOS 与 N3/100 seed/LONG/99%；不关闭完整
   PROC-048/REAL 或共享阶段。
+- W103 后续语义审计确认 W96 的 timeout criterion 和 recovery criterion 均引用 recovery call ID；
+  因此 W96 的 35 项只通过计数、终态与清理，完成证据关联子断言追记为失败并转 S-D02-19 修复。
 
 ### typed non-start 后的控制可见性与失败披露（W97，基线 `45aef48b3`）
 
@@ -1892,6 +1894,26 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   tool/command 失败计数均为 1，零历史检索/截断/重试。独立 **27 项**断言、工作区 tree hash
   `f45956b6…a90d`、应用/profile/Vite 与匹配进程清零、正式备份均通过。timeout/cancel/交互终态、
   其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验；不关闭完整 CTRL/PROC/REAL 或共享阶段。
+
+### timeout 终态作为自身完成证据（W103，基线 `1ae305be8`）
+
+- S-D02-19 / CTRL-006/007、G0-023、PROC-048、REAL-023、A05/A08/A09/A11/A13/A17/A18/A19：
+  审计 W96 Session `01a0eb8c-1f34-72f1-9591-bee302dac00e` 时发现，timeout criterion 和 recovery
+  criterion 都引用了 recovery call ID；原独立断言遗漏逐 criterion 的 call/result 匹配。W96 的计数、
+  timeout/reaped 和清理仍成立，但证据关联子断言追记失败，不以当时 completed 覆盖。
+- 新回归首次 **0/1**：`state=timed_out`、`cleanup.reaped=true`、同一 launch identity 已确定，仍因没有
+  exit code 被排除。现将已回收 timeout 纳入命令自身的不可变 terminal/output 证据；它只证明 timeout
+  失败，不证明成功或当前 workspace 状态。精确回归 **20/20**，Agent Runtime **194/194**，workspace
+  fmt、diff 与正式 Tauri 构建通过；仅有既有 warning。
+- 二进制 `c11540bd33ae194588f8aa9ee9c625c6bf2e8e54b3cb13d81253f065a052034f` 使用全新
+  data/work/profile 和 StepFun Coding Plan / `step-3.7-flash`。Session
+  `01a0ebee-23ee-70c3-8cfd-9be3210867a0` 精确为一次 250 ms timeout→一次 `update_plan`→一次
+  supported completion，共 3 个模型步骤、101 条事件、1 个 returned effect；criterion 只引用
+  timeout call，tool/command 计数均 1，零恢复命令/历史检索/截断。Windows pipe 在 1,152 ms 内经
+  interrupt→terminate 收敛，`reaped=true`、未 force kill。独立 **29 项**断言、工作区 tree hash
+  `9d167b72…8e88`、应用/profile/Vite 与 ping/cmd 清零、正式备份均通过。
+- cancelled/lost/force-kill、外部部分效果、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍待验；
+  不关闭完整 CTRL/PROC/REAL 或共享阶段。
 
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
