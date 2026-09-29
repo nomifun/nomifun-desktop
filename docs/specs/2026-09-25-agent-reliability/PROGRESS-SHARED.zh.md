@@ -702,6 +702,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   137 条事件、2 个 returned effect，独立 31 项断言通过，工作区和进程清理一致。其他 spawn
   permission/format/cwd、其他 Provider/角色/平台及长期矩阵仍开放，不关闭完整 PROC/REAL 或共享阶段。
 
+- S-D04-28（PROC-029/030/031、A11/A13/A17/A19 stdin 大小、owner 与终态边界子断言）：W106
+  首轮新反例全部通过，没有产品首次失败。Engine owner 接受精确 1 MiB 单次写入；1 MiB+1 在进入
+  transport 前拒绝，随后同一进程只收到允许的 4 字节，证明无部分写。已结算进程拒绝迟到 stdin，
+  再从 cursor 0 重放仍保持原 exited 终态和输出。App host 将 W105 新增的结构化 LF 一并计入 1 MiB
+  预算，精确上限加 LF 同样在 journal/dispatch 前拒绝。既有 Runtime 回归另确认未知 Session 与错误
+  invocation/call owner 使用稳定拒绝码且零写入，终态 PTY resize 失败而不复活。三项新 Engine 反例
+  **60/60**，Engine **32 通过 / 1 ignored**、App host **4/4**，Runtime 三项 owner/terminal 定向检查
+  通过。本批只补最小回归并提取等价预算判断；未调用模型或正式 UI。多次分块累计上限、并发
+  input/close、终态错误的正式 UI 呈现、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
