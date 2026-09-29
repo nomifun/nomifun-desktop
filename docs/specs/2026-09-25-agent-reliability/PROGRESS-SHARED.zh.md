@@ -39,7 +39,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
-| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | S-D06-01 修复 A11y/截图媒体耦合；S-D06-02 保留 Computer plan discoverability；S-D06-03 区分 proven stale rejection 与 uncertain effect，其他平台/资源待走查 |
+| S-D06 | 67 | Skill/MCP/Plugin/Browser/Computer 的发现、冻结与生命周期 | S-D06-01 修复 A11y/截图媒体耦合；S-D06-02 保留 Computer plan discoverability；S-D06-03 区分 proven stale rejection 与 uncertain effect；S-D06-04 缺失绝对 launch 路径 fail closed，其他平台/资源待走查 |
 | S-D07 | 53 | 领域 owner/cardinality、跨实例与精确目标绑定 | Canvas/PAL 入口本轮；S-D07-01 修复画布名称上下文，其他平台/完整集合待验 |
 | S-D08 | 103 | 五类 Agent 的产品入口与目标能力；逐角色验证，不互相代替 | 首批 Windows 四条路径已有结果；完整矩阵待走查 |
 | S-D09 | 75 | 恢复 fence、取消、并发、压缩、预算与长稳；按状态边界注入故障 | P1 故障验证后安排 LONG/soak |
@@ -48,6 +48,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | **合计** | **675** | 只统计共享 Case 定义 | 不增加 4,740 个平台结果槽 |
 
 ## 历史修复与未关闭项
+
+- S-D06-04（`COMP-006`、`OBS-005/016` 的共享 Computer launch 缺失绝对路径子断言）：macOS 正式
+  Tauri 首败对明确不存在的 `.app` 绝对路径调用 `computer/launch`；`open::that_detached` 只确认成功
+  派生系统 opener，owner 随即错误返回 Opened，managed effect 误结算 returned，实际路径/进程均不存在。
+  现 `nomi-computer` 在 OS 调用前拒绝不存在的绝对 target 及显式 app 路径；已存在路径和相对 app 名
+  保持原合同。Engine Core 只对精确 `computer/launch` 投影 bounded 安全指引，明确路径不存在、使用确切
+  已安装应用或现存文件/目录、不要猜测替代或原样重试、没有成功启动；不向模型泄漏私有路径或底层诊断。
+  中间正式运行已证明 owner/effect rejected，但旧 Kernel 投影只剩泛化 code，亦独立保留。
+- launch **7/7**、bounded guidance **1/1**、fmt 与两次正式 Tauri build 通过；macOS 最终 2-step /
+  34-event Turn completed，唯一 launch effect rejected、目标仍不存在、fixture failure=null，两 DB `ok`
+  且进程/监听清零。Windows/Linux 原生 opener、相对缺失 app 名、TOCTOU 删除及完整 `COMP-006` 未由此
+  代判，不关闭共享阶段。
 
 - S-D06-03（`COMP-002/010/011`、A07/A08/A13/A17/A20 的共享 Computer stale/settlement 子断言）：
   macOS AX generation 未因外部窗口/焦点变化前进，旧 semantic ref 可向已退到后台的 TextEdit 输入；

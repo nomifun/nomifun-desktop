@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09 正式 UI 已验 raw move/click/scroll；取消/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09/10 已验 raw pointer 与缺失绝对 launch；取消/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -603,3 +603,23 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   right/middle/double/triple click、drag cancel、OCR/pixel-only refs、多显示器/DPI、用户并发输入、
   crash/result-loss 与 soak；因此不关闭完整 Computer、D06 或 M04。合并并发共享 settlement 修复后，
   macOS post-merge Computer role-host **9/9**、owner-success settlement **1/1**、fixture build 与 fmt 通过。
+
+- **M04-10 macOS missing absolute Computer launch**（`COMP-006` 缺失应用路径及 `OBS-005/016` 错误
+  可见性子断言）：正式 Tauri 首败请求唯一、明确不存在的隔离 `.app` 绝对路径；旧
+  `open::that_detached` 仅成功派生 `/usr/bin/open` 即返回，UI 随后暂停，managed launch effect 错误
+  returned，而路径、应用进程和窗口均不存在。完整首败保留于
+  `2026-09-29/macos/m04-computer-missing/run-002-first-ui/`。
+- 产品在 Computer launch owner 的 OS 调用前新增 absolute target/app existence gate，不猜替代路径；
+  Engine Core 对精确 `computer/launch` 的 provider failure 投影固定安全指引，不含真实私有路径，明确
+  “target path does not exist / Do not guess / No successful launch”。首修正式运行已让 effect rejected，
+  但旧 Kernel 仍只给模型泛化 `ROLE_HOST_PROVIDER_FAILURE`；该 31-event 中间失败独立保留于
+  `run-006-final-ui/`，未用 code-only 结果关闭 Case。
+- 最终 `run-010-final-ui`（Session `01a0ed6c-7414-7b12-8ed8-9734f4195e26`）为 **2 model steps /
+  34 events**：唯一 launch effect 为 rejected，bounded observation 保留 owner 的精确不存在原因；模型
+  可见 tool error 三处持久投影均含安全恢复指引，Turn completed。正式 UI 明确“不存在的应用路径已被
+  拒绝，未猜测替代路径”；目标始终不存在，无替代 app/process/window，fixture
+  `missing_launch_rejected=true`、failure=null；运行中/停止后两 DB 均 `ok`，app/fixture process 和两个
+  listener 为 0。launch **7/7**、guidance **1/1**、两次正式 Tauri build、codesign、fmt/diff 通过。
+- 本批公共根因另记 `S-D06-04`。相对缺失 app 名、安装后又删除的 TOCTOU、显式 opener 异步失败、撤权、
+  Windows/Linux 原生 opener 与 soak 仍开放，因此只关闭 macOS 缺失绝对路径子断言，不关闭完整
+  `COMP-006`、Computer、D06 或 M04。

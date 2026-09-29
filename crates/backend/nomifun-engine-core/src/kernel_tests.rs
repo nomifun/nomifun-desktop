@@ -323,7 +323,7 @@ mod tests {
             "CAPABILITY_UNAVAILABLE",
             "process spawn failed: secret=NEVER_EMIT and private cwd",
         );
-        let mapped = kernel_error_for_action(error, true, false).to_string();
+        let mapped = kernel_error_for_action(error, true, false, false).to_string();
         assert!(mapped.contains("command field must contain only the executable"));
         assert!(mapped.contains("\"args\":[\"test\""));
         assert!(!mapped.contains("NEVER_EMIT"));
@@ -335,6 +335,7 @@ mod tests {
             ),
             false,
             false,
+            false,
         ).to_string();
         assert!(!unrelated.contains("Put only the executable in command"));
     }
@@ -343,16 +344,36 @@ mod tests {
     fn file_failure_explains_repair_without_disclosing_host_diagnostics() {
         let detail = "workspace.files failed: cannot resolve parent of PRIVATE_PATH: secret=NEVER_EMIT";
         let mapped = kernel_error_for_action(
-            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true,
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, true, false,
         ).to_string();
         assert!(mapped.contains("parent is unavailable"));
         assert!(mapped.contains("created automatically"));
         assert!(!mapped.contains("PRIVATE_PATH"));
         assert!(!mapped.contains("NEVER_EMIT"));
         let unrelated = kernel_error_for_action(
-            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false,
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", detail), false, false, false,
         ).to_string();
         assert!(!unrelated.contains("created automatically"));
+    }
+
+    #[test]
+    fn computer_launch_missing_path_has_bounded_actionable_guidance() {
+        let detail = "role provider failed: launch target path \"PRIVATE_PATH\" does not exist; secret=NEVER_EMIT";
+        let mapped = kernel_error_for_action(
+            KernelError::capability_execution_failed("ROLE_HOST_PROVIDER_FAILURE", detail),
+            false,
+            false,
+            true,
+        );
+        let EngineToolError::CapabilityKernel { code, message } = mapped else {
+            panic!("Computer launch failure changed error class")
+        };
+        assert_eq!(code, "ROLE_HOST_PROVIDER_FAILURE");
+        assert!(message.contains("target path does not exist"), "{message}");
+        assert!(message.contains("Do not guess"), "{message}");
+        assert!(message.contains("No successful launch"), "{message}");
+        assert!(!message.contains("PRIVATE_PATH"));
+        assert!(!message.contains("NEVER_EMIT"));
     }
 
     #[test]
@@ -376,6 +397,7 @@ mod tests {
                 KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
                 false,
                 true,
+                false,
             );
             let EngineToolError::CapabilityKernel { code,message } = mapped else {
                 panic!("settlement loss changed error class")
@@ -413,6 +435,7 @@ mod tests {
             let mapped = kernel_error_for_action(
                 KernelError::capability_execution_failed("CAPABILITY_UNAVAILABLE",detail),
                 is_process,
+                false,
                 false,
             );
             let EngineToolError::CapabilityKernel { code,message } = mapped else {
