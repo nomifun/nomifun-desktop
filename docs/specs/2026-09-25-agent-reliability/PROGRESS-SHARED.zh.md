@@ -110,6 +110,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   归约。Git worker/SQLite terminal commit 中的进程强杀、主动 remote-ref 对账、第三方改写、其他平台
   及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
 
+- S-D05-12（VCS-013、CTRL-009、LIFE-006/007/016/017、OBS-008/014、A05/A13/A17/A19 owner
+  核对与恢复子断言）：W114 在 W113 的完整 App crash-image 链上增加真实 local bare remote；夹具先
+  独立推送并读取精确 destination ref，再由正式 `execution/effects` 列出唯一 Unknown push，确认
+  `automatic_replay_authorized=false`。错误 input digest 的核对请求在事务前拒绝且 Effect 仍 Unknown；
+  认证 owner 以 exact digest、pause revision 和有界 remote-ref evidence 提交
+  `execution/reconcile` 后，Store 只写一组 attestation/`effect/reconciled`，同 key 重送返回原回执，
+  不伪造原 push receipt。随后带 cleanup attestation 恢复同一 Turn，checkpoint 正常完成；remote ref
+  保持原提交，Pending/Unknown 清零。新增夹具首次因漏定义 API path 编译失败，修正夹具后产品断言
+  首次及连续 **20/20**；完整 App 恢复 **7/7**、Store pause/reconcile **11/11**。生产代码无需修改，
+  无正式 UI/生产 remote。领域级自动对账仍是文档明确未实现的限制；第三方改写、网络 remote、UI
+  核对控制面、其他平台及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个

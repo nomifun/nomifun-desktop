@@ -2069,6 +2069,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   remote-ref 对账、第三方并发改写、正式 UI/模型、其他平台及 N3/100 seed/LONG/99%；不关闭完整
   VCS/LIFE 或共享阶段。
 
+### owner remote-ref 核对后恢复（W114，基线 `b96426178`）
+
+- S-D05-12 / VCS-013、CTRL-009、LIFE-006/007/016/017、OBS-008/014、A05/A13/A17/A19：
+  在 W113 的完整 App crash image 上增加真实 local bare remote。夹具先独立推送并读取精确
+  `refs/heads/main`，再通过正式 `execution/effects` 读取唯一 Unknown push；返回不含自动重放许可。
+- 错误 input digest 的核对请求被拒且 Effect 保持 Unknown。认证 owner 使用 exact digest、pause
+  revision 和有界 remote-ref evidence 调用 `execution/reconcile` 后，只产生一个 attestation 与一个
+  `effect/reconciled`；同 key 重送返回原回执，记录明确不是原始 push receipt。带 cleanup attestation
+  恢复同一 Turn 后，checkpoint 正常完成、Pending/Unknown 清零，bare remote ref 仍为原提交。
+- 新夹具首次因漏定义 execution API path 编译失败，日志保留；修正夹具后首次产品运行及连续
+  **20/20** 通过，完整 App 恢复 **7/7**、Store pause/reconcile **11/11**，fmt/diff 通过。生产代码
+  无需修改，无正式 UI/生产 remote。领域级自动对账按现有设计仍未实现；第三方 remote 改写、网络
+  remote、UI 核对控制面、其他平台及 N3/100 seed/LONG/99% 仍待验，不关闭完整 VCS/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
