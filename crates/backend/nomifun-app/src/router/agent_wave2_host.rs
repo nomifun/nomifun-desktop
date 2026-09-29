@@ -5728,6 +5728,108 @@ mod tests {
         assert!(blocked_target.is_dir());
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn failed_managed_effect_with_uncommitted_terminal_retains_owner_error_and_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let lock_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone())
+            .await
+            .unwrap();
+        let host = Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.process");
+        call.action_id = ActionId::from("workspace.process/start");
+        call.idempotency_key = IdempotencyKey::from("failed-managed-effect-uncommitted-terminal");
+        call.operation_id = OperationId::from("failed-managed-effect-uncommitted-terminal-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let binding = workspace_typed_binding(&call).unwrap().clone();
+        let input = StrictJsonValue(json!({"command":"fixture-owner"}));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let invocation_host = Arc::clone(&host);
+        let invocation_call = call.clone();
+        let invocation_input = input.clone();
+        let owner_entered = Arc::clone(&entered);
+        let owner_release = Arc::clone(&release);
+        let invocation = tokio::spawn(async move {
+            invocation_host.invoke_managed_effect(
+                &invocation_call,&binding,&invocation_input,
+                move || async move {
+                    owner_entered.notify_one();
+                    owner_release.notified().await;
+                    Err::<StrictJsonValue,Wave2HostPortError>(Wave2HostPortError::new(
+                        "PROCESS_EXIT_NON_ZERO","fixture process exited with code 17",
+                    ))
+                },
+            ).await
+        });
+        tokio::time::timeout(Duration::from_secs(5),entered.notified()).await
+            .expect("managed owner must run after durable admission");
+        let mut writer = lock_database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(6),invocation).await
+            .expect("managed failure settlement must stop at the bounded SQLite busy timeout")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner failed with PROCESS_EXIT_NON_ZERO"),"{error:?}");
+        assert!(error.message.contains("fixture process exited with code 17"),"{error:?}");
+        assert!(error.message.contains("terminal observation could not be committed"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        writer.commit().await.unwrap();
+        drop(host);
+        drop(store);
+        database.close().await;
+        lock_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let same_owner_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let same_called = Arc::clone(&same_owner_called);
+        let same_error = restarted.invoke_managed_effect(
+            &call,workspace_typed_binding(&call).unwrap(),&input,
+            move || async move {
+                same_called.store(true,std::sync::atomic::Ordering::Release);
+                Ok(StrictJsonValue(json!({"must_not":"run"})))
+            },
+        ).await.unwrap_err();
+        assert!(same_error.message.contains("durable pending"),"{same_error:?}");
+        assert!(!same_owner_called.load(std::sync::atomic::Ordering::Acquire));
+
+        let mut different = call.clone();
+        different.idempotency_key = IdempotencyKey::from("failed-managed-effect-different-key");
+        different.operation_id = OperationId::from("failed-managed-effect-different-operation");
+        ensure_test_effect_context(&reopened_store,&different).await;
+        let different_owner_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let different_called = Arc::clone(&different_owner_called);
+        let different_error = restarted.invoke_managed_effect(
+            &different,workspace_typed_binding(&different).unwrap(),&input,
+            move || async move {
+                different_called.store(true,std::sync::atomic::Ordering::Release);
+                Ok(StrictJsonValue(json!({"must_not":"run"})))
+            },
+        ).await.unwrap_err();
+        assert!(different_error.message.contains("unsettled"),"{different_error:?}");
+        assert!(!different_owner_called.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(reopened_store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn pending_patch_fences_same_and_new_keys_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();

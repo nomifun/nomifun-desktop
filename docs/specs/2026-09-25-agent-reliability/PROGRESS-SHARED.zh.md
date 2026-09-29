@@ -342,6 +342,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   纠正，不计通过。无模型/UI。其他 Action 的逐分支 fault injection、正式 API/UI 投影、真实磁盘/IO
   fault、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/FILE/OBS 或共享阶段。
 
+- S-D09-23（LIFE-011/024、PROC-014/039、OBS-004/006/015、A04/A08/A11/A17/A19 managed-effect
+  失败结算子断言）：W142 从生产 `invoke_managed_effect` 入口 reserve `workspace.process/start` Effect，
+  夹具 owner 返回确定 `PROCESS_EXIT_NON_ZERO`，同时由独立 SQLite writer lock 阻塞 terminal settlement。
+  W141 的统一 helper 有界返回 `CAPABILITY_UNAVAILABLE`，完整保留原 error code 与 exit 原因并明确
+  terminal observation 未提交；Effect 保持 Pending。关闭并重开数据库后，同 key 与新 key 均在 owner
+  closure 前被 durable/resource fence 拒绝，两个独立调用计数保持 0。首次运行及连续 **20/20**，
+  W141 write 未结算与健康 Rejected/replay 相邻回归 **2/2**。生产代码无需修改，无真实进程/模型/UI。
+  正式 Runtime process owner、cancel/kill 与 terminal 的事务顺序、API/UI 投影、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 LIFE/PROC/OBS 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

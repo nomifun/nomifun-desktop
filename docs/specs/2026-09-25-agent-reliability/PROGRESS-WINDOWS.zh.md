@@ -2427,6 +2427,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖其他 Action 的逐分支 fault injection、正式 API/UI 投影、真实磁盘/IO fault、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/FILE/OBS 或共享阶段。
 
+### managed-effect owner 失败的 terminal settlement（W142，基线 `1f24c27f0`）
+
+- S-D09-23 / LIFE-011/024、PROC-014/039、OBS-004/006/015、A04/A08/A11/A17/A19：从生产
+  `invoke_managed_effect` 入口 reserve `workspace.process/start` Effect，夹具 owner 返回确定
+  `PROCESS_EXIT_NON_ZERO`，同时由独立 SQLite writer lock 阻塞 terminal settlement。
+- W141 的统一 helper 有界返回 `CAPABILITY_UNAVAILABLE`，完整保留原 error code 与 exit 原因并明确
+  terminal observation 未提交；Effect 保持 Pending。关闭并重开数据库后，同 key 与新 key 均在 owner
+  closure 前被 durable/resource fence 拒绝，两个独立调用计数保持 0。
+- 首次产品运行及连续 **20/20**，W141 write 未结算与健康 Rejected/replay 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无真实进程/模型/UI。
+- 未覆盖正式 Runtime process owner、cancel/kill 与 terminal 的事务顺序、API/UI 投影、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/PROC/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
