@@ -1038,6 +1038,13 @@ impl EngineKernelSession {
             route_image_input: self.route_image_input,
         };
         let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(invoker);
+        let invoker = super::engine_computer_media::ComputerMediaTools {
+            inner: invoker,
+            snapshot: self.compiled.clone(),
+            active: self.active.clone(),
+            route_image_input: self.route_image_input,
+        };
+        let invoker: Arc<dyn nomifun_engine_core::EngineToolInvoker> = Arc::new(invoker);
         let invoker = match self.robot_tools.get().and_then(Option::as_ref) {
             Some(frozen) => Arc::new(super::engine_robot_tools::SessionTools {
                 frozen: frozen.clone(),

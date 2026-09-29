@@ -18,7 +18,10 @@ use nomi_types::tool::{JsonSchema, ToolResult};
 use crate::input::{self, ScrollDirection};
 use crate::keys::parse_key_combo;
 use crate::scale::{map_llm_coord, map_screen_coord};
-use crate::screen::{CaptureGeometry, capture_screen, encode_png};
+use crate::screen::{
+    CANONICAL_SCREENSHOT_PNG_BYTES, CaptureGeometry, capture_screen, encode_png,
+    encode_png_with_limit,
+};
 use crate::fallback_backend;
 
 const MAX_WAIT_SECONDS: f64 = 5.0;
@@ -171,6 +174,25 @@ impl ComputerTool {
                 granted_action.id()
             ));
         }
+        if granted_action == crate::capability::ComputerAction::A11yObserve
+            && native_operation == "observe"
+        {
+            // Keep the canonical Accessibility action independent from Screen
+            // Recording. The separate computer/observe action owns pixels;
+            // attaching a full screenshot here couples TCC grants and can force
+            // avoidable model-context compaction for an otherwise small tree.
+            return self.do_observe(false).await;
+        }
+        if granted_action == crate::capability::ComputerAction::Observe
+            && native_operation == "screenshot"
+        {
+            // The canonical Kernel port is JSON-only until the application
+            // restores a typed image part. Bound the PNG before that envelope
+            // so high-entropy screens cannot be truncated into invalid JSON.
+            return self
+                .do_screenshot_with_limit(&input, Some(CANONICAL_SCREENSHOT_PNG_BYTES))
+                .await;
+        }
         self.execute_native(input, &native_operation).await
     }
 
@@ -178,7 +200,7 @@ impl ComputerTool {
         tracing::debug!(action = %action, "ComputerTool executing");
 
         match action {
-            "observe" => self.do_observe().await,
+            "observe" => self.do_observe(true).await,
             "click_element" => self.do_click_element(&input).await,
             "set_element_value" => self.do_set_element_value(&input).await,
             "right_click_element" => {
@@ -217,13 +239,18 @@ impl ComputerTool {
         guard.as_ref().unwrap().clone()
     }
 
-    /// a11y-first "look": read the focused window's accessibility tree, return a
-    /// numbered element list, and (when screen capture is available) a
-    /// Set-of-Marks overlay screenshot. Needs only the Accessibility grant for
-    /// the element list; the overlay additionally needs Screen Recording.
-    async fn do_observe(&self) -> ToolResult {
+    /// A11y-first "look": read the focused window's accessibility tree and
+    /// return a numbered element list. Legacy combined-tool callers may request
+    /// an opportunistic Set-of-Marks overlay; the canonical
+    /// `computer/a11y.observe` action always passes `include_pixels=false` so
+    /// its output and authority remain independent from Screen Recording.
+    async fn do_observe(&self, include_pixels: bool) -> ToolResult {
         // A failed refresh must not leave old OCR/pixel targets actionable.
         *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        *self
+            .last_capture
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         let engine = match self.engine() {
             Ok(e) => e,
             Err(msg) => {
@@ -255,6 +282,37 @@ impl ComputerTool {
         // order); OCR-fused targets continue after this so refs never collide.
         let max_ax_ref = snap.entries.iter().map(|e| e.r#ref).max().unwrap_or(0);
 
+        let ax_only = |note: &str| {
+            let mut cached: Vec<CachedEntry> = Vec::with_capacity(snap.entries.len());
+            for e in &snap.entries {
+                let (cx, cy) = e.bounds.center();
+                cached.push(CachedEntry {
+                    display: e.clone(),
+                    target: CachedTarget::Ax {
+                        engine_ref: e.r#ref,
+                        screen_center: (cx as i32, cy as i32),
+                    },
+                });
+            }
+            let count = cached.len();
+            *self
+                .last_snapshot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SnapshotCache {
+                generation: snap.generation,
+                entries: cached,
+            });
+            ToolResult::text(format!(
+                "Accessibility snapshot (gen {}): {count} element(s){app_note}{ax_note}. {note}\n\n{}",
+                snap.generation.0, snap.text
+            ))
+        };
+        if !include_pixels {
+            return ax_only(
+                "Pixel overlay intentionally omitted by computer/a11y.observe; use the separate computer/observe screenshot action when pixels are required.",
+            );
+        }
+
         // Capture a screenshot for the overlay + OCR fusion + pixel mapping. If
         // it is denied, fall back to an AX-only text list (a11y needs only the
         // Accessibility grant) — the core a11y-first win.
@@ -268,32 +326,9 @@ impl ComputerTool {
                 *self.last_capture.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(shot.geometry);
                 shot
             }
-            Err(_) => {
-                // AX-only: no overlay, no OCR. Display bounds stay AX-space; show
-                // the engine's hierarchical semantic tree (desktop → window → …).
-                let mut cached: Vec<CachedEntry> = Vec::with_capacity(snap.entries.len());
-                for e in &snap.entries {
-                    let (cx, cy) = e.bounds.center();
-                    cached.push(CachedEntry {
-                        display: e.clone(),
-                        target: CachedTarget::Ax {
-                            engine_ref: e.r#ref,
-                            screen_center: (cx as i32, cy as i32),
-                        },
-                    });
-                }
-                let count = cached.len();
-                *self.last_snapshot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(SnapshotCache {
-                    generation: snap.generation,
-                    entries: cached,
-                });
-                return ToolResult::text(format!(
-                    "Accessibility snapshot (gen {}): {count} element(s){app_note}{ax_note}. No \
-                     Set-of-Marks overlay (screen capture unavailable) — still actionable by \
-                     [ref] with `click_element`.\n\n{}",
-                    snap.generation.0, snap.text
-                ));
-            }
+            Err(_) => return ax_only(
+                "No Set-of-Marks overlay (screen capture unavailable) — still actionable by [ref] with `click_element`.",
+            ),
         };
         let geom = shot.geometry;
 
@@ -642,6 +677,14 @@ impl ComputerTool {
     }
 
     async fn do_screenshot(&self, input: &Value) -> ToolResult {
+        self.do_screenshot_with_limit(input, None).await
+    }
+
+    async fn do_screenshot_with_limit(
+        &self,
+        input: &Value,
+        max_png_bytes: Option<usize>,
+    ) -> ToolResult {
         let display = match input.get("display") {
             None | Some(Value::Null) => None,
             Some(v) => match v.as_u64() {
@@ -664,7 +707,11 @@ impl ComputerTool {
 
         match captured {
             Ok(shot) => {
-                match encode_png(&shot.image) {
+                let encoded = match max_png_bytes {
+                    Some(limit) => encode_png_with_limit(&shot.image, limit),
+                    None => encode_png(&shot.image),
+                };
+                match encoded {
                     Ok(encoded) => {
                         let mut geometry = shot.geometry;
                         geometry.img_w = encoded.width;
@@ -1137,6 +1184,50 @@ mod tests {
         }
     }
 
+    struct SnapshotEngine;
+
+    impl A11yEngine for SnapshotEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("unexpected capability probe")
+        }
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            Ok(nomi_a11y::Snapshot {
+                generation: SnapshotGen(9),
+                entries: vec![ElementEntry {
+                    r#ref: 1,
+                    role: "button".into(),
+                    name: Some("Continue".into()),
+                    value: None,
+                    states: vec![],
+                    bounds: nomi_a11y::Rect {
+                        x: 10.0,
+                        y: 20.0,
+                        w: 30.0,
+                        h: 40.0,
+                    },
+                    source: Source::A11y,
+                }],
+                overlay: None,
+                text: "[1] button \"Continue\"".into(),
+                truncated: false,
+                pid: Some(1),
+                app_name: Some("Fixture".into()),
+                window_title: Some("Fixture Window".into()),
+            })
+        }
+        fn invoke(
+            &self,
+            _: &Target,
+            _: SnapshotGen,
+            _: ElementAction,
+        ) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected element action")
+        }
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected window activation")
+        }
+    }
+
     fn tool_with_snapshot(outcome: AxOutcome) -> ComputerTool {
         let t = tool();
         *t.a11y.lock().unwrap() = Some(Ok(Arc::new(FakeEngine(outcome))));
@@ -1407,6 +1498,34 @@ mod tests {
             )
             .await;
         assert!(!result.is_error, "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn canonical_a11y_observe_never_captures_or_emits_screen_pixels() {
+        let t = tool();
+        *t.a11y.lock().unwrap() = Some(Ok(Arc::new(SnapshotEngine)));
+        *t.last_capture.lock().unwrap() = Some(CaptureGeometry {
+            img_w: 100,
+            img_h: 100,
+            logical_w: 100,
+            logical_h: 100,
+            origin_x: 0,
+            origin_y: 0,
+        });
+
+        let result = t
+            .execute_authorized(
+                crate::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                json!({"action":"observe"}),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("Accessibility snapshot (gen 9)"));
+        assert!(result.content.contains("Pixel overlay intentionally omitted"));
+        assert!(t.last_capture.lock().unwrap().is_none());
+        assert!(t.resolve_ref(1).is_ok());
     }
 
     #[tokio::test]

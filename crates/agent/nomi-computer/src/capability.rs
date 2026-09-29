@@ -138,7 +138,15 @@ pub fn module_availability() -> ComputerModuleAvailability {
     let permissions = crate::permissions::permission_status();
     let desktop = desktop_is_available();
     let supported = cfg!(any(target_os = "windows", target_os = "macos"));
+    module_availability_for(permissions, desktop, supported, std::env::consts::OS)
+}
 
+fn module_availability_for(
+    permissions: crate::permissions::PermissionStatus,
+    desktop: bool,
+    supported: bool,
+    platform: &str,
+) -> ComputerModuleAvailability {
     let actions = ComputerAction::ALL
         .into_iter()
         .map(|action| {
@@ -202,7 +210,7 @@ pub fn module_availability() -> ComputerModuleAvailability {
 
     ComputerModuleAvailability {
         module_id: COMPUTER_MODULE_ID.to_owned(),
-        platform: std::env::consts::OS.to_owned(),
+        platform: platform.to_owned(),
         actions,
     }
 }
@@ -300,6 +308,42 @@ mod tests {
                 availability.action(ComputerAction::Input).unwrap().state,
                 ComputerAvailabilityState::Available | ComputerAvailabilityState::NoDesktop
             ));
+        }
+    }
+
+    #[test]
+    fn macos_permission_dimensions_are_independent() {
+        let cases = [
+            (
+                crate::permissions::PermissionStatus {
+                    accessibility: Some(true),
+                    screen_recording: Some(false),
+                },
+                [
+                    ComputerAvailabilityState::PermissionDenied,
+                    ComputerAvailabilityState::Available,
+                    ComputerAvailabilityState::Available,
+                    ComputerAvailabilityState::Available,
+                ],
+            ),
+            (
+                crate::permissions::PermissionStatus {
+                    accessibility: Some(false),
+                    screen_recording: Some(true),
+                },
+                [
+                    ComputerAvailabilityState::Available,
+                    ComputerAvailabilityState::PermissionDenied,
+                    ComputerAvailabilityState::PermissionDenied,
+                    ComputerAvailabilityState::Available,
+                ],
+            ),
+        ];
+        for (permissions, expected) in cases {
+            let availability = module_availability_for(permissions, true, true, "macos");
+            for (action, state) in ComputerAction::ALL.into_iter().zip(expected) {
+                assert_eq!(availability.action(action).unwrap().state, state, "{action:?}");
+            }
         }
     }
 }

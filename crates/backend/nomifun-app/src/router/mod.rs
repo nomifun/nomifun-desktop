@@ -46,6 +46,7 @@ mod engine_robot_tools;
 mod engine_browser_tools;
 mod workspace_file_read;
 mod engine_workspace_media;
+mod engine_computer_media;
 mod engine_mcp_media;
 pub(crate) mod unified_runtime_host;
 mod unified_runtime_history;
