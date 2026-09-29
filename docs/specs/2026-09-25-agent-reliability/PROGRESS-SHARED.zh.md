@@ -1113,6 +1113,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   992/1,587/1,712 ms（中位 1,587）。**该精确 route/model/function 的只读 wire 场景 N3 通过**；
   不外推到 owner 执行、其他工具/协议/模型、原始 frame、正式 UI 或完整 MODEL Case，共享阶段未完成。
 
+- S-D01-07（REG-008、G0-027、PROC-001～032 进程工具 Schema 同构子断言）：W105 的 model
+  `poll_process.cursor` 在 canonical Schema 缺失、W107 的两侧 PTY 上限又同时宽于实际 owner，说明原
+  `full_surface` 只核对 Action 名称与 object 外壳，不能阻止两份 Schema 漂移。新增逐 Action 回归，
+  从正式 Wave2 workspace registration 的 schema ref 解析 canonical exec/start/poll/input/close/
+  resize/cancel，并与 7 个模型工具递归比较属性集合、必填字段、类型、union 及约束。模型侧只允许
+  有意收窄数值范围，例如 start 的 wait_ms=0；缺字段、放宽 max/min 或结构变化直接失败。当前修复
+  基线首次 **20/20**，Agent Runtime **196/196**。本批只补防漂移回归，无新产品失败、模型调用或
+  正式 UI；文件/VCS/Artifact 及其他 Wave Schema、生成时跨 crate 单一来源仍待后续，不关闭完整 REG。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session
