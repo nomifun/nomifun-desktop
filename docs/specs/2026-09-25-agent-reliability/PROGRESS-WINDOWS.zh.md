@@ -2287,6 +2287,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖正式 AgentSession delete API 与 in-flight read 真并发、允许 rename 平台的原生分支、cleanup
   task 强杀、其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE 或共享阶段。
 
+### 正式 Session delete 与 live Artifact owner（W131，基线 `fd7626a52`）
+
+- S-D03-57 / ART-007、LIFE-028、OBS-004/006、A05/A13/A17/A19：既有正式 App managed-workspace
+  删除测试先发布并缓存 Artifact reader，再以固定 idempotency key 删除 Session。Windows 首次返回
+  **500 / INTERNAL_ERROR**（`os error 32`）；canonical Session 已正确保留 deleting fence，但错误分类
+  不准确，首败日志已保留。
+- 正式 HTTP 删除流程现把两条 workspace cleanup 分支统一映射为 **409 /
+  AGENT_SESSION_WORKSPACE_CLEANUP_FAILED**，保留底层详情与 deleting 状态。释放 Artifact owner 后，
+  同一 key 重试完成原 tombstone 和 managed workspace 清理；sibling managed workspace 和 user-selected
+  workspace 均保持。
+- 修复后首次及连续 **20/20**；删除顺序、managed workspace 边界与 W130 reader **3/3**，fmt/diff
+  通过。首个相邻静态命令因错误 test target 执行 0 项，已用 `--lib` 完整名纠正，不计通过。无模型/
+  UI。未覆盖正式 Artifact read 请求与 DELETE 真并发、启动恢复 deleting Session 的 live-handle 重试、
+  其他平台及 N3/100 seed/LONG/99%；不关闭完整 ART/LIFE/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
