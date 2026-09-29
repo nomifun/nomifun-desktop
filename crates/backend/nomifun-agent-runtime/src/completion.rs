@@ -525,7 +525,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled command with a known exit remains eligible after later commands only for its own exact scope, exit and output; a nonzero result is evidence of that failure, not success, and never proves current workspace state. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled command with a known exit, or a reaped timeout, remains eligible after later commands only for its own exact scope and terminal output; a nonzero/timeout result is evidence of that failure, not success, and never proves current workspace state. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -762,10 +762,14 @@ impl CompletionTracker {
         // own scope/exit/output citeable without extending file/path evidence
         // or treating a nonzero exit as success.
         let immutable_command_result = observation.command.as_ref().is_some_and(|command| {
-                command.observation_call_id == observation.call_id
-                    && command.state == "exited"
+                let exact_terminal = (command.state == "exited"
                     && command.exit_code.is_some()
-                    && command.exit_code == observation.command_exit_code
+                    && command.exit_code == observation.command_exit_code)
+                    || (command.state == "timed_out"
+                        && command.exit_code.is_none()
+                        && observation.command_exit_code.is_none());
+                command.observation_call_id == observation.call_id
+                    && exact_terminal
                     && command.cleanup_proven
                     && command.omitted_interactions == 0
                     && command.launch_call_id.as_deref() == Some(observation.call_id.as_str())
@@ -1086,6 +1090,91 @@ mod tests {
         assert_eq!(
             tracker.current(&plan, &work, 1).unwrap().criteria[0].evidence_call_ids,
             ["expected-failure"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reaped_timeout_is_citable_for_its_exact_terminal_result() {
+        let mut binding = process_binding("workspace.process/exec");
+        binding.model_name = "exec_command".into();
+        binding.definition.name = "exec_command".into();
+        let timed_out = ChatToolCall {
+            call_id: "timed-out".into(),
+            name: "exec_command".into(),
+            arguments: StrictJsonValue(serde_json::json!({"command":"slow","timeout_ms":250})),
+            provider_metadata: None,
+        };
+        let mut command = settled_command("timed-out", "process-timeout", 1, 0);
+        command.state = "timed_out".into();
+        command.exit_code = None;
+        command.launch_workspace_epoch = None;
+        command.provenance_workspace_epoch = None;
+        command.was_current_at_observation = false;
+        let work = AgentWorkStatus {
+            failed_commands: 1,
+            failed_tools: 1,
+            workspace_observation_epoch: 1,
+            recent_commands: vec![command.clone()],
+            ..Default::default()
+        };
+        let mut tracker = CompletionTracker::default();
+        tracker.observe(
+            &work,
+            &binding,
+            &timed_out,
+            &AgentToolResult::text(
+                timed_out.call_id.clone(),
+                serde_json::json!({
+                    "process_id":command.process_id,
+                    "state":"timed_out",
+                    "cleanup":{"reaped":true},
+                    "success":false
+                })
+                .to_string(),
+                true,
+            ),
+            true,
+        );
+        assert!(
+            tracker.is_usable(&tracker.observations[0], 1),
+            "a reaped timeout is evidence of that terminal result"
+        );
+        let inputs = vec![crate::context_lifecycle::text_message(
+            nomifun_chat_model_broker::ChatRole::User,
+            "Run the expected timeout diagnostic and explain its terminal".into(),
+        )];
+        let mut plan = AgentPlan::default();
+        let report = ChatToolCall {
+            call_id: "report-timeout".into(),
+            name: TOOL_NAME.into(),
+            arguments: StrictJsonValue(serde_json::json!({
+                "summary":"The diagnostic timed out and was reaped as expected",
+                "observed_tool_error_count":1,
+                "observed_command_failure_count":1,
+                "criteria":[{
+                    "disposition":"supported",
+                    "evidence_call_ids":["timed-out"],
+                    "rationale":"The settled command observation records timed_out with cleanup.reaped=true"
+                }]
+            })),
+            provider_metadata: None,
+        };
+        let result = tracker
+            .submit(
+                &report,
+                &mut plan,
+                &work,
+                &inputs,
+                false,
+                None,
+                &crate::NoopAgentEventSink,
+            )
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output_text());
+        assert_eq!(
+            tracker.current(&plan, &work, 1).unwrap().criteria[0].evidence_call_ids,
+            ["timed-out"]
         );
     }
 
