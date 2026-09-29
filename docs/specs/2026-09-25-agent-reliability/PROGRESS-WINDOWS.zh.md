@@ -1605,6 +1605,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - PTY/resize/close-stdin 的显式续期、lease 边界的真实 OS 调度竞争、macOS、应用强退、PROC-044
   的连续 1,000 个短进程、正式 UI/角色及长期统计仍待验；不关闭完整 PROC-043/044 或共享阶段。
 
+### process tree 升级、后代与 authority lost（W88，基线 `038a30b0a`）
+
+- S-D04-17 / PROC-034～037、A08/A11/A13/A17/A19：Windows Job 的真实 cancel 在
+  `CREATE_NO_WINDOW` 无可信 console interrupt 时继续升级，并在 5 秒合同内精确回收 leader 与
+  grandchild；leader 先正常退出时，Job 后代清理完成前不发布 success，最终仍如实保留 exit 0 与
+  `cleanup.reaped=true`。
+- WSL2 Linux process group 的普通 cancel 清理 leader + grandchild；整组忽略 SIGINT 时等待完整
+  一秒 grace，再升级 SIGTERM，未提前 force kill。leader-first 场景在同组后代回收后才返回 exit 0；
+  `setsid` 逃逸使输出管道无法证明 EOF 时，在一秒内明确返回 `Lost` 与 reader timeout，不伪造清理，
+  随后由独立测试 oracle 清掉逃逸进程。
+- 生产实现首次满足，本批未修改信号、owner 或清理逻辑。Windows 两项各重复 **20/20**，WSL2
+  四项各重复 **20/20**，共 120 次；独立日志计数零失败，结束后两平台 `process_test_helper` 均为 0。
+- ConPTY/PTY、SIGTERM 也被忽略后的 force-kill 级升级、macOS watchdog/session、父进程死亡、
+  正式应用入口、其他 Agent/角色及长期压力仍待验；不关闭完整 PROC-034～041 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

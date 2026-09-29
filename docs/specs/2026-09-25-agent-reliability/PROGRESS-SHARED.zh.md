@@ -436,6 +436,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   close-stdin 的显式续期、macOS、应用强退、1,000 进程长稳与正式 UI/角色仍开放，不关闭完整
   PROC-043/044 或共享阶段。
 
+- S-D04-17（PROC-034～037、A08/A11/A13/A17/A19 process tree 子断言）：W88 复核真实
+  Windows Job 与 WSL2 Linux process group。Windows cancel 在无可信 console interrupt 时升级并在
+  5 秒合同内精确回收 leader + grandchild；leader 先退出时，Job 后代清理完成前不发布成功。Unix
+  普通 cancel 清整组，无视 SIGINT 的整组在完整 grace 后升级 SIGTERM；leader-first 仍保留真实
+  exit 0，`setsid` 逃逸则在有界时间返回 `Lost`，未假报 EOF 或 cleanup 成功。逃逸进程由测试 oracle
+  单独清理。生产实现首次满足，本批未改信号或 owner 逻辑。Windows 两项各 **20/20**，WSL2 四项
+  各 **20/20**；共 120 次且两平台 helper 为 0。ConPTY/PTY、强制 kill 级升级、macOS watchdog/
+  session、父进程死亡、应用入口及长期压力仍开放，不关闭完整 PROC-034～041 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
