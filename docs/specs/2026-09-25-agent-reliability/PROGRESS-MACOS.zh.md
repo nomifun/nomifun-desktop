@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，live held-cancel/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13 已验 owner crash/result-loss；live held-cancel/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -668,4 +668,27 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   fail closed 为 stale element、no frame/no window；合成按键也不能替代真实物理全局 hotkey。相关时序
   失败完整保留于 `m04-computer-cancel/run-011/015/021/023/025/027/029/035/040/042/`，没有一次被改记
   PASS。因尚无正式证据证明 cancel event 发生于 `pressed=true`，本批不关闭 `COMP-012`、Computer、
-  D06 或 M04；key-hold、真实 out-of-band cancel、OS release failure 和 crash/result-loss 仍待后续 runner。
+  D06 或 M04；key-hold、真实 out-of-band cancel、OS release failure 当时仍待后续 runner，
+  crash/result-loss 另由 M04-13 覆盖。
+
+- **M04-13 macOS input owner crash / result loss**（`COMP-010` 的本批完整 macOS 子断言）：新增
+  `--computer-input-crash` 确定性夹具模式及独立 arm64 AppKit 文本目标。Developer ID-signed 正式
+  Tauri app 以隔离 data/Agent/Session `01a0ee3c-6854-7f83-8273-263152077159` 启动目标并取得稳定
+  A11y observation；夹具随后唯一 dispatch 65,536 个 `X`。目标首次记录 **20** 字符时，runner 在
+  精确核对 executable path 后只向 Nomi owner PID `36389` 发送 `SIGKILL`，不终止目标或 fixture。
+  macOS 已排队输入最终稳定在 **44,480 chars / 2,224 change events**，因此不是“零副作用”；crash
+  image 则精确止于 **5 model steps / 67 events**、`tool/call-started` + `effect/started`，Turn/head
+  running、唯一 `computer/input` 为 `external_uncertain_effect/pending`，无 terminal/tool result，DB `ok`。
+- 同一签名 app、同一 data 冷启动没有重放。该 Computer-only Session 没有 canonical workspace，自动
+  recovery 三次明确拒绝后按既有有界策略原子提交 seq 68 `effect/uncertain`（`outcome=unknown`、
+  `process_restart_external_reconciliation_required`）、seq 69 recovery-blocked 与 seq 70 turn/paused；
+  pending=0、unknown=1、`cleanup_proven=false`。正式 UI 显示“执行已暂停 / 资源清理状态尚未确认 / 当前
+  会话暂不接受新消息”，输入与发送禁用并提供“结束本回合”。连续 10 秒 target **44,480→44,480**、
+  fixture model calls **5→5**、events **70→70**、input effects **1→1**；无第二次 dispatch、模型调用或
+  输入。产品按钮结束回合后 head ready、Turn cancelled（seq 71），unknown receipt 仍保留；最终 DB
+  `ok`，target/app/fixture 及 `57744/60965/57261` listener 均为 0。
+- 定向对照：startup pending-external-effect quarantine **1/1**、暂停 UI **2/2**、fixture build、fmt 与
+  diff 通过。没有发现新的共享产品根因，故不改 `PROGRESS-SHARED`；完整证据在
+  `2026-09-30/macos/m04-computer-crash/`。本批关闭 `COMP-010` 的 macOS owner crash/result-loss
+  子断言；`COMP-012` 真实 held cancel/key hold、其他手势/显示器/OCR 与 `COMP-014` soak 仍开放，
+  不关闭完整 Computer、D06 或 M04。
