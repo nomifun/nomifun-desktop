@@ -2002,6 +2002,73 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 本批只补必要回归，没有新产品失败、模型调用或正式 UI。文件/VCS/Artifact、其他 Wave/动态工具
   Schema 及单一生成源仍未覆盖，不关闭完整 REG/G0 或共享阶段。
 
+### 全 workspace standard exposure 与 canonical Schema 同构（W109，基线 `8f4fa17b6`）
+
+- S-D01-08 / REG-008、G0-027、FILE-017/024/032、ART-004、VCS-011：把 W108 守卫扩到
+  Wave2 workspace 的文件、VCS、进程和 Artifact 全部 19 个工具。首次 **0/1** 精确落在
+  Runtime 候选 `read_file.path` 缺少 canonical `\\S`；完整走查又发现其他文件/Artifact 路径、search query、
+  Artifact page default 与 VCS push refspec/force 的同类漂移。首败日志保留。
+- Runtime 候选 Schema 现对路径/查询应用 canonical 非空白约束；Artifact read 默认 limit 从 65536 对齐
+  16384；push refspec 收窄到 1024 和 `HEAD|refs/heads/...:refs/heads/...` pattern，force 固定 false。
+  patch 行改用与 owner 相同的 kind enum，仍只接受 context/add/remove 和无 CR/LF/NUL 的精确文本；
+  status/diff 的空 required 显式化，不改变 admission。正式 App 在 Snapshot 编译时会以 canonical
+  替换候选 Schema，本批未观察到正式 UI dispatch 失败；该修复收紧测试与未来直接集成的边界。
+- 递归同构回归覆盖属性、required、type、union、pattern、const/default 及数值范围；候选可有安全
+  收窄，不能比 canonical 更宽。修复后 **20/20**，Agent Runtime **197/197**，标准工具组 11/11、
+  同步远端 `d4dcae8a3` 后复验及 fmt/diff 通过。本批没有模型调用或正式 UI。
+- 未覆盖其他 Wave、动态/MCP/Plugin Schema 及单一生成源；
+  不关闭完整 REG/G0 或共享阶段。
+
+### local push 成功后的 settlement 丢失（W110，基线 `9d1de5fcb`）
+
+- S-D05-08 / VCS-013、A05/A13/A17/A19：在隔离 worktree 与 bare local remote 中先完成真实
+  push，确认 remote main 指向第一提交；随后故意丢弃尚未确认的 durable settlement，并在本地创建
+  第二提交。首次结果即符合合同：owner 固定进入 `OutcomeUnknown`，第二次 push 在接触 remote 前
+  拒绝，remote main 保持第一提交；`ensure_settled` 等待 worker 后仍不能自行清除未知 fence。
+- 新故障窗口 **20/20**，push owner 全组 **10/10**。host 现有成功 receipt 同 key 重放与
+  not-applied failure 重放 **2/2**，共同覆盖持久化前后两侧的当前进程行为。生产代码无需修改；
+  临时仓库全在外部证据目录，无模型调用、正式 UI、网络 remote 或凭据。
+- 未覆盖应用强退后 push pending effect 的专项恢复、主动 remote-ref 对账、远端 ref 被第三方并发
+  删除/重写、其他平台及 N3/100 seed/LONG/99%；不关闭完整 VCS-013 或共享阶段。
+
+### local push pending receipt 的跨 host fence（W111，基线 `924127be8`）
+
+- S-D05-09 / VCS-013、LIFE-006/007、A05/A13/A17/A19：canonical Store 先 reserve exact
+  external push effect，owner 再把第一提交真实推到隔离 bare remote；测试故意不写 terminal receipt，
+  随后在本地创建第二提交并销毁首个 `Wave2ApplicationHost`。
+- 使用同一 Store 重建 host 后，同 operation 首次即返回 durable pending，新的内存 push owner 未接触
+  remote；remote main 保持第一提交，第二提交只留在本地，Effect 仍为 Pending。新回归 **20/20**，
+  host push **3/3**，owner push **10/10**；生产代码无需修改，无模型/正式 UI/网络 remote 或凭据。
+- 本批复用了同一内存 Store，尚未覆盖数据库连接关闭后重开、应用/进程强退、启动时 pending→unknown
+  归约、主动 remote-ref 对账、第三方并发改写及 N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE。
+
+### local push pending receipt 的 SQLite 重开（W112，基线 `e06f84e06`）
+
+- S-D05-10 / VCS-013、LIFE-006/007、A05/A13/A17/A19：把 W111 改为独立磁盘 SQLite。
+  在 remote main 已更新、exact external Effect 仍为 Pending 时释放 reservation、host 和 Store，关闭
+  所有数据库连接，再从同一路径重新打开数据库、Store 与 host；本地第二提交在关闭前已创建。
+- 首次及 **20/20** 均由重开后的 durable pending 在新 owner 物理调用前拒绝；remote main 保持第一
+  提交、第二提交只在本地，Effect ID 与 Pending 状态未改。相邻 host push **3/3**，fmt/diff 通过；
+  生产代码无需修改，无模型/正式 UI/网络 remote 或凭据。
+- 未覆盖 Git worker 或 SQLite terminal commit 中的真实进程强杀、完整 App startup pending→unknown
+  归约、主动 remote-ref 对账、第三方并发改写、其他平台及 N3/100 seed/LONG/99%；不关闭完整 VCS/LIFE。
+
+### 完整 App startup 的 Pending→Unknown 归约（W113，基线 `f73e6af30`）
+
+- S-D05-11 / VCS-013、LIFE-006/007、OBS-005/016、A05/A13/A17/A19：在现有
+  `native_execution_recovery` 磁盘 crash image 中，通过 canonical Store 给当前 running Turn 写入
+  `workspace.vcs/push` 的 `ExternalUncertainEffect` Pending 事实；随后令旧 lease 过期并保留
+  reconciliation head，从正式 `AppServices`/`create_router` 启动入口执行恢复。
+- 启动恢复原子写入 `effect/uncertain`，Pending 变为 Unknown，同时只写一个
+  `runtime/execution-recovery-blocked`，暂停原 Turn、保留 checkpoint，不启动模型；新 Turn 被明确拒绝。
+  再次关闭数据库并完整启动后仍为一个 Unknown/一个 blocked 事件，没有重复隔离或重放。新增断言
+  首次及连续 **20/20**；完整 App 恢复夹具 **6/6**，Store 原子隔离两项 **2/2**，相邻 host fence
+  **1/1**，fmt/diff 通过。生产代码无需修改。
+- W110～W112 已保留真实 bare remote push、settlement 丢失和 SQLite 重开现场；本批只补正式 App
+  startup 归约，不重复物理 push。未覆盖 Git worker/SQLite terminal commit 中的真实进程强杀、主动
+  remote-ref 对账、第三方并发改写、正式 UI/模型、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  VCS/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

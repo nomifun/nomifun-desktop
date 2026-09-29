@@ -1121,6 +1121,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unconfirmed_successful_settlement_fences_a_second_physical_push() {
+        let fixture = PushFixture::new(true);
+        let owner = fixture.owner();
+        let settlement = owner.settlement_guard();
+        let receipt = owner
+            .push(fixture.request())
+            .await
+            .expect("physical push should complete before settlement loss");
+        assert_eq!(receipt.remote_commit_after, fixture.initial_commit.to_string());
+        assert_eq!(fixture.remote_main(), Some(fixture.initial_commit));
+
+        drop(settlement);
+        let next = commit(
+            &fixture.repository,
+            Some(fixture.initial_commit),
+            "must remain local",
+            "must remain local\n",
+        );
+        let error = owner
+            .push(fixture.request())
+            .await
+            .expect_err("an unconfirmed settlement must fence physical replay");
+
+        assert_eq!(error.kind, VcsPushErrorKind::OutcomeUnknown);
+        assert_eq!(error.disposition, VcsPushEffectDisposition::OutcomeUnknown);
+        assert_eq!(fixture.remote_main(), Some(fixture.initial_commit));
+        assert_ne!(fixture.remote_main(), Some(next));
+        owner
+            .ensure_settled()
+            .await
+            .expect_err("joining the worker cannot clear lost durable settlement");
+    }
+
+    #[tokio::test]
     async fn rejects_a_binding_for_another_repository() {
         let fixture = PushFixture::new(true);
         let other = tempfile::tempdir().expect("other repository root");

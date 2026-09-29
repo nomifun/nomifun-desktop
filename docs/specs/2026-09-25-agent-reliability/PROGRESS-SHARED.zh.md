@@ -73,6 +73,43 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   reuse、multipart fixture 与 plan guard 失败全部保留在 macOS M04-02 证据。Windows/其他平台未由此
   代判；live 单项 grant、撤权竞态、input/launch、长期/99% 与完整 Computer Case 仍开放。
 
+- S-D05-08（VCS-013、A05/A13/A17/A19 push 成功后 settlement 丢失子断言）：W110 用隔离
+  worktree 与 bare local remote 补物理 push→durable receipt 之间的故障窗口。首次即通过：remote ref
+  已更新到第一提交后丢弃未确认 settlement，owner 固定进入 outcome unknown；本地再创建第二提交并
+  重试时在接触 remote 前拒绝，remote ref 仍为第一提交。等待原 worker 结束不能清除 durable
+  settlement 丢失。新回归 **20/20**，push owner **10/10**；相邻 host 已有“成功 receipt 持久后同 key
+  只重放原回执”和 not-applied failure 重放 **2/2**。生产代码无需修改，无模型/UI/生产 remote。
+  应用崩溃后 exact pending effect 的 push 专项恢复、主动 remote-ref 对账、远端删除/重写并发及
+  N3/LONG/99% 仍开放，不关闭完整 VCS-013 或共享阶段。
+
+- S-D05-09（VCS-013、LIFE-006/007、A05/A13/A17/A19 push pending 跨 host 子断言）：W111
+  在 canonical Store 先 reserve 精确 external push effect，再真实更新隔离 bare remote，但故意不写
+  terminal receipt；随后创建只存在本地的第二提交并重建 `Wave2ApplicationHost`。首次及连续
+  **20/20** 均由 durable pending 在新 owner 物理调用前拦截，同 operation 不重放，remote ref 保持
+  第一提交，Effect 状态仍为 Pending。相邻 host push **3/3**、owner **10/10**。生产代码无需修改，
+  无模型/UI/网络 remote。当前仅重建 host 并复用同一内存 Store；真实数据库关闭/重开、进程强退、
+  pending→unknown 启动归约、主动 remote-ref 对账与其他平台仍待验，不关闭完整 VCS/LIFE。
+
+- S-D05-10（VCS-013、LIFE-006/007、A05/A13/A17/A19 push pending 跨数据库重开子断言）：W112
+  将 W111 同一物理故障窗口改为独立磁盘 SQLite；remote 更新、Effect 保持 Pending 后释放 reservation、
+  host 与 Store，关闭全部数据库连接并从同一路径重新初始化 Store。首次及 **20/20** 均在新 host/
+  新 owner 调用 remote 前返回 durable pending，第二提交仍只在本地，remote 与 effect identity/state
+  不变；相邻 host push **3/3**。生产代码无需修改，无模型/UI/网络 remote。尚未覆盖进程在 Git worker
+  或 SQLite terminal commit 中被强杀、完整 App startup 的 pending→unknown 归约、主动 remote 对账及
+  其他平台，不关闭完整 VCS/LIFE。
+
+- S-D05-11（VCS-013、LIFE-006/007、OBS-005/016、A05/A13/A17/A19 完整 App 启动归约子断言）：
+  W113 在 `native_execution_recovery` 的磁盘 crash image 中，通过 canonical Store 给当前原生 Turn
+  写入 `workspace.vcs/push` 的 `ExternalUncertainEffect` Pending 事实，再关闭并从正式
+  `AppServices`/`create_router` 启动入口恢复。启动调度经过既有 fenced recovery 后原子写入
+  `effect/uncertain`，将 Pending 升级为 Unknown，写入唯一 `runtime/execution-recovery-blocked`，暂停
+  原 Turn 并保留 checkpoint；模型请求数保持 0，新 Turn 被拒。再次关闭数据库并完整启动后仍只有
+  一个 Unknown 和一个 blocked 事件，没有重复隔离或重放。新增断言首次及连续 **20/20**，完整 App
+  恢复夹具 **6/6**，相邻 Store 原子隔离 **2/2**、host fence **1/1**。生产代码无需修改，无正式 UI/
+  模型/生产 remote；W110～W112 已提供真实 bare remote push 与 receipt 丢失现场，本批只补正式启动
+  归约。Git worker/SQLite terminal commit 中的进程强杀、主动 remote-ref 对账、第三方改写、其他平台
+  及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
+
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
@@ -1145,6 +1182,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   有意收窄数值范围，例如 start 的 wait_ms=0；缺字段、放宽 max/min 或结构变化直接失败。当前修复
   基线首次 **20/20**，Agent Runtime **196/196**。本批只补防漂移回归，无新产品失败、模型调用或
   正式 UI；文件/VCS/Artifact 及其他 Wave Schema、生成时跨 crate 单一来源仍待后续，不关闭完整 REG。
+
+- S-D01-08（REG-008、G0-027、FILE-017/024/032、ART-004、VCS-011 workspace Schema 同构
+  子断言）：W109 将 W108 守卫扩到全部 19 个 Wave2 workspace 工具，首次 **0/1** 于
+  `read_file.path`：Runtime standard exposure 候选 Schema 缺 canonical `\\S`。
+  继续走查还确认 write/patch/delete/diff/stage/publish 同类路径缺口、search 全空白 query、Artifact
+  read 默认页长 65536/16384 分歧，以及 push 允许 4096 字符任意 refspec 和 `force=true`，canonical
+  实际只允许 1024 字符的显式本地分支 refspec 且 force=false。现统一这些约束和默认值；patch 行由
+  三个等价 oneOf 改用 canonical kind enum，保留 context/add/remove 与严格文本合同；空 required
+  数组也显式一致。正式 App 当前在 Snapshot 编译时会以 canonical 替换该候选 Schema，因此没有
+  已观察的 UI dispatch 失败；修复防止 Runtime 测试、未来宿主或其他直接集成重新暴露放宽合同。
+  递归守卫允许候选侧增加安全收窄，但禁止缺 canonical 字段/约束或放宽范围。
+  修复后完整 workspace 同构 **20/20**；同步远端 `d4dcae8a3` 后 Agent Runtime **197/197**，
+  push/空白路径直接反例通过。
+  本批无模型调用或正式 UI；其他 Wave、动态/MCP schema 及跨 crate 单一生成源仍待验，不关闭完整 REG。
 
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原

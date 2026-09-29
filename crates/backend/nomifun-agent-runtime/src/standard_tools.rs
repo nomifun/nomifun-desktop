@@ -202,7 +202,17 @@ fn empty_schema() -> Value {
     json!({
         "type": "object",
         "additionalProperties": false,
-        "properties": {}
+        "properties": {},
+        "required": []
+    })
+}
+
+fn workspace_path_value() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "pattern": "\\S"
     })
 }
 
@@ -211,11 +221,7 @@ fn path_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "path": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
-            }
+            "path": workspace_path_value()
         },
         "required": ["path"]
     })
@@ -228,7 +234,7 @@ fn read_schema() -> Value {
             "format":{"type":"string", "enum":["text", "image", "instruction_scope"], "default":"text"},
             "recursive":{"type":"boolean", "default":false},
             "missing_ok":{"type":"boolean", "default":false},
-            "path":{"type":"string", "minLength":1, "maxLength":4096},
+            "path":workspace_path_value(),
             "start_line":{"type":"integer", "minimum":1, "maximum":8388609, "description":"One-based source line. Use this with line_count to inspect code; omit byte offset/limit."},
             "line_count":{"type":"integer", "minimum":1, "maximum":2000, "default":200,"description":"Number of source lines to inspect, still bounded by the response byte budget."},
             "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0,"description":"Byte offset, NOT a line number. For pagination use the exact prior next_offset and expected_sha256."},
@@ -250,12 +256,9 @@ fn optional_path_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "path": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
-            }
-        }
+            "path": workspace_path_value()
+        },
+        "required": []
     })
 }
 
@@ -267,7 +270,8 @@ fn search_schema() -> Value {
             "query": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 1024
+                "maxLength": 1024,
+                "pattern": "\\S"
             },
             "path": {
                 "type": "string",
@@ -277,7 +281,8 @@ fn search_schema() -> Value {
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 200
+                "maximum": 200,
+                "default": 100
             }
         },
         "required": ["query"]
@@ -289,11 +294,7 @@ fn write_schema() -> Value {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "path": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 4096
-            },
+            "path": workspace_path_value(),
             "content": {
                 "type": "string",
                 "maxLength": 8_388_608
@@ -305,35 +306,13 @@ fn write_schema() -> Value {
 
 fn patch_schema() -> Value {
     let line = json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "kind": {"const": "context"},
-                    "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
-                },
-                "required": ["kind", "text"]
-            },
-            {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "kind": {"const": "add"},
-                    "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
-                },
-                "required": ["kind", "text"]
-            },
-            {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "kind": {"const": "remove"},
-                    "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
-                },
-                "required": ["kind", "text"]
-            }
-        ]
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "kind": {"type":"string", "enum":["context", "add", "remove"]},
+            "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
+        },
+        "required": ["kind", "text"]
     });
     json!({
         "type": "object",
@@ -347,11 +326,7 @@ fn patch_schema() -> Value {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 4096
-                        },
+                        "path": workspace_path_value(),
                         "expected_source": {
                             "description":"Bind to the full sha256 from read_file, or to observed absence. Omission/any uses legacy line-only matching. A conflict requires re-reading and replanning, not removing the guard.",
                             "oneOf":[
@@ -472,13 +447,13 @@ fn artifact_read_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "artifact_id":{"type":"string","pattern":"^[0-9a-f]{64}$"},
         "offset":{"type":"integer","minimum":0,"maximum":536870912,"default":0},
-        "limit":{"type":"integer","minimum":1,"maximum":1048576,"default":65536}
+        "limit":{"type":"integer","minimum":1,"maximum":1048576,"default":16384}
     },"required":["artifact_id"]})
 }
 
 fn artifact_publish_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
-        "path":{"type":"string","minLength":1,"maxLength":4096},
+        "path":workspace_path_value(),
         "expected_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}
     },"required":["path"]})
 }
@@ -512,10 +487,11 @@ fn push_schema() -> Value {
             "refspec": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 1024,
+                "pattern": "^(HEAD|refs/heads/.+):refs/heads/.+$"
             },
             "force": {
-                "type": "boolean",
+                "const": false,
                 "default": false
             }
         },
@@ -543,7 +519,27 @@ mod tests {
             json!({"path":"file.txt","recursive":true}),
             json!({"path":"image.png","format":"image","start_line":1}),
             json!({"path":"file.txt","start_line":1,"offset":0}),
+            json!({"path":"   "}),
         ] { assert!(!validator.is_valid(&input), "{input}"); }
+    }
+
+    #[test]
+    fn workspace_model_schema_rejects_push_widening_and_matches_artifact_default() {
+        let schema = push_schema();
+        let push = jsonschema::validator_for(&schema).unwrap();
+        assert!(push.is_valid(&json!({
+            "remote":"origin", "refspec":"HEAD:refs/heads/main", "force":false
+        })));
+        for input in [
+            json!({"remote":"origin","refspec":"main"}),
+            json!({"remote":"origin","refspec":"HEAD:refs/heads/main","force":true}),
+        ] {
+            assert!(!push.is_valid(&input), "{input}");
+        }
+        assert_eq!(
+            artifact_read_schema()["properties"]["limit"]["default"],
+            16384
+        );
     }
 
     #[test]
@@ -748,14 +744,34 @@ mod tests {
                     .iter()
                     .filter(|(key, _)| key.as_str() != "description")
                     .collect::<BTreeMap<_, _>>();
-                assert_eq!(
-                    model.keys().collect::<BTreeSet<_>>(),
-                    canonical.keys().collect::<BTreeSet<_>>(),
-                    "schema keys drifted at {path}"
-                );
+                let missing = canonical
+                    .keys()
+                    .filter(|key| !model.contains_key(*key))
+                    .map(|key| key.as_str())
+                    .collect::<BTreeSet<_>>();
+                assert!(missing.is_empty(), "model schema omitted {missing:?} at {path}");
                 for (key, model_value) in model {
-                    let canonical_value = canonical[key];
                     let child = format!("{path}/{key}");
+                    let Some(canonical_value) = canonical.get(key).copied() else {
+                        assert!(
+                            matches!(
+                                key.as_str(),
+                                "minimum"
+                                    | "minItems"
+                                    | "minLength"
+                                    | "minProperties"
+                                    | "maximum"
+                                    | "maxItems"
+                                    | "maxLength"
+                                    | "maxProperties"
+                                    | "pattern"
+                                    | "const"
+                                    | "enum"
+                            ),
+                            "model schema added a non-narrowing keyword at {child}"
+                        );
+                        continue;
+                    };
                     match key.as_str() {
                         "maximum" | "maxItems" | "maxLength" | "maxProperties" => {
                             assert!(
@@ -812,39 +828,32 @@ mod tests {
     }
 
     #[test]
-    fn every_model_process_schema_is_an_admission_subset_of_canonical_wave2() {
+    fn every_model_workspace_schema_is_an_admission_subset_of_canonical_wave2() {
         let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
-        let process = registration
+        let capabilities = registration
             .metadata
             .manifest
             .payload
             .contributions
             .capabilities
             .into_iter()
-            .find(|capability| {
-                capability.id.as_ref()
-                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
-            })
-            .unwrap();
-        let canonical_refs = process
-            .contributions
-            .actions
-            .into_iter()
-            .map(|action| (action.action_id, action.input_schema))
+            .map(|capability| (capability.id.clone(), capability))
             .collect::<BTreeMap<_, _>>();
-        let process_tools = standard_agent_tool_exposures()
-            .into_iter()
-            .filter(|tool| {
-                tool.capability_id.as_ref()
-                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(process_tools.len(), 7);
-        for tool in process_tools {
-            let reference = &canonical_refs[&tool.action_id];
+        let workspace_tools = standard_agent_tool_exposures();
+        assert_eq!(workspace_tools.len(), 19);
+        for tool in workspace_tools {
+            let capability = &capabilities[&tool.capability_id];
+            let reference = capability
+                .contributions
+                .actions
+                .iter()
+                .find(|action| action.action_id == tool.action_id)
+                .unwrap()
+                .input_schema
+                .clone();
             let canonical = nomifun_agent_domain_wave2::resolve_action_schema(
-                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
-                reference,
+                tool.capability_id.as_ref(),
+                &reference,
             )
             .unwrap();
             assert_model_schema_is_canonical_subset(
