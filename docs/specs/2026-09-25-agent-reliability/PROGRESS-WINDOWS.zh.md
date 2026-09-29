@@ -2098,6 +2098,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   patch/delete 同类磁盘重开、文件结果人工核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整
   FILE/LIFE 或共享阶段。
 
+### 多文件 patch receipt 丢失后的 SQLite 重开（W116，基线 `d3a1ae36f`）
+
+- S-D03-52 / FILE-027/031/038、LIFE-006/007、A05/A13/A17/A19：在独立磁盘 SQLite 中 reserve
+  两文件 patch Effect，由实际 `FileService` owner 原子把 `alpha/beta` 发布为 `ALPHA/BETA`；owner
+  返回两文件 receipt 后故意不写 canonical terminal，并关闭 host、Store 与全部数据库连接。
+- 用户随后把两文件分别改为 `user first/user second`。重开数据库与 host 后，原 key 被 durable
+  Pending 拒绝；新 operation/key 使用能合法匹配当前用户文本的 patch，仍在 owner 前被同一 workspace
+  resource fence 拒绝。Effect 总数保持 1/Pending，两份用户字节均未被覆盖。
+- 新增断言首次及连续 **20/20**；App patch 正常/并发/全有或全无/权限路径 **4/4**，W115 写入重开
+  **1/1**，文件 owner patch **2/2**，fmt/diff 通过。生产代码无需修改，无模型/UI。未覆盖文件
+  worker/SQLite terminal commit 进程强杀、delete 同类磁盘重开、patch 结果人工核对、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 FILE/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
