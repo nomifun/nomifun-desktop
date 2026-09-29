@@ -2189,6 +2189,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   多会话入口、真正同时竞争、跨 owner 错配同一路径绑定、owner 核对、其他平台及 N3/100 seed/
   LONG/99% 仍待验，不关闭完整 CONC/FILE/LIFE 或共享阶段。
 
+### 跨连接并发 workspace Effect admission（W123，基线 `430622bb1`）
+
+- S-D09-07 / CONC-015、FILE-038、LIFE-006、AUTH-009、A05/A13/A17/A19：同一磁盘数据库上建立
+  两个独立 SQLite pool、两个 host 和两个同 owner/workspace AgentSession，同时提交不同写 Effect 的
+  canonical reserve。
+- 每轮恰好一个 Reserved、一个在唯一 unsettled-resource 索引处失败；只调用 winner 的实际
+  `FileService` owner，因此只创建一个物理文件。关闭两套连接再重开后，loser 仍被 winner 的 Pending
+  fence 拒绝，未创建 loser Effect 或文件。
+- 新增竞态首次及连续 **20/20**；W122 顺序重开与既有 owner-scoped/跨模块 fence **2/2**，fmt/diff
+  通过。生产代码无需修改，无模型/UI。未覆盖两个完整 host invocation 同时停在 owner 前、跨 action
+  竞态、跨 owner 错配绑定、owner 核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整
+  CONC/FILE/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
