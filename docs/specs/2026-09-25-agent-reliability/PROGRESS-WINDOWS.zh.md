@@ -2202,6 +2202,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   竞态、跨 owner 错配绑定、owner 核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整
   CONC/FILE/LIFE 或共享阶段。
 
+### 文件写与 VCS stage 跨 Action 并发 admission（W124，基线 `d72ce3704`）
+
+- S-D09-08 / CONC-015、FILE-038、VCS-004/014、LIFE-006、AUTH-009、A05/A13/A17/A19：两个
+  独立 SQLite pool/host/Session 同时 reserve 文件写与 Git stage。每轮唯一 workspace fence 恰好放行
+  一个 Effect，随后只调用 winner 对应的实际 FileService 或 VCS stage owner。
+- 关闭连接再重开后 loser action 仍被 Pending 拒绝。文件写获胜时，Git index 保持 base 且只出现
+  新文件；stage 获胜时，index 为 candidate blob 且新文件不存在；HEAD 始终不变。磁盘状态只体现
+  winner，没有 loser Effect。
+- 新增竞态首次及连续 **20/20**，W123 同 action 竞态及两类 owner 正常路径 **3/3**，fmt/diff 通过。
+  生产代码无需修改，无模型/UI。未覆盖两个完整 `invoke` 从入口并发、其他 Action 配对、跨 owner
+  错配绑定、owner 核对、其他平台及 N3/100 seed/LONG/99%；不关闭完整 CONC/FILE/VCS/LIFE
+  或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

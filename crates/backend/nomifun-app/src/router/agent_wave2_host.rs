@@ -4207,6 +4207,119 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_file_and_vcs_effects_share_one_workspace_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let repository = initialize_git_repository(&workspace);
+        let initial_commit = repository.head().unwrap().target().unwrap();
+        std::fs::write(workspace.join("tracked.txt"),b"stage candidate\n").unwrap();
+        drop(repository);
+        let file_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let vcs_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let file_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            file_database.pool().clone(),
+        ).await.unwrap();
+        let vcs_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            vcs_database.pool().clone(),
+        ).await.unwrap();
+        let file_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(file_store.clone());
+        let vcs_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(vcs_store.clone());
+        let mut file = context(&workspace);
+        file.capability_id = CapabilityId::from("workspace.files");
+        file.action_id = ActionId::from("workspace.files/write");
+        file.idempotency_key = IdempotencyKey::from("cross-action-file");
+        file.operation_id = OperationId::from("cross-action-file-operation");
+        let mut vcs = context(&workspace);
+        vcs.capability_id = CapabilityId::from("workspace.vcs");
+        vcs.action_id = ActionId::from("workspace.vcs/stage");
+        vcs.idempotency_key = IdempotencyKey::from("cross-action-vcs");
+        vcs.operation_id = OperationId::from("cross-action-vcs-operation");
+        ensure_test_effect_context(&file_store,&file).await;
+        ensure_test_effect_context(&vcs_store,&vcs).await;
+        let file_input = StrictJsonValue(json!({"path":"file.txt","content":"file winner"}));
+        let vcs_input = StrictJsonValue(json!({"path":"tracked.txt"}));
+        let (file_result,vcs_result) = tokio::join!(
+            begin_wave2_effect(&file_store,&file,workspace_typed_binding(&file).unwrap(),&file_input),
+            begin_wave2_effect(&vcs_store,&vcs,workspace_typed_binding(&vcs).unwrap(),&vcs_input),
+        );
+        let (file_reservation,file_error) = match file_result {
+            Ok(Wave2EffectAdmission::Reserved(reservation)) => (Some(reservation),None),
+            Ok(Wave2EffectAdmission::Replay(_)) => panic!("fresh file effect cannot replay"),
+            Err(error) => (None,Some(error)),
+        };
+        let (vcs_reservation,vcs_error) = match vcs_result {
+            Ok(Wave2EffectAdmission::Reserved(reservation)) => (Some(reservation),None),
+            Ok(Wave2EffectAdmission::Replay(_)) => panic!("fresh VCS effect cannot replay"),
+            Err(error) => (None,Some(error)),
+        };
+        assert_ne!(file_reservation.is_some(),vcs_reservation.is_some());
+        let file_won = file_reservation.is_some();
+        let reservation = file_reservation.or(vcs_reservation).unwrap();
+        let loser_error = file_error.or(vcs_error).unwrap();
+        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
+        if file_won {
+            let scope = file_host.workspace_scope(&file).unwrap();
+            file_host.files.write_file_with_observation_for_agent_session(
+                &scope,"file.txt",b"file winner",
+            ).await.unwrap();
+        } else {
+            let scope = vcs_host.workspace_scope(&vcs).unwrap();
+            vcs_host.invoke_vcs_stage(&scope,"workspace.vcs","tracked.txt").await.unwrap();
+        }
+        let winner_context = if file_won { &file } else { &vcs };
+        let loser_context = if file_won { &vcs } else { &file };
+        let winner_effect_id = wave2_effect_id(winner_context).unwrap();
+
+        drop(reservation);
+        drop(file_host);
+        drop(vcs_host);
+        drop(file_store);
+        drop(vcs_store);
+        file_database.close().await;
+        vcs_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let blocked = if file_won {
+            invoke(&restarted,vcs.clone(),"workspace.vcs/stage",vcs_input.0.clone()).await
+        } else {
+            invoke(&restarted,file.clone(),"workspace.files/write",file_input.0.clone()).await
+        }.unwrap_err();
+        assert_eq!(blocked.code,"CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"),"{blocked:?}");
+        let repository = git2::Repository::open(&workspace).unwrap();
+        assert_eq!(repository.head().unwrap().target(),Some(initial_commit));
+        let index = repository.index().unwrap();
+        let entry = index.get_path(Path::new("tracked.txt"),0).unwrap();
+        let staged = repository.find_blob(entry.id).unwrap();
+        if file_won {
+            assert_eq!(staged.content(),b"base\n");
+            assert_eq!(std::fs::read(workspace.join("file.txt")).unwrap(),b"file winner");
+        } else {
+            assert_eq!(staged.content(),b"stage candidate\n");
+            assert!(!workspace.join("file.txt").exists());
+        }
+        assert_eq!(std::fs::read(workspace.join("tracked.txt")).unwrap(),b"stage candidate\n");
+        assert_eq!(reopened_store.read_effect(&winner_context.agent_session_id,&winner_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.list_effects(&loser_context.agent_session_id).await.unwrap().is_empty());
+        drop(staged);
+        drop(index);
+        drop(repository);
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn durable_effect_pending_and_unknown_fences_survive_host_restart() {
         let pending_root = tempfile::tempdir().unwrap();
