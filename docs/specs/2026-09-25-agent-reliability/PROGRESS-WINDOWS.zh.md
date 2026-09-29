@@ -1620,6 +1620,52 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - ConPTY/PTY、SIGTERM 也被忽略后的 force-kill 级升级、macOS watchdog/session、父进程死亡、
   正式应用入口、其他 Agent/角色及长期压力仍待验；不关闭完整 PROC-034～041 或共享阶段。
 
+### shutdown start gate 与父宿主死亡清理（W89，基线 `5c485e3f7`）
+
+- S-D04-18 / PROC-040/041、A03/A11/A13/A17/A19：公开 supervisor 的正常 shutdown 先关闭
+  start gate，清理两条真实活动 Session；报告逐一保留原 owner/session 和 Cancelled/Lost 终态，
+  两个 PID 均消失。随后尝试启动写 marker 的 helper，在物理 spawn 前返回
+  `supervisor_shutting_down`，marker 不存在。Windows 与 WSL2 Linux 分别重复 **20/20**。
+- 父宿主直接退出的独立 harness 中，Windows 关闭带 `KILL_ON_JOB_CLOSE` 的实际 process Job 后，
+  leader 与 grandchild 都终止，外层 fallback Job 变空；重复 **20/20**。Linux pipe process-group
+  watchdog 与外部 PTY-session watchdog 各重复 **20/20**，subreaper 精确回收 leader、grandchild
+  和 watchdog；PTY leader 只接受 SIGHUP/SIGKILL，其他 owned member 为 SIGKILL。
+- 生产实现首次满足，本批未修改 start gate、Job/watchdog 或 shutdown report。独立日志计数共
+  100 次零失败，结束后两平台 `process_test_helper` 与 `parent_death_harness` 均为 0。
+- 真实 Tauri 主进程的正常/强退、Windows ConPTY parent-death、macOS watchdog/session、start
+  事务与 shutdown 的真实竞争、其他 Agent/角色及长期压力仍待验；不关闭完整 PROC-040/041 或共享阶段。
+
+### 连续 1,000 个短进程的资源与输出长稳（W90，基线 `c48e31f1d`）
+
+- S-D04-19 / PROC-044、A05/A11/A13/A15/A19：新增 `process_soak` 手工回归，默认标为 ignored，
+  不增加普通套件耗时；显式运行时用容量 8 的公开 supervisor 连续启动 1,000 个真实 pipe helper。
+  每个 helper 必须 exit 0、signal none、`cleanup.reaped=true`，固定 32 字节输出逐字节一致且
+  `dropped_bytes=0`。全部完成后 shutdown report 必须为空，证明自然终态未被误记为 shutdown cancel。
+- 首次编译因夹具把 `start(self: &Arc<Self>)` 写成 `&ProcessSupervisor` 而失败，日志独立保留；改为
+  公开 Arc receiver 后通过。首次和最终两轮在 Windows、WSL2 Linux 均 **1,000/1,000**，共执行
+  4,000 个短进程。最终 Windows 用时 178.25 秒，handle **111→111**、thread **13→10**；Linux
+  用时 171.79 秒，fd **11→11**、thread **8→8**。两端 helper 均为 0，生产逻辑无需修改。
+- 默认运行在两平台均为 0 passed / 1 ignored；显式 `--ignored --exact` 才执行长稳。独立断言首版
+  曾把数值 0 当成布尔 false 而错误退出 1，保留后按布尔与计数分开核对，最终 10/10 通过。
+- 额外 `cargo clippy -D warnings` 被该 crate 现有的 range loop、collapsible if 和两处参数数目 warning
+  阻断；失败日志保留，本批不扩大到无关生产重构。两平台 rustc 编译、workspace fmt 与 diff 检查通过。
+- 并发短进程、PTY/ConPTY、macOS、真实应用/UI、系统级内存采样及更长 soak 仍待验；不关闭完整
+  PROC-044 或共享阶段。
+
+### Unix 启动事务内 setup deadline（W91，基线 `1608e82be`）
+
+- S-D04-20 / PROC-047、A08/A11/A13/A17/A19：在 WSL2 Linux 的确定性 fault hook 中，spawn gate
+  被占用 300 ms 时，新 start 只消费原 100 ms setup deadline，结果在 250 ms 内返回；blocking worker
+  完成退出，watchdog PID 保持 0，用户 marker 未创建。另把 blocking transaction 卡在 fork 前，
+  75 ms deadline 后保守返回 `StartLost`；释放 worker 后 leader/watchdog 仍均为 0，marker 不存在。
+- 第三条在 watchdog 已创建后扣留 ACK。唯一 100 ms setup deadline 内返回 `StartLost`，总耗时小于
+  350 ms，没有重新授予 cleanup budget；用户代码从未执行，exact watchdog 随后只 reap 一次并消失。
+  三项生产实现首次满足，首轮 **3/3**，每项重复 **20/20**，最终残留 owner 进程为 0。
+- 首次内联 WSL 命令因宿主引号损坏而把结果目录解析为空，在任何 Cargo 测试前退出；夹具失败独立
+  保留，改用落盘 Bash 脚本后通过。本批未修改 Unix 启动事务。
+- macOS、PTY setup deadline、fork/exec 临界点的真实调度竞争、正式 Tauri/UI/角色及长期压力仍待验；
+  不关闭完整 PROC-047 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
