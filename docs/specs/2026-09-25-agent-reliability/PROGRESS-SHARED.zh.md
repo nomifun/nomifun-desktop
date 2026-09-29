@@ -49,13 +49,13 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 
 ## 历史修复与未关闭项
 
-- S-D04-22（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
+- S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
   没有一致性核对；故意错配只能靠实际命令失败暴露，无法记录要求的稳定错误。现让 exec/start 两个
   launch 工具都携带同一 Runtime host 声明；完成 Snapshot、active set 与 binding 校验后、任何 owner
   调用前比较声明与当前执行 host。错配返回 `HOST_OS_COMMAND_MAPPING_ERROR`、
   `status=not_executed`、`user_code_started=false`，并明确不得盲试另一平台；合法 Schema、权限和 Action
-  不变。Engine **33 通过 / 1 ignored**、Runtime **184/184**。macOS 正式 Tauri 中，即使 accepted input
+  不变。Engine **33 通过 / 1 ignored**、同步远端后 Runtime **187/187**。macOS 正式 Tauri 中，即使 accepted input
   声称客户端为 Windows，首次仍使用字面 `pwd [-P]`，单 effect/零错误且输出为精确 workspace。
   真实异构客户端、远端 owner OS attestation、Windows/Linux 负向正式 UI、N3/100 seed/LONG/99%
   仍开放，不关闭完整 CMD-149/150 或共享 D04。
