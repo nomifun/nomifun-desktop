@@ -22,8 +22,8 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
-| D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 新 Session 冻结/准入定向通过；正式 UI/live 待验 |
-| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139` 子断言完成；M02-01 计划/完成账本定向通过；完整 Case 未验收 |
+| D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 冻结/准入与 M02-02 正式 UI/live 只读 Session 子断言通过；完整领域未验收 |
+| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02 APFS/权限/symlink 与 M03-01 Unix 发布/清理竞态子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03 本地 Git 字面路径、commit/local remote/拒绝边界子断言通过；网络/SSH 条件资源待准备 |
@@ -197,9 +197,27 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `m02-bindings-skills/run-001-deterministic/`；合并后增量见 `m02-session-core/run-003-post-remote-command-failure/`。
 - 正式 Tauri 隔离夹具的两次预检分别因 dataset work-root receipt 与 work-root owner receipt 不一致而
   fail closed，未创建 Session、未消耗模型预算；未放宽保护。成对复制 data/work 身份后的 run-005
-  启动、数据库完整性与端口清理通过，但 macOS 锁屏阻断 UI 输入/截图，已停止应用。因此 M02-02 仍须
-  在解锁后用 StepFun Coding Plan / `step-3.7-flash` 新 Session 首发验证一次精确 `read_file`、计划、
-  完成账本和 UI 绿色投影；本批不关闭完整 `AGEN/ACOD/APAL/AMUL/EXT` Case。
+  启动、数据库完整性与端口清理通过，但当时 macOS 锁屏阻断 UI 输入/截图，已停止应用；该缺口由
+  下述 M02-02 回补。M02-01 本身不关闭完整 `AGEN/ACOD/APAL/AMUL/EXT` Case。
+
+- **M02-02 formal Tauri new Session / live StepFun**（`AGEN-001`、`ACOD-001`、D01/D02 的本批
+  只读子断言）：以当前正式 `NomiFun Dev.app`、原生 arm64、成对隔离 data/work 身份与独立 workspace
+  执行 StepFun Coding Plan / `step-3.7-flash`。应用二进制 SHA-256 为 `2d2863ddacca…`；Session 使用
+  `assistant.general` /「通用」、精确 workspace binding，协作关闭。run-006 首发工具读取正确得到
+  `M02-SESSION-CORE-第一行`，但“逐字 / character by character”被模型解释为字符间插空格，最终
+  canonical/UI 文本为 `M 0 2 - S E S S I O N - C O R E - 第 一 行`；虽 UI 绿色 1/1、零工具错误和
+  零副作用，业务结果不精确，记 **FAIL_RECOVERED**，原 Session 未重试且数据库/事件/推理轨迹保留。
+- 修正仅收紧验收输入语义，不改产品代码或放宽断言：run-007 使用全新 data/work、Session、Execution、
+  Attempt 与哨兵，明确要求回复字节级等于第一行、禁止空格/包装。新 Session 首发通过：外层 1 个计划、
+  1 个 read-only step、1 个 Attempt、1 个 delivered completion；2 个模型 step，恰好 1 个模型发起的
+  `read_file`，另有 3 个 step-0 instruction read 被独立计数；零 process/mutation 调用、零 effect、
+  零 tool error/command failure。工具结果、Attempt/Execution summary、canonical message 与 UI 均精确为
+  `M02-SESSION-CORE-RUN07-原样`，UI 绿色 **1/1**；fixture digest 前后不变，退出后 6 个 listener、
+  相关进程为 0，数据库完整性 `ok`。
+- 确定性 M02-01 的显式 `report_completion` 账本回归与本批正式 Session 的外层 plan/lead-report 分层
+  记录，不能互相替代。完整证据：`2026-09-29/macos/m02-session-core/run-006-formal-ui/` 与
+  `run-007-formal-ui/`。未覆盖 live N3/20 次门槛及完整 Agent/EXT 家族；开发 bundle 缺 CEF 只阻断
+  不相关 Browser 分片，因此不关闭完整 D01/D02 或 M02。
 
 - **M03-01 macOS Unix publication / cleanup race**（`FILE-019/020/028/031/038/039` 及
   A05/A07/A13/A17/A19 的本批子断言）：在 Darwin 25.6.0、原生 arm64、APFS Data 卷上复核共享
