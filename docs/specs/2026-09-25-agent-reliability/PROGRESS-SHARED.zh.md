@@ -926,6 +926,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   编码无需修改。本批只修验证夹具并证明一次压缩；20 次连续压缩、真实 Provider/UI、pause/restart、
   其他 Agent/平台及 LONG 统计仍开放，不关闭完整 LONG-008/ACOD-017 或共享阶段。
 
+- S-D01-04（REG-005/008、LONG-008、AGEN-002/005、ACOD-017/019、A01/A05/A09/A15/A17/A19
+  条件工具面子断言）：W98 用 `browser-use,computer-use` 构建运行 W95 已修的完整
+  `native_coding_reliability`。Coding、General 原生伪调用纠错、General ToolSearch 动态发现及委派
+  provider 暂停四项均通过；Browser/Computer 只绑定或发现，重型 Browser Runtime 启动计数保持 0。
+  selected workspace、单次文件写、压缩后 evidence、未验证范围和暂停错误分类原断言全部保留。
+  首轮 **4/4**（另 2 个显式真实 Provider 用例按设计 ignored），随后完整条件套件 **20/20**，共
+  80 个非忽略测试执行零失败。生产代码无需修改。本批没有运行被忽略的真实 Provider、真实 Browser/
+  Computer 动作或正式 UI；多次压缩、其他角色/平台及 LONG/99% 仍开放，不关闭完整 Case 或共享阶段。
+
 - S-D02-06（OBS-008/014、LIFE-015/019 子断言）：原生暂停已持久化，前端却忽略暂停通知并
   持续转圈。现按通知重读 canonical 状态，停止活动显示、呈现公开原因并阻断新发送，保留原
   回合及队列所有权；结束回合复用 cancel/释放确认。Windows 99 项定向检查和原失败 Session

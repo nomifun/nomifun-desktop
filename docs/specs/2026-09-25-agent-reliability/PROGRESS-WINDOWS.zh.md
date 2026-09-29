@@ -1799,6 +1799,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   匹配进程清零、正式备份均通过。其他 spawn permission/format/cwd、Provider/模型/角色、macOS 与
   N3/100 seed/LONG/99% 仍待验；不关闭完整 PROC/REAL 或共享阶段。
 
+### General 条件工具面下的压缩与发现回归（W98，基线 `1372d1c86`）
+
+- S-D01-04 / REG-005/008、LONG-008、AGEN-002/005、ACOD-017/019、A01/A05/A09/A15/A17/A19：
+  首次用 `browser-use,computer-use` 编译并运行完整 `native_coding_reliability`。四个非忽略场景分别
+  覆盖 Coding 嵌套文件、General 原生伪 tool-call 纠错后写入、General 先用 ToolSearch 发现
+  `browser/navigate` 再完成文件任务，以及 delegate child provider 失败及时传回 scheduler。
+- 首轮 **4/4**；两个需要显式本地 Provider 且会产生模型用量的 live 用例保持 ignored，没有折算为
+  通过。条件套件随后完整重复 **20/20**，共 80 个非忽略测试执行零失败。各轮保持 selected workspace
+  隔离、单次 write、压缩请求与 task request 分账、completion/unverified 披露、暂停错误分类和
+  Browser Runtime 启动计数 0；绑定/发现能力没有提前启动重型运行时。
+- 本批只做验证，无源码修复或真实模型/UI 调用；首次条件编译 3 分 34 秒，仅有既有 warning。
+  被忽略的真实 Provider wire/live Case、真实 Browser/Computer Action、正式 UI、多次压缩、其他
+  Agent/平台与 N3/100 seed/LONG/99% 仍待验；不关闭完整 Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
