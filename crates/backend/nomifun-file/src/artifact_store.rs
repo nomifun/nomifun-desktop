@@ -894,6 +894,49 @@ mod tests {
         let bytes=[first.data_base64,second.data_base64].into_iter().flat_map(|v|base64::engine::general_purpose::STANDARD.decode(v).unwrap()).collect::<Vec<_>>();
         assert_eq!(bytes,b"artifact payload");
     }
+    #[test]
+    fn live_reader_never_follows_a_recreated_workspace_artifact() {
+        let parent = tempfile::tempdir().unwrap();
+        let workspace = parent.path().join("workspace");
+        let retained = parent.path().join("retained-workspace");
+        fs::create_dir(&workspace).unwrap();
+        fs::write(workspace.join("source"),b"original artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let published = store.publish("source",None).unwrap();
+        let first = store.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD.decode(first.data_base64).unwrap(),
+            b"original artifact",
+        );
+
+        match fs::rename(&workspace,&retained) {
+            Ok(()) => {
+                let replacement_namespace = workspace.join(ARTIFACT_RELATIVE_ROOT);
+                fs::create_dir_all(&replacement_namespace).unwrap();
+                fs::write(replacement_namespace.join(&published.artifact_id),b"forged artifact").unwrap();
+                assert!(store.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err(),
+                    "the old reader must reject a recreated workspace root");
+                let replacement = WorkspaceArtifactStore::new(&workspace).unwrap();
+                assert!(replacement.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err(),
+                    "a new reader must reject replacement bytes under an old digest name");
+                assert_eq!(
+                    fs::read(retained.join(&published.relative_path)).unwrap(),
+                    b"original artifact",
+                );
+            }
+            Err(_) => {
+                // Some native filesystems deny workspace cleanup while the
+                // pinned directory/file handles are live. The old identity
+                // then remains authoritative and no replacement can appear.
+                let reread = store.read(&published.artifact_id,0,MAX_ARTIFACT_READ_BYTES).unwrap();
+                assert_eq!(
+                    base64::engine::general_purpose::STANDARD.decode(reread.data_base64).unwrap(),
+                    b"original artifact",
+                );
+                assert!(!retained.exists());
+            }
+        }
+    }
     #[test] fn rejects_noncanonical_owner_paths() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"x").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); for path in ["../x","./result.txt",".nomifun/artifacts/x","nested//x"] { assert!(store.publish(path,None).is_err(),"{path}"); } #[cfg(windows)] assert!(store.publish(".NOMIFUN/artifacts/x",None).is_err()); }
     #[test] fn tampered_chunk_is_rejected() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"original").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let artifact=store.publish("result.txt",None).unwrap(); fs::write(workspace.path().join(&artifact.relative_path),"tampered").unwrap(); assert!(store.read(&artifact.artifact_id,0,MAX_ARTIFACT_READ_BYTES).is_err()); }
     #[test] fn pages_reuse_verified_index() { let workspace=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("large.bin"),vec![b'x';ARTIFACT_CHUNK_BYTES*8]).unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let artifact=store.publish("large.bin",None).unwrap(); let before=store.io_counts(); for offset in [0,17_000,131_000,260_000] { store.read(&artifact.artifact_id,offset,16_384).unwrap(); } let after=store.io_counts(); assert_eq!(after.0,before.0); assert!(after.1-before.1<=4*2*ARTIFACT_CHUNK_BYTES as u64); }

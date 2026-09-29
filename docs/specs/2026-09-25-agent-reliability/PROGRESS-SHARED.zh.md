@@ -218,6 +218,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无需修改，无模型/UI。cleanup/Session 删除与 reader 竞态、不同源大对象、原生 link 中途强杀、
   其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/ART 或共享阶段。
 
+- S-D03-56（ART-005/007、LIFE-028、A05/A13/A17/A19 live reader 与 workspace cleanup 身份子断言）：
+  W130 为 `WorkspaceArtifactStore` 增加 live reader 回归：先发布并缓存原 artifact handle，再尝试把整个
+  workspace 移走并在同路径放入冒用旧 digest 名称的替代字节。若原生系统允许移走，旧 Store 必须因
+  workspace identity 改变而拒绝，新 Store 必须因内容与 digest 不符而拒绝；若原生系统因 pinned
+  handles 拒绝移走，则旧 reader 继续只读原字节且替代 workspace 不出现。Windows 诊断明确走后者，
+  最终形状首次及连续 **20/20**；ArtifactStore 全组 **16/16**、managed workspace cleanup 与 W129
+  **2/2**。生产代码无需修改，无模型/UI。正式 AgentSession delete API 与 in-flight read 真并发、允许
+  rename 平台的原生分支、cleanup task 强杀、其他平台及 N3/LONG/99% 仍开放，不关闭完整 ART/LIFE
+  或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
