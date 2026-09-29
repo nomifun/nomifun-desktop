@@ -152,6 +152,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   生产代码无需修改，无模型/UI。正式 App 多会话入口、真正同时竞争、跨 owner 错配同一路径绑定、
   owner 核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/LIFE 或共享阶段。
 
+- S-D09-07（CONC-015、FILE-038、LIFE-006、AUTH-009、A05/A13/A17/A19 跨连接并发 admission
+  子断言）：W123 使用同一磁盘数据库的两个独立 SQLite pool、两个 host 和两个同 owner/workspace
+  AgentSession，同时提交不同写 Effect 的 canonical reserve。每轮恰好一个 Reserved、一个在唯一
+  unsettled-resource 索引处失败；只调用 winner 的实际 `FileService` owner，因此只有一个物理文件。
+  关闭两套连接再重开后，loser 仍被 winner 的 Pending fence 拒绝，未创建 loser Effect/文件。新增
+  竞态首次及连续 **20/20**，W122 顺序重开与既有 owner-scoped/跨模块 fence **2/2**。生产代码无需
+  修改，无模型/UI。两个完整 host invocation 同时停在 owner 前、跨 action 竞态、跨 owner 错配绑定、
+  owner 核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/LIFE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意

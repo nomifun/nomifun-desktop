@@ -4113,6 +4113,100 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_sessions_have_one_workspace_effect_winner_across_connections() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let left_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let right_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let left_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            left_database.pool().clone(),
+        ).await.unwrap();
+        let right_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            right_database.pool().clone(),
+        ).await.unwrap();
+        let left_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(left_store.clone());
+        let right_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(right_store.clone());
+        let mut left = context(&workspace);
+        left.capability_id = CapabilityId::from("workspace.files");
+        left.action_id = ActionId::from("workspace.files/write");
+        left.idempotency_key = IdempotencyKey::from("left-session-write");
+        left.operation_id = OperationId::from("left-session-operation");
+        let mut right = context(&workspace);
+        right.capability_id = CapabilityId::from("workspace.files");
+        right.action_id = ActionId::from("workspace.files/write");
+        right.idempotency_key = IdempotencyKey::from("right-session-write");
+        right.operation_id = OperationId::from("right-session-operation");
+        ensure_test_effect_context(&left_store,&left).await;
+        ensure_test_effect_context(&right_store,&right).await;
+        let left_input = StrictJsonValue(json!({"path":"left.txt","content":"left"}));
+        let right_input = StrictJsonValue(json!({"path":"right.txt","content":"right"}));
+        let (left_result,right_result) = tokio::join!(
+            begin_wave2_effect(&left_store,&left,workspace_typed_binding(&left).unwrap(),&left_input),
+            begin_wave2_effect(&right_store,&right,workspace_typed_binding(&right).unwrap(),&right_input),
+        );
+        let (left_reservation,left_error) = match left_result {
+            Ok(Wave2EffectAdmission::Reserved(reservation)) => (Some(reservation),None),
+            Ok(Wave2EffectAdmission::Replay(_)) => panic!("fresh left effect cannot replay"),
+            Err(error) => (None,Some(error)),
+        };
+        let (right_reservation,right_error) = match right_result {
+            Ok(Wave2EffectAdmission::Reserved(reservation)) => (Some(reservation),None),
+            Ok(Wave2EffectAdmission::Replay(_)) => panic!("fresh right effect cannot replay"),
+            Err(error) => (None,Some(error)),
+        };
+        assert_ne!(left_reservation.is_some(),right_reservation.is_some());
+        let left_won = left_reservation.is_some();
+        let reservation = left_reservation.or(right_reservation).unwrap();
+        let loser_error = left_error.or(right_error).unwrap();
+        assert_eq!(loser_error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(loser_error.message.contains("unsettled") || loser_error.message.contains("admission failed"),"{loser_error:?}");
+        let (winner_context,winner_host,winner_path,winner_bytes,loser_context,loser_path) = if left_won {
+            (&left,&left_host,"left.txt",b"left".as_slice(),&right,"right.txt")
+        } else {
+            (&right,&right_host,"right.txt",b"right".as_slice(),&left,"left.txt")
+        };
+        let winner_effect_id = wave2_effect_id(winner_context).unwrap();
+        let scope = winner_host.workspace_scope(winner_context).unwrap();
+        winner_host.files.write_file_with_observation_for_agent_session(
+            &scope,winner_path,winner_bytes,
+        ).await.unwrap();
+        assert_eq!(std::fs::read(workspace.join(winner_path)).unwrap(),winner_bytes);
+        assert!(!workspace.join(loser_path).exists());
+
+        drop(reservation);
+        drop(left_host);
+        drop(right_host);
+        drop(left_store);
+        drop(right_store);
+        left_database.close().await;
+        right_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let blocked = invoke(&restarted,loser_context.clone(),"workspace.files/write",json!({
+            "path":loser_path,"content":"must not run after reopen"
+        })).await.unwrap_err();
+        assert_eq!(blocked.code,"CAPABILITY_UNAVAILABLE");
+        assert!(blocked.message.contains("unsettled"),"{blocked:?}");
+        assert_eq!(reopened_store.read_effect(&winner_context.agent_session_id,&winner_effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert!(reopened_store.list_effects(&loser_context.agent_session_id).await.unwrap().is_empty());
+        assert_eq!(std::fs::read(workspace.join(winner_path)).unwrap(),winner_bytes);
+        assert!(!workspace.join(loser_path).exists());
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn durable_effect_pending_and_unknown_fences_survive_host_restart() {
         let pending_root = tempfile::tempdir().unwrap();
