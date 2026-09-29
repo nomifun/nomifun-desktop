@@ -529,6 +529,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   `step-3.7-flash`；业务错误、权限/超时/unknown、其他 Provider/模型/角色/平台与长期矩阵仍开放，
   不关闭完整 REAL/OBS 或共享阶段。
 
+- S-D04-25（PROC-015、OBS-004、REAL-004/021～024、A05/A08/A17/A18/A19 命令失败披露
+  子断言）：Runtime 原已累计 `failed_commands`，但完成报告只强制披露工具结果错误；一次非零退出
+  后恢复成功时，模型可以不申报命令失败。W94 新回归首次按预期失败。现增加动态 exact const
+  `observed_command_failure_count`，非零时必须提交、持久化并参与报告新鲜度判断；最终交付固定追加
+  命令失败数，后续成功不能抹除。若工具错误和命令失败同时非零，模型说明给出包含全部必填计数的
+  单个精确 JSON 对象。首次正式 Tauri 虽正确申报命令失败数，却漏掉同一非零命令产生的工具错误数，
+  completion 先被 Schema 拒绝后恢复，保留为 `FAIL_RECOVERED`。同一夹具和模型修复后精确执行
+  exit 7、更新计划、恢复命令，并在第 4 步一次报告两个计数均为 1；147 条 canonical 事件、2 个真实
+  process effect、工作区和清理结果独立一致。三项新增回归各 **20/20**，Agent Runtime **190/190**，
+  正式构建通过。其他非零码/信号、timeout/lost、多个失败、其他 Provider/角色/平台及长期矩阵仍开放，
+  不关闭完整 PROC/REAL/OBS 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
