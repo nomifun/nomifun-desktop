@@ -376,6 +376,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   正式 reconcile/UI 投影、外部依赖与其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/VCS/BROW/
   COMP/SSH/OBS 或共享阶段。
 
+- S-D09-26（LIFE-006/011/024、FILE-038、VCS-013、BROW-012、COMP-010、SSH-005、OBS-006/015/020、
+  A04/A05/A07/A17/A19 success settlement 子断言）：W145 从正式 `workspace.files/write` handler 发布
+  完整文件后暂停在 terminal settlement，并以 SQLite writer lock 令落库超时。旧路径只返回
+  `database is locked`，调用方无法判断物理效果已发生，Effect 实际为 Pending；首次 FAIL 已保留。
+  新增 `finish_wave2_succeeded_effect`：只记录 canonical result digest，不复制潜在敏感结果正文；落库
+  失败时明确 owner 已报告成功、terminal observation 未提交、durable Effect 仍 Pending、禁止自动重试
+  并要求重读 owner 状态。helper 覆盖 managed effect、write/delete/artifact/stage/commit/push、Browser、
+  Computer Role 与 SSH 的成功分支；patch 保留其更强的逐文件重读诊断。修复后首次及连续 **20/20**；
+  managed success/replay、workspace replay、bare push replay 与 busy fence **4/4**，Browser feature
+  **1/1**、Computer feature **1/1**。无正式 UI/真实外部 owner。各 Action 的逐入口 terminal fault、
+  API/UI 投影、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/FILE/VCS/BROW/COMP/SSH/OBS。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
