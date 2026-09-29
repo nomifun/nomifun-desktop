@@ -2376,6 +2376,17 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖真实磁盘满/写入 IO fault、WAL/fsync 故障、正式应用 shutdown 竞态、其他 Action/平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/FILE 或共享阶段。
 
+### admission 前 Store 不可用（W138，基线 `55ff16b25`）
+
+- S-D09-19 / LIFE-003/024、A04/A05/A17/A19：创建 Session/Turn/tool causation fact 后关闭 canonical
+  Store，再从生产 Wave2 Host 发起文件写。Host 在 Effect ledger read/admission 边界精确返回
+  `CAPABILITY_UNAVAILABLE`，磁盘零文件、数据库零 Effect。
+- 从同一路径重开 Store 与 Host 后，同 operation/key 才首次执行并得到唯一 Returned Effect。首次产品
+  运行及连续 **20/20**，W137 terminal Store close 与 W133 busy admission 相邻回归 **2/2**，
+  fmt/diff 通过。生产代码无需修改，无模型/UI。
+- 未覆盖真实磁盘满/IO fault、连接池关闭与在途 admission 竞态、正式应用 shutdown、其他 Action/平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
