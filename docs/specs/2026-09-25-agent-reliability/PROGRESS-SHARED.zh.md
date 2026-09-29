@@ -541,6 +541,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   正式构建通过。其他非零码/信号、timeout/lost、多个失败、其他 Provider/角色/平台及长期矩阵仍开放，
   不关闭完整 PROC/REAL/OBS 或共享阶段。
 
+- S-D04-26（G0-023、PROC-048、REAL-021～024、A05/A08/A11/A13/A17/A18/A19 运行中 timeout
+  披露子断言）：W96 复用 W94 最终二进制，以正式 Tauri 和 `step-3.7-flash` 运行 250 ms deadline
+  的真实 Windows pipe 命令。结果为 `timed_out`；无可信 console interrupt 后按合同升级 terminate，
+  1,174 ms 内 `reaped=true`，未使用 force kill。模型随后单独更新计划、执行恢复命令，并在第 4 步
+  首次 completion 同时提交 tool/command 计数 1；最终 UI 固定披露两种失败均未被恢复成功抹除。
+  单回合 completed、147 条 canonical 事件、2 个 returned process effect，独立 35 项断言通过；
+  工作区不变，ping/cmd、应用和 profile 进程清零并正式备份。生产代码无需再改。本批未制造外部
+  文件部分效果；持续写入、force-kill/lost、其他命令/Provider/角色/平台与长期矩阵仍开放，不关闭
+  完整 PROC-048/REAL 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

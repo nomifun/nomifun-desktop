@@ -1757,6 +1757,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   模型或 UI。20 次连续压缩、真实 Provider、pause/restart、其他 Agent/平台及 LONG/99% 仍待验，
   不关闭完整 LONG-008/ACOD-017 或共享阶段。
 
+### 运行中 timeout 恢复后的失败披露（W96，基线 `c2eeab594`）
+
+- S-D04-26 / G0-023、PROC-048、REAL-021～024、A05/A08/A11/A13/A17/A18/A19：复用 W94
+  最终二进制 `32d59edc3f352f6b324ffa7f4374e512530c788048a081fcb3f50f2a0affedd7`，以新的
+  正式 Tauri data/work/profile 和 StepFun Coding Plan / `step-3.7-flash` 执行真实 deadline 负向。
+  step 1 精确调用 `cmd.exe /d /c "ping -n 30 127.0.0.1 >nul"`、`timeout_ms=250`；终态为
+  `timed_out`，`interrupt_attempted=true`。CREATE_NO_WINDOW pipe 没有可信 console interrupt 后
+  升级 `terminate_attempted=true`，未 force kill，1,174 ms 内 `reaped=true`。
+- step 2 按 Runtime 要求单独 `update_plan`，step 3 恢复命令 exit 0 并输出精确
+  `W96-RECOVERED`；step 4 首次且仅一次 `report_completion` 同时提交
+  `observed_tool_error_count=1` 和 `observed_command_failure_count=1`。最终摘要明确 timeout 已回收，
+  UI 固定追加两种累计失败披露。Session `01a0eb8c-1f34-72f1-9591-bee302dac00e` 单回合 completed、
+  4 个模型步骤、147 条 canonical 事件；两个 `workspace.process/exec` effect 均 returned。
+- 独立 **35 项**断言通过；工作区前后 tree hash 均为 `f32f2489…c186`，`ping.exe`/匹配 cmd 残留 0，
+  应用、profile 和 Vite 进程清零，正式备份完成。本批无需产品代码修改。未覆盖外部文件部分效果、
+  force-kill/lost、其他命令/Provider/模型/角色、macOS 与 N3/100 seed/LONG/99%；不关闭完整
+  PROC-048/REAL 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
