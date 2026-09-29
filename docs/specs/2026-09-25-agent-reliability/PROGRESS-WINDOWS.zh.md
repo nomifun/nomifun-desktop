@@ -1974,6 +1974,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖多次分块累计流量策略、input/close 并发、终态拒绝的完整 UI/错误披露、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 PROC 或共享阶段。
 
+### PTY resize 的跨平台可执行上限（W107，基线 `b90ddb060`）
+
+- S-D04-29 / PROC-032、A11/A13/A17/A19：标准工具和 canonical start/resize Schema 的
+  `cols/rows` 上限为 65535，Engine request 也只拒绝 0；但 Windows ConPTY 使用 signed 16-bit
+  `COORD`，32768 会通过 Schema 与 App journal 后才在平台 owner 中变成 I/O/unknown。领域 Schema、
+  模型 Schema 和 Engine 校验三项首次反例均 **0/1**，日志独立保留。
+- process Runtime 新增共享 `MAX_PTY_DIMENSION=32767`，resize 在调用平台 owner 前拒绝 0/32768；
+  Engine start 校验、App journal/dispatch 前校验和两套模型 Schema 使用同一上限。合法 132×43
+  ConPTY 仍完成 poll/write/resize/cancel，cancel 得到 cleanup/reaped；越界后 Session 保持运行且 owner
+  resize 调用数为零，终态 resize 仍明确失败而不复活。
+- 合法/越界 ConPTY 组合重复 **40/40**；process Runtime **125/125**、PTY contract **8/8**、
+  Agent Runtime **195/195**、Wave2 **22/22**、Engine **33 通过 / 1 ignored**、App host **5/5**，
+  fmt/diff 通过。本批没有模型调用或正式 UI。
+- Windows ConPTY generic `close_stdin` 仍按既有合同返回“无法证明通用 EOF”，未把该错误伪装为
+  成功；PROC-028、resize 后真实尺寸的应用级观测、其他平台及 N3/100 seed/LONG/99% 仍待验。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
