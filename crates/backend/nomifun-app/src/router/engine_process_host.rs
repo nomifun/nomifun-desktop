@@ -19,6 +19,8 @@ use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+const MAX_STDIN_WRITE_BYTES: usize = 1024 * 1024;
+
 fn error(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("CAPABILITY_UNAVAILABLE", value.to_string())
 }
@@ -78,6 +80,13 @@ fn stdin_bytes(
         bytes.push(b'\n');
     }
     Ok(bytes)
+}
+
+fn stdin_input_exceeds_budget(params: &Params) -> bool {
+    params.input.as_ref().is_some_and(|text| {
+        text.len() > MAX_STDIN_WRITE_BYTES
+            || (params.append_newline == Some(true) && text.len() == MAX_STDIN_WRITE_BYTES)
+    })
 }
 
 pub(crate) struct EngineProcessScope {
@@ -151,13 +160,7 @@ impl EngineProcessScope {
         let params: Params = serde_json::from_value(input.0)
             .map_err(|e| Wave2HostPortError::new("INVALID_PAYLOAD", e.to_string()))?;
         if params.wait_ms.is_some_and(|wait| wait > 30_000)
-            || params
-                .input
-                .as_ref()
-                .is_some_and(|text| {
-                    text.len() > 1024 * 1024
-                        || (params.append_newline == Some(true) && text.len() == 1024 * 1024)
-                })
+            || stdin_input_exceeds_budget(&params)
         {
             return Err(error("process wait/input budget exceeded"));
         }
@@ -510,6 +513,39 @@ mod tests {
             .unwrap(),
             b" payload\r"
         );
+    }
+
+    #[test]
+    fn stdin_budget_counts_the_structured_newline_before_dispatch() {
+        let params = |bytes: usize, append_newline: Option<bool>| Params {
+            operation: Operation::Stdin,
+            command: None,
+            cmd: None,
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: None,
+            process_id: Some("process-1".to_owned()),
+            input: Some("x".repeat(bytes)),
+            append_newline,
+            cursor: None,
+            wait_ms: None,
+            tty: false,
+            cols: None,
+            rows: None,
+        };
+        assert!(!stdin_input_exceeds_budget(&params(
+            MAX_STDIN_WRITE_BYTES,
+            None
+        )));
+        assert!(stdin_input_exceeds_budget(&params(
+            MAX_STDIN_WRITE_BYTES,
+            Some(true)
+        )));
+        assert!(stdin_input_exceeds_budget(&params(
+            MAX_STDIN_WRITE_BYTES + 1,
+            Some(false)
+        )));
     }
 
     #[test]

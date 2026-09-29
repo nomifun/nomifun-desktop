@@ -1960,6 +1960,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 PTY/resize、大块与 1 MiB 边界正式 UI、close/input/poll 并发、retained-base loss、其他
   Provider/角色/平台及 N3/100 seed/LONG/99%；不关闭完整 CTRL/PROC/REAL 或共享阶段。
 
+### stdin 大小、owner 与终态拒绝边界（W106，基线 `a3e810c00`）
+
+- S-D04-28 / PROC-029/030/031、A11/A13/A17/A19：新增 Engine 真实 pipe 反例直接跨过 owner。
+  精确 1 MiB 单次 stdin 写入正常结算并由独立计数进程回报 `1048576`；1 MiB+1 返回稳定上限错误，
+  随后同一进程只回报允许的 `safe` 4 字节，确认超限在 transport 前拒绝且没有部分交付。
+- 已自然退出并 reaped 的 Session 拒绝迟到 stdin；拒绝后 `poll_from(cursor=0)` 仍重放相同 exited
+  终态与原输出，没有复活或污染。App host 另将 `append_newline=true` 的一个 LF 纳入 dispatch 前预算：
+  精确 1 MiB input 可写，精确上限再追加 LF 与 1 MiB+1 均拒绝。
+- 三项新 Engine 反例重复 **60/60**；Engine 完整 **32 通过 / 1 ignored**、App process host
+  **4/4**。既有 process Runtime 的未知 Session/错误双 owner 与终态 PTY resize 三项定向检查通过，
+  均无 owner 写入或 Session 状态改变。首次即通过，无失败可保留；本批没有模型调用或正式 UI。
+- 未覆盖多次分块累计流量策略、input/close 并发、终态拒绝的完整 UI/错误披露、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 PROC 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账与丢批/乱序，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

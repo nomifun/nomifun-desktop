@@ -702,6 +702,33 @@ mod tests {
         }
     }
 
+    fn stdin_count_request() -> EngineProcessRequest {
+        #[cfg(windows)]
+        let (command, args) = (
+            "powershell.exe".to_owned(),
+            vec![
+                "-NoProfile".to_owned(),
+                "-Command".to_owned(),
+                "$text=[Console]::In.ReadToEnd(); [Console]::Out.Write([Text.Encoding]::UTF8.GetByteCount($text))".to_owned(),
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = (
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), "wc -c".to_owned()],
+        );
+        EngineProcessRequest {
+            command,
+            shell_script: None,
+            args,
+            cwd: None,
+            env: BTreeMap::new(),
+            timeout_ms: 10_000,
+            output_limit_bytes: 64 * 1024,
+            transport: EngineProcessTransport::Pipe,
+        }
+    }
+
     fn sleeper_request() -> EngineProcessRequest {
         #[cfg(windows)]
         let (command, args) = (
@@ -1066,6 +1093,111 @@ mod tests {
         };
         assert_eq!(replayed_output.text, first_output.text);
         assert_eq!(replayed_output.next_cursor, first_output.next_cursor);
+    }
+
+    #[tokio::test]
+    async fn stdin_write_limit_rejects_oversize_without_partial_delivery() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner =
+            ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let mut session = owner
+            .start(stdin_count_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        let error = owner
+            .write_stdin(
+                &session,
+                &vec![b'x'; 1024 * 1024 + 1],
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("an oversized stdin write must be rejected before delivery");
+        assert!(error.to_string().contains("may not exceed 1 MiB"));
+        owner
+            .write_stdin(&session, b"safe", CancellationToken::new())
+            .await
+            .unwrap();
+        owner.close_stdin(&session).await.unwrap();
+        let outcome = owner
+            .wait(&mut session, CancellationToken::new())
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited { output, .. } = outcome else {
+            panic!("stdin counter should exit normally");
+        };
+        assert_eq!(output.text.trim(), "4");
+    }
+
+    #[tokio::test]
+    async fn stdin_write_accepts_the_exact_one_mib_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner =
+            ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let mut session = owner
+            .start(stdin_count_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        owner
+            .write_stdin(
+                &session,
+                &vec![b'x'; 1024 * 1024],
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        owner.close_stdin(&session).await.unwrap();
+        let outcome = owner
+            .wait(&mut session, CancellationToken::new())
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited { output, .. } = outcome else {
+            panic!("stdin counter should exit normally");
+        };
+        assert_eq!(output.text.trim(), (1024 * 1024).to_string());
+    }
+
+    #[tokio::test]
+    async fn terminal_session_rejects_late_stdin_without_changing_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let owner =
+            ManagedEngineProcessOwner::new(directory.path(), SupervisorConfig::default()).unwrap();
+        let mut session = owner
+            .start(echo_request(), CancellationToken::new())
+            .await
+            .unwrap();
+        let first = owner
+            .wait(&mut session, CancellationToken::new())
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            output: first_output,
+            ..
+        } = first
+        else {
+            panic!("echo command should exit normally");
+        };
+
+        owner
+            .write_stdin(&session, b"late", CancellationToken::new())
+            .await
+            .expect_err("terminal stdin must reject instead of reviving the process");
+        let replay = owner
+            .poll_from(
+                &mut session,
+                0,
+                Duration::ZERO,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let EngineProcessPoll::Exited {
+            output: replayed_output,
+            ..
+        } = replay
+        else {
+            panic!("terminal replay must remain exited");
+        };
+        assert_eq!(replayed_output, first_output);
     }
 
     #[tokio::test]
