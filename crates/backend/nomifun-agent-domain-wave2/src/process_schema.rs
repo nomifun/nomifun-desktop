@@ -25,8 +25,8 @@ fn launch(include_wait: bool) -> StrictJsonValue {
             "description":"Optional string-valued environment overrides. Omit when empty; never send null."},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
         "tty":{"type":"boolean","default":false},
-        "cols":{"type":"integer","minimum":1,"maximum":65535},
-        "rows":{"type":"integer","minimum":1,"maximum":65535}
+        "cols":{"type":"integer","minimum":1,"maximum":32767},
+        "rows":{"type":"integer","minimum":1,"maximum":32767}
     });
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
@@ -45,6 +45,7 @@ pub fn process_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
         "workspace.process/poll" => object(
             json!({
                 "process_id":{"type":"string","minLength":1,"maxLength":128},
+                "cursor":{"type":"integer","minimum":0,"default":0},
                 "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0}
             }),
             &["process_id"],
@@ -52,7 +53,10 @@ pub fn process_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
         "workspace.process/input" => object(
             json!({
                 "process_id":{"type":"string","minLength":1,"maxLength":128},
-                "input":{"type":"string","maxLength":1048576}
+                "input":{"type":"string","maxLength":1048576,
+                    "description":"Exact UTF-8 text to write without trimming or normalization."},
+                "append_newline":{"type":"boolean","default":false,
+                    "description":"When true, append exactly one LF byte (0x0A) after input. Use this for a requested trailing line feed."}
             }),
             &["process_id", "input"],
         ),
@@ -63,8 +67,8 @@ pub fn process_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
         "workspace.process/resize" => object(
             json!({
                 "process_id":{"type":"string","minLength":1,"maxLength":128},
-                "cols":{"type":"integer","minimum":1,"maximum":65535},
-                "rows":{"type":"integer","minimum":1,"maximum":65535}
+                "cols":{"type":"integer","minimum":1,"maximum":32767},
+                "rows":{"type":"integer","minimum":1,"maximum":32767}
             }),
             &["process_id", "cols", "rows"],
         ),
@@ -91,18 +95,18 @@ mod tests {
             ),
             (
                 "workspace.process/poll",
-                json!({"process_id":"p","wait_ms":1}),
-                json!({"process_id":"p","command":"git"}),
+                json!({"process_id":"p","cursor":0,"wait_ms":1}),
+                json!({"process_id":"p","cursor":-1}),
             ),
             (
                 "workspace.process/input",
-                json!({"process_id":"p","input":"hello"}),
+                json!({"process_id":"p","input":"hello","append_newline":true}),
                 json!({"process_id":"p"}),
             ),
             (
                 "workspace.process/resize",
                 json!({"process_id":"p","cols":120,"rows":40}),
-                json!({"process_id":"p","cols":0,"rows":40}),
+                json!({"process_id":"p","cols":32768,"rows":40}),
             ),
             (
                 "workspace.process/cancel",
@@ -127,5 +131,20 @@ mod tests {
         for invalid in [json!({"cmd":"ls","command":"ls"}),json!({"cmd":"ls","args":["-la"]}),json!({})] {
             assert!(!validator.is_valid(&invalid),"{invalid}");
         }
+    }
+
+    #[test]
+    fn stdin_input_contract_preserves_requested_line_endings() {
+        let schema = process_action_input_schema("workspace.process/input")
+            .unwrap()
+            .0;
+        let description = schema["properties"]["input"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("without trimming or normalization"));
+        assert_eq!(schema["properties"]["append_newline"]["default"], false);
+        assert!(schema["properties"]["append_newline"]["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("0x0A")));
     }
 }

@@ -144,7 +144,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "write_process_stdin",
         capability_id: "workspace.process",
         action_id: "workspace.process/input",
-        description: "Write bounded input to a turn-owned process. This is an effect and invalidates older workspace evidence.",
+        description: "Write bounded input to a turn-owned process. The input text is sent exactly without trimming or normalization. When the request requires one trailing line feed, set append_newline=true to append exactly one LF byte (0x0A) after input. This is an effect and invalidates older workspace evidence.",
         schema: process_input_schema,
     },
     StandardTool {
@@ -412,8 +412,8 @@ fn process_launch(include_wait: bool) -> Value {
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
         "tty":{"type":"boolean","default":false},
-        "cols":{"type":"integer","minimum":1,"maximum":65535},
-        "rows":{"type":"integer","minimum":1,"maximum":65535}
+        "cols":{"type":"integer","minimum":1,"maximum":32767},
+        "rows":{"type":"integer","minimum":1,"maximum":32767}
     });
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
@@ -447,7 +447,10 @@ fn process_poll_schema() -> Value {
 fn process_input_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
-        "input":{"type":"string","maxLength":1048576}
+        "input":{"type":"string","maxLength":1048576,
+            "description":"Exact UTF-8 text to write without trimming or normalization."},
+        "append_newline":{"type":"boolean","default":false,
+            "description":"When true, append exactly one LF byte (0x0A) after input. Use this for a requested trailing line feed."}
     },"required":["process_id","input"]})
 }
 
@@ -460,8 +463,8 @@ fn process_id_schema() -> Value {
 fn process_resize_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
-        "cols":{"type":"integer","minimum":1,"maximum":65535},
-        "rows":{"type":"integer","minimum":1,"maximum":65535}
+        "cols":{"type":"integer","minimum":1,"maximum":32767},
+        "rows":{"type":"integer","minimum":1,"maximum":32767}
     },"required":["process_id","cols","rows"]})
 }
 
@@ -522,7 +525,7 @@ fn push_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
 
@@ -675,6 +678,28 @@ mod tests {
         assert!(description("start_process").contains("Do not run ls"));
         assert!(description("poll_process").contains("expected output"));
         assert!(description("poll_process").contains("not a tool failure"));
+        assert!(description("write_process_stdin").contains("append_newline=true"));
+        assert!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "write_process_stdin")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["input"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("without trimming or normalization"))
+        );
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "write_process_stdin")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["append_newline"]["default"],
+            false
+        );
         assert!(description("cancel_process").contains("cleanup.reaped=true"));
         assert_eq!(
             tools
@@ -686,6 +711,16 @@ mod tests {
                 .0["properties"]["wait_ms"]["maximum"],
             0
         );
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.definition.name == "resize_process")
+                .unwrap()
+                .definition
+                .input_schema
+                .0["properties"]["cols"]["maximum"],
+            32767
+        );
     }
 
     #[test]
@@ -696,6 +731,128 @@ mod tests {
             .map(|tool| tool.definition.name.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), tools.len());
+    }
+
+    fn assert_model_schema_is_canonical_subset(
+        model: &serde_json::Value,
+        canonical: &serde_json::Value,
+        path: &str,
+    ) {
+        match (model, canonical) {
+            (serde_json::Value::Object(model), serde_json::Value::Object(canonical)) => {
+                let model = model
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "description")
+                    .collect::<BTreeMap<_, _>>();
+                let canonical = canonical
+                    .iter()
+                    .filter(|(key, _)| key.as_str() != "description")
+                    .collect::<BTreeMap<_, _>>();
+                assert_eq!(
+                    model.keys().collect::<BTreeSet<_>>(),
+                    canonical.keys().collect::<BTreeSet<_>>(),
+                    "schema keys drifted at {path}"
+                );
+                for (key, model_value) in model {
+                    let canonical_value = canonical[key];
+                    let child = format!("{path}/{key}");
+                    match key.as_str() {
+                        "maximum" | "maxItems" | "maxLength" | "maxProperties" => {
+                            assert!(
+                                model_value.as_u64().unwrap() <= canonical_value.as_u64().unwrap(),
+                                "model schema widened {child}"
+                            );
+                        }
+                        "minimum" | "minItems" | "minLength" | "minProperties" => {
+                            assert!(
+                                model_value.as_u64().unwrap() >= canonical_value.as_u64().unwrap(),
+                                "model schema widened {child}"
+                            );
+                        }
+                        "required" => {
+                            let model = model_value
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<BTreeSet<_>>();
+                            let canonical = canonical_value
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(serde_json::Value::as_str)
+                                .collect::<BTreeSet<_>>();
+                            assert!(
+                                canonical.is_subset(&model),
+                                "model schema omitted canonical required fields at {child}"
+                            );
+                        }
+                        _ => assert_model_schema_is_canonical_subset(
+                            model_value,
+                            canonical_value,
+                            &child,
+                        ),
+                    }
+                }
+            }
+            (serde_json::Value::Array(model), serde_json::Value::Array(canonical)) => {
+                assert_eq!(model.len(), canonical.len(), "schema array drifted at {path}");
+                for (index, (model, canonical)) in
+                    model.iter().zip(canonical.iter()).enumerate()
+                {
+                    assert_model_schema_is_canonical_subset(
+                        model,
+                        canonical,
+                        &format!("{path}/{index}"),
+                    );
+                }
+            }
+            _ => assert_eq!(model, canonical, "schema value drifted at {path}"),
+        }
+    }
+
+    #[test]
+    fn every_model_process_schema_is_an_admission_subset_of_canonical_wave2() {
+        let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+        let process = registration
+            .metadata
+            .manifest
+            .payload
+            .contributions
+            .capabilities
+            .into_iter()
+            .find(|capability| {
+                capability.id.as_ref()
+                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+            })
+            .unwrap();
+        let canonical_refs = process
+            .contributions
+            .actions
+            .into_iter()
+            .map(|action| (action.action_id, action.input_schema))
+            .collect::<BTreeMap<_, _>>();
+        let process_tools = standard_agent_tool_exposures()
+            .into_iter()
+            .filter(|tool| {
+                tool.capability_id.as_ref()
+                    == nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(process_tools.len(), 7);
+        for tool in process_tools {
+            let reference = &canonical_refs[&tool.action_id];
+            let canonical = nomifun_agent_domain_wave2::resolve_action_schema(
+                nomifun_agent_domain_wave2::WORKSPACE_PROCESS_MODULE_ID,
+                reference,
+            )
+            .unwrap();
+            assert_model_schema_is_canonical_subset(
+                &tool.definition.input_schema.0,
+                &canonical.0,
+                tool.action_id.as_ref(),
+            );
+        }
     }
 
     #[test]

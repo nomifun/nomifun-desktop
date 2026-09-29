@@ -9,6 +9,10 @@ use std::{
 use thiserror::Error;
 use uuid::Uuid;
 
+/// Largest portable PTY dimension. Windows ConPTY uses signed 16-bit COORD
+/// fields, so the shared contract must reject larger values before dispatch.
+pub const MAX_PTY_DIMENSION: u16 = i16::MAX as u16;
+
 use crate::{
     CapabilityPolicy,
     outcome::{CleanupReport, ProcessSnapshot, SessionId, SpawnFailure},

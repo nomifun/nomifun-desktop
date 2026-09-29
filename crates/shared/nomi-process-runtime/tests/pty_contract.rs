@@ -506,17 +506,22 @@ async fn running_pty_supports_poll_write_resize_and_cancel() {
 
 #[tokio::test]
 #[cfg_attr(unix, serial_test::serial(unix_pty_contract))]
-async fn resize_rejects_zero_dimensions_without_mutating_the_session() {
+async fn resize_rejects_out_of_range_dimensions_without_mutating_the_session() {
     let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
     let handle = start_pty(&supervisor, &["sleep", "60000"])
         .await
         .expect("PTY resize helper should start");
 
-    for (cols, rows) in [(0, PTY_ROWS), (PTY_COLS, 0)] {
+    for (cols, rows) in [
+        (0, PTY_ROWS),
+        (PTY_COLS, 0),
+        (nomi_process_runtime::MAX_PTY_DIMENSION + 1, PTY_ROWS),
+        (PTY_COLS, nomi_process_runtime::MAX_PTY_DIMENSION + 1),
+    ] {
         let error = supervisor
             .resize(&handle.owner, &handle.session_id, cols, rows)
             .await
-            .expect_err("zero PTY dimensions should be rejected");
+            .expect_err("out-of-range PTY dimensions should be rejected");
         assert_eq!(error.code(), "invalid_transport");
     }
 

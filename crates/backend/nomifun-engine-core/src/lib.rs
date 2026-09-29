@@ -18,6 +18,7 @@ pub use context_resource::{EngineContextContent, EngineContextResource, EngineRe
 pub use context_resource::mcp_template_variables_schema;
 pub use kernel::{EngineToolExposure, KernelEngineToolInvoker, compile_engine_tool_plan};
 pub use nomifun_chat_model_broker::{BrokerEngineModelPort, EngineModelPort, EngineModelStream};
+pub use nomi_process_runtime::MAX_PTY_DIMENSION;
 pub use process::{
     EngineCleanupReport, EngineProcessOutput, EngineProcessPoll, EngineProcessRequest,
     EngineProcessSession, EngineProcessStartError, EngineProcessTransport, ManagedEngineProcessOwner,
