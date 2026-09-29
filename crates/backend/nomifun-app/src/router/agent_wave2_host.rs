@@ -5139,6 +5139,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vcs_push_pending_receipt_fences_replay_after_host_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let worktree = directory.path().join("worktree");
+        let remote_path = directory.path().join("remote.git");
+        std::fs::create_dir(&worktree).unwrap();
+        let repository = initialize_git_repository(&worktree);
+        git2::Repository::init_bare(&remote_path).unwrap();
+        repository
+            .remote("origin", remote_path.to_str().unwrap())
+            .unwrap();
+        let first_commit = repository.head().unwrap().target().unwrap();
+        let store = test_effect_store().await;
+        let first_host = Wave2ApplicationHost::for_workspace_root(&worktree)
+            .with_effect_store(store.clone());
+        let mut call = context(&worktree);
+        call.capability_id = CapabilityId::from("workspace.vcs");
+        call.action_id = ActionId::from("workspace.vcs/push");
+        call.operation_id = OperationId::from("push-before-receipt-loss");
+        call.idempotency_key = IdempotencyKey::from("push-before-receipt-loss");
+        ensure_test_effect_context(&store, &call).await;
+        let effect_input = StrictJsonValue(json!({
+            "remote":"origin", "refspec":"HEAD:refs/heads/main", "force":false
+        }));
+        let Wave2EffectAdmission::Reserved(_reservation) = begin_wave2_exclusive_effect(
+            &store,
+            &call,
+            workspace_typed_binding(&call).unwrap(),
+            &effect_input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        )
+        .await
+        .unwrap()
+        else {
+            panic!("fresh push effect must reserve");
+        };
+        let owner = VcsPushOwner::new(&worktree).unwrap();
+        let settlement = owner.settlement_guard();
+        owner
+            .push(VcsPushRequest::from_action_input(
+                call.principal.principal_id.clone(),
+                worktree.clone(),
+                workspace_typed_binding(&call).unwrap().clone(),
+                VcsPushActionInput {
+                    remote: "origin".to_owned(),
+                    refspec: "HEAD:refs/heads/main".to_owned(),
+                    force: false,
+                },
+            ))
+            .await
+            .unwrap();
+        drop(settlement);
+        assert_eq!(
+            git2::Repository::open_bare(&remote_path)
+                .unwrap()
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .target(),
+            Some(first_commit)
+        );
+
+        std::fs::write(worktree.join("tracked.txt"), "must remain local\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repository.find_tree(tree_id).unwrap();
+        let parent = repository.find_commit(first_commit).unwrap();
+        let signature = git2::Signature::now("NomiFun test", "test@nomifun.invalid").unwrap();
+        let second_commit = repository
+            .commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "must remain local",
+                &tree,
+                &[&parent],
+            )
+            .unwrap();
+        drop(tree);
+        drop(parent);
+        drop(owner);
+        drop(first_host);
+
+        let restarted = Wave2ApplicationHost::for_workspace_root(&worktree)
+            .with_effect_store(store.clone());
+        let error = invoke(
+            &restarted,
+            call.clone(),
+            "workspace.vcs/push",
+            json!({"remote":"origin","refspec":"HEAD:refs/heads/main"}),
+        )
+        .await
+        .expect_err("a durable pending push must not execute again after restart");
+        assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("durable pending"));
+        assert_eq!(
+            git2::Repository::open_bare(&remote_path)
+                .unwrap()
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .target(),
+            Some(first_commit)
+        );
+        assert_ne!(Some(second_commit), Some(first_commit));
+        assert_eq!(
+            store
+                .read_effect(&call.agent_session_id, &wave2_effect_id(&call).unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            nomifun_agent_session::AgentEffectState::Pending
+        );
+    }
+
+    #[tokio::test]
     async fn vcs_push_replays_a_not_applied_failure_without_late_execution() {
         let directory = tempfile::tempdir().unwrap();
         let worktree = directory.path().join("worktree");
