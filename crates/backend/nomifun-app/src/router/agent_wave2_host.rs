@@ -3479,6 +3479,96 @@ mod tests {
         reopened_database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn concurrent_write_and_delete_have_one_serializable_file_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("shared.txt"),b"base\n").unwrap();
+        let write_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let delete_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let write_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            write_database.pool().clone(),
+        ).await.unwrap();
+        let delete_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            delete_database.pool().clone(),
+        ).await.unwrap();
+        let write_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(write_store.clone());
+        let delete_host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(delete_store.clone());
+        let mut write = context(&workspace);
+        write.capability_id = CapabilityId::from("workspace.files");
+        write.action_id = ActionId::from("workspace.files/write");
+        write.idempotency_key = IdempotencyKey::from("concurrent-write");
+        write.operation_id = OperationId::from("concurrent-write-operation");
+        let mut delete = context(&workspace);
+        delete.capability_id = CapabilityId::from("workspace.files");
+        delete.action_id = ActionId::from("workspace.files/delete");
+        delete.idempotency_key = IdempotencyKey::from("concurrent-delete");
+        delete.operation_id = OperationId::from("concurrent-delete-operation");
+        ensure_test_effect_context(&write_store,&write).await;
+        ensure_test_effect_context(&delete_store,&delete).await;
+        let content = "W".repeat(1024 * 1024);
+        let (write_result,delete_result) = tokio::join!(
+            invoke(&write_host,write.clone(),"workspace.files/write",json!({
+                "path":"shared.txt","content":content
+            })),
+            invoke(&delete_host,delete.clone(),"workspace.files/delete",json!({
+                "path":"shared.txt"
+            })),
+        );
+        let write_ok = write_result.is_ok();
+        let delete_ok = delete_result.is_ok();
+        assert!(write_ok || delete_ok,"both authorized operations failed: write={write_result:?}, delete={delete_result:?}");
+        for error in [write_result.as_ref().err(),delete_result.as_ref().err()].into_iter().flatten() {
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("unsettled") || error.message.contains("admission failed"),"{error:?}");
+        }
+        match std::fs::read(workspace.join("shared.txt")) {
+            Ok(bytes) => {
+                assert_eq!(bytes.len(),1024 * 1024);
+                assert!(bytes.iter().all(|byte|*byte == b'W'));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("concurrent file state is unreadable: {error}"),
+        }
+        let write_effects = write_store.list_effects(&write.agent_session_id).await.unwrap();
+        let delete_effects = delete_store.list_effects(&delete.agent_session_id).await.unwrap();
+        assert_eq!(write_effects.len(),if write_ok { 1 } else { 0 });
+        assert_eq!(delete_effects.len(),if delete_ok { 1 } else { 0 });
+        for effect in write_effects.iter().chain(delete_effects.iter()) {
+            assert_eq!(effect.state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+        assert!(!write_store.has_unsettled_effects(&write.agent_session_id).await.unwrap());
+        assert!(!delete_store.has_unsettled_effects(&delete.agent_session_id).await.unwrap());
+
+        drop(write_host);
+        drop(delete_host);
+        drop(write_store);
+        drop(delete_store);
+        write_database.close().await;
+        delete_database.close().await;
+
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(
+            reopened_database.pool().clone(),
+        ).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(reopened_store.clone());
+        let mut later = context(&workspace);
+        later.capability_id = CapabilityId::from("workspace.files");
+        later.action_id = ActionId::from("workspace.files/write");
+        invoke(&restarted,later,"workspace.files/write",json!({
+            "path":"shared.txt","content":"after write-delete race"
+        })).await.unwrap();
+        assert_eq!(std::fs::read(workspace.join("shared.txt")).unwrap(),b"after write-delete race");
+        drop(restarted);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
     #[tokio::test]
     async fn workspace_artifact_publish_and_read_use_the_file_domain_owner() {
         let directory = tempfile::tempdir().unwrap();
