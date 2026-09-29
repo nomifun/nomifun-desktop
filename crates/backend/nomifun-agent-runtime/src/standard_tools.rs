@@ -120,7 +120,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run a workspace process. Prefer command plus args for an ordinary single-executable invocation; every argument remains a literal argv token. With command, args must be an actual JSON array, never a quoted string containing JSON. Use cmd only when shell semantics such as pipelines, redirection, globbing, or compound syntax are required. Command alone never gets silently split or evaluated as shell text. Do not combine the two forms. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a workspace process using exactly one input form. For an ordinary executable, use {command:\"program\",args:[\"literal\",\"tokens\"]}; for example, Command Prompt is {command:\"cmd.exe\",args:[\"/d\",\"/c\",\"echo ready\"]}. For shell syntax, use {cmd:\"script text\"} with no args field. Never put an executable name in cmd when supplying args, and never combine cmd with command or args. With command, args must be an actual JSON array, never a quoted string containing JSON. Command alone never gets silently split or evaluated as shell text. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -402,9 +402,9 @@ fn process_launch(include_wait: bool) -> Value {
         "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
     };
     let mut properties = json!({
-        "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":cmd_description},
-        "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Preferred for an ordinary single executable: the executable name or path only, for example git, bun, /bin/ls, or powershell.exe. Never include arguments such as ls -la in this field."},
-        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Literal separate argument tokens as an actual JSON array value, for example [\"status\",\"--short\"] for git or [\"-a\"] for /bin/ls; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\"."},
+        "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":format!("Shell-script form only: supply {{\"cmd\":\"script text\"}} and omit both command and args. Never use cmd for an executable plus an args array. {cmd_description}")},
+        "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable form: supply {\"command\":\"program\",\"args\":[...]} and omit cmd. This field is the executable name or path only, for example git, bun, /bin/ls, powershell.exe, or cmd.exe. Never include arguments such as ls -la in this field."},
+        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Valid only with command, never with cmd. Literal separate argument tokens as an actual JSON array value, for example [\"status\",\"--short\"] for git, [\"-a\"] for /bin/ls, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\"."},
         "cwd":{"type":"string","maxLength":4096},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
@@ -415,7 +415,7 @@ fn process_launch(include_wait: bool) -> Value {
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
     }
-    json!({"type":"object","additionalProperties":false,"properties":properties,
+    json!({"type":"object","description":"Choose exactly one form: command plus an args array for an executable, or cmd alone for shell script text. cmd plus args is invalid.","additionalProperties":false,"properties":properties,
         "oneOf":[{"required":["cmd"],"not":{"required":["command"]},"properties":{"args":{"maxItems":0}}},
                  {"required":["command"],"not":{"required":["cmd"]}}]})
 }
@@ -626,19 +626,23 @@ mod tests {
             process
                 .definition
                 .description
-                .contains("Prefer command plus args for an ordinary single-executable invocation")
+                .contains("{command:\"program\",args:[\"literal\",\"tokens\"]}")
         );
+        assert!(process.definition.description.contains("{cmd:\"script text\"} with no args field"));
+        assert!(process.definition.input_schema.0["description"]
+            .as_str().is_some_and(|description| description.contains("cmd plus args is invalid")));
         let properties = &process.definition.input_schema.0["properties"];
         assert!(properties["cmd"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("Use cmd only when shell semantics")));
+            .as_str().is_some_and(|description| description.contains("omit both command and args")
+                && description.contains("Never use cmd for an executable plus an args array")));
         assert!(properties["command"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("Preferred for an ordinary single executable")));
+            .as_str().is_some_and(|description| description.contains("omit cmd")
+                && description.contains("cmd.exe")));
         assert!(properties["args"]["description"]
             .as_str()
-            .is_some_and(|description| description.contains("JSON array value")
-                && description.contains("never a JSON-encoded string")));
+            .is_some_and(|description| description.contains("Valid only with command, never with cmd")
+                && description.contains("actual JSON array value")
+                && description.contains("command=cmd.exe")));
     }
 
     #[test]
