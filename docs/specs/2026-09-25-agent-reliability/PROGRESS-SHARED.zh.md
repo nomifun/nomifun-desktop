@@ -122,6 +122,45 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无正式 UI/生产 remote。领域级自动对账仍是文档明确未实现的限制；第三方改写、网络 remote、UI
   核对控制面、其他平台及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
 
+- S-D05-13（VCS-006/009/014、LIFE-006/007、A05/A13/A17/A19 commit receipt 丢失子断言）：
+  W120 在磁盘 SQLite 中 reserve `workspace.vcs/commit` external Effect，再经生产
+  `invoke_vcs_commit` 创建真实 commit；owner 返回 commit ID 后故意不写 terminal receipt，并关闭全部
+  数据库连接。用户随后修改并 stage 新字节。重开后原 key 与新 operation/key 均在 commit owner/hook
+  前被 workspace fence 拒绝；HEAD 保持首个新 commit、历史仍只有 initial+该 commit，index blob 与
+  worktree 都保留用户后写字节，Effect 保持唯一 Pending。新增断言首次及连续 **20/20**；相邻 commit
+  replay/identity/scope **4/4**、stage/commit 共享门及并发 commit **2/2**。生产代码无需修改，无模型/
+  UI。commit-intent 主动核对、libgit2 worker/SQLite terminal commit 进程强杀、post-commit 故障窗口的
+  Windows 运行、其他平台及 N3/LONG/99% 仍开放，不关闭完整 VCS/LIFE 或共享阶段。
+
+- S-D05-14（VCS-004/014、LIFE-006、A05/A13/A17/A19 stage receipt 丢失子断言）：W121 在
+  磁盘 SQLite 中 reserve `workspace.vcs/stage` Effect，并由实际 `WorkspaceVcsStageOwner` 把 worktree
+  新字节写入 Git index；owner 返回 staged receipt 后故意不写 terminal receipt，关闭全部数据库连接。
+  用户随后把 index 恢复到 HEAD，同时保留新的 unstaged worktree 字节。重开后原 key 与新
+  operation/key 均在 stage owner 前被 workspace fence 拒绝；HEAD/index 仍为 base，worktree 保留用户
+  字节，Effect 保持唯一 Pending。首次新增断言使用早先打开的独立 `git2::Repository` 读到缓存 index，
+  失败已保留；改用重开仓库的磁盘 oracle 后首次及连续 **20/20**。相邻 App stage/commit **3/3**、
+  VCS stage owner 锁/scope/删除/置换 **7/7**。生产代码无需修改，无模型/UI。index replace/SQLite
+  terminal commit 进程强杀、stage 结果人工核对、linked worktree/submodule、其他平台及 N3/LONG/99%
+  仍开放，不关闭完整 VCS/LIFE 或共享阶段。
+
+- S-D09-06（CONC-015、FILE-038、LIFE-006/007、AUTH-009、A05/A13/A17/A19 跨 Session
+  workspace fence 子断言）：W122 在 Session A 的磁盘 Effect reserve 后由实际 `FileService` 发布文件，
+  故意丢失 terminal receipt，并关闭全部数据库连接；重开 Store/host 后创建同一认证 owner、同一物理
+  workspace 的独立 Session B。B 的不同 operation/key 在文件 owner 前被全局 unsettled-resource 索引
+  拒绝，未创建 B Effect 或目标文件；A 仍只有一个 Pending，已发布字节不变。新增断言首次及连续
+  **20/20**；既有 owner-scoped/跨模块 fence、W115 写入重开及 Store external uncertainty **3/3**。
+  生产代码无需修改，无模型/UI。正式 App 多会话入口、真正同时竞争、跨 owner 错配同一路径绑定、
+  owner 核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/LIFE 或共享阶段。
+
+- S-D09-07（CONC-015、FILE-038、LIFE-006、AUTH-009、A05/A13/A17/A19 跨连接并发 admission
+  子断言）：W123 使用同一磁盘数据库的两个独立 SQLite pool、两个 host 和两个同 owner/workspace
+  AgentSession，同时提交不同写 Effect 的 canonical reserve。每轮恰好一个 Reserved、一个在唯一
+  unsettled-resource 索引处失败；只调用 winner 的实际 `FileService` owner，因此只有一个物理文件。
+  关闭两套连接再重开后，loser 仍被 winner 的 Pending fence 拒绝，未创建 loser Effect/文件。新增
+  竞态首次及连续 **20/20**，W122 顺序重开与既有 owner-scoped/跨模块 fence **2/2**。生产代码无需
+  修改，无模型/UI。两个完整 host invocation 同时停在 owner 前、跨 action 竞态、跨 owner 错配绑定、
+  owner 核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 CONC/FILE/LIFE 或共享阶段。
+
 - S-D03-51（FILE-019/020/038、LIFE-006/007、A05/A13/A17/A19 文件发布 receipt 丢失子断言）：
   W115 将原先只复用内存 Store、并用 `std::fs::write` 模拟发布的回归升级为磁盘 SQLite 与实际
   `FileService` owner。canonical Effect reserve 后文件 owner 成功原子发布并返回 receipt，夹具故意
@@ -161,6 +200,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **20/20**；W117 文件重建/部分递归删除 **2/2**，FileService 目录置换与 Windows 空目录路径
   **3/3**。生产代码无需修改，无模型/UI。文件 worker/SQLite terminal commit 进程强杀、目录结果
   人工核对、其他平台及 N3/LONG/99% 仍开放，不关闭完整 FILE/LIFE 或共享阶段。
+
+- S-D03-55（ART-001/003/005、LIFE-006/007、A05/A13/A17/A19 Artifact publish receipt 丢失
+  子断言）：W119 在磁盘 SQLite 中 reserve publish Effect，由实际 `WorkspaceArtifactStore` 把源文件
+  发布为 content-addressed blob；owner 返回 artifact ID 后故意不写 terminal receipt，并关闭全部数据库
+  连接。源文件随后改成不同内容。重开后原 key 与携带新 digest 的新 operation/key 均在 Artifact owner
+  前被 workspace fence 拒绝；原 artifact 字节/ID 保持且目录只有一个 64 位内容对象，新 digest 对象
+  不存在，Effect 保持唯一 Pending。首个新增断言因夹具 reserve 未使用生产规范化的 optional-null input
+  而得到正确 `IDEMPOTENCY_CONFLICT`，失败已保留；修正夹具后首次及连续 **20/20**。App Artifact
+  **2/2**、ArtifactStore 发布/读取/篡改/清理/并发 **15/15**。生产代码无需修改，无模型/UI。Artifact
+  worker/SQLite terminal commit 进程强杀、owner 核对/恢复、Session 删除与 reader 并发、其他平台及
+  N3/LONG/99% 仍开放，不关闭完整 ART/LIFE 或共享阶段。
 
 - S-D04-23（`CMD-149/150`、A02/A08/A13/A17/A19 process host OS 映射子断言）：旧标准工具
   description 在 Runtime 侧写入 host OS，renderer/client OS 不参与，但 Kernel 在 owner dispatch 前
