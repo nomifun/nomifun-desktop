@@ -654,6 +654,10 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   通过。无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期/跨重启恢复、更多取消/并发驱逐拓扑、
   其他角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
 
+- macOS M06-01 原生复核上述 DesktopServer 正常退出/SQLite writer lock 场景，前后两个源码快照各
+  **2/2**，4 个独立 DB/唯一文件及 cleanup witness 一致；后续 `S-D09-47` host/journal 定向 **4/4**。
+  尚无正式 renderer 或真实模型验证，未修改 Windows 原结果。
+
 - S-D09-47（LIFE-009/011/019/023/024/029、CONC-014、A04/A06/A07/A10/A13/A17/A19 清理投影及
   初始化前取消子断言）：W167 只读并发复核发现并执行四个反例：跨 step 的旧 completion 写失败后
   cursor 提前丢失；bootstrap 第二条失败后按 sequence 跳过重试；无 active 的 terminal 仅内存确认；
@@ -1452,6 +1456,11 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   预算后仍要求原 6 秒上界、唯一 Cancelled/reaped、同一 poll/report 和精确 PID 消失，未放宽断言。
   真实 start/shutdown、start future drop、正式 Tauri、ConPTY 父死亡、其他平台/角色及完整
   N3/100 seed/LONG/99% 仍开放；只通过该子断言，不关闭完整 PROC/LIFE 或共享阶段。
+- macOS M06-01 的仓库外 PID evidence 重跑首败在 poll 前：marker 不属于原 helper cwd 的 Seatbelt
+  工作区。夹具现将 canonical evidence root 同时作为 cwd/唯一 capability root，未增加旁路授权。
+  修复后首次 + 20 repeats **21/21**，独立 PID/report **21/21**，6 秒上界、原 poll 唤醒与相同 report
+  全满足；普通 shutdown **3/3**，helper 残留 0。证据位于 `2026-09-30/macos/m06-native-shutdown/`；
+  该原生子断言通过，正式 Tauri/更多拓扑与完整统计门槛仍开放。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从

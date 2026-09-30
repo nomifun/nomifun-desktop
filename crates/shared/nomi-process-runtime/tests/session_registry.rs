@@ -709,6 +709,7 @@ async fn shutdown_wakes_long_poll_and_reaps_active_process() {
         .map(std::path::PathBuf::from);
     let directory = evidence_root.as_deref().unwrap_or(temporary.path());
     std::fs::create_dir_all(directory).expect("evidence directory should exist");
+    let directory = directory.canonicalize().expect("evidence directory must resolve");
     let marker = directory.join("long-poll.pid");
     let supervisor = ProcessSupervisor::new(SupervisorConfig {
         max_sessions: 2,
@@ -723,6 +724,10 @@ async fn shutdown_wakes_long_poll_and_reaps_active_process() {
         ],
         Duration::from_secs(30),
     );
+    // The optional evidence root is the helper's workspace, not an ambient
+    // write grant. Bind both cwd and the sole capability root to that directory.
+    request.cwd = directory.clone();
+    request.capability = CapabilityPolicy::local_owner(directory);
     // Use the product stop contract, rather than the surrounding lease tests'
     // 75 ms total cleanup allowance, when proving a native shutdown boundary.
     let default_stop = ProcessPolicy::default();
