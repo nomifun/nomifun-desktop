@@ -11,7 +11,7 @@
 
 | 簇 | macOS 候选复用证据（保留原构建及覆盖限制） | 本轮下一缺口 |
 | --- | --- | --- |
-| C01 命令选择与参数 | M01-03 正式 `ls -a`；M01-05 host `pwd -P`；argv/cwd/OS mapping 回归 | MAC-A 的普通命令组合，真实 GEN/COD 入口；不补全全部 CMD 语料 |
+| C01 命令选择与参数 | M01-03 正式 `ls -a`；M01-05 host `pwd -P`；MAC-C01-01 宿主示例/字面恢复 | MAC-A 的普通命令首发/N3，真实 GEN/COD 入口；不补全全部 CMD 语料 |
 | C02 读取与搜索 | M02-02 正式 StepFun 单次精确读取；文件路径/读搜组件 | MAC-A 的中文/空格、头尾/计数、查有与零匹配、源文件不变 |
 | C03 Git观察与小测试 | M03 Git 只读/身份边界组件及 native coding 回归 | MAC-A 首次 `status/diff`、按 AGENTS 指定小测试、预期非零的准确说明 |
 | C04 文件与步骤结果 | M01-02/M03 文件原子性、权限和真实 receipt 回归 | MAC-B 连续写改/复制移动/回读/hash/精确删除，最终字节与回答一致 |
@@ -33,8 +33,9 @@
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
-当前 M04-27 的真实 StepFun 首次 transport failure 无 HTTP 认证/额度证据，只阻断相关 live 运行；
-先核对网络恢复条件并冻结该批次数/输出/时限，再进入正式 UI，不把已授权模型预算设为永久 0。
+M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后 MAC-A-01
+已恢复真实请求。当前锁屏只阻断正式 UI，C05 另待系统授权条件核对；每次 live 先冻结次数/输出/
+时限，不把已授权模型预算设为永久 0，也不由组件或模型回包代判正式场景通过。
 
 ## 收敛处置与本轮结束条件
 
@@ -1250,3 +1251,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   1 MiB/UTF-8 截断规则不变，首次 FAIL 不覆盖。
 - 证据 `2026-10-01/macos/c03-diff-render/`。本批未额外调用模型或重跑完整领域；正式 Tauri/live
   修后、当前 MAC-A 首发/N3 及 C05 系统授权/退出仍开放，不以组件 PASS 关闭完整场景或 Windows 验收。
+
+- **MAC-C01-01 host-specific executable guidance**（C01、`PROC-003/004`、`CMD-132/134` 的本批
+  提示与 native 恢复子断言）：接续 MAC-A-01 的真实整行 command 首败，macOS 26.6.2 / 原生 arm64 /
+  APFS。模型提示中的通用 Command Prompt 及混合属性示例改为宿主适用的合法 JSON/argv；明确
+  `/bin/pwd` + `["-P"]`、`/bin/ls` + `["-a"]`。公共反馈优先字面 executable/args，cmd 仅供 shell
+  syntax；保留 Windows 专属 PowerShell 合同，不改 owner、输入合法集合或暗中拆参。
+- 提示回归及真实 host 恢复回归各一次首败保留；修后 tools/Schema **12/12**、process host
+  **10/10**、native 特殊 token argv **1/1** 通过。错误 `/bin/ls -a` 仍返回未启动且 quiescent，
+  分离 argv 随后真实 exit **0**、reaped；不存在把拒绝改成成功或吞掉历史错误。
+- 公共提示问题见 **C01-01**，完整日志在 `2026-10-01/macos/c01-literal-guidance/`。无额外模型
+  调用或全仓构建；本次只读 UI inventory 明确 Mac locked、自动解锁失败，须人工解锁后补正式
+  首发/N3。C05 Keychain 条件与退出另待验；提示回归不关闭 MAC-A、模型首发或完整 Case。

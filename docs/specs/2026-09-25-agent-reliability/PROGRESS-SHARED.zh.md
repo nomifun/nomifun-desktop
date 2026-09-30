@@ -10,7 +10,7 @@
 
 | 簇 | 可复用基线 | 下一缺口 |
 | --- | --- | --- |
-| C01 命令选择与参数 | W73/W92；W184相对cwd/PowerShell；W185系统CMD单脚本文本引号 | GEN/COD原生CMD已各有样本；综合A其他普通命令待验 |
+| C01 命令选择与参数 | W73/W92；W184相对cwd/PowerShell；W185系统CMD单脚本文本引号；MAC-C01-01宿主示例/字面恢复 | GEN/COD原生CMD已各有样本；综合A其他普通命令与macOS首发/N3待验 |
 | C02 读取与搜索 | 工作区读搜、路径/输出回归 | 综合场景A的中文/空格、零匹配与只读结果 |
 | C03 Git观察与小测试 | W86；W184正式GEN的git_diff path=.及定向测试结果 | 综合A尚有未闭合调用；不因小复验通过结案整组 |
 | C04 文件与步骤结果 | 既有File/Artifact根因修复及定向回归 | 综合场景B的实际步骤、字节/hash与最终回答 |
@@ -46,6 +46,20 @@
   原生结果不代判，完整综合 A/C03 未因该组件结果通过。
 - Windows W186 并行发现的是同一格式化根因，统一引用本项；保留双方独立首次结果、CLI byte oracle
   与 patch 解析断言，不重复建立公共修复任务或互相移植平台 PASS。
+
+### C01-01 宿主命令示例与启动失败恢复提示（2026-10-01）
+
+- MAC-A-01 已有整行 `/bin/ls -a` 被按字面查找、not_started 的真实反例。暴露给 macOS 的公共
+  exec 示例仍混入 Command Prompt，属性示例同时列出两平台命令；not_started 提示先推荐 shell。
+  本项只修提示一致性，不据此断言已证明模型选错的唯一原因或真实首发已修复。
+- 通用示例改为合法 JSON 的 Git argv；宿主提示/属性按本机给出普通 executable 与分离 args，
+  macOS 明示 `/bin/pwd` + `["-P"]`、`/bin/ls` + `["-a"]`。保留 Windows PowerShell 5.1 的专属
+  合同；失败反馈优先纠正字面 argv，只有确需 shell syntax 才用 cmd。未改 Schema 接受集合、
+  owner、权限、自动拆参或错误/收据语义。
+- 两个最小回归首败保留；macOS tools/Schema **12/12**（含 canonical admission subset）、
+  process host **10/10**、既有 native 字面特殊 token **1/1** 通过。错误整行仍未启动，正确 argv
+  后续 exit 0/reaped；日志在 `2026-10-01/macos/c01-literal-guidance/`。正式 UI 被当前锁屏阻断，
+  不以组件结果关闭 C01/MAC-A/N3，不代判 Windows 原生验收，也不把模型预算恢复为 0。
 
 ## 历史全产品口径快照（已停止本轮排程）
 

@@ -286,7 +286,7 @@ impl EngineProcessScope {
                             "schema":"nomifun.process-start-observation.v1", "state":"not_started",
                             "success":false, "user_code_started":false,
                             "code":"PROCESS_NOT_STARTED",
-                            "message":"The requested executable did not start. Use cmd for a shell command, or command for the executable only with a separate args array. Check the executable and cwd, then correct this request. Process capability remains available; this failed launch did not invalidate earlier file/check observations."
+                            "message":"The requested executable did not start. For an ordinary executable, use command for the executable name or path only, with separate literal tokens in an args JSON array, and omit cmd. The owner never splits command or evaluates it as shell text. Use cmd only when shell syntax is required; then omit command and args. Check the executable and workspace-relative cwd, then correct this request. Process capability remains available; this failed launch did not invalidate earlier file/check observations."
                         })));
                     }
                     return Err(if failure.no_live_process_proven {
@@ -498,6 +498,39 @@ fn process_output(
 mod tests {
     use super::*;
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn unsplit_executable_failure_keeps_literal_argv_recovery_available() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"exec", "command":"/bin/ls -a", "timeout_ms":5000
+        })), "reject-unsplit-command").await.unwrap().0;
+        assert_eq!(rejected["code"], "PROCESS_NOT_STARTED");
+        assert_eq!(rejected["state"], "not_started");
+        assert_eq!(rejected["success"], false);
+        assert_eq!(rejected["user_code_started"], false);
+        assert!(scope.is_quiescent().await);
+
+        let corrected = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"exec", "command":"/bin/ls", "args":["-a"], "timeout_ms":5000
+        })), "correct-literal-argv").await.unwrap().0;
+        assert_eq!(corrected["state"], "exited");
+        assert_eq!(corrected["exit_code"], 0);
+        assert_eq!(corrected["success"], true);
+        assert_eq!(corrected["cleanup"]["reaped"], true);
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        drop(scope);
+        pool.close().await;
+
+        let message = rejected["message"].as_str().unwrap();
+        assert!(message.contains("For an ordinary executable, use command"));
+        assert!(message.contains("never splits command"));
+        assert!(message.contains("Use cmd only when shell syntax is required"));
+    }
 
     #[tokio::test]
     async fn invalid_process_reference_preserves_the_original_owned_process() {
