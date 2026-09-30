@@ -737,7 +737,8 @@ fn append_diff_patch(
         return Ok(());
     }
     diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-        if line.origin() != '\0' {
+        // F/H/B and EOF origins classify complete records, not text prefixes.
+        if matches!(line.origin(), ' ' | '+' | '-') {
             patch.push(line.origin());
         }
         patch.push_str(&String::from_utf8_lossy(line.content()));
@@ -980,6 +981,12 @@ mod tests {
         let diff = invoke(tools[1].as_ref(), json!({})).await;
         assert!(!diff.is_error, "{}", diff.content);
         assert!(diff.content.contains("changed"));
+        let actual: Value = serde_json::from_str(&diff.content).unwrap();
+        let expected = std::process::Command::new("git").current_dir(directory.path())
+            .args(["-c", "color.ui=false", "-c", "core.abbrev=7", "diff", "--no-ext-diff", "--no-textconv", "--", "tracked.txt"])
+            .output().unwrap();
+        assert!(expected.status.success());
+        assert_eq!(actual["unstaged_patch"].as_str().unwrap().as_bytes(), expected.stdout);
 
         let stage = invoke(tools[2].as_ref(), json!({"path": "tracked.txt"})).await;
         assert!(!stage.is_error, "{}", stage.content);

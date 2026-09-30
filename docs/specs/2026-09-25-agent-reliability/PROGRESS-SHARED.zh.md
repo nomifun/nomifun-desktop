@@ -35,6 +35,16 @@
   保留精确 failed-check 与 plan 回执，11 requests 内完成，原件/测试次数/历史错误独立核对。
   只关闭此公共根因；完整连续/纠正、其他平台、首发参数及新发现的 App 退出等待未由该证据代判。
 
+### C03-01 Git diff 的分类标记不是补丁正文（2026-10-01）
+
+- MAC-A-01 真实 Git 回执出现 `Fdiff/H@@`；App 与 VCS 工具的 formatter 对所有非 NUL origin 加前缀，
+  把 libgit2 file/hunk/binary/EOF 分类误当 unified diff 字符。逐 byte Git CLI 最小反例两路径均首败。
+- 现只有 context/add/delete 内容行补标准 sigil，其他完整记录原样返回；不改路径解析/owner 过滤、
+  admission、权限、文件/index 或 1 MiB/UTF-8 上限。真实 F/H 内容、EOF 与 binary notice 不被替换。
+- macOS App staged/unstaged/EOF/binary CLI oracle **1/1**、嵌套 workspace 正负向 **1/1**、VCS 工具
+  **6/6**；日志在 `2026-10-01/macos/c03-diff-render/`。只关闭格式化根因，正式 UI/live 及其他平台
+  原生结果不代判，完整综合 A/C03 未因该组件结果通过。
+
 ## 历史全产品口径快照（已停止本轮排程）
 
 - 公共 P0 为 **5/5 任务已验证**。本文213个去重问题编号属于问题簇，不是已通过的Case数量。
