@@ -2933,6 +2933,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - staging/drop 名称复用、rollback check→unlink、并发增长预算、真实满盘/fsync、正式UI/模型/其他角色平台及
   N3/100 seed/LONG/99%仍未覆盖；不关闭完整ART/FILE Case或共享阶段。
 
+### Artifact 源/blob并发增长读取预算（W175，基线 `003f12a78`）
+
+- S-D03-61 / ART-002/004/005/006、A05/A07/A13/A14/A15/A17/A19：源暂存和完整blob验证
+  都在metadata捕获后读取到EOF；8字节样本增长为131,080字节时，原实现拒绝前完整扫描新增数据。
+  证据根为外部 `2026-09-30/windows/w175-artifact-growth-budget`，两项 **0/2**首败、磁盘和实际IO计数
+  保留于 `01-first-product-run`。metadata/read的同步故障hook不引入新的等待点或模型权限。
+- 两路径使用观察大小+1字节的真实reader上界，增长立即Conflict；不额外暂存/hash/cache，
+  不返回截断内容。原变化后源/blob保留，publication temp清零；既有最大大小和正常完整性检查保持。
+- Windows模块 **20/20**、新两项 **20/20 × 2**、42份独立磁盘/IO核对通过（131,080→9字节）；
+  WSL Ubuntu ext4模块 **23/23**、两原生场景独立核对、fmt/diff通过。正常pages/cache断言未变，
+  无UI/模型调用，未计macOS；全部日志、源码/binary身份和现场在外部。
+- 连续多进程写、512MiB边界样本、staging/drop与rollback名称竞态、真实IO fault、完整应用/UI/
+  角色及N3/100 seed/LONG/99%仍开放，不关闭完整Case或共享阶段。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。
