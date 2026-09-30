@@ -1,6 +1,6 @@
 import '../../../../test/setup-dom.ts';
 
-import { act, cleanup, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 describe('Guid default Agent workbench setting', () => {
-  test('shows the configured default and saves a new catalog-backed choice', async () => {
+  test('shows an inline selector and saves a new catalog-backed choice immediately', async () => {
     configService.setLocal('guid.defaultAgentSelection', {
       kind: 'preset',
       presetId: stablePreset.preset_id,
@@ -90,12 +90,11 @@ describe('Guid default Agent workbench setting', () => {
         </I18nextProvider>
       );
 
-      fireEvent.click(page.getByRole('button', {
-        name: `Default Agent: ${stablePreset.display_name}`,
-      }));
       const select = page.getByRole('combobox', {
-        name: agentSettings.defaultAgent.field,
+        name: agentSettings.defaultAgent.title,
       }) as HTMLSelectElement;
+      expect(select.value).toBe(`preset:${stablePreset.preset_id}`);
+      expect(page.queryByRole('dialog')).toBeNull();
       expect([...select.options].map((option) => option.text)).toContain(
         agentSettings.template.coding.codex.name
       );
@@ -112,11 +111,8 @@ describe('Guid default Agent workbench setting', () => {
         agentSettings.template.companion.default.name
       );
 
-      fireEvent.change(select, { target: { value: 'template:coding.codex' } });
       await act(async () => {
-        fireEvent.click(page.getByRole('button', {
-          name: agentSettings.defaultAgent.save,
-        }));
+        fireEvent.change(select, { target: { value: 'template:coding.codex' } });
       });
       expect(save).toHaveBeenCalledWith('guid.defaultAgentSelection', {
         kind: 'template',
@@ -138,8 +134,33 @@ describe('Guid default Agent workbench setting', () => {
       </I18nextProvider>
     );
 
-    expect(page.getByRole('button', {
-      name: `Default Agent: ${agentSettings.template.chat.minimal.name}`,
-    })).not.toBeNull();
+    expect((page.getByRole('combobox', {
+      name: agentSettings.defaultAgent.title,
+    }) as HTMLSelectElement).value).toBe('template:chat.minimal');
+  });
+
+  test('blocks overlapping changes and restores the previous default after a failed save', async () => {
+    const previous = { kind: 'template', templateKey: 'assistant.general' } as const;
+    configService.setLocal('guid.defaultAgentSelection', previous);
+    let rejectSave!: (error: Error) => void;
+    const save = spyOn(configService, 'set').mockImplementation((key, value) => {
+      configService.setLocal(key, value);
+      return new Promise<void>((_resolve, reject) => { rejectSave = reject; });
+    });
+    try {
+      const page = render(<I18nextProvider i18n={i18n}><GuidDefaultAgentSetting library={library} /></I18nextProvider>);
+      const select = page.getByRole('combobox', { name: agentSettings.defaultAgent.title }) as HTMLSelectElement;
+      fireEvent.change(select, { target: { value: 'template:chat.minimal' } });
+      expect(select.disabled).toBe(true);
+      fireEvent.change(select, { target: { value: 'template:coding.codex' } });
+      expect(save).toHaveBeenCalledTimes(1);
+      await act(async () => { rejectSave(new Error('offline')); });
+      await waitFor(() => expect(page.getByRole('alert').textContent).toBe(agentSettings.defaultAgent.saveFailed));
+      expect(configService.get('guid.defaultAgentSelection')).toEqual(previous);
+      expect(select.value).toBe('template:assistant.general');
+      expect(select.disabled).toBe(false);
+    } finally {
+      save.mockRestore();
+    }
   });
 });

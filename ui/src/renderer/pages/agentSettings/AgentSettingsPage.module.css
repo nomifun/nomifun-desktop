@@ -9,15 +9,22 @@
 }
 .workspace { display:flex; flex:1; height:100%; min-height:0; align-items:stretch; }
 .mainArea { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; container-type:inline-size; container-name:agent-editor; }
-.defaultsToolbar { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px; padding:8px 24px; flex-shrink:0; border-bottom:1px solid var(--agent-border); }
-.defaultAgentButton { max-width:min(320px, 45vw); overflow:hidden; }
-.defaultAgentButton :global(.arco-btn-content) { min-width:0; overflow:hidden; }
-.defaultAgentButtonLabel { display:block; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.defaultAgentDialog { display:flex; flex-direction:column; gap:16px; }
-.defaultAgentDialog > p { margin:0; color:var(--color-text-3); font-size:12px; line-height:1.7; }
-.defaultAgentField { display:flex; flex-direction:column; gap:8px; }
-.defaultAgentField > span { color:var(--color-text-2); font-size:12px; font-weight:500; }
-.defaultAgentActions { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+.libraryFooter { display:flex; flex-direction:column; gap:4px; padding:12px 10px; }
+.libraryFooter :global(.arco-btn) { display:flex; align-items:center; justify-content:flex-start; gap:8px; width:100%; min-width:0; height:32px; padding:0 10px; border-radius:8px; background:transparent; color:var(--color-text-2); font-size:12px; }
+.libraryFooter :global(.arco-btn):not(:disabled):hover { background:var(--color-fill-2); }
+.libraryFooter :global(.arco-btn):disabled { color:var(--color-text-4); }
+.libraryFooter :global(.arco-btn) > span { min-width:0; }
+.libraryFooter :global(.arco-btn) > :global(.arco-icon) + span { margin-left:0; }
+.libraryFooter :global(.i-icon) { display:inline-flex; align-items:center; flex-shrink:0; line-height:1; }
+.defaultAgentSetting { min-width:0; display:flex; flex-direction:column; gap:4px; }
+.defaultAgentField { min-width:0; height:32px; display:flex; align-items:center; gap:8px; padding:0 10px; color:var(--color-text-2); font-size:12px; }
+.defaultAgentField > span { flex-shrink:0; white-space:nowrap; }
+.defaultAgentSelect { flex:1; width:0; min-width:0; height:28px; padding:0 6px; border:1px solid var(--color-border-2); border-radius:6px; background:var(--color-bg-2); color:var(--color-text-1); font:inherit; text-overflow:ellipsis; cursor:pointer; }
+.defaultAgentSelect:not(:disabled):hover { border-color:var(--color-border-3); }
+.defaultAgentSelect:focus-visible { outline:2px solid rgb(var(--primary-6)); outline-offset:2px; }
+.defaultAgentSelect:disabled { cursor:not-allowed; color:var(--color-text-4); }
+.defaultAgentFeedback { margin:0; padding:0 10px; color:var(--color-text-3); font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+.defaultAgentError { color:rgb(var(--danger-6)); }
 .library { border-radius:0; overflow:hidden; }
 .editorSurface { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--agent-surface); overflow:hidden; }
 .libraryHeader { display:flex; flex-direction:column; gap:6px; padding:8px 10px 6px; }
@@ -36,10 +43,6 @@
 .libraryTabs button[aria-selected='true'] { background: var(--color-bg-2); color: var(--color-text-1); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
 .libraryTabs button span { font-size: 10px; color: var(--color-text-3); }
 .libraryBody { overflow-y: auto; min-height: 0; padding: 0 10px 14px; }
-.firstRun { margin: 0 0 12px; padding: 11px; border: 1px solid rgba(var(--primary-6), .18); border-radius: 9px; background: rgba(var(--primary-6), .055); }
-.firstRun strong { display: block; color: var(--color-text-1); font-size: 12px; font-weight: 600; }
-.firstRun p { margin: 4px 0 9px; color: var(--agent-muted); font-size: 11px; line-height: 1.5; }
-.firstRun > div { display: flex; align-items: center; gap: 5px; }
 .libraryHint { padding: 0 5px; margin: 0 0 12px; color: var(--agent-muted); font-size: 11px; line-height: 1.6; }
 .libraryList { display: flex; flex-direction: column; gap: 3px; }
 .libraryRow, .libraryPersonalRow { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 50px; box-sizing: border-box; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--color-text-1); text-align: left; }
