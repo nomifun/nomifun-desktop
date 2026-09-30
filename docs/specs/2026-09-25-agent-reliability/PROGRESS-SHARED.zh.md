@@ -764,6 +764,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   恰好上限512MiB完整发布、持续增长、stale cleanup/Unix最终窗口、真IO fault、正式UI/模型/角色
   平台及长期门槛仍开放，不关闭完整ART或共享阶段。
 
+- S-D03-65（ART-001/004/006、A05/A13/A14/A15/A17/A19 上限正向子断言）：W179 对恰好
+  536,870,912 字节的真实文件完成发布、512 页回读及空 EOF；拼接 digest、receipt 和独立磁盘
+  hash 一致，分页未增加 full scan，page IO 恰好等于文件大小，publication temp 为零。
+  Windows 三个独立样本 **3/3**、相邻超限 **2/2**，WSL Ubuntu ext4 **1/1**，八次外部文件
+  hash 及 fmt/diff 通过。首次即通过，无新产品 FAIL/生产修复；重型回归默认 ignored，本批
+  显式执行，未将跳过计作通过。证据在外部 `2026-09-30/windows/w179-artifact-exact-budget`。
+  持续增长、startup stale cleanup、Unix 最终窗口、真实 IO fault、正式 UI/模型/角色/macOS
+  及长期门槛仍未覆盖；不关闭完整 ART Case 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
