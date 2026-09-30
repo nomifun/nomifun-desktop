@@ -508,7 +508,25 @@ fn rollback_confirmed_published(
     target: &str,
     staged: &StagedArtifact,
 ) -> Result<(), AppError> {
-    let target_file = match directory.open_with(target, &read_options()) {
+    rollback_confirmed_published_with_hook(directory, target, staged, || {})
+}
+
+fn rollback_confirmed_published_with_hook(
+    directory: &Dir,
+    target: &str,
+    staged: &StagedArtifact,
+    after_identity: impl FnOnce(),
+) -> Result<(), AppError> {
+    let options = read_options();
+    #[cfg(windows)]
+    let mut options = options;
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.access_mode(DELETE | FILE_READ_ATTRIBUTES).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let target_file = match directory.open_with(target, &options) {
         Ok(file) => file.into_std(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             sync_directory(directory)?;
@@ -520,7 +538,7 @@ fn rollback_confirmed_published(
             )));
         }
     };
-    let target_identity = SameFileHandle::from_file(target_file).map_err(|error| {
+    let target_identity = SameFileHandle::from_file(target_file.try_clone().map_err(|error| AppError::Conflict(error.to_string()))?).map_err(|error| {
         AppError::Conflict(format!("cannot identify published artifact for rollback: {error}"))
     })?;
     if staged
@@ -532,6 +550,12 @@ fn rollback_confirmed_published(
             "published artifact identity changed before rollback".into(),
         ));
     }
+    after_identity();
+    #[cfg(windows)]
+    crate::windows_cleanup::remove_handle(&target_file).map_err(|error| {
+        AppError::Conflict(format!("cannot remove recorded artifact handle: {error}"))
+    })?;
+    #[cfg(not(windows))]
     directory.remove_file(target).map_err(|error| {
         AppError::Conflict(format!("cannot remove unconfirmed artifact link: {error}"))
     })?;
@@ -959,6 +983,69 @@ mod tests {
     #[test]
     fn staging_cleanup_preserves_a_foreign_reused_name() {
         staging_cleanup_name_race(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_identity_window_preserves_a_preexisting_foreign_target() {
+        rollback_identity_window(false);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rollback_identity_window_locks_the_recorded_target_until_delete() {
+        rollback_identity_window(true);
+    }
+
+    #[cfg(windows)]
+    fn rollback_identity_window(after_identity: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if after_identity {"after-identity"} else {"before-identity"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let foreign = workspace.join("foreign");
+        fs::write(&foreign, b"foreign!").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let target = staged.digest.clone();
+        let target_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&target);
+        let (created, verified) = publish_content_addressed(&namespace, &target, &staged, &ArtifactIoCounters::default()).unwrap();
+        assert!(created);
+        drop(verified);
+        if !after_identity {
+            crate::windows_test_support::rename_with_posix_semantics(&foreign, &target_path, true).unwrap();
+        }
+        let mut blocked = None;
+        let rollback = rollback_confirmed_published_with_hook(&namespace.dir, &target, &staged, || {
+            if after_identity {
+                blocked = crate::windows_test_support::rename_with_posix_semantics(&foreign, &target_path, true)
+                    .err().and_then(|error| error.raw_os_error());
+            }
+        });
+        let foreign_preserved = if after_identity {fs::read(&foreign).ok()} else {fs::read(&target_path).ok()};
+        let confirmed = rollback.is_ok();
+        drop(staged);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "after_identity":after_identity, "blocked_native_code":blocked,
+            "rollback_confirmed":confirmed, "foreign_preserved_bytes":foreign_preserved,
+            "target_exists":target_path.exists(), "target_digest":target,
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert_eq!(foreign_preserved.as_deref(), Some(b"foreign!".as_slice()), "rollback deleted an unowned target after identity verification");
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+        if after_identity {
+            assert_eq!(blocked, Some(32));
+            assert!(confirmed && !target_path.exists());
+            fs::write(&target_path, b"later file").unwrap();
+            crate::windows_test_support::rename_with_posix_semantics(&foreign, &target_path, true).unwrap();
+            assert_eq!(fs::read(&target_path).unwrap(), b"foreign!");
+        } else {
+            assert!(!confirmed && target_path.exists());
+        }
     }
 
     #[test]
