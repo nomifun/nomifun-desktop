@@ -106,6 +106,16 @@
   cursor: grab;
 }
 
+.nodeTitle[data-renamable='true'] {
+  cursor: text;
+}
+
+.nodeTitle:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid color-mix(in srgb, rgb(var(--primary-6)) 48%, transparent);
+  outline-offset: 2px;
+}
+
 .nodeTypeIcon {
   display: flex;
   flex: 0 0 18px;
@@ -131,6 +141,26 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.nodeNameInput {
+  width: min(220px, 100%);
+  min-width: 0;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 1px 5px;
+  border: 1px solid rgb(var(--primary-6));
+  border-radius: 5px;
+  background: var(--color-bg-2);
+  color: var(--color-text-1);
+  font: inherit;
+  line-height: 20px;
+  outline: none;
+  pointer-events: auto;
+}
+
+.nodeNameInput:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--primary-6)) 22%, transparent);
 }
 
 .status[data-status='failed'] {

@@ -196,7 +196,8 @@ describe('Creative Studio canonical node views', () => {
     const sources = `${typesSource}\n${viewsSource}\n${frameSource}`;
 
     expect(typesSource.includes("from '../../domain/schema'")).toBe(true);
-    expect(sources.includes('useState')).toBe(false);
+    expect(`${typesSource}\n${viewsSource}`.includes('useState')).toBe(false);
+    expect(frameSource.includes('useState')).toBe(true);
     expect(sources.includes('useReducer')).toBe(false);
     expect(sources.includes('<svg')).toBe(false);
     expect(sources.includes('localStorage')).toBe(false);

@@ -861,6 +861,8 @@
       },
       "lock": "Lock node",
       "locked": "Node locked",
+      "renameHint": "Double-click to rename",
+      "renamePlaceholder": "Enter a node name",
       "status": {
         "canceled": "Canceled",
         "failed": "Failed",
@@ -900,7 +902,6 @@
       "assetUnavailable": "Asset unavailable",
       "assetsAdded": "Added {{count}} asset(s) to the timeline.",
       "cancelExport": "Cancel export",
-      "close": "Delete timeline node",
       "clipLabel": "{{title}}, duration {{duration}}",
       "collapseAssets": "Collapse asset panel",
       "defaultTitle": "Timeline {{ordinal}}",

@@ -56,6 +56,9 @@ const nodeCallbacks = <K extends CreativeCanvasNodeKind>(
 ) => ({
   onActivate: props.onActivate ? () => props.onActivate?.(node) : undefined,
   onOpen: props.onOpen ? () => props.onOpen?.(node) : undefined,
+  onRename: props.onRename
+    ? (title: string) => props.onRename?.(node, title)
+    : undefined,
   onToggleLock: props.onToggleLock ? () => props.onToggleLock?.(node) : undefined,
 });
 
@@ -268,7 +271,9 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   const { t } = useTranslation();
   const { node } = props;
   const resolved = Boolean(node.data.assetId && asset?.src);
-  const resolvedTitle = title ?? t('creativeStudio.canvas.nodeKinds.audio');
+  const resolvedTitle = title ?? (
+    node.data.title || t('creativeStudio.canvas.nodeKinds.audio')
+  );
   const resolvedEmptyLabel =
     asset?.deleted ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
       : emptyLabel ?? t('creativeStudio.canvas.nodes.audio.empty');
@@ -278,7 +283,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      title={node.data.title || resolvedTitle}
+      title={resolvedTitle}
       footer={resolved ? trimLabel : undefined}
       {...sharedFrameProps(props)}
     >
@@ -294,8 +299,7 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
             aria-label={
               asset?.alt ??
               asset?.label ??
-              node.data.title ??
-              resolvedTitle
+              (node.data.title || resolvedTitle)
             }
             onPointerDown={(event) => event.stopPropagation()}
           />
@@ -312,11 +316,13 @@ export const CreativeAudioNode: React.FC<CreativeAudioNodeProps> = ({
 };
 
 export interface CreativeGroupNodeProps extends CreativeNodePresentationProps<'group'> {
+  title?: string;
   titleFallback?: string;
   children?: React.ReactNode;
 }
 
 export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
+  title,
   titleFallback,
   children,
   ...props
@@ -332,7 +338,7 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
   return (
     <CreativeNodeFrame
       node={node}
-      title={node.data.title || resolvedTitleFallback}
+      title={title ?? (node.data.title || resolvedTitleFallback)}
       variant='group'
       {...sharedFrameProps({ ...props, style: groupStyle })}
     >
@@ -358,7 +364,6 @@ export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCan
     data: CreativeNodeOfKind<'timeline'>['data'],
     mergeKey?: string
   ) => void;
-  onTimelineDelete?: () => void;
   onTimelineAddAsset?: (assetId: string) => void;
   onTimelineRequestAssets?: (popupContainer: HTMLElement | null) => void;
   onTimelineUploadFiles?: (files: readonly File[]) => void | Promise<void>;
@@ -393,7 +398,6 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
           libraryAssets={props.timelineLibraryAssets}
           libraryLoading={props.timelineLibraryLoading}
           onChange={props.onTimelineChange}
-          onDelete={props.onTimelineDelete}
           onAddAsset={props.onTimelineAddAsset}
           onRequestAssets={props.onTimelineRequestAssets}
           onUploadFiles={props.onTimelineUploadFiles}

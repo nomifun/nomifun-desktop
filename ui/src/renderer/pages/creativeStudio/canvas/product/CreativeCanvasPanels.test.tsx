@@ -206,6 +206,7 @@ describe('Creative Canvas product presentation panels', () => {
   test('projects display names only from canonical node data', () => {
     expect(creativeCanvasNodeDisplayName(groupNode)).toBe('第一幕素材');
     expect(creativeCanvasNodeDisplayName(textNode)).toBe('雨夜里的第一幕');
+    expect(creativeCanvasNodeDisplayName({ ...textNode, name: '旁白文案' })).toBe('旁白文案');
     expect(
       creativeCanvasNodeDisplayName({
         ...textNode,
