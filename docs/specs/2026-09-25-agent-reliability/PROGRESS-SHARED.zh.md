@@ -572,6 +572,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/LONG/99% 仍开放，不关闭完整
   LIFE/CONC/G0/FILE 或共享阶段。
 
+- S-D09-40（LIFE-007/023/024、CONC-014、G0-030、OBS-006、A04/A07/A08/A17/A19 failed/uncertain
+  busy+full terminal 子断言）：W160 对 managed owner 确定失败与 external owner outcome unknown 分别
+  reserve Effect，再让 terminal settlement 先等待独立 SQLite writer lock、释放后命中真实
+  `SQLITE_FULL`。两类均返回 full、禁止自动重试并保留各自 owner code/message；Effect 保持 Pending。
+  解除 page budget 后只补 terminal receipt，分别唯一归约为 Rejected 与 Unknown。首版 ASCII padding
+  恰好落入页内空隙，settlement 成功导致夹具 `unwrap_err` 失败；首次失败保留，改用多字节大诊断强制
+  跨页分配后首次及连续 **20/20**。相邻 failed-full、uncertain-full 与 W159 success busy-full
+  **3/3**。生产代码无需修改，无 UI/模型。多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0/OBS 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
