@@ -142,6 +142,19 @@ describe('CreativeAssetLibrary', () => {
     expect(html.match(/type="checkbox"/g)?.length).toBe(4);
   });
 
+  test('keeps source-page batch actions before upload and uses shared checkbox controls', () => {
+    const html = renderLibrary({ appearance: 'source-page' });
+    const toolbar = html.slice(html.indexOf('data-asset-selection-toolbar'), html.indexOf(`>${testLabels.upload}</button>`));
+
+    expect(html.includes('data-asset-selection-bar')).toBe(false);
+    expect(toolbar.includes('已选择 2 项')).toBe(true);
+    expect(toolbar.includes('arco-checkbox-indeterminate')).toBe(true);
+    expect(toolbar.includes('arco-btn-status-danger')).toBe(true);
+    expect(html.indexOf('data-asset-selection-toolbar')).toBeLessThan(html.indexOf(`>${testLabels.upload}</button>`));
+    expect(html.match(/type="checkbox"/g)?.length).toBe(5);
+    expect(html.includes('aria-label="选择素材: image asset"')).toBe(true);
+  });
+
   test('switches to the controlled list presentation without changing asset identity', () => {
     const html = renderLibrary({ view: 'list', selectedIds: new Set() });
     expect(html.includes('data-asset-view="list"')).toBe(true);
@@ -281,7 +294,7 @@ describe('CreativeAssetLibrary', () => {
     expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
     expect(css.includes("[data-asset-appearance='source-page']")).toBe(true);
     expect(css.includes('.collectionBadge {')).toBe(true);
-    expect(css.includes('left: 8px;')).toBe(true);
+    expect(css.includes('right: 8px;')).toBe(true);
     expect(css.includes('.assetTags')).toBe(false);
   });
 });

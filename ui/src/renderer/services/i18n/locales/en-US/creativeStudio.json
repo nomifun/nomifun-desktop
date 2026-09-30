@@ -111,10 +111,12 @@
     },
     "delete": {
       "activeTask": "An active generation task is using this asset. Wait for it to finish or cancel it before deleting the asset.",
+      "batchDescription": "Permanently delete the {{assetCount}} selected assets? The original files and thumbnails will be deleted and cannot be recovered. Canvases and generation history will retain their records and show “Asset deleted”.",
       "cancel": "Cancel",
       "confirm": "Permanently delete",
       "retryCleanup": "Deletion or file cleanup has not completed. Please retry deleting this asset.",
       "description": "Permanently delete “{{title}}”? The original file and thumbnail will be deleted and cannot be recovered. Canvases and generation history will retain their records and show “Asset deleted”.",
+      "partialFailure": "Deleted {{deletedCount}} assets; {{failedCount}} could not be deleted. Retry the remaining assets.",
       "title": "Delete asset"
     },
     "deleted": "Asset deleted",
@@ -188,6 +190,7 @@
     },
     "messages": {
       "assetDeleted": "Asset deleted.",
+      "assetsDeleted": "Deleted {{assetCount}} assets.",
       "assetUpdated": "Asset updated.",
       "collectionUnused": "No assets use this collection.",
       "collectionUpdated": "Updated {{assetCount}} assets.",

@@ -12,6 +12,7 @@ import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { creativeAssetClient } from '../client';
 import { subscribeCreativeAssetDeletion } from '../assetDeletion';
 import { saveCreativeAssetAs } from '../saveCreativeAsset';
+import { creativeAssetDisplayTitle } from '../presentation';
 import {
   CreateCreativeTextAssetModal,
   CreativeAssetLibrary,
@@ -42,7 +43,6 @@ import {
 import type { CreativeAssetEditDraft } from './model';
 import { useCreativeAssetUploadQueue } from './useCreativeAssetUploadQueue';
 
-const EMPTY_SELECTION = new Set<string>();
 const SOURCE_ASSET_PAGE_SIZE = 10;
 const DEFAULT_EDIT_DRAFT: CreativeAssetEditDraft = {
   title: '',
@@ -188,6 +188,11 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   const [kind, setKind] = useState<CreativeAssetKindFilter>('all');
   const [view, setView] = useState<CreativeAssetViewMode>('grid');
   const [page, setPage] = useState(1);
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [deletingAssets, setDeletingAssets] = useState<readonly CreativeAsset[]>([]);
+  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteSubmittingRef = useRef(false);
   const querySearch = creativeAssetQuerySearch(debouncedSearch, submittedSearch);
 
   const query = useMemo(
@@ -219,6 +224,10 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   }, [totalPages]);
 
   useEffect(() => {
+    setSelectedIds(new Set());
+  }, [client, kind, querySearch, visiblePage]);
+
+  useEffect(() => {
     if (pageLoaded) {
       pageLoadAttemptRef.current = null;
       return;
@@ -227,7 +236,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       pageLoadAttemptRef.current = null;
       return;
     }
-    if (library.loading || library.loadingMore || !library.hasMore) return;
+    if (deleteSubmitting || library.loading || library.loadingMore || !library.hasMore) return;
     const previousAttempt = pageLoadAttemptRef.current;
     if (
       previousAttempt?.page === visiblePage &&
@@ -238,6 +247,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     pageLoadAttemptRef.current = { page: visiblePage, loaded: library.assets.length };
     void library.loadMore();
   }, [
+    deleteSubmitting,
     library.assets.length,
     library.error,
     library.hasMore,
@@ -274,6 +284,12 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       ? { ...current, deletedAt: Date.now(), textContent: null, originalUrl: '', thumbnailUrl: null, inLibrary: false }
       : current);
     setEditingAsset((current) => current?.id === assetId ? null : current);
+    setSelectedIds((current) => {
+      if (!current.has(assetId)) return current;
+      const next = new Set(current);
+      next.delete(assetId);
+      return next;
+    });
   }), [client]);
 
   useEffect(() => {
@@ -293,11 +309,6 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
   const [editDraft, setEditDraft] = useState<CreativeAssetEditDraft>(DEFAULT_EDIT_DRAFT);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
-
-  const [deletingAsset, setDeletingAsset] = useState<CreativeAsset | null>(null);
-  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
-  const [deleteError, setDeleteError] = useState<string | null>(null);
-  const deleteSubmittingRef = useRef(false);
 
   const handleUploadFiles = (files: readonly File[]): void => {
     const accepted: File[] = [];
@@ -368,28 +379,57 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
     }
   };
 
+  const openDelete = (assets: readonly CreativeAsset[]): void => {
+    if (!assets.length || deleteSubmittingRef.current) return;
+    setDeleteError(null);
+    setDeletingAssets(assets);
+  };
+
   const handleDelete = async (): Promise<void> => {
-    if (!deletingAsset || deleteSubmittingRef.current) return;
+    if (!deletingAssets.length || deleteSubmittingRef.current) return;
     deleteSubmittingRef.current = true;
     setDeleteSubmitting(true);
     setDeleteError(null);
+    const deletedIds = new Set<string>();
+    const failures: Array<{ asset: CreativeAsset; message: string }> = [];
     try {
-      await library.remove(deletingAsset.id);
-      void library.reload();
-      setDeletingAsset(null);
-      Message.success(
-        t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
-      );
-    } catch (reason) {
-      setDeleteError(
-        isBackendHttpError(reason) && reason.status === 409
-          ? t('creativeStudio.assets.delete.activeTask', {
-              defaultValue: '素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。',
-            })
-          : isBackendHttpError(reason) && reason.status >= 500
-            ? t('creativeStudio.assets.delete.retryCleanup', { defaultValue: '删除或文件清理尚未完成，请重试删除。' })
-            : isBackendHttpError(reason) ? reason.backendMessage : errorText(reason)
-      );
+      for (const asset of deletingAssets) {
+        try {
+          await library.remove(asset.id);
+          deletedIds.add(asset.id);
+        } catch (reason) {
+          failures.push({
+            asset,
+            message: isBackendHttpError(reason) && reason.status === 409
+              ? t('creativeStudio.assets.delete.activeTask', {
+                  defaultValue: '素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。',
+                })
+              : isBackendHttpError(reason) && reason.status >= 500
+                ? t('creativeStudio.assets.delete.retryCleanup', { defaultValue: '删除或文件清理尚未完成，请重试删除。' })
+                : isBackendHttpError(reason) ? reason.backendMessage : errorText(reason),
+          });
+        }
+      }
+      setSelectedIds((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
+      setDeletingAssets(failures.map(({ asset }) => asset));
+      if (failures.length) {
+        setDeleteError(deletingAssets.length === 1 ? failures[0].message : [
+          t('creativeStudio.assets.delete.partialFailure', {
+            defaultValue: '已删除 {{deletedCount}} 项，{{failedCount}} 项未能删除。请重试剩余素材。',
+            deletedCount: deletedIds.size,
+            failedCount: failures.length,
+          }),
+          ...failures.map(({ asset, message }) => `${creativeAssetDisplayTitle(asset)}：${message}`),
+        ].join('\n'));
+      } else {
+        Message.success(deletedIds.size === 1
+          ? t('creativeStudio.assets.messages.assetDeleted', { defaultValue: '素材已删除。' })
+          : t('creativeStudio.assets.messages.assetsDeleted', {
+              defaultValue: '已删除 {{assetCount}} 项素材。',
+              assetCount: deletedIds.size,
+            }));
+      }
+      if (deletedIds.size) await library.reload();
     } finally {
       deleteSubmittingRef.current = false;
       setDeleteSubmitting(false);
@@ -406,14 +446,14 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       <CreativeAssetLibrary
         className={styles.library}
         appearance='source-page'
-        selectable={false}
+        disabled={deleteSubmitting}
         state={pageState}
         search={search}
         kind={kind}
         scope='library'
         view={view}
         locale={locale ?? i18n.resolvedLanguage ?? i18n.language}
-        selectedIds={EMPTY_SELECTION}
+        selectedIds={selectedIds}
         uploads={uploads.items}
         uploadAccept={CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT}
         uploadHint={t('creativeStudio.assets.upload.hint', {
@@ -423,7 +463,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
           page: visiblePage,
           pageSize: SOURCE_ASSET_PAGE_SIZE,
           total: library.total,
-          loading: library.loading || library.loadingMore || (!pageLoaded && !library.error),
+          loading: deleteSubmitting || library.loading || library.loadingMore || (!pageLoaded && !library.error),
           onPageChange: handlePageChange,
         }}
         labels={{
@@ -435,6 +475,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
             defaultValue: '搜索素材标题',
           }),
           kindFilter: t('creativeStudio.assets.page.kindFilter', { defaultValue: '类型' }),
+          selectAll: t('assetLibrary.selection.selectAll', { defaultValue: '全选本页' }),
           emptyTitle: t('creativeStudio.assets.page.emptyTitle', {
             defaultValue: '没有找到素材',
           }),
@@ -456,7 +497,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         onKindChange={setKind}
         onScopeChange={() => undefined}
         onViewChange={setView}
-        onSelectionChange={() => undefined}
+        onSelectionChange={setSelectedIds}
         onUploadFiles={handleUploadFiles}
         onCreateText={() => {
           setTextError(null);
@@ -466,11 +507,8 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         onOpenAsset={setPreviewAsset}
         onEditAsset={openEdit}
         onDownloadAsset={saveAssetAs}
-        onRemoveAsset={(asset) => {
-          if (deleteSubmittingRef.current) return;
-          setDeleteError(null);
-          setDeletingAsset(asset);
-        }}
+        onRemoveAsset={(asset) => openDelete([asset])}
+        onRemoveSelected={openDelete}
         onCancelUpload={uploads.cancel}
         onRetryUpload={uploads.retry}
         onDismissUpload={uploads.dismiss}
@@ -506,7 +544,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       />
 
       <Modal
-        visible={Boolean(deletingAsset)}
+        visible={deletingAssets.length > 0}
         title={t('creativeStudio.assets.delete.title', { defaultValue: '删除素材' })}
         confirmLoading={deleteSubmitting}
         okButtonProps={{ status: 'danger' }}
@@ -517,14 +555,17 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         getPopupContainer={popupContainer}
         onOk={() => void handleDelete()}
         onCancel={() => {
-          if (!deleteSubmittingRef.current) setDeletingAsset(null);
+          if (!deleteSubmittingRef.current) setDeletingAssets([]);
         }}
       >
         <div className={styles.modalBody}>
           <p className={styles.deleteText}>
-            {t('creativeStudio.assets.delete.description', {
+            {deletingAssets.length > 1 ? t('creativeStudio.assets.delete.batchDescription', {
+              defaultValue: '确定永久删除选中的 {{assetCount}} 项素材吗？原始文件及缩略图将被删除，且无法恢复。使用这些素材的画布和生成历史会保留记录，并显示“素材已删除”。',
+              assetCount: deletingAssets.length,
+            }) : t('creativeStudio.assets.delete.description', {
               defaultValue: '确定永久删除“{{title}}”吗？原始文件及缩略图将被删除，且无法恢复。使用此素材的画布和生成历史会保留记录，并显示“素材已删除”。',
-              title: deletingAsset?.title ?? '',
+              title: deletingAssets[0]?.title ?? '',
             })}
           </p>
           {deleteError ? <p className={styles.modalError} role='alert'>{deleteError}</p> : null}
