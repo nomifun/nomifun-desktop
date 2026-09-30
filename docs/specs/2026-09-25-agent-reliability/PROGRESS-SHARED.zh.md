@@ -552,6 +552,47 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   fsync 中途故障、WAL 文件级损坏、写锁并发+满盘、正式应用 shutdown 竞态、多连接池
   拓扑、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/G0/FILE 或共享阶段。
 
+- S-D09-38（LIFE-003/023/024、CONC-014、FILE-038、G0-029、A04/A05/A07/A17/A19 writer lock +
+  disk full 子断言）：W158 使用独立连接持有真实 SQLite writer lock，同时把 production Store 的单连接
+  pool 限制在当前 page count。正式文件写先在 `BEGIN IMMEDIATE` 等待，200 ms 时零文件/零 Effect；
+  释放 writer 后同一 admission 精确命中 `SQLITE_FULL`，仍零副作用且返回真实 full 原因。解除 page
+  budget 后，同 pool/host、同 operation/key 的显式重试只执行一次并得到唯一 Returned Effect，证明
+  W157 的失步连接驱逐在 busy→full 组合下没有误驱逐健康锁连接或留下 depth 污染。新增场景首次及
+  连续 **20/20**；单独 disk-full、busy-timeout、rollback-journal IO fault **3/3**。生产代码无需修改，
+  无 UI/模型。terminal 阶段的 busy+full、多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0/FILE 或共享阶段。
+
+- S-D09-39（LIFE-006/023/024、CONC-014、FILE-038、G0-030、A04/A05/A07/A17/A19 busy terminal +
+  disk full 子断言）：W159 先 reserve canonical Effect 并由实际 `FileService` 发布文件，再让 terminal
+  settlement 在独立 SQLite writer lock 后等待；释放 writer 后同一 terminal 写精确命中
+  `SQLITE_FULL`。返回值同时保留 owner 已成功、full 原因与禁止自动重试，Effect 仍为 Pending，文件
+  字节保持且未二次发布。解除 page budget 后，同 reservation 只补写一次 receipt，Effect 唯一变为
+  Returned。新增场景首次及连续 **20/20**；单独 disk-full terminal、W158 busy-full admission、普通
+  busy terminal **3/3**。生产代码无需修改，无 UI/模型。failed/uncertain terminal 的 busy+full、多个
+  受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/LONG/99% 仍开放，不关闭完整
+  LIFE/CONC/G0/FILE 或共享阶段。
+
+- S-D09-40（LIFE-007/023/024、CONC-014、G0-030、OBS-006、A04/A07/A08/A17/A19 failed/uncertain
+  busy+full terminal 子断言）：W160 对 managed owner 确定失败与 external owner outcome unknown 分别
+  reserve Effect，再让 terminal settlement 先等待独立 SQLite writer lock、释放后命中真实
+  `SQLITE_FULL`。两类均返回 full、禁止自动重试并保留各自 owner code/message；Effect 保持 Pending。
+  解除 page budget 后只补 terminal receipt，分别唯一归约为 Rejected 与 Unknown。首版 ASCII padding
+  恰好落入页内空隙，settlement 成功导致夹具 `unwrap_err` 失败；首次失败保留，改用多字节大诊断强制
+  跨页分配后首次及连续 **20/20**。相邻 failed-full、uncertain-full 与 W159 success busy-full
+  **3/3**。生产代码无需修改，无 UI/模型。多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、
+  其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0/OBS 或共享阶段。
+
+- S-D09-41（LIFE-003/024、CONC-014、G0-029、A04/A05/A07/A17/A19 多 Store pool 失步恢复
+  子断言）：W161 在同一 SQLite 文件上建立两个独立单连接 production Store pool、两个 Session 与
+  两个物理 workspace resource，分别设置连接级 page budget；两条 admission 均真实命中
+  `SQLITE_FULL`，保持零文件/零 Effect，并让各自 sqlx 连接失步。分别解除预算后并发显式重试，两个
+  Store 各自驱逐自己的坏连接并各生成唯一 Returned Effect；随后改写文件再同 key 并发重放，用户字节
+  保持且 Effect count 仍各为 1。前三版夹具依次触发精确 tool causation、连接级 PRAGMA 与物理资源唯一
+  fence 的正确拒绝，另一次补丁定位导致编译失败；日志均保留且不计产品失败。纠正后首次及连续
+  **20/20**，单 pool 满盘、busy→full、资源 fence 相邻回归 **3/3**。生产代码无需修改，无 UI/模型。
+  同一 pool 内多连接同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/LONG/99% 仍开放，
+  不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

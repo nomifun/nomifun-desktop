@@ -6201,6 +6201,350 @@ mod tests {
         database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn disk_full_after_busy_writer_fails_closed_and_recovers_once() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace=directory.path().join("workspace");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool=single_connection_pool(&database_path).await;
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host=Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call=context(&workspace);
+        call.idempotency_key=IdempotencyKey::from("busy-then-disk-full-admission");
+        call.operation_id=OperationId::from("busy-then-disk-full-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id=wave2_effect_id(&call).unwrap();
+        let input=StrictJsonValue(json!({
+            "path":"busy-full.txt","content":"execute after the disk recovers"
+        }));
+        set_database_page_budget(&pool,true).await;
+
+        let mut writer=database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let blocked_host=Arc::clone(&host);
+        let blocked_call=call.clone();
+        let blocked_input=input.clone();
+        let mut blocked=tokio::spawn(async move {
+            blocked_host.invoke(Wave2HostRequest {
+                context:blocked_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:blocked_input },
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!blocked.is_finished(),"admission must wait for the existing writer");
+        assert!(!workspace.join("busy-full.txt").exists());
+        assert!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        writer.commit().await.unwrap();
+
+        let error=tokio::time::timeout(Duration::from_secs(6),&mut blocked).await
+            .expect("admission must finish after the writer releases")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("full"),"{error:?}");
+        assert!(!workspace.join("busy-full.txt").exists());
+        assert!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+
+        set_database_page_budget(&pool,false).await;
+        let result=host.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("busy-full.txt")).unwrap(),b"execute after the disk recovers");
+        let effects=store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        drop(observer);
+        pool.close().await;
+        database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn disk_full_terminal_after_busy_writer_keeps_pending_until_receipt_retry() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace=directory.path().join("workspace");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool=single_connection_pool(&database_path).await;
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host=Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut call=context(&workspace);
+        call.idempotency_key=IdempotencyKey::from("busy-then-disk-full-terminal");
+        call.operation_id=OperationId::from("busy-then-disk-full-terminal-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id=wave2_effect_id(&call).unwrap();
+        let input=StrictJsonValue(json!({
+            "path":"terminal.txt","content":"published before terminal storage fails"
+        }));
+        let Wave2EffectAdmission::Reserved(reservation)=begin_wave2_exclusive_effect(
+            &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh terminal effect must reserve")
+        };
+        let scope=host.workspace_scope(&call).unwrap();
+        let receipt=host.files.write_file_with_observation_for_agent_session(
+            &scope,"terminal.txt",b"published before terminal storage fails",
+        ).await.unwrap();
+        assert!(receipt.created);
+        let output=StrictJsonValue(json!({
+            "written":true,"path":"terminal.txt","detail":"t".repeat(4096)
+        }));
+        set_database_page_budget(&pool,true).await;
+
+        let mut writer=database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let settle_reservation=reservation.clone();
+        let settle_output=output.clone();
+        let mut settlement=tokio::spawn(async move {
+            finish_wave2_succeeded_effect(
+                &settle_reservation,"workspace.files/write",&settle_output,
+            ).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!settlement.is_finished(),"terminal write must wait for the existing writer");
+        assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(workspace.join("terminal.txt")).unwrap(),b"published before terminal storage fails");
+        writer.commit().await.unwrap();
+
+        let error=tokio::time::timeout(Duration::from_secs(6),&mut settlement).await
+            .expect("terminal write must finish after the writer releases")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner reported success"),"{error:?}");
+        assert!(error.message.contains("full"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(workspace.join("terminal.txt")).unwrap(),b"published before terminal storage fails");
+
+        set_database_page_budget(&pool,false).await;
+        finish_wave2_succeeded_effect(&reservation,"workspace.files/write",&output).await.unwrap();
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Returned);
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+        assert_eq!(std::fs::read(workspace.join("terminal.txt")).unwrap(),b"published before terminal storage fails");
+        drop(reservation);
+        drop(host);
+        drop(store);
+        drop(observer);
+        pool.close().await;
+        database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn disk_full_failed_and_uncertain_terminals_after_busy_writer_keep_their_causes() {
+        for uncertain in [false,true] {
+            let directory=tempfile::tempdir().unwrap();
+            let database_path=directory.path().join("agent.db");
+            let database=nomifun_db::init_database(&database_path).await.unwrap();
+            let pool=single_connection_pool(&database_path).await;
+            let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+            let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+            let mut call=context(directory.path());
+            let (capability,action,key,strategy)=if uncertain {
+                ("workspace.vcs","workspace.vcs/push","busy-full-uncertain",nomifun_agent_session::EffectStrategy::ExternalUncertainEffect)
+            } else {
+                ("workspace.process","workspace.process/start","busy-full-failed",nomifun_agent_session::EffectStrategy::ManagedEffect)
+            };
+            call.capability_id=CapabilityId::from(capability);
+            call.action_id=ActionId::from(action);
+            call.idempotency_key=IdempotencyKey::from(key);
+            call.operation_id=OperationId::from(format!("{key}-operation"));
+            ensure_test_effect_context(&store,&call).await;
+            let effect_id=wave2_effect_id(&call).unwrap();
+            let input=StrictJsonValue(if uncertain {
+                json!({"remote":"origin","refspec":"HEAD:refs/heads/main"})
+            } else {
+                json!({"command":"fixture-owner"})
+            });
+            let Wave2EffectAdmission::Reserved(reservation)=begin_wave2_exclusive_effect(
+                &store,&call,workspace_typed_binding(&call).unwrap(),&input,strategy,
+            ).await.unwrap() else {
+                panic!("fresh terminal effect must reserve")
+            };
+            let owner_error=if uncertain {
+                Wave2HostPortError::new(
+                    "EFFECT_OUTCOME_UNKNOWN",
+                    format!("remote accepted bytes before disconnect {}","😀".repeat(4096)),
+                )
+            } else {
+                Wave2HostPortError::new(
+                    "PROCESS_EXIT_NON_ZERO",
+                    format!("fixture process exited with code 17 {}","😀".repeat(4096)),
+                )
+            };
+            set_database_page_budget(&pool,true).await;
+            let mut writer=database.pool().begin().await.unwrap();
+            sqlx::query("UPDATE users SET updated_at=updated_at")
+                .execute(&mut *writer).await.unwrap();
+            let settle_reservation=reservation.clone();
+            let settle_error=owner_error.clone();
+            let mut settlement=tokio::spawn(async move {
+                if uncertain {
+                    finish_wave2_uncertain_effect(&settle_reservation,action,&settle_error).await
+                } else {
+                    finish_wave2_failed_effect(&settle_reservation,action,&settle_error).await
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!settlement.is_finished(),"terminal write must wait for the existing writer");
+            assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+                nomifun_agent_session::AgentEffectState::Pending);
+            writer.commit().await.unwrap();
+
+            let error=tokio::time::timeout(Duration::from_secs(6),&mut settlement).await
+                .expect("terminal write must finish after the writer releases")
+                .unwrap().unwrap_err();
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("full"),"{error:?}");
+            assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+            if uncertain {
+                assert!(error.message.contains("owner outcome is unknown"),"{error:?}");
+                assert!(error.message.contains("EFFECT_OUTCOME_UNKNOWN"),"{error:?}");
+            } else {
+                assert!(error.message.contains("owner failed with PROCESS_EXIT_NON_ZERO"),"{error:?}");
+                assert!(error.message.contains("fixture process exited with code 17"),"{error:?}");
+            }
+            assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+                nomifun_agent_session::AgentEffectState::Pending);
+
+            set_database_page_budget(&pool,false).await;
+            if uncertain {
+                finish_wave2_uncertain_effect(&reservation,action,&owner_error).await.unwrap();
+            } else {
+                finish_wave2_failed_effect(&reservation,action,&owner_error).await.unwrap();
+            }
+            let expected=if uncertain {
+                nomifun_agent_session::AgentEffectState::Unknown
+            } else {
+                nomifun_agent_session::AgentEffectState::Rejected
+            };
+            assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,expected);
+            assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+            drop(reservation);
+            drop(store);
+            drop(observer);
+            pool.close().await;
+            database.close().await;
+        }
+    }
+
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn two_desynced_store_pools_recover_without_cross_pool_duplicates() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace_a=directory.path().join("workspace-a");
+        let workspace_b=directory.path().join("workspace-b");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace_a).unwrap();
+        std::fs::create_dir(&workspace_b).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool_a=single_connection_pool(&database_path).await;
+        let pool_b=single_connection_pool(&database_path).await;
+        let store_a=nomifun_agent_session::AgentSessionStore::from_pool(pool_a.clone()).await.unwrap();
+        let store_b=nomifun_agent_session::AgentSessionStore::from_pool(pool_b.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host_a=Wave2ApplicationHost::for_workspace_root(&workspace_a)
+            .with_effect_store(store_a.clone());
+        let host_b=Wave2ApplicationHost::for_workspace_root(&workspace_b)
+            .with_effect_store(store_b.clone());
+        let mut call_a=context(&workspace_a);
+        call_a.idempotency_key=IdempotencyKey::from("two-pools-disk-full-a");
+        call_a.operation_id=OperationId::from("two-pools-disk-full-a-operation");
+        let mut call_b=context(&workspace_b);
+        call_b.idempotency_key=IdempotencyKey::from("two-pools-disk-full-b");
+        call_b.operation_id=OperationId::from("two-pools-disk-full-b-operation");
+        let session_a=call_a.agent_session_id.clone();
+        let session_b=call_b.agent_session_id.clone();
+        ensure_test_effect_context(&store_a,&call_a).await;
+        ensure_test_effect_context(&store_b,&call_b).await;
+        let effect_a=wave2_effect_id(&call_a).unwrap();
+        let effect_b=wave2_effect_id(&call_b).unwrap();
+        let input_a=StrictJsonValue(json!({
+            "path":"pool-a.txt","content":"pool a executes after storage recovery"
+        }));
+        let input_b=StrictJsonValue(json!({
+            "path":"pool-b.txt","content":"pool b executes after storage recovery"
+        }));
+
+        set_database_page_budget(&pool_a,true).await;
+        set_database_page_budget(&pool_b,true).await;
+        for (host,call,input) in [(&host_a,&call_a,&input_a),(&host_b,&call_b,&input_b)] {
+            let error=host.invoke(Wave2HostRequest {
+                context:call.clone(),
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:input.clone() },
+            }).await.unwrap_err();
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("full"),"{error:?}");
+        }
+        assert!(!workspace_a.join("pool-a.txt").exists());
+        assert!(!workspace_b.join("pool-b.txt").exists());
+        assert!(observer.read_effect(&call_a.agent_session_id,&effect_a).await.unwrap().is_none());
+        assert!(observer.read_effect(&call_b.agent_session_id,&effect_b).await.unwrap().is_none());
+
+        // Lift each connection-local cap. Each production Store must
+        // independently evict its own desynchronized connection;
+        // neither recovery may consume or duplicate the other's operation.
+        set_database_page_budget(&pool_a,false).await;
+        set_database_page_budget(&pool_b,false).await;
+        let retry_a=host_a.invoke(Wave2HostRequest {
+            context:call_a.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_a.clone() },
+        });
+        let retry_b=host_b.invoke(Wave2HostRequest {
+            context:call_b.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_b.clone() },
+        });
+        let (result_a,result_b)=tokio::join!(retry_a,retry_b);
+        assert_eq!(result_a.unwrap().0["written"],true);
+        assert_eq!(result_b.unwrap().0["written"],true);
+        assert_eq!(std::fs::read(workspace_a.join("pool-a.txt")).unwrap(),b"pool a executes after storage recovery");
+        assert_eq!(std::fs::read(workspace_b.join("pool-b.txt")).unwrap(),b"pool b executes after storage recovery");
+        for session_id in [&session_a,&session_b] {
+            let effects=observer.list_effects(session_id).await.unwrap();
+            assert_eq!(effects.len(),1);
+            assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+
+        std::fs::write(workspace_a.join("pool-a.txt"),b"user edit a").unwrap();
+        std::fs::write(workspace_b.join("pool-b.txt"),b"user edit b").unwrap();
+        let replay_a=host_a.invoke(Wave2HostRequest {
+            context:call_a,
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_a },
+        });
+        let replay_b=host_b.invoke(Wave2HostRequest {
+            context:call_b,
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_b },
+        });
+        let (replay_a,replay_b)=tokio::join!(replay_a,replay_b);
+        assert_eq!(replay_a.unwrap().0["written"],true);
+        assert_eq!(replay_b.unwrap().0["written"],true);
+        assert_eq!(std::fs::read(workspace_a.join("pool-a.txt")).unwrap(),b"user edit a");
+        assert_eq!(std::fs::read(workspace_b.join("pool-b.txt")).unwrap(),b"user edit b");
+        assert_eq!(observer.list_effects(&session_a).await.unwrap().len(),1);
+        assert_eq!(observer.list_effects(&session_b).await.unwrap().len(),1);
+        drop(host_a);
+        drop(host_b);
+        drop(store_a);
+        drop(store_b);
+        drop(observer);
+        pool_a.close().await;
+        pool_b.close().await;
+        database.close().await;
+    }
+
     #[tokio::test]
     async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
         let directory = tempfile::tempdir().unwrap();
