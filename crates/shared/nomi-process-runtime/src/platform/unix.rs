@@ -1711,6 +1711,7 @@ async fn spawn_inner_with_cancellation(
     let blocking_worker_finished = options.blocking_worker_finished.clone();
     let deadline = Deadline::after(setup_timeout).map_err(protocol_spawn_failed)?;
     let async_deadline = tokio::time::Instant::now() + setup_timeout;
+    let retain_committed_owner = external_cancellation.is_some();
     let mut cancellation = match external_cancellation {
         Some(cancelled) => StartCancellationGuard { cancelled, armed: true },
         None => StartCancellationGuard::new(),
@@ -1739,7 +1740,13 @@ async fn spawn_inner_with_cancellation(
         if let Some(pause) = blocking_transaction_pause {
             pause.block();
         }
-        if worker_cancelled.load(std::sync::atomic::Ordering::Acquire) {
+        // After COMMITTED, the supervisor's retained start worker must receive
+        // the exact owner and register its cleanup witness. An outer caller
+        // cancellation cannot release the reservation while only the platform
+        // poller owns cleanup. Standalone platform future drops still relay.
+        if !retain_committed_owner
+            && worker_cancelled.load(std::sync::atomic::Ordering::Acquire)
+        {
             return Err(transaction.post_exec_failure(
                 "start_cancelled_during_transaction",
                 io::Error::new(
@@ -5538,6 +5545,59 @@ mod tests {
             audit.group_signals.load(Ordering::SeqCst) <= 1,
             "cleanup must not issue redundant host group signals after the watchdog seal"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn external_start_cancel_after_commit_retains_the_native_owner() {
+        let audit = TestSpawnAudit::default();
+        let pause = super::TestBlockingTransactionPause::new();
+        let _release_guard = pause.release_guard();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pause_for_start = pause.clone();
+        let audit_for_start = audit.clone();
+        let cancellation_for_start = cancellation.clone();
+        let start = tokio::spawn(async move {
+            super::spawn_inner_with_cancellation(
+                request("/bin/sleep".into(), vec!["60".into()]),
+                Arc::new(OutputBuffer::new(1024)),
+                SpawnOptions {
+                    audit: audit_for_start,
+                    blocking_transaction_pause: Some(pause_for_start),
+                    ..SpawnOptions::default()
+                },
+                SpawnTransport::Pipe,
+                Some(cancellation_for_start),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), pause.wait_until_entered())
+            .await.expect("native COMMITTED ownership must be reached");
+        let leader = audit.leader_pid.load(Ordering::SeqCst);
+        let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
+        assert!(process_exists(leader), "exact committed child must be alive");
+        cancellation.store(true, Ordering::Release);
+        pause.release();
+        let result = tokio::time::timeout(Duration::from_secs(2), start)
+            .await.expect("committed owner delivery must remain bounded")
+            .expect("native start task should join");
+        let retained_owner = result.is_ok();
+        if let Ok(spawned) = result {
+            assert_eq!(spawned.owner.pid(), leader as u32);
+            spawned.owner.force_kill().await.expect("exact retained owner cleanup should start");
+            spawned.owner.wait_reaped(Instant::now() + Duration::from_secs(2))
+                .await.expect("retained owner must prove exact reap");
+        }
+        let exact_cleanup = tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(leader) || process_exists(watchdog)
+                || audit.leader_reaps.load(Ordering::SeqCst) != 1
+                || audit.watchdog_reaps.load(Ordering::SeqCst) != 1
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.is_ok();
+        assert!(exact_cleanup, "clean the native child before reporting the first failure");
+        assert!(retained_owner, "post-commit caller cancellation lost the supervisor's native owner");
     }
 
     #[tokio::test]
