@@ -1498,6 +1498,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   WSL Linux 单包兼容编译与 fmt/diff 通过，未代判 macOS。原生失败/unknown/worker panic 组合、
   ConPTY 本组真实竞态、正式 Tauri/其他平台角色及 N3/100 seed/LONG/99% 仍开放。证据见外部 W170。
 
+- **S-D04-32**（`PROC-039/040/042`、`CONC-004`、`LIFE-029`，Unix post-COMMITTED start
+  取消子断言）：M06-02 首次重复证明真实 child 执行后，外层取消位在 blocking transaction 末尾触发
+  `post_exec_failure`；native owner 被转交平台 poller，而 Supervisor reservation 已释放，shutdown
+  因而返回空报告且进程当时未消失。固定窗口新反例在 cleanup 后仍明确 FAIL，首次结果均保留。
+- 对 Supervisor 已持有的 start worker，commit 后外层取消现保留并返回精确 native owner，由原
+  Session 统一 retirement/回执；pre-commit 取消、deadline、独立底层 future-drop 与原清理预算不变。
+  macOS Pipe **105/105**、PTY **42/42**，独立物理 PID/磁盘 **147/147**，fallback 0；新增固定窗口
+  **21/21**、底层 drop 相邻 **2/2**、pre-fork deadline **1/1**、shutdown **8/8**、
+  registry shutdown **3/3** 与 fmt/diff 通过。证据 `2026-09-30/macos/m06-start-delivery/`。
+  仅关闭该 Unix 取消窗口根因；Linux 原生执行、native failure/unknown/worker panic、正式 Tauri、
+  其他角色及完整 Case/长期统计仍开放，Windows 原结果未改写，付费模型调用 0。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
