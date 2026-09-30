@@ -303,12 +303,21 @@ struct SpawnOptions {
     blocking_start_pause: Option<TestBlockingTransactionPause>,
     #[cfg(test)]
     blocking_worker_finished: Option<Arc<tokio::sync::Notify>>,
+    #[cfg(all(test, target_os = "macos"))]
+    fork_preparation: Option<TestForkPreparation>,
     #[cfg(test)]
     lifecycle_failure_before_cleanup: bool,
     #[cfg(test)]
     cleanup_hold: Option<TestCleanupHold>,
     #[cfg(test)]
     registration_fault: TestRegistrationFault,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[derive(Clone)]
+struct TestForkPreparation {
+    initialized: Arc<std::sync::Once>,
+    entered: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
@@ -598,6 +607,16 @@ impl ChildProcessSpawnTransaction {
         let platform_permit = platform_lifecycle_poller()?.reserve()?;
         let deadline = Deadline::after(SETUP_TIMEOUT).map_err(protocol_io_error)?;
         let spawn_gate = lock_child_process_spawn_gate(deadline)?;
+        #[cfg(target_os = "macos")]
+        {
+            super::macos_watchdog::prepare_host_for_fork();
+            if deadline.is_expired().map_err(protocol_io_error)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "child-process host preparation exceeded the shared setup deadline",
+                ));
+            }
+        }
         let nonce = Nonce::new(uuid::Uuid::now_v7().into_bytes());
         let parent_pid = std::process::id() as libc::pid_t;
         #[cfg(target_os = "linux")]
@@ -3089,6 +3108,17 @@ fn spawn_transaction(
         }
         prepared.release_startup_slave().map_err(spawn_failed)?;
     }
+    #[cfg(target_os = "macos")]
+    {
+        #[cfg(test)]
+        if let Some(prepared) = options.fork_preparation.as_ref() {
+            prepared.entered.notify_one();
+            super::macos_watchdog::prepare_host_for_fork_with(&prepared.initialized);
+        }
+        super::macos_watchdog::prepare_host_for_fork();
+    }
+    // Waiting for host initialization consumes the same setup budget. It must
+    // never allow a late watchdog/user fork after timeout or caller cancellation.
     ensure_setup_active(deadline, cancelled)?;
 
     // SAFETY: the child branch immediately enters the raw watchdog and never unwinds.
@@ -5352,7 +5382,15 @@ mod tests {
             &audit,
         )
         .await
-        .expect("PTY child should commit before the injected watchdog death");
+        .unwrap_or_else(|error| {
+            panic!(
+                "PTY child should commit before the injected watchdog death: {error:?}; watchdog_pid={} watchdog_status={:#x} watchdog_reaps={} leader_pid={}",
+                audit.watchdog_pid.load(Ordering::SeqCst),
+                audit.watchdog_status.load(Ordering::SeqCst),
+                audit.watchdog_reaps.load(Ordering::SeqCst),
+                audit.leader_pid.load(Ordering::SeqCst),
+            )
+        });
         let leader = spawned.owner.pid() as libc::pid_t;
 
         let result = spawned
@@ -5368,6 +5406,118 @@ mod tests {
         assert_eq!(audit.leader_reaps.load(Ordering::SeqCst), 1);
         assert!(audit.group_signals.load(Ordering::SeqCst) >= 1);
         assert!(!process_exists(leader));
+        let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
+        let status = audit.watchdog_status.load(Ordering::SeqCst);
+        assert!(libc::WIFSIGNALED(status) && libc::WTERMSIG(status) == libc::SIGKILL);
+        assert!(!process_exists(watchdog));
+        eprintln!("NOMIFUN_PTY_WATCHDOG leader={leader} watchdog={watchdog} status={status:#x} reaps=1,1");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn macos_pipe_fork_waits_for_host_notification_initialization() {
+        assert_macos_fork_waits_for_initialization(SpawnTransport::Pipe, false).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn macos_pty_fork_waits_for_host_notification_initialization() {
+        assert_macos_fork_waits_for_initialization(SpawnTransport::Pty { cols: 80, rows: 24 }, false).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn macos_pipe_notification_initialization_cannot_extend_setup_deadline() {
+        assert_macos_fork_waits_for_initialization(SpawnTransport::Pipe, true).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn macos_pty_notification_initialization_cannot_extend_setup_deadline() {
+        assert_macos_fork_waits_for_initialization(SpawnTransport::Pty { cols: 80, rows: 24 }, true).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn assert_macos_fork_waits_for_initialization(transport: SpawnTransport, expire: bool) {
+        let initialization = super::TestBlockingTransactionPause::new();
+        let _release = initialization.release_guard();
+        let prepared = super::TestForkPreparation {
+            initialized: Arc::new(std::sync::Once::new()),
+            entered: Arc::new(tokio::sync::Notify::new()),
+        };
+        let initializing = std::thread::spawn({
+            let once = Arc::clone(&prepared.initialized);
+            let initialization = initialization.clone();
+            move || once.call_once(|| initialization.block())
+        });
+        initialization.wait_until_entered().await;
+
+        let audit = TestSpawnAudit::default();
+        let worker_finished = Arc::new(tokio::sync::Notify::new());
+        let mut starting = Box::pin(spawn_inner(
+            request("/bin/sleep".into(), vec!["60".into()]),
+            Arc::new(OutputBuffer::new(1024)),
+            SpawnOptions {
+                audit: audit.clone(),
+                fork_preparation: Some(prepared.clone()),
+                setup_timeout: expire.then_some(Duration::from_millis(100)),
+                blocking_worker_finished: Some(Arc::clone(&worker_finished)),
+                ..SpawnOptions::default()
+            },
+            transport,
+        ));
+        // Simulate an initializer in flight, not a corrupt private OS lock.
+        // The native start must wait before creating even its watchdog.
+        tokio::select! {
+            result = &mut starting => {
+                initialization.release();
+                initializing.join().expect("initializer should finish");
+                if let Ok(spawned) = result {
+                    spawned.owner.force_kill().await.expect("unexpected start should clean up");
+                    spawned.owner.wait_reaped(Instant::now() + Duration::from_secs(3))
+                        .await.expect("unexpected start must be reaped before reporting failure");
+                }
+                panic!("native fork crossed the in-flight host notification initialization");
+            }
+            _ = prepared.entered.notified() => {}
+        }
+        assert_eq!(audit.watchdog_pid.load(Ordering::SeqCst), 0);
+        assert_eq!(audit.leader_pid.load(Ordering::SeqCst), 0);
+        if expire {
+            let started = Instant::now();
+            let result = tokio::time::timeout(Duration::from_millis(350), &mut starting)
+                .await.expect("host initialization must not extend the caller setup bound");
+            assert!(matches!(result, Err(ProcessError::StartLost { ref failure, .. })
+                if failure.code == "spawn_transaction_deadline"));
+            let elapsed = started.elapsed();
+            initialization.release();
+            initializing.join().expect("initializer should finish");
+            tokio::time::timeout(Duration::from_secs(2), worker_finished.notified())
+                .await.expect("original worker should stop after initialization finishes");
+            assert_eq!(audit.watchdog_pid.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.leader_pid.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.watchdog_reaps.load(Ordering::SeqCst), 0);
+            assert_eq!(audit.leader_reaps.load(Ordering::SeqCst), 0);
+            eprintln!("NOMIFUN_FORK_PREPARATION_EXPIRED watchdog=0 leader=0 caller_ms={}", elapsed.as_millis());
+            return;
+        }
+        initialization.release();
+        initializing.join().expect("initializer should finish");
+        let spawned = starting.await.expect("native start should proceed after initialization");
+        let leader = spawned.owner.pid() as libc::pid_t;
+        let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
+        spawned.owner.force_kill().await.expect("owned process should stop");
+        spawned.owner.wait_reaped(Instant::now() + Duration::from_secs(3))
+            .await.expect("initialization must preserve exact native cleanup");
+        assert_eq!(audit.watchdog_reaps.load(Ordering::SeqCst), 1);
+        assert_eq!(audit.leader_reaps.load(Ordering::SeqCst), 1);
+        assert!(!process_exists(leader));
+        assert!(!process_exists(watchdog));
+        eprintln!("NOMIFUN_FORK_PREPARATION leader={leader} watchdog={watchdog} reaps=1,1");
     }
 
     #[tokio::test]
