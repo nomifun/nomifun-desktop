@@ -1214,3 +1214,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   **30 秒 backend cleanup timeout**，TERM 后仍活；核对 exact PID/executable 后 KILL，最终 owned
   App/Helper/fixture/listener **0**。原超时与人工清理记录保留，**不算产品清理通过**，列为 C05 接续。
   不改 Windows 结果，不扩模型 context 额度或权限；首发形态、退出等待、MAC-A N3、MAC-B/C 仍开放。
+
+- **MAC-C05-01 native shutdown acknowledgement**（C05、`LIFE-029`、A11/A13 的本批子断言）：
+  接续 MAC-A-01 的真实 30 秒退出首败，线程样本定位主线程在 `Engine::shutdown → CEF shutdown`
+  等待，不据此误判仍在执行测试。macOS 26.6.2 / 原生 arm64 / APFS；原现场/样本不覆盖。
+- 发现并修复独立证明漏洞：原 Engine 在调用 CEF 关闭前已设置 stopped，晚到/重试可提前返回成功。
+  现分别记录 native entry 与 native completion，阻止重复原生进入及关闭后的新工作；只有 CEF 真正
+  返回后才发布完成，未确认重试保持错误，不把等待超时或“开始关闭”当成功。不改变预算/系统保护。
+- 精确旧语义反例首败保留在 `run-002-first-failure`；修后 pending/重复进入两项与 Mac lib
+  **13/13**、Browser platform 关闭顺序/取消 **2/2** 通过。无模型调用；这是证明状态修复，尚未
+  证明 MAC-A-01 的 CEF 内部等待根因已消失，不记完整 C05 或正常 UI 退出 PASS。
+- 空数据正式 App 对照经产品 SIGTERM observer → Tauri `ExitRequested` 正常 exit **0**，没有
+  active Session；锁屏阻断 UI Cmd-Q 验收，已请求手动解锁，信号对照不替代按钮/UI 证据。完整记录：
+  `2026-10-01/macos/c05-shutdown/`。Windows/WebView2 路径未改，已完成 Session 的退出重验仍开放。
