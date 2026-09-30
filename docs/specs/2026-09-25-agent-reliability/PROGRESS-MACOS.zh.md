@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～16 已验 owner crash/result-loss、Unicode 直接文本、大型 A11y 树及 100-cycle soak；live held-cancel/IME/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～17 已验 owner crash/result-loss、Unicode、大型 A11y、100-cycle soak 与 click variants；live held-cancel/IME/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -764,3 +764,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批未发现共享产品根因，不改 `PROGRESS-SHARED`。该 macOS `COMP-014` 子断言通过；更长 LONG/
   99% 统计、真实模型、并发用户干预、sleep/wake 与 release 构建仍按各自 Case 开放，不关闭完整
   Computer、D06、D09 或 M04。
+
+- **M04-17 macOS raw click variants**（`COMP-003` 的 right/middle/double/triple 扩展子断言）：新增
+  `--computer-click-variants` fixture 与仓库外 Developer ID-signed arm64 AppKit 原始事件目标；四个
+  手势使用分离坐标，每次前均取得 fresh `computer/observe` screenshot generation，独立 target 按
+  event type、global screen point、down 次数及最大 clickCount 判定，不以 tool returned 代替命中。
+- 原生 target 首次 Swift `@main` build 漏 `-parse-as-library`，在生成 app 前失败并单独保留。首个正式
+  `run-002-formal` 的 right-click effect 已 returned，映射坐标 `(177,719)→screen (289,1174)` 与 target
+  `(290,1175)` 只差 1 px，但只装 local monitor 的 oracle 记录 0；Turn 暂停，完整 DB/status 保留，未改记
+  PASS。新 target 复用 M04-09 已验证的 local/global 双 monitor，并按 type+timestamp+button+clickCount
+  去重，以全局屏幕坐标判命中；产品 input 实现不改。
+- 最终 `run-004-formal`（Session `01a0f069-d7f4-7190-af03-cd2cea2bb7eb`）为 **15 model steps /
+  188 events**；4 次 fresh screenshot 与 4 次 input call 均唯一，launch + 4 个 input effects 全 returned，
+  无 pending/unknown/retry。target 精确记录 right **1**、middle **1**、double **2 / max clickCount 2**、
+  triple **3 / max clickCount 3**、unexpected **0**；正式 UI 明确原生命中与唯一结算。运行中及停止后
+  DB `ok`，最终 SHA-256 `de64ff97b44a083b1a94645d002bc8f64aef9daf0dfb7eea9e00c01ef4047f7f`，
+  target/app/fixture 与 `62477/62404` listener 为 0。证据：
+  `2026-09-30/macos/m04-computer-click-variants/`。
+- 当前宿主只有一个 online 主显示器（Q2790PQ，2560×1440，mirror off），因此不以本批截图缩放冒充
+  `COMP-005` 多显示器/不同 scale PASS；该 live Case 明确阻断。本批无共享产品根因，不改
+  `PROGRESS-SHARED`；关闭上述 macOS click-variants 子断言，held cancel、IME/layout、multi-display
+  与 release 仍开放，不关闭完整 Computer、D06 或 M04。
