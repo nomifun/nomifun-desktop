@@ -2813,6 +2813,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期与跨重启、更多取消/并发驱逐拓扑、其他角色/
   平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
 
+### 真实长 poll 与进程 shutdown（W168，基线 `ff587afc9`）
+
+- S-D04-30 / PROC-040、LIFE-029、A03/A11/A13/A17/A19：独立 PID 标记和精确 OS handle 证明
+  pipe child 存活，60 秒 poll 已进入等待；shutdown 在 6 秒内不能清理。释放 poll 后正式 shutdown
+  才取得唯一 Cancelled/reaped。证据根为外部 `2026-09-30/windows/w168-process-start-shutdown`，
+  产品首败保留于 `01-first-long-poll`。共享修复分开 lease/容量保护与关闭阻塞计数，仅 poll 可随原 Session 退休，
+  stdin/close/resize 等写操作的关闭屏障保持；原 poll 最终观察同一清理终态。
+- 旧 75 毫秒夹具重复第 13 轮返回真实 Lost/reaped=false，精确 handle 的兜底强杀单列，未计通过；
+  原日志与分类保留于 `07-repeat-20/run-13`。新回归采用生产默认 1/1/3 秒预算，原 6 秒上界、
+  Cancelled/reaped、唯一 owner/report、重复 shutdown 幂等及 PID 消失断言全部保留。
+- 最终首次及重复 **21/21**，21 份独立 PID/report 核对、helper 残留 0；shutdown **5/5**、
+  natural exit **5/5**、cancel-first **1/1**、registry **13/13**，fmt/diff 通过。两条代码通道
+  使用独立文件范围，重型 Cargo 构建串行；本批没有模型/UI。
+- 未覆盖真实 start/shutdown、start future drop、正式 Tauri 正常/强退、ConPTY 父死亡、macOS、
+  其他角色及 N3/100 seed/LONG/99%；不关闭完整 PROC/LIFE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
