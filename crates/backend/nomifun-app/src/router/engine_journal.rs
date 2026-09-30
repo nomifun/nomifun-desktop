@@ -599,13 +599,16 @@ impl EngineTurnJournal {
             return Ok(());
         }
         if cursor.assistant_step.as_ref().is_some_and(|current| current.step != step) {
-            let previous = cursor.assistant_step.take().expect("checked above");
+            let previous = cursor.assistant_step.as_ref().expect("checked above");
             if step <= previous.step {
                 return Err(failure("assistant model step moved backwards"));
             }
-            let completed = Self::assistant_completion_event(journal, &previous);
+            let completed = Self::assistant_completion_event(journal, previous);
             let completed_id = completed.event_id.clone();
             journal.append_projection(&completed).await.map_err(failure)?;
+            // A failed completion must retain the previous response cursor
+            // until its exact durable acknowledgement arrives.
+            cursor.assistant_step = None;
             cursor.last_assistant_event_id = Some(completed_id);
         }
         if cursor.assistant_step.is_none() {
