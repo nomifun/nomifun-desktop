@@ -5562,7 +5562,7 @@ mod tests {
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
-        assert!(result.output_text.contains("Tool-call errors observed in this turn: 1"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
         assert_eq!(tools.writes.load(Ordering::SeqCst), 1);
         assert_eq!(result.model_steps, 8);
     }
@@ -5597,7 +5597,7 @@ mod tests {
             AgentTurnRequest::new(request(), two_tool_plan(AgentEffectClass::ManagedEffect, false), principal(), 0),
         ).await.unwrap();
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
-        assert!(result.output_text.contains("Tool-call errors observed in this turn: 2"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
         assert_eq!(tools.writes.load(Ordering::SeqCst), 2, "the valid prefix of the rejected batch must not execute");
         let requests = model.requests.lock().unwrap();
         for id in ["held-valid", "held-invalid"] {

@@ -1506,7 +1506,10 @@ impl Wave2ApplicationHost {
         let workspace = scope.workspace_root().to_path_buf();
         let capability_id = capability_id.to_owned();
         let worker_capability_id = capability_id.clone();
-        let path = match path.filter(|path| !path.is_empty()) {
+        // `.` selects the bound workspace, including a repository subdirectory.
+        // Keep the existing repository-prefix fence instead of resolving it as
+        // a file path or falling back to the whole repository.
+        let path = match path.filter(|path| !path.is_empty() && *path != ".") {
             Some(path) => {
                 let resolved = scope
                     .resolve_relative_path(path)
@@ -7813,6 +7816,15 @@ mod tests {
             .await
             .unwrap();
         assert!(!diff.0["patch"].as_str().unwrap().contains("root changed"));
+
+        let root_diff = invoke(&host, context.clone(), "workspace.vcs/diff", json!({"path":"."}))
+            .await
+            .expect("the workspace root alias is a valid read-only diff scope");
+        assert_eq!(root_diff.0, diff.0);
+        for path in ["..", "../tracked.txt", "nested/../.."] {
+            assert!(invoke(&host, context.clone(), "workspace.vcs/diff", json!({"path":path}))
+                .await.is_err(), "root alias support must not admit {path}");
+        }
 
         invoke(
             &host,

@@ -88,7 +88,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "git_diff",
         capability_id: "workspace.vcs",
         action_id: "workspace.vcs/diff",
-        description: "Return a repository diff, optionally scoped to one workspace path.",
+        description: "Return the bound workspace diff, optionally scoped to one workspace-relative path. Omit path or use '.' for the workspace root, even when the workspace is a repository subdirectory.",
         schema: optional_path_schema,
     },
     StandardTool {
@@ -383,7 +383,7 @@ fn process_launch(include_wait: bool) -> Value {
         "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":format!("Shell-script form only: supply {{\"cmd\":\"script text\"}} and omit both command and args. Never use cmd for an executable plus an args array. {cmd_description}")},
         "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable form: supply {\"command\":\"program\",\"args\":[...]} and omit cmd. This field is the executable name or path only, for example git, bun, /bin/ls, powershell.exe, or cmd.exe. Never include arguments such as ls -la in this field."},
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Valid only with command, never with cmd. Literal separate argument tokens as an actual JSON array value, for example [\"status\",\"--short\"] for git, [\"-a\"] for /bin/ls, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\"."},
-        "cwd":{"type":"string","maxLength":4096},
+        "cwd":{"type":"string","maxLength":4096,"description":"Normalized workspace-relative directory only, for example src or tests. Omit cwd or use '.' for the bound workspace root. Never pass an absolute OS path, a drive prefix, backslashes, or '..'. Command arguments may contain the literal path format required by the executable."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
         "tty":{"type":"boolean","default":false},

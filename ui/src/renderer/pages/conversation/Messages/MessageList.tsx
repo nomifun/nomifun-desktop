@@ -342,6 +342,12 @@ const formatToolReceiptPart = (
       defaultValue: '{{count}} operations did not complete',
     });
   }
+  if (part.commandExitCode !== undefined && part.commandExitCode !== 0) {
+    return t('messages.processReceipt.commandNonzero', {
+      count: part.count, code: part.commandExitCode,
+      defaultValue: '{{count}} commands ended with exit code {{code}}',
+    });
+  }
   if (part.state === 'canceled') {
     return t('messages.processReceipt.canceledOperation', { defaultValue: 'Operation canceled' });
   }
@@ -456,7 +462,7 @@ const buildProcessReceiptSummary = (
     const summarySeparator = t('messages.processReceipt.summarySeparator', { defaultValue: ', ' });
     const boundedSearchCount = countBoundedSearchResults(tools);
     const recoveredFailureCount = options.recovered
-      ? Math.max(1, buildToolReceiptDetailRows(tools).filter((row) => row.state === 'failed').length)
+      ? buildToolReceiptDetailRows(tools).filter((row) => row.state === 'failed').length
       : countRecoveredToolFailures(tools);
     const recovered = recoveredFailureCount > 0;
     const label = recovered
