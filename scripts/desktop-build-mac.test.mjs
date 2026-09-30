@@ -113,4 +113,24 @@ describe('macOS Desktop build contract', () => {
     expect(fixture.includes('let close = runtime.close().await')).toBe(true);
     expect(fixture.includes('let shutdown = engine.shutdown().await')).toBe(true);
   });
+
+  test('keeps native CEF window replacement identities and pending-work fences explicit', () => {
+    const runner = readFileSync(
+      new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8',
+    );
+    const fixture = readFileSync(
+      new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8',
+    );
+    const lifecycle = readFileSync(
+      new URL('../apps/desktop/examples/support/browser_window_reopen.rs', import.meta.url), 'utf8',
+    );
+    expect(runner.includes("args.includes('--window-reopen-only')")).toBe(true);
+    expect(runner.includes("'NOMIFUN_CEF_WINDOW_REOPEN_ONLY=1'")).toBe(true);
+    expect(fixture.includes('mod browser_window_reopen;')).toBe(true);
+    expect(lifecycle.includes('BrowserEvaluationOutcome::AwaitingDialog')).toBe(true);
+    expect(lifecycle.includes('Err(WorkspaceError::WorkspaceClosed)')).toBe(true);
+    expect(lifecycle.includes('Err(WorkspaceError::TabNotFound)')).toBe(true);
+    expect(lifecycle.includes('old_window_identity == new_window_identity')).toBe(true);
+    expect(lifecycle.includes('create_runtime(engine, app, base_url, 52, "new")')).toBe(true);
+  });
 });

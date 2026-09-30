@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～19 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名与 native Browser soak；live held-cancel/IME、packaged Browser UI/reopen 与扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～20 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen；live held-cancel/IME、packaged Browser UI 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -830,3 +830,21 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   runner 仍明确 `productAcceptance=false`；正式 packaged AgentSession UI、真实模型、Tauri 窗口重开
   identity/fence、睡眠唤醒及更长 LONG/99% 门槛仍开放，因此只关闭 `BROW-018` 的本批 macOS native
   100-cycle 子断言，不关闭完整 Browser、D06/D09 或 M04/M06。
+
+- **M04-20 macOS native CEF Tauri window close/reopen**（`BROW-017`、`MAC-017` 的本批平台
+  lifecycle 子断言）：新增独立 `--window-reopen-only` runner；隐藏 guard window 只用于在真实 main
+  window 销毁期间保留 Tauri event loop，不承载 Browser surface。旧 main window 上创建 runtime
+  generation 51 / document generation 2，取得 fresh semantic ref 后用原生 `confirm` 留下 owned pending
+  work，再真正关闭该 NSWindow。
+- 关闭后 cancel/finish 精确 drain pending dialog，旧 runtime 随后 close；旧 snapshot 与旧 ref action 均
+  精确返回 `WorkspaceClosed`。以同一 `main` label 新建 Tauri window 时 NSWindow identity 不复用；新
+  runtime generation 52 / 新 tab identity 均唯一，旧 target 对新 runtime 精确返回 `TabNotFound`。新
+  surface 随后以 `reopened-中文` 和页面 DOM oracle 证明 click count 1、`event.isTrusted=true`。
+- 首次 build 的 cargo check 实际通过，但外部 `tee` 目录尚未创建导致证据捕获命令非零，已单独保留且
+  未冒充产品失败。正式 `run-002-formal` 首轮即全部通过，`shutdown_complete=true`；Developer ID
+  deep/strict 签名通过，无 `process_requirement/-67030`，最终 App/Helper 为 0。证据：
+  `2026-09-30/macos/m04-browser-window-reopen/`。
+- 本批未发现产品或共享根因，不改 `PROGRESS-SHARED`。runner 仍明确 `productAcceptance=false`，且只
+  覆盖 native Tauri/CEF window、runtime/tab/ref 与 pending-dialog owner；正式 packaged NomiFun
+  AgentSession UI、close-to-tray renderer attach/detach、nested frame 及真实模型仍须单独验证。因此只
+  关闭 `BROW-017/MAC-017` 的本批平台 lifecycle 子断言，不关闭完整 Browser、D06 或 M04。
