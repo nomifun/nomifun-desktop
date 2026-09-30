@@ -6689,6 +6689,121 @@ mod tests {
         database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn all_desynced_pool_connections_recover_concurrent_terminals_across_100_seeds() {
+        let directory=tempfile::tempdir().unwrap();
+        let evidence_root=std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
+            .map(std::path::PathBuf::from);
+        let fixture_root=evidence_root.as_ref().map(|root| root.join("data"))
+            .unwrap_or_else(|| directory.path().to_path_buf());
+        std::fs::create_dir_all(&fixture_root).unwrap();
+        let database_path=fixture_root.join("agent.db");
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool=store_pool(&database_path,3).await;
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        for seed in 0..100_u64 {
+            let mut reservations=Vec::new();
+            for index in 0..3 {
+                let workspace=fixture_root.join(format!("seed-{seed}-workspace-{index}"));
+                std::fs::create_dir(&workspace).unwrap();
+                let mut call=context(&workspace);
+                call.idempotency_key=IdempotencyKey::from(format!("all-full-{seed}-{index}"));
+                call.operation_id=OperationId::from(format!("all-full-{seed}-{index}-operation"));
+                ensure_test_effect_context(&store,&call).await;
+                let input=StrictJsonValue(json!({"path":"fixture.txt","content":"fixture"}));
+                let Wave2EffectAdmission::Reserved(reservation)=begin_wave2_exclusive_effect(
+                    &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+                    nomifun_agent_session::EffectStrategy::ManagedEffect,
+                ).await.unwrap() else { panic!("seed {seed}: fresh effect must reserve") };
+                let error=Wave2HostPortError::new("PROCESS_EXIT_NON_ZERO",
+                    format!("seed {seed} owner {index} failed {}","😀".repeat(4096)));
+                reservations.push((call,reservation,error));
+            }
+            let mut connections=Vec::new();
+            for _ in 0..3 { connections.push(pool.acquire().await.unwrap()); }
+            sqlx::query("VACUUM").execute(&mut *connections[0]).await.unwrap();
+            let limit=sqlx::query_scalar::<_,i64>("PRAGMA page_count")
+                .fetch_one(&mut *connections[0]).await.unwrap();
+            for connection in &mut connections {
+                sqlx::query(&format!("PRAGMA max_page_count={limit}"))
+                    .execute(&mut **connection).await.unwrap();
+                let error=sqlx::query("CREATE TABLE __fault_probe (x INTEGER)")
+                    .execute(&mut **connection).await.unwrap_err();
+                assert!(error.to_string().contains("full"),"seed {seed}: {error:?}");
+                connection.return_to_pool().await;
+            }
+            for (call,reservation,owner_error) in &reservations {
+                let error=finish_wave2_failed_effect(reservation,"workspace.files/write",owner_error)
+                    .await.unwrap_err();
+                assert_eq!(error.code,"CAPABILITY_UNAVAILABLE","seed {seed}");
+                assert!(error.message.contains("full"),"seed {seed}: {error:?}");
+                assert!(error.message.contains("automatic retry is disabled"),"seed {seed}: {error:?}");
+                assert_eq!(observer.read_effect(&call.agent_session_id,&reservation.request.effect_id)
+                    .await.unwrap().unwrap().state,nomifun_agent_session::AgentEffectState::Pending);
+            }
+            let mut connections=Vec::new();
+            for _ in 0..3 { connections.push(pool.acquire().await.unwrap()); }
+            assert!(connections.iter().all(|connection| connection.is_in_transaction()),"seed {seed}");
+            for connection in &mut connections {
+                sqlx::query("PRAGMA max_page_count=1073741823")
+                    .execute(&mut **connection).await.unwrap();
+            }
+            // Reproducible queue permutations and independent scheduling
+            // delays exercise concurrent replacement of a fully poisoned pool.
+            let mut random=seed+1;
+            for index in (1..connections.len()).rev() {
+                random=random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                connections.swap(index,((random>>32) as usize)%(index+1));
+            }
+            for connection in &mut connections { connection.return_to_pool().await; }
+            let barrier=Arc::new(tokio::sync::Barrier::new(4));
+            let mut workers=Vec::new();
+            for (_,reservation,error) in &reservations {
+                random=random.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let delay=Duration::from_micros((random>>16)%7000);
+                let reservation=reservation.clone();
+                let error=error.clone();
+                let barrier=Arc::clone(&barrier);
+                workers.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    tokio::time::sleep(delay).await;
+                    finish_wave2_failed_effect(&reservation,"workspace.files/write",&error).await
+                }));
+            }
+            barrier.wait().await;
+            for worker in workers {
+                tokio::time::timeout(Duration::from_secs(6),worker).await
+                    .expect("concurrent pool recovery must be bounded").unwrap().unwrap();
+            }
+            for (call,reservation,error) in &reservations {
+                let effects=observer.list_effects(&call.agent_session_id).await.unwrap();
+                assert_eq!(effects.len(),1,"seed {seed}");
+                assert_eq!(effects[0].effect_id,reservation.request.effect_id);
+                assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Rejected);
+                let observation=effects[0].bounded_observation.as_ref().unwrap();
+                assert_eq!(observation["error"],
+                    bounded_terminal_payload(Wave2EffectCompletion::Failed(error)).0["error"]);
+                assert_eq!(observation["effect_id"],reservation.request.effect_id);
+                assert_eq!(observation["operation_id"],call.operation_id.as_ref());
+                assert_eq!(observation["resource_key"],reservation.request.resource_key.as_deref().unwrap());
+                let head=observer.head(&call.agent_session_id).await.unwrap();
+                finish_wave2_failed_effect(reservation,"workspace.files/write",error).await.unwrap();
+                assert_eq!(observer.head(&call.agent_session_id).await.unwrap().last_seq,head.last_seq);
+            }
+            println!("seed={seed} full_connections=3 unique_terminals=3 replay_new_events=0");
+        }
+        if let Some(evidence_root)=evidence_root {
+            let snapshot=evidence_root.join("final-agent.db");
+            sqlx::query("VACUUM INTO ?").bind(snapshot.to_string_lossy().as_ref())
+                .execute(&pool).await.unwrap();
+        }
+        drop(observer);
+        drop(store);
+        pool.close().await;
+        database.close().await;
+    }
+
     #[tokio::test]
     async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
         let directory = tempfile::tempdir().unwrap();
