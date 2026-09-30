@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-01 首轮限额暂停，修后完成但保留 not_started 和退出清理失败；完整首发及逐项证据仍待修/验，不记整组 PASS |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-01 修后 canonical completed，但 MAC-A-02 确认 cwd 未执行及交付遗漏；首发/交付/退出仍未达，不记整组 PASS |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1263,3 +1263,18 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 公共提示问题见 **C01-01**，完整日志在 `2026-10-01/macos/c01-literal-guidance/`。无额外模型
   调用或全仓构建；本次只读 UI inventory 明确 Mac locked、自动解锁失败，须人工解锁后补正式
   首发/N3。C05 Keychain 条件与退出另待验；提示回归不关闭 MAC-A、模型首发或完整 Case。
+
+- **MAC-A-02 exact delivery/receipt audit**（C01/C02/C03/C06、`CMD-134/136`、A18 的本批
+  独立复核）：只读核对 MAC-A-01 原修后 DB、403 个 canonical 事件、原请求及正式 UI 文本，
+  不重跑模型或改旧数据。事件副本与闭库逐项一致；7/7 原件 hash、完整四行读取、查有/完整零匹配、
+  Git 观察、两指定测试实际 exit 0/1 有证据，先前组件及压缩修复结论不改。
+- 明确失败而非继续“待核对”：实际只有 not_started、`ls -la`、两个测试共四个 process 调用，
+  **没有执行 cwd 检查**；报告 rationale 却称 cwd/全要求完成。最终 UI/summary 一致，但没有
+  cwd、隐藏目录结果及头尾原文。仅有三条可用 ID，分别为 listing 和两个测试，不能证明整个
+  input_0；旧读搜/Git 已不在最后 schema 可用集合，不可搬入或放宽 freshness 来制造支持。
+- 外部严格场景 oracle 仍 **FAIL / MAC_A_INCOMPLETE_DESPITE_CANONICAL_COMPLETED**；诊断模式
+  输出事实不算修后通过。首个 audit 脚本误写 fixture 注释的失败也保留，改为从原件取实际注释后
+  才核对场景；没有把 verifier 错误归因产品。完整记录 `2026-10-01/macos/mac-a-delivery-audit/`。
+- 本批未修改产品；completion 现有合同本就区分合法引用和模型解释，不新增猜测式语义 veto。
+  解锁后按原任务验证实际 pwd、头尾/列表交付与准确的缺证据披露，不重跑领域矩阵。当前 CUA
+  再次明确锁屏；正式首发/N3、C05 系统条件/退出、MAC-B/C 仍开放，不改 Windows 或完整场景结果。
