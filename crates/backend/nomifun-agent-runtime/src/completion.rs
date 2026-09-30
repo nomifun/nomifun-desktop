@@ -2079,14 +2079,14 @@ impl AgentCompletionReport {
 
     pub(crate) fn tool_error_disclosure(&self) -> Option<String> {
         (self.observed_tool_error_count > 0).then(|| format!(
-            "\n\n- ⚠ Tool-call errors observed in this turn: {}. Later successful calls did not erase these errors.",
+            "\n\nUnsuccessful tool attempts in this turn: {} (including argument checks and command outcomes). Details remain available in the execution steps.",
             self.observed_tool_error_count
         ))
     }
 
     pub(crate) fn command_failure_disclosure(&self) -> Option<String> {
         (self.observed_command_failure_count > 0).then(|| format!(
-            "\n\n- ⚠ Command failures observed in this turn: {}. Later successful commands did not erase these failures.",
+            "\n\nUnsuccessful command attempts in this turn: {}. Each command's exit status and output explain the result.",
             self.observed_command_failure_count
         ))
     }

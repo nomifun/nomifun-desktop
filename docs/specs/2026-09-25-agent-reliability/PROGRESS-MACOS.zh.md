@@ -1,13 +1,69 @@
-# macOS Case 处理进度
+# macOS 命令与会话可靠性进度
 
-更新：2026-09-30。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
+更新：2026-10-01。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
-覆盖 675 个共享 + 72 个 macOS 专属 Case，合计 2,366 槽。
-Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
+按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
+与共享计划的 C01～C08、A/B/C 三组正式会话一致。停止按 M01～M06 穷举全产品余项。
+旧 675 共享 + 72 macOS 专属、2,366 槽与五角色分配仅为历史口径，不再作本轮完成率或结束门槛；
+范围外、复用、手测与未验分开，原 Case 定义、首败及修复证据不删除、不自动记 PASS。
 
-## macOS 专属集合
+## 当前活动问题簇
 
-以下集合共 72 条；其余本平台任务取目录中的 Both Case，范围包含首尾。
+| 簇 | macOS 候选复用证据（保留原构建及覆盖限制） | 本轮下一缺口 |
+| --- | --- | --- |
+| C01 命令选择与参数 | M01-03 正式 `ls -a`；M01-05 host `pwd -P`；argv/cwd/OS mapping 回归 | MAC-A 的普通命令组合，真实 GEN/COD 入口；不补全全部 CMD 语料 |
+| C02 读取与搜索 | M02-02 正式 StepFun 单次精确读取；文件路径/读搜组件 | MAC-A 的中文/空格、头尾/计数、查有与零匹配、源文件不变 |
+| C03 Git观察与小测试 | M03 Git 只读/身份边界组件及 native coding 回归 | MAC-A 首次 `status/diff`、按 AGENTS 指定小测试、预期非零的准确说明 |
+| C04 文件与步骤结果 | M01-02/M03 文件原子性、权限和真实 receipt 回归 | MAC-B 连续写改/复制移动/回读/hash/精确删除，最终字节与回答一致 |
+| C05 进程与停止 | M01-04 正式 start/poll/cancel；M06-01～09 精确 owner/清理 fence | MAC-B 交互 stdin/close 与长 helper/后代停止；不继续组合穷举启动故障 |
+| C06 过程与交付真实性 | M01-04 取消成功投影、M02 completion；M04-26/27 正式暂停/取消 | 在 MAC-A/B/C 同次核对 UI/API/canonical、错误类别、实际结果与完成证据 |
+| C07 连续会话与纠正 | M02/M04-26；MAC-A-01 已修固定开销反复压缩及精确收据丢失，正式修后完成链有证据 | MAC-C 追加纠正/取消冷读及当前命令首发仍待验，不由组件或单样本代替 |
+| C08 模型协议接合 | M01/M02 正式 StepFun → 实际 owner；Schema/decoder/预算护栏 | 与 MAC-A/B/C 同次核对原生 tool 参数和结果回配，不另跑 wire-only 扩样 |
+
+以上是候选复用，不代表三组综合任务已通过。先核对原始断言、制品和相关源码差异；只有受变更影响、
+真实现场反例或明确新风险才运行最小回归，不重跑全仓/全领域或新建同构底层测试。
+
+## 三组正式会话与活动状态
+
+| 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
+| --- | --- | --- |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-01 首轮限额暂停，修后完成但保留 not_started 和退出清理失败；完整首发及逐项证据仍待修/验，不记整组 PASS |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
+| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
+
+GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
+已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
+当前 M04-27 的真实 StepFun 首次 transport failure 无 HTTP 认证/额度证据，只阻断相关 live 运行；
+先核对网络恢复条件并冻结该批次数/输出/时限，再进入正式 UI，不把已授权模型预算设为永久 0。
+
+## 收敛处置与本轮结束条件
+
+- **复用**：Schema/整批预检/decoder/CAS、argv/PTY/游标、APFS/文件原子性、权限、lease/fence/receipt、
+  secret 隔离等已有定向回归。保留覆盖边界，受影响才最小重跑，安全和真实性断言不缩减。
+- **合并**：CMD/PROC/REAL/AGEN/ACOD 的同一命令链、CTRL/OBS 的同一终态和 LIFE/CONC 的同一恢复，
+  在 A/B/C 同次运行核对各关键断言，不重复扩角色/层级/故障组合来填原槽数。
+- **手测建议/移出活动队列**：模型管理 CRUD、伙伴/创作/客服、Knowledge/Canvas/Office/媒体等普通业务；
+  Browser/Computer/SSH/MCP/渠道/设备生态、Git 发布、Schedule/Requirements/委派全功能。已有缺陷保留为
+  模块回归；确实影响当前命令链的共同根因仍处理。旧 MM retry spinner 未关闭，需另行按钮/事件复现，
+  不能用新 Session 首发成功关闭，但不阻断本轮命令收尾。
+- **独立发布认证**：x86_64、其他 OS、signing/notarization、全 CMD/五角色矩阵、每 Case 20 次、全部竞态
+  100 seed、LONG/4h/8h soak、408 样本/99% 声明保留原标准，移出本轮结束条件，不宣称已认证。
+- **结案**：A/B/C 的本机关键链与 GEN/COD 实际入口达标，核心命令 bad-case 根因闭环，UI/API/canonical/
+  exit/stdout/stderr/磁盘结果一致，取消无新副作用或孤儿，历史失败如实披露。尚未达到该条件。
+
+### 本次收敛执行（2026-10-01）
+
+- 已同步并核对远端 `6fbed902e`：实施计划/共享进度已收敛，本页原活动队列未跟进；现按同一方案调整。
+- 优先执行候选复用核对：M01-03 的 exact 目录输出/exit/reaped 与 M01-04 的原库 start/cancel 同 handle、
+  completed/head ready、helper digest 复核通过。仅复用原构建子断言，不拼成当前 MAC-A/B/C PASS。
+- MAC-A live 前置的无凭据 HEAD 再次 TLS error（curl 35）；未新建模型 Session、未发付费模型请求，
+  只阻断相关 live。继续证据核对和范围整理，未扩大权限、关闭 TLS 校验或改写模型额度。
+- 完整依据/只读核对在 `2026-09-30/macos/command-scope-cleanup/`（批次跨午夜，保留开始日期）。
+  本次只改排程文档，不再重复 Cargo/build 或增加底层矩阵；Windows 结果和下方历史批次原样保留。
+
+## 历史 macOS 专属集合（不作为活动队列）
+
+以下保留原全产品冻结集合与范围，不继续全量排程，也不将未跑项改为通过。
 
 | 家族 | macOS 专属 ID |
 | --- | --- |
@@ -16,9 +72,10 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | Browser/Computer | BROW-017；COMP-008～009 |
 | UI/宿主 | REAL-016～019；MAC-001～018 |
 
-## 全领域排程
+## 历史全领域分配（已停止本轮排程）
 
-取实施计划各领域中 macOS 适用且属于对应 Agent 产品目标的槽；共享组件证据不替代本表验收。
+下表为原全产品计划的历史分配；状态是当时各模块的覆盖说明，不能据此启动完整领域余项。
+当前调度仅取上面的 C01～C08/MAC-A～C；共享组件证据仍不替代正式产品验收。
 
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
@@ -30,12 +87,15 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～07 已验 shutdown/写锁、start 取消/IO failure/deadline/commit failure 所有权、caller-drop/quiesce 组合及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～09 已验 shutdown/写锁、start 取消/IO failure/deadline/commit failure、pre-exec 辅助清理、caller-drop/quiesce 与 Engine 精确收据衔接及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
 
-## 原生接续任务
+## 历史 M01～M06 任务映射（停止穷举接续）
+
+下表只保留历史来源。未完任务须先归入 C01～C08 的实际命令缺口，否则作为模块回归、手测建议
+或独立发布认证搁置；不再按 M01→M06 逐领域补完。
 
 | 任务 | 对应 Case | 测试 → 排查 → 修复安排 |
 | --- | --- | --- |
@@ -46,7 +106,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | M05 条件业务 | ACSR、媒体、Channel/Robot、D07/D08 剩余 | 逐项建正式资源与安全测试账户；缺资源记阻断，能力缺项进入共享问题簇 |
 | M06 生命周期与长稳 | LIFE/CONC/LONG；MAC-014/018；PORT | sleep/wake、主进程死亡、故障窗口、恢复 fence 与幂等；然后长稳统计 |
 
-## 阶段性 P0 收尾（2026-09-29）
+## 历史阶段性 P0 收尾（2026-09-29）
 
 用户因当前算力额度要求先做阶段性 P0 收尾，余项等待后续安排。本轮按已交付证据结算，不把未跑槽
 降级为通过：M01 已完成 process/APFS/argv/shell/PTY/group/Seatbelt 与正式 Tauri 关键子断言；M02
@@ -76,7 +136,10 @@ M06 LIFE/CONC/LONG/soak 均明确延期；真实 Provider N3/20/99%、release si
 完整新证据默认存仓库外 `~/code/temp/nomifun-agent-reliability/phase-2-3/<date>/macos/<batch>/<run>/`。
 Git 只更新本页的批次结论与必要代码/测试，不提交完整日志或展开索引。
 
-## 本轮原生批次
+## 已有原生批次与后续聚焦记录
+
+下列旧批次中的“完整领域/阶段/20次/N3/99%仍开放”等为当时结论，不再整体作为本轮前置门槛。
+保留首次/修后记录及其原构建；只有当前活动范围的关键链继续推进，移出的模块不追认 PASS。
 
 - **M01-01 process owner / Seatbelt**（PROC-006/011/012/014/016/033～041/046、TERM-012，
   MAC-005～010/015 的本批子断言）：宿主为 macOS 26.6.2 / Darwin 25.6.0、原生 arm64、
@@ -1077,3 +1140,77 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批是 native process 组件，不替代真实 Engine Turn cancel、正式 Tauri/角色或完整 Case；
   pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复、其他平台、LONG/99%
   仍开放。Windows 原结果未改写，不关闭完整 M06 或阶段二、三。
+
+- **M06-08 pre-exec deferred auxiliary cleanup**（`PROC-040/047/050`、A08/A11/A13 的本批
+  native 子断言）：macOS 26.6.2 / 原生 arm64 / APFS，付费调用 0。WithholdAck 保证 user exec
+  为零，100 ms setup 后固定 watchdog 的未证明清理窗口。首败 caller 105 ms 返回原 deadline，
+  shutdown 已空报告返回而 watchdog 未 reap；随后底层回收。首败 `run-001` 保留。
+- 公共根因/修复见 `S-D04-37`：原 worker/准入租约/容量持有至辅助清理证明，原 caller deadline
+  不延长；失败启动单列 `startups` owner/host SessionId/error/cleanup，不制造用户 PID/可用 handle。
+  non-exact 启动清理保持 quarantine 和占额，已证明记录有界且可消费；普通 Session 语义不变。
+- 首次重复 **3/4** 又证明 transaction 恰先于 timer 交付时，辅助等待漏原 deadline 通知；原日志
+  `run-006/repeat-01` 保留。现两阶段共享同一绝对 deadline；另保留负向夹具缺 import 编译首败。
+- Pipe/PTY × shutdown/quiesce 最终首次 + 20 repeats **84/84**；独立辅助 PID 消失 **84/84**，
+  user exec **0**、无伪造用户 Session **84/84**，精确启动收据/容量阻止新 exec **84/84**；每个
+  watchdog reap 恰好一次，fallback 0。原 setup 100 ms/caller 350 ms 下最大 **106 ms**，原 marker
+  2 秒/cleanup 6 秒上界不变。quarantine/有界报告两项 **2/2**；Runtime **172/172**、registry
+  **13/13**、Engine process **16 通过/1 ignored**、boundary/fmt/diff 通过。全证据
+  `2026-09-30/macos/m06-preexec-cleanup/`。
+- 本批是原生组件和 Engine 定向影响检查，未验真实 Engine cancel/正式 Tauri、真实永久 authority
+  loss/后续恢复、其他 transfer failure、worker panic、其他平台/角色与 LONG/99%。Windows 原
+  结果未改写，不关闭完整 PROC/M06 或阶段二、三。
+
+- **M06-09 Engine unregistered-start fence**（`PROC-039/050`、A13/A18 的 App/Engine 子断言）：
+  macOS 26.6.2 / 原生 arm64 / APFS。走查发现 App 的 `unregistered_start` 永久拒绝清理，未读取
+  后来的精确 native 收据；组件首败 `run-001` 已保留。公共根因/修复见 `S-D04-38`：Engine 在首个
+  native await 前保存宿主 owner，App cleanup 通过其 fence 核对收据；空报告、同 invocation 的
+  其他 call、未证明清理不能解除 unknown，部分精确收据保留到后续重试，panic 不确定性不清除。
+- Native Engine Pipe/PTY 的已 exec、未交付 handle、caller future drop 两场景首次 + 20 repeats
+  **42/42**；独立 PID marker/原 owner/物理 PID 消失 **42/42**，精确 fence 后 tracking 为零。
+  App process-host **8/8**，Core process **20 通过/1 ignored**，fmt/boundary/diff 通过。
+  Native 夹具缺 libc/违反既有 unsafe lint 的两次编译失败单列保留；最终使用现有安全身份探测，
+  未关闭或放宽 `forbid(unsafe_code)`，无新依赖。证据 `2026-09-30/macos/m06-engine-startup-fence/`。
+- 本批未额外调用外部测试模型（实际 0 次）；仅 App 组件与 Native Engine adapter 验证，未替代
+  正式 Tauri/live Provider、完整真实 Turn cancel、pre-exec auxiliary 故障的 App 全链路、永久
+  authority loss/恢复、worker panic、其他平台/角色或 LONG/99%。Windows 原结果未改写，完整
+  PROC/M06 与阶段二、三仍开放；需要 live 的 Case 另冻结小批次调用上限。
+
+- **M04-27 real StepFun terminal / bounded live fixture**（`ACOD-002/014`、`CTRL-006` 的接续尝试，
+  `MODEL-019/027/035`、`OBS-005/007` 的本批失败投影子断言）：macOS 26.6.2 / 原生 arm64 / APFS；
+  fresh 正式 Tauri dev App `ca9b51e91228…`，deep/strict ad-hoc 签名通过，不作 release/notarization 证据。
+  从本机 encrypted `stepfun-plan` / `step-3.7-flash` 读取凭据，仅内存解密、stdin 交给 fixture。
+  冻结 **1 Session / 最多 6 次上游请求 / 每次 1024 output tokens / 180 秒模型转发窗口**；实际
+  **1 次上游尝试**在 HTTP 响应前 transport failure，随后停止转发。无认证/额度 HTTP 证据，不归因为
+  凭据或余额；无凭据 HEAD 在直连及现有代理路径独立得到 TLS error，未关闭 TLS 校验或改系统代理。
+- fixture 原先固定 32/4096 且统一改写上游拒绝为 502；现可显式收紧调用/输出/时间上限，剩余请求
+  timeout 不超过原截止点，首次上游状态保留，拒绝后本地重试不再转发。四项护栏首次 + 20 repeats
+  **84/84**，完整 example **5/5**；只改测试 fixture，不把组件结果替代 post-fix live terminal。
+- 正式 UI 显示 provider unavailable 暂停、任务未完成；seq 27 `cleanup_proven=true`，UI 结束本回合后
+  seq 28 cancelled/head ready。独立闭库查询：effect **0**、witness **0**、源码仍为原 `+2`、无 completed；
+  DB/闭库备份均 `ok`，owned App/Helper/fixture/listener **0**。普通 readonly 收集的 SQLite 14 首败
+  与空输出保留，另以 immutable 只读 URI 验证，不改原 DB。凭据 exact match **0**。
+- 证据 `2026-09-30/macos/m04-live-terminal/`；该 live 正向任务为 transport 阻断，M04-23 terminal、
+  真实模型效率/N3/20/99%、其他角色/平台与旧 MM retry spinner 仍开放；本批没有新公共产品根因，
+  不改共享进度或 Windows 结果，不关闭完整 Case、M04 或阶段二、三。
+
+- **MAC-A-01 command / compaction continuity**（C01/C02/C03/C06/C07/C08；`CTRL-006`、
+  `ACOD-017` 等对应子断言）：用户切网后同域 HTTPS 恢复；原 transport 首败未覆盖。macOS 26.6.2 /
+  原生 arm64 / APFS，官方 `coding.codex`、隔离 Session/work、现有加密 StepFun Plan / `step-3.7-flash`。
+  首轮及独立修后轮各冻结 **1 Session / 16 上游请求（含摘要）/ 4096 output tokens / 360 秒窗口**。
+- 首轮 `run-002` 实际 **16 requests / 687 events**，三个 command 整行字面形态被真实 owner 证明
+  not_started；两个指定测试各只执行一次、exit **0/1**，读搜和 Git 已有真实结果，但三次压缩只保留
+  accepted input、零原工具收据，随后重复检查。fixture cap 触发 `EXECUTION_MODEL_RATE_LIMITED` /
+  `cleanup_proven=true`，不是供应商实际限流或余额证据；正式 UI 结束后 cancelled/head ready。
+- 公共根因/修复见 **C07-01**：固定 instructions/schema 本身超过软字节触发点时反复压缩，另以最大
+  摘要预留丢弃实际放得下的已结算交换。最小反例首败 `run-003` 保留；现只调整可压缩历史余量，并按
+  实际摘要保留有界完整后缀，原 token/byte/message/调用上限及失败/freshness/authority 语义不变。
+  压缩定向 **15/15**、Runtime **200/200**、fixture **5/5**、正式 Tauri build 和 deep/strict 验签通过。
+- 修后 App `b366fe1f091d…` 的 `run-006` 实际 **11 requests / 403 events**，两次压缩分别保留精确
+  exit-1 原收据及 plan 更新；不再重复两个测试，`report_completion` 接受、UI 披露 exit **0/1** 和历史
+  `2 tool errors / 1 command failure`，canonical completed/head ready。仍有 **1 not_started**，因此
+  只验证修后压缩/完成链，不记首发零错误或完整 MAC-A PASS；cwd/逐项 evidence 映射仍需独立核对。
+- 两轮 **7/7** 原件 hash、原 dirty Git/HEAD 均不变，禁跑哨兵不存在，DB/备份 `ok`，凭据 exact
+  match **0**；请求/SSE/事件/UI/数据库在 `2026-10-01/macos/mac-a-observe/`。修后正常 App 退出另
+  **30 秒 backend cleanup timeout**，TERM 后仍活；核对 exact PID/executable 后 KILL，最终 owned
+  App/Helper/fixture/listener **0**。原超时与人工清理记录保留，**不算产品清理通过**，列为 C05 接续。
+  不改 Windows 结果，不扩模型 context 额度或权限；首发形态、退出等待、MAC-A N3、MAC-B/C 仍开放。

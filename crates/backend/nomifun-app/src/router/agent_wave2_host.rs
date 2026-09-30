@@ -1506,7 +1506,10 @@ impl Wave2ApplicationHost {
         let workspace = scope.workspace_root().to_path_buf();
         let capability_id = capability_id.to_owned();
         let worker_capability_id = capability_id.clone();
-        let path = match path.filter(|path| !path.is_empty()) {
+        // `.` selects the bound workspace, including a repository subdirectory.
+        // Keep the existing repository-prefix fence instead of resolving it as
+        // a file path or falling back to the whole repository.
+        let path = match path.filter(|path| !path.is_empty() && *path != ".") {
             Some(path) => {
                 let resolved = scope
                     .resolve_relative_path(path)
@@ -3922,6 +3925,144 @@ mod tests {
         drop(restarted);
         drop(reopened_store);
         reopened_database.close().await;
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_artifact_cleanup_fence_survives_repair_and_database_reopen() {
+        let temporary = tempfile::tempdir().unwrap();
+        let evidence = std::env::var_os("NOMIFUN_ARTIFACT_FENCE_EVIDENCE_DIR")
+            .map(PathBuf::from).unwrap_or_else(|| temporary.path().to_path_buf());
+        let workspace = evidence.join("workspace");
+        let database_path = evidence.join("agent.db");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("result.txt"), b"original artifact").unwrap();
+        let seed = WorkspaceArtifactStore::new(&workspace).unwrap().publish("result.txt", None).unwrap();
+        let foreign_path = workspace.join(".nomifun/artifacts/.publish-4294967295-34.tmp");
+        std::fs::write(&foreign_path, b"foreign!").unwrap();
+        std::fs::hard_link(&foreign_path, evidence.join("retained-foreign")).unwrap();
+        let foreign = std::fs::File::open(&foreign_path).unwrap();
+        let original_identity = artifact_fence_fixture_identity(&foreign);
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace).with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.capability_id = CapabilityId::from("workspace.artifacts");
+        pending.action_id = ActionId::from("workspace.artifacts/publish");
+        pending.idempotency_key = IdempotencyKey::from("artifact-cleanup-unknown");
+        pending.operation_id = OperationId::from("artifact-cleanup-unknown-operation");
+        let input = json!({"path":"result.txt","expected_sha256":seed.sha256});
+        let first = invoke(&host, pending.clone(), "workspace.artifacts/publish", input.clone()).await.unwrap_err();
+        assert_eq!(first.code, "EFFECT_OUTCOME_UNKNOWN");
+        let effect_id = wave2_effect_id(&pending).unwrap();
+        let record = store.read_effect(&pending.agent_session_id, &effect_id).await.unwrap().unwrap();
+        assert_eq!(record.state, nomifun_agent_session::AgentEffectState::Pending);
+        assert!(record.terminal_event_id.is_none() && record.settled_at.is_none());
+        assert_eq!(std::fs::read(&foreign_path).unwrap(), b"foreign!");
+        assert_eq!(artifact_fence_fixture_identity(&std::fs::File::open(&foreign_path).unwrap()), original_identity);
+        let same = invoke(&host, pending.clone(), "workspace.artifacts/publish", input.clone()).await.unwrap_err();
+        assert_eq!(same.code, "CAPABILITY_UNAVAILABLE");
+        assert!(same.message.contains("durable pending"), "{same:?}");
+        drop(host);
+        drop(store);
+        database.close().await;
+
+        std::fs::write(workspace.join("result.txt"), b"later source").unwrap();
+        let later_digest = nomifun_agent_contracts::digest_bytes(b"later source");
+        let reopened_database = nomifun_db::init_database(&database_path).await.unwrap();
+        let reopened_store = nomifun_agent_session::AgentSessionStore::from_pool(reopened_database.pool().clone()).await.unwrap();
+        let restarted = Wave2ApplicationHost::for_workspace_root(&workspace).with_effect_store(reopened_store.clone());
+        let mut later = pending.clone();
+        later.idempotency_key = IdempotencyKey::from("artifact-cleanup-different-key");
+        later.operation_id = OperationId::from("artifact-cleanup-different-operation");
+        let cold_same = invoke(&restarted, pending.clone(), "workspace.artifacts/publish", input).await.unwrap_err();
+        assert_eq!(cold_same.code, "CAPABILITY_UNAVAILABLE");
+        assert!(cold_same.message.contains("durable pending"), "{cold_same:?}");
+        let changed = invoke(&restarted, later.clone(), "workspace.artifacts/publish", json!({
+            "path":"result.txt","expected_sha256":later_digest.as_ref()
+        })).await.unwrap_err();
+        assert_eq!(changed.code, "CAPABILITY_UNAVAILABLE");
+        assert!(changed.message.contains("unsettled"), "{changed:?}");
+        let foreign_identity_after_reopen = artifact_fence_fixture_identity(&std::fs::File::open(&foreign_path).unwrap());
+        assert_eq!(foreign_identity_after_reopen, original_identity);
+        assert_eq!(std::fs::read(&foreign_path).unwrap(), b"foreign!");
+        assert_eq!(reopened_store.read_effect(&pending.agent_session_id, &effect_id).await.unwrap().unwrap(), record);
+
+        // Resolving the filesystem residue does not reconcile the canonical effect.
+        std::fs::remove_file(&foreign_path).unwrap();
+        drop(foreign);
+        drop(restarted);
+        let repaired = Wave2ApplicationHost::for_workspace_root(&workspace).with_effect_store(reopened_store.clone());
+        let repaired_error = invoke(&repaired, later.clone(), "workspace.artifacts/publish", json!({
+            "path":"result.txt","expected_sha256":later_digest.as_ref()
+        })).await.unwrap_err();
+        assert_eq!(repaired_error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(repaired_error.message.contains("unsettled"), "{repaired_error:?}");
+        let mut file_write = later.clone();
+        file_write.capability_id = CapabilityId::from("workspace.files");
+        file_write.action_id = ActionId::from("workspace.files/write");
+        file_write.idempotency_key = IdempotencyKey::from("artifact-cleanup-file-write");
+        file_write.operation_id = OperationId::from("artifact-cleanup-file-operation");
+        let file_error = invoke(&repaired, file_write.clone(), "workspace.files/write", json!({
+            "path":"blocked.txt","content":"must not run"
+        })).await.unwrap_err();
+        assert_eq!(file_error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(file_error.message.contains("unsettled"), "{file_error:?}");
+        let mut other_session = context(&workspace);
+        other_session.idempotency_key = IdempotencyKey::from("artifact-cleanup-other-session");
+        other_session.operation_id = OperationId::from("artifact-cleanup-other-operation");
+        let other_error = invoke(&repaired, other_session.clone(), "workspace.files/write", json!({
+            "path":"other-blocked.txt","content":"must not run"
+        })).await.unwrap_err();
+        assert_eq!(other_error.code, "CAPABILITY_UNAVAILABLE");
+        assert!(other_error.message.contains("unsettled"), "{other_error:?}");
+        let read = invoke(&repaired, pending.clone(), "workspace.artifacts/read", json!({
+            "artifact_id":seed.artifact_id,"offset":0,"limit":1024
+        })).await.unwrap();
+        assert_eq!(read.0["sha256"], seed.sha256);
+        assert_eq!(read.0["complete"], true);
+        assert_eq!(read.0["data_base64"], "b3JpZ2luYWwgYXJ0aWZhY3Q=");
+        assert!(!workspace.join("blocked.txt").exists() && !workspace.join("other-blocked.txt").exists());
+        assert!(!workspace.join(".nomifun/artifacts").join(later_digest.as_ref()).exists());
+        assert_eq!(std::fs::read(workspace.join(&seed.relative_path)).unwrap(), b"original artifact");
+        assert_eq!(std::fs::read(workspace.join("result.txt")).unwrap(), b"later source");
+        assert_eq!(reopened_store.list_effects(&pending.agent_session_id).await.unwrap(), vec![record.clone()]);
+        assert!(reopened_store.list_effects(&other_session.agent_session_id).await.unwrap().is_empty());
+        assert!(reopened_store.has_unsettled_effects(&pending.agent_session_id).await.unwrap());
+        std::fs::write(evidence.join("assertions.json"), serde_json::to_vec(&json!({
+            "session_id":pending.agent_session_id, "other_session_id":other_session.agent_session_id,
+            "record":record, "foreign_identity_before":original_identity,
+            "foreign_identity_after_reopen":foreign_identity_after_reopen,
+            "first_code":first.code, "same_code":same.code, "cold_same_code":cold_same.code,
+            "changed_code":changed.code, "repaired_code":repaired_error.code,
+            "file_code":file_error.code, "other_session_code":other_error.code,
+            "published_relative_path":seed.relative_path, "later_digest":later_digest,
+            "diagnostic_read":read.0, "native_residue_removed":true,
+        })).unwrap()).unwrap();
+        drop(repaired);
+        drop(reopened_store);
+        reopened_database.close().await;
+    }
+
+    fn artifact_fence_fixture_identity(file: &std::fs::File) -> Value {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Storage::FileSystem::{FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx};
+            let mut info = FILE_ID_INFO::default();
+            // SAFETY: the live file handle and correctly sized output buffer remain valid.
+            let ok = unsafe { GetFileInformationByHandleEx(file.as_raw_handle(), FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(), std::mem::size_of_val(&info) as u32) };
+            assert_ne!(ok, 0, "{}", std::io::Error::last_os_error());
+            json!({"volume":info.VolumeSerialNumber,"file_id":info.FileId.Identifier})
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = file.metadata().unwrap();
+            json!({"device":metadata.dev(),"inode":metadata.ino()})
+        }
+        #[cfg(not(any(windows, unix)))]
+        { panic!("native file identity is unavailable") }
     }
 
     #[tokio::test(flavor="multi_thread", worker_threads=2)]
@@ -7675,6 +7816,15 @@ mod tests {
             .await
             .unwrap();
         assert!(!diff.0["patch"].as_str().unwrap().contains("root changed"));
+
+        let root_diff = invoke(&host, context.clone(), "workspace.vcs/diff", json!({"path":"."}))
+            .await
+            .expect("the workspace root alias is a valid read-only diff scope");
+        assert_eq!(root_diff.0, diff.0);
+        for path in ["..", "../tracked.txt", "nested/../.."] {
+            assert!(invoke(&host, context.clone(), "workspace.vcs/diff", json!({"path":path}))
+                .await.is_err(), "root alias support must not admit {path}");
+        }
 
         invoke(
             &host,

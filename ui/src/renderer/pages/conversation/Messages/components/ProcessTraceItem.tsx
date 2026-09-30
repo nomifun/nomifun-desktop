@@ -191,6 +191,12 @@ const formatToolReceiptDetailLabel = (
       defaultValue: defaultToolSummaryByState[row.state],
     });
   }
+  if (row.commandExitCode !== undefined) {
+    return t('messages.toolSummary.commandExited', {
+      target: displayTarget ?? row.title, code: row.commandExitCode,
+      defaultValue: '{{target}} ended with exit code {{code}}',
+    });
+  }
 
   if (row.action === 'run_commands' && row.target) {
     return t(`messages.toolSummary.${row.state}`, {

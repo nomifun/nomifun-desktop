@@ -13,7 +13,8 @@
     "canceled": "已取消 {{target}}",
     "skipped": "已跳过 {{target}}",
     "invalidArguments": "参数未通过校验，未执行 {{target}}",
-    "notExecuted": "未执行 {{target}}"
+    "notExecuted": "未执行 {{target}}",
+    "commandExited": "{{target}} 已结束，退出码 {{code}}"
   },
   "processReceipt": {
     "tool": "工具",
@@ -48,7 +49,8 @@
     "preparedResponse": "已整理结果",
     "prepareResponse": "整理结果",
     "failedOperations": "{{count}} 项操作未完成",
-    "recoveredOperations": "{{count}} 项操作出现异常",
+    "recoveredOperations": "曾有 {{count}} 次尝试未成功",
+    "commandNonzero": "{{count}} 条命令已结束，退出码 {{code}}",
     "searchResultsLimited": "搜索结果受限，需要完整核对",
     "recoveredAfterRetry": "{{target}} 已恢复 · 重试 {{count}} 次",
     "summarySeparator": "，",
