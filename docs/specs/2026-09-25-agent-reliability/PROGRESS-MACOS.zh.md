@@ -785,3 +785,26 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `COMP-005` 多显示器/不同 scale PASS；该 live Case 明确阻断。本批无共享产品根因，不改
   `PROGRESS-SHARED`；关闭上述 macOS click-variants 子断言，held cancel、IME/layout、multi-display
   与 release 仍开放，不关闭完整 Computer、D06 或 M04。
+
+- **M04-18 macOS packaged CEF dynamic signing prerequisite**（`BROW-017`、`MAC-017` 的正式
+  product-bundle 签名/Seatbelt 前置子断言）：current-source arm64 host、固定 CEF 152.0.6 / Chromium
+  152.0.7977.83 与五类 Helper 首次经 Developer ID 深度签名后，路径级及运行中
+  `codesign --verify` 均通过，Helper 也实际进入 Seatbelt；但两个独立启动都在约三分钟后的 Chromium
+  on-device utility 初始化时稳定报告 `errSecCSInfoPlistFailed (-67030)`。首次正式 UI 因 Mac 锁屏保持
+  **0 turn / 0 effect / 0 model call** 后清理，未用 API 提交冒充 UI PASS；签名首败与锁屏运行分别保留于
+  `2026-09-30/macos/m04-browser-packaged/run-002-formal/`、`run-003-signature-diagnostic/`。
+- 根因是 Chromium 动态 peer 校验会把 outer bundle 的内存 `Info.plist` 重新序列化为 canonical XML，
+  而原主包和脚本生成的 Helper plist 字节并非该序列化；因此普通磁盘/动态 `codesign` 可通过，带
+  canonical plist bytes 的 Chromium 校验仍 fail closed。staging 现于签名前用系统 `plutil` 将主包和
+  五个 Helper 的 plist 规范化为 XML，不改签名身份、entitlement、runtime hardening 或 CEF 校验。
+- 修复后的独立 bundle（host executable SHA-256
+  `4e4c4bcc50f141cdf39950a7b0d6ad5301bd2fd6ebccb0195af33a43a14d788f`）六份 plist 均与再次
+  canonical roundtrip 逐字节相同，deep/strict 签名通过；同等 on-device utility 触发后
+  `process_requirement/-67030` 为 **0**，主进程仍 dynamically valid，五类 Helper 保持 sandboxed。
+  packaging contract **6/6**，Browser platform boundary 通过，停止后 App/Helper/listener 为 0、DB
+  `ok`。证据：`2026-09-30/macos/m04-browser-packaged/run-004-fixed-product/`、
+  `run-005-fixed-signature-soak/`。
+- 本批为 macOS packaging 根因，不改 `PROGRESS-SHARED`。正式 packaged Browser AgentSession 的
+  navigate/Unicode type/trusted click witness 仍须在解锁后以新隔离 UI 运行；Tauri 窗口关闭/重开、
+  新 surface identity 与旧 frame/session fence 也仍开放，因此只关闭本签名/Seatbelt 前置子断言，
+  不关闭完整 `BROW-017`、`MAC-017`、D06 或 M04。
