@@ -2919,6 +2919,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖真实IO fault与更多partial restore组合、macOS、完整应用/UI/角色及长期门槛；不关闭
   完整FILE Case或共享阶段。单agent只做一次小package定向构建，其余复用binary。
 
+### Artifact 同对象/同长度错误字节发布（W174，基线 `4fc8ac8dd`）
+
+- S-D03-60 / ART-001/002/005、FILE-038/039、A04/A05/A07/A13/A14/A17/A19：stage完成后或
+  hardlink之后，把同对象的8字节改为8字节corrupt内容；原实现两项 **0/2**，仍返回成功/旧digest。
+  证据根为外部 `2026-09-30/windows/w174-artifact-publication-bytes`，反例、错误返回及坏blob
+  保留于 `01-first-product-run`，没有覆盖首次失败。
+- 新发布在返回receipt/缓存前复用reader完整SHA-256与chunk index验证，继续核对原staged对象/
+  大小。确认rollback后known rejection，其他对象或清理未确认仍unknown；原源文件不变。
+- Windows模块 **18/18**、新反例 **20/20 × 2**、42份独立磁盘/目录项核对通过；WSL Ubuntu
+  ext4模块 **21/21**、两原生场景独立核对通过，fmt/diff通过。Windows/LINUX结果不折算macOS。
+  新发布增加一次full scan，计数如实；原pages/cache复用断言保持，未扩大输出或权限。
+- staging/drop 名称复用、rollback check→unlink、并发增长预算、真实满盘/fsync、正式UI/模型/其他角色平台及
+  N3/100 seed/LONG/99%仍未覆盖；不关闭完整ART/FILE Case或共享阶段。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。

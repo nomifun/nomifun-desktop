@@ -637,37 +637,21 @@ fn publish_content_addressed_with_hook<F: FnOnce()>(
     after_link();
     let finalized = (|| {
         sync_directory(&namespace.dir)?;
-        let file = namespace
-            .dir
-            .open_with(target, &read_options())
-            .map_err(|error| AppError::Conflict(error.to_string()))?
-            .into_std();
-        let identity = SameFileHandle::from_file(
-            file.try_clone()
-                .map_err(|error| AppError::Conflict(error.to_string()))?,
-        )
-        .map_err(|error| AppError::Conflict(error.to_string()))?;
+        // An unchanged inode and length cannot attest the bytes copied during
+        // staging. Reuse the reader's bounded full verification before
+        // returning a publication receipt or caching its chunk index.
+        let verified = load_verified_artifact(namespace, target, counters)?;
         if staged
             .identity
             .as_ref()
-            .is_none_or(|expected| expected != &identity)
-            || file
-                .metadata()
-                .map_err(|error| AppError::Conflict(error.to_string()))?
-                .len()
-                != staged.size_bytes
+            .is_none_or(|expected| expected != &verified.identity)
+            || verified.size_bytes != staged.size_bytes
         {
             return Err(AppError::Conflict(
                 "published artifact differs from staged bytes".into(),
             ));
         }
-        Ok(VerifiedArtifact {
-            file,
-            identity,
-            size_bytes: staged.size_bytes,
-            sha256: staged.digest.clone(),
-            chunk_hashes: staged.chunk_hashes.clone(),
-        })
+        Ok(verified)
     })();
     match finalized {
         Ok(verified) => Ok((true, verified)),
@@ -880,6 +864,56 @@ mod tests {
             publication_temp_count(&workspace.path().join(ARTIFACT_RELATIVE_ROOT)),
             0
         );
+    }
+
+    #[test]
+    fn publication_bytes_reject_same_inode_corruption_before_link() {
+        publication_bytes_race(false);
+    }
+
+    #[test]
+    fn publication_bytes_reject_same_inode_corruption_after_link() {
+        publication_bytes_race(true);
+    }
+
+    fn publication_bytes_race(after_link: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if after_link {"after-link"} else {"before-link"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &counters, || {}).unwrap();
+        let target = staged.digest.clone();
+        let staged_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let target_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&target);
+        if !after_link { fs::write(&staged_path, b"corrupt!").unwrap(); }
+        verify_staged_identity(&staged).unwrap();
+        let result = publish_content_addressed_with_hook(&namespace, &target, &staged, &counters, || {
+            if after_link { fs::write(&target_path, b"corrupt!").unwrap(); }
+        });
+        let same_inode = staged.identity.as_ref().unwrap() == &SameFileHandle::from_path(&staged_path).unwrap();
+        assert!(same_inode, "fault must keep the original staged inode");
+        let rejected = result.is_err();
+        let unknown = result.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let target_before_drop = fs::read(&target_path).ok();
+        drop(result);
+        drop(staged);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "after_link":after_link, "same_inode":same_inode, "same_size":true,
+            "rejected":rejected, "unknown":unknown, "digest":target,
+            "target_bytes_before_drop":target_before_drop, "target_exists":target_path.exists(),
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+        assert!(rejected, "artifact publication accepted bytes inconsistent with its declared digest");
+        assert!(!unknown, "confirmed rollback must remain a known rejection");
+        assert!(!target_path.exists(), "corrupt publication must be rolled back");
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
     }
 
     #[test] fn publish_and_read_round_trip() {
