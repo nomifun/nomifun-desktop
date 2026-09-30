@@ -6344,6 +6344,104 @@ mod tests {
         database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn disk_full_failed_and_uncertain_terminals_after_busy_writer_keep_their_causes() {
+        for uncertain in [false,true] {
+            let directory=tempfile::tempdir().unwrap();
+            let database_path=directory.path().join("agent.db");
+            let database=nomifun_db::init_database(&database_path).await.unwrap();
+            let pool=single_connection_pool(&database_path).await;
+            let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+            let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+            let mut call=context(directory.path());
+            let (capability,action,key,strategy)=if uncertain {
+                ("workspace.vcs","workspace.vcs/push","busy-full-uncertain",nomifun_agent_session::EffectStrategy::ExternalUncertainEffect)
+            } else {
+                ("workspace.process","workspace.process/start","busy-full-failed",nomifun_agent_session::EffectStrategy::ManagedEffect)
+            };
+            call.capability_id=CapabilityId::from(capability);
+            call.action_id=ActionId::from(action);
+            call.idempotency_key=IdempotencyKey::from(key);
+            call.operation_id=OperationId::from(format!("{key}-operation"));
+            ensure_test_effect_context(&store,&call).await;
+            let effect_id=wave2_effect_id(&call).unwrap();
+            let input=StrictJsonValue(if uncertain {
+                json!({"remote":"origin","refspec":"HEAD:refs/heads/main"})
+            } else {
+                json!({"command":"fixture-owner"})
+            });
+            let Wave2EffectAdmission::Reserved(reservation)=begin_wave2_exclusive_effect(
+                &store,&call,workspace_typed_binding(&call).unwrap(),&input,strategy,
+            ).await.unwrap() else {
+                panic!("fresh terminal effect must reserve")
+            };
+            let owner_error=if uncertain {
+                Wave2HostPortError::new(
+                    "EFFECT_OUTCOME_UNKNOWN",
+                    format!("remote accepted bytes before disconnect {}","😀".repeat(4096)),
+                )
+            } else {
+                Wave2HostPortError::new(
+                    "PROCESS_EXIT_NON_ZERO",
+                    format!("fixture process exited with code 17 {}","😀".repeat(4096)),
+                )
+            };
+            set_database_page_budget(&pool,true).await;
+            let mut writer=database.pool().begin().await.unwrap();
+            sqlx::query("UPDATE users SET updated_at=updated_at")
+                .execute(&mut *writer).await.unwrap();
+            let settle_reservation=reservation.clone();
+            let settle_error=owner_error.clone();
+            let mut settlement=tokio::spawn(async move {
+                if uncertain {
+                    finish_wave2_uncertain_effect(&settle_reservation,action,&settle_error).await
+                } else {
+                    finish_wave2_failed_effect(&settle_reservation,action,&settle_error).await
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!settlement.is_finished(),"terminal write must wait for the existing writer");
+            assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+                nomifun_agent_session::AgentEffectState::Pending);
+            writer.commit().await.unwrap();
+
+            let error=tokio::time::timeout(Duration::from_secs(6),&mut settlement).await
+                .expect("terminal write must finish after the writer releases")
+                .unwrap().unwrap_err();
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("full"),"{error:?}");
+            assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+            if uncertain {
+                assert!(error.message.contains("owner outcome is unknown"),"{error:?}");
+                assert!(error.message.contains("EFFECT_OUTCOME_UNKNOWN"),"{error:?}");
+            } else {
+                assert!(error.message.contains("owner failed with PROCESS_EXIT_NON_ZERO"),"{error:?}");
+                assert!(error.message.contains("fixture process exited with code 17"),"{error:?}");
+            }
+            assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+                nomifun_agent_session::AgentEffectState::Pending);
+
+            set_database_page_budget(&pool,false).await;
+            if uncertain {
+                finish_wave2_uncertain_effect(&reservation,action,&owner_error).await.unwrap();
+            } else {
+                finish_wave2_failed_effect(&reservation,action,&owner_error).await.unwrap();
+            }
+            let expected=if uncertain {
+                nomifun_agent_session::AgentEffectState::Unknown
+            } else {
+                nomifun_agent_session::AgentEffectState::Rejected
+            };
+            assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,expected);
+            assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+            drop(reservation);
+            drop(store);
+            drop(observer);
+            pool.close().await;
+            database.close().await;
+        }
+    }
+
     #[tokio::test]
     async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
         let directory = tempfile::tempdir().unwrap();

@@ -2716,6 +2716,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 failed/uncertain terminal 的 busy+full、多个受限 pool 同时失步、fsync/WAL 损坏、正式
   shutdown、其他平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0/FILE 或共享阶段。
 
+### writer lock 后 failed/uncertain terminal 命中磁盘满（W160，基线 `943dd8035`）
+
+- S-D09-40 / LIFE-007/023/024、CONC-014、G0-030、OBS-006、A04/A07/A08/A17/A19：managed owner
+  确定失败与 external owner outcome unknown 分别 reserve Effect；terminal settlement 先等待独立
+  SQLite writer lock，释放后命中真实 `SQLITE_FULL`。
+- 两类均返回 full、禁止自动重试并保留各自 owner code/message；Effect 保持 Pending。解除 page
+  budget 后只补 terminal receipt，分别唯一归约为 Rejected 与 Unknown。
+- 首版 ASCII padding 恰好落入页内空隙，settlement 成功使夹具 `unwrap_err` 失败；首次失败日志保留。
+  改用多字节大诊断强制跨页分配后首次及连续 **20/20**；相邻 failed-full、uncertain-full 与 W159
+  success busy-full **3/3**，fmt/diff 通过。生产代码无需修改，无 UI/模型。
+- 未覆盖多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0/OBS 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
