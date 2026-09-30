@@ -7,6 +7,8 @@ use crate::protocol::Protocol;
 mod callbacks;
 #[path = "site_data.rs"]
 mod site_data;
+#[path = "shutdown_state.rs"]
+mod shutdown_state;
 pub use callbacks::{NativeDialog, PageSnapshot};
 
 pub type UiWork = Box<dyn FnOnce() + Send>;
@@ -26,7 +28,7 @@ const BOOTSTRAP_URL: &str = "data:text/html,";
 /// mutations happen on the application's existing main thread.
 pub struct Engine {
     ready: watch::Sender<bool>,
-    stopped: AtomicBool,
+    stopped: shutdown_state::ShutdownState,
     closing: AtomicBool,
     pump_generation: AtomicU64,
     pump_due: Mutex<Option<Instant>>,
@@ -54,7 +56,7 @@ impl Engine {
         if unsafe { load_library(Some(&*library.as_ptr().cast())) } != 1 { return Err("CEF framework could not be loaded".into()); }
         let _ = api_hash(sys::CEF_API_VERSION_LAST, 0);
         let (ready, _) = watch::channel(false);
-        let engine = Arc::new(Self { ready, stopped: AtomicBool::new(false), closing: AtomicBool::new(false), pump_generation: AtomicU64::new(0), pump_due: Mutex::new(None), pump_active: AtomicBool::new(false), pump_reentered: AtomicBool::new(false), pages: Mutex::new(BTreeMap::new()), contexts: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()), root });
+        let engine = Arc::new(Self { ready, stopped: Default::default(), closing: AtomicBool::new(false), pump_generation: AtomicU64::new(0), pump_due: Mutex::new(None), pump_active: AtomicBool::new(false), pump_reentered: AtomicBool::new(false), pages: Mutex::new(BTreeMap::new()), contexts: Mutex::new(BTreeMap::new()), pointer_owners: Mutex::new(BTreeMap::new()), root });
         crate::application::install(Arc::downgrade(&engine))?;
         let args = args::Args::new();
         let helper_text = crate::text::Text::new(helper.to_str().ok_or("CEF helper path must be UTF-8")?);
@@ -77,21 +79,21 @@ impl Engine {
         };
         let mut app = Application::new(engine.clone());
         if initialize(Some(args.as_main_args()), Some(&settings), Some(&mut app), std::ptr::null_mut()) != 1 {
-            engine.stopped.store(true, Ordering::Release);
+            engine.stopped.finish();
             return Err("CEF initialization failed".into());
         }
         Ok(engine)
     }
 
     pub fn post(self: &Arc<Self>, work: UiWork) -> Result<(), String> {
-        if self.stopped.load(Ordering::Acquire) { return Err("CEF is stopped".into()); }
+        if self.stopped.blocks_work() { return Err("CEF is stopped or shutting down".into()); }
         // CEF work belongs to its UI task runner, even though that runner and
         // Tauri share the same macOS main thread. Serialize the CEF API call
         // with shutdown on that thread: an async caller must never race a
         // check-then-post against cef_shutdown from another thread.
         let engine = self.clone();
         dispatch2::DispatchQueue::main().exec_async(move || {
-            if engine.stopped.load(Ordering::Acquire) { return; }
+            if engine.stopped.blocks_work() { return; }
             let mut task = NativeTask::new(Arc::new(Mutex::new(Some(work))));
             let _ = post_task(ThreadId::UI, Some(&mut task));
             // A rejected task drops its owned oneshot sender. The waiter gets
@@ -167,7 +169,7 @@ impl Engine {
         let weak = Arc::downgrade(self);
         let work = Box::new(move || {
             if let Some(engine) = weak.upgrade() {
-                if engine.stopped.load(Ordering::Acquire) { return; }
+                if engine.stopped.blocks_work() { return; }
                 // Claim under the same lock used by schedule(). A stale task
                 // must never erase a newer immediate wakeup's deadline.
                 let mut pending = engine.pump_due.lock().unwrap();
@@ -181,7 +183,7 @@ impl Engine {
                 engine.pump_reentered.store(false, Ordering::Release);
                 do_message_loop_work();
                 engine.pump_active.store(false, Ordering::Release);
-                if !engine.stopped.load(Ordering::Acquire) {
+                if !engine.stopped.blocks_work() {
                     engine.schedule(if engine.pump_reentered.swap(false, Ordering::AcqRel) { 0 } else { 33 });
                 }
             }
@@ -198,7 +200,7 @@ impl Engine {
         let mut ready = self.ready.subscribe();
         tokio::time::timeout(std::time::Duration::from_secs(30), async {
             while !*ready.borrow_and_update() {
-                if self.stopped.load(Ordering::Acquire) || self.closing.load(Ordering::Acquire) { return Err("CEF initialization stopped".into()); }
+                if self.stopped.blocks_work() || self.closing.load(Ordering::Acquire) { return Err("CEF initialization stopped".into()); }
                 ready.changed().await.map_err(|_| "CEF readiness channel closed")?;
             }
             Ok(())
@@ -289,7 +291,8 @@ impl Engine {
     }
 
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), String> {
-        if self.stopped.load(Ordering::Acquire) { return Ok(()); }
+        if self.stopped.completed() { return Ok(()); }
+        if self.stopped.blocks_work() { return Err("CEF shutdown is still in progress; completion has not been acknowledged".into()); }
         self.closing.store(true, Ordering::Release);
         self.ready.send_replace(false);
         let pages: Vec<_> = self.pages.lock().unwrap().values().filter_map(Weak::upgrade).collect();
@@ -297,13 +300,17 @@ impl Engine {
         let (tx, rx) = oneshot::channel();
         let engine = self.clone();
         dispatch2::DispatchQueue::main().exec_async(move || {
+            if engine.stopped.completed() { let _ = tx.send(Ok(())); return; }
+            if engine.stopped.blocks_work() { let _ = tx.send(Err("CEF shutdown is still in progress; completion has not been acknowledged".into())); return; }
             if engine.pages.lock().unwrap().values().any(|page| page.strong_count() != 0) {
                 let _ = tx.send(Err("CEF pages remain during shutdown".to_owned()));
                 return;
             }
             let contexts: Vec<_> = std::mem::take(&mut *engine.contexts.lock().unwrap()).into_values().filter_map(|context| context.upgrade()).collect();
             for context in contexts { let raw = context.raw.lock().unwrap().take(); drop(raw); }
-            if !engine.stopped.swap(true, Ordering::AcqRel) { shutdown(); }
+            if !engine.stopped.begin() { let _ = tx.send(Err("CEF shutdown entry was already claimed".into())); return; }
+            shutdown();
+            engine.stopped.finish();
             let _ = tx.send(Ok(()));
         });
         rx.await.map_err(|_| "CEF shutdown acknowledgement was lost")?
