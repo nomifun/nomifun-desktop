@@ -1,13 +1,69 @@
-# macOS Case 处理进度
+# macOS 命令与会话可靠性进度
 
-更新：2026-09-30。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
+更新：2026-10-01。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
-覆盖 675 个共享 + 72 个 macOS 专属 Case，合计 2,366 槽。
-Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
+按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
+与共享计划的 C01～C08、A/B/C 三组正式会话一致。停止按 M01～M06 穷举全产品余项。
+旧 675 共享 + 72 macOS 专属、2,366 槽与五角色分配仅为历史口径，不再作本轮完成率或结束门槛；
+范围外、复用、手测与未验分开，原 Case 定义、首败及修复证据不删除、不自动记 PASS。
 
-## macOS 专属集合
+## 当前活动问题簇
 
-以下集合共 72 条；其余本平台任务取目录中的 Both Case，范围包含首尾。
+| 簇 | macOS 候选复用证据（保留原构建及覆盖限制） | 本轮下一缺口 |
+| --- | --- | --- |
+| C01 命令选择与参数 | M01-03 正式 `ls -a`；M01-05 host `pwd -P`；argv/cwd/OS mapping 回归 | MAC-A 的普通命令组合，真实 GEN/COD 入口；不补全全部 CMD 语料 |
+| C02 读取与搜索 | M02-02 正式 StepFun 单次精确读取；文件路径/读搜组件 | MAC-A 的中文/空格、头尾/计数、查有与零匹配、源文件不变 |
+| C03 Git观察与小测试 | M03 Git 只读/身份边界组件及 native coding 回归 | MAC-A 首次 `status/diff`、按 AGENTS 指定小测试、预期非零的准确说明 |
+| C04 文件与步骤结果 | M01-02/M03 文件原子性、权限和真实 receipt 回归 | MAC-B 连续写改/复制移动/回读/hash/精确删除，最终字节与回答一致 |
+| C05 进程与停止 | M01-04 正式 start/poll/cancel；M06-01～09 精确 owner/清理 fence | MAC-B 交互 stdin/close 与长 helper/后代停止；不继续组合穷举启动故障 |
+| C06 过程与交付真实性 | M01-04 取消成功投影、M02 completion；M04-26/27 正式暂停/取消 | 在 MAC-A/B/C 同次核对 UI/API/canonical、错误类别、实际结果与完成证据 |
+| C07 连续会话与纠正 | M02 Session/steering/Skill、native recovery；M04-26 页外 pause | MAC-C 追加纠正、一次实际 compaction、取消冷读；组件不替代正式会话 |
+| C08 模型协议接合 | M01/M02 正式 StepFun → 实际 owner；Schema/decoder/预算护栏 | 与 MAC-A/B/C 同次核对原生 tool 参数和结果回配，不另跑 wire-only 扩样 |
+
+以上是候选复用，不代表三组综合任务已通过。先核对原始断言、制品和相关源码差异；只有受变更影响、
+真实现场反例或明确新风险才运行最小回归，不重跑全仓/全领域或新建同构底层测试。
+
+## 三组正式会话与活动状态
+
+| 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
+| --- | --- | --- |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | 待补综合正式任务，优先执行；已有单项按原构建复用，不能拼成整组 PASS |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
+| MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
+
+GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
+已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
+当前 M04-27 的真实 StepFun 首次 transport failure 无 HTTP 认证/额度证据，只阻断相关 live 运行；
+先核对网络恢复条件并冻结该批次数/输出/时限，再进入正式 UI，不把已授权模型预算设为永久 0。
+
+## 收敛处置与本轮结束条件
+
+- **复用**：Schema/整批预检/decoder/CAS、argv/PTY/游标、APFS/文件原子性、权限、lease/fence/receipt、
+  secret 隔离等已有定向回归。保留覆盖边界，受影响才最小重跑，安全和真实性断言不缩减。
+- **合并**：CMD/PROC/REAL/AGEN/ACOD 的同一命令链、CTRL/OBS 的同一终态和 LIFE/CONC 的同一恢复，
+  在 A/B/C 同次运行核对各关键断言，不重复扩角色/层级/故障组合来填原槽数。
+- **手测建议/移出活动队列**：模型管理 CRUD、伙伴/创作/客服、Knowledge/Canvas/Office/媒体等普通业务；
+  Browser/Computer/SSH/MCP/渠道/设备生态、Git 发布、Schedule/Requirements/委派全功能。已有缺陷保留为
+  模块回归；确实影响当前命令链的共同根因仍处理。旧 MM retry spinner 未关闭，需另行按钮/事件复现，
+  不能用新 Session 首发成功关闭，但不阻断本轮命令收尾。
+- **独立发布认证**：x86_64、其他 OS、signing/notarization、全 CMD/五角色矩阵、每 Case 20 次、全部竞态
+  100 seed、LONG/4h/8h soak、408 样本/99% 声明保留原标准，移出本轮结束条件，不宣称已认证。
+- **结案**：A/B/C 的本机关键链与 GEN/COD 实际入口达标，核心命令 bad-case 根因闭环，UI/API/canonical/
+  exit/stdout/stderr/磁盘结果一致，取消无新副作用或孤儿，历史失败如实披露。尚未达到该条件。
+
+### 本次收敛执行（2026-10-01）
+
+- 已同步并核对远端 `6fbed902e`：实施计划/共享进度已收敛，本页原活动队列未跟进；现按同一方案调整。
+- 优先执行候选复用核对：M01-03 的 exact 目录输出/exit/reaped 与 M01-04 的原库 start/cancel 同 handle、
+  completed/head ready、helper digest 复核通过。仅复用原构建子断言，不拼成当前 MAC-A/B/C PASS。
+- MAC-A live 前置的无凭据 HEAD 再次 TLS error（curl 35）；未新建模型 Session、未发付费模型请求，
+  只阻断相关 live。继续证据核对和范围整理，未扩大权限、关闭 TLS 校验或改写模型额度。
+- 完整依据/只读核对在 `2026-09-30/macos/command-scope-cleanup/`（批次跨午夜，保留开始日期）。
+  本次只改排程文档，不再重复 Cargo/build 或增加底层矩阵；Windows 结果和下方历史批次原样保留。
+
+## 历史 macOS 专属集合（不作为活动队列）
+
+以下保留原全产品冻结集合与范围，不继续全量排程，也不将未跑项改为通过。
 
 | 家族 | macOS 专属 ID |
 | --- | --- |
@@ -16,9 +72,10 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | Browser/Computer | BROW-017；COMP-008～009 |
 | UI/宿主 | REAL-016～019；MAC-001～018 |
 
-## 全领域排程
+## 历史全领域分配（已停止本轮排程）
 
-取实施计划各领域中 macOS 适用且属于对应 Agent 产品目标的槽；共享组件证据不替代本表验收。
+下表为原全产品计划的历史分配；状态是当时各模块的覆盖说明，不能据此启动完整领域余项。
+当前调度仅取上面的 C01～C08/MAC-A～C；共享组件证据仍不替代正式产品验收。
 
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
@@ -35,7 +92,10 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
 
-## 原生接续任务
+## 历史 M01～M06 任务映射（停止穷举接续）
+
+下表只保留历史来源。未完任务须先归入 C01～C08 的实际命令缺口，否则作为模块回归、手测建议
+或独立发布认证搁置；不再按 M01→M06 逐领域补完。
 
 | 任务 | 对应 Case | 测试 → 排查 → 修复安排 |
 | --- | --- | --- |
@@ -46,7 +106,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | M05 条件业务 | ACSR、媒体、Channel/Robot、D07/D08 剩余 | 逐项建正式资源与安全测试账户；缺资源记阻断，能力缺项进入共享问题簇 |
 | M06 生命周期与长稳 | LIFE/CONC/LONG；MAC-014/018；PORT | sleep/wake、主进程死亡、故障窗口、恢复 fence 与幂等；然后长稳统计 |
 
-## 阶段性 P0 收尾（2026-09-29）
+## 历史阶段性 P0 收尾（2026-09-29）
 
 用户因当前算力额度要求先做阶段性 P0 收尾，余项等待后续安排。本轮按已交付证据结算，不把未跑槽
 降级为通过：M01 已完成 process/APFS/argv/shell/PTY/group/Seatbelt 与正式 Tauri 关键子断言；M02
@@ -76,7 +136,10 @@ M06 LIFE/CONC/LONG/soak 均明确延期；真实 Provider N3/20/99%、release si
 完整新证据默认存仓库外 `~/code/temp/nomifun-agent-reliability/phase-2-3/<date>/macos/<batch>/<run>/`。
 Git 只更新本页的批次结论与必要代码/测试，不提交完整日志或展开索引。
 
-## 本轮原生批次
+## 已有原生批次与后续聚焦记录
+
+下列旧批次中的“完整领域/阶段/20次/N3/99%仍开放”等为当时结论，不再整体作为本轮前置门槛。
+保留首次/修后记录及其原构建；只有当前活动范围的关键链继续推进，移出的模块不追认 PASS。
 
 - **M01-01 process owner / Seatbelt**（PROC-006/011/012/014/016/033～041/046、TERM-012，
   MAC-005～010/015 的本批子断言）：宿主为 macOS 26.6.2 / Darwin 25.6.0、原生 arm64、
