@@ -2704,6 +2704,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 terminal 阶段的 busy+full、多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、其他
   平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0/FILE 或共享阶段。
 
+### writer lock 后 success terminal 命中磁盘满（W159，基线 `7da1cb06a`）
+
+- S-D09-39 / LIFE-006/023/024、CONC-014、FILE-038、G0-030、A04/A05/A07/A17/A19：先 reserve
+  canonical Effect 并由实际 `FileService` 发布文件，再让 terminal settlement 在独立 SQLite writer
+  lock 后等待；释放 writer 后同一 terminal 写精确命中 `SQLITE_FULL`。
+- 返回值同时保留 owner 已成功、full 原因与禁止自动重试；Effect 仍为 Pending，文件字节保持且未
+  二次发布。解除 page budget 后，同 reservation 只补写一次 receipt，Effect 唯一变为 Returned。
+- 新增场景首次及连续 **20/20**；单独 disk-full terminal、W158 busy-full admission、普通 busy
+  terminal **3/3**，fmt/diff 通过。生产代码无需修改，无 UI/模型。
+- 未覆盖 failed/uncertain terminal 的 busy+full、多个受限 pool 同时失步、fsync/WAL 损坏、正式
+  shutdown、其他平台及 N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

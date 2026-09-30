@@ -6266,6 +6266,84 @@ mod tests {
         database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn disk_full_terminal_after_busy_writer_keeps_pending_until_receipt_retry() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace=directory.path().join("workspace");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool=single_connection_pool(&database_path).await;
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host=Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut call=context(&workspace);
+        call.idempotency_key=IdempotencyKey::from("busy-then-disk-full-terminal");
+        call.operation_id=OperationId::from("busy-then-disk-full-terminal-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id=wave2_effect_id(&call).unwrap();
+        let input=StrictJsonValue(json!({
+            "path":"terminal.txt","content":"published before terminal storage fails"
+        }));
+        let Wave2EffectAdmission::Reserved(reservation)=begin_wave2_exclusive_effect(
+            &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh terminal effect must reserve")
+        };
+        let scope=host.workspace_scope(&call).unwrap();
+        let receipt=host.files.write_file_with_observation_for_agent_session(
+            &scope,"terminal.txt",b"published before terminal storage fails",
+        ).await.unwrap();
+        assert!(receipt.created);
+        let output=StrictJsonValue(json!({
+            "written":true,"path":"terminal.txt","detail":"t".repeat(4096)
+        }));
+        set_database_page_budget(&pool,true).await;
+
+        let mut writer=database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let settle_reservation=reservation.clone();
+        let settle_output=output.clone();
+        let mut settlement=tokio::spawn(async move {
+            finish_wave2_succeeded_effect(
+                &settle_reservation,"workspace.files/write",&settle_output,
+            ).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!settlement.is_finished(),"terminal write must wait for the existing writer");
+        assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(workspace.join("terminal.txt")).unwrap(),b"published before terminal storage fails");
+        writer.commit().await.unwrap();
+
+        let error=tokio::time::timeout(Duration::from_secs(6),&mut settlement).await
+            .expect("terminal write must finish after the writer releases")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner reported success"),"{error:?}");
+        assert!(error.message.contains("full"),"{error:?}");
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(std::fs::read(workspace.join("terminal.txt")).unwrap(),b"published before terminal storage fails");
+
+        set_database_page_budget(&pool,false).await;
+        finish_wave2_succeeded_effect(&reservation,"workspace.files/write",&output).await.unwrap();
+        assert_eq!(store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Returned);
+        assert_eq!(store.list_effects(&call.agent_session_id).await.unwrap().len(),1);
+        assert_eq!(std::fs::read(workspace.join("terminal.txt")).unwrap(),b"published before terminal storage fails");
+        drop(reservation);
+        drop(host);
+        drop(store);
+        drop(observer);
+        pool.close().await;
+        database.close().await;
+    }
+
     #[tokio::test]
     async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
         let directory = tempfile::tempdir().unwrap();

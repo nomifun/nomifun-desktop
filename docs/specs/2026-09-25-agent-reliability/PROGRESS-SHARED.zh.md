@@ -562,6 +562,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无 UI/模型。terminal 阶段的 busy+full、多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、
   其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0/FILE 或共享阶段。
 
+- S-D09-39（LIFE-006/023/024、CONC-014、FILE-038、G0-030、A04/A05/A07/A17/A19 busy terminal +
+  disk full 子断言）：W159 先 reserve canonical Effect 并由实际 `FileService` 发布文件，再让 terminal
+  settlement 在独立 SQLite writer lock 后等待；释放 writer 后同一 terminal 写精确命中
+  `SQLITE_FULL`。返回值同时保留 owner 已成功、full 原因与禁止自动重试，Effect 仍为 Pending，文件
+  字节保持且未二次发布。解除 page budget 后，同 reservation 只补写一次 receipt，Effect 唯一变为
+  Returned。新增场景首次及连续 **20/20**；单独 disk-full terminal、W158 busy-full admission、普通
+  busy terminal **3/3**。生产代码无需修改，无 UI/模型。failed/uncertain terminal 的 busy+full、多个
+  受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/LONG/99% 仍开放，不关闭完整
+  LIFE/CONC/G0/FILE 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
