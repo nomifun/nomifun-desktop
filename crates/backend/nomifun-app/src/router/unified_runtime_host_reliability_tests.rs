@@ -40,6 +40,14 @@ struct Fixture {
 
 impl Fixture {
     async fn new(scenario: &str) -> Self {
+        Self::build_delivery(scenario, vec![], vec![], None, false).await
+    }
+
+    async fn with_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>) -> Self {
+        Self::build_delivery(scenario, files, inject_skills, origin, true).await
+    }
+
+    async fn build_delivery(scenario: &str, files: Vec<String>, inject_skills: Vec<String>, origin: Option<String>, explicit_metadata: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
             .map(|root| PathBuf::from(root).join(scenario))
@@ -96,15 +104,19 @@ impl Fixture {
         let host = HOSTS.get().unwrap().lock().unwrap().remove(id).unwrap().upgrade().unwrap();
         // Accept the durable root without starting a model task. This is the
         // cancellation-before-first-driver-poll boundary, not a UI scenario.
+        let mut delivery = json!({ "content":"cancel before model dispatch", "admission":{
+            "route_identity":host.route, "resolved_snapshot_ref":host.snapshot_ref
+        }});
+        if explicit_metadata {
+            delivery["files"] = json!(files);
+            delivery["inject_skills"] = json!(inject_skills);
+            delivery["origin"] = json!(origin);
+        }
         let (input, _) = owner.canonical().store().start_turn(&id.to_owned().into(), "session_api".into(),
-            "cleanup-retry-turn".into(), "cleanup-retry-turn".into(), StrictJsonValue(json!({
-                "content":"cancel before model dispatch", "admission":{
-                    "route_identity":host.route, "resolved_snapshot_ref":host.snapshot_ref
-                }
-            }))).await.unwrap();
+            "cleanup-retry-turn".into(), "cleanup-retry-turn".into(), StrictJsonValue(delivery)).await.unwrap();
         let root = input.record.unwrap().event_id;
         let message = SendMessageData { content:"cancel before model dispatch".into(), msg_id:"cleanup-wire".into(),
-            source_message_id:Some(root.as_ref().into()), files:vec![], inject_skills:vec![], origin:None };
+            source_message_id:Some(root.as_ref().into()), files, inject_skills, origin };
         println!("CLEANUP_FIXTURE scenario={scenario} session={id} operation=cleanup-retry-turn database={}", database_path.display());
         Self { _directory:directory, _router:router, runtime, services, host, message, database_path }
     }
@@ -137,6 +149,65 @@ impl Fixture {
         assert_eq!(head.status, "ready");
         assert!(head.active_turn_id.is_none());
     }
+}
+
+#[tokio::test]
+async fn cancellation_receipt_identity_rejects_altered_empty_delivery() {
+    cancellation_identity_scenario(false).await;
+}
+
+#[tokio::test]
+async fn cancellation_receipt_identity_preserves_unopened_attachment_delivery() {
+    cancellation_identity_scenario(true).await;
+}
+
+async fn cancellation_identity_scenario(attachments: bool) {
+    let fixture = if attachments {
+        Fixture::with_delivery("cancel-identity-attachments", vec!["cancel-note.txt".into(), "cancel-context.txt".into()],
+            vec![], Some("fixture-source".into())).await
+    } else {
+        Fixture::with_delivery("cancel-identity-empty", vec![], vec![], None).await
+    };
+    let store = fixture.host.session_host.canonical_store().unwrap();
+    let (_, terminal) = store.cancel_active_turn(&fixture.host.options.conversation_id.clone().into(),
+        "cancel-delivery-identity".into(), "session_api".into()).await.unwrap();
+    let original_terminal = terminal.record.unwrap().event_id;
+    let before = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
+    let mut altered_files = fixture.message.clone();
+    if attachments { altered_files.files.reverse(); }
+    else { altered_files.files.push("unaccepted.txt".into()); }
+    let mut altered_skills = fixture.message.clone();
+    altered_skills.inject_skills.push("unaccepted-skill".into());
+    let mut altered_origin = fixture.message.clone();
+    altered_origin.origin = Some("altered-origin".into());
+    let mut missing_origin = fixture.message.clone();
+    missing_origin.origin = None;
+    let mut failures = Vec::new();
+    for (field, candidate) in [("files", altered_files), ("inject_skills", altered_skills), ("origin", altered_origin)] {
+        let cleanup_rejected = fixture.host.cleanup_turn(&candidate).await.is_err();
+        let terminal_rejected = fixture.host.record_event(&candidate, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err();
+        if !cleanup_rejected || !terminal_rejected { failures.push((field, cleanup_rejected, terminal_rejected)); }
+    }
+    if attachments && fixture.host.cleanup_turn(&missing_origin).await.is_ok() {
+        failures.push(("missing_origin", false, false));
+    }
+    assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
+    assert!(fixture.host.active.lock().await.is_none());
+    // An accepted cancelled delivery closes through the actual SDK without
+    // reading its attachment references or dispatching a model or tool.
+    fixture.runtime.send_message(fixture.message.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(8), fixture.runtime.cancel()).await.unwrap().unwrap();
+    let receipt = store.read_turn_receipt(&fixture.host.options.conversation_id.clone().into(),
+        &"cleanup-retry-turn".into()).await.unwrap();
+    assert_eq!(receipt.terminal_event.unwrap().event_id, original_terminal);
+    assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
+    let lease: (i64, Option<String>) = sqlx::query_as("SELECT execution_generation,execution_owner FROM agent_turns WHERE session_id=?")
+        .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(lease, (0, None));
+    fixture.assert_settled().await;
+    println!("CANCEL_DELIVERY_IDENTITY attachments={attachments} unaccepted_fields={failures:?}");
+    fixture.finish().await;
+    assert!(failures.is_empty(), "cancel acknowledgement accepted altered delivery fields: {failures:?}");
 }
 
 #[tokio::test]
