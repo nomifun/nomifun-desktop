@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-launch-missing]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -34,6 +34,9 @@ struct LiveFrontend {
     served: Mutex<Vec<String>>,
 }
 const BROKEN_JS: &str = "function nextCount(value) { return value + 2; }\n";
+const COMPUTER_UNICODE_TEXT: &str = "NomiFun-é-e\u{301}-中文-かな-🙂-👩🏽‍💻-𝄞-END";
+const COMPUTER_UNICODE_A11Y_TEXT: &str =
+    r"NomiFun-é-e\u{301}-中文-かな-🙂-👩🏽\u{200d}💻-𝄞-END";
 const FRONTEND_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Counter app</title>
 <style>body{font:20px system-ui;padding:36px}button{font:inherit;padding:12px 24px}output{display:block;font-size:32px;margin:24px 0}</style>
 <h1>Counter app</h1><label for=count>Count</label><output id=count>0</output><button id=increment>Increment</button>
@@ -53,6 +56,7 @@ struct Fixture {
     computer_pointer_input: bool,
     computer_drag_cancel: bool,
     computer_input_crash: bool,
+    computer_unicode_input: bool,
     computer_launch_missing: bool,
     computer_file: Option<PathBuf>,
     computer_pointer_target: Option<PathBuf>,
@@ -72,6 +76,7 @@ struct Fixture {
     drag_dispatched: AtomicBool,
     crash_input_ready: AtomicBool,
     crash_input_dispatched: AtomicBool,
+    unicode_verified: AtomicBool,
     missing_launch_rejected: AtomicBool,
     pointer_baseline: Mutex<Option<PointerCounts>>,
     witnesses: Mutex<Vec<Value>>,
@@ -1413,6 +1418,153 @@ async fn computer_drag_cancel_operation(
     )))
 }
 
+fn wait_unicode_status(fixture: &Fixture) -> anyhow::Result<Value> {
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        let status = pointer_status(fixture)?;
+        if status["content"].as_str() == Some(COMPUTER_UNICODE_TEXT) {
+            return Ok(status);
+        }
+        last = status;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    anyhow::bail!("Unicode target never reached the exact text; last status: {last}")
+}
+
+fn verify_unicode_status(status: &Value) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        status["content"].as_str() == Some(COMPUTER_UNICODE_TEXT),
+        "Unicode target content differs from the exact requested scalars"
+    );
+    anyhow::ensure!(
+        status["utf8_bytes"].as_u64() == Some(COMPUTER_UNICODE_TEXT.len() as u64),
+        "Unicode target UTF-8 byte count changed"
+    );
+    anyhow::ensure!(
+        status["scalar_count"].as_u64()
+            == Some(COMPUTER_UNICODE_TEXT.chars().count() as u64),
+        "Unicode target scalar count changed"
+    );
+    anyhow::ensure!(
+        status["utf16_units"].as_u64()
+            == Some(COMPUTER_UNICODE_TEXT.encode_utf16().count() as u64),
+        "Unicode target UTF-16 unit count changed"
+    );
+    anyhow::ensure!(
+        status["change_events"].as_u64().is_some_and(|count| count > 0),
+        "Unicode target recorded no text change"
+    );
+    anyhow::ensure!(
+        status["modifier_key_events"].as_u64() == Some(0)
+            && status["shortcut_events"].as_u64() == Some(0),
+        "Unicode text injection produced a modifier or shortcut side effect"
+    );
+    Ok(())
+}
+
+fn computer_unicode_input_operation(
+    fixture: &Fixture,
+    body: &Value,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    let call = |id| computer_tool_result(body, id).is_some();
+    if call("gui-computer-unicode-verify") {
+        let snapshot = accessibility_snapshot_text(computer_result_text(
+            body,
+            "gui-computer-unicode-verify",
+        )?)?;
+        anyhow::ensure!(
+            snapshot.contains("Nomi Unicode Input Target")
+                && snapshot.contains(COMPUTER_UNICODE_A11Y_TEXT),
+            "Final Accessibility observation lost the exact escaped Unicode value"
+        );
+        verify_unicode_status(&wait_unicode_status(fixture)?)?;
+        fixture.unicode_verified.store(true, Ordering::SeqCst);
+        return Ok(None);
+    }
+    if call("gui-computer-unicode-input") {
+        require_computer_success(body, "gui-computer-unicode-input")?;
+        verify_unicode_status(&wait_unicode_status(fixture)?)?;
+        return Ok(Some((
+            "gui-computer-unicode-verify".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    if call("gui-computer-unicode-observe-stable") {
+        let snapshot = accessibility_snapshot_text(computer_result_text(
+            body,
+            "gui-computer-unicode-observe-stable",
+        )?)?;
+        anyhow::ensure!(
+            snapshot.contains("Nomi Unicode Input Target"),
+            "Stable Computer observation lost the Unicode target"
+        );
+        pointer_status(fixture)?;
+        return Ok(Some(computer_input_call(
+            body,
+            "gui-computer-unicode-input",
+            "gui-computer-unicode-observe-stable",
+            "type",
+            json!({"text":COMPUTER_UNICODE_TEXT}),
+        )?));
+    }
+
+    const OBSERVATIONS: [&str; 8] = [
+        "gui-computer-unicode-observe-1",
+        "gui-computer-unicode-observe-2",
+        "gui-computer-unicode-observe-3",
+        "gui-computer-unicode-observe-4",
+        "gui-computer-unicode-observe-5",
+        "gui-computer-unicode-observe-6",
+        "gui-computer-unicode-observe-7",
+        "gui-computer-unicode-observe-8",
+    ];
+    for (index, call_id) in OBSERVATIONS.iter().enumerate().rev() {
+        if computer_tool_result(body, call_id).is_none() {
+            continue;
+        }
+        let result = computer_result_text(body, call_id)?;
+        let snapshot = accessibility_snapshot_text(result)?;
+        if snapshot.contains("Nomi Unicode Input Target") {
+            pointer_status(fixture)?;
+            std::thread::sleep(Duration::from_millis(750));
+            return Ok(Some((
+                "gui-computer-unicode-observe-stable".into(),
+                browser_tool(body, "computer/a11y.observe")?,
+                json!({"action":"observe"}),
+            )));
+        }
+        anyhow::ensure!(
+            index + 1 < OBSERVATIONS.len(),
+            "Computer Unicode target never became the foreground accessibility window"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+        return Ok(Some((
+            OBSERVATIONS[index + 1].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+
+    if call("gui-computer-unicode-launch") {
+        require_computer_success(body, "gui-computer-unicode-launch")?;
+        return Ok(Some((
+            OBSERVATIONS[0].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    let target = fixture
+        .computer_pointer_target
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Computer Unicode target app missing"))?;
+    Ok(Some((
+        "gui-computer-unicode-launch".into(),
+        browser_tool(body, "computer/launch")?,
+        json!({"action":"launch","target":target.to_string_lossy()}),
+    )))
+}
+
 async fn computer_input_crash_operation(
     fixture: &Fixture,
     body: &Value,
@@ -1635,6 +1787,14 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
                 return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
             }
         }
+    } else if fixture.computer_unicode_input {
+        match computer_unicode_input_operation(&fixture, &body) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
     } else if fixture.computer_launch_missing {
         match computer_missing_launch_operation(&fixture, &body) {
             Ok(operation) => operation,
@@ -1664,6 +1824,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             && !fixture.computer_pointer_input
             && !fixture.computer_drag_cancel
             && !fixture.computer_input_crash
+            && !fixture.computer_unicode_input
             && !fixture.computer_launch_missing
             && !fixture.computer_input
         {
@@ -1690,6 +1851,8 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             "长拖拽必须在取消后释放鼠标状态并留下清理证据。"
         } else if fixture.computer_input_crash {
             "输入已开始后 owner crash；必须保留 unknown 并禁止自动重放。"
+        } else if fixture.computer_unicode_input {
+            "已通过正式 Computer Actions 按原始 Unicode scalar 输入文本，且没有修饰键快捷键副作用。"
         } else if fixture.computer_launch_missing {
             "不存在的应用路径已被正式 Computer launch 明确拒绝，未猜测替代路径。"
         } else if fixture.computer_input {
@@ -1769,6 +1932,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_pointer_input = mode.as_deref() == Some("--computer-pointer-input");
     let computer_drag_cancel = mode.as_deref() == Some("--computer-drag-cancel");
     let computer_input_crash = mode.as_deref() == Some("--computer-input-crash");
+    let computer_unicode_input = mode.as_deref() == Some("--computer-unicode-input");
     let computer_launch_missing = mode.as_deref() == Some("--computer-launch-missing");
     anyhow::ensure!(
         mode.is_none()
@@ -1784,22 +1948,29 @@ async fn main() -> anyhow::Result<()> {
             || computer_pointer_input
             || computer_drag_cancel
             || computer_input_crash
+            || computer_unicode_input
             || computer_launch_missing,
         "unsupported fixture mode"
     );
     let computer_pointer_target = (computer_pointer_input
         || computer_drag_cancel
-        || computer_input_crash)
+        || computer_input_crash
+        || computer_unicode_input)
         .then(|| std::env::args().nth(3))
         .flatten()
         .map(PathBuf::from);
     let computer_pointer_status = (computer_pointer_input
         || computer_drag_cancel
-        || computer_input_crash)
+        || computer_input_crash
+        || computer_unicode_input)
         .then(|| std::env::args().nth(4))
         .flatten()
         .map(PathBuf::from);
-    if computer_pointer_input || computer_drag_cancel || computer_input_crash {
+    if computer_pointer_input
+        || computer_drag_cancel
+        || computer_input_crash
+        || computer_unicode_input
+    {
         let target = computer_pointer_target
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("computer pointer target app path required"))?;
@@ -1838,6 +2009,7 @@ async fn main() -> anyhow::Result<()> {
         computer_pointer_input,
         computer_drag_cancel,
         computer_input_crash,
+        computer_unicode_input,
         computer_launch_missing,
         computer_file,
         computer_pointer_target,
@@ -1857,6 +2029,7 @@ async fn main() -> anyhow::Result<()> {
         drag_dispatched: AtomicBool::new(false),
         crash_input_ready: AtomicBool::new(false),
         crash_input_dispatched: AtomicBool::new(false),
+        unicode_verified: AtomicBool::new(false),
         missing_launch_rejected: AtomicBool::new(false),
         pointer_baseline: Mutex::new(None),
         witnesses: Mutex::new(Vec::new()),
@@ -1890,7 +2063,7 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,"computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,"computer_drag_cancel":f.computer_drag_cancel,"computer_input_crash":f.computer_input_crash,"computer_launch_missing":f.computer_launch_missing,"computer_file":f.computer_file.as_ref(),"computer_pointer_target":f.computer_pointer_target.as_ref(),"computer_pointer_status":f.computer_pointer_status.as_ref(),"computer_missing_target":f.computer_missing_target.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),"concurrent_user_preserved":f.concurrent_user_preserved.load(Ordering::SeqCst),"pointer_verified":f.pointer_verified.load(Ordering::SeqCst),"drag_ready":f.drag_ready.load(Ordering::SeqCst),"drag_dispatched":f.drag_dispatched.load(Ordering::SeqCst),"crash_input_ready":f.crash_input_ready.load(Ordering::SeqCst),"crash_input_dispatched":f.crash_input_dispatched.load(Ordering::SeqCst),"missing_launch_rejected":f.missing_launch_rejected.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,"computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,"computer_drag_cancel":f.computer_drag_cancel,"computer_input_crash":f.computer_input_crash,"computer_unicode_input":f.computer_unicode_input,"computer_launch_missing":f.computer_launch_missing,"computer_file":f.computer_file.as_ref(),"computer_pointer_target":f.computer_pointer_target.as_ref(),"computer_pointer_status":f.computer_pointer_status.as_ref(),"computer_missing_target":f.computer_missing_target.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),"concurrent_user_preserved":f.concurrent_user_preserved.load(Ordering::SeqCst),"pointer_verified":f.pointer_verified.load(Ordering::SeqCst),"drag_ready":f.drag_ready.load(Ordering::SeqCst),"drag_dispatched":f.drag_dispatched.load(Ordering::SeqCst),"crash_input_ready":f.crash_input_ready.load(Ordering::SeqCst),"crash_input_dispatched":f.crash_input_dispatched.load(Ordering::SeqCst),"unicode_verified":f.unicode_verified.load(Ordering::SeqCst),"missing_launch_rejected":f.missing_launch_rejected.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
             }),
         )
         .route(
@@ -1984,6 +2157,8 @@ async fn main() -> anyhow::Result<()> {
             "Computer 长拖拽取消验收"
         } else if computer_input_crash {
             "Computer 输入后 owner crash 验收"
+        } else if computer_unicode_input {
+            "Computer Unicode 输入验收"
         } else if computer_launch_missing {
             "Computer 缺失应用拒绝验收"
         } else if computer_input {
@@ -2023,7 +2198,7 @@ async fn main() -> anyhow::Result<()> {
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/launch"]
             }])
-        } else if computer_input || computer_stale_focus || computer_concurrent_user || computer_input_crash {
+        } else if computer_input || computer_stale_focus || computer_concurrent_user || computer_input_crash || computer_unicode_input {
             json!([{
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/a11y.observe","computer/input","computer/launch"]
@@ -2046,7 +2221,7 @@ async fn main() -> anyhow::Result<()> {
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
         let expected_capabilities=if live_mode {2}else{1};
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_concurrent_user || computer_pointer_input || computer_drag_cancel || computer_input_crash || computer_launch_missing {
+        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_concurrent_user || computer_pointer_input || computer_drag_cancel || computer_input_crash || computer_unicode_input || computer_launch_missing {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else if live_mode {
             json!([
@@ -2070,7 +2245,7 @@ async fn main() -> anyhow::Result<()> {
     let session = prepared?;
     println!(
         "BROWSER_GUI_FIXTURE_READY {}",
-        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_concurrent_user":computer_concurrent_user,"computer_pointer_input":computer_pointer_input,"computer_drag_cancel":computer_drag_cancel,"computer_input_crash":computer_input_crash,"computer_launch_missing":computer_launch_missing,"computer_file":fixture.computer_file.as_ref(),"computer_pointer_target":fixture.computer_pointer_target.as_ref(),"computer_pointer_status":fixture.computer_pointer_status.as_ref(),"computer_missing_target":fixture.computer_missing_target.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
+        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_concurrent_user":computer_concurrent_user,"computer_pointer_input":computer_pointer_input,"computer_drag_cancel":computer_drag_cancel,"computer_input_crash":computer_input_crash,"computer_unicode_input":computer_unicode_input,"computer_launch_missing":computer_launch_missing,"computer_file":fixture.computer_file.as_ref(),"computer_pointer_target":fixture.computer_pointer_target.as_ref(),"computer_pointer_status":fixture.computer_pointer_status.as_ref(),"computer_missing_target":fixture.computer_missing_target.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
     );
     // Keep only the model/page server alive; the real desktop now owns the DB.
     fixture.stop.cancelled().await;
