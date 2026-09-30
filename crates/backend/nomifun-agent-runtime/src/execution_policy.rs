@@ -49,7 +49,7 @@ pub(crate) fn failed_process_observation(
     binding: &AgentToolBinding,
     result: &AgentToolResult,
 ) -> bool {
-    if binding.capability_id.as_ref() != "workspace.process" || process_did_not_start(binding, result) {
+    if binding.capability_id.as_ref() != "workspace.process" || process_operation_not_applied(binding, result) {
         return false;
     }
     let Some(value) = serde_json::from_str::<serde_json::Value>(&result.output_text()).ok() else {
@@ -88,6 +88,26 @@ pub(crate) fn process_did_not_start(binding: &AgentToolBinding, result: &AgentTo
                 && value["success"] == false && value.get("process_id").is_none())
 }
 
+/// A trusted owner fact that the named control was rejected before native I/O.
+/// This says nothing about whether another, already started process is alive.
+pub(crate) fn process_operation_not_applied(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
+    if process_did_not_start(binding, result) { return true; }
+    if binding.capability_id.as_ref() != "workspace.process" { return false; }
+    let operation = match binding.action_id.as_ref() {
+        "workspace.process/poll" => "poll",
+        "workspace.process/input" => "stdin",
+        "workspace.process/close_stdin" => "close_stdin",
+        "workspace.process/resize" => "resize",
+        "workspace.process/cancel" => "cancel",
+        _ => return false,
+    };
+    serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+        value["schema"] == "nomifun.process-control-observation.v1"
+            && value["state"] == "not_executed" && value["code"] == "PROCESS_REFERENCE_INVALID"
+            && value["operation"] == operation && value["control_applied"] == false
+            && value["success"] == false && value.get("process_id").is_none())
+}
+
 /// A read failure or a proposal held before dispatch is not a change of task
 /// scope. Let the model correct the call within its existing plan. An
 /// attempted effect may have partially happened and still requires recovery.
@@ -97,7 +117,7 @@ pub(crate) fn requires_replanning_after_result(
     attempted: bool,
     plan_revision: u32,
 ) -> bool {
-    if !attempted || process_did_not_start(binding, result) {
+    if !attempted || process_operation_not_applied(binding, result) {
         return false;
     }
     if failed_process_observation(binding, result) {
@@ -400,5 +420,38 @@ mod tests {
         assert!(work.recent_commands[0].cleanup_proven);
         assert_eq!(work.recent_commands[0].interaction_call_ids, ["poll-1"]);
         assert!(!work.recent_commands[0].was_current_at_observation);
+    }
+
+    #[test]
+    fn rejected_process_control_keeps_the_original_handle_and_workspace_evidence() {
+        let input = binding("workspace.process", "workspace.process/input");
+        let mut work = crate::AgentWorkStatus { workspace_observation_epoch:7,
+            successful_commands:1, command_observed_after_latest_mutation:true, ..Default::default() };
+        work.running_processes.insert("original-process".into());
+        let mut commands = crate::workflow::CommandTracker::default();
+        let call = nomifun_chat_model_broker::ChatToolCall { call_id:"rejected-control".into(),
+            name:"write_process_stdin".into(), arguments:StrictJsonValue(serde_json::json!({
+                "process_id":"wrong-reference", "input":"do not send"
+            })), provider_metadata:None };
+        let receipt = serde_json::json!({"schema":"nomifun.process-control-observation.v1",
+            "state":"not_executed", "code":"PROCESS_REFERENCE_INVALID", "operation":"stdin",
+            "control_applied":false, "success":false});
+        let result = crate::AgentToolResult::text(call.call_id.clone(), receipt.to_string(), true);
+        assert!(process_operation_not_applied(&input, &result));
+        assert!(!failed_process_observation(&input, &result));
+        assert!(!requires_replanning_after_result(&input, &result, true, 0));
+        work.observe(&input, &call, &result, &mut commands);
+        assert_eq!(work.failed_tools, 1, "the rejected call stays in failure history");
+        assert_eq!(work.failed_commands, 0);
+        assert_eq!(work.workspace_observation_epoch, 7);
+        assert!(work.command_observed_after_latest_mutation);
+        assert!(work.running_processes.contains("original-process"));
+        let mut uncertain = receipt;
+        uncertain["control_applied"] = serde_json::json!(true);
+        let result = crate::AgentToolResult::text(call.call_id.clone(), uncertain.to_string(), true);
+        assert!(!process_operation_not_applied(&input, &result));
+        assert!(!process_operation_not_applied(&binding("workspace.process", "workspace.process/exec"), &result));
+        work.observe(&input, &call, &result, &mut commands);
+        assert_eq!(work.workspace_observation_epoch, 8);
     }
 }

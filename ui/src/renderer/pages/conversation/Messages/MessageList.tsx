@@ -335,6 +335,11 @@ const formatToolReceiptPart = (
       ? t('messages.processReceipt.commandNotExecuted', { defaultValue: 'Command not run' })
       : t('messages.processReceipt.operationNotExecuted', { defaultValue: 'Operation not run' });
   }
+  if (part.notExecutedReason === 'process_reference') {
+    return t('messages.processReceipt.processReferenceInvalid', {
+      defaultValue: 'Process not found in this execution; operation not run',
+    });
+  }
 
   if (part.state === 'failed') {
     return t('messages.processReceipt.failedOperations', {

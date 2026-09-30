@@ -118,7 +118,7 @@ impl AgentWorkStatus {
         if result.is_error {
             self.failed_tools = self.failed_tools.saturating_add(1);
         }
-        if crate::execution_policy::process_did_not_start(binding, result) {
+        if crate::execution_policy::process_operation_not_applied(binding, result) {
             return;
         }
         // Only attempted invocations enter this method. Even failed/uncertain

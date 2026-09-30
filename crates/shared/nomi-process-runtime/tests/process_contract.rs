@@ -1225,6 +1225,28 @@ async fn windows_program_powershell_initializes_under_managed_owner() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn windows_cmd_c_preserves_a_quoted_workspace_path() {
+    let workspace = tempfile::Builder::new().prefix("命令 repo ").tempdir().unwrap();
+    fs::create_dir(workspace.path().join("资料 空格")).unwrap();
+    let content = b"CMD_QUOTED_PATH_185\r\n";
+    let file = workspace.path().join("资料 空格/样本.txt");
+    fs::write(&file, content).unwrap();
+    let mut process = request("cmd.exe", ["/d", "/c", "type \"资料 空格\\样本.txt\""].map(OsString::from));
+    process.cwd = workspace.path().to_path_buf();
+    process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("cmd starts");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, .. } = outcome else {
+        panic!("cmd should exit: {outcome:?}");
+    };
+    assert_eq!(code, Some(0), "cmd output: {}", output.text());
+    assert_eq!(output.text().as_bytes(), content);
+    assert_eq!(fs::read(file).unwrap(), content);
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_powershell_autoloads_hash_cmdlet_under_managed_owner() {
     let workspace = tempfile::Builder::new().prefix("任务 hash ").tempdir().unwrap();
     fs::write(workspace.path().join("normal.txt"), b"fixture").unwrap();

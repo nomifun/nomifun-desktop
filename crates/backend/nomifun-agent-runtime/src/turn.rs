@@ -1259,8 +1259,8 @@ pub(crate) async fn run_turn(
                         let attempted = dispatch.attempted(&expected_call_id)?;
                         let failed_process = attempted
                             && crate::execution_policy::failed_process_observation(binding, &result);
-                        let process_nonstart = attempted
-                            && crate::execution_policy::process_did_not_start(binding, &result);
+                        let process_not_applied = attempted
+                            && crate::execution_policy::process_operation_not_applied(binding, &result);
                         terminal_collaboration_accepted |= single_call_batch
                             && attempted
                             && !result.is_error
@@ -1299,10 +1299,11 @@ pub(crate) async fn run_turn(
                             }
                             state.completion.invalidate();
                         }
-                        if process_nonstart {
-                            // A typed non-start proves user code did not run,
-                            // so it neither invalidates workspace evidence nor
-                            // forces replanning. It is still a visible tool
+                        if process_not_applied {
+                            // A typed non-start or rejected control proves this
+                            // call did not apply an effect. It neither advances
+                            // workspace evidence nor forces replanning. It is
+                            // still a visible tool
                             // failure that needs an exact completion account.
                             // Expose plan/completion controls before the model
                             // can search for them or replay the failed launch.
@@ -1319,7 +1320,7 @@ pub(crate) async fn run_turn(
                             patch_recovery.observe_read(call, &result);
                         }
                         if (attempted && (request.unscoped_tool_hooks || (crate::execution_policy::affects_workspace(binding)
-                            && !crate::execution_policy::process_did_not_start(binding, &result))))
+                            && !crate::execution_policy::process_operation_not_applied(binding, &result))))
                             || !state.work_status.running_processes.is_empty()
                         {
                             // Failed calls may have partial effects too.
@@ -1432,11 +1433,8 @@ pub(crate) async fn run_turn(
                             model_steps,&output_text,&reasoning_text,tool_call_count,provider_round_id.clone()).await;
                     }
                     if let Some(report) = terminal_report {
-                        let mut delivery = if output_text.is_empty() { report.summary.clone() }
-                            else { format!("\n\n{}",report.summary) };
-                        if let Some(disclosure)=report.unverified_disclosure() { delivery.push_str(&disclosure); }
-                        if let Some(disclosure)=report.tool_error_disclosure() { delivery.push_str(&disclosure); }
-                        if let Some(disclosure)=report.command_failure_disclosure() { delivery.push_str(&disclosure); }
+                        let mut delivery = report.delivery_text();
+                        if !output_text.is_empty() { delivery.insert_str(0, "\n\n"); }
                         output_text.push_str(&delivery);
                         event_sink.emit(AgentEngineEvent::CompletionDelivered { step:model_steps,text:delivery }).await?;
                         if report.is_blocked() {
