@@ -18,6 +18,53 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
 }
 
 #[tokio::test]
+async fn failed_cleanup_write_allows_only_its_exact_receipt_retry() {
+    let (journal,pool)=test_fixture().await;
+    let cleanup=json!({"event":"host_cleanup_proven","source":"exact-owner"}).to_string();
+    sqlx::query("CREATE TRIGGER reject_cleanup_journal BEFORE INSERT ON agent_events WHEN NEW.kind='runtime/progress-recorded' AND json_extract(NEW.inline_json,'$.event.event')='host_cleanup_proven' BEGIN SELECT RAISE(FAIL,'fixture cleanup write failure'); END")
+        .execute(&pool).await.unwrap();
+    assert!(journal.append(cleanup.clone(),None,EngineJournalWrite::Cleanup).await.is_err());
+    assert_eq!(journal.sequence(),0);
+    let before=journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    assert!(journal.append(json!({"event":"host_cleanup_proven","source":"other-owner"}).to_string(),None,
+        EngineJournalWrite::Cleanup).await.is_err());
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::ModelStepStarted {
+        step:1,operation_id:"must-not-run".into()}).unwrap(),None,EngineJournalWrite::Progress).await.is_err());
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(),before);
+    sqlx::query("DROP TRIGGER reject_cleanup_journal").execute(&pool).await.unwrap();
+    journal.append(cleanup,None,EngineJournalWrite::Cleanup).await.unwrap();
+    assert_eq!(journal.sequence(),1);
+    journal.append(serde_json::to_string(&AgentEngineEvent::TurnCancelled {model_steps:2}).unwrap(),None,
+        EngineJournalWrite::Terminal).await.unwrap();
+    let state:String=sqlx::query_scalar("SELECT state FROM agent_turns WHERE session_id=?")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(state,"cancelled");
+}
+
+#[tokio::test]
+async fn partially_committed_terminal_retries_without_a_new_journal_record() {
+    let (journal,pool)=test_fixture().await;
+    journal.append(json!({"event":"host_cleanup_proven"}).to_string(),None,EngineJournalWrite::Cleanup).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_turn_cancelled BEFORE INSERT ON agent_events WHEN NEW.kind='turn/cancelled' BEGIN SELECT RAISE(FAIL,'fixture terminal commit failure'); END")
+        .execute(&pool).await.unwrap();
+    let terminal=serde_json::to_string(&AgentEngineEvent::TurnCancelled {model_steps:2}).unwrap();
+    assert!(journal.append(terminal.clone(),None,EngineJournalWrite::Terminal).await.is_err());
+    let before=journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::TurnCancelled {model_steps:3}).unwrap(),None,
+        EngineJournalWrite::Terminal).await.is_err());
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(),before);
+    sqlx::query("DROP TRIGGER reject_turn_cancelled").execute(&pool).await.unwrap();
+    journal.append(terminal,None,EngineJournalWrite::Terminal).await.unwrap();
+    let journal_records:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/progress-recorded'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    let terminals:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='turn/cancelled'")
+        .bind(journal.0.session.as_ref()).fetch_one(&pool).await.unwrap();
+    assert_eq!(journal_records,2);
+    assert_eq!(terminals,1);
+    assert_eq!(journal.sequence(),2);
+}
+
+#[tokio::test]
 async fn journal_window_renews_only_after_checkpoint_ack_and_keeps_cumulative_usage() {
     let (journal,_) = test_fixture().await;
     journal.save_execution_checkpoint(checkpoint(&journal,false),owner(&journal)).await.unwrap().unwrap();
