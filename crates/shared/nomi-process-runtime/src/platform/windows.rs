@@ -1758,6 +1758,7 @@ async fn spawn_inner_with_cancellation(
 
     Ok(SpawnedPlatformProcess {
         owner: Arc::new(owner),
+        startup_failure: None,
     })
 }
 

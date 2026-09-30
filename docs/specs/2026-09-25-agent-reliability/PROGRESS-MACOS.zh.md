@@ -30,7 +30,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01 shutdown/长 poll/写锁及 M06-02 Pipe/PTY start 交付与取消清理子断言通过；其余故障边界及 LONG 待验 |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01 shutdown/写锁、M06-02 start 取消及 M06-03 post-commit IO failure 所有权子断言通过；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
@@ -996,3 +996,17 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 全证据：`2026-09-30/macos/m06-start-delivery/`；本批不调用模型或正式 Tauri，不改 Windows 原
   结果。native 失败/unknown、worker panic、失去 ownership、更多 descendants/角色及完整
   PROC/CONC/LIFE、N3/100 seed/LONG/99% 仍开放。
+
+- **M06-03 committed start IO failure**（`PROC-039/040/042/047`、`CONC-004`、`LIFE-029`）：
+  macOS arm64 / APFS 的固定故障窗口已让真实 child 执行，随后注入 stdio wrap failure；首败
+  shutdown report 为空、返回时 PID 尚未回收，之后 poller 才完成清理。完整首败保留于
+  `run-001-first-failure`；首次修复编译漏 Unavailable Drop 分支、重复第 5 轮读到未写完 PID 行均单列。
+- 公共根因/修复见 `S-D04-33`：启动错误携带 native owner 回到 Supervisor，先注册原 Session，
+  按原 retirement/清理预算完成或保留真实未决状态；普通 start 返回原 StartLost/code/PID，并发
+  shutdown 维持取消优先并保留原 owner 清理报告。
+  测试只接收换行结尾的完整 PID 行，原 2 秒发布/6 秒回收上界不变，未加 sleep 或放宽断言。
+- Pipe/PTY × 普通 start error/并发 shutdown 四场景，最终首次 + 20 repeats **84/84**；
+  独立 marker/报告/PID 消失 **84/84**，错误从未改写为成功，首败与 marker-failure PID 亦已消失。
+  process Runtime lib **149/149**、session registry **13/13**、Rust fmt/diff 通过，付费调用 0。
+  证据 `2026-09-30/macos/m06-start-failure/`。本批只有原生组件证据；setup deadline/commit handshake
+  失败、worker panic、清理失败与未知恢复、更多角色/descendants、正式 Tauri 及完整 Case/LONG 仍开放。
