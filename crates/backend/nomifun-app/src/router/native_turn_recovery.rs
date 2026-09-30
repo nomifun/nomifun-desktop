@@ -43,7 +43,23 @@ impl NomiCoreSessionOwner {
                                 if failures >= 3 {
                                     if let Ok(facts) = store.chat_causality_facts(&session, &operation).await {
                                         match store.quarantine_native_recovery(&facts.session.owner_ref, &session, &operation, facts.execution_fence).await {
-                                            Ok(_) => return,
+                                            Ok(quarantined) => {
+                                                if quarantined {
+                                                    let root = facts.events.iter().find(|event|
+                                                        event.kind.0 == "turn/started" && event.correlation_id.as_ref() == operation.as_ref())
+                                                        .and_then(|event|facts.event_payloads.get(event.event_id.as_ref()))
+                                                        .and_then(|payload|payload.get("source_message_id"))
+                                                        .and_then(Value::as_str);
+                                                    if let Some(root) = root {
+                                                        owner.user_events.send_to_user(&facts.session.owner_ref.principal_id,
+                                                            Self::canonical_turn_paused_wire_event(&session,root));
+                                                    } else {
+                                                        tracing::warn!(session_id=session.as_ref(),
+                                                            "native recovery quarantine has no source message for realtime pause notification");
+                                                    }
+                                                }
+                                                return;
+                                            }
                                             Err(nomifun_agent_session::SessionStoreError::ExecutionLeaseActive | nomifun_agent_session::SessionStoreError::ExecutionFenced) => failures = 0,
                                             Err(error) => tracing::warn!(session_id=session.as_ref(), error=%error, "native recovery quarantine not committed; retrying safely"),
                                         }
