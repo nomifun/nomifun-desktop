@@ -67,6 +67,12 @@ async function requireFile(path, label) {
   await descriptor.close();
 }
 
+// Chromium reconstructs the outer bundle's in-memory Info.plist as canonical
+// XML when it validates sandboxed peer processes. The bytes in the code
+// signature therefore need to use the same serialization; otherwise macOS
+// reports errSecCSInfoPlistFailed even though a path-only codesign check passes.
+const canonicalizeInfoPlist = path => run('/usr/bin/plutil', ['-convert', 'xml1', path]);
+
 async function signMachO(directory, sign) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
@@ -134,6 +140,11 @@ try {
     }));
   }
 
+  await canonicalizeInfoPlist(join(contents, 'Info.plist'));
+  for (const name of helperNames) {
+    await canonicalizeInfoPlist(join(frameworks, `${name}.app`, 'Contents/Info.plist'));
+  }
+
   const legal = join(contents, 'Resources', 'browser-cef');
   await mkdir(legal, { recursive: true });
   await cp(join(runtime, 'CREDITS.html'), join(legal, 'CREDITS.html'));
@@ -172,6 +183,7 @@ try {
     framework: `Contents/Frameworks/${basename(framework)}`,
     helpers: helperNames.map(name => `Contents/Frameworks/${name}.app`),
     credits: 'Contents/Resources/browser-cef/CREDITS.html',
+    info_plist_serialization: 'canonical-xml',
   }, null, 2)}\n`);
 } catch (error) {
   process.stderr.write(`MACOS_CEF_STAGE_FAIL ${error.message}\n`);

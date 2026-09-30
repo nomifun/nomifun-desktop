@@ -73,4 +73,26 @@ describe('macOS Desktop build contract', () => {
       expect(smoke.includes(`${key}:`)).toBe(true);
     }
   });
+
+  test('canonicalizes host and helper Info.plists before CEF bundle signing', () => {
+    const stage = readFileSync(
+      new URL('./validation/stage-macos-cef-bundle.mjs', import.meta.url), 'utf8',
+    );
+    const hostCanonicalization = stage.indexOf(
+      "await canonicalizeInfoPlist(join(contents, 'Info.plist'));",
+    );
+    const helperCanonicalization = stage.indexOf(
+      "await canonicalizeInfoPlist(join(frameworks, `${name}.app`, 'Contents/Info.plist'));",
+    );
+    const helperSigning = stage.indexOf(
+      'for (const name of helperNames) await sign(join(frameworks, `${name}.app`), true);',
+    );
+    const appSigning = stage.indexOf('await sign(app);');
+    expect(stage.includes("run('/usr/bin/plutil', ['-convert', 'xml1', path])")).toBe(true);
+    expect(hostCanonicalization).toBeGreaterThan(0);
+    expect(helperCanonicalization).toBeGreaterThan(hostCanonicalization);
+    expect(helperCanonicalization).toBeLessThan(helperSigning);
+    expect(hostCanonicalization).toBeLessThan(appSigning);
+    expect(stage.includes("info_plist_serialization: 'canonical-xml'")).toBe(true);
+  });
 });
