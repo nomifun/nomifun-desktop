@@ -31,6 +31,7 @@ struct LiveFrontend {
     local_token: String,
     client: reqwest::Client,
     work: PathBuf,
+    source: Mutex<PathBuf>,
     served: Mutex<Vec<String>>,
 }
 const BROKEN_JS: &str = "function nextCount(value) { return value + 2; }\n";
@@ -39,6 +40,38 @@ const COMPUTER_UNICODE_A11Y_TEXT: &str =
     r"NomiFun-é-e\u{301}-中文-かな-🙂-👩🏽\u{200d}💻-𝄞-END";
 const LARGE_A11Y_SENTINEL: &str = "AX_OMITTED_SENTINEL_199";
 const COMPUTER_SOAK_TEXT: &str = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+
+fn install_live_source(work: &std::path::Path, session_id: &str) -> anyhow::Result<PathBuf> {
+    nomifun_common::validate_uuidv7(session_id)?;
+    let conversations=work.join("conversations");
+    let session_work=conversations.join(session_id);
+    std::fs::create_dir_all(&session_work)?;
+    let canonical_conversations=conversations.canonicalize()?;
+    let canonical_session=session_work.canonicalize()?;
+    anyhow::ensure!(canonical_session.parent()==Some(canonical_conversations.as_path()),"live source workspace is not the exact managed Session child");
+    let source=canonical_session.join("app.js");
+    std::fs::write(&source,BROKEN_JS)?;
+    Ok(source)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_source_uses_the_exact_managed_session_workspace() {
+        let root=tempfile::tempdir().unwrap();
+        let work=root.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let session=uuid::Uuid::now_v7().to_string();
+        let source=install_live_source(&work,&session).unwrap();
+        let expected=work.join("conversations").join(&session).canonicalize().unwrap();
+        assert_eq!(source.parent(),Some(expected.as_path()));
+        assert_eq!(std::fs::read_to_string(source).unwrap(),BROKEN_JS);
+        assert!(!work.join("app.js").exists());
+    }
+}
+
 const FRONTEND_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Counter app</title>
 <style>body{font:20px system-ui;padding:36px}button{font:inherit;padding:12px 24px}output{display:block;font-size:32px;margin:24px 0}</style>
 <h1>Counter app</h1><label for=count>Count</label><output id=count>0</output><button id=increment>Increment</button>
@@ -2399,10 +2432,10 @@ async fn main() -> anyhow::Result<()> {
         anyhow::ensure!(key.len()<=16384 && !key.trim().is_empty() && !key.trim().contains(['\r','\n']), "Invalid live key input");
         let work = root.join("work");
         std::fs::create_dir(&work)?;
-        std::fs::write(work.join("app.js"),BROKEN_JS)?;
+        let source = work.join("app.js");
         Some(LiveFrontend { key:Zeroizing::new(key.trim().to_owned()),local_token:format!("Bearer {}",uuid::Uuid::new_v4()),
             client:reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(90)).build()?,
-            work,served:Mutex::new(vec![]) })
+            work,source:Mutex::new(source),served:Mutex::new(vec![]) })
     } else { None };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -2551,7 +2584,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(|State(f):State<Arc<Fixture>>| async move { ([("cache-control","no-store")],Html(if f.live.is_some() {FRONTEND_PAGE} else {PAGE})) }))
         .route("/app.js", get(|State(f):State<Arc<Fixture>>| async move {
             if let Some(live)=&f.live {
-                if let Ok(source)=tokio::fs::read_to_string(live.work.join("app.js")).await {
+                let source_path=live.source.lock().unwrap().clone();
+                if let Ok(source)=tokio::fs::read_to_string(source_path).await {
                     if source.len()<=65536 {
                         let mut served=live.served.lock().unwrap(); if served.len()<64 {served.push(source.clone());}
                         return ([("content-type","text/javascript; charset=utf-8"),("cache-control","no-store")],source).into_response();
@@ -2775,7 +2809,12 @@ async fn main() -> anyhow::Result<()> {
             json!([{"resource_kind":"browser","resource_id":"managed-browser"}])
         };
         let session = api(&app,"/api/agent-sessions",json!({"preset_id":preset,"title":display_name,"resource_selections":resources,"model":{"provider_id":provider,"model":"browser-gui-fixture"}})).await?;
-        Ok::<_,anyhow::Error>(session["agent_session_id"].clone())
+        let session_id=session["agent_session_id"].as_str().ok_or_else(||anyhow::anyhow!("session id missing"))?.to_owned();
+        if let Some(live)=&fixture.live {
+            let source=install_live_source(&live.work,&session_id)?;
+            *live.source.lock().unwrap()=source;
+        }
+        Ok::<_,anyhow::Error>(Value::String(session_id))
     }.await;
     let cleanup = app.shutdown_all().await;
     drop(app);
