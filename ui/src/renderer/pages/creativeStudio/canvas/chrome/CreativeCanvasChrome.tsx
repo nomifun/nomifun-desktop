@@ -15,7 +15,6 @@ import {
   GridFour,
   Group,
   HandDrag,
-  History,
   Loading,
   MenuFold,
   Pic,
@@ -48,10 +47,8 @@ import {
   CREATIVE_CANVAS_CHROME_BACKGROUNDS,
   CREATIVE_CANVAS_CHROME_NODE_KINDS,
   CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS,
-  toggleCreativeCanvasBottomPanel,
   toggleCreativeCanvasPanel,
   toggleCreativeCanvasTool,
-  type CreativeCanvasBottomView,
   type CreativeCanvasChromeBackground,
   type CreativeCanvasChromeNodeKind,
   type CreativeCanvasChromeProps,
@@ -86,10 +83,6 @@ const LEFT_LABEL_KEYS: Record<CreativeCanvasLeftView, string> = {
 const RIGHT_LABEL_KEYS: Record<CreativeCanvasRightView, string> = {
   assistant: 'creativeStudio.canvas.panels.right.assistant',
   properties: 'creativeStudio.canvas.panels.right.properties',
-};
-
-const BOTTOM_LABEL_KEYS: Record<CreativeCanvasBottomView, string> = {
-  history: 'creativeStudio.canvas.panels.bottom.history',
 };
 
 const SAVE_LABEL_KEYS: Record<CreativeCanvasChromeSaveStatus, string> = {
@@ -191,10 +184,6 @@ function leftIcon(view: CreativeCanvasLeftView): React.ReactNode {
 
 function rightIcon(view: CreativeCanvasRightView): React.ReactNode {
   return view === 'assistant' ? <Robot {...iconProps} /> : <Setting {...iconProps} />;
-}
-
-function bottomIcon(_view: CreativeCanvasBottomView): React.ReactNode {
-  return <History {...iconProps} />;
 }
 
 function saveIcon(status: CreativeCanvasChromeSaveStatus): React.ReactNode {
@@ -368,7 +357,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
     ? props.slots?.left?.[props.resourceView]
     : null;
   const rightSlot = props.rightView ? props.slots?.right?.[props.rightView] : null;
-  const bottomSlot = props.bottomView ? props.slots?.bottom?.[props.bottomView] : null;
   const widthBounds = rightPanelWidthBounds(containerWidth);
   const rightPanelWidth = clampRightPanelWidth(
     rightPanelWidthDraft,
@@ -589,7 +577,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
       data-left-view={props.leftView}
       data-resource-view={props.resourceView ?? 'closed'}
       data-right-view={props.rightView ?? 'closed'}
-      data-bottom-view={props.bottomView ?? 'closed'}
       aria-label={t('creativeStudio.canvas.chrome.workspaceControls')}
     >
       <header className={styles.topBar} data-canvas-no-zoom {...chromeEventProps}>
@@ -657,15 +644,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
           {props.slots?.topActions ? (
             <div className={styles.customTopActions}>{props.slots.topActions}</div>
           ) : null}
-          <ChromeIconButton
-            label={t(BOTTOM_LABEL_KEYS.history)}
-            icon={<History {...iconProps} />}
-            active={props.bottomView !== null}
-            disabled={props.disabled}
-            onClick={() =>
-              props.onBottomViewChange(toggleCreativeCanvasBottomPanel(props.bottomView))
-            }
-          />
           {(['assistant', 'properties'] as const).map((view) => (
             <ChromeIconButton
               key={view}
@@ -857,51 +835,6 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
             {rightSlot}
           </div>
         </aside>
-      ) : null}
-
-      {props.bottomView ? (
-        <section
-          className={styles.bottomPanel}
-          aria-label={t(BOTTOM_LABEL_KEYS[props.bottomView])}
-          data-canvas-no-zoom
-          {...chromeEventProps}
-        >
-          <header className={styles.panelHeader}>
-            <div
-              className={styles.panelTabs}
-              role='tablist'
-              aria-label={t('creativeStudio.canvas.chrome.bottomPanel')}
-            >
-              {(['history'] as const).map((view) => (
-                <button
-                  key={view}
-                  type='button'
-                  role='tab'
-                  aria-selected={props.bottomView === view}
-                  data-active={props.bottomView === view || undefined}
-                  disabled={props.disabled}
-                  onClick={() => props.onBottomViewChange(view)}
-                >
-                  {bottomIcon(view)}
-                  <span>{t(BOTTOM_LABEL_KEYS[view])}</span>
-                </button>
-              ))}
-            </div>
-            <ChromeIconButton
-              label={t('creativeStudio.canvas.chrome.closeBottomPanel')}
-              icon={<Close {...iconProps} />}
-              disabled={props.disabled}
-              onClick={() => props.onBottomViewChange(null)}
-            />
-          </header>
-          <div
-            className={styles.panelBody}
-            role='tabpanel'
-            data-bottom-panel-body={props.bottomView}
-          >
-            {bottomSlot}
-          </div>
-        </section>
       ) : null}
 
       <CreativeCanvasResourceDialog

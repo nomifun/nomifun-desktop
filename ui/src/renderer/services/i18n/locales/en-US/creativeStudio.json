@@ -429,9 +429,7 @@
       "addNode": "Add node",
       "backToLibrary": "Back to canvas library",
       "backgroundLabel": "Canvas background: {{background}}",
-      "bottomPanel": "Bottom panel",
       "canvasBackground": "Canvas background",
-      "closeBottomPanel": "Close bottom panel",
       "closeRightPanel": "Close right panel",
       "collapseResources": "Collapse canvas resources panel",
       "resetRightPanelWidth": "Reset right panel width",
@@ -641,16 +639,6 @@
       "videoSourceChangedBeforeTask": "The video node or its direct reference changed, so no video task was created.",
       "videoTaskBusy": "A video task is already in progress. Wait for it to finish."
     },
-    "history": {
-      "disclosure": "History is stored as document snapshots without action names or timestamps. This panel shows only the undo and redo states that are actually available.",
-      "label": "Edit history",
-      "redo": "Redo",
-      "redoable": "Redo steps",
-      "subtitle": "Snapshots from this editing session",
-      "title": "Edit history",
-      "undo": "Undo",
-      "undoable": "Undo steps"
-    },
     "image": {
       "aspectRatioLabel": "Aspect ratio",
       "autoQuality": "Auto",
@@ -841,8 +829,6 @@
     },
     "loading": {
       "documentValidation": "Waiting for the canvas document to pass canonical v1 validation.",
-      "historyDescription": "The History panel shows the undo history for the current editing session.",
-      "historyTitle": "Loading undo history",
       "outlineTitle": "Loading canvas structure",
       "propertiesDescription": "Select a node to view its canonical properties.",
       "propertiesTitle": "Loading properties"
@@ -1003,9 +989,6 @@
       "title": "Canvas outline"
     },
     "panels": {
-      "bottom": {
-        "history": "History"
-      },
       "left": {
         "assets": "Asset library",
         "canvas": "Canvas",

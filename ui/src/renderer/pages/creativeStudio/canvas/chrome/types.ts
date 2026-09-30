@@ -21,7 +21,6 @@ export type CreativeCanvasChromeSaveStatus = CanvasCasSaveStatus;
 export type CreativeCanvasLeftView = 'canvas' | 'assets' | 'prompts' | 'templates';
 export type CreativeCanvasResourceView = Exclude<CreativeCanvasLeftView, 'canvas'>;
 export type CreativeCanvasRightView = 'assistant' | 'properties';
-export type CreativeCanvasBottomView = 'history';
 
 export interface CreativeCanvasChromeSlots {
   canvas?: ReactNode;
@@ -29,7 +28,6 @@ export interface CreativeCanvasChromeSlots {
   toolbarTrailing?: ReactNode;
   left?: Partial<Record<CreativeCanvasLeftView, ReactNode>>;
   right?: Partial<Record<CreativeCanvasRightView, ReactNode>>;
-  bottom?: Partial<Record<CreativeCanvasBottomView, ReactNode>>;
 }
 
 export interface CreativeCanvasChromeProps {
@@ -52,7 +50,6 @@ export interface CreativeCanvasChromeProps {
   rightView: CreativeCanvasRightView | null;
   /** Current persisted width of the right panel, in CSS pixels. */
   rightPanelWidth?: number;
-  bottomView: CreativeCanvasBottomView | null;
   /** @deprecated Background selection now lives in the zoom popover. */
   backgroundMenuOpen?: boolean;
   compact?: boolean;
@@ -74,7 +71,6 @@ export interface CreativeCanvasChromeProps {
   onRightViewChange(view: CreativeCanvasRightView | null): void;
   /** Persist a user-adjusted right panel width, in CSS pixels. */
   onRightPanelWidthChange?(width: number): void;
-  onBottomViewChange(view: CreativeCanvasBottomView | null): void;
 }
 
 export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
@@ -108,10 +104,4 @@ export function toggleCreativeCanvasTool(
   current: CreativeCanvasChromeTool
 ): CreativeCanvasChromeTool {
   return current === 'pan' ? 'select' : 'pan';
-}
-
-export function toggleCreativeCanvasBottomPanel(
-  current: CreativeCanvasBottomView | null
-): CreativeCanvasBottomView | null {
-  return current === null ? 'history' : null;
 }
