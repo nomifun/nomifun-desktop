@@ -141,7 +141,7 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
         {isDirectory ? <FolderOpen size={24} fill='currentColor' /> : isImage && imageUrl ? <img src={imageUrl} alt={file_name} /> : <img className={attachmentStyles.fileIcon} src={fileIcon} alt={isImage ? '正在读取图片' : fileExt} />}
       </button>
     </ComposerAttachmentTile>
-    {viewing && imageUrl && <ImageLightbox key={imageUrl} src={imageUrl} title={file_name} onClose={() => setViewing(false)} onDownload={() => downloadFileFromPath(path, file_name)} />}
+    {viewing && imageUrl && <ImageLightbox key={imageUrl} src={imageUrl} title={file_name} onClose={() => setViewing(false)} onSaveAs={() => downloadFileFromPath(path, file_name)} />}
   </>;
 
   if (isImage) {

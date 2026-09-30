@@ -1,22 +1,46 @@
-import { useEffect, useState } from 'react';
-import { Message, Modal, Tooltip } from '@arco-design/web-react';
+import { useEffect, useLayoutEffect, useState } from 'react';
+import { Button, Message, Modal, Tooltip } from '@arco-design/web-react';
 import { Close, Download, Minus, Plus } from '@icon-park/react';
+import { useTranslation } from 'react-i18next';
 import styles from './ImageLightbox.module.css';
 
-export default function ImageLightbox({ src, title, onClose, onDownload, zIndex }: {
-  src: string;
+export default function ImageLightbox({
+  src,
+  title,
+  alt = title,
+  loading = false,
+  error = null,
+  onClose,
+  onRetry,
+  onSaveAs,
+  zIndex,
+}: {
+  src?: string | null;
   title: string;
+  alt?: string;
+  loading?: boolean;
+  error?: string | null;
   onClose(): void;
-  onDownload?: () => Promise<void>;
+  onRetry?: () => void;
+  onSaveAs?: () => Promise<unknown>;
   /** Raise the lightbox above product-local overlay stacks such as the canvas composer. */
   zIndex?: number;
 }) {
+  const { t } = useTranslation();
   const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const [bounds, setBounds] = useState({ width: 1, height: 1 });
   const [natural, setNatural] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState<number | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [downloading, setDownloading] = useState(false);
+  const [imageFailed, setImageFailed] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [saving, setSaving] = useState(false);
+
+  useLayoutEffect(() => {
+    setNatural({ width: 0, height: 0 });
+    setScale(null);
+    setImageFailed(false);
+  }, [src]);
+
   useEffect(() => {
     const element = viewport;
     if (!element) return;
@@ -28,31 +52,48 @@ export default function ImageLightbox({ src, title, onClose, onDownload, zIndex 
   }, [viewport]);
   const fit = natural.width ? Math.min(1, (bounds.width - 32) / natural.width, (bounds.height - 32) / natural.height) : 1;
   const zoom = scale ?? Math.max(.01, fit);
-  const loaded = natural.width > 0 && !failed;
-  const download = async () => {
-    if (!onDownload || downloading) return;
-    setDownloading(true);
-    try { await onDownload(); }
+  const failed = Boolean(error) || imageFailed;
+  const loaded = Boolean(src) && natural.width > 0 && !failed;
+  const saveAs = async () => {
+    if (!onSaveAs || saving) return;
+    setSaving(true);
+    try { await onSaveAs(); }
     catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
-    finally { setDownloading(false); }
+    finally { setSaving(false); }
   };
-  return <Modal visible title='查看图片' className={`nomifun-modal-fullscreen ${styles.modal}`} wrapClassName={styles.wrap} maskStyle={{ background: 'rgba(0, 0, 0, .88)', zIndex }} wrapStyle={zIndex === undefined ? undefined : { zIndex }} footer={null} closable={false} focusLock unmountOnExit onCancel={onClose}>
-    <div className={styles.viewport} ref={setViewport} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
-      {!failed && <img className={styles.image} src={src} alt={title} draggable={false} style={{ width: loaded ? natural.width * zoom : undefined, height: loaded ? natural.height * zoom : undefined, visibility: loaded ? 'visible' : 'hidden' }} onLoad={event => {
+  const retry = () => {
+    setNatural({ width: 0, height: 0 });
+    setScale(null);
+    setImageFailed(false);
+    setReloadKey((current) => current + 1);
+    onRetry?.();
+  };
+  const previewTitle = t('common.imagePreview.title', { defaultValue: '查看图片' });
+  const saveAsLabel = t('common.imagePreview.saveAs', { defaultValue: '图片另存为' });
+  const closeLabel = t('common.imagePreview.close', { defaultValue: '关闭图片预览' });
+  const fitLabel = t('common.imagePreview.fit', { defaultValue: '适应窗口' });
+  return <Modal visible title={previewTitle} aria-label={previewTitle} className={`nomifun-modal-fullscreen ${styles.modal}`} wrapClassName={styles.wrap} maskStyle={{ background: 'rgba(0, 0, 0, .88)', zIndex }} wrapStyle={zIndex === undefined ? undefined : { zIndex }} footer={null} closable={false} focusLock unmountOnExit onCancel={onClose}>
+    <div className={styles.viewport} ref={setViewport} aria-busy={loading || (!loaded && !failed)} onClick={event => { if (event.target === event.currentTarget) onClose(); }}>
+      {src && !failed && <img key={`${src}:${reloadKey}`} className={styles.image} src={src} alt={alt} draggable={false} style={{ width: loaded ? natural.width * zoom : undefined, height: loaded ? natural.height * zoom : undefined, visibility: loaded ? 'visible' : 'hidden' }} onLoad={event => {
         const image = event.currentTarget;
+        setImageFailed(false);
         setNatural({ width: image.naturalWidth, height: image.naturalHeight });
-      }} onError={() => setFailed(true)} />}
-      {!loaded && <span className={styles.status} role='status'>{failed ? '图片加载失败' : '正在加载图片…'}</span>}
+      }} onError={() => setImageFailed(true)} />}
+      {!loaded && <div className={styles.status} role={failed ? 'alert' : 'status'}>
+        <span>{error ?? (imageFailed
+          ? t('common.imagePreview.loadFailed', { defaultValue: '图片加载失败' })
+          : t('common.imagePreview.loading', { defaultValue: '正在加载图片…' }))}</span>
+        {failed && onRetry ? <Button type='secondary' onClick={retry}>{t('common.retry')}</Button> : null}
+      </div>}
     </div>
     <div className={styles.actions}>
-      {onDownload ? <Tooltip content='下载图片'><button type='button' aria-label='下载图片' disabled={downloading || !loaded} onClick={() => void download()}><Download size={20} fill='currentColor' /></button></Tooltip>
-        : <Tooltip content='下载图片'><a href={src} download={title} aria-label='下载图片'><Download size={20} fill='currentColor' /></a></Tooltip>}
-      <Tooltip content='关闭'><button type='button' aria-label='关闭图片预览' onClick={onClose}><Close size={20} fill='currentColor' /></button></Tooltip>
+      {onSaveAs ? <Tooltip content={saveAsLabel}><button type='button' aria-label={saveAsLabel} disabled={saving || !loaded} onClick={() => void saveAs()}><Download size={20} fill='currentColor' /></button></Tooltip> : null}
+      <Tooltip content={t('common.close')}><button type='button' aria-label={closeLabel} onClick={onClose}><Close size={20} fill='currentColor' /></button></Tooltip>
     </div>
-    <div className={styles.zoom} role='group' aria-label='图片缩放'>
-      <Tooltip content='缩小'><button type='button' aria-label='缩小图片' disabled={!loaded || zoom <= .01} onClick={() => setScale(Math.max(.01, zoom / 1.25))}><Minus size={20} fill='currentColor' /></button></Tooltip>
-      <Tooltip content='适应窗口'><button type='button' className={styles.percentage} aria-label='适应窗口' disabled={!loaded} onClick={() => setScale(null)}>{loaded ? `${Math.round(zoom * 100)}%` : '—'}</button></Tooltip>
-      <Tooltip content='放大'><button type='button' aria-label='放大图片' disabled={!loaded || zoom >= 4} onClick={() => setScale(Math.min(4, zoom * 1.25))}><Plus size={20} fill='currentColor' /></button></Tooltip>
+    <div className={styles.zoom} role='group' aria-label={t('common.imagePreview.zoom', { defaultValue: '图片缩放' })}>
+      <Tooltip content={t('common.imagePreview.zoomOut', { defaultValue: '缩小图片' })}><button type='button' aria-label={t('common.imagePreview.zoomOut', { defaultValue: '缩小图片' })} disabled={!loaded || zoom <= .01} onClick={() => setScale(Math.max(.01, zoom / 1.25))}><Minus size={20} fill='currentColor' /></button></Tooltip>
+      <Tooltip content={fitLabel}><button type='button' className={styles.percentage} aria-label={fitLabel} disabled={!loaded} onClick={() => setScale(null)}>{loaded ? `${Math.round(zoom * 100)}%` : '—'}</button></Tooltip>
+      <Tooltip content={t('common.imagePreview.zoomIn', { defaultValue: '放大图片' })}><button type='button' aria-label={t('common.imagePreview.zoomIn', { defaultValue: '放大图片' })} disabled={!loaded || zoom >= 4} onClick={() => setScale(Math.min(4, zoom * 1.25))}><Plus size={20} fill='currentColor' /></button></Tooltip>
     </div>
   </Modal>;
 }

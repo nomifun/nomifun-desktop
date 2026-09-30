@@ -5,12 +5,13 @@
  */
 
 import { Close, Download } from '@icon-park/react';
-import { Modal, Tooltip } from '@arco-design/web-react';
-import React from 'react';
+import { Message, Modal, Tooltip } from '@arco-design/web-react';
+import React, { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import ImageLightbox from '@/renderer/components/media/ImageLightbox';
 import imageLightboxStyles from '@/renderer/components/media/ImageLightbox.module.css';
+import { saveUrlAs } from '@/renderer/utils/file/saveAs';
 import CreativeVideoPlayer from './CreativeVideoPlayer';
 import styles from './CreativeMediaLightbox.module.css';
 
@@ -19,6 +20,9 @@ interface CreativeMediaLightboxProps {
   src: string;
   posterSrc?: string | null;
   title: string;
+  fileName?: string;
+  mimeType?: string | null;
+  onSaveAs?: () => Promise<unknown>;
   onClose(): void;
   zIndex?: number;
 }
@@ -29,15 +33,26 @@ const CreativeMediaLightbox: React.FC<CreativeMediaLightboxProps> = ({
   src,
   posterSrc,
   title,
+  fileName,
+  mimeType,
+  onSaveAs,
   onClose,
   zIndex,
 }) => {
   const { t } = useTranslation();
+  const [saving, setSaving] = useState(false);
+  const suggestedName = fileName
+    ?? (/\.[a-z0-9]{1,16}$/i.test(title) ? title : `${title}.${kind === 'image' ? 'png' : 'mp4'}`);
+  const saveMedia = onSaveAs ?? (() => saveUrlAs(src, {
+    suggestedName,
+    mimeType,
+    dialogTitle: t('common.saveAs', { defaultValue: '另存为' }),
+  }));
   if (kind === 'image') {
-    return <ImageLightbox src={src} title={title} onClose={onClose} zIndex={zIndex} />;
+    return <ImageLightbox src={src} title={title} onClose={onClose} onSaveAs={saveMedia} zIndex={zIndex} />;
   }
 
-  const downloadLabel = t('common.download', { defaultValue: '下载' });
+  const saveAsLabel = t('common.saveAs', { defaultValue: '另存为' });
   const closeLabel = t('common.close', { defaultValue: '关闭' });
   const closePreviewLabel = t('creativeStudio.canvas.video.closePreview', {
     defaultValue: '关闭视频预览',
@@ -66,10 +81,21 @@ const CreativeMediaLightbox: React.FC<CreativeMediaLightboxProps> = ({
         </div>
       </div>
       <div className={imageLightboxStyles.actions}>
-        <Tooltip content={downloadLabel}>
-          <a href={src} download={title} aria-label={`${downloadLabel}：${title}`}>
+        <Tooltip content={saveAsLabel}>
+          <button
+            type='button'
+            disabled={saving}
+            aria-label={`${saveAsLabel}：${title}`}
+            onClick={() => {
+              if (saving) return;
+              setSaving(true);
+              void saveMedia()
+                .catch((error) => Message.error(error instanceof Error ? error.message : String(error)))
+                .finally(() => setSaving(false));
+            }}
+          >
             <Download size={20} fill='currentColor' />
-          </a>
+          </button>
         </Tooltip>
         <Tooltip content={closeLabel}>
           <button type='button' aria-label={closePreviewLabel} onClick={onClose}>
