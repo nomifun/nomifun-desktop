@@ -23,7 +23,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 冻结/准入与 M02-02 正式 UI/live 只读 Session 子断言通过；完整领域未验收 |
-| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影子断言通过；完整 Case 未验收 |
+| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影，M04-13 crash 冷启动暂停/列表投影子断言通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
@@ -692,3 +692,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `2026-09-30/macos/m04-computer-crash/`。本批关闭 `COMP-010` 的 macOS owner crash/result-loss
   子断言；`COMP-012` 真实 held cancel/key hold、其他手势/显示器/OCR 与 `COMP-014` soak 仍开放，
   不关闭完整 Computer、D06 或 M04。
+
+- M04-13 后续 UI 审计修正上述“无共享根因”结论：同一正式截图虽证明主会话页暂停与发送禁用，侧栏
+  悬浮卡却仍显示“活跃状态 运行中”。公共根因及修复记为 `S-D02-22`：startup quarantine 成功后向
+  精确 owner 补发 canonical `turn.paused`，让既有列表订阅重读 durable Session；不改变
+  `COMP-010` 的 unknown/零重放结论。集成回归 **1/1**、暂停/HoverCard/列表 refresh **4/4**。
+  post-fix Developer ID-signed arm64 App（executable SHA-256
+  `ec6caacdba1a81c42ab5acbbceba0b5f4d81237a334d6ffa016d709a92d40eb5`）从原 seq-67 crash image
+  冷启动；复制旧 work-root marker 的首次夹具启动被产品 fail closed，纠正隔离绑定后再次得到
+  paused/unknown，且 `turn.paused` 后出现新的 `/api/agent-sessions` canonical refresh。解锁后同一
+  正式 UI 的详情页仍显示暂停/发送禁用，侧栏悬浮卡精确显示“活跃状态 执行已暂停”；产品按钮结束
+  回合后 head ready、seq 71 cancelled，unknown receipt 保留。最终 DB `ok`，App 与 `63143` listener
+  为 0。证据在 `m04-computer-crash/run-009～011-*`；该 OBS 冷启动投影子断言通过。

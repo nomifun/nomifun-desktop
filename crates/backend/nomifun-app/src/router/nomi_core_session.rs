@@ -1646,18 +1646,25 @@ impl NomiCoreSessionOwner {
         )
     }
 
+    fn canonical_turn_paused_wire_event(
+        session_id: &AgentSessionId,
+        root_message_id: &str,
+    ) -> WebSocketMessage<Value> {
+        WebSocketMessage::new("turn.paused",json!({
+            "conversation_id":session_id,"turn_id":root_message_id,"status":"paused","execution_phase":"paused",
+            "state":"ai_waiting_input","detail":"Execution paused; owner authorization is required to continue.","can_send_message":false,
+            "runtime":{"state":"idle","execution_phase":"paused","can_send_message":false,"has_runtime":true,
+                "runtime_status":"finished","is_processing":false,"active_turn_id":root_message_id},
+        }))
+    }
+
     fn canonical_turn_completed_wire_event(
         session_id: &AgentSessionId,
         root_message_id: &str,
         terminal: &AgentStreamEvent,
     ) -> WebSocketMessage<Value> {
         if matches!(terminal, AgentStreamEvent::Finish(data) if data.stop_reason == Some(nomifun_ai_agent::protocol::events::TurnStopReason::Paused)) {
-            return WebSocketMessage::new("turn.paused",json!({
-                "conversation_id":session_id,"turn_id":root_message_id,"status":"paused","execution_phase":"paused",
-                "state":"ai_waiting_input","detail":"Execution paused; owner authorization is required to continue.","can_send_message":false,
-                "runtime":{"state":"idle","execution_phase":"paused","can_send_message":false,"has_runtime":true,
-                    "runtime_status":"finished","is_processing":false,"active_turn_id":root_message_id},
-            }));
+            return Self::canonical_turn_paused_wire_event(session_id,root_message_id);
         }
         let (state, detail) = match terminal {
             AgentStreamEvent::Error(error) => ("error", error.message.as_str()),

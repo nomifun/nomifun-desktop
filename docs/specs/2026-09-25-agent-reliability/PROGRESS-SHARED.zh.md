@@ -35,7 +35,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
-| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过，旧失败保留；完整控制/观测矩阵待验 |
+| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过；S-D02-22 已修 startup quarantine 暂停列表单播并完成 macOS 冷 UI 复核；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
@@ -686,6 +686,26 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **195/195**、Wave2 **22/22**、Engine **29 通过 / 1 ignored**、App host **3/3**；正式 Session
   5 步/177 事件、独立 34 项断言、工作区/进程/应用清理与备份通过。PTY/resize、并发 close/poll、
   retained-base loss、其他 Provider/角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 Case 或共享阶段。
+
+- S-D02-22（OBS-008/014、LIFE-015/019、COMP-010 的冷启动暂停投影子断言，**已验证**）：
+  macOS M04-13 的正式 owner-crash 冷启动在第三次受控 recovery admission 失败后，已原子
+  提交 `effect/uncertain`、recovery-blocked 和 `turn/paused`；会话详情主动重读 canonical 状态，正确显示
+  “执行已暂停”并禁用发送，但同一截图中的侧栏悬浮卡仍显示“活跃状态 运行中”。根因是 startup
+  quarantine 只持久化暂停，没有向精确 owner 发送 `turn.paused`；侧栏在 quarantine 前已完成首次
+  `/api/agent-sessions` 读取，因而没有触发现有 canonical refresh。静态 HoverCard 测试用预填
+  `execution_phase=paused`，未覆盖这个 lifecycle 缺口。首次正式证据保留于
+  `2026-09-30/macos/m04-computer-crash/run-005-formal-crash/`。
+- 现抽取并复用唯一 canonical pause wire helper；仅当 `quarantine_native_recovery` 确认提交后，使用
+  原 Turn 的 `source_message_id` 向 Session owner 单播 `turn.paused`，不广播、不生成新输入，也不改变
+  effect/Turn 状态机。startup recovery 集成回归在 route 创建前订阅 user event，验证 exact owner、
+  Session、36 字符 root message ID、`execution_phase=paused` 及 `can_send_message=false` **1/1**；暂停
+  notice/HoverCard/侧栏 canonical refresh **4/4**。Developer ID-signed arm64 post-fix App 已从原 seq-67
+  crash image 复跑：夹具首次因复制旧 work-root marker 被产品 fail closed，修正隔离数据绑定后 DB
+  再次到 paused/unknown，日志在第三次拒绝后立即出现新的 `/api/agent-sessions` 读取，证明 Realtime
+  事件已触发现有侧栏 refresh。解锁后同一正式 UI 的详情页仍显示暂停/发送禁用，侧栏悬浮卡由首败的
+  “活跃状态 运行中”变为精确“活跃状态 执行已暂停”。产品按钮结束回合后 head ready、seq 71
+  cancelled，原 unknown receipt 保留；最终 DB `ok`，App PID 与 listener 归零。其他平台、断线时事件
+  丢失与完整 OBS/LIFE 矩阵仍开放。
 
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但

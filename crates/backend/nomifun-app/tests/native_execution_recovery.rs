@@ -682,6 +682,7 @@ async fn startup_recovery_scenario(
         Some(effect_id)
     } else { None };
     let second = AppServices::from_config(recovered_db, &config).await.unwrap();
+    let mut user_events = second.event_bus.subscribe_user();
     let restored_router = create_router(&second).await;
     if reconciliation_required {
         let inspection = tokio::time::timeout(Duration::from_secs(30),async {
@@ -700,6 +701,19 @@ async fn startup_recovery_scenario(
         assert_eq!(inspection["unknown_effects"],1);
         assert_eq!(resumed.load(Ordering::SeqCst),0);
         assert_eq!(std::fs::read_to_string(project.join("answer.txt")).unwrap(),"CHECKPOINT_RECOVERY_OK");
+        let paused_event = tokio::time::timeout(Duration::from_secs(2),async {
+            loop {
+                let envelope = user_events.recv().await.unwrap();
+                if envelope.event.name == "turn.paused"
+                    && envelope.event.data["conversation_id"].as_str() == Some(id.as_str()) {
+                    break envelope;
+                }
+            }
+        }).await.expect("startup quarantine must notify the live owner about the canonical pause");
+        assert_eq!(paused_event.user_id,second.authoritative_user_id.as_ref());
+        assert_eq!(paused_event.event.data["execution_phase"],"paused");
+        assert_eq!(paused_event.event.data["can_send_message"],false);
+        assert!(paused_event.event.data["turn_id"].as_str().is_some_and(|value|value.len()==36));
 
         let effect_id = pending_effect_id.as_ref().unwrap();
         let (effect_state, strategy, action_id, terminal_event_id): (String, String, String, Option<String>) =
