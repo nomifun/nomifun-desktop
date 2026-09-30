@@ -64,6 +64,10 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   `pressed=false` 且 mouse-up 到达，并保留 timeout unknown/cleanup pause 与本机 UI Stop 在 held mouse
   期间不可自动操作的首败；但没有得到“取消事件确实发生于 pressed=true”的最终正式样本。因此本项只
   关闭共享组件清理缺陷，不关闭 `COMP-012`、平台验收或共享阶段；Windows/Linux 亦未代判。
+- 后续 macOS M04-25 通过正式 UI + 已认证产品 cancel 取得有界 drag 期间真实取消：canonical 取消后
+  17 ms 目标仍 pressed，最终唯一 mouseUp/input returned/`host_cleanup_proven`，UI cancelled、零
+  pending/unknown 与进程/端口残留。实测 hold 106.6 ms，因此长时 drag/key hold、原生 release-failure
+  与完整 `COMP-012` 继续开放；本批没有新增公共产品修复或付费模型调用。
 
 - S-D06-04（`COMP-006`、`OBS-005/016` 的共享 Computer launch 缺失绝对路径子断言）：macOS 正式
   Tauri 首败对明确不存在的 `.app` 绝对路径调用 `computer/launch`；`open::that_detached` 只确认成功
