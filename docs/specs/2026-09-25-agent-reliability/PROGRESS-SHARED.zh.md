@@ -704,6 +704,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   实际 pause/resume 和冷启动恢复 **2/2**、fmt/diff通过。未覆盖 preparation panic/commit ack失落、
   长附件准备与超时、更多并发恢复拓扑、正式 UI/其他平台角色和完整长期门槛；共享阶段继续开放。
 
+- S-D03-59（FILE-020/025/039、A05/A13/A14/A17/A19 recovery 名称窗口子断言）：W173 对
+  Windows 原生恢复的最后 identity check→rename 窗口补两项回归；原实现首次 **2/2**，无产品
+  新首败或修复。backup 原对象在恢复过程中两种 POSIX remap 均被 sharing violation=32 拒绝，
+  释放 guard 后相同 remap 确实可执行；并发建立的 foreign hardlink target使恢复原子拒绝，原 backup
+  与并发对象身份/字节保留。首次及 **20/20 × 2**，42个独立磁盘/目录项及hardlink身份核对通过，
+  cleanup 模块 **4/4**、fmt/diff通过；外部证据 `2026-09-30/windows/w173-file-recovery-window`。
+  仅补最小回归，不把 Windows 结果折算为 macOS 或完整 FILE Case；真实 IO fault、更多恢复组合、
+  正式 UI/角色及 N3/100 seed/LONG/99%仍开放，共享阶段继续推进。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

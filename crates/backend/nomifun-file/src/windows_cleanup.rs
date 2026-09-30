@@ -191,6 +191,75 @@ mod tests {
     use std::fs;
     use crate::windows_test_support::rename_with_posix_semantics;
 
+    fn recovery_fixture(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::env::var_os("NOMIFUN_FILE_PUBLICATION_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join(name))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&root).unwrap();
+        (temporary, root)
+    }
+
+    #[test]
+    fn recovery_window_locks_the_original_backup_name() {
+        let (_temporary, root) = recovery_fixture("locked-backup");
+        let backup = root.join("backup");
+        let target = root.join("target");
+        let foreign = root.join("foreign");
+        let displaced = root.join("displaced");
+        fs::write(&backup, b"original").unwrap();
+        fs::write(&foreign, b"foreign").unwrap();
+        let owner = OwnedFile::capture(&File::open(&backup).unwrap()).unwrap();
+        let mut blocked = Vec::new();
+        owner.restore_with_hook(&backup, &target, || {
+            for (source, destination, replace) in [(&backup, &displaced, false), (&foreign, &backup, true)] {
+                let failure = rename_with_posix_semantics(source, destination, replace).unwrap_err();
+                blocked.push(failure.raw_os_error());
+                assert_eq!(failure.raw_os_error(), Some(32));
+            }
+        }).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        assert_eq!(fs::read(&foreign).unwrap(), b"foreign");
+        assert!(!backup.exists() && !displaced.exists());
+        drop(owner);
+        // The identical remap becomes possible after the recorded operation
+        // releases its name guard; the fixture can perform the attempted race.
+        fs::write(&backup, b"next original").unwrap();
+        rename_with_posix_semantics(&backup, &displaced, false).unwrap();
+        rename_with_posix_semantics(&foreign, &backup, true).unwrap();
+        assert_eq!(fs::read(&backup).unwrap(), b"foreign");
+        assert_eq!(fs::read(&displaced).unwrap(), b"next original");
+        fs::write(root.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blocked_native_codes":blocked, "restored_original":true, "foreign_preserved":true,
+            "same_race_possible_after_release":true,
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn recovery_window_preserves_a_concurrent_hardlink_target() {
+        let (_temporary, root) = recovery_fixture("concurrent-hardlink");
+        let backup = root.join("backup");
+        let target = root.join("target");
+        let foreign = root.join("foreign");
+        fs::write(&backup, b"original").unwrap();
+        fs::write(&foreign, b"concurrent").unwrap();
+        let owner = OwnedFile::capture(&File::open(&backup).unwrap()).unwrap();
+        let failure = owner.restore_with_hook(&backup, &target, || {
+            fs::hard_link(&foreign, &target).unwrap();
+        }).unwrap_err();
+        assert_eq!(failure.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&backup).unwrap(), b"original");
+        assert_eq!(fs::read(&target).unwrap(), b"concurrent");
+        assert_eq!(fs::read(&foreign).unwrap(), b"concurrent");
+        let concurrent_owner = OwnedFile::capture(&File::open(&foreign).unwrap()).unwrap();
+        assert!(concurrent_owner.matches_handle(&File::open(&target).unwrap()).unwrap());
+        assert!(!owner.matches_handle(&File::open(&target).unwrap()).unwrap());
+        fs::write(root.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "error_kind":"AlreadyExists", "original_backup_preserved":true,
+            "concurrent_hardlink_preserved":true, "foreign_object_identity_unchanged":true,
+        })).unwrap()).unwrap();
+    }
+
     #[test]
     fn cleanup_locks_the_named_object_until_handle_deletion_finishes() {
         let fixture = tempfile::tempdir().unwrap();
