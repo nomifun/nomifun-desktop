@@ -1691,6 +1691,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   authority loss/恢复、其他 transfer failure、worker panic、正式 Tauri/角色、Linux/Windows 原生与
   完整 Case/统计仍开放，Windows 原结果未改写。
 
+- **S-D04-38**（`PROC-039/050`、A13/A18，Engine/App 未注册启动的迟到收据）：M06-09 首个
+  App 组件反例证明，即使已有精确清理证明，`unregistered_start` 仍永久报 unknown。现 Engine
+  在首个 native await 前跟踪不可变 host owner，App cleanup 接 native quiesce fence；只有对应
+  owner 的已证明 Session/startup 收据能解除标记，不以空 map、外来 call 或非 exact 报告代替。
+  部分精确收据跨重试保留，cleanup panic 的既有不确定性继续存在。
+- macOS Native Engine Pipe/PTY caller-drop 两场景 **42/42**，独立 PID/owner/清理 **42/42**；
+  App process-host **8/8**、Core process **20/1 ignored**、fmt/boundary/diff 通过。原组件首败及
+  两次 native 夹具编译失败保留，最终走既有安全身份 API，无新增依赖或 unsafe lint 放宽。
+  证据 `2026-09-30/macos/m06-engine-startup-fence/`，外部模型实际调用 0；正式 Tauri/live
+  Provider、pre-exec auxiliary App 全链路、完整真实 Turn cancel、永久 authority loss/恢复、
+  worker panic、其他平台/角色与完整统计仍开放，Windows 原结果未改写。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

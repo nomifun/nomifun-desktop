@@ -30,7 +30,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～08 已验 shutdown/写锁、start 取消/IO failure/deadline/commit failure、pre-exec 辅助清理责任、caller-drop/quiesce 组合及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～09 已验 shutdown/写锁、start 取消/IO failure/deadline/commit failure、pre-exec 辅助清理、caller-drop/quiesce 与 Engine 精确收据衔接及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
@@ -1096,3 +1096,18 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批是原生组件和 Engine 定向影响检查，未验真实 Engine cancel/正式 Tauri、真实永久 authority
   loss/后续恢复、其他 transfer failure、worker panic、其他平台/角色与 LONG/99%。Windows 原
   结果未改写，不关闭完整 PROC/M06 或阶段二、三。
+
+- **M06-09 Engine unregistered-start fence**（`PROC-039/050`、A13/A18 的 App/Engine 子断言）：
+  macOS 26.6.2 / 原生 arm64 / APFS。走查发现 App 的 `unregistered_start` 永久拒绝清理，未读取
+  后来的精确 native 收据；组件首败 `run-001` 已保留。公共根因/修复见 `S-D04-38`：Engine 在首个
+  native await 前保存宿主 owner，App cleanup 通过其 fence 核对收据；空报告、同 invocation 的
+  其他 call、未证明清理不能解除 unknown，部分精确收据保留到后续重试，panic 不确定性不清除。
+- Native Engine Pipe/PTY 的已 exec、未交付 handle、caller future drop 两场景首次 + 20 repeats
+  **42/42**；独立 PID marker/原 owner/物理 PID 消失 **42/42**，精确 fence 后 tracking 为零。
+  App process-host **8/8**，Core process **20 通过/1 ignored**，fmt/boundary/diff 通过。
+  Native 夹具缺 libc/违反既有 unsafe lint 的两次编译失败单列保留；最终使用现有安全身份探测，
+  未关闭或放宽 `forbid(unsafe_code)`，无新依赖。证据 `2026-09-30/macos/m06-engine-startup-fence/`。
+- 本批未额外调用外部测试模型（实际 0 次）；仅 App 组件与 Native Engine adapter 验证，未替代
+  正式 Tauri/live Provider、完整真实 Turn cancel、pre-exec auxiliary 故障的 App 全链路、永久
+  authority loss/恢复、worker panic、其他平台/角色或 LONG/99%。Windows 原结果未改写，完整
+  PROC/M06 与阶段二、三仍开放；需要 live 的 Case 另冻结小批次调用上限。
