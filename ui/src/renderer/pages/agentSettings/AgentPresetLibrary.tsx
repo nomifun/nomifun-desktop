@@ -10,7 +10,7 @@ import ContentSider from '@/renderer/components/layout/ContentSider';
 
 type Selection = { kind: 'template'; template: OfficialPresetTemplate } | { kind: 'preset'; preset: AgentPresetSummary } | null;
 type Props = {
-  width?: number; resizeHandle?: React.ReactNode; onCollapse?: () => void;
+  width?: number; resizeHandle?: React.ReactNode; onCollapse?: () => void; footer?: React.ReactNode;
   library: AgentPresetLibraryResponse; selection: Selection; busy: boolean; creating: boolean;
   dirtyPresetId?: AgentPresetId;
   openingPresetId: string | null; deletingPresetId: string | null;
@@ -28,7 +28,7 @@ const TemplateIcon: React.FC<{ templateKey: OfficialPresetKey }> = ({ templateKe
 };
 
 const AgentPresetLibrary: React.FC<Props> = ({
-  width = 300, resizeHandle, onCollapse, library, selection, busy, creating, openingPresetId, deletingPresetId,
+  width = 300, resizeHandle, onCollapse, footer, library, selection, busy, creating, openingPresetId, deletingPresetId,
   dirtyPresetId,
   onSelectTemplate, onSelectPreset, onCreatePreset, onDeletePreset,
 }) => {
@@ -43,7 +43,6 @@ const AgentPresetLibrary: React.FC<Props> = ({
     return matches(t(`agentSettings.template.${path}.name`), t(`agentSettings.template.${path}.description`));
   });
   const presets = library.user_presets.filter((preset) => matches(preset.display_name, preset.description));
-  const minimalTemplate = library.official_templates.find((template) => template.template_key === 'chat.minimal');
   const activateTab = (next: 'mine' | 'official') => {
     setMode(next);
     requestAnimationFrame(() => tabRefs.current.get(next)?.focus());
@@ -59,7 +58,7 @@ const AgentPresetLibrary: React.FC<Props> = ({
     activateTab(next);
   };
 
-  return <ContentSider width={width} resizeHandle={resizeHandle} className={styles.library} ariaLabel={t('agentSettings.library.ariaLabel')} header={<>
+  return <ContentSider width={width} resizeHandle={resizeHandle} footer={footer} className={styles.library} ariaLabel={t('agentSettings.library.ariaLabel')} header={<>
     <div className={styles.libraryHeader}>
       <div className={styles.libraryTitle}>{t('agentSettings.title')}<button type='button' onClick={onCollapse} aria-label={t('agentSettings.workbench.hideList')} title={t('agentSettings.workbench.hideList')}><ExpandLeft theme='outline' size={15} /></button></div>
       <Button size='small' icon={<AddOne theme='outline' size={15} />} loading={creating} disabled={busy} onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}>{t('agentSettings.actions.create')}</Button>
@@ -71,20 +70,6 @@ const AgentPresetLibrary: React.FC<Props> = ({
     </div>
     </>}>
     <div className={styles.libraryBody} id='agent-library-panel' role='tabpanel' aria-labelledby={`agent-library-tab-${mode}`}>
-      {library.fresh_start.user_preset_count === 0 && (
-        <section className={styles.firstRun} aria-label={t('agentSettings.workbench.firstRunTitle')}>
-          <strong>{t('agentSettings.workbench.firstRunTitle')}</strong>
-          <p>{t('agentSettings.workbench.firstRunHint')}</p>
-          <div>
-            <Button size='small' disabled={busy || !minimalTemplate} onClick={() => {
-              if (minimalTemplate) onSelectTemplate(minimalTemplate);
-            }}>{t('agentSettings.workbench.startMinimal')}</Button>
-            <Button size='small' type='text' disabled={busy} onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}>
-              {t('agentSettings.workbench.startCustom')}
-            </Button>
-          </div>
-        </section>
-      )}
       <p className={styles.libraryHint}>{t(mode === 'mine' ? 'agentSettings.workbench.myHint' : 'agentSettings.workbench.officialHint')}</p>
       {mode === 'official' ? <div className={styles.libraryList}>
         {templates.map((template) => {

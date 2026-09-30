@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
+import { SettingConfig } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { agentPlatform } from '@/common/adapter/ipcBridge';
 import type { AgentCatalogResponse, InstallationRoleBinding, RoleProviderSelection } from '@/common/types/agentPlatform';
@@ -41,7 +42,7 @@ export default function AgentRoleDefaults({ catalog }: { catalog: AgentCatalogRe
   };
   const roleIds = [...new Set([...catalog.roles.map(role => role.role.key.role_id), ...bindings.map(binding => binding.selection.role.key.role_id)])].sort();
   return <>
-    <Button onClick={() => { setOpen(true); void load(); }}>{t('agentSettings.providers.defaultsTitle')}</Button>
+    <Button icon={<SettingConfig theme='outline' size={15} />} onClick={() => { setOpen(true); void load(); }}>{t('agentSettings.providers.defaultsTitle')}</Button>
     <Modal visible={open} title={t('agentSettings.providers.defaultsTitle')} footer={null}
       onCancel={() => { if (!saving) setOpen(false); }} autoFocus focusLock>
       <div style={{ maxHeight: '65vh', overflowY: 'auto' }}>
