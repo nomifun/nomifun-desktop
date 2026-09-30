@@ -2884,7 +2884,14 @@ async fn effect_store_requires_exact_tool_causation_and_immutable_terminal_ident
 
 #[tokio::test]
 async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() {
-    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let fixture_root = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
+        .map(|root| std::path::PathBuf::from(root).join("data"))
+        .unwrap_or_else(|| directory.path().to_path_buf());
+    std::fs::create_dir_all(&fixture_root).unwrap();
+    let database_path = fixture_root.join("agent.db");
+    let database = nomifun_db::init_database(&database_path).await.unwrap();
+    let mut store = AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
     let (session, ready_event) = create_ready(&store, "effect").await;
     let turn = append(
         &session.agent_session_id,
@@ -3018,10 +3025,28 @@ async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() 
         causation_event_id: Some(uncertain_ack.event_id.clone()),
         ..started.clone()
     };
-    store
-        .reconcile_effect(reconcile, EffectReconcileOutcome::StillUncertain)
+    let committed_reconcile = store
+        .reconcile_effect(reconcile.clone(), EffectReconcileOutcome::StillUncertain)
         .await
         .unwrap();
+    database.close().await;
+    store = AgentSessionStore::connect_existing(&database_path).await.unwrap();
+    let mut retry_reconcile = reconcile;
+    retry_reconcile.recorded_at += 1_000;
+    let replay = store.reconcile_effect(retry_reconcile.clone(), EffectReconcileOutcome::StillUncertain)
+        .await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.record, committed_reconcile.record);
+    assert_eq!(replay.ack, committed_reconcile.ack);
+    let head = store.head(&session.agent_session_id).await.unwrap();
+    assert!(matches!(store.reconcile_effect(retry_reconcile.clone(),
+        EffectReconcileOutcome::ConfirmedSucceeded {receipt: json!({"receipt": "different fact"})}).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+    let mut changed_identity = retry_reconcile;
+    changed_identity.resource_key = Some("workspace:other-resource".to_owned());
+    assert!(matches!(store.reconcile_effect(changed_identity, EffectReconcileOutcome::StillUncertain).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().last_seq, head.last_seq);
     let effect = store
         .read_effect(&session.agent_session_id, "effect-1")
         .await
@@ -3055,6 +3080,7 @@ async fn external_uncertain_effect_is_terminal_until_owning_plugin_reconciles() 
             .projection["state"],
         "still_uncertain"
     );
+    store.test_pool().close().await;
 }
 
 #[tokio::test]

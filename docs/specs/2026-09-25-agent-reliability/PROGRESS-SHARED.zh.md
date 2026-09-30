@@ -617,6 +617,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   无正式 UI/模型。池关闭/取消与驱逐组合、fsync/WAL 损坏、正式 shutdown、其他平台及完整
   N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0 或共享阶段。
 
+- S-D09-44（LIFE-007/008/011、G0-025、A04/A06/A07/A09/A17/A19 reconciliation receipt 时间
+  重放子断言）：W164 在相邻 `reconcile_effect` 复现相同回执仅时间变化就误报 IdempotencyConflict，
+  首败保留。terminal 与 reconciliation 现共用保留首次时间的事务写入口，全部身份和核对结果仍精确
+  去重。关闭所有连接后重新打开磁盘 Store，同 receipt 返回原 record/ack，结果或资源变化仍冲突，
+  Unknown 与 reconciliation fence 保留。磁盘重开首次及 **20/20**，独立核对 21 个 DB 均为唯一
+  StillUncertain 回执、原时间 20、8 条连续事件、零重放新事件；Session Store **76/76**、相邻
+  terminal 身份/删除 fence **2/2**，fmt/diff 通过。无正式 UI/模型；confirmed outcome 完整矩阵、
+  真实外部 owner、池关闭/取消、正式 shutdown、其他平台和完整 N3/LONG/99% 仍开放。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
