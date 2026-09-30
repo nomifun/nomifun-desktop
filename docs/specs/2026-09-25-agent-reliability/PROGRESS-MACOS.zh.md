@@ -1111,3 +1111,21 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   正式 Tauri/live Provider、完整真实 Turn cancel、pre-exec auxiliary 故障的 App 全链路、永久
   authority loss/恢复、worker panic、其他平台/角色或 LONG/99%。Windows 原结果未改写，完整
   PROC/M06 与阶段二、三仍开放；需要 live 的 Case 另冻结小批次调用上限。
+
+- **M04-27 real StepFun terminal / bounded live fixture**（`ACOD-002/014`、`CTRL-006` 的接续尝试，
+  `MODEL-019/027/035`、`OBS-005/007` 的本批失败投影子断言）：macOS 26.6.2 / 原生 arm64 / APFS；
+  fresh 正式 Tauri dev App `ca9b51e91228…`，deep/strict ad-hoc 签名通过，不作 release/notarization 证据。
+  从本机 encrypted `stepfun-plan` / `step-3.7-flash` 读取凭据，仅内存解密、stdin 交给 fixture。
+  冻结 **1 Session / 最多 6 次上游请求 / 每次 1024 output tokens / 180 秒模型转发窗口**；实际
+  **1 次上游尝试**在 HTTP 响应前 transport failure，随后停止转发。无认证/额度 HTTP 证据，不归因为
+  凭据或余额；无凭据 HEAD 在直连及现有代理路径独立得到 TLS error，未关闭 TLS 校验或改系统代理。
+- fixture 原先固定 32/4096 且统一改写上游拒绝为 502；现可显式收紧调用/输出/时间上限，剩余请求
+  timeout 不超过原截止点，首次上游状态保留，拒绝后本地重试不再转发。四项护栏首次 + 20 repeats
+  **84/84**，完整 example **5/5**；只改测试 fixture，不把组件结果替代 post-fix live terminal。
+- 正式 UI 显示 provider unavailable 暂停、任务未完成；seq 27 `cleanup_proven=true`，UI 结束本回合后
+  seq 28 cancelled/head ready。独立闭库查询：effect **0**、witness **0**、源码仍为原 `+2`、无 completed；
+  DB/闭库备份均 `ok`，owned App/Helper/fixture/listener **0**。普通 readonly 收集的 SQLite 14 首败
+  与空输出保留，另以 immutable 只读 URI 验证，不改原 DB。凭据 exact match **0**。
+- 证据 `2026-09-30/macos/m04-live-terminal/`；该 live 正向任务为 transport 阻断，M04-23 terminal、
+  真实模型效率/N3/20/99%、其他角色/平台与旧 MM retry spinner 仍开放；本批没有新公共产品根因，
+  不改共享进度或 Windows 结果，不关闭完整 Case、M04 或阶段二、三。
