@@ -3033,6 +3033,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 正式 Tauri UI/Runtime/真实模型、其他角色、macOS及完整N3/100 seed/LONG/99%仍开放；
   不关闭完整 Case 或共享阶段；应用宿主组件结果不代替正式产品入口。
 
+### 正式 Tauri cancelled 冷读与页面重连（W182，基线 `dbb786ebf`）
+
+- S-D09-51 / LIFE-020、OBS-014、A05/A10/A13/A17/A19：复用 W165 原隔离 data/work/profile，
+  保存完整 DB 基线后，以最新配对前端/正式 Tauri custom-protocol 在1280×832完成 **1次冷启动、
+  1次页面重连**。三个 Turn 显示“已取消执行”，展开仍保留原文件完成回执，Session空闲，无结束/
+  恢复按钮；原provider端口以健康受控监听器证明新增模型请求0。
+- 独立只读 DB/文件核对：3 cancelled、3 returned、213 events及head全记录摘要不变，
+  文件digest不变，零running/paused Turn、pending/unknown effect或新执行；没有重放/重复工具行。
+  UI截图、accessibility、完整 DB、provider记录、构建身份及日志均在外部
+  `2026-09-30/windows/w182-tauri-cancelled-cold-load`，原W165失败记录保留。
+- 首次前端构建因锁定的plugin-fs未安装失败，冻结安装补4包后构建通过；包/锁文件及产品源码
+  未变。辅助PS parser/日期类型护栏错误保留，修正后保持原15秒PID身份护栏；桌面边界/diff通过。
+- 托盘窗口仍不可操作，quiescent GUI只做已核对PID/路径/创建时间/数据根的强制清理，provider
+  经HTTP正常关闭；最终GUI/profile/provider均0。graceful quit、N3冷启动、真实模型、其他角色/
+  macOS及LONG/99%未验，不关闭完整Case/共享阶段；只有简短进度入Git。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。
