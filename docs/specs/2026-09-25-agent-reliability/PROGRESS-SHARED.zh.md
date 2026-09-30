@@ -723,6 +723,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   一次完整校验并如实计入IO计数。staging/drop 名称复用、rollback check→unlink、并发增长预算、真实满盘/fsync、
   正式 UI/模型/其他角色平台和完整长期门槛仍开放，不关闭完整Artifact或共享阶段。
 
+- S-D03-61（ART-002/004/005/006、A05/A07/A13/A14/A15/A17/A19 Artifact 并发增长预算
+  子断言）：W175 在真实 metadata→read 窗口把8字节源/blob追加为131,080字节，原实现虽最终拒绝，
+  两条路径均完整扫描新增内容，首败 **0/2** 与磁盘/IO计数留在外部 W175。现 stage与verified load
+  都按观察大小加1字节封顶；检测增长立即Conflict，禁止额外暂存/hash/cache，不把截断当成功。
+  首轮模块 Windows **20/20**、新两项 **20/20 × 2**、独立磁盘/计数 **42/42**，每项131,080→9字节；
+  WSL ext4模块 **23/23**与两原生场景独立核对、fmt/diff通过，不代判macOS。原增长数据保留、
+  零publication temp，正常分页/cache复用不变。证据 `2026-09-30/windows/w175-artifact-growth-budget`。
+  连续多进程写、上限512MiB样本、staging/drop及rollback名称竞态、真实IO fault、完整UI/角色平台
+  和长期门槛仍开放，不关闭完整ART或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
