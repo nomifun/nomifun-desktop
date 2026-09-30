@@ -1239,3 +1239,14 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批只收最小复现入口及脚本回归；native 三次均保留 FAIL/forced-cleanup，不能以 Mac lib 通过或
   原空数据 signal exit 0 关闭。记录 `2026-10-01/macos/c05-context-release/`；系统授权/解锁条件需
   人工核对，后续只重验该 native 子链与正式已完成 Session 的退出，不扩回 Browser/soak 矩阵。
+
+- **MAC-C03-01 exact unified diff output**（C03、`CMD-137`、`VCS-003` 的本批渲染子断言）：
+  复用 MAC-A-01 真实回执里的 `Fdiff/H@@`，当前两处 formatter 仍把 libgit2 分类标记拼成正文。
+  修前 App 与公开 VCS 工具的 Git CLI byte oracle 均失败，完整首败在 `run-001-first-failure`。
+- 公共修复 **C03-01** 仅为 context/add/delete 内容行补 `' '/'+'/'-'`，完整 header、EOF marker、
+  binary notice 原样输出；不做字符串替换，不误删真正以 F/H 开头的内容。修后 staged/unstaged、
+  无 EOF newline 与 binary 输出逐 byte 等于本机 Git CLI **1/1**；子 repo/根路径/越界 **1/1**、
+  VCS 工具相邻回归 **6/6**。原文件与 staged/unstaged 状态独立核对，路径/owner 过滤、权限、
+  1 MiB/UTF-8 截断规则不变，首次 FAIL 不覆盖。
+- 证据 `2026-10-01/macos/c03-diff-render/`。本批未额外调用模型或重跑完整领域；正式 Tauri/live
+  修后、当前 MAC-A 首发/N3 及 C05 系统授权/退出仍开放，不以组件 PASS 关闭完整场景或 Windows 验收。

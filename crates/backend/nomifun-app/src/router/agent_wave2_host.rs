@@ -1852,7 +1852,9 @@ fn append_diff_patch(
         if owner_delta {
             return true;
         }
-        if line.origin() != '\0' {
+        // Only content lines need a unified-diff sigil. Headers, binary
+        // notices and EOF markers already contain their complete text.
+        if matches!(line.origin(), ' ' | '+' | '-') {
             patch.push(line.origin());
         }
         patch.push_str(&String::from_utf8_lossy(line.content()));
@@ -7581,6 +7583,47 @@ mod tests {
         assert!(!root.path().join(".git").exists());
         std::fs::write(root.path().join(".git"),"not a valid gitdir file").unwrap();
         assert!(scoped_repository_if_present(root.path()).is_err(),"corruption is not normal repository absence");
+    }
+
+    #[tokio::test]
+    async fn vcs_diff_matches_git_cli_headers_content_and_eof_markers() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = initialize_git_repository(directory.path());
+        std::fs::write(directory.path().join("tracked.txt"), "base\nstaged\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("tracked.txt")).unwrap();
+        index.write().unwrap();
+        std::fs::write(directory.path().join("tracked.txt"), "base\nstaged\nFcontent\nHcontent").unwrap();
+        let host = test_host(directory.path()).await;
+        let result = invoke(&host, context(directory.path()), "workspace.vcs/diff", json!({"path":"tracked.txt"}))
+            .await.unwrap();
+        for (field, staged) in [("staged_patch", true), ("unstaged_patch", false)] {
+            let mut command = std::process::Command::new("git");
+            command.current_dir(directory.path()).args([
+                "-c", "color.ui=false", "-c", "core.abbrev=7", "diff", "--no-ext-diff", "--no-textconv",
+            ]);
+            if staged { command.arg("--cached"); }
+            let expected = command.args(["--", "tracked.txt"]).output().unwrap();
+            assert!(expected.status.success());
+            assert_eq!(result.0[field].as_str().unwrap().as_bytes(), expected.stdout,
+                "Git callback categories must not leak into {field}");
+        }
+        let patch = result.0["patch"].as_str().unwrap();
+        assert!(patch.contains("+Fcontent\n+Hcontent\n\\ No newline at end of file\n"));
+        assert_eq!(std::fs::read(directory.path().join("tracked.txt")).unwrap(), b"base\nstaged\nFcontent\nHcontent");
+        assert!(repository.status_file(Path::new("tracked.txt")).unwrap().contains(git2::Status::INDEX_MODIFIED));
+        assert!(repository.status_file(Path::new("tracked.txt")).unwrap().contains(git2::Status::WT_MODIFIED));
+        std::fs::write(directory.path().join("tracked.txt"), b"\0binary change").unwrap();
+        let binary = invoke(&host, context(directory.path()), "workspace.vcs/diff", json!({"path":"tracked.txt"}))
+            .await.unwrap();
+        let expected = std::process::Command::new("git").current_dir(directory.path())
+            .args(["-c", "color.ui=false", "-c", "core.abbrev=7", "diff", "--no-ext-diff", "--no-textconv", "--", "tracked.txt"])
+            .output().unwrap();
+        assert!(expected.status.success());
+        assert_eq!(binary.0["unstaged_patch"].as_str().unwrap().as_bytes(), expected.stdout,
+            "the binary origin is not an extra B prefix");
+        assert!(binary.0["unstaged_patch"].as_str().unwrap().contains("Binary files"));
+        assert_eq!(std::fs::read(directory.path().join("tracked.txt")).unwrap(), b"\0binary change");
     }
 
     #[tokio::test]
