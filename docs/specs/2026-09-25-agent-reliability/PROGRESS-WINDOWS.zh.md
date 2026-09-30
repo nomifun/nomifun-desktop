@@ -2978,6 +2978,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - startup stale cleanup、Unix stage/rollback check→unlink、更多IO fault、完整应用/UI/角色平台
   及N3/100 seed/LONG/99%仍开放；不关闭完整Case或共享阶段。
 
+### Artifact 512MiB+1真实文件准入（W178，基线 `ad9836e19`）
+
+- S-D03-64 / ART-005/006、A05/A13/A14/A15/A17/A19：NTFS sparse source/blob真实逻辑大小
+  536,870,913字节，超过512MiB一字节；源publish以BadRequest、blob校验以Conflict拒绝，
+  full-scan计数均0，对象/大小不变、无publication temp或false success，权限和断言未放宽。
+- 首次 **2/2**，最终源独立三样本 **3×2/2**、六份外部磁盘/稀疏属性核对；Windows模块
+  **28/28**、WSL Ubuntu ext4模块 **28/28**、两原生超限文件及IO核对、fmt/diff通过。
+  原实现首次满足，无新产品FAIL或生产源码变更，只补边界回归；无模型/UI。现场、日志、源码/
+  binary身份在外部 `2026-09-30/windows/w178-artifact-size-admission`，Linux不计macOS。
+- 未覆盖恰好512MiB完整发布、持续增长、startup stale cleanup、Unix最终窗口、真IO fault、
+  正式UI/平台/角色及N3/100 seed/LONG/99%；不关闭完整Case或共享阶段。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。
