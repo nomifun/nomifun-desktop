@@ -1224,6 +1224,27 @@ async fn windows_program_powershell_initializes_under_managed_owner() {
 }
 
 #[cfg(windows)]
+#[tokio::test]
+async fn windows_powershell_autoloads_hash_cmdlet_under_managed_owner() {
+    let workspace = tempfile::Builder::new().prefix("任务 hash ").tempdir().unwrap();
+    fs::write(workspace.path().join("normal.txt"), b"fixture").unwrap();
+    let script = "$ErrorActionPreference = 'Stop'; (Get-FileHash -LiteralPath 'normal.txt' -Algorithm SHA256).Hash";
+    let mut process = request("powershell.exe", ["-NoProfile", "-Command", script].map(OsString::from));
+    process.cwd = workspace.path().to_path_buf();
+    process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("hash command starts");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, .. } = outcome else {
+        panic!("hash command should exit: {outcome:?}");
+    };
+    assert_eq!(code, Some(0), "hash cmdlet output: {}", output.text());
+    let hash = output.text().trim().to_owned();
+    assert_eq!(hash.len(), 64, "SHA-256 must actually be returned: {hash}");
+    assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+}
+
+#[cfg(windows)]
 async fn wait_for_windows_pid_marker(path: &Path) -> u32 {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

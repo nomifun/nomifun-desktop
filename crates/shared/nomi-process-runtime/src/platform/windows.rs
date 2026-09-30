@@ -3805,7 +3805,18 @@ impl PreparedCommand {
                 reason: error.to_string(),
             },
         )?;
-        let environment = encode_environment(&request.env)?;
+        let environment = if is_system_powershell(&application_program) {
+            // A host launched from PowerShell 7 inherits its module search path.
+            // Windows PowerShell 5.1 then selects incompatible modules ahead of
+            // its own, so ordinary cmdlets such as Get-FileHash cannot autoload.
+            // Let 5.1 construct its native defaults; explicit caller overrides
+            // retain their existing semantics.
+            encode_environment_from(std::env::vars_os().filter(|(key, _)| {
+                compare_os_case_insensitive(key, OsStr::new("PSModulePath")) != Ordering::Equal
+            }), &request.env)?
+        } else {
+            encode_environment(&request.env)?
+        };
         Ok(Self {
             application,
             command_line,
@@ -3939,6 +3950,18 @@ fn powershell_executable() -> Result<OsString, ProcessError> {
         });
     }
     Ok(executable.into_os_string())
+}
+
+fn is_system_powershell(program: &OsStr) -> bool {
+    if !Path::new(program).file_name().is_some_and(|name| {
+        compare_os_case_insensitive(name, OsStr::new("powershell.exe")) == Ordering::Equal
+    }) {
+        return false;
+    }
+    let Ok(trusted) = powershell_executable() else { return false };
+    let Ok(actual) = crate::request::canonicalize_compatible(Path::new(program)) else { return false };
+    let Ok(expected) = crate::request::canonicalize_compatible(Path::new(&trusted)) else { return false };
+    compare_os_case_insensitive(actual.as_os_str(), expected.as_os_str()) == Ordering::Equal
 }
 
 fn powershell_payload(script: &str) -> String {

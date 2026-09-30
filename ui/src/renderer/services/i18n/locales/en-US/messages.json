@@ -13,7 +13,8 @@
     "canceled": "Canceled {{target}}",
     "skipped": "Skipped {{target}}",
     "invalidArguments": "Arguments did not pass validation; {{target}} was not run",
-    "notExecuted": "Did not run {{target}}"
+    "notExecuted": "Did not run {{target}}",
+    "commandExited": "{{target}} ended with exit code {{code}}"
   },
   "processReceipt": {
     "tool": "tool",
@@ -48,7 +49,8 @@
     "preparedResponse": "Prepared the result",
     "prepareResponse": "Prepare the result",
     "failedOperations": "{{count}} operations did not complete",
-    "recoveredOperations": "{{count}} operations encountered an error",
+    "recoveredOperations": "{{count}} earlier attempts did not succeed",
+    "commandNonzero": "{{count}} commands ended with exit code {{code}}",
     "searchResultsLimited": "Search results limited; full reconciliation required",
     "recoveredAfterRetry": "{{target}} recovered · retried {{count}} times",
     "summarySeparator": ", ",

@@ -6,6 +6,63 @@ import {
 } from './normalizeToolCall';
 
 describe('normalizeToolCall', () => {
+  const nativeExit = (code = 1) => ({
+    state: 'exited', exit_code: code, signal: null,
+    output: { text: '0 pass, 1 fail', next_cursor: 14, retained_bytes: 14, dropped_bytes: 0 },
+    cleanup: { interrupt_attempted: false, terminate_attempted: false, force_kill_attempted: false,
+      reaped: true, elapsed_ms: 0, errors: [] },
+    process_id: 'owned-process', success: code === 0,
+  });
+
+  it('keeps a real native nonzero exit visible as a command outcome', () => {
+    const output = JSON.stringify(nativeExit());
+    const result = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'diagnostic-test', name: 'exec_command', status: 'error', output,
+    } } as any);
+    expect(result?.status).toBe('error');
+    expect(result?.commandExitCode).toBe(1);
+    expect(result?.nonFatalFailure).toBe(true);
+    expect(result?.output).toBe(output);
+  });
+
+  it('does not relabel infrastructure, signal or cleanup failures as ordinary command exits', () => {
+    for (const receipt of [
+      { ...nativeExit(), state: 'timed_out' },
+      { ...nativeExit(), signal: 9 },
+      { ...nativeExit(), exit_code: -1 },
+      { ...nativeExit(), cleanup: { ...nativeExit().cleanup, reaped: false } },
+      { ...nativeExit(), cleanup: { ...nativeExit().cleanup, errors: ['cleanup unproven'] } },
+      { ...nativeExit(), cleanup: { ...nativeExit().cleanup, force_kill_attempted: true } },
+    ]) {
+      const result = normalizeToolCall({ type: 'tool_call', content: {
+        call_id: 'failed-native', name: 'exec_command', status: 'error', output: JSON.stringify(receipt),
+      } } as any);
+      expect(result?.commandExitCode).toBeUndefined();
+      expect(result?.nonFatalFailure).toBeUndefined();
+      expect(result?.status).toBe('error');
+    }
+    const remote = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'remote', name: 'remote_exec_command', status: 'error', output: JSON.stringify(nativeExit()),
+    } } as any);
+    expect(remote?.nonFatalFailure).toBeUndefined();
+  });
+
+  it('recognizes the native structured argument rejection without hiding its diagnostic', () => {
+    const output = JSON.stringify({ status: 'not_executed', code: 'INVALID_TOOL_ARGUMENTS',
+      tool: 'read_tool_history', issues: [{ schema_path: '/properties/id/pattern',
+        expected: '^[0-9a-f]{64}$', parameter_path_template: '/id' }],
+      message: 'No call in this batch was executed.' });
+    const result = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'bad-history-id', name: 'read_tool_history', status: 'error', output,
+    } } as any);
+    expect(result?.notExecutedReason).toBe('invalid_arguments');
+    expect(result?.output).toBe(output);
+    const remote = normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'remote', name: 'remote_read_tool_history', status: 'error', output,
+    } } as any);
+    expect(remote?.notExecutedReason).toBeUndefined();
+  });
+
   it('preserves an explicit cancelled process receipt and its partial output', () => {
     const result = normalizeToolCall({type:'tool_call',content:{
       call_id:'cancel-call',name:'exec_command',status:'canceled',output:'STARTED',
