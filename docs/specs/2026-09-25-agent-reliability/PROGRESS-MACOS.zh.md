@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；live held-cancel/IME、nested frame 与扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -899,3 +899,30 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   packaged AgentSession/profile，`BROW-017` 与 `MAC-017` 的 macOS 功能验收槽现为 **PASS**。这不关闭
   其他 Browser Case、完整 D06/M04；真实 StepFun、nested frame/popup 正式 UI、release/notarization 与
   LONG/99% 仍按各自槽开放。
+
+- **M04-23 real StepFun Browser + Workspace functional chain**（真实 Provider 的本批单次预算冻结
+  子断言）：只读本机 `NomiFun-dev` 已加密 Provider，确认 exact `stepfun-plan` endpoint 与
+  `step-3.7-flash`；一次性仓库外 launcher 在内存 AES-GCM 解密后只把 key 放入既有 live wrapper 环境，
+  Cargo/argv/App/fixture 文件和日志均不接收明文。`run-001` 先选到无 credential 的 production data，
+  在任何请求前 fail closed；`run-002` 首次 App 又因未传 exact `NOMIFUN_WORK_DIR` 被 work-root receipt
+  拒绝，均原样保留。
+- 修正 App 启动后，`run-002` 的真实模型仍把 Workspace 看成空目录并在 29 calls 时由 UI 停止。DB
+  证明 Session binding 已准确冻结 `work` root；根因是 fixture 把 `app.js` 放在上层 `work/`，而当前
+  `default-workspace` 合同正确物理化为 `work/conversations/<session_id>`。fixture 现只在 exact managed
+  Session child 创建源码，HTTP `/app.js` 也读取同一路径；新增原生路径回归覆盖 macOS `/var` →
+  `/private/var` canonical alias，且 root-level `app.js` 必须不存在。
+- 最终 `run-004` 由正式 signed Tauri UI 提交 exact loopback URL 与 repair 任务，真实
+  `step-3.7-flash` 得到 trusted witnesses **[2, 2, 1]**，`changed_source_served=true`，最终绑定源码为
+  exact `function nextCount(value) { return value + 1; }`。第二个 2 是模型在 patch 成功前过早 reload/click，
+  未从历史中删除；一次 patch payload 被精确 rejected，随后一次 patch returned。Browser effects 为
+  navigate **7 returned**、act **3 returned**，最终零 pending/unknown、inline PNG 0。
+- 本轮冻结上限为最多 32 次真实 Provider 请求；Runtime 在 **30 model steps / 635 events** 后因 fixture
+  call cap 投影 `EXECUTION_MODEL_RATE_LIMITED`，`host_cleanup_proven=true`、head paused。功能链完成但
+  未提交 canonical completion，因此不记 terminal PASS；正式 UI “结束本回合”后 Turn cancelled/head
+  ready，最终 DB `ok`。wrapper 被 Ctrl-C 后两个 detached fixture 曾各保留唯一 listener，均在核对
+  exact PID/executable/argv 后定向 TERM 并清零；App/Helper/listener 最终为 0。
+- 凭据审计扫描本批 **869** 个仓库外文件、Git diff 与进程 argv，exact credential match 为 0；不提交
+  launcher、DB、日志或凭据。完整证据：`2026-09-30/macos/m04-browser-live-stepfun/`。本批只修 fixture
+  的 exact Session source placement，不改 `PROGRESS-SHARED`；真实 Provider 功能链子断言通过，但
+  terminal、N3/20/99% 与效率门槛保持开放。暂停 UI 同时把 canonical `cleanup_proven=true` 错显示为
+  “资源清理状态尚未确认”，作为下一公共 D02 问题簇处理，不在本条冒充已修复。
