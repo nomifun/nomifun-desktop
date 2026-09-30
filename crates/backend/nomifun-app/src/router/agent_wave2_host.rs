@@ -6201,6 +6201,71 @@ mod tests {
         database.close().await;
     }
 
+    #[tokio::test(flavor="multi_thread",worker_threads=2)]
+    async fn disk_full_after_busy_writer_fails_closed_and_recovers_once() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace=directory.path().join("workspace");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool=single_connection_pool(&database_path).await;
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host=Arc::new(Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone()));
+        let mut call=context(&workspace);
+        call.idempotency_key=IdempotencyKey::from("busy-then-disk-full-admission");
+        call.operation_id=OperationId::from("busy-then-disk-full-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id=wave2_effect_id(&call).unwrap();
+        let input=StrictJsonValue(json!({
+            "path":"busy-full.txt","content":"execute after the disk recovers"
+        }));
+        set_database_page_budget(&pool,true).await;
+
+        let mut writer=database.pool().begin().await.unwrap();
+        sqlx::query("UPDATE users SET updated_at=updated_at")
+            .execute(&mut *writer).await.unwrap();
+        let blocked_host=Arc::clone(&host);
+        let blocked_call=call.clone();
+        let blocked_input=input.clone();
+        let mut blocked=tokio::spawn(async move {
+            blocked_host.invoke(Wave2HostRequest {
+                context:blocked_call,
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:blocked_input },
+            }).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!blocked.is_finished(),"admission must wait for the existing writer");
+        assert!(!workspace.join("busy-full.txt").exists());
+        assert!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+        writer.commit().await.unwrap();
+
+        let error=tokio::time::timeout(Duration::from_secs(6),&mut blocked).await
+            .expect("admission must finish after the writer releases")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("full"),"{error:?}");
+        assert!(!workspace.join("busy-full.txt").exists());
+        assert!(observer.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none());
+
+        set_database_page_budget(&pool,false).await;
+        let result=host.invoke(Wave2HostRequest {
+            context:call.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(std::fs::read(workspace.join("busy-full.txt")).unwrap(),b"execute after the disk recovers");
+        let effects=store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        drop(observer);
+        pool.close().await;
+        database.close().await;
+    }
+
     #[tokio::test]
     async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
         let directory = tempfile::tempdir().unwrap();
