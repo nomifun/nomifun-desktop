@@ -713,6 +713,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   仅补最小回归，不把 Windows 结果折算为 macOS 或完整 FILE Case；真实 IO fault、更多恢复组合、
   正式 UI/角色及 N3/100 seed/LONG/99%仍开放，共享阶段继续推进。
 
+- S-D03-60（ART-001/002/005、FILE-038/039、A04/A05/A07/A13/A14/A17/A19 Artifact 发布字节
+  子断言）：W174 两个首次反例均失败；暂存或 post-link blob 同 inode/同长度改成错误字节后，
+  原 publish 仍返回成功及旧 digest/chunk index。证据根为外部 `2026-09-30/windows/w174-artifact-publication-bytes`，
+  首败及坏 blob 留在 `01-first-product-run`。新发布复用现有 reader 完整 hash 校验及大小准入边界，
+  再比 staged 身份/大小；仅真实验证结果进入 receipt/cache。原确认 rollback 与 unknown 分支不变。
+  Windows 模块 **18/18**、新两项 **20/20 × 2**、独立磁盘 **42/42**；WSL ext4 模块 **21/21**、
+  两个原生场景独立核对通过，fmt/diff通过，不代判macOS。分页复用仍无额外full scan；新发布增加
+  一次完整校验并如实计入IO计数。staging/drop 名称复用、rollback check→unlink、并发增长预算、真实满盘/fsync、
+  正式 UI/模型/其他角色平台和完整长期门槛仍开放，不关闭完整Artifact或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
