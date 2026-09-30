@@ -2848,10 +2848,38 @@ async fn effect_store_requires_exact_tool_causation_and_immutable_terminal_ident
         recorded_at: 32,
         ..started
     };
-    store
-        .record_effect_terminal(terminal, EffectTerminalState::Succeeded)
+    let committed = store
+        .record_effect_terminal(terminal.clone(), EffectTerminalState::Succeeded)
         .await
         .unwrap();
+    let mut retry = terminal;
+    retry.recorded_at = 1_032;
+    let replay = store.record_effect_terminal(retry.clone(), EffectTerminalState::Succeeded)
+        .await.unwrap();
+    assert!(replay.duplicate);
+    assert_eq!(replay.record, committed.record);
+    assert_eq!(replay.ack, committed.ack);
+    let head = store.head(&session.agent_session_id).await.unwrap();
+    for field in ["payload", "operation_id", "owner_domain", "input_digest", "resource_key",
+        "producer_id", "causation_event_id"] {
+        let mut changed = retry.clone();
+        match field {
+            "payload" => changed.payload = SessionEventPayloadRef::InlineJson(StrictJsonValue(
+                json!({"result": "different owner receipt"}))),
+            "operation_id" => changed.operation_id = OperationId::from("other-operation"),
+            "owner_domain" => changed.owner_domain = "other-owner".to_owned(),
+            "input_digest" => changed.input_digest = digest('7'),
+            "resource_key" => changed.resource_key = Some("workspace:other.txt".to_owned()),
+            "producer_id" => changed.producer_id = EventProducerId::from("other-owner"),
+            "causation_event_id" => changed.causation_event_id = Some(event_id("other-cause")),
+            _ => unreachable!(),
+        }
+        assert!(matches!(store.record_effect_terminal(changed, EffectTerminalState::Succeeded).await,
+            Err(SessionStoreError::IdempotencyConflict(_))), "changed {field} must remain a conflict");
+    }
+    assert!(matches!(store.record_effect_terminal(retry, EffectTerminalState::Failed).await,
+        Err(SessionStoreError::IdempotencyConflict(_))));
+    assert_eq!(store.head(&session.agent_session_id).await.unwrap().last_seq, head.last_seq);
 }
 
 #[tokio::test]

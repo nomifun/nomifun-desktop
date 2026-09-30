@@ -3023,8 +3023,23 @@ impl AgentSessionStore {
             EffectTerminalState::Failed => "effect/failed",
             EffectTerminalState::Uncertain => "effect/uncertain",
         };
-        let append = effect_append(request, kind)?;
+        let mut append = effect_append(request, kind)?;
         let mut tx = self.begin_write_transaction().await?;
+        if let Some(existing) = event_by_event_id_tx(&mut tx, append.event_id.as_ref()).await? {
+            let existing = event_from_row(existing)?;
+            if existing.agent_session_id == append.agent_session_id && existing.kind.0 == kind {
+                // A receipt retry can run later than its original commit. Keep
+                // that commit's timestamp while the normal duplicate check
+                // still compares every identity and owner observation field.
+                if let Some(recorded_at) = effect_payload_from_event(&existing)?
+                    .get("recorded_at").and_then(Value::as_i64).filter(|value| *value >= 0)
+                {
+                    if let SessionEventPayloadRef::InlineJson(payload) = &mut append.semantic_event.payload {
+                        payload.0["recorded_at"] = Value::from(recorded_at);
+                    }
+                }
+            }
+        }
         let result = self
             .append_event_tx_with_policy(
                 &mut tx,
