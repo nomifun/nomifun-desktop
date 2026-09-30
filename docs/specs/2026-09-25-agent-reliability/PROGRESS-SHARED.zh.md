@@ -1643,9 +1643,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   收据携带原握手错误和最近实际诊断，而非吞错换 PASS。macOS Pipe/PTY 四场景 **84/84**，
   独立 marker/错误/报告 **84/84**、物理 PID 消失 **168/168**，fallback 0；anchor 负向 **1/1**、
   Runtime **162/162**、registry **13/13**、boundary/fmt/diff 通过。证据
-  `2026-09-30/macos/m06-commit-failure/`，付费模型 0。仅关闭该窗口；caller-drop/握手失败组合、
+  `2026-09-30/macos/m06-commit-failure/`，付费模型 0。仅关闭该窗口；caller-drop/握手失败组合当批未验，native 接续见 M06-07；
   pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复、Linux/Windows 原生、
   正式 Tauri/更多角色及完整 Case/长期统计仍开放，Windows 原验收未改写。
+- macOS M06-07 复核 `S-D04-36` 的 caller-drop/commit failure 组合，新增四个最小 native 回归，
+  无需修改产品逻辑。Pipe/PTY × 无 shutdown/quiesce 首次 + 20 repeats **84/84**；原/后续各一次
+  物理启动 **168/168**、原 owner 报告 **84/84**、PID 消失 **336/336**，capacity probe 零 dispatch
+  **84/84**、fence held **42/42**、无 shutdown/lease cleanup **42/42**、容量/准入复用 **84/84**，
+  fallback 0；Runtime **166/166**、registry **13/13**、boundary/fmt/diff 通过。首次结果均通过且保留。
+  证据 `2026-09-30/macos/m06-dropped-commit/`，付费模型 0；真实 Engine Turn cancel、正式 Tauri/
+  角色、pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复及其他平台/完整
+  统计仍开放，不把该组件回归当完整 Case PASS，不改写 Windows 原结果。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
