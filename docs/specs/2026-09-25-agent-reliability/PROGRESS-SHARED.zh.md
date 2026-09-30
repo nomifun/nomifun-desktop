@@ -704,6 +704,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   实际 pause/resume 和冷启动恢复 **2/2**、fmt/diff通过。未覆盖 preparation panic/commit ack失落、
   长附件准备与超时、更多并发恢复拓扑、正式 UI/其他平台角色和完整长期门槛；共享阶段继续开放。
 
+- S-D09-51（LIFE-020、OBS-014、A05/A10/A13/A17/A19 cancelled 冷读与页面重连）：W182
+  正式 Tauri 配对构建在 W165 隔离 data/work/profile 原样本上完成一次冷启动、一次页面重连。
+  三个已取消 Turn 显示“已取消执行”，原写入显示“已编辑1个文件”；3 cancelled/3 returned/
+  213 events及head完整摘要、文件digest均不变，原provider端口健康监听且新增模型请求0。
+  首次UI构建因已声明的plugin-fs未安装失败；冻结锁文件安装4包后构建通过，首败及辅助
+  脚本错误留于外部 `2026-09-30/windows/w182-tauri-cancelled-cold-load`，无产品首败或源码修复。
+  GUI在quiescent后做自有进程强制清理，provider正常HTTP关闭，GUI/profile/provider均0；
+  graceful quit未验。N3冷启动、真实模型/其他角色/macOS及长期门槛仍开放，不关闭完整Case。
+
 - S-D03-59（FILE-020/025/039、A05/A13/A14/A17/A19 recovery 名称窗口子断言）：W173 对
   Windows 原生恢复的最后 identity check→rename 窗口补两项回归；原实现首次 **2/2**，无产品
   新首败或修复。backup 原对象在恢复过程中两种 POSIX remap 均被 sharing violation=32 拒绝，
