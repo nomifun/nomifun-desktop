@@ -10,7 +10,7 @@ use std::{
 
 use tokio::sync::watch;
 
-use crate::{ProcessOutcome, ProcessOwner, SessionId, supervisor::Session};
+use crate::{ProcessOutcome, ProcessOwner, SessionId, supervisor::{Session, StartupCleanupReport}};
 
 pub(crate) struct Registry {
     state: Mutex<RegistryState>,
@@ -23,6 +23,7 @@ struct RegistryState {
     active: HashMap<SessionId, SessionEntry>,
     retiring: HashMap<SessionId, Arc<Retirement>>,
     reservations: usize,
+    failed_starts: HashMap<SessionId, StartupCleanupReport>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,6 +100,7 @@ impl Registry {
                 active: HashMap::new(),
                 retiring: HashMap::new(),
                 reservations: 0,
+                failed_starts: HashMap::new(),
             }),
             changes,
             max_sessions,
@@ -179,6 +181,38 @@ impl Registry {
         };
         self.bump_changes();
         result
+    }
+
+    pub(crate) fn record_failed_start(&self, reservation: &mut StartReservation, report: StartupCleanupReport) {
+        {
+            let mut state = self.state.lock().expect("process registry lock is poisoned");
+            assert!(!reservation.completed, "startup reservation was already consumed");
+            state.reservations = state.reservations.checked_sub(1).expect("startup owns one reservation");
+            reservation.completed = true;
+            assert!(state.failed_starts.insert(report.session_id, report).is_none(), "startup identity must be unique");
+        }
+        self.bump_changes();
+    }
+
+    pub(crate) fn startup_reports(&self) -> Vec<StartupCleanupReport> {
+        let state = self.state.lock().expect("process registry lock is poisoned");
+        let mut reports = state.failed_starts.values().cloned().collect::<Vec<_>>();
+        reports.sort_by_key(|report| report.session_id);
+        reports
+    }
+
+    pub(crate) fn take_startup_reports(&self) -> Vec<StartupCleanupReport> {
+        let reports = {
+            let mut state = self.state.lock().expect("process registry lock is poisoned");
+            let mut reports = state.failed_starts.values().cloned().collect::<Vec<_>>();
+            reports.sort_by_key(|report| report.session_id);
+            // Unproven auxiliary ownership stays quarantined and occupies
+            // capacity. Only exact failed-start reports can be consumed.
+            state.failed_starts.retain(|_, report| !report.cleanup.reaped);
+            reports
+        };
+        self.bump_changes();
+        reports
     }
 
     pub(crate) fn begin_action(
@@ -385,7 +419,13 @@ impl Registry {
                 })
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(id, _)| *id);
-            victim.and_then(|id| state.active.remove(&id)).is_some()
+            if victim.and_then(|id| state.active.remove(&id)).is_some() {
+                true
+            } else {
+                let startup = state.failed_starts.iter().filter(|(_, report)| report.cleanup.reaped)
+                    .min_by_key(|(id, _)| **id).map(|(id, _)| *id);
+                startup.and_then(|id| state.failed_starts.remove(&id)).is_some()
+            }
         };
         if removed {
             self.bump_changes();
@@ -726,6 +766,7 @@ fn occupancy(state: &RegistryState) -> usize {
         .len()
         .saturating_add(state.retiring.len())
         .saturating_add(state.reservations)
+        .saturating_add(state.failed_starts.len())
 }
 
 fn renew_entry(entry: &mut SessionEntry, now: Instant) {

@@ -107,6 +107,25 @@ pub(crate) struct Session {
 /// interpreting shutdown completion as proof that the OS process tree vanished.
 pub struct ShutdownReport {
     pub sessions: Vec<ShutdownSessionReport>,
+    pub startups: Vec<StartupCleanupReport>,
+}
+
+impl ShutdownReport {
+    pub fn is_exact(&self) -> bool {
+        self.sessions.iter().all(|session| outcome_reaped(&session.outcome))
+            && self.startups.iter().all(|startup| startup.cleanup.reaped)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+/// Cleanup for a failed native startup without a published user process handle.
+/// Its resource identity is host-owned; no synthetic user PID is introduced.
+pub struct StartupCleanupReport {
+    pub session_id: SessionId,
+    pub owner: ProcessOwner,
+    pub failure: crate::SpawnFailure,
+    pub cleanup: CleanupReport,
+    pub user_code_not_started: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,12 +143,14 @@ pub struct ShutdownSessionReport {
 /// is false.
 pub struct QuiesceReport {
     pub sessions: Vec<QuiesceSessionReport>,
+    pub startups: Vec<StartupCleanupReport>,
     pub errors: Vec<String>,
 }
 
 impl QuiesceReport {
     pub fn is_exact(&self) -> bool {
         self.errors.is_empty()
+            && self.startups.iter().all(|startup| startup.cleanup.reaped)
             && self
                 .sessions
                 .iter()
@@ -339,7 +360,18 @@ impl ProcessSupervisor {
             ),
             None => OutputBuffer::with_activity(request.policy.output_limit_bytes, activity),
         });
-        let spawned = crate::platform::spawn(request.clone(), output.clone(), cancellation).await?;
+        let spawned = match crate::platform::spawn(request.clone(), output.clone(), cancellation).await {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                if let ProcessError::StartLost { failure, last_known: None, cleanup } = &error {
+                    self.registry.record_failed_start(&mut reservation, StartupCleanupReport {
+                        session_id, owner: request.owner.clone(), failure: failure.clone(), cleanup: cleanup.clone(),
+                        user_code_not_started: failure.code == "spawn_cleanup_deferred",
+                    });
+                }
+                return Err(error);
+            }
+        };
         let startup_failure = spawned.startup_failure;
         let (handle, session) = self.register_reserved(
             request,
@@ -748,6 +780,7 @@ impl ProcessSupervisor {
 
         let mut report = QuiesceReport {
             sessions: Vec::new(),
+            startups: self.registry.take_startup_reports(),
             errors: Vec::new(),
         };
         while let Some(result) = workers.join_next().await {
@@ -1012,7 +1045,8 @@ async fn run_shutdown(registry: Arc<Registry>, shutdown: Arc<ShutdownState>) {
                     .collect::<Vec<_>>();
                 sessions.sort_by_key(|session| session.session_id);
                 registry.complete_shutdown();
-                shutdown.report.send_replace(Some(ShutdownReport { sessions }));
+                let startups = registry.startup_reports();
+                shutdown.report.send_replace(Some(ShutdownReport { sessions, startups }));
                 return;
             }
             continue;
@@ -1796,7 +1830,7 @@ mod tests {
         SupervisorConfig, outcome_reaped, start_waiter,
     };
     use crate::{
-        CapabilityPolicy, CommandSpec, ProcessOwner, ProcessPolicy,
+        CapabilityPolicy, CleanupReport, CommandSpec, ProcessOwner, ProcessPolicy,
         ProcessOutcome, NormalizedProcessRequest, OutputBuffer, OutputCursor, OutputSnapshot,
         OutputStream, PollResult, ProcessState, SandboxPolicy, SessionId, Transport,
         platform::{ExitFact, PlatformProcess},
@@ -1817,6 +1851,53 @@ mod tests {
         Controlled {
             fact: ExitFact,
         },
+    }
+
+    #[tokio::test]
+    async fn failed_startup_without_reap_proof_stays_quarantined_in_boundary_reports() {
+        let supervisor = ProcessSupervisor::new(SupervisorConfig { max_sessions: 1, ..SupervisorConfig::default() });
+        let owner = ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+        let mut reservation = supervisor.registry.begin_test_reservation().unwrap();
+        supervisor.registry.record_failed_start(&mut reservation, super::StartupCleanupReport {
+            session_id: SessionId::new(), owner: owner.clone(),
+            failure: crate::SpawnFailure { code: "spawn_cleanup_deferred".to_owned(), message: "injected auxiliary authority loss".to_owned() },
+            cleanup: CleanupReport::default(), user_code_not_started: true,
+        });
+        let quiesce = supervisor.quiesce().await;
+        assert!(!quiesce.is_exact());
+        assert!(quiesce.sessions.is_empty());
+        assert_eq!(quiesce.startups.len(), 1);
+        assert_eq!(quiesce.startups[0].owner, owner);
+        assert!(!supervisor.registry.evict_oldest_finished());
+        assert!(matches!(supervisor.registry.test_reserve_once(), Err(crate::registry::ReserveError::Capacity)));
+        let shutdown = supervisor.shutdown().await;
+        assert!(!shutdown.is_exact());
+        assert!(shutdown.sessions.is_empty());
+        assert_eq!(shutdown.startups.len(), 1);
+        assert_eq!(shutdown.startups[0].owner, owner);
+        assert!(!shutdown.startups[0].cleanup.reaped);
+    }
+
+    #[tokio::test]
+    async fn reaped_failed_startup_reports_are_bounded_by_registry_capacity() {
+        let supervisor = ProcessSupervisor::new(SupervisorConfig { max_sessions: 1, ..SupervisorConfig::default() });
+        for _ in 0..8 {
+            if supervisor.registry.test_reserve_once().is_err() {
+                assert!(supervisor.registry.evict_oldest_finished());
+            }
+            let mut reservation = supervisor.registry.begin_test_reservation().unwrap();
+            supervisor.registry.record_failed_start(&mut reservation, super::StartupCleanupReport {
+                session_id: SessionId::new(), owner: ProcessOwner::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+                failure: crate::SpawnFailure { code: "spawn_cleanup_deferred".to_owned(), message: "exact auxiliary reap".to_owned() },
+                cleanup: CleanupReport { reaped: true, ..CleanupReport::default() }, user_code_not_started: true,
+            });
+            assert_eq!(supervisor.registry.startup_reports().len(), 1);
+        }
+        let report = supervisor.quiesce().await;
+        assert!(report.is_exact() && report.sessions.is_empty());
+        assert_eq!(report.startups.len(), 1);
+        assert!(supervisor.registry.startup_reports().is_empty());
+        assert!(supervisor.registry.test_reserve_once().is_ok());
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

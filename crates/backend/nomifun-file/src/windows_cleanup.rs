@@ -33,6 +33,11 @@ fn identity(file: &File) -> io::Result<(u64, [u8; 16])> {
     Ok((info.VolumeSerialNumber, info.FileId.Identifier))
 }
 
+pub(crate) fn durable_identity_token(file: &File) -> io::Result<String> {
+    let (volume, id) = identity(file)?;
+    Ok(format!("{volume:016x}-{:032x}", u128::from_le_bytes(id)))
+}
+
 impl OwnedFile {
     pub(crate) fn capture_named_regular(path: &Path) -> io::Result<Self> {
         use std::os::windows::fs::MetadataExt;

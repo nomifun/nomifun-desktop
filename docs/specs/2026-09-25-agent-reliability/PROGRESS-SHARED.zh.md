@@ -1,10 +1,48 @@
-# 跨平台共享 Case 处理进度
+# 命令与会话可靠性共享进度
 
-更新：2026-09-30。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
-本表管理 675 个 Both Case 的公共根因；Windows/macOS 产品验收分别记在各自文档。
-本轮 S-P0-01～05 已完成共享子断言的走查、修复与回归；不等于 675 条完整 Case 全部通过。
-当前优先共享队列，相关 Windows 修复一并完成；共享阶段结算后通知并交付 macOS 接续 prompt，
-再推进 Windows 专属队列。各域尚未达到完整验收门槛，当前不声明共享阶段完成。
+更新：2026-10-01。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+2026-09-30按用户明确目的收敛为[八个命令问题簇、三组正式会话](IMPLEMENTATION-PLAN.zh.md)。
+本轮处理简单命令、步骤衔接、过程状态及结果可信性；通用/编程入口各保留真实执行证据。
+旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
+核心共同链路达标后单独通知，再补其中尚缺的Windows命令/native断言，不以全产品发布认证阻断收尾。
+
+## 当前活动问题簇
+
+| 簇 | 可复用基线 | 下一缺口 |
+| --- | --- | --- |
+| C01 命令选择与参数 | W73/W92；W184修复PowerShell模块继承并明确相对cwd | 带空格路径的cmd引号；当前COD入口仍待验 |
+| C02 读取与搜索 | 工作区读搜、路径/输出回归 | 综合场景A的中文/空格、零匹配与只读结果 |
+| C03 Git观察与小测试 | W86；W184正式GEN的git_diff path=.及定向测试结果 | 综合A尚有未闭合调用；不因小复验通过结案整组 |
+| C04 文件与步骤结果 | 既有File/Artifact根因修复及定向回归 | 综合场景B的实际步骤、字节/hash与最终回答 |
+| C05 进程与停止 | W105、process/PTY/cancel/host清理回归 | 综合场景B的真实helper停止及无后代 |
+| C06 过程与交付真实性 | W93/W94；W184原生非零退出码与未执行分类、历史保留 | 错误进程ID的可用性/未知效果归因；A/B/C完整结果仍待验 |
+| C07 连续会话与纠正 | W95/W98压缩组件，W182正式取消冷读 | 有界真实连续任务、一次压缩及最新用户纠正 |
+| C08 模型协议接合 | W99/W100；W184真实StepFun→GEN→Git/PowerShell owner | 小复验N1、3模型步；COD及其余实际命令接合待验 |
+
+本表只列候选复用与缺口；是否受新代码影响需核对具体基线，不把源码测试存在当已跑通过。
+本轮结案按A/B/C正式任务、核心bad-case闭环及独立结果，不再按原Case×角色×OS计算完成率。
+
+### C07-01 固定开销与压缩后原收据（2026-10-01）
+
+- macOS MAC-A-01 的真实 StepFun 首败：两个指定测试已 exit 0/1，三次压缩却只留下 accepted input，
+  原工具交换消失、任务重复检查后触及冻结 cap。第一轮/最小反例均保留，不由修后成功抹除。
+- ContextLifecycle 把不可压缩 instructions/schema 计入 75% 软字节触发点；固定开销本身较大时持续
+  再摘要。预留最大摘要长度又排除实际仍放得下的有界后缀，模型只能依赖会失真的派生说明。
+- 现对该固定开销窗口保留剩余硬字节余量的一半供历史增长；摘要完成后按实际大小核对最多三个完整
+  原交换、原 call/result ID 和顺序。失败结果/原要求、token/byte/message 硬限、图片保护、权限及
+  freshness 规则不变，不取回未知 archive，不执行摘要文本，不重标旧观察为当前证明。
+- 最小反例修前失败、修后通过；压缩 **15/15**、Runtime **200/200**。macOS 正式修后有两次实际压缩
+  保留精确 failed-check 与 plan 回执，11 requests 内完成，原件/测试次数/历史错误独立核对。
+  只关闭此公共根因；完整连续/纠正、其他平台、首发参数及新发现的 App 退出等待未由该证据代判。
+
+## 历史全产品口径快照（已停止本轮排程）
+
+- 公共 P0 为 **5/5 任务已验证**。本文213个去重问题编号属于问题簇，不是已通过的Case数量。
+- Windows正文的明确批次范围标注涉及171个共享Case；该提取只证明文档引用，不能证明实际执行、
+  PASS或完整覆盖。其余Case不能据此直接记NOT_RUN；此为历史统计，不另追加675 Case核账任务。
+- 旧全角色/20重复/100 seed/LONG/99%要求留在发布认证计划；用户已将其移出本轮结束条件。
+  本轮安全及结果断言不缩减，具体执行以最新实施计划为准，不再补全不相关业务来填旧分母。
+- 本次只读统计与依据在仓库外 `2026-09-30/progress-audit/`；Git仅维护此摘要，不生成逐槽索引。
 
 ## 当前 P0 批次
 
@@ -28,9 +66,9 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 最终证据为 `app-route-and-catalog-final.log` 与 `runtime-merged-final.log`。
 合并时上游新增的 steering 测试夹具漏了本地新增字段，已补空值并完整重跑 Runtime。
 
-## 全领域公共队列
+## 历史全领域参考（不作为活动队列）
 
-下表 Case 集合 = 实施计划对应领域中平台为 Both 的所有 ID；675 条各有且只有一个主领域。
+下表是原全产品计划的冻结领域分配，675个Both ID各有一个主领域；仅作历史参考，当前不全量排程。
 
 | 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
 | --- | ---: | --- | --- |
@@ -704,6 +742,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   实际 pause/resume 和冷启动恢复 **2/2**、fmt/diff通过。未覆盖 preparation panic/commit ack失落、
   长附件准备与超时、更多并发恢复拓扑、正式 UI/其他平台角色和完整长期门槛；共享阶段继续开放。
 
+- S-D09-51（LIFE-020、OBS-014、A05/A10/A13/A17/A19 cancelled 冷读与页面重连）：W182
+  正式 Tauri 配对构建在 W165 隔离 data/work/profile 原样本上完成一次冷启动、一次页面重连。
+  三个已取消 Turn 显示“已取消执行”，原写入显示“已编辑1个文件”；3 cancelled/3 returned/
+  213 events及head完整摘要、文件digest均不变，原provider端口健康监听且新增模型请求0。
+  首次UI构建因已声明的plugin-fs未安装失败；冻结锁文件安装4包后构建通过，首败及辅助
+  脚本错误留于外部 `2026-09-30/windows/w182-tauri-cancelled-cold-load`，无产品首败或源码修复。
+  GUI在quiescent后做自有进程强制清理，provider正常HTTP关闭，GUI/profile/provider均0；
+  graceful quit未验。N3冷启动、真实模型/其他角色/macOS及长期门槛仍开放，不关闭完整Case。
+
 - S-D03-59（FILE-020/025/039、A05/A13/A14/A17/A19 recovery 名称窗口子断言）：W173 对
   Windows 原生恢复的最后 identity check→rename 窗口补两项回归；原实现首次 **2/2**，无产品
   新首败或修复。backup 原对象在恢复过程中两种 POSIX remap 均被 sharing violation=32 拒绝，
@@ -772,6 +819,29 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   显式执行，未将跳过计作通过。证据在外部 `2026-09-30/windows/w179-artifact-exact-budget`。
   持续增长、startup stale cleanup、Unix 最终窗口、真实 IO fault、正式 UI/模型/角色/macOS
   及长期门槛仍未覆盖；不关闭完整 ART Case 或共享阶段。
+
+- S-D03-66（ART-001/005/007、A05/A07/A13/A14/A17/A19 冷清理身份子断言）：W180 冷重开
+  删除 live cleanup 已保留的外来 stage，同字节异对象也被误删；首次 **0/2** 保留于外部
+  `2026-09-30/windows/w180-artifact-cold-cleanup/01-first-product-run`。另保留预先打开的 Store
+  缓存完成标记而继续发布的两项首败于 `05-first-preexisting-owner`。
+  stage 创建时持久化 hardlink 见证及 native ID/birth identity；重开核对记录和原对象，缺失、
+  替代或无见证的旧 temp 保留并阻止发布，已有产物可诊断读。每次发布在共享 lease 内重新核对，
+  清理上限仍为 64；真实子进程无析构退出验证正常遗留及 orphan witness 回收。
+  Windows 模块 **33/33**、新五项 **3×5/5**、21份独立磁盘/native ID 核对；WSL ext4 模块
+  **33/33**及5份原生核对、fmt/diff通过。辅助 oracle 两次长路径失败另存，修正路径接口后通过。
+  未验见证创建/fsync中途断电、见证及目录同时伪造、Unix最后unlink窗口、正式host fence/UI、
+  macOS/其他角色及长期门槛；不关闭完整Case或共享阶段，无模型/UI调用。
+
+- S-D03-67（ART-007、LIFE-007、A05/A07/A13/A14/A17/A19 宿主 cleanup unknown fence）：
+  W181 使用真实 Artifact owner、canonical 磁盘 DB 和 Wave2ApplicationHost 调用；unwitnessed
+  temp 返回 EFFECT_OUTCOME_UNKNOWN，唯一 Effect 保留 pending、无 terminal/settled_at。
+  原/新 key、冷 DB 重开、文件现场修复、其他 Session 及文件写均被 fence；已有产物诊断读正确，
+  原 effect 完整记录不变，无后来源 blob 或额外 effect。首跑 **1/1**，补独立原对象证据后 **1/1**、
+  N3 **3/3**；四份独立 SQL/磁盘/native ID 核对通过。相邻六项结果通过；过滤词按 OR 误扩大
+  到79项，93秒自然结束 **79/79**，日志留存并复用相关结果，没有再次执行。
+  原实现首次满足，无新产品 FAIL/生产修复，仅最小宿主回归，fmt/diff通过；证据在外部
+  `2026-09-30/windows/w181-artifact-host-cleanup-fence`。正式 Tauri UI/Runtime/模型/其他角色、
+  macOS及长期门槛仍未覆盖；不关闭完整 Case 或共享阶段。
 
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
@@ -1664,6 +1734,33 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   角色、pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复及其他平台/完整
   统计仍开放，不把该组件回归当完整 Case PASS，不改写 Windows 原结果。
 
+- **S-D04-37**（`PROC-040/047/050`、A08/A11/A13，Unix pre-exec deferred cleanup）：M06-08
+  首败在用户代码零执行时，watchdog 清理已转底层 poller，而 Supervisor 释放 startup reservation，
+  shutdown 空报告先于辅助 reap。现原 worker 等待同一个辅助清理 witness，保持原准入/容量；
+  原 deadline 只结束 caller 等待，未复位预算。失败启动单列 `StartupCleanupReport`，带原 owner/
+  host SessionId/error/cleanup/未 exec 事实，不创建虚假用户 PID 或 process handle。
+- 中间 **3/4** 首败证明 transaction 恰先于 timer 交付时，第二段辅助等待漏 deadline 通知；
+  两阶段现共用原绝对 deadline。startup non-exact 保持 quarantine/占额；已证明报告按容量有界，
+  quiesce/shutdown 的 exact 判定包含 startup 清理。负向夹具缺 import 编译失败亦保留。
+- macOS 四场景 **84/84**，独立辅助 PID 消失/精确收据/容量阻止 exec **84/84**，user exec 0、
+  假用户 Session 0、fallback 0；caller 最大106 ms（原350 ms），quarantine/有界报告 **2/2**，
+  Runtime **172/172**、registry **13/13**、Engine process **16/1 ignored**、boundary/fmt/diff 通过。
+  证据 `2026-09-30/macos/m06-preexec-cleanup/`，付费模型 0。仅关闭该受控窗口；真实永久
+  authority loss/恢复、其他 transfer failure、worker panic、正式 Tauri/角色、Linux/Windows 原生与
+  完整 Case/统计仍开放，Windows 原结果未改写。
+
+- **S-D04-38**（`PROC-039/050`、A13/A18，Engine/App 未注册启动的迟到收据）：M06-09 首个
+  App 组件反例证明，即使已有精确清理证明，`unregistered_start` 仍永久报 unknown。现 Engine
+  在首个 native await 前跟踪不可变 host owner，App cleanup 接 native quiesce fence；只有对应
+  owner 的已证明 Session/startup 收据能解除标记，不以空 map、外来 call 或非 exact 报告代替。
+  部分精确收据跨重试保留，cleanup panic 的既有不确定性继续存在。
+- macOS Native Engine Pipe/PTY caller-drop 两场景 **42/42**，独立 PID/owner/清理 **42/42**；
+  App process-host **8/8**、Core process **20/1 ignored**、fmt/boundary/diff 通过。原组件首败及
+  两次 native 夹具编译失败保留，最终走既有安全身份 API，无新增依赖或 unsafe lint 放宽。
+  证据 `2026-09-30/macos/m06-engine-startup-fence/`，外部模型实际调用 0；正式 Tauri/live
+  Provider、pre-exec auxiliary App 全链路、完整真实 Turn cancel、永久 authority loss/恢复、
+  worker panic、其他平台/角色与完整统计仍开放，Windows 原结果未改写。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
@@ -2167,3 +2264,14 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   M04 及其他实际运行中停止/恢复仍待验。
 - 11 个条件能力候选等待对应产品/资源/授权前提，不为完成列表扩权。
 - 本批共享 P0 已随 `85a079fc0` 提交并推送；Windows W01 已接续，见平台进度。
+
+### W184 命令合同与业务结果展示（2026-10-01）
+
+- Case/子断言：C01/C03/C06/C08；CMD-134/137/138、REAL-003/004、A05/A08/A14/A17/A19相关子断言。
+- 公共根因：git_diff合法根路径`.`被文件路径解析器拒绝；改为当前workspace scope，仍保留repo子目录及越界保护。
+  process schema补明cwd为相对目录。UI识别真实exited且清理已证明的原生退出码，业务非零不再统称异常；
+  本地参数预检明确未执行。真实系统/信号/清理失败仍保留失败状态，原始输出、canonical错误及累计历史均保留。
+- Windows根因：宿主继承PowerShell 7的PSModulePath，破坏Windows PowerShell 5.1的Get-FileHash加载；
+  仅系统5.1启动重建默认模块环境，显式调用者覆盖仍保留。原生首败及正式入口小复验见Windows W184。
+- 定向回归：UI 90/90；原生hash、Git子目录边界、完成历史及整批预检共6项Rust通过；类型、i18n、desktop边界、fmt通过。
+  正式StepFun/GEN小复验N1：3模型步、零工具错误，真实Git/hash及磁盘oracle一致；综合A仍失败待修，不能结案共享链路。
