@@ -57,6 +57,7 @@ struct Cursor {
     draining: bool,
     terminal: bool,
     uncertain: bool,
+    pending_cleanup_write: Option<(String, Option<String>, EngineJournalWrite)>,
     assistant_step: Option<AssistantStepCursor>,
     last_assistant_event_id: Option<EventId>,
     assistant_message_id: Option<String>,
@@ -1081,7 +1082,9 @@ impl EngineTurnJournal {
             let _permit = permit;
             let _byte_permit = byte_permit;
             let mut cursor = journal.cursor.lock().await;
-            if cursor.uncertain || cursor.terminal {
+            let retry_cleanup = cursor.uncertain && cursor.pending_cleanup_write.as_ref()
+                .is_some_and(|pending|pending.0==payload && pending.1==model_operation && pending.2==kind);
+            if (cursor.uncertain && !retry_cleanup) || cursor.terminal {
                 return Err(failure("journal is closed or uncertain"));
             }
             if kind == EngineJournalWrite::Progress
@@ -1108,6 +1111,9 @@ impl EngineTurnJournal {
                 || next_total_bytes as u64 > total_limit || cursor.sequence >= cursor.budget.journal_records.saturating_add(if reserved { 4000 } else { 0 }) {
                 return Err(failure("bounded evidence journal exhausted"));
             }
+            if matches!(kind,EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal) {
+                cursor.pending_cleanup_write = Some((payload.clone(),model_operation.clone(),kind));
+            }
             cursor.uncertain = true;
             Self::append_progress(&journal, &cursor, &event_value, kind).await?;
             Self::append_tool_projection(&journal, &mut cursor, &event_value).await?;
@@ -1131,6 +1137,7 @@ impl EngineTurnJournal {
             cursor.draining |= matches!(kind, EngineJournalWrite::Cleanup | EngineJournalWrite::Terminal);
             cursor.terminal = kind == EngineJournalWrite::Terminal;
             cursor.uncertain = false;
+            cursor.pending_cleanup_write = None;
             journal.sequence.store(cursor.sequence, Ordering::Release);
             Ok(())
         });

@@ -390,6 +390,7 @@ struct ActiveTurn {
     cleanup_proven: bool,
     cancellation: CancellationToken,
     event_buffer: super::runtime_event_buffer::AgentEventBuffer,
+    cleanup_records: std::collections::VecDeque<AgentEngineEvent>,
     assistant_text_by_step: BTreeMap<u16, String>,
 }
 
@@ -470,6 +471,7 @@ impl ConversationRuntimeHost {
             cleanup_proven: false,
             cancellation,
             event_buffer: Default::default(),
+            cleanup_records: Default::default(),
             assistant_text_by_step: BTreeMap::new(),
         });
         journal.attach_runtime(active.as_ref().expect("published above").cancellation.clone())?;
@@ -1098,10 +1100,14 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if let Some(turn) = self.active.lock().await.as_mut() {
             turn.cleanup_started = true;
             turn.event_buffer.flush(&mut pending);
+            turn.cleanup_records.extend(pending);
         }
-        for event in pending {
-            self.append_record(message.source_message_id.as_deref().unwrap_or(&message.msg_id),
-                serde_json::to_string(&event).map_err(error)?, None, false).await?;
+        loop {
+            let mut active = self.active.lock().await;
+            let turn = active.as_mut().ok_or_else(||error("cleanup lost its active turn authority"))?;
+            let Some(event) = turn.cleanup_records.front() else { break; };
+            self.append_locked_record(turn,serde_json::to_string(event).map_err(error)?,None,false).await?;
+            turn.cleanup_records.pop_front();
         }
         // Joined tool tasks have already persisted every settlement before this cleanup witness.
         self.tools.discard_closed_observations()?;

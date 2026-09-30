@@ -637,6 +637,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   窗口，托盘退出仍缺夹具；隔离 GUI 的最终强制进程清理单列，不代替 graceful shutdown。满盘/IO fault
   下 shutdown、真实子进程、其他角色/平台及完整 N3/100 seed/LONG/99% 仍开放，不关闭共享阶段。
 
+- S-D09-46（LIFE-019/023/024/029、CONC-014、FILE-038、G0-030、A04/A06/A07/A11/A13/A17/A19
+  shutdown 写锁与清理重试子断言）：W166 在正式 DesktopServer 的唯一写入 Returned、模型流等待后，
+  用独立连接持有真实 `BEGIN IMMEDIATE` writer lock。首败：第一次退出失败，解锁后重试却成功关闭
+  DB，Turn/head/owned lease 仍为 running。SDK 将 task join 当作完整清理，丢失未确认 outcome；host
+  flush 队列被消费，journal uncertain 又永久拒绝原写。现 SDK 保留 exact message/outcome/cleanup
+  见证，失败 flight 不释放 Session，后续显式 teardown 只补清理/回执；host 按 ack 消费队列，journal
+  仅接受原 cleanup/terminal payload、kind、model identity 的相同重试，模型/工具及新记录继续拒绝。
+  取消在首次 terminal commit 前仍优先，已确认 outcome 不重执行。首败与 DB 保留于外部 W166。
+  修复后首次及 **20/20**，21 个 DB/文件独立核对唯一 cancelled/cleanup witness/Returned、连续事件与
+  ready head；AI Agent **331/331**、journal **10/10**、正常 shutdown/pause-resume **2/2**，fmt/diff
+  通过。无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期/跨重启恢复、更多取消/并发驱逐拓扑、
+  其他角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

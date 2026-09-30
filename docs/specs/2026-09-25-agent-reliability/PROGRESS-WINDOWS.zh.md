@@ -2797,6 +2797,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   无真实模型；满盘/IO fault 下 shutdown、真实子进程、其他角色/平台、N3/100 seed/LONG/99% 仍开放，
   不关闭完整 LIFE/FILE Case 或共享阶段。
 
+### 正式 shutdown 写锁失败与原清理见证重试（W166，基线 `846816037`）
+
+- S-D09-46 / LIFE-019/023/024/029、CONC-014、FILE-038、G0-030、A04/A06/A07/A11/A13/A17/A19：
+  唯一文件写入 Returned 后，独立 SQLite 连接持有真实 writer lock；正式 DesktopServer 第一次退出
+  失败，解除锁后原实现第二次却返回成功并关闭 DB，留下 running Turn/head/owned lease。
+- 修复 SDK task join 与 durable cleanup 混淆：保留 exact message/outcome/cleanup 状态，失败 flight
+  不释放 Session，后续显式 teardown 只补清理/回执。host flush 队列按 ack 消费，journal uncertain
+  仅接受原 cleanup/terminal 的 exact payload/kind/model identity 重试；新 progress 与不同事实仍拒绝。
+  首次 terminal commit 前取消优先，已确认 outcome 不重执行；异常 task 仍尝试资源释放并保留失败。
+- 首败日志及 DB 保留于外部 `2026-09-30/windows/w166-shutdown-sqlite-lock/01-first-product-run`。
+  修复后首次及 **20/20**，21 个独立 DB/文件核对均为唯一 cancelled、cleanup witness、Returned、
+  ready head/连续事件，零 running owned lease；AI Agent **331/331**、journal **10/10**、正常
+  shutdown/pause-resume **2/2**，fmt/diff 通过。
+- 无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期与跨重启、更多取消/并发驱逐拓扑、其他角色/
+  平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
