@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13 已验 owner crash/result-loss，M04-14 已验 Unicode 直接文本输入；live held-cancel/IME/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～15 已验 owner crash/result-loss、Unicode 直接文本及大型 A11y 树；live held-cancel/IME/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -725,3 +725,19 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批未发现共享产品代码根因，不改 `PROGRESS-SHARED`。真实 IME composition/候选窗、切换输入源、
   Dvorak/其他 layout、dead key 与 shortcut 组合仍开放；因此只关闭 `COMP-004` 的 macOS Unicode 直接
   文本子断言，不关闭完整 `COMP-004`、Computer、D06 或 M04。
+
+- **M04-15 macOS large Accessibility tree**（`COMP-013` 的 node-budget/incomplete 子断言）：
+  新增 `--computer-large-a11y` fixture、仓库外 Developer ID-signed arm64
+  AppKit 目标及最小组件回归。独立目标实际创建 **200** 个可操作按钮，记录首项
+  `AX_ITEM_000` 与尾部哨兵 `AX_OMITTED_SENTINEL_199`；current-source signed Tauri 的 canonical
+  `computer/a11y.observe` 只返回 **120 elements / 3,409 chars**，明确包含
+  `a11y tree truncated to the node budget` 与首项，不包含已由 target 证明存在的尾部哨兵，且零 pixels。
+- 正式 Session `01a0f029-0ec1-7442-87a7-132f0e7a2867` 已 completed，**8 model steps / 100 events**，
+  唯一 launch effect returned；A11y read 不制造 effect。fixture `large_a11y_verified=true`、failure=null，
+  运行中 DB `ok`。新增组件回归及 `nomi-computer` 全组 **100 passed / 7 ignored**，同时证明 ref 120
+  可用、ref 121 不存在。解锁后正式 UI 明确“结果标记 incomplete，不能把省略节点当作不存在”；原生
+  目标尾部截图直接显示被 canonical snapshot 省略的 sentinel。最终 DB `ok`、SHA-256
+  `0b8029c1d01e0b03306457969516ca1bb0f02b830f65676e37ea3dcec9a0cbd3`，target/app/fixture 与
+  `55520/55439` listener 均为 0。证据在 `2026-09-30/macos/m04-computer-large-a11y/`。本批关闭
+  `COMP-013` 的 macOS A11y node-budget/incomplete 子断言；OCR-large、截图之外的 pixel-only 目标及
+  真实模型如何使用 incomplete 仍开放，不关闭完整 `COMP-013`、Computer、D06 或 M04。
