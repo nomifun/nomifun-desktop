@@ -1,5 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
-//! No real provider credentials, user dataset, or browser profile is read.
+//! Deterministic modes read no user dataset or real provider credential.
+//! Opt-in --live-frontend / --live-commands accept the live key only via stdin.
 //! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
@@ -8,6 +9,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
+use futures_util::StreamExt;
 use nomifun_app::{DesktopHostServices, DesktopServer};
 use nomifun_browser_platform::{
     runtime::{BrowserRuntime, BrowserRuntimeFactory, CreateBrowserRuntime, WorkspaceError},
@@ -37,6 +39,8 @@ struct LiveFrontend {
     started: Mutex<Option<Instant>>,
     upstream_requests: AtomicUsize,
     stopped_status: AtomicUsize,
+    trace_dir: PathBuf,
+    trace_sequence: AtomicUsize,
 }
 
 #[derive(Clone, Copy)]
@@ -2331,6 +2335,18 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
         body.as_object_mut().unwrap().remove("max_completion_tokens");
         body["temperature"] = json!(0);
         body["stream"] = json!(true);
+        let number = live.trace_sequence.fetch_add(1, Ordering::SeqCst) + 1;
+        let request_path = live.trace_dir.join(format!("request-{number:02}.json"));
+        let response_path = live.trace_dir.join(format!("response-{number:02}.sse"));
+        let trace = std::fs::write(request_path, serde_json::to_vec(&body).unwrap())
+            .and_then(|_| std::fs::OpenOptions::new().write(true).create_new(true).open(response_path));
+        let mut trace = match trace {
+            Ok(trace) => trace,
+            Err(_) => {
+                *fixture.failure.lock().unwrap() = Some("model_trace_unavailable".into());
+                return stop_live_once(&live.stopped_status, axum::http::StatusCode::INTERNAL_SERVER_ERROR).into_response();
+            }
+        };
         live.upstream_requests.fetch_add(1, Ordering::SeqCst);
         let response = tokio::select! {
             _=fixture.stop.cancelled()=>return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -2339,9 +2355,28 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
                 .bearer_auth(live.key.as_str()).json(&body).send()=>response,
         };
         return match response {
-            Ok(response) if response.status().is_success() => axum::response::Response::builder()
-                .header("content-type","text/event-stream")
-                .body(axum::body::Body::from_stream(response.bytes_stream())).unwrap(),
+            Ok(response) if response.status().is_success() => {
+                let tracing_fixture = Arc::clone(&fixture);
+                let mut bytes = 0usize;
+                let stream = response.bytes_stream().map(move |part| {
+                    use std::io::Write;
+                    let result = part.map_err(std::io::Error::other).and_then(|part| {
+                        if bytes.saturating_add(part.len()) > 8 * 1024 * 1024 {
+                            return Err(std::io::Error::other("model response trace exceeded bounded limit"));
+                        }
+                        trace.write_all(&part)?;
+                        bytes += part.len();
+                        Ok(part)
+                    });
+                    if result.is_err() {
+                        *tracing_fixture.failure.lock().unwrap() = Some("model_stream_or_trace_failed".into());
+                        stop_live_once(&tracing_fixture.live.as_ref().unwrap().stopped_status, axum::http::StatusCode::BAD_GATEWAY);
+                    }
+                    result
+                });
+                axum::response::Response::builder().header("content-type","text/event-stream")
+                    .body(axum::body::Body::from_stream(stream)).unwrap()
+            },
             Ok(response) => {
                 let status = response.status().as_u16();
                 let stopped = stop_live_once(&live.stopped_status, axum::http::StatusCode::from_u16(status).unwrap());
@@ -2614,7 +2649,8 @@ async fn main() -> anyhow::Result<()> {
         "refusing an existing or relative data directory"
     );
     std::fs::create_dir(&root)?;
-    let live_mode = std::env::args().nth(2).as_deref() == Some("--live-frontend");
+    let live_commands = std::env::args().nth(2).as_deref() == Some("--live-commands");
+    let live_mode = live_commands || std::env::args().nth(2).as_deref() == Some("--live-frontend");
     let live = if live_mode {
         use std::io::{IsTerminal, Read};
         anyhow::ensure!(std::env::var_os("NOMIFUN_LIVE_STEPFUN_API_KEY").is_none() && !std::io::stdin().is_terminal(), "Live key must arrive only through stdin");
@@ -2624,6 +2660,8 @@ async fn main() -> anyhow::Result<()> {
         let work = root.join("work");
         std::fs::create_dir(&work)?;
         let source = work.join("app.js");
+        let trace_dir = root.join("model-traces");
+        std::fs::create_dir(&trace_dir)?;
         let budget = LiveBudget::parse(
             std::env::var("NOMIFUN_LIVE_GUI_CALL_LIMIT").ok().as_deref(),
             std::env::var("NOMIFUN_LIVE_GUI_OUTPUT_LIMIT").ok().as_deref(),
@@ -2632,7 +2670,7 @@ async fn main() -> anyhow::Result<()> {
         Some(LiveFrontend { key:Zeroizing::new(key.trim().to_owned()),local_token:format!("Bearer {}",uuid::Uuid::new_v4()),
             client:reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(90)).build()?,
             work,source:Mutex::new(source),served:Mutex::new(vec![]), budget, started:Mutex::new(None),
-            upstream_requests:AtomicUsize::new(0),stopped_status:AtomicUsize::new(0) })
+            upstream_requests:AtomicUsize::new(0),stopped_status:AtomicUsize::new(0),trace_dir,trace_sequence:AtomicUsize::new(0) })
     } else { None };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -2908,8 +2946,25 @@ async fn main() -> anyhow::Result<()> {
     let prepared = async {
         let local_key=fixture.live.as_ref().map(|live|live.local_token.strip_prefix("Bearer ").unwrap()).unwrap_or("local-fixture-not-a-secret");
         let model_traits = if computer_granted || computer_screen_denied || computer_pointer_input || computer_click_variants || computer_drag_cancel { json!(["vision_input"]) } else { json!([]) };
-        let provider = api(&app,"/api/providers",json!({"platform":"custom","name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":"browser-gui-fixture","enabled":true,"capabilities":[{"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
+        let provider = api(&app,"/api/providers",json!({"platform":if live_commands {"stepfun-plan"}else{"custom"},"name":if live_mode {"真实模型前端验收"}else{"本机浏览器验收模型"},"base_url":format!("http://{address}/v1"),"auth_scheme":"bearer","credentials":{"api_keys":[local_key]},"enabled":true,"initial_model":{"model":if live_commands {"step-3.7-flash"}else{"browser-gui-fixture"},"enabled":true,"capabilities":[{"task":"chat","traits":model_traits,"protocol":"openai.chat_text","connection_role":"default","output_limit":4096}]}})).await?;
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
+        if live_commands {
+            let model = json!({"provider_id":provider,"model":"step-3.7-flash"});
+            let editor = api(&app,"/api/agent-presets/from-template/coding.codex",json!({
+                "reuse_existing":false,"display_name":"MAC-A 编程命令验收","model":model
+            })).await?;
+            let preset = editor["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("Coding preset missing"))?;
+            let session = api(&app,"/api/agent-sessions",json!({
+                "preset_id":preset,"title":"MAC-A 观察、只读、小测试","model":model,
+                "resource_selections":[
+                    {"resource_kind":"workspace","resource_id":"default-workspace"},
+                    {"resource_kind":"process_session","resource_id":"managed-process-session"},
+                    {"resource_kind":"project_memory","resource_id":"default-project-memory"}
+                ]
+            })).await?;
+            return Ok::<_,anyhow::Error>(Value::String(session["agent_session_id"].as_str()
+                .ok_or_else(||anyhow::anyhow!("Coding Session missing"))?.to_owned()));
+        }
         let display_name = if computer_denied {
             "Computer 权限拒绝验收"
         } else if computer_granted {

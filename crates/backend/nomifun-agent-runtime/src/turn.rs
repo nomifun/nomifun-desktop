@@ -3922,6 +3922,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_keeps_settled_checks_when_fixed_context_exceeds_the_soft_byte_trigger() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step("The two checks already ran; continue without replaying them.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(50_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(1100),
+        ));
+        let calls = ["check-pass", "check-expected-nonzero"];
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: calls.iter().map(|id| ChatContentPart::ToolCall {
+                call_id: (*id).into(), name: "exec_command".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test",id]})),
+                provider_metadata: None,
+            }).collect(),
+            provider_round_id: None,
+        });
+        for (index, id) in calls.iter().enumerate() {
+            request.input.messages.push(ChatMessage {
+                role: ChatRole::Tool,
+                content: vec![ChatContentPart::ToolResult {
+                    call_id: (*id).into(), is_error: index == 1,
+                    output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                        text: json!({"state":"exited","exit_code":index,"cleanup":{"reaped":true},
+                            "success":index==0}).to_string(),
+                    }],
+                }], provider_round_id: None,
+            });
+        }
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), resource,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < before && after <= resource.max_context_bytes);
+        for id in calls {
+            assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolCall { call_id, .. } if call_id.as_ref()==id)),
+                "a fitting exact check must not disappear behind a derived summary: {id}");
+        }
+        assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id, is_error:true, .. }
+                if call_id.as_ref()=="check-expected-nonzero")), "failed-check semantics must remain failed");
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,
+            "Continue to report the observed checks.".into()));
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "unchanged fixed instructions must not cause another paid summary after a small continuation");
+    }
+
+    #[tokio::test]
     async fn compaction_output_limit_retries_once_without_replaying_tools() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![
