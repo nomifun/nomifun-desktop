@@ -75,6 +75,8 @@ const AgentSettingsPage: React.FC = () => {
   }, [narrow, desktopSider.toggle]);
   const collapse = () => narrow ? closeNarrowSider() : desktopSider.setCollapsed(true);
   const trapNarrowOverlay = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Portaled settings dialogs manage their own keyboard focus.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       closeNarrowSider();
@@ -178,7 +180,7 @@ const AgentSettingsPage: React.FC = () => {
     };
   }, [controller.draft, controller.library, t]);
 
-  const libraryPanel = visibleLibrary ? (<AgentPresetLibrary
+  const libraryPanel = controller.library && visibleLibrary ? (<AgentPresetLibrary
             width={narrow ? 300 : resize.splitRatio}
             resizeHandle={narrow ? undefined : resize.createDragHandle({ className: 'right-0' })}
             onCollapse={collapse}
@@ -189,6 +191,10 @@ const AgentSettingsPage: React.FC = () => {
             creating={controller.busyAction === 'create'}
             openingPresetId={controller.openingPresetId}
             deletingPresetId={controller.deletingPresetId}
+            footer={<div className={styles.libraryFooter}>
+              <GuidDefaultAgentSetting library={controller.library} />
+              <AgentRoleDefaults catalog={controller.catalog} />
+            </div>}
             onSelectTemplate={(template) => {
               if (controller.selection?.kind === 'template' && controller.selection.template.template_key === template.template_key) return;
               beforeSwitch(() => { setTemplateInitialEditing(undefined); controller.openTemplate(template); setNarrowSiderOpen(false); });
@@ -256,11 +262,6 @@ const AgentSettingsPage: React.FC = () => {
         <div className={styles.workspace}>
           {!collapsed && (narrow ? <div ref={narrowOverlay} className={styles.siderOverlay} role='dialog' aria-modal='true' aria-label={t('agentSettings.library.ariaLabel')} onKeyDown={trapNarrowOverlay}><button className={styles.siderBackdrop} aria-label={t('agentSettings.workbench.hideList')} onClick={collapse} />{libraryPanel}</div> : libraryPanel)}
           <div className={styles.mainArea}>
-          <div className={styles.defaultsToolbar}>
-            <GuidDefaultAgentSetting library={controller.library} />
-            <AgentRoleDefaults catalog={controller.catalog} />
-          </div>
-
           {selectedTemplate ? (
             <OfficialTemplateOverview
               key={selectedTemplate.template_key}

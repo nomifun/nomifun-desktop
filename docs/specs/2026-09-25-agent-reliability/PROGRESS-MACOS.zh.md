@@ -30,7 +30,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～06 已验 shutdown/写锁、start 取消/IO failure/deadline/commit failure 所有权及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～07 已验 shutdown/写锁、start 取消/IO failure/deadline/commit failure 所有权、caller-drop/quiesce 组合及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
@@ -1059,6 +1059,21 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   **84/84**、物理 PID 消失 **168/168**，leader/watchdog 均恰好 reap 一次，fallback 0。
   外部 anchor 负向 **1/1**、Runtime **162/162**、registry **13/13**、boundary/fmt/diff 通过；
   原 2 秒 marker/6 秒收敛上界不变。全证据 `2026-09-30/macos/m06-commit-failure/`。
-- 本批只有原生组件证据；caller drop 与握手失败组合、pre-exec deferred cleanup、其他 owner
+- 本批只有原生组件证据；caller drop 与握手失败组合当批未验，native 接续见 M06-07；pre-exec deferred cleanup、其他 owner
   transfer failure、worker panic/未知恢复、正式 Tauri/其他平台角色及完整 Case/LONG/99% 仍开放。
   Windows 原结果未改写，不关闭完整 M06 或阶段二、三。
+
+- **M06-07 dropped caller / commit failure**（`PROC-039/042`、`CONC-004` 的底层 start/cancel
+  与容量/fence 子断言）：macOS 26.6.2 / 原生 arm64 / APFS，付费调用 0。真实进程先写唯一 PID/
+  starts marker，在 COMMIT 前 abort caller；watchdog 固定退出于 COMMIT/pre-COMMITTED，清理
+  未证明窗口被持有。Pipe/PTY × 无 shutdown/quiesce fence 四项首次通过，无新增产品缺陷；仅补
+  最小回归，复核 `S-D04-36` 修复影响，首次证据 `run-001/002` 保留。
+- 首次 + 20 repeats **84/84**；独立磁盘证明确实只启动原/后续各一次 **168/168**，capacity probe
+  零 dispatch **84/84**，原 owner 报告 **84/84**、物理 PID 消失 **336/336**，各 leader/watchdog
+  恰好 reap 一次，fallback 0。无 shutdown/lease 清理 **42/42**；fence 在清理未完成时 pending
+  **42/42**；原报错 `ownership_commit_failed` 不丢，清理后同一 Supervisor 容量/准入可复用
+  **84/84**。Runtime **166/166**、registry **13/13**、boundary/fmt/diff 通过，原 marker 2 秒/
+  cleanup 6 秒界限不变。证据 `2026-09-30/macos/m06-dropped-commit/`。
+- 本批是 native process 组件，不替代真实 Engine Turn cancel、正式 Tauri/角色或完整 Case；
+  pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复、其他平台、LONG/99%
+  仍开放。Windows 原结果未改写，不关闭完整 M06 或阶段二、三。

@@ -12,9 +12,8 @@ import {
   isConversationAgentTemplate,
 } from '@/renderer/components/agent/conversationAgentCatalog';
 import { useConfig } from '@/renderer/hooks/config/useConfig';
-import { Alert, Button, Modal } from '@arco-design/web-react';
 import { SettingTwo } from '@icon-park/react';
-import { useEffect, useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   DEFAULT_GUID_AGENT_SELECTION,
@@ -44,10 +43,9 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
   const { t } = useTranslation();
   const [storedDefault, setStoredDefault] = useConfig('guid.defaultAgentSelection');
   const [legacySelection] = useConfig('guid.agentSelection');
-  const [open, setOpen] = useState(false);
-  const [draftValue, setDraftValue] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const feedbackId = useId();
 
   const templateOptions = useMemo<DefaultAgentOption[]>(() =>
     library.official_templates
@@ -107,25 +105,14 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
     (storedDefault !== undefined || legacySelection !== undefined)
     && !optionByValue.has(configuredValue);
 
-  useEffect(() => {
-    if (open) setDraftValue(effectiveValue);
-  }, [effectiveValue, open]);
-
-  const show = () => {
-    setDraftValue(effectiveValue);
-    setError(null);
-    setOpen(true);
-  };
-
-  const save = async () => {
-    const option = optionByValue.get(draftValue);
-    if (!option) return;
+  const save = async (value: string) => {
+    const option = optionByValue.get(value);
+    if (!option || saving || value === effectiveValue) return;
     const previous = storedDefault;
     setSaving(true);
     setError(null);
     try {
       await setStoredDefault(option.selection as GuidAgentSelectionPreference);
-      setOpen(false);
     } catch {
       configService.setLocal('guid.defaultAgentSelection', previous);
       setError(t('agentSettings.defaultAgent.saveFailed'));
@@ -136,92 +123,43 @@ export default function GuidDefaultAgentSetting({ library }: Props) {
 
   const currentName = effectiveOption?.label
     ?? t('agentSettings.defaultAgent.noAvailableShort');
-  const buttonLabel = t('agentSettings.defaultAgent.button', {
-    name: currentName,
-  });
+  const feedback = error ?? (configuredDefaultUnavailable && effectiveOption
+    ? t('agentSettings.defaultAgent.unavailable', { name: effectiveOption.label })
+    : null);
 
-  return <>
-    <Button
-      className={styles.defaultAgentButton}
-      icon={<SettingTwo theme='outline' size={15} />}
-      disabled={options.length === 0}
-      title={buttonLabel}
-      onClick={show}
-    >
-      <span className={styles.defaultAgentButtonLabel}>{buttonLabel}</span>
-    </Button>
-    <Modal
-      visible={open}
-      title={t('agentSettings.defaultAgent.title')}
-      footer={null}
-      autoFocus
-      focusLock
-      unmountOnExit
-      onCancel={() => { if (!saving) setOpen(false); }}
-    >
-      <div className={styles.defaultAgentDialog}>
-        <p>{t('agentSettings.defaultAgent.hint')}</p>
-        {configuredDefaultUnavailable && effectiveOption && (
-          <Alert
-            type='warning'
-            showIcon
-            content={t('agentSettings.defaultAgent.unavailable', {
-              name: effectiveOption.label,
-            })}
-          />
+  return <div className={styles.defaultAgentSetting}>
+    <label className={styles.defaultAgentField} title={t('agentSettings.defaultAgent.hint')}>
+      <SettingTwo theme='outline' size={15} />
+      <span>{t('agentSettings.defaultAgent.title')}</span>
+      <select
+        className={styles.defaultAgentSelect}
+        aria-label={t('agentSettings.defaultAgent.title')}
+        aria-describedby={feedback ? feedbackId : undefined}
+        aria-busy={saving}
+        title={options.length === 0 ? t('agentSettings.defaultAgent.noAvailable') : currentName}
+        value={effectiveValue}
+        disabled={saving || options.length === 0}
+        onChange={(event) => void save(event.currentTarget.value)}
+      >
+        {!effectiveOption && <option value='' disabled>{t('agentSettings.defaultAgent.noAvailableShort')}</option>}
+        {templateOptions.length > 0 && (
+          <optgroup label={t('agentSettings.defaultAgent.officialGroup')}>
+            {templateOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </optgroup>
         )}
-        {error && <Alert type='error' showIcon content={error} />}
-        {options.length === 0 ? (
-          <Alert
-            type='warning'
-            showIcon
-            content={t('agentSettings.defaultAgent.noAvailable')}
-          />
-        ) : (
-          <label className={styles.defaultAgentField}>
-            <span>{t('agentSettings.defaultAgent.field')}</span>
-            <select
-              className={styles.nativeSelect}
-              aria-label={t('agentSettings.defaultAgent.field')}
-              value={draftValue}
-              disabled={saving}
-              onChange={(event) => setDraftValue(event.currentTarget.value)}
-            >
-              {templateOptions.length > 0 && (
-                <optgroup label={t('agentSettings.defaultAgent.officialGroup')}>
-                  {templateOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {presetOptions.length > 0 && (
-                <optgroup label={t('agentSettings.defaultAgent.personalGroup')}>
-                  {presetOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-            </select>
-          </label>
+        {presetOptions.length > 0 && (
+          <optgroup label={t('agentSettings.defaultAgent.personalGroup')}>
+            {presetOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </optgroup>
         )}
-        <div className={styles.defaultAgentActions}>
-          <Button disabled={saving} onClick={() => setOpen(false)}>
-            {t('common.cancel')}
-          </Button>
-          <Button
-            type='primary'
-            loading={saving}
-            disabled={!draftValue || draftValue === configuredValue}
-            onClick={() => void save()}
-          >
-            {t('agentSettings.defaultAgent.save')}
-          </Button>
-        </div>
-      </div>
-    </Modal>
-  </>;
+      </select>
+    </label>
+    {feedback && <p id={feedbackId} role={error ? 'alert' : 'status'} className={`${styles.defaultAgentFeedback} ${error ? styles.defaultAgentError : ''}`}>
+      {feedback}
+    </p>}
+  </div>;
 }

@@ -6193,6 +6193,166 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(unix_spawn)]
+    async fn dropped_pipe_commit_failure_keeps_capacity_without_shutdown() {
+        dropped_commit_failure_scenario(Transport::Pipe, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn dropped_pty_commit_failure_keeps_capacity_without_shutdown() {
+        dropped_commit_failure_scenario(Transport::Pty { cols: 80, rows: 24 }, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn dropped_pipe_commit_failure_keeps_turn_quiesce_fence() {
+        dropped_commit_failure_scenario(Transport::Pipe, true).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn dropped_pty_commit_failure_keeps_turn_quiesce_fence() {
+        dropped_commit_failure_scenario(Transport::Pty { cols: 80, rows: 24 }, true).await;
+    }
+
+    async fn dropped_commit_failure_scenario(transport: Transport, use_fence: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let scenario = match (&transport, use_fence) {
+            (Transport::Pipe, false) => "drop-pipe-alone",
+            (Transport::Pipe, true) => "drop-pipe-fence",
+            (Transport::Pty { .. }, false) => "drop-pty-alone",
+            (Transport::Pty { .. }, true) => "drop-pty-fence",
+        };
+        let root = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|path| path.join(scenario))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let marker = root.join("executed.pid");
+        let make_request = |marker: &std::path::Path| {
+            let mut request = request("/bin/sh".into(), vec!["-c".into(),
+                "printf '%s\\n' \"$$\" >> \"$2\"; printf '%s\\n' \"$$\" > \"$1\"; exec sleep 60".into(),
+                "dropped-commit-fixture".into(), marker.as_os_str().to_owned(),
+                marker.with_extension("starts").as_os_str().to_owned()]);
+            request.cwd = root.clone();
+            request.capability = CapabilityPolicy::local_owner(root.clone());
+            request.transport = transport.clone();
+            request
+        };
+        let request = make_request(&marker);
+        let owner = request.owner.clone();
+        let audit = TestSpawnAudit::default();
+        let pause = super::TestBlockingTransactionPause::new();
+        let _commit_release = pause.release_guard();
+        let held_cleanup = super::TestCleanupHold::new();
+        let _cleanup_release = held_cleanup.release_guard();
+        super::TEST_SUPERVISED_SPAWNS.get_or_init(Default::default).lock().unwrap()
+            .insert(owner.call_id, SpawnOptions {
+                audit: audit.clone(), before_commit_pause: Some(pause.clone()),
+                cleanup_hold: Some(held_cleanup.clone()),
+                fault: TestSpawnFault::WatchdogDiesAfterCommitBeforeCommitted,
+                ..SpawnOptions::default()
+            });
+        let supervisor = crate::ProcessSupervisor::new(crate::SupervisorConfig {
+            max_sessions: 1, reaper_interval: Duration::from_secs(30),
+        });
+        let starter = supervisor.clone();
+        let start = tokio::spawn(async move { starter.start(request).await });
+        tokio::time::timeout(Duration::from_secs(2), pause.wait_until_entered()).await.unwrap();
+        let leader = wait_for_complete_pid_marker(&marker).await;
+        let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
+        assert_eq!(audit.leader_pid.load(Ordering::SeqCst), leader);
+        start.abort();
+        let caller_cancelled = tokio::time::timeout(Duration::from_secs(1), start)
+            .await.unwrap().unwrap_err().is_cancelled();
+        pause.release();
+        tokio::time::timeout(Duration::from_secs(2), held_cleanup.wait_until_attempted()).await.unwrap();
+
+        let probe_marker = root.join("capacity-probe.pid");
+        let probe = tokio::time::timeout(Duration::from_secs(2), supervisor.start(make_request(&probe_marker)))
+            .await.expect("capacity probe must not wait for an unrelated lease");
+        let capacity_held = matches!(&probe, Err(ProcessError::CapacityExhausted { max_sessions: 1 }));
+        if let Ok(handle) = probe {
+            supervisor.cancel(&handle.owner, &handle.session_id).await.unwrap();
+        }
+        let probe_not_executed = !probe_marker.exists() && !probe_marker.with_extension("starts").exists();
+        let mut fence = Box::pin(supervisor.quiesce());
+        let early_report = if use_fence {
+            std::future::poll_fn(|cx| std::task::Poll::Ready(match
+                std::future::Future::poll(fence.as_mut(), cx) {
+                std::task::Poll::Pending => None,
+                std::task::Poll::Ready(report) => Some(report),
+            })).await
+        } else { None };
+        let fence_pending = early_report.is_none();
+        let still_owned_while_held = process_exists(leader)
+            && audit.leader_reaps.load(Ordering::SeqCst) == 0;
+        held_cleanup.release();
+        let cleaned_without_boundary = tokio::time::timeout(Duration::from_secs(6), async {
+            while process_exists(leader) || process_exists(watchdog)
+                || audit.leader_reaps.load(Ordering::SeqCst) != 1 || audit.watchdog_reaps.load(Ordering::SeqCst) != 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.is_ok();
+        // Keep an unexpected early report as failure evidence, never poll a
+        // completed future again or obscure it with a fixture panic.
+        let report = match early_report {
+            Some(report) => report,
+            None => tokio::time::timeout(Duration::from_secs(6), fence.as_mut()).await.unwrap(),
+        };
+        let reported = report.is_exact() && report.sessions.len() == 1
+            && report.sessions.iter().all(|entry| entry.owner == owner
+                && matches!(&entry.outcome, crate::ProcessOutcome::Cancelled { cleanup, .. }
+                    if cleanup.reaped && cleanup.errors.iter().any(|error| error.contains("ownership_commit_failed"))));
+        let followup_marker = root.join("followup.pid");
+        let followup_request = make_request(&followup_marker);
+        let followup_owner = followup_request.owner.clone();
+        let followup_audit = TestSpawnAudit::default();
+        super::TEST_SUPERVISED_SPAWNS.get_or_init(Default::default).lock().unwrap()
+            .insert(followup_owner.call_id, SpawnOptions { audit: followup_audit.clone(), ..SpawnOptions::default() });
+        let followup = supervisor.start(followup_request).await.expect("exact cleanup must release capacity and admission");
+        let followup_pid = wait_for_complete_pid_marker(&followup_marker).await;
+        let followup_watchdog = followup_audit.watchdog_pid.load(Ordering::SeqCst);
+        let followup_outcome = supervisor.cancel(&followup.owner, &followup.session_id).await.unwrap();
+        let followup_reaped = matches!(followup_outcome, crate::ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped)
+            && !process_exists(followup_pid) && !process_exists(followup_watchdog);
+        fs::write(root.join("assertions.json"), serde_json::json!({
+            "leader":leader,"watchdog":watchdog,"caller_cancelled":caller_cancelled,
+            "capacity_held":capacity_held,"probe_not_executed":probe_not_executed,
+            "use_fence":use_fence,"fence_pending":fence_pending,"still_owned_while_held":still_owned_while_held,
+            "exact_cleanup_before_boundary_result":cleaned_without_boundary,"reported":reported,
+            "original_invocation":owner.invocation_id.to_string(),"original_call":owner.call_id.to_string(),
+            "report_owners":report.sessions.iter().map(|entry| format!("{}:{}", entry.owner.invocation_id, entry.owner.call_id)).collect::<Vec<_>>(),
+            "report_outcomes":report.sessions.iter().map(|entry| format!("{:?}", entry.outcome)).collect::<Vec<_>>(),
+            "leader_reaps":audit.leader_reaps.load(Ordering::SeqCst),"watchdog_reaps":audit.watchdog_reaps.load(Ordering::SeqCst),
+            "watchdog_status":audit.watchdog_status.load(Ordering::SeqCst),
+            "followup_pid":followup_pid,"followup_watchdog":followup_watchdog,"followup_reaped":followup_reaped,
+            "followup_leader_reaps":followup_audit.leader_reaps.load(Ordering::SeqCst),
+            "followup_watchdog_reaps":followup_audit.watchdog_reaps.load(Ordering::SeqCst),
+            "followup_invocation":followup_owner.invocation_id.to_string(),"followup_call":followup_owner.call_id.to_string(),
+        }).to_string()).unwrap();
+        assert!(caller_cancelled && capacity_held && probe_not_executed && fence_pending && still_owned_while_held);
+        assert!(cleaned_without_boundary && reported && followup_reaped);
+        assert_eq!(fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{leader}\n"));
+        assert_eq!(fs::read_to_string(followup_marker.with_extension("starts")).unwrap(), format!("{followup_pid}\n"));
+        assert_eq!(audit.watchdog_status.load(Ordering::SeqCst), super::EXIT_FAULT_AFTER_COMMIT_BEFORE_COMMITTED << 8);
+        assert_eq!(followup_audit.leader_reaps.load(Ordering::SeqCst), 1);
+        assert_eq!(followup_audit.watchdog_reaps.load(Ordering::SeqCst), 1);
+    }
+
+    async fn wait_for_complete_pid_marker(marker: &std::path::Path) -> libc::pid_t {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(contents) = fs::read_to_string(marker) {
+                    if contents.ends_with('\n') { break contents.trim().parse::<libc::pid_t>().unwrap(); }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.expect("complete native PID marker must be published within the original bound")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
     async fn dropping_start_future_after_commit_leaves_cleanup_with_worker() {
         let audit = TestSpawnAudit::default();
         let pause = super::TestStartPause {
