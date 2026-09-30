@@ -1618,7 +1618,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   handshake failure、worker panic、cleanup failure/unknown recovery、Linux/Windows 原生、正式
   Tauri/其他角色和完整 LONG/统计仍开放，Windows 原结果未改写。
 - 中间 raw PTY watchdog-after-COMMITTED 注入曾在 spawn 返回 PeerClosed（152/153），原日志在
-  `m06-start-deadline/run-007-retained-io/`，该注入窗口作为独立未关闭项保留。
+  `m06-start-deadline/run-007-retained-io/`，当批未关闭；接续首次失败根因见 `S-D04-35`。
+
+- **S-D04-35**（`PROC-041/046/047`、A11/A13/A19，macOS watchdog fork 前置）：M06-05
+  对齐旧首败与系统 crash，确认 watchdog 在系统 `_notify_fork_child` 的懒初始化访问中终止，
+  未进入 BootReady，而非 COMMITTED 后清理错误。实现依据
+  [Apple libnotify](https://github.com/apple-oss-distributions/Libnotify/blob/main/notify_client.c)：
+  现两个 macOS 启动入口在父进程中以无注册副作用的负 token 查询完成一次初始化，不跳过 fork
+  handlers，不重试隐藏首败；等待仍消耗原 setup deadline，耗尽后不迟到 fork。
+- 未完成初始化的受控窗口（非私有 OS 锁损坏注入）首次 Pipe/PTY **0/2**，修复后等待/超时
+  四场景 **84/84**；原生 pipe/PTY post-COMMITTED fault **42/42**，独立 PID 消失 **126/126**、
+  零 fork **42/42**，caller 最大103 ms；Runtime **157/157**、registry **13/13**、boundary/fmt/diff
+  通过。证据 `2026-09-30/macos/m06-pty-watchdog/`，付费模型 0。只关闭该 macOS 初始化根因；
+  其他 fork callback、正式 Tauri/父死亡与 sleep/wake、未知恢复、其他平台/角色及完整 Case/统计
+  仍开放；Linux/Windows 分支不增加该初始化，也不改写已有 Windows 验收结果。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
