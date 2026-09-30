@@ -4,6 +4,21 @@ import { describe, expect, test } from 'bun:test';
 const source = readFileSync(new URL('./desktop-build-mac.sh', import.meta.url), 'utf8');
 
 describe('macOS Desktop build contract', () => {
+  test('keeps the context-only shutdown probe separate from navigation and soak', () => {
+    const runner = readFileSync(new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8');
+    const fixture = readFileSync(new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8');
+    expect(runner.includes("args.includes('--context-shutdown-only')")).toBe(true);
+    expect(runner.includes("'NOMIFUN_CEF_CONTEXT_SHUTDOWN_ONLY=1'")).toBe(true);
+    expect(runner.includes("'tauri-native-cef-context-shutdown'")).toBe(true);
+    expect(runner.includes('productAcceptance: false')).toBe(true);
+    const start = fixture.indexOf('if context_shutdown_only {');
+    const branch = fixture.slice(start, fixture.indexOf('if window_reopen_only {', start));
+    expect(branch.includes('engine.create_context(')).toBe(true);
+    expect(branch.includes('create_page(')).toBe(false);
+    expect(branch.includes('retained_shutdown_context = Some')).toBe(true);
+    expect(fixture.indexOf('drop(retained_shutdown_context)')).toBeGreaterThan(fixture.indexOf('let shutdown = engine.shutdown().await'));
+  });
+
   test('removes binary import and rejects the retired flag before passthrough', () => {
     expect(source.includes('WITH_CODEX_RUNTIME')).toBe(false);
     expect(source.includes('NOMIFUN_CODEX_RUNTIME')).toBe(false);

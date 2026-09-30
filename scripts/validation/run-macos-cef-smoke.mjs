@@ -12,7 +12,8 @@ const args = process.argv.slice(2);
 const option = (key, fallback) => args.includes(key) ? args[args.indexOf(key) + 1] : fallback;
 const soakOnly = args.includes('--soak-only');
 const windowReopenOnly = args.includes('--window-reopen-only');
-if (soakOnly && windowReopenOnly) throw new Error('choose only one native CEF focused mode');
+const contextShutdownOnly = args.includes('--context-shutdown-only');
+if ([soakOnly, windowReopenOnly, contextShutdownOnly].filter(Boolean).length > 1) throw new Error('choose only one native CEF focused mode');
 const environment = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'DEVELOPER_DIR', 'CEF_PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUST_MIN_STACK'].filter(key => process.env[key]).map(key => [key, process.env[key]]));
 const run = (command, argv, capture = false) => new Promise((resolve, reject) => {
   const child = spawn(command, argv, { cwd: root, env: environment, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
@@ -117,11 +118,12 @@ try {
   const report = join(stage, 'native-result.json');
   const helpers = [];
   for (const name of helperNames) helpers.push({ name, sha256: await hash(join(contents, 'Frameworks', `${name}.app`, 'Contents/MacOS', name)) });
-  const receipt = { scope: soakOnly ? 'tauri-native-cef-100-cycle-soak' : windowReopenOnly ? 'tauri-native-cef-window-reopen' : 'tauri-native-cef-input', productAcceptance: false, app, report, executableSha256: await hash(executable), helpers, architecture: await run('lipo', ['-archs', executable], true), infoPlistSerialization: 'canonical-xml' };
+  const receipt = { scope: contextShutdownOnly ? 'tauri-native-cef-context-shutdown' : soakOnly ? 'tauri-native-cef-100-cycle-soak' : windowReopenOnly ? 'tauri-native-cef-window-reopen' : 'tauri-native-cef-input', productAcceptance: false, app, report, executableSha256: await hash(executable), helpers, architecture: await run('lipo', ['-archs', executable], true), infoPlistSerialization: 'canonical-xml' };
   await writeFile(join(stage, 'artifact.json'), JSON.stringify(receipt, null, 2));
   const launchArgs = ['-W', '-n', '--env', `NOMIFUN_CEF_REPORT=${report}`];
   if (soakOnly) launchArgs.push('--env', 'NOMIFUN_CEF_SOAK_ONLY=1');
   if (windowReopenOnly) launchArgs.push('--env', 'NOMIFUN_CEF_WINDOW_REOPEN_ONLY=1');
+  if (contextShutdownOnly) launchArgs.push('--env', 'NOMIFUN_CEF_CONTEXT_SHUTDOWN_ONLY=1');
   launchArgs.push('-o', join(stage, 'stdout.log'), '--stderr', join(stage, 'stderr.log'), app);
   const launch = spawn('open', launchArgs, { cwd: root, env: environment, stdio: 'inherit' });
   const exited = new Promise((resolve, reject) => { launch.once('error', reject); launch.once('exit', resolve); });

@@ -30,6 +30,7 @@ fn main() {
         .unwrap_or_else(|| { eprintln!("NOMIFUN_CEF_REPORT is required"); std::process::exit(2) });
     let soak_only = std::env::var_os("NOMIFUN_CEF_SOAK_ONLY").is_some();
     let window_reopen_only = std::env::var_os("NOMIFUN_CEF_WINDOW_REOPEN_ONLY").is_some();
+    let context_shutdown_only = std::env::var_os("NOMIFUN_CEF_CONTEXT_SHUTDOWN_ONLY").is_some();
     std::fs::write(report.with_extension("pid"), std::process::id().to_string()).expect("fixture PID receipt");
     let root = tempfile::Builder::new().prefix("nomi-cef-smoke-").tempdir().expect("disposable CEF profile");
     let data = root.path().to_path_buf();
@@ -128,7 +129,13 @@ fn main() {
             watchdog.exit(2);
         });
         tauri::async_runtime::spawn(async move {
+            let mut retained_shutdown_context = None;
             let result = async {
+                if context_shutdown_only {
+                    retained_shutdown_context = Some(engine.create_context(Some(data.join("shutdown-context"))).await?);
+                    eprintln!("CEF_SMOKE_PHASE shutdown_context_created_without_page");
+                    return Ok::<_, String>(serde_json::json!({"checks":{"request_context_created":true},"passed":true}));
+                }
                 if window_reopen_only {
                     return browser_window_reopen::verify(
                         &engine,
@@ -230,7 +237,10 @@ fn main() {
                 verify_storage(&engine, parent, &data, &format!("http://{address}"), &mut checks).await?;
                 Ok::<_, String>(serde_json::json!({"checks":checks,"page":state,"passed":checks.as_object().unwrap().values().all(|v|v==true)}))
             }.await;
+            eprintln!("CEF_SMOKE_PHASE shutdown_begin");
             let shutdown = engine.shutdown().await;
+            eprintln!("CEF_SMOKE_PHASE shutdown_returned");
+            drop(retained_shutdown_context);
             let result = match (result, shutdown) {
                 (Ok(mut value), Ok(())) => { value["shutdown_complete"] = true.into(); value },
                 (result, shutdown) => serde_json::json!({"passed":false,"error":result.err(),"shutdown_error":shutdown.err()}),
