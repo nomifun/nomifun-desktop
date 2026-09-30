@@ -6082,6 +6082,470 @@ mod tests {
         reopened_database.close().await;
     }
 
+    /// A single-connection pool over the migrated file database: one
+    /// per-connection PRAGMA fault reaches every write the canonical Store
+    /// performs while that connection stays pooled — not a mock and not a
+    /// production change.
+    async fn single_connection_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+        sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(path)
+                    .create_if_missing(true)
+                    .busy_timeout(Duration::from_secs(5))
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Cap the database at its current page count, or lift the cap back to
+    /// SQLite's own ceiling. The cap is a per-connection page budget: any
+    /// allocation beyond it fails with SQLITE_FULL, the identical result code
+    /// SQLite surfaces when the underlying disk is actually full. VACUUM at the
+    /// minimum page size first packs the b-tree and empties the freelist, so
+    /// a write whose rows exceed one small page cannot hide inside slack — it
+    /// must allocate and fail.
+    async fn set_database_page_budget(pool: &sqlx::SqlitePool, cap_at_current_size: bool) {
+        let mut connection = pool.acquire().await.unwrap();
+        let limit = if cap_at_current_size {
+            sqlx::query("PRAGMA page_size=512")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query("VACUUM")
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+            sqlx::query_scalar::<_, i64>("PRAGMA page_count")
+                .fetch_one(&mut *connection)
+                .await
+                .unwrap()
+        } else {
+            1_073_741_823
+        };
+        sqlx::query(&format!("PRAGMA max_page_count={limit}"))
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        if cap_at_current_size {
+            // Prove the fault is real on this connection before the production
+            // path sees it: a one-page allocation must already fail full.
+            let probe = sqlx::query("CREATE TABLE __fault_probe (x INTEGER)")
+                .execute(&mut *connection)
+                .await;
+            let Err(probe_error) = probe else {
+                panic!("the page cap must return a real SQLITE_FULL, got {probe:?}")
+            };
+            assert!(
+                probe_error.to_string().contains("full"),
+                "the page cap must return a real SQLITE_FULL, got {probe_error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disk_full_admission_fails_closed_and_the_retry_executes_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let pool = single_connection_pool(&database_path).await;
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut call = context(&workspace);
+        call.idempotency_key = IdempotencyKey::from("disk-full-admission");
+        call.operation_id = OperationId::from("disk-full-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"full.txt","content":"must not exist on disk"
+        }));
+        // The disk fills between the causation facts and effect admission.
+        set_database_page_budget(&pool, true).await;
+        let error = host.invoke(Wave2HostRequest {
+            context: call.clone(),
+            operation: Wave2CapabilityOperation::WorkspaceExecution { input: input.clone() },
+        }).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        // The honest storage cause must surface, not a secondary bookkeeping
+        // error from a wedged connection.
+        assert!(error.message.contains("full"),"{error:?}");
+        assert!(!workspace.join("full.txt").exists());
+        assert!(
+            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none(),
+            "a failed admission must not leave a durable Effect"
+        );
+        // Freeing the disk admits the explicit retry exactly once.
+        set_database_page_budget(&pool, false).await;
+        let result = host.invoke(Wave2HostRequest {
+            context: call.clone(),
+            operation: Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        assert_eq!(
+            std::fs::read(workspace.join("full.txt")).unwrap(),
+            b"must not exist on disk"
+        );
+        let effects = store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        pool.close().await;
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let pool = single_connection_pool(&database_path).await;
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        let mut pending = context(&workspace);
+        pending.idempotency_key = IdempotencyKey::from("disk-full-success-settlement");
+        pending.operation_id = OperationId::from("disk-full-success-settlement-operation");
+        ensure_test_effect_context(&store,&pending).await;
+        let effect_id = wave2_effect_id(&pending).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"result.txt","content":"published before the disk filled"
+        }));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&pending,workspace_typed_binding(&pending).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else {
+            panic!("fresh file write effect must reserve")
+        };
+        let scope = host.workspace_scope(&pending).unwrap();
+        let receipt = host.files.write_file_with_observation_for_agent_session(
+            &scope,"result.txt",b"published before the disk filled",
+        ).await.unwrap();
+        assert!(receipt.created);
+        // The disk fills after the physical effect but before its terminal receipt.
+        set_database_page_budget(&pool, true).await;
+        let output = StrictJsonValue(json!({
+            "written":true,"path":"result.txt","detail":"x".repeat(4096)
+        }));
+        let error = finish_wave2_succeeded_effect(
+            &reservation,"workspace.files/write",&output,
+        ).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner reported success"),"{error:?}");
+        assert!(
+            error.message.contains("terminal observation could not be committed"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(
+            store.read_effect(&pending.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(
+            std::fs::read(workspace.join("result.txt")).unwrap(),
+            b"published before the disk filled"
+        );
+        // While the terminal observation is uncommitted the durable Pending
+        // still fences a retry: the caller is told to reconcile instead of the
+        // owner writing the file a second time.
+        let fenced = host.invoke(Wave2HostRequest {
+            context: pending.clone(),
+            operation: Wave2CapabilityOperation::WorkspaceExecution { input: input.clone() },
+        }).await.unwrap_err();
+        assert_eq!(fenced.code,"CAPABILITY_UNAVAILABLE","{fenced:?}");
+        assert_eq!(
+            std::fs::read(workspace.join("result.txt")).unwrap(),
+            b"published before the disk filled"
+        );
+        // The bounded failure is not latched: once the disk frees, the explicit
+        // settlement commits the same observation exactly once.
+        set_database_page_budget(&pool, false).await;
+        finish_wave2_succeeded_effect(&reservation,"workspace.files/write",&output)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_effect(&pending.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Returned);
+        assert_eq!(store.list_effects(&pending.agent_session_id).await.unwrap().len(),1);
+        assert_eq!(
+            std::fs::read(workspace.join("result.txt")).unwrap(),
+            b"published before the disk filled"
+        );
+        drop(reservation);
+        drop(host);
+        drop(store);
+        pool.close().await;
+        database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread", worker_threads=2)]
+    async fn disk_full_failed_terminal_keeps_owner_error_and_the_pending_fence() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let pool = single_connection_pool(&database_path).await;
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let host = Arc::new(
+            Wave2ApplicationHost::for_workspace_root(&workspace)
+                .with_effect_store(store.clone()),
+        );
+        let mut call = context(&workspace);
+        call.capability_id = CapabilityId::from("workspace.process");
+        call.action_id = ActionId::from("workspace.process/start");
+        call.idempotency_key = IdempotencyKey::from("disk-full-failed-settlement");
+        call.operation_id = OperationId::from("disk-full-failed-settlement-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let binding = workspace_typed_binding(&call).unwrap().clone();
+        let input = StrictJsonValue(json!({"command":"fixture-owner"}));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let invocation_host = Arc::clone(&host);
+        let invocation_call = call.clone();
+        let invocation_input = input.clone();
+        let owner_entered = Arc::clone(&entered);
+        let owner_release = Arc::clone(&release);
+        let invocation = tokio::spawn(async move {
+            invocation_host.invoke_managed_effect(
+                &invocation_call,&binding,&invocation_input,
+                move || async move {
+                    owner_entered.notify_one();
+                    owner_release.notified().await;
+                    Err::<StrictJsonValue,Wave2HostPortError>(Wave2HostPortError::new(
+                        "PROCESS_EXIT_NON_ZERO",
+                        format!("fixture process exited with code 17 {}","p".repeat(4096)),
+                    ))
+                },
+            ).await
+        });
+        tokio::time::timeout(Duration::from_secs(5),entered.notified()).await
+            .expect("managed owner must run after durable admission");
+        // The disk fills while the owner runs, before its failure receipt lands.
+        set_database_page_budget(&pool, true).await;
+        release.notify_one();
+        let error = tokio::time::timeout(Duration::from_secs(6),invocation).await
+            .expect("terminal settlement must fail at once, not wait out a full disk")
+            .unwrap().unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner failed with PROCESS_EXIT_NON_ZERO"),"{error:?}");
+        assert!(error.message.contains("fixture process exited with code 17"),"{error:?}");
+        assert!(
+            error.message.contains("terminal observation could not be committed"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(
+            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        // With the disk free again the durable Pending still fences replay.
+        set_database_page_budget(&pool, false).await;
+        let same_owner_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let same_called = Arc::clone(&same_owner_called);
+        let same_error = host.invoke_managed_effect(
+            &call,workspace_typed_binding(&call).unwrap(),&input,
+            move || async move {
+                same_called.store(true,std::sync::atomic::Ordering::Release);
+                Ok(StrictJsonValue(json!({"must_not":"run"})))
+            },
+        ).await.unwrap_err();
+        assert!(same_error.message.contains("durable pending"),"{same_error:?}");
+        assert!(!same_owner_called.load(std::sync::atomic::Ordering::Acquire));
+        drop(host);
+        drop(store);
+        pool.close().await;
+        database.close().await;
+    }
+
+    #[tokio::test]
+    async fn disk_full_uncertain_terminal_keeps_the_unknown_reason() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("agent.db");
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let pool = single_connection_pool(&database_path).await;
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let mut call = context(directory.path());
+        call.capability_id = CapabilityId::from("workspace.vcs");
+        call.action_id = ActionId::from("workspace.vcs/push");
+        call.idempotency_key = IdempotencyKey::from("disk-full-uncertain-settlement");
+        call.operation_id = OperationId::from("disk-full-uncertain-settlement-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({"remote":"origin","refspec":"HEAD:refs/heads/main"}));
+        let Wave2EffectAdmission::Reserved(reservation) = begin_wave2_exclusive_effect(
+            &store,&call,workspace_typed_binding(&call).unwrap(),&input,
+            nomifun_agent_session::EffectStrategy::ExternalUncertainEffect,
+        ).await.unwrap() else {
+            panic!("fresh uncertain effect must reserve")
+        };
+        // The disk fills before the uncertain terminal observation commits.
+        set_database_page_budget(&pool, true).await;
+        let owner_error = Wave2HostPortError::new(
+            "EFFECT_OUTCOME_UNKNOWN",
+            format!(
+                "remote accepted bytes before the transport disconnected {}",
+                "u".repeat(4096)
+            ),
+        );
+        let error = finish_wave2_uncertain_effect(
+            &reservation,"workspace.vcs/push",&owner_error,
+        ).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(error.message.contains("owner outcome is unknown"),"{error:?}");
+        assert!(error.message.contains("EFFECT_OUTCOME_UNKNOWN"),"{error:?}");
+        assert!(
+            error.message.contains("remote accepted bytes before the transport disconnected"),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("uncertain observation could not be committed"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("automatic retry is disabled"),"{error:?}");
+        assert_eq!(
+            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        // After the disk frees the uncertain observation still commits exactly once.
+        set_database_page_budget(&pool, false).await;
+        finish_wave2_uncertain_effect(&reservation,"workspace.vcs/push",&owner_error)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Unknown);
+        drop(reservation);
+        drop(store);
+        pool.close().await;
+        database.close().await;
+    }
+
+    /// Same single-connection pool, but pinned to rollback-journal mode so a
+    /// fault on the `*-journal` path only blocks write transactions — reads
+    /// never need the journal file. Switching WAL -> DELETE checkpoints the
+    /// WAL under an exclusive lock, so the connect retries briefly while the
+    /// previous pool's worker threads finish releasing file handles.
+    async fn rollback_journal_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .busy_timeout(Duration::from_secs(5))
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
+        for _ in 0..40 {
+            match sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect_with(options.clone())
+                .await
+            {
+                Ok(pool) => return pool,
+                Err(error)
+                    if error.to_string().contains("locked")
+                        || error.to_string().contains("busy") =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("journal-mode pool connect failed: {error:?}"),
+            }
+        }
+        panic!("journal-mode pool connect never got the file lock")
+    }
+
+    #[tokio::test]
+    async fn journal_creation_io_fault_fails_closed_and_recovers_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = directory.path().join("workspace");
+        let database_path = directory.path().join("agent.db");
+        std::fs::create_dir(&workspace).unwrap();
+        let database = nomifun_db::init_database(&database_path).await.unwrap();
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(
+            database.pool().clone(),
+        ).await.unwrap();
+        let mut call = context(&workspace);
+        call.idempotency_key = IdempotencyKey::from("journal-fault-admission");
+        call.operation_id = OperationId::from("journal-fault-admission-operation");
+        ensure_test_effect_context(&store,&call).await;
+        let effect_id = wave2_effect_id(&call).unwrap();
+        let input = StrictJsonValue(json!({
+            "path":"io-fault.txt","content":"must not exist on disk"
+        }));
+        // Switching WAL -> rollback journal needs an exclusive checkpoint; the
+        // fixture pool's idle connections still hold the WAL, so it must close
+        // before the single-connection rollback pool switches journal modes.
+        drop(store);
+        database.close().await;
+        let pool = rollback_journal_pool(&database_path).await;
+        let store = nomifun_agent_session::AgentSessionStore::from_pool(pool.clone())
+            .await
+            .unwrap();
+        let host = Wave2ApplicationHost::for_workspace_root(&workspace)
+            .with_effect_store(store.clone());
+        // Occupying the journal path with a directory is a real filesystem
+        // fault: the next write cannot create the journal SQLite requires,
+        // while reads never touch it.
+        let journal_path = PathBuf::from(format!(
+            "{}-journal",
+            database_path.as_os_str().to_string_lossy()
+        ));
+        assert!(!journal_path.exists());
+        std::fs::create_dir(&journal_path).unwrap();
+        // A direct write on the same connection still cannot create the
+        // journal, while the read path above stays healthy — the fault sits at
+        // the write boundary, not in pool or schema setup.
+        let probe = sqlx::query("CREATE TABLE __fault_probe (x INTEGER)")
+            .execute(&pool)
+            .await;
+        let Err(probe_error) = probe else {
+            panic!("the journal fault must block writes, got {probe:?}")
+        };
+        assert!(
+            probe_error.to_string().contains("unable to open"),
+            "the journal path must fault writes with an IO error, got {probe_error:?}"
+        );
+        // Reads never touch the journal path and must stay healthy while the
+        // write boundary is faulted.
+        assert!(
+            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none()
+        );
+        let error = host.invoke(Wave2HostRequest {
+            context: call.clone(),
+            operation: Wave2CapabilityOperation::WorkspaceExecution { input: input.clone() },
+        }).await.unwrap_err();
+        assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+        assert!(!workspace.join("io-fault.txt").exists());
+        assert!(
+            store.read_effect(&call.agent_session_id,&effect_id).await.unwrap().is_none(),
+            "an IO-faulted admission must not leave a durable Effect"
+        );
+        // Removing the fault lets the explicit retry execute exactly once on
+        // the same pooled connection — no restart is required.
+        std::fs::remove_dir(&journal_path).unwrap();
+        let result = host.invoke(Wave2HostRequest {
+            context: call.clone(),
+            operation: Wave2CapabilityOperation::WorkspaceExecution { input },
+        }).await.unwrap();
+        assert_eq!(result.0["written"],true);
+        let effects = store.list_effects(&call.agent_session_id).await.unwrap();
+        assert_eq!(effects.len(),1);
+        assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        drop(host);
+        drop(store);
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn pending_patch_fences_same_and_new_keys_after_database_reopen() {
         let directory = tempfile::tempdir().unwrap();

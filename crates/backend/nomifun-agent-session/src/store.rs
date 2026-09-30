@@ -25,7 +25,7 @@ use nomifun_agent_contracts::{
 };
 use serde_json::{Value, json};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{Sqlite, SqlitePool, Transaction};
+use sqlx::{Connection, Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
 
 use crate::checkpoint::{evaluate_snapshot_compatibility, validate_checkpoint};
@@ -343,7 +343,46 @@ impl AgentSessionStore {
         // SQLite's deferred BEGIN allows two writers to validate the same
         // head snapshot before either one obtains the write lock.  Lifecycle
         // mutations need one serialized validation/append boundary.
-        Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+        match self.pool.begin_with("BEGIN IMMEDIATE").await {
+            Ok(tx) => Ok(tx),
+            Err(error) => {
+                if !matches!(error, sqlx::Error::InvalidSavePointStatement) {
+                    return Err(error.into());
+                }
+                // A storage fault such as SQLITE_FULL aborts the write
+                // transaction inside SQLite itself, so the rollback the
+                // dropped sqlx Transaction queues finds no live transaction:
+                // the connection worker's tracked depth stays nonzero and
+                // rejects every later `begin_with` on that pooled connection
+                // with a misleading transaction-depth error.  Evict the
+                // desynced connection so the pool replaces it with a healthy
+                // one, then retry once; a healthy pool returns the probe
+                // connection unchanged.
+                self.evict_transaction_desynced_connection().await?;
+                Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
+            }
+        }
+    }
+
+    /// Acquire each idle pooled connection once and close the one whose sqlx
+    /// worker still believes a transaction is open after SQLite already
+    /// rolled it back underneath a storage fault.
+    async fn evict_transaction_desynced_connection(&self) -> Result<(), SessionStoreError> {
+        for _ in 0..self.pool.options().get_max_connections() {
+            let mut connection = self.pool.acquire().await?;
+            let desynced = match connection.begin_with("BEGIN IMMEDIATE").await {
+                Ok(probe) => {
+                    let _ = probe.rollback().await;
+                    false
+                }
+                Err(error) => matches!(error, sqlx::Error::InvalidSavePointStatement),
+            };
+            if !desynced {
+                return Ok(());
+            }
+            connection.close().await?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
