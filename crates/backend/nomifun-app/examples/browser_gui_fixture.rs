@@ -20,7 +20,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
@@ -33,6 +33,177 @@ struct LiveFrontend {
     work: PathBuf,
     source: Mutex<PathBuf>,
     served: Mutex<Vec<String>>,
+    budget: LiveBudget,
+    started: Mutex<Option<Instant>>,
+    upstream_requests: AtomicUsize,
+    stopped_status: AtomicUsize,
+}
+
+#[derive(Clone, Copy)]
+struct LiveBudget {
+    calls: usize,
+    output_tokens: u64,
+    seconds: u64,
+}
+
+impl LiveBudget {
+    fn parse(
+        calls: Option<&str>,
+        tokens: Option<&str>,
+        seconds: Option<&str>,
+    ) -> anyhow::Result<Self> {
+        let budget = Self {
+            calls: calls.unwrap_or("32").parse()?,
+            output_tokens: tokens.unwrap_or("4096").parse()?,
+            seconds: seconds.unwrap_or("1800").parse()?,
+        };
+        anyhow::ensure!(
+            (1..=32).contains(&budget.calls)
+                && (128..=4096).contains(&budget.output_tokens)
+                && (1..=1800).contains(&budget.seconds),
+            "live GUI budget outside bounded acceptance range"
+        );
+        Ok(budget)
+    }
+
+    fn reserve(
+        &self,
+        started: &Mutex<Option<Instant>>,
+        calls: &AtomicUsize,
+        stopped: &AtomicUsize,
+        now: Instant,
+    ) -> Result<Duration, axum::http::StatusCode> {
+        let mut started = started.lock().unwrap();
+        let status = stopped.load(Ordering::SeqCst);
+        if status != 0 {
+            return Err(axum::http::StatusCode::from_u16(status as u16).unwrap());
+        }
+        let elapsed = now.saturating_duration_since(*started.get_or_insert(now));
+        if elapsed >= Duration::from_secs(self.seconds)
+            || calls.load(Ordering::SeqCst) >= self.calls
+        {
+            return Err(stop_live_once(
+                stopped,
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+            ));
+        }
+        calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Duration::from_secs(self.seconds)
+            .saturating_sub(elapsed)
+            .min(Duration::from_secs(90)))
+    }
+}
+
+fn stop_live_once(stopped: &AtomicUsize, status: axum::http::StatusCode) -> axum::http::StatusCode {
+    let first = stopped
+        .compare_exchange(
+            0,
+            status.as_u16() as usize,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .unwrap_or_else(|first| first);
+    if first == 0 {
+        status
+    } else {
+        axum::http::StatusCode::from_u16(first as u16).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod live_budget_tests {
+    use super::*;
+    #[test]
+    fn explicit_budget_is_bounded_and_zero_or_widened_budgets_fail_closed() {
+        let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
+        assert_eq!(
+            (budget.calls, budget.output_tokens, budget.seconds),
+            (6, 1024, 180)
+        );
+        for values in [
+            ("0", "1024", "180"),
+            ("33", "1024", "180"),
+            ("6", "0", "180"),
+            ("6", "127", "180"),
+            ("6", "4097", "180"),
+            ("6", "1024", "0"),
+            ("6", "1024", "1801"),
+            ("invalid", "1024", "180"),
+        ] {
+            assert!(LiveBudget::parse(Some(values.0), Some(values.1), Some(values.2)).is_err());
+        }
+    }
+
+    #[test]
+    fn call_limit_is_exact_and_local_retries_do_not_reset_it() {
+        let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
+        let started = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let stopped = AtomicUsize::new(0);
+        let now = Instant::now();
+        for _ in 0..6 {
+            assert_eq!(
+                budget.reserve(&started, &calls, &stopped, now),
+                Ok(Duration::from_secs(90))
+            );
+        }
+        for _ in 0..20 {
+            assert_eq!(
+                budget.reserve(&started, &calls, &stopped, now),
+                Err(axum::http::StatusCode::TOO_MANY_REQUESTS)
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(*started.lock().unwrap(), Some(now));
+    }
+
+    #[test]
+    fn remaining_timeout_and_expiration_use_the_original_monotonic_start() {
+        let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
+        let started = Mutex::new(None);
+        let calls = AtomicUsize::new(0);
+        let stopped = AtomicUsize::new(0);
+        let now = Instant::now();
+        assert_eq!(
+            budget.reserve(&started, &calls, &stopped, now),
+            Ok(Duration::from_secs(90))
+        );
+        assert_eq!(
+            budget.reserve(&started, &calls, &stopped, now + Duration::from_secs(179)),
+            Ok(Duration::from_secs(1))
+        );
+        assert_eq!(
+            budget.reserve(&started, &calls, &stopped, now + Duration::from_secs(180)),
+            Err(axum::http::StatusCode::TOO_MANY_REQUESTS)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(*started.lock().unwrap(), Some(now));
+    }
+
+    #[test]
+    fn first_upstream_rejection_is_preserved_without_forwarding_local_retries() {
+        for code in [401, 403, 429, 502, 503] {
+            let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
+            let started = Mutex::new(None);
+            let calls = AtomicUsize::new(0);
+            let stopped = AtomicUsize::new(0);
+            let now = Instant::now();
+            assert!(budget.reserve(&started, &calls, &stopped, now).is_ok());
+            let rejection = axum::http::StatusCode::from_u16(code).unwrap();
+            assert_eq!(stop_live_once(&stopped, rejection), rejection);
+            assert_eq!(
+                stop_live_once(&stopped, axum::http::StatusCode::TOO_MANY_REQUESTS),
+                rejection
+            );
+            for _ in 0..20 {
+                assert_eq!(
+                    budget.reserve(&started, &calls, &stopped, now),
+                    Err(rejection)
+                );
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
 }
 const BROKEN_JS: &str = "function nextCount(value) { return value + 2; }\n";
 const COMPUTER_UNICODE_TEXT: &str = "NomiFun-é-e\u{301}-中文-かな-🙂-👩🏽‍💻-𝄞-END";
@@ -2151,26 +2322,36 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             return axum::http::StatusCode::UNAUTHORIZED.into_response();
         }
         if !body.is_object() || !body["messages"].is_array() { return axum::http::StatusCode::BAD_REQUEST.into_response(); }
-        if fixture.calls.fetch_add(1, Ordering::SeqCst) >= 32 { return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response(); }
+        let timeout = match live.budget.reserve(&live.started, &fixture.calls, &live.stopped_status, Instant::now()) {
+            Ok(timeout) => timeout,
+            Err(status) => return status.into_response(),
+        };
         body["model"] = json!("step-3.7-flash");
-        body["max_tokens"] = json!(4096);
+        body["max_tokens"] = json!(live.budget.output_tokens);
+        body.as_object_mut().unwrap().remove("max_completion_tokens");
         body["temperature"] = json!(0);
         body["stream"] = json!(true);
+        live.upstream_requests.fetch_add(1, Ordering::SeqCst);
         let response = tokio::select! {
             _=fixture.stop.cancelled()=>return axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-            response=live.client.post("https://api.stepfun.com/step_plan/v1/chat/completions").bearer_auth(live.key.as_str()).json(&body).send()=>response,
+            response=live.client.post("https://api.stepfun.com/step_plan/v1/chat/completions")
+                .timeout(timeout)
+                .bearer_auth(live.key.as_str()).json(&body).send()=>response,
         };
         return match response {
             Ok(response) if response.status().is_success() => axum::response::Response::builder()
                 .header("content-type","text/event-stream")
                 .body(axum::body::Body::from_stream(response.bytes_stream())).unwrap(),
             Ok(response) => {
-                *fixture.failure.lock().unwrap()=Some(format!("upstream_status_{}",response.status().as_u16()));
-                (axum::http::StatusCode::BAD_GATEWAY, Json(json!({"error":{"message":"Live test provider rejected the request"}}))).into_response()
+                let status = response.status().as_u16();
+                let stopped = stop_live_once(&live.stopped_status, axum::http::StatusCode::from_u16(status).unwrap());
+                *fixture.failure.lock().unwrap()=Some(format!("upstream_status_{status}"));
+                (stopped, Json(json!({"error":{"message":"Live test provider rejected the request"}}))).into_response()
             }
             Err(_) => {
+                let stopped = stop_live_once(&live.stopped_status, axum::http::StatusCode::BAD_GATEWAY);
                 *fixture.failure.lock().unwrap()=Some("upstream_transport_failed".into());
-                axum::http::StatusCode::BAD_GATEWAY.into_response()
+                stopped.into_response()
             }
         };
     }
@@ -2443,9 +2624,15 @@ async fn main() -> anyhow::Result<()> {
         let work = root.join("work");
         std::fs::create_dir(&work)?;
         let source = work.join("app.js");
+        let budget = LiveBudget::parse(
+            std::env::var("NOMIFUN_LIVE_GUI_CALL_LIMIT").ok().as_deref(),
+            std::env::var("NOMIFUN_LIVE_GUI_OUTPUT_LIMIT").ok().as_deref(),
+            std::env::var("NOMIFUN_LIVE_GUI_SECONDS").ok().as_deref(),
+        )?;
         Some(LiveFrontend { key:Zeroizing::new(key.trim().to_owned()),local_token:format!("Bearer {}",uuid::Uuid::new_v4()),
             client:reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(Duration::from_secs(90)).build()?,
-            work,source:Mutex::new(source),served:Mutex::new(vec![]) })
+            work,source:Mutex::new(source),served:Mutex::new(vec![]), budget, started:Mutex::new(None),
+            upstream_requests:AtomicUsize::new(0),stopped_status:AtomicUsize::new(0) })
     } else { None };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -2618,7 +2805,13 @@ async fn main() -> anyhow::Result<()> {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
                 let mut status=serde_json::Map::new();
                 let sections=[
-                    json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"native_pause":f.native_pause,
+                    json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),
+                        "upstream_requests":f.live.as_ref().map(|live| live.upstream_requests.load(Ordering::SeqCst)),
+                        "live_call_limit":f.live.as_ref().map(|live|live.budget.calls),
+                        "live_output_limit":f.live.as_ref().map(|live|live.budget.output_tokens),
+                        "live_seconds":f.live.as_ref().map(|live|live.budget.seconds),
+                        "live_stopped_status":f.live.as_ref().map(|live|live.stopped_status.load(Ordering::SeqCst)),
+                        "native_actions":f.native_url.is_some(),"native_pause":f.native_pause,
                         "computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,
                         "computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,
                         "computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,
