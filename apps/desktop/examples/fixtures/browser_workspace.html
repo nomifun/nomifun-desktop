@@ -47,9 +47,12 @@ for (const type of ['pointerdown','pointerup','mousedown','mouseup','click','dbl
     smoke.events.push({ type, trusted: event.isTrusted, target: event.target.id, button: event.button, buttons: event.buttons, detail: event.detail, key: event.key });
   }, true);
 }
-document.querySelector('#submit').addEventListener('click', () => {
+document.querySelector('#submit').addEventListener('click', event => {
   smoke.clicks++;
-  document.querySelector('#result').textContent = '已收到浏览器点击与文本：' + document.querySelector('#field').value;
+  const result = document.querySelector('#result');
+  result.dataset.clicks = String(smoke.clicks);
+  result.dataset.lastClickTrusted = String(event.isTrusted);
+  result.textContent = '已收到浏览器点击与文本：' + document.querySelector('#field').value;
 });
 document.querySelector('#mutates').addEventListener('click', event => {
   smoke.replacementClicks++;

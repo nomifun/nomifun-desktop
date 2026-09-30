@@ -25,6 +25,7 @@ fn main() {
     use tauri::Manager;
     let report = std::env::var_os("NOMIFUN_CEF_REPORT").map(std::path::PathBuf::from)
         .unwrap_or_else(|| { eprintln!("NOMIFUN_CEF_REPORT is required"); std::process::exit(2) });
+    let soak_only = std::env::var_os("NOMIFUN_CEF_SOAK_ONLY").is_some();
     std::fs::write(report.with_extension("pid"), std::process::id().to_string()).expect("fixture PID receipt");
     let root = tempfile::Builder::new().prefix("nomi-cef-smoke-").tempdir().expect("disposable CEF profile");
     let data = root.path().to_path_buf();
@@ -117,6 +118,13 @@ fn main() {
         });
         tauri::async_runtime::spawn(async move {
             let result = async {
+                if soak_only {
+                    return verify_runtime_soak(
+                        &engine,
+                        &handle,
+                        &format!("http://{address}"),
+                    ).await;
+                }
                 let context = engine.create_context(None).await?;
                 eprintln!("CEF_SMOKE_PHASE context_ready");
                 let page = engine.create_page(parent.clone(), context.clone()).await?;
@@ -716,6 +724,287 @@ async fn verify_runtime(engine: &std::sync::Arc<nomifun_browser_macos::engine::E
     runtime.close().await.map_err(|e|e.to_string())?;
     eprintln!("CEF_SMOKE_PHASE runtime_guard_stop_settled");
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn verify_runtime_soak(
+    engine: &std::sync::Arc<nomifun_browser_macos::engine::Engine>,
+    app: &tauri::AppHandle,
+    base_url: &str,
+) -> Result<serde_json::Value, String> {
+    use nomifun_browser_platform::{
+        run_guard::{BrowserInputState, BrowserRunCoordinator},
+        runtime::{
+            BrowserAction, BrowserEvaluation, BrowserEvaluationOutcome, BrowserProfile,
+            BrowserResourceKey, BrowserRuntimeFactory, BrowserTabCommand, BrowserTabLifecycle,
+            CreateBrowserRuntime, WorkspaceError,
+        },
+    };
+    use std::time::Instant;
+
+    fn percentile(values: &[u128], numerator: usize, denominator: usize) -> u128 {
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        let index = ((sorted.len() - 1) * numerator).div_ceil(denominator);
+        sorted[index.min(sorted.len() - 1)]
+    }
+
+    let host = macos::host::DesktopBrowserHost::new(app.clone(), engine.clone());
+    let runtime = host.create(CreateBrowserRuntime {
+        key: BrowserResourceKey {
+            principal_id: "fixture".into(),
+            agent_session_id: "native-cef-soak".into(),
+            resource_binding_id: "browser-fixture:native-cef-soak".into(),
+        },
+        runtime_generation: 18,
+        profile: BrowserProfile::Ephemeral,
+        user_input_enabled: true,
+    }).await.map_err(|error| error.to_string())?;
+    runtime.surface().ok_or("Native CEF soak surface is missing")?
+        .set_surface(
+            nomifun_browser_platform::runtime::BrowserSurfaceBounds {
+                x: 20., y: 60., width: 1060., height: 620.,
+            },
+            true,
+            Default::default(),
+        ).await.map_err(|error| error.to_string())?;
+
+    let initial_url = format!("{base_url}/browser_workspace.html?cycle=initial");
+    runtime.execute(
+        BrowserTabCommand::Create { url: initial_url.clone() },
+        Default::default(),
+    ).await.map_err(|error| error.to_string())?;
+    let mut changes = runtime.changes().ok_or("Native CEF soak changes are unavailable")?;
+    let mut target = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let snapshot = runtime.snapshot().await.map_err(|error| error.to_string())?;
+            if let Some(tab) = snapshot.tabs.iter().find(|tab|
+                tab.url == initial_url && tab.lifecycle == BrowserTabLifecycle::Ready
+            ) {
+                return Ok::<_, String>(tab.target.clone());
+            }
+            changes.changed().await.map_err(|_| "Native CEF soak subscription closed".to_owned())?;
+        }
+    }).await.map_err(|_| "Native CEF soak initial navigation timed out".to_owned())??;
+    let stable_tab_id = target.tab_id.clone();
+    let coordinator = BrowserRunCoordinator::new(runtime.clone());
+    let run = coordinator.begin().await.map_err(|error| error.to_string())?;
+    run.require_explicit_finish();
+
+    let cycle_result = async {
+        let mut durations_ms = Vec::with_capacity(100);
+        let mut stale_reference = None;
+        let mut stale_target_rejections = 0usize;
+        let mut generations = Vec::with_capacity(100);
+        for cycle in 0..100usize {
+            let started = Instant::now();
+            let url = format!("{base_url}/browser_workspace.html?cycle={cycle:03}");
+            let previous_generation = target.document_generation;
+            runtime.execute(
+                BrowserTabCommand::Navigate { target: target.clone(), url: url.clone() },
+                Default::default(),
+            ).await.map_err(|error| error.to_string())?;
+            target = tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                loop {
+                    let snapshot = runtime.snapshot().await.map_err(|error| error.to_string())?;
+                    if let Some(tab) = snapshot.tabs.iter().find(|tab|
+                        tab.target.tab_id == stable_tab_id
+                            && tab.url == url
+                            && tab.lifecycle == BrowserTabLifecycle::Ready
+                            && tab.target.document_generation > previous_generation
+                    ) {
+                        return Ok::<_, String>(tab.target.clone());
+                    }
+                    changes.changed().await.map_err(|_| "Native CEF soak subscription closed".to_owned())?;
+                }
+            }).await.map_err(|_| format!("Native CEF soak navigation {cycle:03} timed out"))??;
+            generations.push(target.document_generation);
+
+            let mut fixture_ready = false;
+            for _ in 0..100 {
+                let readiness = {
+                    let runtime = runtime.clone();
+                    let target = target.clone();
+                    coordinator.agent_operation(&run, move |cancel| async move {
+                        Ok(runtime.automation().expect("CEF automation").evaluate(
+                            BrowserEvaluation {
+                                target,
+                                expression: "document.readyState==='complete'&&document.querySelector('#field')!==null&&document.querySelector('#result')?.textContent==='等待 Agent'".into(),
+                            },
+                            cancel,
+                        ).await)
+                    }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?
+                };
+                if matches!(readiness.outcome, BrowserEvaluationOutcome::Completed { value } if value == true) {
+                    fixture_ready = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            if !fixture_ready {
+                return Err(format!("Cycle {cycle:03} reached Ready before the fixture script settled"));
+            }
+
+            if let Some(reference) = stale_reference.take() {
+                let stale = {
+                    let runtime = runtime.clone();
+                    coordinator.agent_operation(&run, move |cancel| async move {
+                        Ok(runtime.automation().expect("CEF automation").act(
+                            BrowserAction::click(reference), cancel,
+                        ).await)
+                    }).await.map_err(|error| error.to_string())?
+                };
+                if !matches!(stale, Err(WorkspaceError::StaleTarget)) {
+                    return Err(format!("Cycle {cycle:03} did not reject the previous-document target exactly: {stale:?}"));
+                }
+                stale_target_rejections += 1;
+            }
+
+            let observation = {
+                let runtime = runtime.clone();
+                let tab_id = stable_tab_id.clone();
+                coordinator.agent_operation(&run, move |cancel| async move {
+                    Ok(runtime.automation().expect("CEF automation").observe(Some(tab_id), cancel).await)
+                }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?
+            };
+            if observation.target != target {
+                return Err(format!("Cycle {cycle:03} observation target drifted"));
+            }
+            let field = observation.elements.iter()
+                .find(|element| element.name == "输入内容" && element.role == "textbox")
+                .ok_or_else(|| format!("Cycle {cycle:03} omitted the textbox"))?
+                .reference.clone();
+            let text = format!("soak-{cycle:03}-中文");
+            {
+                let runtime = runtime.clone();
+                let text = text.clone();
+                coordinator.agent_operation(&run, move |cancel| async move {
+                    Ok(runtime.automation().expect("CEF automation").act(
+                        BrowserAction::Type { element: field, text }, cancel,
+                    ).await)
+                }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+            }
+            let observation = {
+                let runtime = runtime.clone();
+                let tab_id = stable_tab_id.clone();
+                coordinator.agent_operation(&run, move |cancel| async move {
+                    Ok(runtime.automation().expect("CEF automation").observe(Some(tab_id), cancel).await)
+                }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?
+            };
+            let button = observation.elements.iter()
+                .find(|element| element.name == "验证点击" && element.role == "button")
+                .ok_or_else(|| format!("Cycle {cycle:03} omitted the click target"))?
+                .reference.clone();
+            {
+                let runtime = runtime.clone();
+                coordinator.agent_operation(&run, move |cancel| async move {
+                    Ok(runtime.automation().expect("CEF automation").act(
+                        BrowserAction::click(button), cancel,
+                    ).await)
+                }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+            }
+            let observation = {
+                let runtime = runtime.clone();
+                let tab_id = stable_tab_id.clone();
+                coordinator.agent_operation(&run, move |cancel| async move {
+                    Ok(runtime.automation().expect("CEF automation").observe(Some(tab_id), cancel).await)
+                }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?
+            };
+            stale_reference = Some(observation.elements.iter()
+                .find(|element| element.name == "验证点击" && element.role == "button")
+                .ok_or_else(|| format!("Cycle {cycle:03} omitted the final click target"))?
+                .reference.clone());
+
+            let state = runtime.snapshot().await.map_err(|error| error.to_string())?;
+            let tab = state.tabs.iter().find(|tab| tab.target.tab_id == stable_tab_id)
+                .ok_or_else(|| format!("Cycle {cycle:03} lost the stable tab"))?;
+            if state.tabs.len() != 1
+                || state.active_tab_id.as_deref() != Some(stable_tab_id.as_str())
+                || !state.downloads.is_empty()
+                || !tab.blocked_permissions.is_empty()
+                || !tab.permission_requests.is_empty()
+                || tab.script_dialog.is_some()
+            {
+                return Err(format!("Cycle {cycle:03} leaked native Browser state"));
+            }
+            let evaluated = {
+                let runtime = runtime.clone();
+                let target = target.clone();
+                coordinator.agent_operation(&run, move |cancel| async move {
+                    Ok(runtime.automation().expect("CEF automation").evaluate(
+                        BrowserEvaluation {
+                            target,
+                            expression: "(()=>{const field=document.querySelector('#field');const result=document.querySelector('#result');return {value:field?.value,clicks:Number(result?.dataset.clicks||0),trusted:result?.dataset.lastClickTrusted==='true',result:result?.textContent}})()".into(),
+                        },
+                        cancel,
+                    ).await)
+                }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?
+            };
+            let result = match evaluated.outcome {
+                BrowserEvaluationOutcome::Completed { value } => value,
+                outcome => return Err(format!("Cycle {cycle:03} evaluation did not complete: {outcome:?}")),
+            };
+            if result["value"] != text || result["clicks"] != 1 || result["trusted"] != true {
+                return Err(format!("Cycle {cycle:03} native result mismatch: {result}"));
+            }
+            durations_ms.push(started.elapsed().as_millis());
+            if cycle % 10 == 9 {
+                eprintln!("CEF_SOAK_PHASE cycles_completed={}", cycle + 1);
+            }
+        }
+        Ok::<_, String>((durations_ms, generations, stale_target_rejections))
+    }.await;
+
+    if cycle_result.is_err() {
+        run.cancel();
+    }
+    let finish = coordinator.finish(&run).await.map_err(|error| error.to_string());
+    let gate = coordinator.snapshot().await;
+    let close = runtime.close().await.map_err(|error| error.to_string());
+    let (durations_ms, generations, stale_target_rejections) = match (cycle_result, finish, close) {
+        (Ok(metrics), Ok(()), Ok(())) => metrics,
+        (cycles, finish, close) => {
+            return Err(format!("Native CEF soak cycles={cycles:?}; finish={finish:?}; close={close:?}"));
+        }
+    };
+    if gate.input_state != BrowserInputState::UserReady || gate.input_gate_failed {
+        return Err("Native CEF soak did not settle its input gate".into());
+    }
+    if generations.windows(2).any(|pair| pair[1] <= pair[0]) {
+        return Err("Native CEF soak document generations were not strictly increasing".into());
+    }
+    let first_median = percentile(&durations_ms[..20], 1, 2);
+    let last_median = percentile(&durations_ms[80..], 1, 2);
+    let first_p95 = percentile(&durations_ms[..20], 95, 100);
+    let last_p95 = percentile(&durations_ms[80..], 95, 100);
+    let latency_stable = last_median <= first_median.saturating_mul(3).saturating_add(250)
+        && last_p95 <= first_p95.saturating_mul(4).saturating_add(500);
+    let checks = serde_json::json!({
+        "cycles_completed": durations_ms.len() == 100,
+        "strict_document_generations": generations.len() == 100,
+        "previous_document_refs_rejected": stale_target_rejections == 99,
+        "single_runtime_and_tab": true,
+        "unicode_type_and_trusted_click": true,
+        "zero_cycle_errors": true,
+        "input_gate_settled": true,
+        "latency_not_sequence_degraded": latency_stable,
+    });
+    Ok(serde_json::json!({
+        "scope": "native-cef-100-cycle-soak",
+        "checks": checks,
+        "metrics": {
+            "cycles": durations_ms.len(),
+            "stale_target_rejections": stale_target_rejections,
+            "first_20_median_ms": first_median,
+            "last_20_median_ms": last_median,
+            "first_20_p95_ms": first_p95,
+            "last_20_p95_ms": last_p95,
+            "max_cycle_ms": durations_ms.iter().copied().max().unwrap_or(0),
+            "first_document_generation": generations.first(),
+            "last_document_generation": generations.last(),
+        },
+        "passed": checks.as_object().is_some_and(|values| values.values().all(|value| value == true)),
+    }))
 }
 
 #[cfg(target_os = "macos")]

@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～17 已验 owner crash/result-loss、Unicode、大型 A11y、100-cycle soak 与 click variants；live held-cancel/IME/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～19 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名与 native Browser soak；live held-cancel/IME、packaged Browser UI/reopen 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -808,3 +808,25 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   navigate/Unicode type/trusted click witness 仍须在解锁后以新隔离 UI 运行；Tauri 窗口关闭/重开、
   新 surface identity 与旧 frame/session fence 也仍开放，因此只关闭本签名/Seatbelt 前置子断言，
   不关闭完整 `BROW-017`、`MAC-017`、D06 或 M04。
+
+- **M04-19 macOS native CEF 100-cycle soak**（`BROW-018` 的本批平台子断言）：在 Mac 仍锁屏、正式
+  packaged UI 不可操作期间新增独立 `--soak-only` native runner，不用 API 提交冒充 UI。Developer
+  ID-signed arm64 Tauri/CEF bundle 在同一 ephemeral runtime、同一 tab 上执行固定 100 轮
+  navigate → readiness → fresh semantic observe → Unicode type → fresh observe → native click → final observe；
+  下一轮还必须以精确 `StaleTarget` 拒绝上一 document 的未消费 ref。
+- 首次 compile 漏引 `BrowserRuntimeFactory`；前三次正式运行又依次暴露 runner 把隔离 evaluation world
+  当页面 world、以页面全局变量作 oracle，以及把跨 document fence 错写为 `StaleObservation`。产品均
+  fail closed，runtime close / engine shutdown 正常；失败完整保留于
+  `2026-09-30/macos/m04-browser-soak/run-001-build/`、`run-002-formal/`、`run-003-formal/`、
+  `run-004-formal/`。修复后的 oracle 只从隔离 world 读取页面事件监听器写入的 DOM `data-*`，不穿透
+  world；跨 document 则精确要求 `StaleTarget` 99 次，未放宽为多个可接受错误。
+- 最终 exact-source `run-007-final-source` 完成 **100/100**，document generation **3→102**、旧 ref
+  `StaleTarget` **99/99**；每轮页面独立证明 exact `soak-NNN-中文`、click count 1 与
+  `event.isTrusted=true`。全过程始终 1 runtime / 1 tab，零 download/dialog/permission 残留、零 cycle
+  error；首 20 轮 median/p95 **311/504 ms**，末 20 轮 **316/524 ms**，最大 **524 ms**，无随序号
+  退化。全部 Helper 在第 10 轮前已启动，之后无新增；`shutdown_complete=true`，最终 App/Helper 为 0，
+  deep/strict 签名及六份 plist canonical roundtrip 通过。
+- 本批只扩展确定性 runner/页面 oracle，未发现新的产品或共享根因，故不改 `PROGRESS-SHARED`。
+  runner 仍明确 `productAcceptance=false`；正式 packaged AgentSession UI、真实模型、Tauri 窗口重开
+  identity/fence、睡眠唤醒及更长 LONG/99% 门槛仍开放，因此只关闭 `BROW-018` 的本批 macOS native
+  100-cycle 子断言，不关闭完整 Browser、D06/D09 或 M04/M06。

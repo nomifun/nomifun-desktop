@@ -95,4 +95,22 @@ describe('macOS Desktop build contract', () => {
     expect(hostCanonicalization).toBeLessThan(appSigning);
     expect(stage.includes("info_plist_serialization: 'canonical-xml'")).toBe(true);
   });
+
+  test('keeps the native CEF 100-cycle soak isolated and fail-closed', () => {
+    const runner = readFileSync(
+      new URL('./validation/run-macos-cef-smoke.mjs', import.meta.url), 'utf8',
+    );
+    const fixture = readFileSync(
+      new URL('../apps/desktop/examples/browser_cef_smoke.rs', import.meta.url), 'utf8',
+    );
+    expect(runner.includes("args.includes('--soak-only')")).toBe(true);
+    expect(runner.includes("'NOMIFUN_CEF_SOAK_ONLY=1'")).toBe(true);
+    expect(runner.includes("infoPlistSerialization: 'canonical-xml'")).toBe(true);
+    expect(fixture.includes('for cycle in 0..100usize')).toBe(true);
+    expect(fixture.includes('Err(WorkspaceError::StaleTarget)')).toBe(true);
+    expect(fixture.includes('stale_target_rejections == 99')).toBe(true);
+    expect(fixture.includes('latency_not_sequence_degraded')).toBe(true);
+    expect(fixture.includes('let close = runtime.close().await')).toBe(true);
+    expect(fixture.includes('let shutdown = engine.shutdown().await')).toBe(true);
+  });
 });
