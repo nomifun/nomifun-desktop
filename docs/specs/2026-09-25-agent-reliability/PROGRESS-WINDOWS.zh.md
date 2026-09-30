@@ -3019,6 +3019,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   macOS/其他角色及 N3/100 seed/LONG/99% 仍开放；不关闭完整 Case/共享阶段，无模型/UI。
   所有现场、日志及构建身份在外部，单 agent 只运行直接相关模块和复用 binary 的 N3 样本。
 
+### Artifact cleanup unknown 的 canonical fence 与诊断读（W181，基线 `b6a0c78ea`）
+
+- S-D03-67 / ART-007、LIFE-007、A05/A07/A13/A14/A17/A19：真实 owner 的无见证 temp
+  经应用宿主返回 EFFECT_OUTCOME_UNKNOWN，唯一 canonical Effect 保留 pending、无终态。
+  同 key/新 key、DB 真正关闭重开、磁盘残留修复、其他 Session 及文件写均拒绝，原 effect
+  全记录不变；已有产物读回原字节，后来的源 blob/写目标均未创建，零额外 effect/人工 override。
+- 首次 **1/1**，增加保留外来原对象的独立证据后 **1/1**；复用 binary 补 **3/3**，四份
+  独立 SQL/磁盘/native ID 核对通过。相邻六项通过；误把两过滤词当 AND 而实际 OR，运行了
+  79项并于93秒自然完成 **79/79**，保留日志、复用六项结果，无强停或重复测试。无新产品 FAIL。
+- 仅最小宿主回归，未修改生产行为；fmt/diff通过。完整 DB、现场、日志及源码/binary身份在外部
+  `2026-09-30/windows/w181-artifact-host-cleanup-fence`；两次构建分别144秒/20秒，N3复用既有binary。
+- 正式 Tauri UI/Runtime/真实模型、其他角色、macOS及完整N3/100 seed/LONG/99%仍开放；
+  不关闭完整 Case 或共享阶段；应用宿主组件结果不代替正式产品入口。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。
