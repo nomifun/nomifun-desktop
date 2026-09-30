@@ -681,6 +681,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   build identity **1/1**、fmt/diff 通过；最终组合 Desktop shutdown **2/2** 与 DB/文件独立核对通过。
   其他消息字段、claim 后未安装 ActiveTurn、跨重启、正式 UI/其他平台及完整长期门槛仍开放。
 
+- S-D09-49（G0-025、CTRL-018、LIFE-019/029、A03/A06/A09/A10/A14/A17/A19 取消回执输入匹配
+  子断言）：W171 原 gen0 取消证明只核对正文，同一 cancelled root 的附件、技能提示和 origin 被改动
+  后，cleanup/terminal 仍成功确认。证据根为外部 `2026-09-30/windows/w171-cancel-delivery-identity`，
+  两个首败及 DB 保留于 `01-first-product-run`。现复用 accepted delivery 的有界解析器比较
+  files/inject_skills 的完整数组及顺序、origin 的精确 Option；只有 absent/null 表示原 None，
+  不读附件、不授予 Skill 或打开资源。合法原取消经真实 SDK send/cancel/teardown保持原 terminal。
+  首轮 **2/2**、同构建 **20/20 × 2**、独立 SQLite **42/42**，原清理相邻 **9/9**、fmt/diff通过。
+  全部恢复为原 ready head、gen0/无 owner、零模型/effect/事件增量；首次失败不改写。wrapped delivery、
+  非空已选择 Skill、claim 后未安装 ActiveTurn、正式 UI/其他平台及完整长期门槛仍开放。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
