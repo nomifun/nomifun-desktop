@@ -3002,6 +3002,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 持续增长、startup stale cleanup、Unix 最终窗口、真实 IO fault、正式 UI/模型/角色/macOS
   及 N3/100 seed/LONG/99% 仍开放，不关闭完整 Case 或共享阶段；全程单 agent。
 
+### Artifact 冷清理身份与既有 owner 对账（W180，基线 `95525a679`）
+
+- S-D03-66 / ART-001/005/007、A05/A07/A13/A14/A17/A19：冷重开把已保留的 foreign stage
+  按文件名删除并允许发布，首次 **0/2**；修复后又发现旧 Store 的 cleanup_complete 缓存绕过
+  新 unknown，另两项首败保留。证据根为外部 `2026-09-30/windows/w180-artifact-cold-cleanup`，
+  原失败在 `01-first-product-run`、`05-first-preexisting-owner`，没有覆盖。
+- stage 持久化 original hardlink 与 native ID/birth 记录，重开核对同一对象后原生删除；
+  无见证的旧 temp、外来 stage/见证保留并公开 unknown，新发布被拒，已有产物仍可诊断读。
+  每次发布在共享 lease 内对账，64 项上限保持。三项旧夹具改用真实子进程无析构退出，
+  正向回收、PID 名复用及 65→1→0 断言保留，并验证 temp 已删而 witness 遗留的恢复。
+- Windows 模块 **33/33**，新五项 **3×5/5**；独立磁盘/native ID/birth 核对 **21/21**。
+  WSL Ubuntu ext4 模块 **33/33**、五场景原生核对 **5/5**，fmt/diff通过；两项 ignored
+  不计通过，退出夹具由父测试显式调用。辅助 oracle 两次长路径接口失败已留存，修正后通过。
+- 见证创建/fsync中途断电、见证及目录同时伪造、Unix最终check→unlink、正式应用host fence/UI、
+  macOS/其他角色及 N3/100 seed/LONG/99% 仍开放；不关闭完整 Case/共享阶段，无模型/UI。
+  所有现场、日志及构建身份在外部，单 agent 只运行直接相关模块和复用 binary 的 N3 样本。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。

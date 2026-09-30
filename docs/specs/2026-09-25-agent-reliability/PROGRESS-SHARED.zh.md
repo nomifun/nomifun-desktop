@@ -773,6 +773,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   持续增长、startup stale cleanup、Unix 最终窗口、真实 IO fault、正式 UI/模型/角色/macOS
   及长期门槛仍未覆盖；不关闭完整 ART Case 或共享阶段。
 
+- S-D03-66（ART-001/005/007、A05/A07/A13/A14/A17/A19 冷清理身份子断言）：W180 冷重开
+  删除 live cleanup 已保留的外来 stage，同字节异对象也被误删；首次 **0/2** 保留于外部
+  `2026-09-30/windows/w180-artifact-cold-cleanup/01-first-product-run`。另保留预先打开的 Store
+  缓存完成标记而继续发布的两项首败于 `05-first-preexisting-owner`。
+  stage 创建时持久化 hardlink 见证及 native ID/birth identity；重开核对记录和原对象，缺失、
+  替代或无见证的旧 temp 保留并阻止发布，已有产物可诊断读。每次发布在共享 lease 内重新核对，
+  清理上限仍为 64；真实子进程无析构退出验证正常遗留及 orphan witness 回收。
+  Windows 模块 **33/33**、新五项 **3×5/5**、21份独立磁盘/native ID 核对；WSL ext4 模块
+  **33/33**及5份原生核对、fmt/diff通过。辅助 oracle 两次长路径失败另存，修正路径接口后通过。
+  未验见证创建/fsync中途断电、见证及目录同时伪造、Unix最后unlink窗口、正式host fence/UI、
+  macOS/其他角色及长期门槛；不关闭完整Case或共享阶段，无模型/UI调用。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

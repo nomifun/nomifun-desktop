@@ -135,7 +135,7 @@ describe('AgentPreset library deletion', () => {
     expect(tabs[1].getAttribute('aria-controls')).toBe('agent-library-panel');
     expect(within(result.container).getByRole('tabpanel').getAttribute('aria-labelledby')).toBe('agent-library-tab-official');
   });
-  test('offers explicit Minimal and blank custom choices on first run', () => {
+  test('keeps Minimal and Create available without a first-run prompt', () => {
     let selected = '';
     let created = '';
     const fresh = {
@@ -160,10 +160,10 @@ describe('AgentPreset library deletion', () => {
       </I18nextProvider>
     );
     const page = within(result.container);
-    expect(page.getByRole('region', { name: 'Choose your starting point' })).toBeTruthy();
-    fireEvent.click(page.getByRole('button', { name: 'Start minimal' }));
+    expect(page.queryByRole('region', { name: 'Choose your starting point' })).toBeNull();
+    fireEvent.click(page.getByRole('button', { name: /Minimal/ }));
     expect(selected).toBe('chat.minimal');
-    fireEvent.click(page.getByRole('button', { name: 'Blank custom' }));
+    fireEvent.click(page.getByRole('button', { name: 'Create' }));
     expect(created).toBe('Untitled Agent');
   });
 
