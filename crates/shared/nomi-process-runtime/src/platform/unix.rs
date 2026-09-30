@@ -1799,10 +1799,15 @@ async fn spawn_inner_with_cancellation(
                 ),
             ));
         }
-        if transaction.startup_failure.is_some() {
-            transaction.start_failed_cleanup()
+        if let Some(cleanup) = transaction.auxiliary_cleanup.take() {
+            Ok(UnixStartResult::PreExecFailure {
+                failure: transaction.startup_failure.take().expect("deferred cleanup retains its startup failure"),
+                cleanup,
+            })
+        } else if transaction.startup_failure.is_some() {
+            transaction.start_failed_cleanup().map(UnixStartResult::Process)
         } else {
-            transaction.start_lifecycle()
+            transaction.start_lifecycle().map(UnixStartResult::Process)
         }
     });
     let (joined, deadline_expired) = match tokio::time::timeout_at(async_deadline, &mut transaction).await {
@@ -1821,8 +1826,28 @@ async fn spawn_inner_with_cancellation(
             ));
         }
     };
-    let committed = joined
+    let started = joined
         .map_err(|error| start_lost_message("spawn transaction join failed", error.to_string()))??;
+    let committed = match started {
+        UnixStartResult::Process(committed) => committed,
+        UnixStartResult::PreExecFailure { failure, cleanup } => {
+            let mut waiting = Box::pin(await_auxiliary_cleanup(failure, cleanup));
+            if let Some(expired) = setup_expired.as_ref() {
+                // The transaction can finish just before its setup timer while
+                // auxiliary cleanup remains pending. Cover this second stage
+                // with the same absolute deadline, not a new cleanup budget.
+                tokio::select! {
+                    result = waiting.as_mut() => return Err(result),
+                    _ = tokio::time::sleep_until(async_deadline) => expired.cancel(),
+                }
+                return Err(waiting.await);
+            }
+            return match tokio::time::timeout_at(async_deadline, waiting.as_mut()).await {
+                Ok(error) => Err(error),
+                Err(_) => Err(super::setup_deadline_error()),
+            };
+        }
+    };
     cancellation.disarm();
     let startup_failure = if committed.startup_failure.is_some() {
         committed.startup_failure.clone()
@@ -1946,6 +1971,37 @@ struct CommittedSpawn {
     startup_failure: Option<SpawnFailure>,
 }
 
+enum UnixStartResult {
+    Process(CommittedSpawn),
+    PreExecFailure { failure: SpawnFailure, cleanup: watch::Receiver<LifecycleCompletion> },
+}
+
+async fn await_auxiliary_cleanup(failure: SpawnFailure, mut completion: watch::Receiver<LifecycleCompletion>) -> ProcessError {
+    let started = Instant::now();
+    let cleanup = loop {
+        let state = completion.borrow().clone();
+        match state {
+            LifecycleCompletion::Reaped(fact) => break CleanupReport {
+                reaped: true, elapsed: started.elapsed(), errors: fact.cleanup_errors,
+                ..CleanupReport::default()
+            },
+            LifecycleCompletion::Failed { message, .. } => break CleanupReport {
+                reaped: false, elapsed: started.elapsed(), errors: vec![message.to_string()],
+                ..CleanupReport::default()
+            },
+            LifecycleCompletion::Running => {}
+        }
+        if completion.changed().await.is_err() {
+            break CleanupReport {
+                reaped: false, elapsed: started.elapsed(),
+                errors: vec!["startup auxiliary cleanup ended without exact proof".to_owned()],
+                ..CleanupReport::default()
+            };
+        }
+    };
+    ProcessError::StartLost { failure, last_known: None, cleanup }
+}
+
 enum CommittedIo {
     Unavailable,
     Pipe {
@@ -2022,6 +2078,7 @@ struct SpawnTransaction {
     nonce: Nonce,
     platform_permit: Option<PlatformLifecyclePermit>,
     startup_failure: Option<SpawnFailure>,
+    auxiliary_cleanup: Option<watch::Receiver<LifecycleCompletion>>,
     #[cfg(test)]
     lifecycle_start_delay: Option<Duration>,
     #[cfg(test)]
@@ -2125,6 +2182,43 @@ impl SpawnTransaction {
                     cleanup
                 },
             },
+        }
+    }
+
+    fn fail_pre_exec(mut self, error: io::Error, deadline: Deadline, retain: bool) -> Result<Self, ProcessError> {
+        if !retain {
+            return Err(self.pre_exec_failure(error, deadline));
+        }
+        self.control.take();
+        match self.reap_watchdog_before_setup_deadline(deadline) {
+            Ok(_) => {
+                self.disarmed = true;
+                Err(spawn_failed(error))
+            }
+            Err(reap_error) => {
+                let failure = SpawnFailure {
+                    code: "spawn_cleanup_deferred".to_owned(),
+                    message: format!("{error}; watchdog setup reap: {reap_error}"),
+                };
+                let (sender, receiver) = watch::channel(LifecycleCompletion::Running);
+                let job = CleanupJob {
+                    child: None, raw_leader_pid: None, watchdog_pid: self.watchdog_pid.take(),
+                    watchdog_anchors_group: false, control: None, pgid: None, leader_starttime: None,
+                    group_state: CleanupGroupState::NotRequired, signal_gate: None, completion: Some(sender),
+                    cleanup_proof_only: true,
+                    failure_context: Some((io::ErrorKind::Other, Arc::<str>::from(failure.message.clone()))),
+                    attempts: 0, last_error: None, watchdog_ownership_lost: false, leader_ownership_lost: false,
+                    retry_delay: CLEANUP_RETRY_DELAY, next_attempt: Instant::now(),
+                    #[cfg(test)] audit: self.audit.clone(),
+                    #[cfg(test)] hold: self.cleanup_hold.clone(),
+                };
+                let permit = self.platform_permit.take().expect("pre-exec watchdog retains cleanup admission");
+                defer_cleanup_job(job, permit);
+                self.disarmed = true;
+                self.startup_failure = Some(failure);
+                self.auxiliary_cleanup = Some(receiver);
+                Ok(self)
+            }
         }
     }
 
@@ -3251,6 +3345,7 @@ fn spawn_transaction(
         nonce,
         platform_permit: Some(platform_permit),
         startup_failure: None,
+        auxiliary_cleanup: None,
         #[cfg(test)]
         lifecycle_start_delay: options.lifecycle_start_delay,
         #[cfg(test)]
@@ -3273,13 +3368,14 @@ fn spawn_transaction(
     if let Err(error) = recv_expected(control_fd, nonce, FrameKind::BootReady, deadline)
         .and_then(|frame| validate_frame_identity(frame, 0, 0))
     {
-        return Err(transaction.pre_exec_failure(protocol_io_error(error), deadline));
+        return transaction.fail_pre_exec(protocol_io_error(error), deadline, retain_start_owner);
     }
     if let Err(error) = ensure_setup_active(deadline, cancelled) {
-        return Err(transaction.pre_exec_failure(
+        return transaction.fail_pre_exec(
             io::Error::new(io::ErrorKind::TimedOut, error.to_string()),
             deadline,
-        ));
+            retain_start_owner,
+        );
     }
 
     let registration_fd = registration_child.as_raw_fd();
@@ -3323,7 +3419,7 @@ fn spawn_transaction(
         Err(error) => {
             let abort = Frame::new(FrameKind::Abort, nonce, 0, 0);
             let _ = send_frame(control_fd, &abort, deadline);
-            return Err(transaction.pre_exec_failure(error, deadline));
+            return transaction.fail_pre_exec(error, deadline, retain_start_owner);
         }
     };
     let transaction_io = match (pty, prepared_pty) {
@@ -6349,6 +6445,118 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         }).await.expect("complete native PID marker must be published within the original bound")
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn preexec_pipe_deferred_cleanup_keeps_shutdown_responsibility() {
+        preexec_deferred_cleanup_scenario(Transport::Pipe, true).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn preexec_pty_deferred_cleanup_keeps_shutdown_responsibility() {
+        preexec_deferred_cleanup_scenario(Transport::Pty { cols: 80, rows: 24 }, true).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn preexec_pipe_deferred_cleanup_keeps_quiesce_responsibility() {
+        preexec_deferred_cleanup_scenario(Transport::Pipe, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn preexec_pty_deferred_cleanup_keeps_quiesce_responsibility() {
+        preexec_deferred_cleanup_scenario(Transport::Pty { cols: 80, rows: 24 }, false).await;
+    }
+
+    async fn preexec_deferred_cleanup_scenario(transport: Transport, shutdown: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let scenario = match (&transport, shutdown) {
+            (Transport::Pipe, true) => "preexec-pipe-shutdown",
+            (Transport::Pipe, false) => "preexec-pipe-quiesce",
+            (Transport::Pty { .. }, true) => "preexec-pty-shutdown",
+            (Transport::Pty { .. }, false) => "preexec-pty-quiesce",
+        };
+        let root = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|path| path.join(scenario))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let marker = root.join("must-not-exec.marker");
+        let mut request = shell_request(&marker);
+        request.cwd = root.clone();
+        request.capability = CapabilityPolicy::local_owner(root.clone());
+        request.transport = transport;
+        let owner = request.owner.clone();
+        let audit = TestSpawnAudit::default();
+        let held_cleanup = super::TestCleanupHold::new();
+        let _release = held_cleanup.release_guard();
+        super::TEST_SUPERVISED_SPAWNS.get_or_init(Default::default).lock().unwrap()
+            .insert(owner.call_id, SpawnOptions {
+                audit: audit.clone(), fault: TestSpawnFault::WithholdAck,
+                setup_timeout: Some(Duration::from_millis(100)),
+                cleanup_hold: Some(held_cleanup.clone()), ..SpawnOptions::default()
+            });
+        let supervisor = crate::ProcessSupervisor::new(crate::SupervisorConfig {
+            max_sessions: 1, reaper_interval: Duration::from_secs(30),
+        });
+        let starter = supervisor.clone();
+        let before = Instant::now();
+        let start = tokio::spawn(async move { starter.start(request).await });
+        let result = tokio::time::timeout(Duration::from_millis(350), start).await.unwrap().unwrap();
+        let caller_ms = before.elapsed().as_millis();
+        tokio::time::timeout(Duration::from_secs(2), held_cleanup.wait_until_attempted()).await.unwrap();
+        let watchdog = audit.watchdog_pid.load(Ordering::SeqCst);
+        let auxiliary_unreaped = process_exists(watchdog) && audit.watchdog_reaps.load(Ordering::SeqCst) == 0;
+        let probe_marker = root.join("capacity-probe.marker");
+        let mut probe_request = shell_request(&probe_marker);
+        probe_request.cwd = root.clone();
+        probe_request.capability = CapabilityPolicy::local_owner(root.clone());
+        let probe = tokio::time::timeout(Duration::from_secs(2), supervisor.start(probe_request)).await.unwrap();
+        let capacity_held = matches!(&probe, Err(ProcessError::CapacityExhausted { max_sessions: 1 }));
+        if let Ok(handle) = probe { supervisor.cancel(&handle.owner, &handle.session_id).await.unwrap(); }
+        let mut boundary = Box::pin(async {
+            if shutdown {
+                let report = supervisor.shutdown().await;
+                (report.sessions, report.startups)
+            } else {
+                let report = supervisor.quiesce().await;
+                (report.sessions.into_iter().map(|entry| crate::ShutdownSessionReport {
+                    session_id: entry.session_id, owner: entry.owner, outcome: entry.outcome,
+                }).collect(), report.startups)
+            }
+        });
+        let early = tokio::time::timeout(Duration::from_millis(150), boundary.as_mut()).await.ok();
+        let boundary_early = early.is_some();
+        held_cleanup.release();
+        let (report, startups) = match early {
+            Some(report) => report,
+            None => tokio::time::timeout(Duration::from_secs(6), boundary.as_mut()).await.unwrap(),
+        };
+        let reaped = tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(watchdog) || audit.watchdog_reaps.load(Ordering::SeqCst) != 1 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.is_ok();
+        let reported = report.is_empty() && startups.len() == 1 && startups.iter().all(|entry|
+            entry.owner == owner && entry.cleanup.reaped && entry.user_code_not_started
+                && entry.failure.code == "spawn_cleanup_deferred");
+        fs::write(root.join("assertions.json"), serde_json::json!({
+            "watchdog":watchdog,"caller_ms":caller_ms,"caller_result":format!("{result:?}"),
+            "auxiliary_unreaped_while_held":auxiliary_unreaped,"boundary_early":boundary_early,
+            "report_count":report.len(),"report":format!("{report:?}"),
+            "startup_report_count":startups.len(),"startups":format!("{startups:?}"),"reported":reported,
+            "capacity_held":capacity_held,"probe_not_executed":!probe_marker.exists(),
+            "watchdog_reaps":audit.watchdog_reaps.load(Ordering::SeqCst),
+            "leader_pid":audit.leader_pid.load(Ordering::SeqCst),
+            "leader_reaps":audit.leader_reaps.load(Ordering::SeqCst),
+            "user_code_not_executed":!marker.exists(),"exact_auxiliary_cleanup":reaped,
+        }).to_string()).unwrap();
+        assert!(result.is_err() && !marker.exists() && reaped && auxiliary_unreaped);
+        assert!(!boundary_early, "boundary returned while its native startup watchdog remained unreaped");
+        assert!(reported && capacity_held && !probe_marker.exists(), "auxiliary startup ownership must retain capacity and an exact report without a fake user process");
     }
 
     #[tokio::test]
