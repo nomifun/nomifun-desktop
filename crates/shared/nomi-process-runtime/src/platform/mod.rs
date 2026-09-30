@@ -51,33 +51,68 @@ pub(crate) struct SpawnedPlatformProcess {
     pub(crate) owner: Arc<dyn PlatformProcess>,
 }
 
+#[derive(Clone)]
+pub(crate) struct StartCancellation {
+    #[cfg(windows)]
+    native: Arc<windows::StartCancellation>,
+    #[cfg(not(windows))]
+    native: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StartCancellation {
+    pub(crate) fn new() -> Self {
+        Self {
+            #[cfg(windows)]
+            native: Arc::new(windows::StartCancellation::new()),
+            #[cfg(not(windows))]
+            native: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        #[cfg(windows)]
+        self.native.cancel();
+        #[cfg(not(windows))]
+        self.native.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        #[cfg(windows)]
+        { self.native.is_cancelled() }
+        #[cfg(not(windows))]
+        { self.native.load(std::sync::atomic::Ordering::Acquire) }
+    }
+}
+
 pub(crate) async fn spawn(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: StartCancellation,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     match request.transport {
-        Transport::Pipe => spawn_pipe(request, output).await,
-        Transport::Pty { cols, rows } => spawn_pty(request, output, cols, rows).await,
+        Transport::Pipe => spawn_pipe(request, output, cancellation).await,
+        Transport::Pty { cols, rows } => spawn_pty(request, output, cols, rows, cancellation).await,
     }
 }
 
 pub(crate) async fn spawn_pipe(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: StartCancellation,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     #[cfg(unix)]
     {
-        unix::spawn_pipe(request, output).await
+        unix::spawn_pipe(request, output, cancellation.native).await
     }
 
     #[cfg(windows)]
     {
-        windows::spawn_pipe(request, output).await
+        windows::spawn_pipe(request, output, cancellation.native).await
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (request, output);
+        let _ = (request, output, cancellation);
         Err(ProcessError::Transport {
             reason: "platform pipe adapter is pending".to_owned(),
         })
@@ -89,20 +124,21 @@ pub(crate) async fn spawn_pty(
     output: Arc<OutputBuffer>,
     cols: u16,
     rows: u16,
+    cancellation: StartCancellation,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     #[cfg(unix)]
     {
-        unix::spawn_pty(request, output, cols, rows).await
+        unix::spawn_pty(request, output, cols, rows, cancellation.native).await
     }
 
     #[cfg(windows)]
     {
-        windows::spawn_pty(request, output, cols, rows).await
+        windows::spawn_pty(request, output, cols, rows, cancellation.native).await
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (request, output, cols, rows);
+        let _ = (request, output, cols, rows, cancellation);
         Err(ProcessError::Transport {
             reason: "platform PTY adapter is unavailable".to_owned(),
         })

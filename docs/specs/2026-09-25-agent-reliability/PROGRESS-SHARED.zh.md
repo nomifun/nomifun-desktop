@@ -1449,6 +1449,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   真实 start/shutdown、start future drop、正式 Tauri、ConPTY 父死亡、其他平台/角色及完整
   N3/100 seed/LONG/99% 仍开放；只通过该子断言，不关闭完整 PROC/LIFE 或共享阶段。
 
+- S-D04-31（PROC-039/040/042、CONC-004、A03/A10/A11/A13/A17/A19）：W170 手动首次 poll
+  命中原生 spawn 的真实 await，PID 标记和精确 OS handle 证明 child 已执行；drop caller 后 shutdown
+  空报告且 child 当时仍活，平台后续 Drop 清理不能替代该时点的证明。启动改为宿主持有的 worker，
+  保留原原生取消、准入租约/预留与结果 ACK；未交付结果仍清理同一 Session，ACK 不持准入锁。
+  中间实现把准入放到 worker 后又被真实 quiesce 反例揭示：空 exact fence 后旧 start 继续执行。
+  该引入失败保留并修为 public 首次 poll 取得 read_owned/预留后连续移交。最终五项首轮及
+  **20/20 × 5**、独立 PID/磁盘 **105/105**、自有 helper 0；直接相邻 **11/11**、API **21/21**，
+  WSL Linux 单包兼容编译与 fmt/diff 通过，未代判 macOS。原生失败/unknown/worker panic 组合、
+  ConPTY 本组真实竞态、正式 Tauri/其他平台角色及 N3/100 seed/LONG/99% 仍开放。证据见外部 W170。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
