@@ -981,6 +981,61 @@ mod tests {
     }
 
     #[test]
+    fn artifact_size_admission_rejects_source_above_512_mib_without_reading() {
+        artifact_size_admission(false);
+    }
+
+    #[test]
+    fn artifact_size_admission_rejects_blob_above_512_mib_without_reading() {
+        artifact_size_admission(true);
+    }
+
+    fn artifact_size_admission(blob: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if blob {"oversized-blob"} else {"oversized-source"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let id = "0".repeat(64);
+        let path = if blob {workspace.join(ARTIFACT_RELATIVE_ROOT).join(&id)} else {workspace.join("source")};
+        let file = File::create(&path).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+            let mut returned = 0;
+            let ok = unsafe { DeviceIoControl(file.as_raw_handle(), FSCTL_SET_SPARSE,
+                std::ptr::null(), 0, std::ptr::null_mut(), 0, &mut returned, std::ptr::null_mut()) };
+            assert_ne!(ok, 0, "sparse fixture setup failed: {}", std::io::Error::last_os_error());
+        }
+        file.set_len(MAX_ARTIFACT_BYTES + 1).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let source_identity = SameFileHandle::from_path(&path).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let error = if blob {
+            load_verified_artifact(&namespace, &id, &counters).err().expect("oversized blob must fail admission")
+        } else {
+            store.publish("source", None).unwrap_err()
+        };
+        let scanned = if blob {counters.full_scan_bytes.load(Ordering::Acquire)} else {store.io_counts().0};
+        assert!(source_identity == SameFileHandle::from_path(&path).unwrap());
+        assert_eq!(scanned, 0, "size admission must reject before a full scan");
+        assert_eq!(fs::metadata(&path).unwrap().len(), MAX_ARTIFACT_BYTES + 1);
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        assert!(!artifact_publication_outcome_unknown(&error));
+        if blob { assert!(matches!(error, AppError::Conflict(_))); }
+        else { assert!(matches!(error, AppError::BadRequest(_))); }
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blob":blob, "maximum_bytes":MAX_ARTIFACT_BYTES, "actual_bytes":fs::metadata(&path).unwrap().len(),
+            "full_scan_bytes":scanned, "known_rejection":true, "path_preserved":true,
+            "relative_path":path.strip_prefix(&workspace).unwrap(), "remaining_temps":0,
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
     fn staging_cleanup_preserves_a_foreign_reused_name() {
         staging_cleanup_name_race(false);
     }
