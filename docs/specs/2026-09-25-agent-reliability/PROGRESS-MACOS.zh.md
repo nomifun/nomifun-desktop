@@ -1227,3 +1227,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 空数据正式 App 对照经产品 SIGTERM observer → Tauri `ExitRequested` 正常 exit **0**，没有
   active Session；锁屏阻断 UI Cmd-Q 验收，已请求手动解锁，信号对照不替代按钮/UI 证据。完整记录：
   `2026-10-01/macos/c05-shutdown/`。Windows/WebView2 路径未改，已完成 Session 的退出重验仍开放。
+
+- **MAC-C05-02 context-only native isolation**（C05 的本批定位，非完整 UI 验收）：现有 signed Tauri
+  CEF runner 新增互斥的 `--context-shutdown-only`，只持有一个真实 persistent request context，
+  零页面/导航/模型；原 180 秒 native watchdog、260 秒 runner 上限及强制清理判 FAIL 未放宽。
+  首次原生运行在 shutdown_begin 等待；随后“移至 CEF runner 释放”“等待 context initialized”两项
+  假设同样失败，三个独立日志与差异保留，**两项未证实产品改动已撤回，未提交为修复**。
+- 原 MAC-A-01 线程样本还证明 CEF foreground worker 在 `SecItemCopyMatching → Keychain decrypt`
+  的系统 RPC 等待，与 SecurityAgent 存在一致；这缩小了原生加密/授权条件范围，尚未读取或证明具体
+  Keychain 授权项。工具拒绝操作 SecurityAgent，未改加密、权限、mock keychain 或系统保护来制造通过。
+- 本批只收最小复现入口及脚本回归；native 三次均保留 FAIL/forced-cleanup，不能以 Mac lib 通过或
+  原空数据 signal exit 0 关闭。记录 `2026-10-01/macos/c05-context-release/`；系统授权/解锁条件需
+  人工核对，后续只重验该 native 子链与正式已完成 Session 的退出，不扩回 Browser/soak 矩阵。
