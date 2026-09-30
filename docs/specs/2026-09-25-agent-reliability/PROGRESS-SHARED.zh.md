@@ -755,6 +755,15 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   startup stale cleanup、Unix stage/rollback check→unlink、真IO fault、完整UI/角色平台和完整
   长期门槛仍开放，不关闭完整Case或共享阶段。
 
+- S-D03-64（ART-005/006、A05/A13/A14/A15/A17/A19 512MiB超限准入）：W178真实 sparse
+  source/blob各536,870,913字节，均在full scan前按原上限拒绝，源为BadRequest、blob为Conflict，
+  不是unknown/截断成功；对象和大小保留，零publication temp。首次 **2/2**、最终源三个独立
+  样本 **3×2/2**及六份磁盘/稀疏属性核对，Windows模块 **28/28**、WSL ext4模块 **28/28**和两
+  原生超限文件核对、fmt/diff通过，不代判macOS。无新产品FAIL或生产修复，仅必要边界回归。
+  完整现场/IO计数/源码及binary身份在外部 `2026-09-30/windows/w178-artifact-size-admission`。
+  恰好上限512MiB完整发布、持续增长、stale cleanup/Unix最终窗口、真IO fault、正式UI/模型/角色
+  平台及长期门槛仍开放，不关闭完整ART或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
