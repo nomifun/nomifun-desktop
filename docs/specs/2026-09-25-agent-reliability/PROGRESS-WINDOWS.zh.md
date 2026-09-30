@@ -2813,6 +2813,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期与跨重启、更多取消/并发驱逐拓扑、其他角色/
   平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
 
+### Cleanup 部分投影与初始化前取消（W167，基线 `ff587afc9`，验证含 W168）
+
+- S-D09-47 / LIFE-009/011/019/023/024/029、CONC-014、A04/A06/A07/A10/A13/A17/A19：正式
+  factory/Kernel/canonical root 配合独立 SQLite writer lock 和 projection trigger，四个反例首次均失败：
+  旧 step completion 丢失、bootstrap 部分提交后永久 exact mismatch、未初始化 terminal 内存假确认、
+  claim 写锁错误被 cleanup 吞掉。只读复核与两条代码通道使用独立文件范围，Git 由 root 串行处理。
+- 旧 cursor 及 typed 初始化队列只在持久化确认后消费；claim failure 原样返回，terminal 缺 admitted
+  authority 正式拒绝。owner/snapshot/holder/fence 与原 exact retry 保留，模型和工具不重执行。
+- 外部证据根 `2026-09-30/windows/w167-cleanup-projection-retry`：`01` 编译、`02` 缺 workspace
+  的夹具失败分别保留；journal 最早产品首败日志在 `02`，`03` 四个产品反例的 DB/日志完整保留。
+  最终 **4/4**、同构建 **20/20 × 4**，独立 SQL **84/84** 验证文本 causation 链、63 个唯一 cancelled/
+  cleanup witness、ready head/连续事件及零模型 admission/effect；journal **11/11**、build identity
+  **1/1**、fmt/diff 通过。正式 Desktop 健康/写锁 shutdown 相邻 **2/2**，独立 DB/文件核对 **2/2**。
+  未选用 Knowledge broker 的 pipe 权限 unavailable 与既有构建 warnings 留在外部日志，本批未验证该能力。
+- 未覆盖 pending steering 局部 flush、commit 后 ack 丢失、跨重启/lease 过期、真实满盘/WAL/fsync、
+  正式 UI、其他平台/角色及 N3/100 seed/LONG/99%；后续继续共享队列，不关闭完整 LIFE/CONC 或共享阶段。
+
 ### 真实长 poll 与进程 shutdown（W168，基线 `ff587afc9`）
 
 - S-D04-30 / PROC-040、LIFE-029、A03/A11/A13/A17/A19：独立 PID 标记和精确 OS handle 证明

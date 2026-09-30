@@ -650,6 +650,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   通过。无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期/跨重启恢复、更多取消/并发驱逐拓扑、
   其他角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
 
+- S-D09-47（LIFE-009/011/019/023/024/029、CONC-014、A04/A06/A07/A10/A13/A17/A19 清理投影及
+  初始化前取消子断言）：W167 只读并发复核发现并执行四个反例：跨 step 的旧 completion 写失败后
+  cursor 提前丢失；bootstrap 第二条失败后按 sequence 跳过重试；无 active 的 terminal 仅内存确认；
+  writer lock 下 cleanup 吞 claim 错误并返回成功。最早 journal 首败在外部 W167 `02`，三个 host
+  首败在 `03`；编译/缺 workspace 的夹具失败单列保留。现旧 cursor 与初始化队列按持久化 ack 消费，
+  preclaim 错误继续返回，无 admitted authority 的 terminal 走正式拒绝，snapshot/owner/lease 不变。
+  最终 **4/4**、同构建 **20/20 × 4**；独立 SQLite **84/84** 证明文本 causation 链、63 个 host 的
+  唯一 cancelled/cleanup witness、ready head、零新模型/effect；journal **11/11**、build identity **1/1**，fmt/diff
+  通过。正式 Desktop shutdown 健康/写锁相邻 **2/2**，独立 DB/文件核对 **2/2**。
+  pending steering 的局部 flush、commit 后 ack 丢失、跨重启/lease 过期、真实满盘/WAL/fsync、正式 UI、
+  其他平台/角色和 N3/100 seed/LONG/99% 仍开放；不关闭完整 LIFE/CONC 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
