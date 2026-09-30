@@ -54,6 +54,7 @@
   color: rgb(var(--danger-6));
   font-size: 12px;
   line-height: 1.5;
+  white-space: pre-line;
 }
 
 .modalFooter {

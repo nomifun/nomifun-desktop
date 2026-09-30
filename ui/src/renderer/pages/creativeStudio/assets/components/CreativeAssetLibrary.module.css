@@ -121,6 +121,7 @@
 .root[data-asset-appearance='source-page'] .filterRow {
   width: min(1152px, 100%);
   align-self: center;
+  align-items: baseline;
   flex-wrap: wrap;
   padding: 18px 0 8px;
   border-bottom: 0;
@@ -132,7 +133,7 @@
 
 .root[data-asset-appearance='source-page'] .sourceFilterGroup {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
 }
 
@@ -172,9 +173,51 @@
 
 .root[data-asset-appearance='source-page'] .sourceActions {
   display: flex;
+  max-width: 100%;
   flex: 0 0 auto;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
   gap: 16px;
+  margin-left: auto;
+}
+
+.sourceSelection {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.sourceSelectAll {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.sourceSelectAll :global(.arco-checkbox-mask-wrapper) {
+  top: 0;
+  align-self: center;
+}
+
+.sourceSelection :global(.arco-btn) {
+  line-height: 20px;
+}
+
+.sourceSelection > span {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.selectAllLabel {
+  color: var(--color-text-2);
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .root[data-asset-appearance='source-page'] .sourceActions > button {
@@ -186,6 +229,7 @@
   font: inherit;
   font-size: 14px;
   font-weight: 590;
+  line-height: 20px;
   outline: none;
   cursor: pointer;
 }
@@ -210,7 +254,7 @@
   box-sizing: border-box;
   flex: 0 0 auto;
   overflow: visible;
-  padding: 14px 0 0;
+  padding: 8px 0 0;
 }
 
 .root[data-asset-appearance='source-page'] .statePanel {
@@ -245,7 +289,19 @@
 
 .root[data-asset-appearance='source-page'] .assetGrid {
   gap: 12px;
-  margin-top: 6px;
+  margin-top: 2px;
+}
+
+.root[data-asset-appearance='source-page'] .assetGrid .assetPreviewButton {
+  aspect-ratio: 3 / 2;
+}
+
+.root[data-asset-appearance='source-page'] .assetGrid .textPreview p {
+  -webkit-line-clamp: 5;
+}
+
+.root[data-asset-appearance='source-page'] .assetGrid .assetFooter {
+  margin-top: -4px;
 }
 
 .root[data-asset-appearance='source-page'] .assetItem {
@@ -673,39 +729,21 @@
   width: 24px;
   height: 24px;
   place-items: center;
+  opacity: 0;
+  pointer-events: none;
   cursor: pointer;
 }
 
-.assetSelect input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  opacity: 0;
+.assetItem:hover .assetSelect,
+.assetItem:focus-within .assetSelect,
+.assetItem[data-selected='true'] .assetSelect {
+  opacity: 1;
+  pointer-events: auto;
 }
 
-.assetSelect > span[aria-hidden] {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  box-sizing: border-box;
-  place-items: center;
-  border: 1px solid rgba(255, 255, 255, 0.75);
-  border-radius: 6px;
-  background: rgba(22, 22, 25, 0.58);
-  color: transparent;
-  box-shadow: 0 3px 9px rgba(0, 0, 0, 0.17);
-  backdrop-filter: blur(8px);
-}
-
-.assetSelect input:checked + span {
-  border-color: rgb(var(--primary-6));
-  background: rgb(var(--primary-6));
-  color: #fff;
-}
-
-.assetSelect input:focus-visible + span {
-  box-shadow: 0 0 0 3px rgba(var(--primary-6), 0.28);
+.assetCheckbox {
+  padding: 0;
+  line-height: 1;
 }
 
 .assetCover {
@@ -814,7 +852,7 @@
   flex: 1;
   flex-direction: column;
   gap: 6px;
-  padding: 10px 12px 4px;
+  padding: 10px 12px 0;
 }
 
 .assetTitleBlock {
@@ -843,12 +881,21 @@
   line-height: 1.4;
 }
 
-.collectionBadge {
+.assetBadges {
   position: absolute;
   top: 8px;
-  left: 8px;
+  right: 8px;
   z-index: 2;
-  max-width: calc(100% - 86px);
+  display: flex;
+  max-width: calc(100% - 48px);
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.collectionBadge {
+  min-width: 0;
+  max-width: 100%;
   box-sizing: border-box;
   overflow: hidden;
   padding: 3px 8px;
@@ -866,19 +913,10 @@
   pointer-events: none;
 }
 
-.assetItem[data-selectable='true'] .collectionBadge {
-  left: 41px;
-  max-width: calc(100% - 119px);
-}
-
 .kindBadge {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  z-index: 1;
   display: inline-flex;
   min-height: 22px;
-  max-width: calc(100% - 46px);
+  max-width: 100%;
   box-sizing: border-box;
   flex: 0 0 auto;
   align-items: center;
@@ -890,8 +928,20 @@
   color: var(--color-text-3);
   font-size: 10px;
   font-weight: 620;
+  line-height: 16px;
   white-space: nowrap;
   pointer-events: none;
+}
+
+.kindBadge > span[aria-hidden='true'] {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  line-height: 0;
+}
+
+.kindBadge svg {
+  display: block;
 }
 
 .kindBadge[data-kind='image'] {
@@ -913,12 +963,12 @@
 .assetFooter {
   display: flex;
   min-width: 0;
-  min-height: 38px;
+  min-height: 28px;
   box-sizing: border-box;
   align-items: center;
   gap: 8px;
   margin-top: auto;
-  padding: 0 8px 6px 12px;
+  padding: 0 8px 2px 12px;
 }
 
 .assetDetails {
@@ -930,9 +980,9 @@
 }
 
 .assetMoreButton {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
   margin-left: auto;
   color: var(--color-text-2);
 }
@@ -1000,6 +1050,11 @@
 
 .assetRow .assetCover {
   grid-row: 1 / -1;
+}
+
+.assetRow .assetBadges {
+  flex-direction: column;
+  align-items: flex-end;
 }
 
 .assetRow .assetPreviewButton {
