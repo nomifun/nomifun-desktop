@@ -1225,6 +1225,43 @@ async fn windows_program_powershell_initializes_under_managed_owner() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn windows_shell_reports_full_cwd_and_explicit_hidden_flags() {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let prefix = format!("{} 中文 ", "long-path-".repeat(14));
+    let workspace = tempfile::Builder::new().prefix(&prefix).tempdir().unwrap();
+    fs::write(workspace.path().join(".dot-note"), b"dot").unwrap();
+    fs::OpenOptions::new().write(true).create_new(true).attributes(2)
+        .open(workspace.path().join("hidden.txt")).unwrap();
+    let scripts = [
+        "(Get-Location).Path",
+        "Get-ChildItem -LiteralPath . -Force | ForEach-Object { [pscustomobject]@{Name=$_.Name;Attributes=$_.Attributes.ToString();Hidden=[bool]($_.Attributes -band [IO.FileAttributes]::Hidden);System=[bool]($_.Attributes -band [IO.FileAttributes]::System);LinkType=$_.LinkType} } | ConvertTo-Json -Compress",
+    ];
+    for (index, script) in scripts.into_iter().enumerate() {
+        let mut process = request(helper_binary(), Vec::<OsString>::new());
+        process.command = CommandSpec::Shell { shell:ShellKind::PowerShell, script:script.into() };
+        process.cwd = workspace.path().to_path_buf();
+        process.capability = CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor.start(process).await.unwrap();
+        let ProcessOutcome::Exited { code, output, .. } = wait_for_terminal(&supervisor, &handle).await else {
+            panic!("observation command must exit");
+        };
+        assert_eq!(code, Some(0), "{}", output.text());
+        if index == 0 {
+            assert_eq!(output.text().trim(), workspace.path().to_str().unwrap());
+        } else {
+            let entries: serde_json::Value = serde_json::from_str(&output.text()).unwrap();
+            for name in [".dot-note", "hidden.txt"] {
+                let entry = entries.as_array().unwrap().iter().find(|entry| entry["Name"] == name).unwrap();
+                let attributes = fs::metadata(workspace.path().join(name)).unwrap().file_attributes();
+                assert_eq!(entry["Hidden"], attributes & 2 != 0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_cmd_c_preserves_a_quoted_workspace_path() {
     let workspace = tempfile::Builder::new().prefix("命令 repo ").tempdir().unwrap();
     fs::create_dir(workspace.path().join("资料 空格")).unwrap();

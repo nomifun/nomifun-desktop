@@ -3121,3 +3121,20 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 19项本批不同Rust回归及新增压缩回归通过；合并后3项相关检查、i18n/desktop边界、UI/Tauri构建通过。
 六个正式回合最终4个实际执行、1个只复述、1个模型前失败，其中重复执行回合仍为验收FAIL；全终态且profile进程0。
 完整A/B/C、交互停止、纠正跨压缩与其余基础命令仍待验；两修复点N3不替代整体共享门槛。
+
+### W186 综合A：完整路径、隐藏属性与可解析Git diff（2026-10-01）
+
+- Case/子断言：C01/C02/C03/C06/C08；CMD-134～138、REAL-003/004，正式Tauri/StepFun、原五项prompt不缩减。
+- 首败：01-first GEN7模型步/1压缩，Get-Location对象表格把真实长cwd截为workspa...，最终回答漏掉项目目录；
+  .hidden-note真实Archive却称隐藏。五项结果虽有完成终态仍FAIL。修复Windows指引为(Get-Location).Path和属性布尔JSON。
+- 02-fixed GEN8模型步/1压缩：cwd精确到任务A repo，8项根目录含.git Hidden和dotfile非Hidden；文件43字节/4行/hash、
+  查有1/查无0、Git状态变更及两个Bun测试exit0/1均正确，测试各1次、无unrelated哨兵、9文件hash不变。
+- 新首败：owner Git patch多加Fdiff/H@@，最小解析回归红（no patch found）；修复回调内容行前缀，
+  未暂存/已暂存有效patch及子目录隔离2项绿；当前正式COD调用的patch与独立Git输出字节一致。
+- 定向检查：原生长路径/隐藏标记、工具暴露合同、Git两项，共4项Rust通过；fmt/当前正式构建通过。
+- 未闭合：COD完整五项实际命令已有结果，但完成报告不断补查/校验、31模型步后报compaction无法容纳固定上下文及保留交换。
+  首次报告missing/stale plan、closed plan预检、后续参数/历史调用及最终失败全部留存；本批不记完整A N3或GEN/COD整组PASS。
+  下一批优先报告计划/引用与压缩预算；B/C仍未整组完成，不转旧全产品Windows队列。
+- 证据：仓库外2026-10-01/windows/w186-full-command-a，01-first/02-fixed独立data/work/profile、完整日志/DB/截图及模型轨迹。
+  实际模型始终复用加密StepFun配置，无原会话/明文凭据入Git；9文件不变、Git只保留原tracked-note变更。
+  全终态后按精确PID/启动时间停止测试GUI，不声称正式shutdown竞态已验。

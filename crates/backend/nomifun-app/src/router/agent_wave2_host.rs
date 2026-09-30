@@ -1852,8 +1852,8 @@ fn append_diff_patch(
         if owner_delta {
             return true;
         }
-        // Only content lines need a unified-diff sigil. Headers, binary
-        // notices and EOF markers already contain their complete text.
+        // Only content lines need a diff prefix. File/hunk/binary/EOF marker
+        // callbacks already contain their complete patch text; F/H/B are tags.
         if matches!(line.origin(), ' ' | '+' | '-') {
             patch.push(line.origin());
         }
@@ -7648,6 +7648,9 @@ mod tests {
             .await
             .unwrap();
         assert!(diff.0["patch"].as_str().unwrap().contains("changed"));
+        let parsed = git2::Diff::from_buffer(diff.0["patch"].as_str().unwrap().as_bytes())
+            .expect("the observation must contain a valid Git patch, including its headers");
+        assert_eq!(parsed.deltas().len(), 1);
 
         let staged = invoke(
             &host,
@@ -7674,6 +7677,8 @@ mod tests {
                 .contains("changed")
         );
         assert_eq!(staged_diff.0["unstaged_patch"], "");
+        git2::Diff::from_buffer(staged_diff.0["staged_patch"].as_str().unwrap().as_bytes())
+            .expect("staged patch headers must also remain valid");
     }
 
     #[tokio::test]
