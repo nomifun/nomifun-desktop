@@ -691,6 +691,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   全部恢复为原 ready head、gen0/无 owner、零模型/effect/事件增量；首次失败不改写。wrapped delivery、
   非空已选择 Skill、claim 后未安装 ActiveTurn、正式 UI/其他平台及完整长期门槛仍开放。
 
+- S-D09-50（LIFE-011/013/014/019/029、G0-025/030、A03/A04/A06/A07/A10/A12/A13/A14/A17/A19
+  claim 与 Runtime 准备取消子断言）：W172 手动 poll 原准备 future 命中实际 SQLite await，claim
+  已落盘、ActiveTurn 尚未安装；canonical cancel 后丢弃 caller，原 cleanup 再读 Running receipt
+  失败，无法收尾。证据根为外部 `2026-09-30/windows/w172-claimed-preparation-cleanup`，
+  首败日志/DB留在 `01-first-product-run`。
+  准备改为宿主持有的任务，清理先等其 completion；claim journal 先发布到 ActiveTurn，再 await
+  budget/重新验 receipt。取消不新开资源，原 root/holder/generation/fence 结算；公共 open_journal
+  仍刷新预算，未放宽 gen0 特例或借用另一个 execution owner。
+  首次 **1/2**（普通 drop 旧码即通过），最终 **3/3**、**20/20 × 3**、独立 SQLite **63/63**：42个
+  原 owner cleanup witness、21个 foreign owner 拒绝、唯一原 claim、零新模型/effect；相邻 **11/11**、
+  实际 pause/resume 和冷启动恢复 **2/2**、fmt/diff通过。未覆盖 preparation panic/commit ack失落、
+  长附件准备与超时、更多并发恢复拓扑、正式 UI/其他平台角色和完整长期门槛；共享阶段继续开放。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
