@@ -2770,6 +2770,18 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖池关闭/取消与驱逐组合、fsync/WAL 损坏、正式 Tauri shutdown、其他平台及完整
   N3/LONG/99%；本批无 UI/模型，不关闭完整 LIFE/CONC/G0 或共享阶段。
 
+### 磁盘重开后 unknown reconciliation receipt 重放（W164，基线 `e78708426`）
+
+- S-D09-44 / LIFE-007/008/011、G0-025、A04/A06/A07/A09/A17/A19：相邻 `reconcile_effect` 的同
+  receipt 仅时间变化仍误报 IdempotencyConflict；外部 W164 `01-first-product-run.log` 保留首败。
+- terminal 与 reconciliation 共用保留首次时间的事务写入口。关闭全部连接再重开磁盘 Store，同一
+  核对回执返回原 record/ack；改变结果或资源仍冲突，Unknown 与 reconciliation fence 保留。
+- 磁盘重开首次及 **20/20**；21 个独立 DB 核对均为唯一 StillUncertain 回执、原时间 20、8 条连续
+  事件、零重放新事件；Session Store **76/76**、相邻 terminal 身份/删除 fence **2/2**，fmt/diff
+  通过。日志与 DB 保留于外部 `2026-09-30/windows/w164-reconciliation-time-replay`。
+- 无正式 UI/模型；confirmed outcome 完整矩阵、真实外部 owner、池关闭/取消、正式 shutdown、其他
+  平台及完整 N3/LONG/99% 仍开放，不关闭完整 LIFE/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

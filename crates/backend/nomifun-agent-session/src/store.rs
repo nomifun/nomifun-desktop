@@ -3023,11 +3023,17 @@ impl AgentSessionStore {
             EffectTerminalState::Failed => "effect/failed",
             EffectTerminalState::Uncertain => "effect/uncertain",
         };
-        let mut append = effect_append(request, kind)?;
+        self.append_effect_settlement(effect_append(request, kind)?).await
+    }
+
+    async fn append_effect_settlement(
+        &self,
+        mut append: SessionEventAppend,
+    ) -> Result<SessionEventAppendResult, SessionStoreError> {
         let mut tx = self.begin_write_transaction().await?;
         if let Some(existing) = event_by_event_id_tx(&mut tx, append.event_id.as_ref()).await? {
             let existing = event_from_row(existing)?;
-            if existing.agent_session_id == append.agent_session_id && existing.kind.0 == kind {
+            if existing.agent_session_id == append.agent_session_id && existing.kind == append.semantic_event.kind {
                 // A receipt retry can run later than its original commit. Keep
                 // that commit's timestamp while the normal duplicate check
                 // still compares every identity and owner observation field.
@@ -3059,18 +3065,7 @@ impl AgentSessionStore {
     ) -> Result<SessionEventAppendResult, SessionStoreError> {
         request.payload =
             SessionEventPayloadRef::InlineJson(StrictJsonValue(serde_json::to_value(outcome)?));
-        let append = effect_append(request, "effect/reconciled")?;
-        let mut tx = self.begin_write_transaction().await?;
-        let result = self
-            .append_event_tx_with_policy(
-                &mut tx,
-                &append,
-                None,
-                AppendSessionStatePolicy::EffectSettlement,
-            )
-            .await?;
-        tx.commit().await?;
-        Ok(result)
+        self.append_effect_settlement(effect_append(request, "effect/reconciled")?).await
     }
 
     pub async fn record_resource_cleanup_started(
