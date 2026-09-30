@@ -2850,6 +2850,7 @@ mod tests {
         CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
         MaterializationPolicy, SessionCapabilityState,
     };
+    use sqlx::Connection as _;
 
     struct StateCaptureHostPort {
         captured: Arc<Mutex<Option<Wave2StateHandle>>>,
@@ -6082,13 +6083,12 @@ mod tests {
         reopened_database.close().await;
     }
 
-    /// A single-connection pool over the migrated file database: one
-    /// per-connection PRAGMA fault reaches every write the canonical Store
-    /// performs while that connection stays pooled — not a mock and not a
-    /// production change.
-    async fn single_connection_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+    /// A pool over the migrated file database for real connection-local
+    /// storage faults. The single-connection wrapper makes one PRAGMA fault
+    /// reach every canonical Store write while that connection stays pooled.
+    async fn store_pool(path: &std::path::Path, max_connections: u32) -> sqlx::SqlitePool {
         sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
+            .max_connections(max_connections)
             .connect_with(
                 sqlx::sqlite::SqliteConnectOptions::new()
                     .filename(path)
@@ -6098,6 +6098,10 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    async fn single_connection_pool(path: &std::path::Path) -> sqlx::SqlitePool {
+        store_pool(path,1).await
     }
 
     /// Cap the database at its current page count, or lift the cap back to
@@ -6542,6 +6546,146 @@ mod tests {
         drop(observer);
         pool_a.close().await;
         pool_b.close().await;
+        database.close().await;
+    }
+
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn one_store_pool_recovers_when_a_healthy_connection_separates_two_desynced_peers() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace_a=directory.path().join("workspace-a");
+        let workspace_b=directory.path().join("workspace-b");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace_a).unwrap();
+        std::fs::create_dir(&workspace_b).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool=store_pool(&database_path,3).await;
+        let store=nomifun_agent_session::AgentSessionStore::from_pool(pool.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let mut call_a=context(&workspace_a);
+        call_a.idempotency_key=IdempotencyKey::from("interleaved-pool-disk-full-a");
+        call_a.operation_id=OperationId::from("interleaved-pool-disk-full-a-operation");
+        let mut call_b=context(&workspace_b);
+        call_b.idempotency_key=IdempotencyKey::from("interleaved-pool-disk-full-b");
+        call_b.operation_id=OperationId::from("interleaved-pool-disk-full-b-operation");
+        let session_a=call_a.agent_session_id.clone();
+        let session_b=call_b.agent_session_id.clone();
+        ensure_test_effect_context(&store,&call_a).await;
+        ensure_test_effect_context(&store,&call_b).await;
+        let effect_a=wave2_effect_id(&call_a).unwrap();
+        let effect_b=wave2_effect_id(&call_b).unwrap();
+        let input_a=StrictJsonValue(json!({"path":"interleaved-a.txt","content":"fixture a"}));
+        let input_b=StrictJsonValue(json!({"path":"interleaved-b.txt","content":"fixture b"}));
+        let Wave2EffectAdmission::Reserved(reservation_a)=begin_wave2_exclusive_effect(
+            &store,&call_a,workspace_typed_binding(&call_a).unwrap(),&input_a,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else { panic!("first effect must reserve") };
+        let Wave2EffectAdmission::Reserved(reservation_b)=begin_wave2_exclusive_effect(
+            &store,&call_b,workspace_typed_binding(&call_b).unwrap(),&input_b,
+            nomifun_agent_session::EffectStrategy::ManagedEffect,
+        ).await.unwrap() else { panic!("second effect must reserve") };
+        let owner_error_a=Wave2HostPortError::new(
+            "PROCESS_EXIT_NON_ZERO",format!("first fixture failure {}","😀".repeat(4096)),
+        );
+        let owner_error_b=Wave2HostPortError::new(
+            "PROCESS_EXIT_NON_ZERO",format!("second fixture failure {}","😀".repeat(4096)),
+        );
+
+        let mut first=pool.acquire().await.unwrap();
+        let mut healthy=pool.acquire().await.unwrap();
+        let mut third=pool.acquire().await.unwrap();
+        sqlx::query("PRAGMA page_size=512").execute(&mut *first).await.unwrap();
+        sqlx::query("VACUUM").execute(&mut *first).await.unwrap();
+        let limit=sqlx::query_scalar::<_,i64>("PRAGMA page_count")
+            .fetch_one(&mut *first).await.unwrap();
+        for connection in [&mut first,&mut third] {
+            sqlx::query(&format!("PRAGMA max_page_count={limit}"))
+                .execute(&mut **connection).await.unwrap();
+            let error=sqlx::query("CREATE TABLE __fault_probe (x INTEGER)")
+                .execute(&mut **connection).await.unwrap_err();
+            assert!(error.to_string().contains("full"),"{error:?}");
+        }
+        let healthy_limit=sqlx::query_scalar::<_,i64>("PRAGMA max_page_count")
+            .fetch_one(&mut *healthy).await.unwrap();
+        assert!(healthy_limit>limit);
+        first.return_to_pool().await;
+        healthy.return_to_pool().await;
+        third.return_to_pool().await;
+
+        let first_error=finish_wave2_failed_effect(
+            &reservation_a,"workspace.files/write",&owner_error_a,
+        ).await.unwrap_err();
+        assert!(first_error.message.contains("full"),"{first_error:?}");
+        let mut middle=pool.acquire().await.unwrap();
+        assert!(!middle.is_in_transaction(),"the middle pool connection must remain healthy");
+        middle.return_to_pool().await;
+        let second_error=finish_wave2_failed_effect(
+            &reservation_b,"workspace.files/write",&owner_error_b,
+        ).await.unwrap_err();
+        assert!(second_error.message.contains("full"),"{second_error:?}");
+        assert_eq!(observer.read_effect(&session_a,&effect_a).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+        assert_eq!(observer.read_effect(&session_b,&effect_b).await.unwrap().unwrap().state,
+            nomifun_agent_session::AgentEffectState::Pending);
+
+        let mut connections=Vec::new();
+        for _ in 0..3 { connections.push(pool.acquire().await.unwrap()); }
+        assert_eq!(connections.iter().filter(|connection| connection.is_in_transaction()).count(),2);
+        for connection in &mut connections {
+            sqlx::query("PRAGMA max_page_count=1073741823")
+                .execute(&mut **connection).await.unwrap();
+        }
+        let mut desynced=Vec::new();
+        let mut healthy=None;
+        for connection in connections {
+            if connection.is_in_transaction() { desynced.push(connection); }
+            else { healthy=Some(connection); }
+        }
+        assert_eq!(desynced.len(),2);
+        let mut desynced=desynced.into_iter();
+        let mut first_bad=desynced.next().unwrap();
+        let mut healthy=healthy.unwrap();
+        let mut second_bad=desynced.next().unwrap();
+        sqlx::query("CREATE TEMP TABLE __healthy_connection_marker (value TEXT)")
+            .execute(&mut *healthy).await.unwrap();
+        sqlx::query("INSERT INTO __healthy_connection_marker VALUES ('retained')")
+            .execute(&mut *healthy).await.unwrap();
+        first_bad.return_to_pool().await;
+        healthy.return_to_pool().await;
+        second_bad.return_to_pool().await;
+
+        finish_wave2_failed_effect(&reservation_a,"workspace.files/write",&owner_error_a)
+            .await.unwrap();
+        finish_wave2_failed_effect(&reservation_b,"workspace.files/write",&owner_error_b)
+            .await.unwrap();
+        for (session_id,effect_id) in [(&session_a,&effect_a),(&session_b,&effect_b)] {
+            let effects=observer.list_effects(session_id).await.unwrap();
+            assert_eq!(effects.len(),1);
+            assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Rejected);
+            assert_eq!(observer.read_effect(session_id,effect_id).await.unwrap().unwrap().state,
+                nomifun_agent_session::AgentEffectState::Rejected);
+        }
+        let mut recovered=Vec::new();
+        for _ in 0..3 { recovered.push(pool.acquire().await.unwrap()); }
+        let mut retained=0;
+        for connection in &mut recovered {
+            assert!(!connection.is_in_transaction());
+            let marker_exists=sqlx::query_scalar::<_,i64>(
+                "SELECT COUNT(*) FROM sqlite_temp_master WHERE name='__healthy_connection_marker'",
+            ).fetch_one(&mut **connection).await.unwrap();
+            if marker_exists==1 {
+                let marker=sqlx::query_scalar::<_,String>("SELECT value FROM __healthy_connection_marker")
+                    .fetch_one(&mut **connection).await.unwrap();
+                assert_eq!(marker,"retained");
+                retained+=1;
+            }
+        }
+        assert_eq!(retained,1,"recovery must preserve the existing healthy connection");
+        drop(recovered);
+        drop(reservation_a);
+        drop(reservation_b);
+        drop(store);
+        drop(observer);
+        pool.close().await;
         database.close().await;
     }
 

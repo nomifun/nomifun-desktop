@@ -343,46 +343,25 @@ impl AgentSessionStore {
         // SQLite's deferred BEGIN allows two writers to validate the same
         // head snapshot before either one obtains the write lock.  Lifecycle
         // mutations need one serialized validation/append boundary.
-        match self.pool.begin_with("BEGIN IMMEDIATE").await {
-            Ok(tx) => Ok(tx),
-            Err(error) => {
-                if !matches!(error, sqlx::Error::InvalidSavePointStatement) {
-                    return Err(error.into());
-                }
-                // A storage fault such as SQLITE_FULL aborts the write
-                // transaction inside SQLite itself, so the rollback the
-                // dropped sqlx Transaction queues finds no live transaction:
-                // the connection worker's tracked depth stays nonzero and
-                // rejects every later `begin_with` on that pooled connection
-                // with a misleading transaction-depth error.  Evict the
-                // desynced connection so the pool replaces it with a healthy
-                // one, then retry once; a healthy pool returns the probe
-                // connection unchanged.
-                self.evict_transaction_desynced_connection().await?;
-                Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
-            }
-        }
-    }
-
-    /// Acquire each idle pooled connection once and close the one whose sqlx
-    /// worker still believes a transaction is open after SQLite already
-    /// rolled it back underneath a storage fault.
-    async fn evict_transaction_desynced_connection(&self) -> Result<(), SessionStoreError> {
-        for _ in 0..self.pool.options().get_max_connections() {
+        // SQLITE_FULL can roll back inside SQLite before sqlx's queued
+        // rollback runs, leaving the worker's tracked depth nonzero. Keep
+        // ownership of the exact connection so a healthy peer cannot hide a
+        // poisoned one during a separate pool scan. The extra acquisition
+        // allows a replacement after every existing connection was evicted.
+        for _ in 0..=self.pool.options().get_max_connections() {
             let mut connection = self.pool.acquire().await?;
-            let desynced = match connection.begin_with("BEGIN IMMEDIATE").await {
-                Ok(probe) => {
-                    let _ = probe.rollback().await;
-                    false
+            if connection.is_in_transaction() {
+                // Drain any queued normal rollback before deciding to evict;
+                // custom pools may disable sqlx's ping on acquisition.
+                connection.ping().await?;
+                if connection.is_in_transaction() {
+                    connection.close().await?;
+                    continue;
                 }
-                Err(error) => matches!(error, sqlx::Error::InvalidSavePointStatement),
-            };
-            if !desynced {
-                return Ok(());
             }
-            connection.close().await?;
+            return Ok(Transaction::begin(connection, Some("BEGIN IMMEDIATE".into())).await?);
         }
-        Ok(())
+        Err(sqlx::Error::InvalidSavePointStatement.into())
     }
 
     #[cfg(test)]

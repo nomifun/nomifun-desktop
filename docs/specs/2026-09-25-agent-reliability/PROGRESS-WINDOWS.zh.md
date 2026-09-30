@@ -2742,6 +2742,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖同一 pool 内多连接同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0 或共享阶段。
 
+### 同 pool 内坏/健康/坏连接交错恢复（W162，基线 `d7fc83b21`）
+
+- S-D09-42 / LIFE-006/024、CONC-014、G0-030、A04/A07/A08/A17/A19：三连接 production Store
+  pool 内两条 terminal 写真实命中 `SQLITE_FULL`，各自保持 Pending；解除页限制后按坏/健康/坏顺序
+  归还连接，首次重试仍以 non-zero transaction depth 失败。旧驱逐扫描在首个健康连接处提前退出。
+- 修复唯一写入口：保留取得的精确连接，ping 等待排队回滚，只关闭深度仍非零的坏连接；直接在取得
+  的健康连接上 `BEGIN IMMEDIATE`，有界取得替代连接。两条显式重试各补写唯一 Rejected，健康连接
+  的临时表标记保留；不重放业务写事务、不吞掉真实存储错误。
+- 首版 admission 夹具未跨页分配的失败、terminal 夹具的真实产品首败分别保留于外部
+  `2026-09-30/windows/w162-interleaved-desynced-connections` 的 01/02 日志；修复后首次及连续
+  **20/20**，Wave2 host **77/77**、Session Store **76/76**，fmt/diff 通过。无正式 UI/模型。
+- 未覆盖全池失步、并发驱逐/池关闭、fsync/WAL 损坏、正式 shutdown、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
