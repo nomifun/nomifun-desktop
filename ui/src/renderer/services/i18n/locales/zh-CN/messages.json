@@ -14,7 +14,8 @@
     "skipped": "已跳过 {{target}}",
     "invalidArguments": "参数未通过校验，未执行 {{target}}",
     "notExecuted": "未执行 {{target}}",
-    "commandExited": "{{target}} 已结束，退出码 {{code}}"
+    "commandExited": "{{target}} 已结束，退出码 {{code}}",
+    "processReferenceInvalid": "未找到本次执行的进程，未执行 {{target}}"
   },
   "processReceipt": {
     "tool": "工具",
@@ -58,6 +59,7 @@
     "invalidArguments": "参数不符合要求，操作未执行",
     "commandNotExecuted": "命令未执行",
     "operationNotExecuted": "操作未执行",
+    "processReferenceInvalid": "未找到本次执行的进程，操作未执行",
     "canceledOperation": "操作已取消",
     "repeatedOperation": "{{label}} · {{count}} 次",
     "contextCompressed": "上下文已自动压缩",

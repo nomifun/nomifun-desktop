@@ -2035,6 +2035,28 @@ mod tests {
 }
 
 impl AgentCompletionReport {
+    pub(crate) fn delivery_text(&self) -> String {
+        format!("{}{}{}{}", self.summary,
+            self.unverified_disclosure().unwrap_or_default(),
+            self.tool_error_disclosure().unwrap_or_default(),
+            self.command_failure_disclosure().unwrap_or_default())
+    }
+
+    pub(crate) fn matches_delivery(&self, text: &str) -> bool {
+        let current = self.delivery_text();
+        if text == current || text == format!("\n\n{current}") { return true; }
+        // Preserve immutable deliveries from the earlier formatter. Both known
+        // formats contain the exact accepted report and cumulative counts.
+        let mut legacy = format!("{}{}", self.summary, self.unverified_disclosure().unwrap_or_default());
+        if self.observed_tool_error_count > 0 {
+            legacy.push_str(&format!("\n\n- ⚠ Tool-call errors observed in this turn: {}. Later successful calls did not erase these errors.", self.observed_tool_error_count));
+        }
+        if self.observed_command_failure_count > 0 {
+            legacy.push_str(&format!("\n\n- ⚠ Command failures observed in this turn: {}. Later successful commands did not erase these failures.", self.observed_command_failure_count));
+        }
+        text == legacy || text == format!("\n\n{legacy}")
+    }
+
     pub(crate) fn is_blocked(&self) -> bool {
         self.criteria
             .iter()

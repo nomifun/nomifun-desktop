@@ -25,6 +25,24 @@ describe('normalizeToolCall', () => {
     expect(result?.output).toBe(output);
   });
 
+  it('shows a proven rejected process reference as unexecuted and preserves the diagnostic', () => {
+    const receipt = { schema: 'nomifun.process-control-observation.v1', state: 'not_executed',
+      code: 'PROCESS_REFERENCE_INVALID', operation: 'poll', control_applied: false, success: false,
+      message: 'Process reference is not available in this exact turn; no control was applied.' };
+    const normalize = (name: string, value: unknown) => normalizeToolCall({ type: 'tool_call', content: {
+      call_id: 'wrong-reference', name, status: 'error', output: JSON.stringify(value),
+    } } as any);
+    const result = normalize('poll_process', receipt);
+    expect(result?.notExecutedReason).toBe('process_reference');
+    expect(result?.status).toBe('canceled');
+    expect(result?.output).toBe(JSON.stringify(receipt));
+    for (const value of [
+      { ...receipt, control_applied: true }, { ...receipt, operation: 'cancel' },
+      { ...receipt, state: 'lost' }, { ...receipt, process_id: 'foreign-id' },
+    ]) expect(normalize('poll_process', value)?.notExecutedReason).toBeUndefined();
+    expect(normalize('remote_poll_process', receipt)?.notExecutedReason).toBeUndefined();
+  });
+
   it('does not relabel infrastructure, signal or cleanup failures as ordinary command exits', () => {
     for (const receipt of [
       { ...nativeExit(), state: 'timed_out' },

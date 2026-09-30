@@ -14,7 +14,8 @@
     "skipped": "Skipped {{target}}",
     "invalidArguments": "Arguments did not pass validation; {{target}} was not run",
     "notExecuted": "Did not run {{target}}",
-    "commandExited": "{{target}} ended with exit code {{code}}"
+    "commandExited": "{{target}} ended with exit code {{code}}",
+    "processReferenceInvalid": "Process not found in this execution; did not run {{target}}"
   },
   "processReceipt": {
     "tool": "tool",
@@ -58,6 +59,7 @@
     "invalidArguments": "Invalid arguments; operation not run",
     "commandNotExecuted": "Command not run",
     "operationNotExecuted": "Operation not run",
+    "processReferenceInvalid": "Process not found in this execution; operation not run",
     "canceledOperation": "Operation canceled",
     "repeatedOperation": "{{label}} · {{count}} times",
     "contextCompressed": "Context compressed",

@@ -4,7 +4,7 @@ import { toDisplayText } from './displayText';
 import { normalizeToolGroupStatus } from './toolGroupStatus';
 
 export type NormalizedToolStatus = 'pending' | 'running' | 'completed' | 'error' | 'canceled';
-export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight';
+export type NormalizedToolNotExecutedReason = 'invalid_arguments' | 'runtime_preflight' | 'process_reference';
 export type NormalizedToolBoundedResult = 'search_context_withheld';
 
 interface NormalizedToolRetry {
@@ -234,6 +234,27 @@ const isRuntimePreflightNotExecuted = (name: unknown, status: unknown, output: u
   return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |Call update_plan alone first; report_completion cannot close a missing or stale plan|The plan needs reconsideration after |Capability Kernel rejected Agent Runtime Tool \(CAPABILITY_UNAVAILABLE\): Process launch failed\. The command field must contain only the executable;)/.test(text);
 };
 
+const processControlOperations: Record<string, string> = {
+  poll_process: 'poll', write_process_stdin: 'stdin', close_process_stdin: 'close_stdin',
+  resize_process: 'resize', cancel_process: 'cancel',
+};
+
+const isProcessReferenceNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error') return false;
+  const operation = processControlOperations[toDisplayText(name).trim()];
+  if (!operation) return false;
+  try {
+    const receipt = JSON.parse(toDisplayText(output));
+    return receipt?.schema === 'nomifun.process-control-observation.v1'
+      && receipt.state === 'not_executed' && receipt.code === 'PROCESS_REFERENCE_INVALID'
+      && receipt.operation === operation && receipt.control_applied === false && receipt.success === false
+      && !Object.hasOwn(receipt, 'process_id')
+      && typeof receipt.message === 'string' && receipt.message.length > 0 && receipt.message.length <= 2048;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Match only the local runtime's standardized pre-dispatch rejection. A null
  * `args` value alone is not sufficient: remote tools can fail without echoing
@@ -287,6 +308,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
   const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
   const runtimePreflightNotExecuted = !skipped && isRuntimePreflightNotExecuted(name, status, output);
   const searchContextWithheld = isSearchContextWithheld(name, status, output);
+  const processReferenceNotExecuted = isProcessReferenceNotExecuted(name, status, output);
   const commandExitCode = getNativeCommandExitCode(name, status, output);
   const nonFatalFailure = searchContextWithheld
     || (status === 'error' && commandExitCode !== undefined && commandExitCode !== 0)
@@ -296,10 +318,12 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
   return {
     key: toDisplayText(call_id),
     name: toDisplayText(name, 'Tool'),
-    status: skipped || invalidArgumentsNotExecuted || runtimePreflightNotExecuted ? 'canceled' : normalizeToolCallStatus(status),
+    status: skipped || invalidArgumentsNotExecuted || runtimePreflightNotExecuted || processReferenceNotExecuted
+      ? 'canceled' : normalizeToolCallStatus(status),
     ...(skipped ? { skipped: true } : {}),
     ...(invalidArgumentsNotExecuted ? { notExecutedReason: 'invalid_arguments' as const } : {}),
     ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),
+    ...(processReferenceNotExecuted ? { notExecutedReason: 'process_reference' as const } : {}),
     ...(searchContextWithheld ? { boundedResult: 'search_context_withheld' as const } : {}),
     ...(nonFatalFailure ? { nonFatalFailure: true } : {}),
     ...(commandExitCode !== undefined ? { commandExitCode } : {}),
