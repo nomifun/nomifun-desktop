@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-launch-missing]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -38,6 +38,7 @@ const COMPUTER_UNICODE_TEXT: &str = "NomiFun-é-e\u{301}-中文-かな-🙂-👩
 const COMPUTER_UNICODE_A11Y_TEXT: &str =
     r"NomiFun-é-e\u{301}-中文-かな-🙂-👩🏽\u{200d}💻-𝄞-END";
 const LARGE_A11Y_SENTINEL: &str = "AX_OMITTED_SENTINEL_199";
+const COMPUTER_SOAK_TEXT: &str = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
 const FRONTEND_PAGE: &str = r#"<!doctype html><meta charset=utf-8><title>Counter app</title>
 <style>body{font:20px system-ui;padding:36px}button{font:inherit;padding:12px 24px}output{display:block;font-size:32px;margin:24px 0}</style>
 <h1>Counter app</h1><label for=count>Count</label><output id=count>0</output><button id=increment>Increment</button>
@@ -59,6 +60,7 @@ struct Fixture {
     computer_input_crash: bool,
     computer_unicode_input: bool,
     computer_large_a11y: bool,
+    computer_soak: bool,
     computer_launch_missing: bool,
     computer_file: Option<PathBuf>,
     computer_pointer_target: Option<PathBuf>,
@@ -80,6 +82,7 @@ struct Fixture {
     crash_input_dispatched: AtomicBool,
     unicode_verified: AtomicBool,
     large_a11y_verified: AtomicBool,
+    soak_verified: AtomicBool,
     missing_launch_rejected: AtomicBool,
     pointer_baseline: Mutex<Option<PointerCounts>>,
     witnesses: Mutex<Vec<Value>>,
@@ -1421,6 +1424,147 @@ async fn computer_drag_cancel_operation(
     )))
 }
 
+fn wait_soak_status(fixture: &Fixture, expected: usize) -> anyhow::Result<Value> {
+    anyhow::ensure!(
+        COMPUTER_SOAK_TEXT.len() == 100 && expected <= COMPUTER_SOAK_TEXT.len(),
+        "Computer soak fixture text contract changed"
+    );
+    let expected_text = &COMPUTER_SOAK_TEXT[..expected];
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        let status = pointer_status(fixture)?;
+        if status["content"].as_str() == Some(expected_text) {
+            anyhow::ensure!(
+                status["change_events"].as_u64() == Some(expected as u64),
+                "Computer soak target change-event count diverged at cycle {expected}"
+            );
+            anyhow::ensure!(
+                status["modifier_key_events"].as_u64() == Some(0)
+                    && status["shortcut_events"].as_u64() == Some(0)
+                    && status["focus_losses"].as_u64() == Some(0),
+                "Computer soak target observed modifier, shortcut or focus drift"
+            );
+            return Ok(status);
+        }
+        last = status;
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    anyhow::bail!("Computer soak target did not settle at cycle {expected}; last status: {last}")
+}
+
+fn computer_soak_operation(
+    fixture: &Fixture,
+    body: &Value,
+) -> anyhow::Result<Option<(String, String, Value)>> {
+    let call = |id: &str| computer_tool_result(body, id).is_some();
+    for cycle in (0usize..100).rev() {
+        let input_id = format!("gui-computer-soak-input-{cycle:03}");
+        if call(&input_id) {
+            require_computer_success(body, &input_id)?;
+            wait_soak_status(fixture, cycle + 1)?;
+            if cycle == 99 {
+                fixture.soak_verified.store(true, Ordering::SeqCst);
+                return Ok(None);
+            }
+            let observe_id = format!("gui-computer-soak-observe-{:03}", cycle + 1);
+            return Ok(Some((
+                observe_id,
+                browser_tool(body, "computer/a11y.observe")?,
+                json!({"action":"observe"}),
+            )));
+        }
+
+        let observe_id = format!("gui-computer-soak-observe-{cycle:03}");
+        if call(&observe_id) {
+            let snapshot = accessibility_snapshot_text(computer_result_text(body, &observe_id)?)?;
+            anyhow::ensure!(
+                snapshot.contains("Nomi Computer Soak Target") && snapshot.contains("[focused]"),
+                "Computer soak observation lost the focused target at cycle {cycle}"
+            );
+            wait_soak_status(fixture, cycle)?;
+            let next = char::from(COMPUTER_SOAK_TEXT.as_bytes()[cycle]);
+            return Ok(Some(computer_input_call(
+                body,
+                &input_id,
+                &observe_id,
+                "type",
+                json!({"text":next.to_string()}),
+            )?));
+        }
+    }
+
+    if call("gui-computer-soak-observe-stable") {
+        let snapshot = accessibility_snapshot_text(computer_result_text(
+            body,
+            "gui-computer-soak-observe-stable",
+        )?)?;
+        anyhow::ensure!(
+            snapshot.contains("Nomi Computer Soak Target") && snapshot.contains("[focused]"),
+            "Stable Computer soak observation lost the focused target"
+        );
+        wait_soak_status(fixture, 0)?;
+        return Ok(Some((
+            "gui-computer-soak-observe-000".into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+
+    const SETTLE_OBSERVATIONS: [&str; 8] = [
+        "gui-computer-soak-settle-1",
+        "gui-computer-soak-settle-2",
+        "gui-computer-soak-settle-3",
+        "gui-computer-soak-settle-4",
+        "gui-computer-soak-settle-5",
+        "gui-computer-soak-settle-6",
+        "gui-computer-soak-settle-7",
+        "gui-computer-soak-settle-8",
+    ];
+    for (index, call_id) in SETTLE_OBSERVATIONS.iter().enumerate().rev() {
+        if computer_tool_result(body, call_id).is_none() {
+            continue;
+        }
+        let snapshot = accessibility_snapshot_text(computer_result_text(body, call_id)?)?;
+        if snapshot.contains("Nomi Computer Soak Target") {
+            pointer_status(fixture)?;
+            std::thread::sleep(Duration::from_millis(750));
+            return Ok(Some((
+                "gui-computer-soak-observe-stable".into(),
+                browser_tool(body, "computer/a11y.observe")?,
+                json!({"action":"observe"}),
+            )));
+        }
+        anyhow::ensure!(
+            index + 1 < SETTLE_OBSERVATIONS.len(),
+            "Computer soak target never became the foreground accessibility window"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+        return Ok(Some((
+            SETTLE_OBSERVATIONS[index + 1].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+
+    if call("gui-computer-soak-launch") {
+        require_computer_success(body, "gui-computer-soak-launch")?;
+        return Ok(Some((
+            SETTLE_OBSERVATIONS[0].into(),
+            browser_tool(body, "computer/a11y.observe")?,
+            json!({"action":"observe"}),
+        )));
+    }
+    let target = fixture
+        .computer_pointer_target
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Computer soak target app missing"))?;
+    Ok(Some((
+        "gui-computer-soak-launch".into(),
+        browser_tool(body, "computer/launch")?,
+        json!({"action":"launch","target":target.to_string_lossy()}),
+    )))
+}
+
 fn computer_large_a11y_operation(
     fixture: &Fixture,
     body: &Value,
@@ -1880,6 +2024,14 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
                 return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
             }
         }
+    } else if fixture.computer_soak {
+        match computer_soak_operation(&fixture, &body) {
+            Ok(operation) => operation,
+            Err(error) => {
+                *fixture.failure.lock().unwrap() = Some(error.to_string());
+                return (axum::http::StatusCode::BAD_REQUEST, Json(json!({"error":{"message":error.to_string(),"type":"fixture_error"}}))).into_response();
+            }
+        }
     } else if fixture.computer_large_a11y {
         match computer_large_a11y_operation(&fixture, &body) {
             Ok(operation) => operation,
@@ -1925,6 +2077,7 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             && !fixture.computer_pointer_input
             && !fixture.computer_drag_cancel
             && !fixture.computer_input_crash
+            && !fixture.computer_soak
             && !fixture.computer_large_a11y
             && !fixture.computer_unicode_input
             && !fixture.computer_launch_missing
@@ -1953,6 +2106,8 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             "长拖拽必须在取消后释放鼠标状态并留下清理证据。"
         } else if fixture.computer_input_crash {
             "输入已开始后 owner crash；必须保留 unknown 并禁止自动重放。"
+        } else if fixture.computer_soak {
+            "100 次 fresh observe/input 已全部唯一结算；文本、焦点与输入清理保持稳定。"
         } else if fixture.computer_large_a11y {
             "原生 Accessibility 树超过节点预算；结果明确标记 incomplete，不能把省略节点当作不存在。"
         } else if fixture.computer_unicode_input {
@@ -2038,6 +2193,7 @@ async fn main() -> anyhow::Result<()> {
     let computer_input_crash = mode.as_deref() == Some("--computer-input-crash");
     let computer_unicode_input = mode.as_deref() == Some("--computer-unicode-input");
     let computer_large_a11y = mode.as_deref() == Some("--computer-large-a11y");
+    let computer_soak = mode.as_deref() == Some("--computer-soak");
     let computer_launch_missing = mode.as_deref() == Some("--computer-launch-missing");
     anyhow::ensure!(
         mode.is_none()
@@ -2055,6 +2211,7 @@ async fn main() -> anyhow::Result<()> {
             || computer_input_crash
             || computer_unicode_input
             || computer_large_a11y
+            || computer_soak
             || computer_launch_missing,
         "unsupported fixture mode"
     );
@@ -2062,7 +2219,8 @@ async fn main() -> anyhow::Result<()> {
         || computer_drag_cancel
         || computer_input_crash
         || computer_unicode_input
-        || computer_large_a11y)
+        || computer_large_a11y
+        || computer_soak)
         .then(|| std::env::args().nth(3))
         .flatten()
         .map(PathBuf::from);
@@ -2070,7 +2228,8 @@ async fn main() -> anyhow::Result<()> {
         || computer_drag_cancel
         || computer_input_crash
         || computer_unicode_input
-        || computer_large_a11y)
+        || computer_large_a11y
+        || computer_soak)
         .then(|| std::env::args().nth(4))
         .flatten()
         .map(PathBuf::from);
@@ -2079,6 +2238,7 @@ async fn main() -> anyhow::Result<()> {
         || computer_input_crash
         || computer_unicode_input
         || computer_large_a11y
+        || computer_soak
     {
         let target = computer_pointer_target
             .as_ref()
@@ -2120,6 +2280,7 @@ async fn main() -> anyhow::Result<()> {
         computer_input_crash,
         computer_unicode_input,
         computer_large_a11y,
+        computer_soak,
         computer_launch_missing,
         computer_file,
         computer_pointer_target,
@@ -2141,6 +2302,7 @@ async fn main() -> anyhow::Result<()> {
         crash_input_dispatched: AtomicBool::new(false),
         unicode_verified: AtomicBool::new(false),
         large_a11y_verified: AtomicBool::new(false),
+        soak_verified: AtomicBool::new(false),
         missing_launch_rejected: AtomicBool::new(false),
         pointer_baseline: Mutex::new(None),
         witnesses: Mutex::new(Vec::new()),
@@ -2174,7 +2336,30 @@ async fn main() -> anyhow::Result<()> {
             "/status",
             get(|State(f): State<Arc<Fixture>>| async move {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
-                Json(json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,"computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,"computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,"computer_drag_cancel":f.computer_drag_cancel,"computer_input_crash":f.computer_input_crash,"computer_unicode_input":f.computer_unicode_input,"computer_large_a11y":f.computer_large_a11y,"computer_launch_missing":f.computer_launch_missing,"computer_file":f.computer_file.as_ref(),"computer_pointer_target":f.computer_pointer_target.as_ref(),"computer_pointer_status":f.computer_pointer_status.as_ref(),"computer_missing_target":f.computer_missing_target.as_ref(),"a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),"screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),"input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),"stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),"concurrent_user_preserved":f.concurrent_user_preserved.load(Ordering::SeqCst),"pointer_verified":f.pointer_verified.load(Ordering::SeqCst),"drag_ready":f.drag_ready.load(Ordering::SeqCst),"drag_dispatched":f.drag_dispatched.load(Ordering::SeqCst),"crash_input_ready":f.crash_input_ready.load(Ordering::SeqCst),"crash_input_dispatched":f.crash_input_dispatched.load(Ordering::SeqCst),"unicode_verified":f.unicode_verified.load(Ordering::SeqCst),"large_a11y_verified":f.large_a11y_verified.load(Ordering::SeqCst),"missing_launch_rejected":f.missing_launch_rejected.load(Ordering::SeqCst),"failure":*f.failure.lock().unwrap(),"witnesses":*f.witnesses.lock().unwrap(),"served_versions":versions.len(),"changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)}))
+                let mut status=serde_json::Map::new();
+                let sections=[
+                    json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),
+                        "computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,
+                        "computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,
+                        "computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,"computer_drag_cancel":f.computer_drag_cancel,
+                        "computer_input_crash":f.computer_input_crash,"computer_unicode_input":f.computer_unicode_input,"computer_large_a11y":f.computer_large_a11y,
+                        "computer_soak":f.computer_soak,"computer_launch_missing":f.computer_launch_missing}),
+                    json!({"computer_file":f.computer_file.as_ref(),"computer_pointer_target":f.computer_pointer_target.as_ref(),
+                        "computer_pointer_status":f.computer_pointer_status.as_ref(),"computer_missing_target":f.computer_missing_target.as_ref(),
+                        "a11y_observed":f.a11y_observed.load(Ordering::SeqCst),"a11y_denied":f.a11y_denied.load(Ordering::SeqCst),
+                        "screen_denied":f.screen_denied.load(Ordering::SeqCst),"screen_observed":f.screen_observed.load(Ordering::SeqCst),
+                        "input_verified":f.input_verified.load(Ordering::SeqCst),"input_initial_plan_unavailable":f.input_initial_plan_unavailable.load(Ordering::SeqCst),
+                        "stale_observed":f.stale_observed.load(Ordering::SeqCst),"stale_input_rejected":f.stale_input_rejected.load(Ordering::SeqCst),
+                        "concurrent_user_preserved":f.concurrent_user_preserved.load(Ordering::SeqCst),"pointer_verified":f.pointer_verified.load(Ordering::SeqCst),
+                        "drag_ready":f.drag_ready.load(Ordering::SeqCst),"drag_dispatched":f.drag_dispatched.load(Ordering::SeqCst),
+                        "crash_input_ready":f.crash_input_ready.load(Ordering::SeqCst),"crash_input_dispatched":f.crash_input_dispatched.load(Ordering::SeqCst)}),
+                    json!({"unicode_verified":f.unicode_verified.load(Ordering::SeqCst),"large_a11y_verified":f.large_a11y_verified.load(Ordering::SeqCst),
+                        "soak_verified":f.soak_verified.load(Ordering::SeqCst),"missing_launch_rejected":f.missing_launch_rejected.load(Ordering::SeqCst),
+                        "failure":f.failure.lock().unwrap().clone(),"witnesses":f.witnesses.lock().unwrap().clone(),"served_versions":versions.len(),
+                        "changed_source_served":versions.last().is_some_and(|source|source!=BROKEN_JS)})
+                ];
+                for section in sections { if let Value::Object(fields)=section { status.extend(fields); } }
+                Json(Value::Object(status))
             }),
         )
         .route(
@@ -2272,6 +2457,8 @@ async fn main() -> anyhow::Result<()> {
             "Computer Unicode 输入验收"
         } else if computer_large_a11y {
             "Computer 大型 A11y 树验收"
+        } else if computer_soak {
+            "Computer 100 轮 soak 验收"
         } else if computer_launch_missing {
             "Computer 缺失应用拒绝验收"
         } else if computer_input {
@@ -2316,7 +2503,7 @@ async fn main() -> anyhow::Result<()> {
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/a11y.observe","computer/launch"]
             }])
-        } else if computer_input || computer_stale_focus || computer_concurrent_user || computer_input_crash || computer_unicode_input {
+        } else if computer_input || computer_stale_focus || computer_concurrent_user || computer_input_crash || computer_unicode_input || computer_soak {
             json!([{
                 "capability":{"id":"computer"},
                 "action_allowlist":["computer/a11y.observe","computer/input","computer/launch"]
@@ -2339,7 +2526,7 @@ async fn main() -> anyhow::Result<()> {
         let saved=api(&app,&revision_path,json!({"expected_current_revision":draft["current_revision"].clone(),"draft":draft,"reason":"deterministic native Browser GUI acceptance"})).await?;
         let expected_capabilities=if live_mode {2}else{1};
         anyhow::ensure!(saved["revision"]["document"]["enabled_capabilities"].as_array().is_some_and(|values|values.len()==expected_capabilities),"Browser fixture revision missing selected Module");
-        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_concurrent_user || computer_pointer_input || computer_drag_cancel || computer_input_crash || computer_unicode_input || computer_large_a11y || computer_launch_missing {
+        let resources = if computer_denied || computer_granted || computer_a11y_denied || computer_screen_denied || computer_input || computer_stale_focus || computer_concurrent_user || computer_pointer_input || computer_drag_cancel || computer_input_crash || computer_unicode_input || computer_large_a11y || computer_soak || computer_launch_missing {
             json!([{"resource_kind":"computer","resource_id":"local-desktop"}])
         } else if live_mode {
             json!([
@@ -2363,7 +2550,7 @@ async fn main() -> anyhow::Result<()> {
     let session = prepared?;
     println!(
         "BROWSER_GUI_FIXTURE_READY {}",
-        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_concurrent_user":computer_concurrent_user,"computer_pointer_input":computer_pointer_input,"computer_drag_cancel":computer_drag_cancel,"computer_input_crash":computer_input_crash,"computer_unicode_input":computer_unicode_input,"computer_large_a11y":computer_large_a11y,"computer_launch_missing":computer_launch_missing,"computer_file":fixture.computer_file.as_ref(),"computer_pointer_target":fixture.computer_pointer_target.as_ref(),"computer_pointer_status":fixture.computer_pointer_status.as_ref(),"computer_missing_target":fixture.computer_missing_target.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
+        json!({"data_dir":root,"work_dir":fixture.live.as_ref().map(|live|&live.work),"real_provider":live_mode,"native_actions":native_actions,"computer_denied":computer_denied,"computer_granted":computer_granted,"computer_a11y_denied":computer_a11y_denied,"computer_screen_denied":computer_screen_denied,"computer_input":computer_input,"computer_stale_focus":computer_stale_focus,"computer_concurrent_user":computer_concurrent_user,"computer_pointer_input":computer_pointer_input,"computer_drag_cancel":computer_drag_cancel,"computer_input_crash":computer_input_crash,"computer_unicode_input":computer_unicode_input,"computer_large_a11y":computer_large_a11y,"computer_soak":computer_soak,"computer_launch_missing":computer_launch_missing,"computer_file":fixture.computer_file.as_ref(),"computer_pointer_target":fixture.computer_pointer_target.as_ref(),"computer_pointer_status":fixture.computer_pointer_status.as_ref(),"computer_missing_target":fixture.computer_missing_target.as_ref(),"page":format!("http://{address}/"),"control":format!("http://{address}"),"session_id":session})
     );
     // Keep only the model/page server alive; the real desktop now owns the DB.
     fixture.stop.cancelled().await;
