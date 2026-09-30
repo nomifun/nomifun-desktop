@@ -408,9 +408,8 @@ impl EngineProcessScope {
         self.close_admission();
         let mut state = self.state.lock().await;
         let mut failures = Vec::new();
-        if state.unregistered_start {
-            failures
-                .push("a process start has no retained handle; cleanup cannot be certified".into());
+        if let Err(cause) = reconcile_unregistered_start(&mut state, self.owner.quiesce_unregistered_starts()).await {
+            failures.push(cause);
         }
         if state.cleanup_panicked {
             failures
@@ -450,6 +449,23 @@ impl EngineProcessScope {
     }
 }
 
+async fn reconcile_unregistered_start(
+    state: &mut ProcessState,
+    proof: impl std::future::Future<Output = bool>,
+) -> Result<(), String> {
+    if state.unregistered_start {
+        match AssertUnwindSafe(proof).catch_unwind().await {
+            Ok(true) => state.unregistered_start = false,
+            Ok(false) => return Err("a process start has no exact owner cleanup proof".into()),
+            Err(_) => {
+                state.cleanup_panicked = true;
+                return Err("startup cleanup fence panicked; settlement unknown".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn process_output(
     id: &str,
     poll: &EngineProcessPoll,
@@ -475,6 +491,30 @@ fn process_output(
 mod tests {
     use super::*;
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
+
+    #[tokio::test]
+    async fn exact_owner_startup_fence_releases_unregistered_start_uncertainty() {
+        let mut state = ProcessState { unregistered_start: true, ..ProcessState::default() };
+        let result = reconcile_unregistered_start(&mut state, async { true }).await;
+        assert!(result.is_ok(), "late exact owner cleanup must not remain permanently unknown");
+        assert!(state.is_quiescent());
+    }
+
+    #[tokio::test]
+    async fn unproven_startup_fence_cannot_clear_unregistered_start_uncertainty() {
+        let mut state = ProcessState { unregistered_start: true, ..ProcessState::default() };
+        assert!(reconcile_unregistered_start(&mut state, async { false }).await.is_err());
+        assert!(!state.is_quiescent());
+    }
+
+    #[tokio::test]
+    async fn startup_fence_panic_remains_uncertain_after_a_later_exact_proof() {
+        let mut state = ProcessState { unregistered_start: true, ..ProcessState::default() };
+        assert!(reconcile_unregistered_start(&mut state, async { panic!("injected startup fence panic") }).await.is_err());
+        assert!(state.cleanup_panicked && !state.is_quiescent());
+        assert!(reconcile_unregistered_start(&mut state, async { true }).await.is_ok());
+        assert!(!state.unregistered_start && state.cleanup_panicked && !state.is_quiescent());
+    }
 
     #[test]
     fn omitted_wait_and_cursor_match_explicit_zero_wire_contract() {
