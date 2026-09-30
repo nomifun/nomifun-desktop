@@ -1,6 +1,6 @@
 # Windows Case 处理进度
 
-更新：2026-09-29。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-09-30。当前宿主 Windows。执行顺序见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 覆盖 675 个共享 + 82 个 Windows 专属 Case；按适用 Agent 展开为 2,374 槽。
 Agent 槽数：GEN 600、COD 594、PAL 323、MM 567、CS 242、HOST 48。
 共享 P0 已由 `85a079fc0` 提交/推送；W01 首批组件走查完成，不重复维护共享根因文本。
@@ -2977,6 +2977,30 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   binary身份均外部，生产修改仅Windows删除分支与保留原核对handle。
 - startup stale cleanup、Unix stage/rollback check→unlink、更多IO fault、完整应用/UI/角色平台
   及N3/100 seed/LONG/99%仍开放；不关闭完整Case或共享阶段。
+
+### Artifact 512MiB+1真实文件准入（W178，基线 `ad9836e19`）
+
+- S-D03-64 / ART-005/006、A05/A13/A14/A15/A17/A19：NTFS sparse source/blob真实逻辑大小
+  536,870,913字节，超过512MiB一字节；源publish以BadRequest、blob校验以Conflict拒绝，
+  full-scan计数均0，对象/大小不变、无publication temp或false success，权限和断言未放宽。
+- 首次 **2/2**，最终源独立三样本 **3×2/2**、六份外部磁盘/稀疏属性核对；Windows模块
+  **28/28**、WSL Ubuntu ext4模块 **28/28**、两原生超限文件及IO核对、fmt/diff通过。
+  原实现首次满足，无新产品FAIL或生产源码变更，只补边界回归；无模型/UI。现场、日志、源码/
+  binary身份在外部 `2026-09-30/windows/w178-artifact-size-admission`，Linux不计macOS。
+- 未覆盖恰好512MiB完整发布、持续增长、startup stale cleanup、Unix最终窗口、真IO fault、
+  正式UI/平台/角色及N3/100 seed/LONG/99%；不关闭完整Case或共享阶段。
+
+### Artifact 恰好 512MiB 完整发布与分页（W179，基线 `11c2627c8`）
+
+- S-D03-65 / ART-001/004/006、A05/A13/A14/A15/A17/A19：真实 536,870,912 字节 source
+  发布成功，512 页拼接 digest 与独立预计算值一致，EOF 为空，receipt/磁盘大小一致；分页
+  full scan 不增加、page IO 恰好为文件大小、零 publication temp。原实现首次满足，无新
+  产品 FAIL/生产修复；只补显式运行的 ignored 重型回归，未把跳过计作通过。
+- Windows **3/3**（1,536 页），独立磁盘 hash **6/6**；相邻超限 **2/2**；WSL Ubuntu
+  原生 ext4 **1/1**，源/blob 独立 hash **2/2**，fmt/diff 通过。完整日志、现场、源码/binary
+  身份与计数在外部 `2026-09-30/windows/w179-artifact-exact-budget`，未调用模型/UI。
+- 持续增长、startup stale cleanup、Unix 最终窗口、真实 IO fault、正式 UI/模型/角色/macOS
+  及 N3/100 seed/LONG/99% 仍开放，不关闭完整 Case 或共享阶段；全程单 agent。
 
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认

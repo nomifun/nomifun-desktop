@@ -755,6 +755,24 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   startup stale cleanup、Unix stage/rollback check→unlink、真IO fault、完整UI/角色平台和完整
   长期门槛仍开放，不关闭完整Case或共享阶段。
 
+- S-D03-64（ART-005/006、A05/A13/A14/A15/A17/A19 512MiB超限准入）：W178真实 sparse
+  source/blob各536,870,913字节，均在full scan前按原上限拒绝，源为BadRequest、blob为Conflict，
+  不是unknown/截断成功；对象和大小保留，零publication temp。首次 **2/2**、最终源三个独立
+  样本 **3×2/2**及六份磁盘/稀疏属性核对，Windows模块 **28/28**、WSL ext4模块 **28/28**和两
+  原生超限文件核对、fmt/diff通过，不代判macOS。无新产品FAIL或生产修复，仅必要边界回归。
+  完整现场/IO计数/源码及binary身份在外部 `2026-09-30/windows/w178-artifact-size-admission`。
+  恰好上限512MiB完整发布、持续增长、stale cleanup/Unix最终窗口、真IO fault、正式UI/模型/角色
+  平台及长期门槛仍开放，不关闭完整ART或共享阶段。
+
+- S-D03-65（ART-001/004/006、A05/A13/A14/A15/A17/A19 上限正向子断言）：W179 对恰好
+  536,870,912 字节的真实文件完成发布、512 页回读及空 EOF；拼接 digest、receipt 和独立磁盘
+  hash 一致，分页未增加 full scan，page IO 恰好等于文件大小，publication temp 为零。
+  Windows 三个独立样本 **3/3**、相邻超限 **2/2**，WSL Ubuntu ext4 **1/1**，八次外部文件
+  hash 及 fmt/diff 通过。首次即通过，无新产品 FAIL/生产修复；重型回归默认 ignored，本批
+  显式执行，未将跳过计作通过。证据在外部 `2026-09-30/windows/w179-artifact-exact-budget`。
+  持续增长、startup stale cleanup、Unix 最终窗口、真实 IO fault、正式 UI/模型/角色/macOS
+  及长期门槛仍未覆盖；不关闭完整 ART Case 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
@@ -1623,6 +1641,28 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   通过。证据 `2026-09-30/macos/m06-pty-watchdog/`，付费模型 0。只关闭该 macOS 初始化根因；
   其他 fork callback、正式 Tauri/父死亡与 sleep/wake、未知恢复、其他平台/角色及完整 Case/统计
   仍开放；Linux/Windows 分支不增加该初始化，也不改写已有 Windows 验收结果。
+
+- **S-D04-36**（`PROC-040/050`、A08/A11/A13/A19，Unix 已 exec 的 commit failure）：M06-06
+  首败证明 native transaction 握手错误已转交底层清理器，但 Supervisor 丢失该 owner/预留，
+  shutdown 在 PID 未回收时空报告完成。现已执行 transaction 的错误携带 cleanup-only owner，
+  复用原 Session retirement；startup failure 与机器回收证明分开，不发布可用进程 handle，
+  普通错误保留原 code/PID/reap，shutdown 保留取消优先及原 owner 报告。standalone raw/drop 不变。
+- 清理证明只在精确 direct-child reap + group quiescence 时产生；失去 group anchor 仍为未证明。
+  中间收据 **2/4** 两次首败另发现普通退出等待覆盖了历史 cleanup 诊断，已保留并修复；最终
+  收据携带原握手错误和最近实际诊断，而非吞错换 PASS。macOS Pipe/PTY 四场景 **84/84**，
+  独立 marker/错误/报告 **84/84**、物理 PID 消失 **168/168**，fallback 0；anchor 负向 **1/1**、
+  Runtime **162/162**、registry **13/13**、boundary/fmt/diff 通过。证据
+  `2026-09-30/macos/m06-commit-failure/`，付费模型 0。仅关闭该窗口；caller-drop/握手失败组合当批未验，native 接续见 M06-07；
+  pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复、Linux/Windows 原生、
+  正式 Tauri/更多角色及完整 Case/长期统计仍开放，Windows 原验收未改写。
+- macOS M06-07 复核 `S-D04-36` 的 caller-drop/commit failure 组合，新增四个最小 native 回归，
+  无需修改产品逻辑。Pipe/PTY × 无 shutdown/quiesce 首次 + 20 repeats **84/84**；原/后续各一次
+  物理启动 **168/168**、原 owner 报告 **84/84**、PID 消失 **336/336**，capacity probe 零 dispatch
+  **84/84**、fence held **42/42**、无 shutdown/lease cleanup **42/42**、容量/准入复用 **84/84**，
+  fallback 0；Runtime **166/166**、registry **13/13**、boundary/fmt/diff 通过。首次结果均通过且保留。
+  证据 `2026-09-30/macos/m06-dropped-commit/`，付费模型 0；真实 Engine Turn cancel、正式 Tauri/
+  角色、pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复及其他平台/完整
+  统计仍开放，不把该组件回归当完整 Case PASS，不改写 Windows 原结果。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
