@@ -102,6 +102,10 @@ name = "startup_smoke"
 path = "tests/startup_smoke.rs"
 
 [[test]]
+name = "desktop_agent_shutdown"
+path = "tests/desktop_agent_shutdown.rs"
+
+[[test]]
 name = "system_auth_e2e"
 path = "tests/system_auth_e2e.rs"
 

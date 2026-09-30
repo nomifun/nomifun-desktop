@@ -17,8 +17,18 @@ use tokio_util::sync::CancellationToken;
 struct Fixture {
     calls: AtomicUsize,
     creative_failure: bool,
+    shutdown_wait: bool,
+    waiting_streams: AtomicUsize,
     finish: Semaphore,
     stop: CancellationToken,
+}
+
+struct WaitingStream(Arc<Fixture>);
+
+impl Drop for WaitingStream {
+    fn drop(&mut self) {
+        self.0.waiting_streams.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn frame(delta: Value, finish: Option<&str>) -> String {
@@ -57,6 +67,31 @@ async fn model(State(fixture): State<Arc<Fixture>>, Json(body): Json<Value>) -> 
         .is_some_and(|message| message["content"].to_string().contains("格式异常"));
     let has_tool = messages.iter().rev().take_while(|message| message["role"] != "user")
         .any(|message| message["role"] == "tool");
+    if fixture.shutdown_wait && has_tool {
+        fixture.waiting_streams.fetch_add(1, Ordering::SeqCst);
+        let stream = futures_util::stream::unfold((WaitingStream(fixture),0_u8), |(guard,phase)| async move {
+            match phase {
+                0 => Some((Ok::<_,std::io::Error>(frame(json!({"role":"assistant",
+                    "content":"检查文件已经写入，正在等待后续检查。"}),None)),(guard,1))),
+                1 => {
+                    let current = Arc::clone(&guard.0);
+                    tokio::select! {
+                    _ = current.stop.cancelled() => None,
+                    permit = current.finish.acquire() => {
+                        if let Ok(permit) = permit { permit.forget(); }
+                        Some((Ok(format!("{}data: [DONE]\n\n",frame(json!({}),Some("stop")))),(guard,2)))
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(250)) =>
+                        Some((Ok(": fixture keepalive\n\n".to_owned()),(guard,1))),
+                    }
+                },
+                _ => None,
+            }
+        });
+        return axum::response::Response::builder()
+            .header("content-type","text/event-stream")
+            .body(axum::body::Body::from_stream(stream)).unwrap();
+    }
     let mut frames = if malformed {
         vec![
             frame(json!({"role":"assistant","content":"正在准备文件。 <to"}), None),
@@ -111,11 +146,14 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(root.is_absolute() && !root.exists(), "refusing an existing data directory");
     let mode = std::env::args().nth(2);
     let creative_failure = mode.as_deref() == Some("--creative-failure");
-    anyhow::ensure!(mode.is_none() || creative_failure, "unsupported fixture mode");
+    let shutdown_wait = mode.as_deref() == Some("--shutdown-wait");
+    anyhow::ensure!(mode.is_none() || creative_failure || shutdown_wait, "unsupported fixture mode");
     std::fs::create_dir(&root)?;
     let fixture = Arc::new(Fixture {
         calls: AtomicUsize::new(0),
         creative_failure,
+        shutdown_wait,
+        waiting_streams: AtomicUsize::new(0),
         finish: Semaphore::new(0),
         stop: CancellationToken::new(),
     });
@@ -123,13 +161,16 @@ async fn main() -> anyhow::Result<()> {
     let address = listener.local_addr()?;
     let routes = Router::new().route("/v1/chat/completions", post(model))
         .route("/finish", post(|State(f): State<Arc<Fixture>>| async move { f.finish.add_permits(1); "released" }))
-        .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),"creative_failure":f.creative_failure})) }))
+        .route("/status", get(|State(f): State<Arc<Fixture>>| async move { Json(json!({"calls":f.calls.load(Ordering::SeqCst),
+            "creative_failure":f.creative_failure,"shutdown_wait":f.shutdown_wait,
+            "waiting_streams":f.waiting_streams.load(Ordering::SeqCst)})) }))
         .route("/shutdown", post(|State(f): State<Arc<Fixture>>| async move { f.stop.cancel(); "stopped" }))
         .with_state(fixture.clone());
     let stop = fixture.stop.clone();
     tokio::spawn(async move { axum::serve(listener, routes).with_graceful_shutdown(stop.cancelled_owned()).await });
     let cli = nomifun_app::cli::Cli {
-        host:"127.0.0.1".into(), port:0, data_dir:root.clone(), work_dir:None,
+        host:"127.0.0.1".into(), port:0, data_dir:root.clone(),
+        work_dir:shutdown_wait.then(|| root.parent().unwrap().join("work")),
         app_version:env!("CARGO_PKG_VERSION").into(), local:true,
         log_dir:Some(root.join("logs")), log_level:Some("off".into()), command:None,
     };
@@ -164,7 +205,7 @@ async fn main() -> anyhow::Result<()> {
     println!("CONVERSATION_GUI_FIXTURE_READY {}",json!({
         "data_dir":root,"control":format!("http://{address}"),
         "session_id":prepared.get("session_id"),"canvas_id":prepared.get("canvas_id"),
-        "creative_failure":creative_failure
+        "creative_failure":creative_failure,"shutdown_wait":shutdown_wait
     }));
     fixture.stop.cancelled().await;
     Ok(())
