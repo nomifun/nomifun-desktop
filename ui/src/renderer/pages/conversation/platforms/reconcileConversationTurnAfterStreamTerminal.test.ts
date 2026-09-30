@@ -61,7 +61,7 @@ describe('terminal stream runtime reconciliation', () => {
     } finally { emitter.off('conversation.turn.settled', onSettled); }
   });
 
-  test('a cleanup-proven canonical pause supersedes one transient unproven snapshot', async () => {
+  test('each explicit resync immediately adopts its exact canonical pause snapshot', async () => {
     const unproven = {
       status: 'running',
       extra: { execution_phase: 'paused', execution_pause: {
@@ -75,20 +75,24 @@ describe('terminal stream runtime reconciliation', () => {
     const snapshots = [unproven, proven];
     const observed: TChatConversation[] = [];
 
-    expect(await reconcileConversationAuthoritativeRuntime(conversationId, {
+    const options = {
       isCurrent: () => true,
       onIdle: () => { throw new Error('pause must not settle the turn'); },
-      onPaused: conversation => { observed.push(conversation); },
+      onPaused: (conversation: TChatConversation) => { observed.push(conversation); },
       delaysMs: [0, 0],
       getConversation: async () => snapshots.shift() ?? proven,
       retryForever: false,
       announceSettled: false,
-    })).toBe(false);
-    expect(observed).toEqual([proven]);
+    };
+    expect(await reconcileConversationAuthoritativeRuntime(conversationId, options)).toBe(false);
+    expect(observed).toEqual([unproven]);
+    expect(snapshots).toHaveLength(1);
+    expect(await reconcileConversationAuthoritativeRuntime(conversationId, options)).toBe(false);
+    expect(observed).toEqual([unproven, proven]);
     expect(snapshots).toHaveLength(0);
   });
 
-  test('two identical unproven pause snapshots still surface cleanupRequired', async () => {
+  test('an unproven canonical pause immediately surfaces cleanupRequired', async () => {
     const paused = {
       status: 'running',
       extra: { execution_phase: 'paused', execution_pause: {
@@ -108,7 +112,7 @@ describe('terminal stream runtime reconciliation', () => {
       retryForever: false,
       announceSettled: false,
     })).toBe(false);
-    expect(reads).toBe(2);
+    expect(reads).toBe(1);
     expect(getConversationPauseNotice(observed)).toMatchObject({ cleanupProven: false });
   });
 

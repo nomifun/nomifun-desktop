@@ -107,6 +107,33 @@ pub(super) async fn native_budget_tx(tx: &mut Transaction<'_, Sqlite>, session: 
 }
 
 impl AgentSessionStore {
+    /// Read the exact Turn's pause at an already-observed head boundary.
+    /// Pause events are immutable; bounding by that cursor keeps a later resume
+    /// or new pause from changing an earlier consumer snapshot. This lookup is
+    /// independent of the ordinary event page and reads at most one record.
+    pub async fn read_native_pause_event_at(
+        &self,
+        session: &AgentSessionId,
+        operation: &OperationId,
+        through_seq: u64,
+    ) -> Result<Option<SessionEventRecord>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session.as_ref()).await?;
+        let row = sqlx::query_as::<_, StoredEventRow>(
+            "SELECT session_id,seq,event_id,producer_id,idempotency_key,runtime_binding_id,runtime_producer_seq, \
+             kind,kind_version,correlation_id,causation_event_id,inline_json,payload_id FROM agent_events \
+             WHERE session_id=? AND correlation_id=? AND kind='turn/paused' AND seq<=? \
+             ORDER BY seq DESC LIMIT 1",
+        )
+        .bind(session.as_ref())
+        .bind(operation.as_ref())
+        .bind(as_i64(through_seq, "pause observation cursor")?)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        row.map(event_from_row).transpose()
+    }
+
     pub async fn native_pause_state(&self, session: &AgentSessionId, operation: &OperationId) -> Result<Option<NativePauseState>, SessionStoreError> {
         let value: Option<String> = sqlx::query_scalar("SELECT native_pause_json FROM agent_turns WHERE session_id=? AND operation_id=?")
             .bind(session.as_ref()).bind(operation.as_ref()).fetch_one(&self.pool).await?;

@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! No real provider credentials, user dataset, or browser profile is read.
-//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
+//! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
     Json, Router,
@@ -81,6 +81,7 @@ struct Fixture {
     live: Option<LiveFrontend>,
     calls: AtomicUsize,
     native_url: Option<String>,
+    native_pause: bool,
     computer_denied: bool,
     computer_granted: bool,
     computer_a11y_denied: bool,
@@ -196,6 +197,9 @@ fn native_operation(
     body: &Value,
     step: usize,
 ) -> anyhow::Result<Option<(String, Value)>> {
+    if fixture.native_pause && step >= 8 {
+        return Ok(Some((browser_tool(body, "browser/observe")?, json!({}))));
+    }
     let reference = |name: &str| -> anyhow::Result<Value> {
         let observation = last_tool(body)?;
         observation["elements"].as_array()
@@ -2170,7 +2174,12 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             }
         };
     }
-    fixture.calls.fetch_add(1, Ordering::SeqCst);
+    let call = fixture.calls.fetch_add(1, Ordering::SeqCst);
+    // Local-only protocol fault: enough canonical events to put the pause past
+    // the first 500-event consumer page, followed by the normal rate-limit path.
+    if fixture.native_pause && call >= 45 {
+        return axum::http::StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     if !body["tools"].is_array() {
         let observed = if fixture.computer_denied || fixture.computer_granted {
             observe_computer_permission_results(&fixture, &body)
@@ -2195,10 +2204,11 @@ async fn model(State(fixture): State<Arc<Fixture>>, headers: axum::http::HeaderM
             ),
         ).into_response();
     }
-    // Each user turn starts a new sequence; never replay a prior turn's refs.
-    let step = body["messages"].as_array().map(|messages| messages.iter().rev()
+    // Ordinary fixtures reset per Turn. The one-Turn pause fixture keeps its
+    // monotonic request counter across context compaction.
+    let step = if fixture.native_pause { call } else { body["messages"].as_array().map(|messages| messages.iter().rev()
         .take_while(|message| message["role"] != "user")
-        .filter(|message| message["role"] == "tool").count()).unwrap_or(0);
+        .filter(|message| message["role"] == "tool").count()).unwrap_or(0) };
     let operation: Option<(String, String, Value)> = if fixture.native_url.is_some() {
         match native_operation(&fixture, &body, step) {
             Ok(operation) => operation.map(|(tool, arguments)| {
@@ -2440,7 +2450,8 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let mode = std::env::args().nth(2);
-    let native_actions = mode.as_deref() == Some("--native-actions");
+    let native_pause = mode.as_deref() == Some("--native-pause");
+    let native_actions = mode.as_deref() == Some("--native-actions") || native_pause;
     let computer_denied = mode.as_deref() == Some("--computer-denied");
     let computer_granted = mode.as_deref() == Some("--computer-granted");
     let computer_a11y_denied = mode.as_deref() == Some("--computer-a11y-denied");
@@ -2533,6 +2544,7 @@ async fn main() -> anyhow::Result<()> {
         live,
         calls: AtomicUsize::new(0),
         native_url: native_actions.then(|| format!("http://{address}/")),
+        native_pause,
         computer_denied,
         computer_granted,
         computer_a11y_denied,
@@ -2606,7 +2618,7 @@ async fn main() -> anyhow::Result<()> {
                 let versions=f.live.as_ref().map(|live|live.served.lock().unwrap().clone()).unwrap_or_default();
                 let mut status=serde_json::Map::new();
                 let sections=[
-                    json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),
+                    json!({"model_calls":f.calls.load(Ordering::SeqCst),"real_provider":f.live.is_some(),"native_actions":f.native_url.is_some(),"native_pause":f.native_pause,
                         "computer_denied":f.computer_denied,"computer_granted":f.computer_granted,"computer_a11y_denied":f.computer_a11y_denied,
                         "computer_screen_denied":f.computer_screen_denied,"computer_input":f.computer_input,"computer_stale_focus":f.computer_stale_focus,
                         "computer_concurrent_user":f.computer_concurrent_user,"computer_pointer_input":f.computer_pointer_input,
