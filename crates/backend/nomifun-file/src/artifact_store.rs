@@ -1,9 +1,9 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -84,7 +84,6 @@ pub struct WorkspaceArtifactStore {
     workspace_identity: Arc<SameFileHandle>,
     workspace: Arc<Dir>,
     publication_lock: Arc<Mutex<()>>,
-    cleanup_complete: Arc<AtomicBool>,
     verified: Arc<Mutex<VerifiedArtifactCache>>,
     io_counters: Arc<ArtifactIoCounters>,
 }
@@ -205,15 +204,21 @@ impl WorkspaceArtifactStore {
             workspace_identity: Arc::new(workspace_identity),
             workspace: Arc::new(workspace),
             publication_lock: Arc::new(Mutex::new(())),
-            cleanup_complete: Arc::new(AtomicBool::new(false)),
             verified: Arc::new(Mutex::new(VerifiedArtifactCache::default())),
             io_counters: Arc::new(ArtifactIoCounters::default()),
         };
         match open_artifact_namespace(&store.workspace, false) {
             Ok(namespace) => {
                 let _lease = PublicationLease::acquire(&namespace.dir)?;
-                let complete = cleanup_stale_publications(&namespace.dir)?;
-                store.cleanup_complete.store(complete, Ordering::Release);
+                match cleanup_stale_publications(&namespace.dir) {
+                    Ok(_) => {}
+                    Err(error) if artifact_publication_outcome_unknown(&error) => {
+                        // Keep diagnostic reads available. Every publication must
+                        // retry this unresolved cleanup and return its public error.
+                        tracing::warn!(%error, "artifact startup cleanup remains unconfirmed; publication is blocked");
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             Err(AppError::NotFound(_)) => {}
             Err(error) => return Err(error),
@@ -234,10 +239,10 @@ impl WorkspaceArtifactStore {
         let relative = normalized_workspace_relative(source, false)?;
         let namespace = open_artifact_namespace(&self.workspace, true)?;
         let _lease = PublicationLease::acquire(&namespace.dir)?;
-        let cleaned_now = !self.cleanup_complete.load(Ordering::Acquire);
-        if cleaned_now {
-            let complete = cleanup_stale_publications(&namespace.dir)?;
-            self.cleanup_complete.store(complete, Ordering::Release);
+        // A different owner may have left unconfirmed cleanup since this store
+        // was opened. Reconcile under the shared lease before every publication.
+        if !cleanup_stale_publications(&namespace.dir)? {
+            return Err(AppError::Conflict("artifact startup cleanup has more owned files to reconcile; retry before publishing".into()));
         }
         after_namespace();
         verify_namespace(&self.workspace, &namespace)?;
@@ -365,6 +370,7 @@ fn validate_artifact_id(id: &str) -> Result<(), AppError> {
 struct StagedArtifact {
     dir: Dir,
     name: String,
+    witness: Option<String>,
     identity: Option<SameFileHandle>,
     digest: String,
     size_bytes: u64,
@@ -376,7 +382,11 @@ impl StagedArtifact {
     fn cleanup(&mut self) -> Result<(), AppError> {
         if self.cleanup_attempted { return Ok(()); }
         self.cleanup_attempted = true;
-        remove_owned_staging_name(self, || {})
+        remove_owned_staging_name(self, || {})?;
+        if let Some(witness) = &self.witness {
+            remove_owned_publication_name(&self.dir, witness, self.identity.as_ref().unwrap(), || {})?;
+        }
+        Ok(())
     }
 }
 
@@ -390,6 +400,10 @@ impl Drop for StagedArtifact {
 
 fn remove_owned_staging_name(staged: &StagedArtifact, after_identity: impl FnOnce()) -> Result<(), AppError> {
     let expected = staged.identity.as_ref().ok_or_else(|| AppError::Conflict("staging object identity is unavailable".into()))?;
+    remove_owned_publication_name(&staged.dir, &staged.name, expected, after_identity)
+}
+
+fn remove_owned_publication_name(directory: &Dir, name: &str, expected: &SameFileHandle, after_identity: impl FnOnce()) -> Result<(), AppError> {
     let options = read_options();
     #[cfg(windows)]
     let mut options = options;
@@ -399,7 +413,7 @@ fn remove_owned_staging_name(staged: &StagedArtifact, after_identity: impl FnOnc
         use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE};
         options.access_mode(DELETE | FILE_READ_ATTRIBUTES).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
     }
-    let current = match staged.dir.open_with(&staged.name, &options) {
+    let current = match directory.open_with(name, &options) {
         Ok(file) => file.into_std(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(AppError::Conflict(format!("cannot pin staging cleanup name: {error}"))),
@@ -411,8 +425,40 @@ fn remove_owned_staging_name(staged: &StagedArtifact, after_identity: impl FnOnc
     #[cfg(windows)]
     crate::windows_cleanup::remove_handle(&current).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging handle: {error}")))?;
     #[cfg(not(windows))]
-    staged.dir.remove_file(&staged.name).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging name: {error}")))?;
-    sync_directory(&staged.dir)
+    directory.remove_file(name).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging name: {error}")))?;
+    sync_directory(directory)
+}
+
+fn durable_publication_identity(file: &File) -> Result<String, AppError> {
+    let metadata = file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?;
+    if !metadata.is_file() { return Err(AppError::Conflict("publication witness is not a regular file".into())); }
+    let birth = metadata.created().and_then(|time| time.duration_since(std::time::UNIX_EPOCH)
+        .map_err(std::io::Error::other)).map_err(|error| AppError::Conflict(format!("publication birth identity is unavailable: {error}")))?.as_nanos();
+    #[cfg(windows)]
+    let object = crate::windows_cleanup::durable_identity_token(file)
+        .map_err(|error| AppError::Conflict(format!("publication object identity is unavailable: {error}")))?;
+    #[cfg(unix)]
+    let object = {
+        use std::os::unix::fs::MetadataExt;
+        format!("{:016x}-{:032x}", metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(any(windows, unix)))]
+    return Err(AppError::Conflict("durable publication identity is unavailable on this host".into()));
+    #[cfg(any(windows, unix))]
+    Ok(format!("{object}-{birth:032x}"))
+}
+
+fn publication_witness_name(stage: &str, identity: &str) -> String {
+    format!("{stage}.owner-{identity}")
+}
+
+fn parse_publication_witness(name: &str) -> Option<(&str, &str)> {
+    let (stage, identity) = name.rsplit_once(".owner-")?;
+    let fields = identity.split('-').collect::<Vec<_>>();
+    (is_owner_publication_temp(stage) && fields.len() == 3 && fields[0].len() == 16
+        && fields[1].len() == 32 && fields[2].len() == 32
+        && fields.iter().all(|field| field.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))))
+        .then_some((stage, identity))
 }
 
 fn open_artifact_namespace(workspace: &Dir, create: bool) -> Result<ArtifactNamespace, AppError> {
@@ -563,7 +609,7 @@ fn rollback_confirmed_published_with_hook(
 }
 
 fn cleanup_stale_publications(directory: &Dir) -> Result<bool, AppError> {
-    let mut stale = BTreeSet::new();
+    let mut stale = BTreeMap::<String, Option<String>>::new();
     let mut has_more = false;
     for entry in directory.entries().map_err(|error| {
         AppError::Internal(format!("cannot inspect artifact staging namespace: {error}"))
@@ -572,22 +618,46 @@ fn cleanup_stale_publications(directory: &Dir) -> Result<bool, AppError> {
             AppError::Internal(format!("cannot inspect artifact staging entry: {error}"))
         })?;
         let name = entry.file_name();
-        if name.to_str().is_some_and(is_owner_publication_temp) {
-            if stale.len() < MAX_STALE_PUBLICATION_CLEANUP {
-                stale.insert(name);
-            } else {
-                has_more = true;
-                break;
+        let Some(name) = name.to_str() else { continue };
+        let (stage, witness) = if is_owner_publication_temp(name) {
+            (name, None)
+        } else if let Some((stage, _)) = parse_publication_witness(name) {
+            (stage, Some(name))
+        } else { continue };
+        if !stale.contains_key(stage) && stale.len() == MAX_STALE_PUBLICATION_CLEANUP {
+            has_more = true;
+            break;
+        }
+        let candidate = stale.entry(stage.to_owned()).or_default();
+        if let Some(witness) = witness {
+            if candidate.as_ref().is_some_and(|previous| previous != witness) {
+                return Err(AppError::Conflict(format!("{PUBLICATION_OUTCOME_UNKNOWN}: multiple staging ownership witnesses require reconciliation")));
             }
+            *candidate = Some(witness.to_owned());
         }
     }
-    for name in &stale {
-        directory.remove_file(name).map_err(|error| {
-            AppError::Conflict(format!("cannot remove stale artifact staging file: {error}"))
-        })?;
-    }
-    if !stale.is_empty() {
-        sync_directory(directory)?;
+    for (stage, observed_witness) in stale {
+        let cleanup = (|| {
+            let witness = match directory.open_with(&stage, &read_options()) {
+                Ok(file) => publication_witness_name(&stage, &durable_publication_identity(&file.into_std())?),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => observed_witness
+                    .ok_or_else(|| AppError::Conflict("staging name disappeared without an ownership witness".into()))?,
+                Err(error) => return Err(AppError::Conflict(format!("cannot pin stale staging name: {error}"))),
+            };
+            let (_, recorded_identity) = parse_publication_witness(&witness)
+                .ok_or_else(|| AppError::Conflict("staging ownership witness is invalid".into()))?;
+            let file = directory.open_with(&witness, &read_options())
+                .map_err(|error| AppError::Conflict(format!("cannot pin staging ownership witness: {error}")))?.into_std();
+            if durable_publication_identity(&file)? != recorded_identity {
+                return Err(AppError::Conflict("staging ownership witness belongs to another object".into()));
+            }
+            let identity = SameFileHandle::from_file(file).map_err(|error| AppError::Conflict(error.to_string()))?;
+            remove_owned_publication_name(directory, &stage, &identity, || {})?;
+            remove_owned_publication_name(directory, &witness, &identity, || {})
+        })();
+        cleanup.map_err(|error| AppError::Conflict(format!(
+            "{PUBLICATION_OUTCOME_UNKNOWN}: startup staging cleanup cannot be proven ({error})"
+        )))?;
     }
     Ok(!has_more)
 }
@@ -673,6 +743,7 @@ fn create_staging_file(namespace: &ArtifactNamespace) -> Result<(StagedArtifact,
                 let mut staged = StagedArtifact {
                     dir: staged_dir,
                     name,
+                    witness: None,
                     identity: None,
                     digest: String::new(),
                     size_bytes: 0,
@@ -685,6 +756,30 @@ fn create_staging_file(namespace: &ArtifactNamespace) -> Result<(StagedArtifact,
                 )
                 .map_err(|error| AppError::Internal(error.to_string()))?;
                 staged.identity = Some(identity);
+                let witness_result = (|| {
+                    // The hardlink keeps the recorded object alive across process
+                    // death. Its native ID and birth time reject a reused name.
+                    let token = durable_publication_identity(&file)?;
+                    let witness = publication_witness_name(&staged.name, &token);
+                    staged.dir.hard_link(&staged.name, &staged.dir, &witness)
+                        .map_err(|error| AppError::Conflict(format!("cannot persist staging ownership witness: {error}")))?;
+                    staged.witness = Some(witness.clone());
+                    let witnessed = staged.dir.open_with(&witness, &read_options())
+                        .map_err(|error| AppError::Conflict(error.to_string()))?.into_std();
+                    if durable_publication_identity(&witnessed)? != token {
+                        return Err(AppError::Conflict("staging ownership witness changed while creating".into()));
+                    }
+                    verify_staged_identity(&staged)?;
+                    sync_directory(&staged.dir)
+                })();
+                if let Err(cause) = witness_result {
+                    return match staged.cleanup() {
+                        Ok(()) => Err(cause),
+                        Err(cleanup) => Err(AppError::Conflict(format!(
+                            "{PUBLICATION_OUTCOME_UNKNOWN}: ownership witness failed ({cause}) and cleanup could not be proven ({cleanup})"
+                        ))),
+                    };
+                }
                 return Ok((staged, file));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1173,6 +1268,132 @@ mod tests {
         staging_cleanup_name_race(true);
     }
 
+    #[test]
+    fn cold_cleanup_preserves_foreign_stage_with_different_bytes() {
+        cold_cleanup_foreign_stage(false);
+    }
+
+    #[test]
+    fn cold_cleanup_preserves_foreign_stage_with_same_bytes() {
+        cold_cleanup_foreign_stage(true);
+    }
+
+    fn cold_cleanup_foreign_stage(same_bytes: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if same_bytes {"cold-same-bytes"} else {"cold-different-bytes"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let published = store.publish("source", None).unwrap();
+        let peer = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, false).unwrap();
+        let lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace,
+            &ArtifactIoCounters::default(), || {}).unwrap();
+        let reused = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let retained = workspace.join("retained-owned-stage");
+        fs::rename(&reused, &retained).unwrap();
+        let foreign_bytes: &[u8] = if same_bytes {b"artifact"} else {b"foreign!"};
+        fs::write(&reused, foreign_bytes).unwrap();
+        let foreign = SameFileHandle::from_path(&reused).unwrap();
+        assert_ne!(staged.identity.as_ref().unwrap(), &foreign);
+        drop(staged);
+        assert_eq!(fs::read(&reused).unwrap(), foreign_bytes);
+        drop(lease);
+        drop(namespace);
+        let live_retry = store.publish("source", None);
+        let peer_retry = peer.publish("source", None);
+        let live_unknown = live_retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let peer_unknown = peer_retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        drop(peer);
+        drop(store);
+        let reopened = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let read = reopened.read(&published.artifact_id, 0, MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(read.data_base64).unwrap(), b"artifact");
+        let retry = reopened.publish("source", None);
+        let unknown = retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let actual = fs::read(&reused).ok();
+        let same_identity = SameFileHandle::from_path(&reused).ok().as_ref() == Some(&foreign);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "same_bytes":same_bytes, "foreign_bytes":foreign_bytes, "actual_after_reopen":actual,
+            "foreign_identity_preserved":same_identity, "retry_unknown":unknown,
+            "same_store_retry_unknown":live_unknown, "preexisting_store_retry_unknown":peer_unknown,
+            "reused_relative_path":reused.strip_prefix(&workspace).unwrap(),
+            "published_relative_path":published.relative_path, "diagnostic_read_ok":true,
+            "retained_owned_bytes":fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(actual.as_deref(), Some(foreign_bytes), "cold cleanup deleted an unowned object retained by live cleanup");
+        assert!(same_identity && unknown, "unconfirmed cleanup must keep its identity and reject new publication");
+        assert!(live_unknown && peer_unknown, "existing owners must observe the same unresolved cleanup as a cold owner");
+        assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+    }
+
+    #[test]
+    fn cold_cleanup_reclaims_owned_stage_after_process_exit() {
+        cold_cleanup_crashed_owner(false, false);
+    }
+
+    #[test]
+    fn cold_cleanup_reclaims_owned_witness_after_stage_unlink() {
+        cold_cleanup_crashed_owner(true, false);
+    }
+
+    #[test]
+    fn cold_cleanup_preserves_a_replaced_ownership_witness() {
+        cold_cleanup_crashed_owner(false, true);
+    }
+
+    fn cold_cleanup_crashed_owner(missing_stage: bool, foreign_witness: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if foreign_witness {"cold-foreign-witness"}
+                else if missing_stage {"cold-orphan-witness"} else {"cold-owned-exit"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let records = crashed_staging_fixture(&workspace, 1);
+        let (stage, witness) = &records[0];
+        let stage_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(stage);
+        let witness_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(witness);
+        assert_eq!(SameFileHandle::from_path(&stage_path).unwrap(), SameFileHandle::from_path(&witness_path).unwrap());
+        let retained = workspace.join("retained-owned-witness");
+        let foreign = if foreign_witness {
+            fs::rename(&witness_path, &retained).unwrap();
+            fs::write(&witness_path, b"artifact").unwrap();
+            let identity = SameFileHandle::from_path(&witness_path).unwrap();
+            assert_ne!(identity, SameFileHandle::from_path(&stage_path).unwrap());
+            Some(identity)
+        } else { None };
+        if missing_stage { fs::remove_file(&stage_path).unwrap(); }
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"artifact"));
+        let page = store.read(&digest, 0, MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(page.data_base64).unwrap(), b"artifact");
+        let retry = store.publish("source", None);
+        let unknown = retry.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let preserved = foreign.as_ref().is_some_and(|expected|
+            SameFileHandle::from_path(&witness_path).ok().as_ref() == Some(expected));
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "missing_stage":missing_stage, "foreign_witness":foreign_witness,
+            "stage_relative_path":stage_path.strip_prefix(&workspace).unwrap(),
+            "witness_relative_path":witness_path.strip_prefix(&workspace).unwrap(),
+            "stage_exists":stage_path.exists(), "witness_exists":witness_path.exists(),
+            "foreign_identity_preserved":preserved, "retry_unknown":unknown,
+            "diagnostic_read_ok":true, "published_relative_path":format!("{ARTIFACT_RELATIVE_ROOT}/{digest}"),
+        })).unwrap()).unwrap();
+        if foreign_witness {
+            assert!(unknown && preserved);
+            assert_eq!(fs::read(&stage_path).unwrap(), b"artifact");
+            assert_eq!(fs::read(&witness_path).unwrap(), b"artifact");
+            assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+        } else {
+            assert_eq!(retry.unwrap().artifact_id, digest);
+            assert!(!stage_path.exists() && !witness_path.exists());
+            assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn staging_cleanup_locks_identity_until_native_delete() {
@@ -1220,7 +1441,7 @@ mod tests {
         let retained = workspace.join("retained-owned-stage");
         let result = store.publish_with_hooks("source", None, || {
             let current = fs::read_dir(workspace.join(ARTIFACT_RELATIVE_ROOT)).unwrap()
-                .map(|entry| entry.unwrap().path()).find(|path| path.file_name().unwrap().to_str().unwrap().starts_with(".publish-")).unwrap();
+                .map(|entry| entry.unwrap().path()).find(|path| path.file_name().unwrap().to_str().is_some_and(is_owner_publication_temp)).unwrap();
             fs::rename(&current, &retained).unwrap();
             fs::write(&current, b"foreign!").unwrap();
             *reused.borrow_mut() = current;
@@ -1445,10 +1666,15 @@ mod tests {
         assert!(store.verified_cache_len() <= MAX_VERIFIED_ARTIFACT_CACHE_ENTRIES);
     }
     #[test]
-    fn startup_cleanup_removes_only_strict_owner_publication_temps() {
+    fn startup_cleanup_requires_original_object_witnesses() {
         let workspace = tempfile::tempdir().unwrap();
         let artifacts = workspace.path().join(ARTIFACT_RELATIVE_ROOT);
-        fs::create_dir_all(&artifacts).unwrap();
+        let owned = crashed_staging_fixture(workspace.path(), 2);
+        WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        for (stage, witness) in owned {
+            assert!(!artifacts.join(stage).exists());
+            assert!(!artifacts.join(witness).exists());
+        }
         let reused_pid = format!(".publish-{}-99.tmp", std::process::id());
         fs::write(artifacts.join(".publish-4294967295-34.tmp"), "stale").unwrap();
         fs::write(artifacts.join(&reused_pid), "stale reused pid").unwrap();
@@ -1456,13 +1682,14 @@ mod tests {
         fs::write(artifacts.join(".publish-12-34-extra.tmp"), "keep").unwrap();
         fs::write(artifacts.join("ordinary.tmp"), "keep").unwrap();
 
-        WorkspaceArtifactStore::new(workspace.path()).unwrap();
+        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
 
-        assert!(!artifacts.join(".publish-4294967295-34.tmp").exists());
-        assert!(!artifacts.join(reused_pid).exists());
+        assert_eq!(fs::read(artifacts.join(".publish-4294967295-34.tmp")).unwrap(), b"stale");
+        assert_eq!(fs::read(artifacts.join(reused_pid)).unwrap(), b"stale reused pid");
         assert!(artifacts.join(".publish-owner.tmp").exists());
         assert!(artifacts.join(".publish-12-34-extra.tmp").exists());
         assert!(artifacts.join("ordinary.tmp").exists());
+        assert!(artifact_publication_outcome_unknown(&store.publish("source", None).unwrap_err()));
     }
 
     #[test]
@@ -1519,13 +1746,11 @@ mod tests {
     fn pid_reuse_temps_do_not_exhaust_publication_names() {
         let workspace = tempfile::tempdir().unwrap();
         let artifacts = workspace.path().join(ARTIFACT_RELATIVE_ROOT);
-        fs::create_dir_all(&artifacts).unwrap();
-        for sequence in 0..16 {
-            fs::write(
-                artifacts.join(format!(".publish-{}-{sequence}.tmp", std::process::id())),
-                "stale",
-            )
-            .unwrap();
+        for (sequence, (stage, witness)) in crashed_staging_fixture(workspace.path(), 16).into_iter().enumerate() {
+            let (_, token) = parse_publication_witness(&witness).unwrap();
+            let reused = format!(".publish-{}-{sequence}.tmp", std::process::id());
+            fs::rename(artifacts.join(stage), artifacts.join(&reused)).unwrap();
+            fs::rename(artifacts.join(&witness), artifacts.join(publication_witness_name(&reused, token))).unwrap();
         }
         fs::write(workspace.path().join("source"), "fresh").unwrap();
         let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
@@ -1533,27 +1758,17 @@ mod tests {
     }
     #[test]
     fn stale_cleanup_makes_bounded_progress_past_sixty_four_files() {
-        let workspace = tempfile::tempdir().unwrap();
-        let artifacts = workspace.path().join(ARTIFACT_RELATIVE_ROOT);
-        fs::create_dir_all(&artifacts).unwrap();
-        for sequence in 0..=MAX_STALE_PUBLICATION_CLEANUP {
-            fs::write(
-                artifacts.join(format!(".publish-777-{sequence}.tmp")),
-                "stale",
-            )
-            .unwrap();
-        }
-        fs::write(workspace.path().join("source"), "fresh").unwrap();
-        let store = WorkspaceArtifactStore::new(workspace.path()).unwrap();
-        assert_eq!(
-            fs::read_dir(&artifacts)
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|entry| entry.file_name().to_string_lossy().starts_with(".publish-"))
-                .count(),
-            1
-        );
-        store.publish("source", None).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("cold-owned-65"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let artifacts = workspace.join(ARTIFACT_RELATIVE_ROOT);
+        crashed_staging_fixture(&workspace, MAX_STALE_PUBLICATION_CLEANUP + 1);
+        fs::write(workspace.join("source"), "fresh").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        assert_eq!(publication_temp_count(&artifacts), 1);
+        let published = store.publish("source", None).unwrap();
         assert_eq!(
             fs::read_dir(&artifacts)
                 .unwrap()
@@ -1562,6 +1777,48 @@ mod tests {
                 .count(),
             0
         );
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "initial_pairs":65, "after_open_stages":1, "after_publish_stages":0,
+            "remaining_publication_names":0, "published_relative_path":published.relative_path,
+            "source_bytes":b"fresh", "child_exit_code":73,
+        })).unwrap()).unwrap();
+    }
+
+    fn crashed_staging_fixture(workspace: &Path, count: usize) -> Vec<(String, String)> {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["artifact_store::tests::cold_cleanup_process_exit_fixture", "--exact", "--ignored", "--nocapture"])
+            .env("NOMIFUN_COLD_CLEANUP_FIXTURE", workspace)
+            .env("NOMIFUN_COLD_CLEANUP_COUNT", count.to_string())
+            .output().unwrap();
+        fs::write(workspace.join("child-output.log"), [&output.stdout[..], &output.stderr[..]].concat()).unwrap();
+        assert_eq!(output.status.code(), Some(73), "fixture must exit without running destructors");
+        serde_json::from_slice(&fs::read(workspace.join("crashed-stages.json")).unwrap()).unwrap()
+    }
+
+    #[test]
+    #[ignore = "fixture subprocess exits without running Rust destructors"]
+    fn cold_cleanup_process_exit_fixture() {
+        let workspace = PathBuf::from(std::env::var_os("NOMIFUN_COLD_CLEANUP_FIXTURE").unwrap());
+        let count: usize = std::env::var("NOMIFUN_COLD_CLEANUP_COUNT").unwrap().parse().unwrap();
+        assert!((1..=MAX_STALE_PUBLICATION_CLEANUP + 1).contains(&count));
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        store.publish("source", None).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, false).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let mut held = Vec::new();
+        let mut names = Vec::new();
+        for _ in 0..count {
+            let staged = stage_source(&store.workspace, Path::new("source"), &namespace,
+                &ArtifactIoCounters::default(), || {}).unwrap();
+            names.push((staged.name.clone(), staged.witness.clone().unwrap()));
+            held.push(staged);
+        }
+        let mut manifest = File::create(workspace.join("crashed-stages.json")).unwrap();
+        manifest.write_all(&serde_json::to_vec(&names).unwrap()).unwrap();
+        manifest.sync_all().unwrap();
+        std::process::exit(73);
     }
     #[cfg(unix)] #[test] fn final_component_swap_is_rejected() { let workspace=tempfile::tempdir().unwrap(); let outside=tempfile::tempdir().unwrap(); fs::write(workspace.path().join("result.txt"),"inside").unwrap(); fs::write(outside.path().join("secret"),"outside").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let result=store.publish_with_hooks("result.txt",None,||{fs::remove_file(workspace.path().join("result.txt")).unwrap();std::os::unix::fs::symlink(outside.path().join("secret"),workspace.path().join("result.txt")).unwrap();},||{}); assert!(result.is_err()); }
     #[cfg(unix)] #[test] fn ancestor_swap_is_rejected() { let workspace=tempfile::tempdir().unwrap(); let outside=tempfile::tempdir().unwrap(); fs::create_dir(workspace.path().join("nested")).unwrap(); fs::write(workspace.path().join("nested/result"),"inside").unwrap(); fs::write(outside.path().join("result"),"outside").unwrap(); let store=WorkspaceArtifactStore::new(workspace.path()).unwrap(); let result=store.publish_with_hooks("nested/result",None,||{fs::rename(workspace.path().join("nested"),workspace.path().join("owned")).unwrap();std::os::unix::fs::symlink(outside.path(),workspace.path().join("nested")).unwrap();},||{}); assert!(result.is_err()); }
