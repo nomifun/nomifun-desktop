@@ -785,6 +785,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   未验见证创建/fsync中途断电、见证及目录同时伪造、Unix最后unlink窗口、正式host fence/UI、
   macOS/其他角色及长期门槛；不关闭完整Case或共享阶段，无模型/UI调用。
 
+- S-D03-67（ART-007、LIFE-007、A05/A07/A13/A14/A17/A19 宿主 cleanup unknown fence）：
+  W181 使用真实 Artifact owner、canonical 磁盘 DB 和 Wave2ApplicationHost 调用；unwitnessed
+  temp 返回 EFFECT_OUTCOME_UNKNOWN，唯一 Effect 保留 pending、无 terminal/settled_at。
+  原/新 key、冷 DB 重开、文件现场修复、其他 Session 及文件写均被 fence；已有产物诊断读正确，
+  原 effect 完整记录不变，无后来源 blob 或额外 effect。首跑 **1/1**，补独立原对象证据后 **1/1**、
+  N3 **3/3**；四份独立 SQL/磁盘/native ID 核对通过。相邻六项结果通过；过滤词按 OR 误扩大
+  到79项，93秒自然结束 **79/79**，日志留存并复用相关结果，没有再次执行。
+  原实现首次满足，无新产品 FAIL/生产修复，仅最小宿主回归，fmt/diff通过；证据在外部
+  `2026-09-30/windows/w181-artifact-host-cleanup-fence`。正式 Tauri UI/Runtime/模型/其他角色、
+  macOS及长期门槛仍未覆盖；不关闭完整 Case 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
