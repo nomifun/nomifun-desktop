@@ -8,9 +8,9 @@ import { Button, Input, Message, Modal } from '@arco-design/web-react';
 import {
   CheckOne,
   Close,
-  Download,
   Error,
   Loading,
+  PreviewOpen,
   Refresh,
 } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -18,6 +18,7 @@ import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { useCreativeAssetAvailability, type CreativeAsset } from '../../assets';
 import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeMediaLightbox from '../../assets/components/CreativeMediaLightbox';
 import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 
 import type { CreativeTemplateRunAggregateV1 } from '../domain';
@@ -200,6 +201,11 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
   const { snapshot } = port;
   const [reviewing, setReviewing] = useState<CreativeTemplateRunAggregateV1 | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
+  const [previewResult, setPreviewResult] = useState<{
+    src: string;
+    title: string;
+    fileName: string;
+  } | null>(null);
   const runs = snapshot.runs;
   const availability = useCreativeAssetAvailability(runs.flatMap((run) => [
     ...run.record.resultAssetIds,
@@ -378,30 +384,36 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
               {hasDeletedInputs ? <p className={styles.runError} role='status'>{t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}</p> : null}
               {run.record.resultAssetIds.length > 0 ? (
                 <div className={styles.runResults}>
-                  {run.record.resultAssetIds.slice(0, 6).map((assetId, index) => (
-                    availability.get(assetId) !== 'available'
-                    ? <CreativeAssetUnavailable key={assetId} status={availability.get(assetId) ?? 'loading'} />
-                    : <a
-                      key={assetId}
-                      href={port.assetUrl(assetId)}
-                      target='_blank'
-                      rel='noreferrer'
-                      title={t('creativeStudio.templates.runCenter.viewResult', {
+                  {run.record.resultAssetIds.slice(0, 6).map((assetId, index) => {
+                    const resultTitle = t('creativeStudio.templates.runCenter.viewResult', {
                         index: index + 1,
                         defaultValue: 'View result {{index}}',
-                      })}
+                      });
+                    const result = {
+                      src: port.assetUrl(assetId),
+                      title: resultTitle,
+                      fileName: `${run.templateSnapshot.metadata.name}-result-${index + 1}.png`,
+                    };
+                    return availability.get(assetId) !== 'available'
+                    ? <CreativeAssetUnavailable key={assetId} status={availability.get(assetId) ?? 'loading'} />
+                    : <button
+                      type='button'
+                      key={assetId}
+                      title={resultTitle}
+                      aria-label={resultTitle}
+                      onClick={() => setPreviewResult(result)}
                     >
                       <CreativeMediaPreview
                         kind='image'
-                        src={port.assetUrl(assetId)}
+                        src={result.src}
                         alt={t('creativeStudio.templates.runCenter.resultAlt', {
                           name: run.templateSnapshot.metadata.name,
                           index: index + 1,
                           defaultValue: '{{name}} result {{index}}',
                         })}
                       />
-                    </a>
-                  ))}
+                    </button>;
+                  })}
                 </div>
               ) : null}
 
@@ -467,10 +479,16 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
                 {run.record.status === 'succeeded' && run.record.resultAssetIds.length > 0 ? (
                   <Button
                     size='small'
-                    icon={<Download theme='outline' size={14} fill='currentColor' />}
+                    icon={<PreviewOpen theme='outline' size={14} fill='currentColor' />}
                     disabled={availability.get(run.record.resultAssetIds[0]) !== 'available'}
-                    href={availability.get(run.record.resultAssetIds[0]) === 'available' ? port.assetUrl(run.record.resultAssetIds[0]) : undefined}
-                    target='_blank'
+                    onClick={() => setPreviewResult({
+                      src: port.assetUrl(run.record.resultAssetIds[0]),
+                      title: t('creativeStudio.templates.runCenter.viewResult', {
+                        index: 1,
+                        defaultValue: 'View result {{index}}',
+                      }),
+                      fileName: `${run.templateSnapshot.metadata.name}-result-1.png`,
+                    })}
                   >
                     {t('creativeStudio.templates.runCenter.openResult', {
                       defaultValue: 'Open result',
@@ -482,6 +500,17 @@ const TemplateRunCenter: React.FC<TemplateRunCenterProps> = ({ port }) => {
           );
         })}
       </div>
+
+      {previewResult ? (
+        <CreativeMediaLightbox
+          kind='image'
+          src={previewResult.src}
+          title={previewResult.title}
+          fileName={previewResult.fileName}
+          mimeType='image/png'
+          onClose={() => setPreviewResult(null)}
+        />
+      ) : null}
 
       <TemplateRunReviewModal
         run={reviewing}

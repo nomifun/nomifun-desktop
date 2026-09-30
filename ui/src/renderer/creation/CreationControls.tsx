@@ -4,6 +4,7 @@ import { BookOpen, Brain, Down, ImageFiles, PageTemplate } from '@icon-park/reac
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
+import { saveCreativeAssetAs } from '@/renderer/pages/creativeStudio/assets/saveCreativeAsset';
 import { useCreativeAssetPickerDialog } from '@/renderer/pages/creativeStudio/assets/useCreativeAssetPickerDialog';
 import CreativeMediaPreview from '@/renderer/pages/creativeStudio/assets/components/CreativeMediaPreview';
 import ComposerAttachmentTile from '@/renderer/components/chat/ComposerAttachmentTile';
@@ -92,6 +93,13 @@ export function CreationReferences({ startIndex = 0 }: { startIndex?: number }) 
     } catch (error) { Message.error(error instanceof Error ? error.message : String(error)); }
     finally { setOpening(false); }
   };
+  const saveAs = async (asset: CreativeAsset) => {
+    try {
+      await saveCreativeAssetAs(asset, '另存为');
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : String(error));
+    }
+  };
   return <>{draft.references.map((ref, index) => {
     const inactive = !active.some(input => input.asset_id === ref.asset_id);
     const label = ref.kind === 'image' ? '查看图片' : '查看文件';
@@ -101,10 +109,8 @@ export function CreationReferences({ startIndex = 0 }: { startIndex?: number }) 
       </button>
     </ComposerAttachmentTile>;
   })}
-    {preview?.kind === 'image' ? <ImageLightbox key={preview.originalUrl} src={preview.originalUrl} title={preview.title} onClose={() => setPreview(null)} />
-      : <CreativeAssetPreviewModal asset={preview} onClose={() => setPreview(null)} onDownload={asset => {
-        const link = document.createElement('a'); link.href = asset.originalUrl; link.download = asset.title; link.click();
-      }} />}
+    {preview?.kind === 'image' ? <ImageLightbox key={preview.originalUrl} src={preview.originalUrl} title={preview.title} onClose={() => setPreview(null)} onSaveAs={() => saveAs(preview)} />
+      : <CreativeAssetPreviewModal asset={preview} onClose={() => setPreview(null)} onSaveAs={saveAs} />}
   </>;
 }
 

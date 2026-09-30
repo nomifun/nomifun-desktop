@@ -1,9 +1,11 @@
 import { createContext, useContext, useMemo, type ReactNode, useState } from 'react';
 import useSWR from 'swr';
-import { Alert, Button, Message, Modal, Tooltip } from '@arco-design/web-react';
+import { Alert, Message, Tooltip } from '@arco-design/web-react';
 import { Close, Download, EditTwo, Refresh, VideoTwo } from '@icon-park/react';
 import type { ConversationId, MessageId } from '@/common/types/ids';
+import ImageLightbox from '@/renderer/components/media/ImageLightbox';
 import { creativeAssetClient } from '@/renderer/pages/creativeStudio/assets/client';
+import { saveCreativeAssetAs } from '@/renderer/pages/creativeStudio/assets/saveCreativeAsset';
 import type { CreativeAsset } from '@/renderer/pages/creativeStudio/assets/types';
 import { useCreationComposer } from './CreationComposerContext';
 import { cancelCreation, creationTasksKey, listCreationTasks } from './client';
@@ -94,13 +96,25 @@ function TaskCard({ task, refresh }: { task: ConversationCreationTask; refresh()
 
 function ResultAsset({ id, onRecall }: { id: string; onRecall(mode: CreationMode, asset: CreativeAsset): Promise<void> }) {
   const { data: asset, error, mutate } = useSWR(['conversation-result-asset', id], () => creativeAssetClient.get(id));
+  const [saving, setSaving] = useState(false);
   if (error) return <button type='button' onClick={() => void mutate()}>素材读取失败，重试</button>;
   if (!asset) return <span>加载素材…</span>;
   if (asset.deletedAt) return <span>此素材已删除</span>;
+  const saveAs = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await saveCreativeAssetAs(asset, '另存为');
+    } catch (reason) {
+      Message.error(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
   return <div className={`${styles.result}${asset.kind === 'image' ? ` ${styles.imageResult}` : ''}`}>
-    {asset.kind === 'image' ? <ConversationImagePreview src={asset.originalUrl} title={asset.title} /> : asset.kind === 'video' ? <video controls preload='metadata' src={asset.originalUrl} /> : asset.kind === 'audio' ? <audio controls preload='metadata' src={asset.originalUrl} /> : <p>{asset.textContent}</p>}
+    {asset.kind === 'image' ? <ConversationImagePreview src={asset.originalUrl} title={asset.title} onSaveAs={saveAs} /> : asset.kind === 'video' ? <video controls preload='metadata' src={asset.originalUrl} /> : asset.kind === 'audio' ? <audio controls preload='metadata' src={asset.originalUrl} /> : <p>{asset.textContent}</p>}
     <div className={styles.actions}>
-      <Tooltip content='下载' mini trigger={['hover', 'focus']}><a className={styles.action} href={asset.originalUrl} download={asset.title} aria-label='下载'><Download size={16} fill='currentColor' /></a></Tooltip>
+      {asset.kind !== 'text' ? <TaskAction label={saving ? '正在另存为…' : '另存为'} disabled={saving} onClick={() => void saveAs()}><Download size={16} fill='currentColor' /></TaskAction> : null}
       {asset.kind === 'image' && <>
         <TaskAction label='编辑图片' onClick={() => void onRecall('image', asset)}><EditTwo size={16} fill='currentColor' /></TaskAction>
         <TaskAction label='转为视频' onClick={() => void onRecall('video', asset)}><VideoTwo size={16} fill='currentColor' /></TaskAction>
@@ -109,32 +123,12 @@ function ResultAsset({ id, onRecall }: { id: string; onRecall(mode: CreationMode
   </div>;
 }
 
-export function ConversationImagePreview({ src, title }: { src: string; title: string }) {
+export function ConversationImagePreview({ src, title, onSaveAs }: { src: string; title: string; onSaveAs?: () => Promise<unknown> }) {
   const [visible, setVisible] = useState(false);
-  const close = () => setVisible(false);
   return <>
     <button type='button' className={styles.previewTrigger} aria-label={`预览图片：${title}`} onClick={() => setVisible(true)}>
       <img className={styles.image} src={src} alt={title} />
     </button>
-    <Modal
-      visible={visible}
-      title='图片预览'
-      aria-label='图片预览'
-      className={styles.previewModal}
-      getPopupContainer={() => document.body}
-      alignCenter
-      autoFocus
-      focusLock
-      closable
-      maskClosable
-      escToExit
-      unmountOnExit
-      onCancel={close}
-      footer={<Button aria-label='关闭图片预览' onClick={close}>关闭</Button>}
-    >
-      <div className={styles.previewStage}>
-        <img src={src} alt={title} draggable={false} />
-      </div>
-    </Modal>
+    {visible ? <ImageLightbox src={src} title={title} onSaveAs={onSaveAs} onClose={() => setVisible(false)} /> : null}
   </>;
 }

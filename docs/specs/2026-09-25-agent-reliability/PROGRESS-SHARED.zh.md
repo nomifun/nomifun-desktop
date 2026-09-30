@@ -64,6 +64,10 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   `pressed=false` 且 mouse-up 到达，并保留 timeout unknown/cleanup pause 与本机 UI Stop 在 held mouse
   期间不可自动操作的首败；但没有得到“取消事件确实发生于 pressed=true”的最终正式样本。因此本项只
   关闭共享组件清理缺陷，不关闭 `COMP-012`、平台验收或共享阶段；Windows/Linux 亦未代判。
+- 后续 macOS M04-25 通过正式 UI + 已认证产品 cancel 取得有界 drag 期间真实取消：canonical 取消后
+  17 ms 目标仍 pressed，最终唯一 mouseUp/input returned/`host_cleanup_proven`，UI cancelled、零
+  pending/unknown 与进程/端口残留。实测 hold 106.6 ms，因此长时 drag/key hold、原生 release-failure
+  与完整 `COMP-012` 继续开放；本批没有新增公共产品修复或付费模型调用。
 
 - S-D06-04（`COMP-006`、`OBS-005/016` 的共享 Computer launch 缺失绝对路径子断言）：macOS 正式
   Tauri 首败对明确不存在的 `.app` 绝对路径调用 `computer/launch`；`open::that_detached` 只确认成功
@@ -649,6 +653,10 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   ready head；AI Agent **331/331**、journal **10/10**、正常 shutdown/pause-resume **2/2**，fmt/diff
   通过。无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期/跨重启恢复、更多取消/并发驱逐拓扑、
   其他角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
+
+- macOS M06-01 原生复核上述 DesktopServer 正常退出/SQLite writer lock 场景，前后两个源码快照各
+  **2/2**，4 个独立 DB/唯一文件及 cleanup witness 一致；后续 `S-D09-47` host/journal 定向 **4/4**。
+  尚无正式 renderer 或真实模型验证，未修改 Windows 原结果。
 
 - S-D09-47（LIFE-009/011/019/023/024/029、CONC-014、A04/A06/A07/A10/A13/A17/A19 清理投影及
   初始化前取消子断言）：W167 只读并发复核发现并执行四个反例：跨 step 的旧 completion 写失败后
@@ -1448,6 +1456,11 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   预算后仍要求原 6 秒上界、唯一 Cancelled/reaped、同一 poll/report 和精确 PID 消失，未放宽断言。
   真实 start/shutdown、start future drop、正式 Tauri、ConPTY 父死亡、其他平台/角色及完整
   N3/100 seed/LONG/99% 仍开放；只通过该子断言，不关闭完整 PROC/LIFE 或共享阶段。
+- macOS M06-01 的仓库外 PID evidence 重跑首败在 poll 前：marker 不属于原 helper cwd 的 Seatbelt
+  工作区。夹具现将 canonical evidence root 同时作为 cwd/唯一 capability root，未增加旁路授权。
+  修复后首次 + 20 repeats **21/21**，独立 PID/report **21/21**，6 秒上界、原 poll 唤醒与相同 report
+  全满足；普通 shutdown **3/3**，helper 残留 0。证据位于 `2026-09-30/macos/m06-native-shutdown/`；
+  该原生子断言通过，正式 Tauri/更多拓扑与完整统计门槛仍开放。
 
 - S-D04-31（PROC-039/040/042、CONC-004、A03/A10/A11/A13/A17/A19）：W170 手动首次 poll
   命中原生 spawn 的真实 await，PID 标记和精确 OS handle 证明 child 已执行；drop caller 后 shutdown
