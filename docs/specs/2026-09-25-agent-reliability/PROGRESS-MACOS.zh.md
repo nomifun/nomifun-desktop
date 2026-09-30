@@ -30,7 +30,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01 原生 shutdown/长 poll 与 SQLite 写锁重试子断言通过；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
@@ -954,3 +954,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   App/Helper/target/fixture 与两个 listener 为 0。普通证据 45 文件签名凭据匹配为 0，全部制品在
   `2026-09-30/macos/m04-computer-held-cancel/`。本批无产品根因/源码改动、付费请求为 0；只关闭
   有界 drag 的取消/释放子断言，长时 hold、key hold、原生 release-failure、N3 与完整 COMP-012 仍开放。
+
+- **M06-01 native shutdown impact verification**（`PROC-040`、`LIFE-019/023/024/029`、`CONC-014`
+  的本批子断言）：合入 `c8fea229f/abf6ed4d9/c3b3dc9ac` 后在 macOS arm64 / APFS 复核
+  `S-D04-30/S-D09-46/47`。首次普通 shutdown **3/3**；导出 PID 证据的重跑却在长 poll 前失败：
+  marker 移到仓库外，helper 仍绑定仓库 cwd，Seatbelt 正确拒写。首败保留，夹具现 canonicalize 隔离
+  evidence root，并将 cwd 与唯一 capability root 同时绑定该目录；生产权限/预算与 6 秒断言不变。
+- 修复后原生长 poll 首次 + 20 repeats **21/21**，独立 marker/report/PID disappearance **21/21**；
+  唯一 Cancelled/reaped 唤醒原 60 秒 poll，重复 shutdown 返回原报告，helper 残留 0。DesktopServer
+  正常退出/真实 SQLite writer lock 两项在前后两个源码快照均 **2/2**；4 个独立 DB 和唯一文件核对
+  `ok/cancelled/head ready/one returned write/one cleanup witness`，未重放写入。当前 merged host/journal
+  清理投影与未准入回执拒绝 **4/4**，Rust fmt/diff 通过。
+- 全证据：`2026-09-30/macos/m06-native-shutdown/`。本批只修证据夹具根绑定，付费请求 0；没有正式
+  Tauri renderer、真实满盘/fsync、跨重启/lease 过期或其他角色证据，因此不关闭完整 PROC/LIFE/M06。
