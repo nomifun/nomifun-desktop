@@ -1687,6 +1687,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   角色、pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复及其他平台/完整
   统计仍开放，不把该组件回归当完整 Case PASS，不改写 Windows 原结果。
 
+- **S-D04-37**（`PROC-040/047/050`、A08/A11/A13，Unix pre-exec deferred cleanup）：M06-08
+  首败在用户代码零执行时，watchdog 清理已转底层 poller，而 Supervisor 释放 startup reservation，
+  shutdown 空报告先于辅助 reap。现原 worker 等待同一个辅助清理 witness，保持原准入/容量；
+  原 deadline 只结束 caller 等待，未复位预算。失败启动单列 `StartupCleanupReport`，带原 owner/
+  host SessionId/error/cleanup/未 exec 事实，不创建虚假用户 PID 或 process handle。
+- 中间 **3/4** 首败证明 transaction 恰先于 timer 交付时，第二段辅助等待漏 deadline 通知；
+  两阶段现共用原绝对 deadline。startup non-exact 保持 quarantine/占额；已证明报告按容量有界，
+  quiesce/shutdown 的 exact 判定包含 startup 清理。负向夹具缺 import 编译失败亦保留。
+- macOS 四场景 **84/84**，独立辅助 PID 消失/精确收据/容量阻止 exec **84/84**，user exec 0、
+  假用户 Session 0、fallback 0；caller 最大106 ms（原350 ms），quarantine/有界报告 **2/2**，
+  Runtime **172/172**、registry **13/13**、Engine process **16/1 ignored**、boundary/fmt/diff 通过。
+  证据 `2026-09-30/macos/m06-preexec-cleanup/`，付费模型 0。仅关闭该受控窗口；真实永久
+  authority loss/恢复、其他 transfer failure、worker panic、正式 Tauri/角色、Linux/Windows 原生与
+  完整 Case/统计仍开放，Windows 原结果未改写。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
