@@ -361,10 +361,11 @@ pub(super) async fn spawn_pipe(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
+    setup_expired: tokio_util::sync::CancellationToken,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     let options = supervised_spawn_options(&request);
     spawn_inner_with_cancellation(
-        request, output, options, SpawnTransport::Pipe, Some(cancellation),
+        request, output, options, SpawnTransport::Pipe, Some(cancellation), Some(setup_expired),
     ).await
 }
 
@@ -1654,6 +1655,7 @@ pub(super) async fn spawn_pty(
     cols: u16,
     rows: u16,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
+    setup_expired: tokio_util::sync::CancellationToken,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     let options = supervised_spawn_options(&request);
     spawn_inner_with_cancellation(
@@ -1662,6 +1664,7 @@ pub(super) async fn spawn_pty(
         options,
         SpawnTransport::Pty { cols, rows },
         Some(cancellation),
+        Some(setup_expired),
     )
     .await
 }
@@ -1688,7 +1691,7 @@ async fn spawn_inner(
     options: SpawnOptions,
     transport: SpawnTransport,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_inner_with_cancellation(request, output, options, transport, None).await
+    spawn_inner_with_cancellation(request, output, options, transport, None, None).await
 }
 
 async fn spawn_inner_with_cancellation(
@@ -1697,6 +1700,7 @@ async fn spawn_inner_with_cancellation(
     options: SpawnOptions,
     transport: SpawnTransport,
     external_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    setup_expired: Option<tokio_util::sync::CancellationToken>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     enforce_sandbox(&request)?;
 
@@ -1736,7 +1740,7 @@ async fn spawn_inner_with_cancellation(
     let worker_cancelled = cancellation.worker_flag();
     let runtime = tokio::runtime::Handle::current();
     let transaction_output = Arc::clone(&output);
-    let transaction = tokio::task::spawn_blocking(move || {
+    let mut transaction = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         let _finished = blocking_worker_finished.map(TestNotifyOnDrop);
         #[cfg(test)]
@@ -1774,16 +1778,30 @@ async fn spawn_inner_with_cancellation(
         }
         transaction.start_lifecycle()
     });
-    let committed = tokio::time::timeout_at(async_deadline, transaction)
-        .await
-        .map_err(|_| {
-            start_lost_message(
+    let (joined, deadline_expired) = match tokio::time::timeout_at(async_deadline, &mut transaction).await {
+        Ok(joined) => (joined, false),
+        Err(_) if setup_expired.is_some() => {
+            // End only the caller's deadline waiter. The supervisor's worker
+            // still holds admission/reservation and joins this exact native
+            // transaction; shutdown/quiesce cannot miss it while it is live.
+            setup_expired.as_ref().unwrap().cancel();
+            (transaction.await, true)
+        }
+        Err(_) => {
+            return Err(start_lost_message(
                 "spawn_transaction_deadline",
                 "Unix spawn transaction exceeded its single setup deadline".to_owned(),
-            )
-        })?
+            ));
+        }
+    };
+    let committed = joined
         .map_err(|error| start_lost_message("spawn transaction join failed", error.to_string()))??;
     cancellation.disarm();
+    let startup_failure = if deadline_expired {
+        let ProcessError::StartLost { failure, .. } = super::setup_deadline_error()
+            else { unreachable!("deadline notification is always StartLost") };
+        Some(failure)
+    } else { None };
     #[cfg(test)]
     if let Some(pause) = start_pause {
         pause.entered.notify_one();
@@ -1841,7 +1859,7 @@ async fn spawn_inner_with_cancellation(
             io,
             readers: Mutex::new(readers),
         }),
-        startup_failure: None,
+        startup_failure,
     })
 }
 
@@ -1855,15 +1873,23 @@ fn failed_committed_spawn(
         lifecycle.shutdown();
         return Err(async_wrap_start_lost(error));
     }
+    retained_failed_spawn(pid, lifecycle, SpawnFailure {
+        code: "async_process_wrap_failed".to_owned(),
+        message: error.to_string(),
+    })
+}
+
+fn retained_failed_spawn(
+    pid: u32,
+    lifecycle: LifecycleHandle,
+    failure: SpawnFailure,
+) -> Result<SpawnedPlatformProcess, ProcessError> {
     Ok(SpawnedPlatformProcess {
         owner: Arc::new(UnixOwner {
             pid, lifecycle, io: UnixIo::Unavailable,
             readers: Mutex::new(Vec::new()),
         }),
-        startup_failure: Some(SpawnFailure {
-            code: "async_process_wrap_failed".to_owned(),
-            message: error.to_string(),
-        }),
+        startup_failure: Some(failure),
     })
 }
 
@@ -5520,6 +5546,142 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(unix_spawn)]
+    async fn supervised_start_deadline_keeps_committed_worker_cleanup() {
+        supervised_start_deadline_scenario(true, Transport::Pipe, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_pty_deadline_keeps_committed_worker_cleanup() {
+        supervised_start_deadline_scenario(true, Transport::Pty { cols: 80, rows: 24 }, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_start_deadline_blocks_unstarted_worker_cleanup() {
+        supervised_start_deadline_scenario(false, Transport::Pipe, false).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_pty_deadline_keeps_quiesce_fence_exact() {
+        supervised_start_deadline_scenario(true, Transport::Pty { cols: 80, rows: 24 }, true).await;
+    }
+
+    async fn supervised_start_deadline_scenario(committed: bool, transport: Transport, quiesce: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let scenario = match (&transport, committed, quiesce) {
+            (Transport::Pipe, true, false) => "pipe-committed-shutdown",
+            (Transport::Pipe, false, false) => "pipe-unstarted-shutdown",
+            (Transport::Pty { .. }, true, false) => "pty-committed-shutdown",
+            (Transport::Pty { .. }, true, true) => "pty-committed-quiesce",
+            _ => unreachable!("only the declared startup deadline scenarios run"),
+        };
+        let root = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|path| path.join(scenario))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let marker = root.join("owned-start.pid");
+        let mut request = request("/bin/sh".into(), vec!["-c".into(),
+            "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 60".into(),
+            "supervised-deadline-fixture".into(), marker.as_os_str().to_owned()]);
+        request.cwd = root.clone();
+        request.capability = CapabilityPolicy::local_owner(root.clone());
+        request.transport = transport;
+        let owner = request.owner.clone();
+        let audit = TestSpawnAudit::default();
+        let pause = super::TestBlockingTransactionPause::new();
+        let _release_guard = pause.release_guard();
+        super::TEST_SUPERVISED_SPAWNS.get_or_init(Default::default).lock().unwrap()
+            .insert(owner.call_id, SpawnOptions {
+                audit: audit.clone(), setup_timeout: Some(Duration::from_millis(100)),
+                blocking_transaction_pause: committed.then(|| pause.clone()),
+                blocking_start_pause: (!committed).then(|| pause.clone()),
+                ..SpawnOptions::default()
+            });
+        let supervisor = crate::ProcessSupervisor::new(crate::SupervisorConfig::default());
+        let starter = supervisor.clone();
+        let started = Instant::now();
+        let start = tokio::spawn(async move { starter.start(request).await });
+        tokio::time::timeout(Duration::from_secs(2), pause.wait_until_entered()).await.unwrap();
+        let pid = if committed { tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(value) = std::fs::read_to_string(&marker) {
+                    if value.ends_with('\n') { break value.trim().parse::<u32>().unwrap(); }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap() } else { 0 };
+        let result = tokio::time::timeout(Duration::from_millis(250), start)
+            .await.expect("caller setup timeout must remain bounded").unwrap();
+        let caller_elapsed = started.elapsed();
+        assert!(matches!(result, Err(ProcessError::StartLost { .. })));
+        let ProcessError::StartLost { failure, cleanup, .. } = result.as_ref().unwrap_err()
+            else { unreachable!("deadline result is StartLost") };
+        assert_eq!(failure.code, "spawn_transaction_deadline");
+        assert!(!cleanup.reaped, "caller deadline cannot invent completed cleanup");
+        if committed {
+            assert!(process_exists(pid as libc::pid_t), "owned child must exist at the held deadline seam");
+        }
+        let boundary = async {
+            if quiesce {
+                let report = supervisor.quiesce().await;
+                let reported = report.is_exact() && report.sessions.iter().any(|entry| entry.owner == owner
+                    && matches!(&entry.outcome, crate::ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped));
+                (report.sessions.len(), reported, report.is_exact())
+            } else {
+                let report = supervisor.shutdown().await;
+                let reported = report.sessions.iter().any(|entry| entry.owner == owner
+                    && matches!(&entry.outcome, crate::ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped));
+                (report.sessions.len(), reported, true)
+            }
+        };
+        let mut boundary = Box::pin(boundary);
+        let early = tokio::time::timeout(Duration::from_millis(50), boundary.as_mut()).await;
+        let completed_while_worker_held = early.is_ok();
+        pause.release();
+        let (report_sessions, reported, boundary_exact) = match early {
+            Ok(report) => report,
+            Err(_) => tokio::time::timeout(Duration::from_secs(6), boundary.as_mut()).await.unwrap(),
+        };
+        let gone_at_report = !committed || !process_exists(pid as libc::pid_t);
+        let exact_cleanup = if committed { tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(pid as libc::pid_t)
+                || audit.leader_reaps.load(Ordering::SeqCst) != 1
+                || audit.watchdog_reaps.load(Ordering::SeqCst) != 1
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.is_ok() } else {
+            audit.leader_pid.load(Ordering::SeqCst)==0 && audit.watchdog_pid.load(Ordering::SeqCst)==0
+                && !marker.exists()
+        };
+        std::fs::write(root.join("assertions.json"), serde_json::json!({
+            "pid":pid,"caller_start_lost":true,"caller_cleanup_unproven":!cleanup.reaped,
+            "caller_elapsed_ms":caller_elapsed.as_millis(),
+            "shutdown_completed_while_worker_held":completed_while_worker_held,
+            "committed":committed,"quiesce":quiesce,"boundary_exact":boundary_exact,
+            "report_sessions":report_sessions,"exact_owner_cleanup_reported":reported,
+            "process_gone_at_report":gone_at_report,"exact_cleanup_finished":exact_cleanup
+        }).to_string()).unwrap();
+        assert!(exact_cleanup, "clean the native child before reporting first FAIL");
+        assert!(caller_elapsed < Duration::from_millis(350));
+        assert!(!completed_while_worker_held, "shutdown released a live startup transaction");
+        assert!(boundary_exact);
+        if committed {
+            assert!(reported && report_sessions==1, "boundary omitted held startup cleanup");
+        } else {
+            assert_eq!(report_sessions,0);
+            assert_eq!(audit.watchdog_pid.load(Ordering::SeqCst),0, "expired worker forked a watchdog");
+            assert_eq!(audit.leader_pid.load(Ordering::SeqCst),0, "expired worker forked user code");
+            assert!(!marker.exists());
+        }
+        assert!(gone_at_report, "shutdown preceded exact startup reap");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
     async fn supervised_stdio_wrap_failure_retains_shutdown_cleanup() {
         supervised_stdio_wrap_failure_scenario(true, Transport::Pipe).await;
     }
@@ -5732,6 +5894,7 @@ mod tests {
                 },
                 SpawnTransport::Pipe,
                 Some(cancellation_for_start),
+                None,
             )
             .await
         });

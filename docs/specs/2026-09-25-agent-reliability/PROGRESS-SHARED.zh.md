@@ -1555,6 +1555,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   native setup deadline/commit failure、worker panic、cleanup failure/unknown recovery、Linux 原生、
   正式 Tauri/更多角色及完整统计门槛仍开放，仅关闭该 IO 转换失败所有权窗口。
 
+- **S-D04-34**（`PROC-039/040/047`、`CONC-004`、`LIFE-029`，Unix startup deadline 所有权）：
+  M06-04 固定真实 COMMITTED worker；旧 timeout 丢弃 JoinHandle、释放 Supervisor 预留，caller
+  105 ms StartLost 后 shutdown 空报告、PID 未回收。首败保留。现 deadline 通知只终止 caller waiter，
+  原 worker 持有 JoinHandle/预留/准入租约直至原事务结束，迟到 owner 只做带原 deadline failure 的
+  retirement。standalone bounded timeout 不变；pre-fork 事务 release 后仍受原 deadline/取消位约束。
+- macOS 四场景首次 + 20 repeats **84/84**，独立物理 PID **63/63**、未开始窗口零 fork **21/21**；
+  setup 100 ms，caller 最大105 ms，350 ms caller/6 秒 cleanup 原断言不变。所有 boundary 在原
+  worker 被持有时保持 pending，最终 owner/清理报告一致；最终 Runtime **153/153**、registry **13/13**、
+  fmt/diff 通过。证据 `2026-09-30/macos/m06-start-deadline/`，付费模型 0；仅关闭该受控窗口，
+  handshake failure、worker panic、cleanup failure/unknown recovery、Linux/Windows 原生、正式
+  Tauri/其他角色和完整 LONG/统计仍开放，Windows 原结果未改写。
+- 中间 raw PTY watchdog-after-COMMITTED 注入曾在 spawn 返回 PeerClosed（152/153），原日志在
+  `m06-start-deadline/run-007-retained-io/`，该注入窗口作为独立未关闭项保留。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

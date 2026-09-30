@@ -267,6 +267,7 @@ impl ProcessSupervisor {
         observer: Option<OutputObserver>,
     ) -> Result<ProcessHandle, ProcessError> {
         let cancellation = crate::platform::StartCancellation::new();
+        let setup_expired = cancellation.setup_expired();
         let mut waiter = StartWaiter { cancellation: cancellation.clone(), armed: true };
         // Acquire admission in this first-polled caller before posting the
         // worker. A quiesce fence must also wait for a worker not yet scheduled.
@@ -292,7 +293,11 @@ impl ProcessSupervisor {
                 }
             }
         });
-        let result = delivered.await.map_err(|_| start_delivery_lost(None))?;
+        let result = tokio::select! {
+            biased;
+            result = delivered => result.map_err(|_| start_delivery_lost(None))?,
+            _ = setup_expired.cancelled() => return Err(crate::platform::setup_deadline_error()),
+        };
         if acknowledge.send(()).is_err() {
             return Err(start_delivery_lost(result.as_ref().ok()));
         }
