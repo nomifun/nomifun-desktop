@@ -3798,7 +3798,11 @@ impl PreparedCommand {
         let (program, args) = command_argv(&request.command)?;
         let application_program = resolve_program_on_path(&program, &request.env);
         let application = encode_nul_terminated(&application_program, "program")?;
-        let command_line = encode_command_line(&program, &args)?;
+        let command_line = if is_system_program(&application_program, Path::new("cmd.exe")) {
+            encode_cmd_command_line(&program, &args)?
+        } else {
+            encode_command_line(&program, &args)?
+        };
         let cwd = encode_nul_terminated(request.cwd.as_os_str(), "working directory").map_err(
             |error| ProcessError::InvalidWorkingDirectory {
                 path: request.cwd.clone(),
@@ -3913,6 +3917,23 @@ fn command_argv(spec: &CommandSpec) -> Result<(OsString, Vec<OsString>), Process
 }
 
 fn powershell_executable() -> Result<OsString, ProcessError> {
+    let executable = windows_directory()?
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    if !executable.is_file() {
+        return Err(ProcessError::SpawnFailed {
+            failure: SpawnFailure {
+                code: "powershell_unavailable".to_owned(),
+                message: format!("trusted Windows PowerShell executable is unavailable: {}", executable.display()),
+            },
+        });
+    }
+    Ok(executable.into_os_string())
+}
+
+fn windows_directory() -> Result<std::path::PathBuf, ProcessError> {
     let mut buffer = vec![0_u16; 32_768];
     // SAFETY: `buffer` is writable for its declared length and the API writes a
     // NUL-terminated Windows directory path or returns zero on failure.
@@ -3933,34 +3954,23 @@ fn powershell_executable() -> Result<OsString, ProcessError> {
         ));
     }
     buffer.truncate(length);
-    let executable = std::path::PathBuf::from(OsString::from_wide(&buffer))
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    if !executable.is_file() {
-        return Err(ProcessError::SpawnFailed {
-            failure: SpawnFailure {
-                code: "powershell_unavailable".to_owned(),
-                message: format!(
-                    "trusted Windows PowerShell executable is unavailable: {}",
-                    executable.display()
-                ),
-            },
-        });
-    }
-    Ok(executable.into_os_string())
+    Ok(std::path::PathBuf::from(OsString::from_wide(&buffer)))
 }
 
 fn is_system_powershell(program: &OsStr) -> bool {
+    is_system_program(program, Path::new("WindowsPowerShell/v1.0/powershell.exe"))
+}
+
+fn is_system_program(program: &OsStr, relative: &Path) -> bool {
     if !Path::new(program).file_name().is_some_and(|name| {
-        compare_os_case_insensitive(name, OsStr::new("powershell.exe")) == Ordering::Equal
+        relative.file_name().is_some_and(|expected| compare_os_case_insensitive(name, expected) == Ordering::Equal)
     }) {
         return false;
     }
-    let Ok(trusted) = powershell_executable() else { return false };
+    let Ok(directory) = windows_directory() else { return false };
+    let trusted = directory.join("System32").join(relative);
     let Ok(actual) = crate::request::canonicalize_compatible(Path::new(program)) else { return false };
-    let Ok(expected) = crate::request::canonicalize_compatible(Path::new(&trusted)) else { return false };
+    let Ok(expected) = crate::request::canonicalize_compatible(&trusted) else { return false };
     compare_os_case_insensitive(actual.as_os_str(), expected.as_os_str()) == Ordering::Equal
 }
 
@@ -3993,6 +4003,30 @@ fn powershell_payload(script: &str) -> String {
     )
 }
 
+fn encode_cmd_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, ProcessError> {
+    // cmd /c and /k parse a command string rather than CRT argv. Preserve the
+    // caller's one script argument literally inside the required outer quotes.
+    // https://doc.rust-lang.org/std/os/windows/process/trait.CommandExt.html#tymethod.raw_arg
+    let Some(mode) = args.iter().position(|arg| {
+        compare_os_case_insensitive(arg, OsStr::new("/c")) == Ordering::Equal
+            || compare_os_case_insensitive(arg, OsStr::new("/k")) == Ordering::Equal
+    }).filter(|index| *index + 2 == args.len()) else {
+        return encode_command_line(program, args);
+    };
+    let mut command_line = Vec::new();
+    append_quoted(program, &mut command_line)?;
+    for arg in &args[..=mode] {
+        command_line.push(b' ' as u16);
+        append_quoted(arg, &mut command_line)?;
+    }
+    let script = args[mode + 1].encode_wide().collect::<Vec<_>>();
+    if script.contains(&0) { return Err(invalid_command("Windows command-line arguments cannot contain NUL")); }
+    command_line.extend_from_slice(&[b' ' as u16, b'"' as u16]);
+    command_line.extend_from_slice(&script);
+    command_line.push(b'"' as u16);
+    finish_command_line(command_line)
+}
+
 fn encode_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, ProcessError> {
     let mut command_line = Vec::new();
     append_quoted(program, &mut command_line)?;
@@ -4000,6 +4034,10 @@ fn encode_command_line(program: &OsStr, args: &[OsString]) -> Result<Vec<u16>, P
         command_line.push(b' ' as u16);
         append_quoted(arg, &mut command_line)?;
     }
+    finish_command_line(command_line)
+}
+
+fn finish_command_line(mut command_line: Vec<u16>) -> Result<Vec<u16>, ProcessError> {
     command_line.push(0);
     if command_line.len() > MAX_COMMAND_LINE_UNITS {
         return Err(invalid_command(

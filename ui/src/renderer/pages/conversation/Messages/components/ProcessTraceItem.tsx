@@ -184,6 +184,12 @@ const formatToolReceiptDetailLabel = (
       defaultValue: 'Did not run {{target}}',
     });
   }
+  if (row.notExecutedReason === 'process_reference') {
+    return t('messages.toolSummary.processReferenceInvalid', {
+      target: displayTarget ?? row.title,
+      defaultValue: 'Process not found in this execution; did not run {{target}}',
+    });
+  }
 
   if ((row.state === 'failed' || row.state === 'canceled') && displayTarget) {
     return t(`messages.toolSummary.${row.state}`, {

@@ -104,11 +104,10 @@ fn replay_into(
         match event {
             AgentEngineEvent::CompletionDelivered { step, text } => {
                 let report = batch.completion_report.as_ref().ok_or_else(|| invalid("completion delivery has no accepted report"))?;
-                let expected = format!("{}{}", report.summary, report.unverified_disclosure().unwrap_or_default());
                 if batch.step != Some(*step) || batch.calls.len() != batch.results.len()
                     || !batch.calls.values().any(|call| call.name == crate::completion::TOOL_NAME
                         && batch.results.get(&call.call_id).is_some_and(|result| !result.is_error))
-                    || (text != &expected && text != &format!("\n\n{expected}"))
+                    || !report.matches_delivery(text)
                     || !matches!(events.get(index + 1), Some(AgentEngineEvent::TurnCompleted { .. } | AgentEngineEvent::TurnFailed { .. }))
                 {
                     return Err(invalid("completion delivery differs from its accepted terminal report"));
@@ -688,6 +687,36 @@ mod tests {
                 text: "change the file".into(),
             }],
             provider_round_id: None,
+        }
+    }
+
+    #[test]
+    fn completed_error_history_accepts_exact_current_and_legacy_disclosures() {
+        let report = crate::AgentCompletionReport { plan_revision:1, observation_revision:1,
+            input_revision:1, workspace_epoch:0, summary:"Known diagnostic result.".into(),
+            criteria:vec![], observed_tool_error_count:1, observed_command_failure_count:2,
+            requirements:vec![] };
+        let events = |delivery: String| vec![
+            AgentEngineEvent::TurnStarted { binding:binding(), turn_operation_id:OperationId::from("turn") },
+            AgentEngineEvent::ModelStepStarted { step:1, operation_id:OperationId::from("turn:model:1") },
+            AgentEngineEvent::ToolCallCompleted { step:1, call:ChatToolCall { call_id:"completion".into(),
+                name:crate::completion::TOOL_NAME.into(), arguments:StrictJsonValue(serde_json::json!({})), provider_metadata:None } },
+            AgentEngineEvent::CompletionReported { report:report.clone() },
+            AgentEngineEvent::ToolCompleted { step:1, result:AgentToolResult::text("completion".into(), "accepted", false) },
+            AgentEngineEvent::CompletionDelivered { step:1, text:delivery },
+            AgentEngineEvent::TurnCompleted { model_steps:1, finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed },
+        ];
+        let legacy = "Known diagnostic result.\n\n- ⚠ Tool-call errors observed in this turn: 1. Later successful calls did not erase these errors.\n\n- ⚠ Command failures observed in this turn: 2. Later successful commands did not erase these failures.";
+        for delivery in [report.delivery_text(), format!("\n\n{}",report.delivery_text()), legacy.into()] {
+            let mut history = Vec::new();
+            replay_closed_turn(&mut history, requirement(), &events(delivery)).unwrap();
+        }
+        for delivery in [report.summary.clone(), report.delivery_text().replace("turn: 1", "turn: 0"),
+            report.delivery_text().replace("Known diagnostic result.", "Everything succeeded.")] {
+            let mut history = vec![requirement()];
+            let before = history.clone();
+            assert!(replay_closed_turn(&mut history, requirement(), &events(delivery)).is_err());
+            assert_eq!(history, before, "invalid delivery must not partly alter model history");
         }
     }
 

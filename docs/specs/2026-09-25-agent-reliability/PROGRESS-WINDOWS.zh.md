@@ -3095,3 +3095,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 证据：仓库外2026-09-30/windows/w184-focused-command-a；源码同步至0c960b328后含本批改动，
   frontend d538b067-60cf-46a2-a383-04a2626c5dd0；宿主/patch身份、分会话DB、完整输出和机器oracle均在该目录。
   应用仅在已取消/完成且无活动Turn后按精确PID/启动时间清理；不声称正式应用优雅shutdown竞态已验。
+
+### W185 原生命令参数与已完成历史（2026-10-01；基线c880a62d3）
+
+- Case/子断言：C01/C05/C06/C07/C08；PROC-001/005/007、CMD-139、REAL-004/005。
+- 首败与修复：合法type中文/空格路径因CRT转义返回1；仅系统cmd.exe的/c、/k单脚本文本改用原生引号。
+  错误process_id此前返回CAPABILITY_UNAVAILABLE且暗示效果不明；改为未执行控制的类型化事实，保留原进程和计数。
+  真实host检查还验证外属scope不可cancel、错误stdin未传入、正确输入后原进程退出0且reaped。
+- 新首败：第二个真实GEN回合0模型步失败，原因是completion delivery历史校验漏掉失败披露；
+  共用生成/校验文本，精确兼容旧版披露，缺失计数、改写计数/摘要及不完整历史仍拒绝。原失败回合不重写。
+- 验证：native3、host1、policy9、history/turn定向检查通过；UI91、类型/i18n/desktop边界/fmt及正式UI/Tauri构建通过。
+  GEN/COD各一个实际两调用样本通过；CMD exit0、43字节与磁盘一致；各一次引用拒绝仍保留is_error=true。
+  原GEN会话在保留首败和重启后恢复响应，但只复述旧结果，不计重新执行样本。
+- 未闭合：COD连续样本12模型步/3压缩、重复读/拒绝各4次，附带history组合预检2次失败；
+  最终回答“未重试”与轨迹不符，不因terminal=completed或重复成功记N3。远端744ca440b须正常同步后定向复验。
+  模型未验说明仍有技术术语；既有Native会话原位切角色不支持，现场另存，COD通过正式创建入口完成。
+  完整A/B/C、完整交互/停止、更多命令形态及发布认证未关闭。
+- 证据：仓库外2026-10-01/windows/w185-cmd-handle-contract，原生/host首红、完整DB/事件/截图/结果均保留。
+  两次构建和宿主patch/binary身份在目录内；全回合terminal后按精确PID/启动时间清理，profile子进程0。
