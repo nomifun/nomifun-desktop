@@ -31,9 +31,23 @@ async fn api(server:&DesktopServer,method:&str,path:&str,body:Value)->Value {
 
 #[tokio::test(flavor="multi_thread",worker_threads=4)]
 async fn desktop_shutdown_drains_a_waiting_model_before_storage_close_and_preserves_one_write() {
+    shutdown_scenario(false).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=4)]
+async fn desktop_shutdown_under_sqlite_writer_lock_retains_cleanup_until_explicit_retry() {
+    shutdown_scenario(true).await;
+}
+
+async fn shutdown_scenario(hold_writer:bool) {
+    // Desktop bootstrap exports process environment; two scenarios must not
+    // race that authority or share an opt-in evidence database.
+    static STARTUP:std::sync::OnceLock<tokio::sync::Mutex<()>>=std::sync::OnceLock::new();
+    let _startup=STARTUP.get_or_init(||tokio::sync::Mutex::new(())).lock().await;
     let directory=tempfile::tempdir().unwrap();
     let root=std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR")
-        .map(std::path::PathBuf::from).unwrap_or_else(||directory.path().to_path_buf());
+        .map(|root|std::path::PathBuf::from(root).join(if hold_writer {"locked"} else {"healthy"}))
+        .unwrap_or_else(||directory.path().to_path_buf());
     let data=root.join("data");
     let work=root.join("work");
     std::fs::create_dir_all(&work).unwrap();
@@ -111,6 +125,22 @@ async fn desktop_shutdown_drains_a_waiting_model_before_storage_close_and_preser
     assert_eq!(before,"running");
     let file=work.join("conversations").join(id).join("result.txt");
     assert_eq!(std::fs::read(&file).unwrap(),b"SHUTDOWN_WRITE_ONCE");
+    if hold_writer {
+        let lock_pool=sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(data.join("nomifun-backend.db"))
+                .busy_timeout(Duration::from_secs(5))).await.unwrap();
+        let mut writer=lock_pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE agent_sessions SET title=title WHERE agent_session_id=?")
+            .bind(id).execute(&mut *writer).await.unwrap();
+        let error=tokio::time::timeout(Duration::from_secs(20),server.shutdown_all()).await
+            .expect("failed shutdown must remain bounded").unwrap_err();
+        println!("FIRST_SHUTDOWN_ERROR {error:#}");
+        assert_eq!(std::fs::read(&file).unwrap(),b"SHUTDOWN_WRITE_ONCE");
+        assert_eq!(sqlx::query_scalar::<_,String>("SELECT state FROM agent_effects WHERE session_id=?")
+            .bind(id).fetch_one(&observer).await.unwrap(),"returned");
+        writer.rollback().await.unwrap();
+        lock_pool.close().await;
+    }
     tokio::time::timeout(Duration::from_secs(20),server.shutdown_all()).await
         .expect("formal desktop shutdown must be bounded").unwrap();
     tokio::time::timeout(Duration::from_secs(5),async {

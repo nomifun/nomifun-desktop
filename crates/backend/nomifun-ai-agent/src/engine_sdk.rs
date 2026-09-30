@@ -207,11 +207,20 @@ impl Drop for CompletionGuard {
 struct CleanupFlight {
     completion: Completion,
 }
+#[derive(Clone)]
+struct PendingTurnSettlement {
+    message: SendMessageData,
+    outcome: EngineTurnOutcome,
+    cleanup_proven: bool,
+    cancellation: CancellationToken,
+    failed: bool,
+}
 struct SharedRuntime {
     state: AgentRuntimeState,
     closed: CancellationToken,
     active: Mutex<Option<ActiveTurn>>,
     cleanup: Mutex<Option<Arc<CleanupFlight>>>,
+    pending_settlement: Mutex<Option<PendingTurnSettlement>>,
     driver: Arc<dyn EngineSessionDriver>,
 }
 
@@ -245,6 +254,7 @@ impl HostedAgentRuntime {
                 closed: CancellationToken::new(),
                 active: Mutex::new(None),
                 cleanup: Mutex::new(None),
+                pending_settlement: Mutex::new(None),
                 driver,
             }),
         })
@@ -318,13 +328,26 @@ impl AgentRuntimeControl for HostedAgentRuntime {
             }).catch_unwind().await.unwrap_or_else(|_| Err(AppError::Internal("Engine turn panicked".into())));
             let recorded_model_steps = output.close();
             task_cancellation.cancel();
+            let mut outcome = execution.unwrap_or_else(|error| EngineTurnOutcome::failed(error.to_string()));
+            outcome.model_steps = outcome.model_steps.max(recorded_model_steps);
+            if requested_cancellation.is_cancelled() { outcome.terminal = EngineTurnTerminal::Cancelled; }
+            *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(PendingTurnSettlement {
+                message: message.clone(), outcome: outcome.clone(), cleanup_proven: false,
+                cancellation: requested_cancellation.clone(),
+                failed: false,
+            });
             let cleanup = AssertUnwindSafe(shared.driver.cleanup_turn(&message))
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(AppError::Internal("Engine turn cleanup panicked".into())));
             if let Err(error) = cleanup {
+                if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
+                    pending.failed = true;
+                }
                 let suspended = AssertUnwindSafe(shared.driver.suspend_after_cleanup_failure(&message)).catch_unwind().await;
                 if matches!(suspended,Ok(Ok(true))) {
+                    // The host retained a fenced nonterminal cleanup witness.
+                    *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
                     shared.state.mark_transport_broken();
                     shared.state.emit_finish_for_turn(turn,Some(shared.state.conversation_id().to_owned()),Some(TurnStopReason::Paused));
                     return;
@@ -332,16 +355,20 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 break_transport(&shared, turn, error.to_string());
                 return;
             }
-            let mut outcome =
-                execution.unwrap_or_else(|error| EngineTurnOutcome::failed(error.to_string()));
-            outcome.model_steps = outcome.model_steps.max(recorded_model_steps);
             if requested_cancellation.is_cancelled() {
                 outcome.terminal = EngineTurnTerminal::Cancelled;
+            }
+            if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
+                pending.outcome = outcome.clone();
+                pending.cleanup_proven = true;
             }
             let record = AssertUnwindSafe(shared.driver.record_terminal(&message, &outcome))
                 .catch_unwind()
                 .await;
             if !matches!(record, Ok(Ok(()))) {
+                if let Some(pending) = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).as_mut() {
+                    pending.failed = true;
+                }
                 break_transport(
                     &shared,
                     turn,
@@ -349,6 +376,7 @@ impl AgentRuntimeControl for HostedAgentRuntime {
                 );
                 return;
             }
+            *shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
             let reason = match outcome.terminal {
                 EngineTurnTerminal::Completed { finish_reason } => match finish_reason {
                     ChatFinishReason::Completed => TurnStopReason::EndTurn,
@@ -467,24 +495,53 @@ impl OfficialAgentRuntime for HostedAgentRuntime {
         let flight = {
             let mut slot = shared.cleanup.lock().unwrap_or_else(|e| e.into_inner());
             slot.get_or_insert_with(|| {
-                let completion = shared
-                    .active
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .as_ref()
-                    .map(|turn| turn.completion.clone());
+                let completion = shared.active.lock().unwrap_or_else(|e|e.into_inner())
+                    .as_ref().map(|turn|turn.completion.clone());
+                let retry_failed_turn = shared.pending_settlement.lock().unwrap_or_else(|e|e.into_inner())
+                    .as_ref().is_some_and(|pending|pending.failed);
                 let driver = shared.driver.clone();
+                let settlement_owner = shared.clone();
                 let task = executor.spawn(async move {
                     let joined = match completion {
                         Some(completion) => completion.await,
                         None => Ok(()),
                     };
+                    if let Err(join_error) = joined {
+                        // Preserve the existing best-effort resource release
+                        // after an abnormal task exit, while retaining failure.
+                        let cleanup = AssertUnwindSafe(driver.cleanup_session()).catch_unwind().await;
+                        return Err(match cleanup {
+                            Ok(Ok(())) => join_error,
+                            Ok(Err(error)) => format!("{join_error}; Session cleanup failed: {error}"),
+                            Err(_) => format!("{join_error}; Session cleanup panicked"),
+                        });
+                    }
+                    let pending = settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()).clone();
+                    if let Some(mut pending) = pending {
+                        if !retry_failed_turn {
+                            return Err("Engine turn cleanup or terminal receipt remains unconfirmed".to_owned());
+                        }
+                        // A new explicit teardown flight retries only the retained
+                        // cleanup/receipt. The driver is never asked to run_turn again.
+                        if !pending.cleanup_proven {
+                            AssertUnwindSafe(driver.cleanup_turn(&pending.message)).catch_unwind().await
+                                .map_err(|_|"Engine turn cleanup retry panicked".to_owned())?
+                                .map_err(|error|error.to_string())?;
+                            pending.cleanup_proven = true;
+                            if pending.cancellation.is_cancelled() { pending.outcome.terminal = EngineTurnTerminal::Cancelled; }
+                            *settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = Some(pending.clone());
+                        }
+                        AssertUnwindSafe(driver.record_terminal(&pending.message,&pending.outcome)).catch_unwind().await
+                            .map_err(|_|"Engine terminal retry panicked".to_owned())?
+                            .map_err(|error|error.to_string())?;
+                        *settlement_owner.pending_settlement.lock().unwrap_or_else(|e|e.into_inner()) = None;
+                    }
                     AssertUnwindSafe(driver.cleanup_session())
                         .catch_unwind()
                         .await
                         .map_err(|_| "Engine Session cleanup panicked".to_owned())?
                         .map_err(|error| error.to_string())?;
-                    joined
+                    Ok(())
                 });
                 Arc::new(CleanupFlight {
                     completion: async move { task.await.map_err(|error| error.to_string())? }

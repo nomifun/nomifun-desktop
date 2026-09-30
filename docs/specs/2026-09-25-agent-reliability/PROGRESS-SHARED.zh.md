@@ -641,6 +641,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   窗口，托盘退出仍缺夹具；隔离 GUI 的最终强制进程清理单列，不代替 graceful shutdown。满盘/IO fault
   下 shutdown、真实子进程、其他角色/平台及完整 N3/100 seed/LONG/99% 仍开放，不关闭共享阶段。
 
+- S-D09-46（LIFE-019/023/024/029、CONC-014、FILE-038、G0-030、A04/A06/A07/A11/A13/A17/A19
+  shutdown 写锁与清理重试子断言）：W166 在正式 DesktopServer 的唯一写入 Returned、模型流等待后，
+  用独立连接持有真实 `BEGIN IMMEDIATE` writer lock。首败：第一次退出失败，解锁后重试却成功关闭
+  DB，Turn/head/owned lease 仍为 running。SDK 将 task join 当作完整清理，丢失未确认 outcome；host
+  flush 队列被消费，journal uncertain 又永久拒绝原写。现 SDK 保留 exact message/outcome/cleanup
+  见证，失败 flight 不释放 Session，后续显式 teardown 只补清理/回执；host 按 ack 消费队列，journal
+  仅接受原 cleanup/terminal payload、kind、model identity 的相同重试，模型/工具及新记录继续拒绝。
+  取消在首次 terminal commit 前仍优先，已确认 outcome 不重执行。首败与 DB 保留于外部 W166。
+  修复后首次及 **20/20**，21 个 DB/文件独立核对唯一 cancelled/cleanup witness/Returned、连续事件与
+  ready head；AI Agent **331/331**、journal **10/10**、正常 shutdown/pause-resume **2/2**，fmt/diff
+  通过。无正式 UI/真实模型；真实满盘/WAL/fsync、lease 过期/跨重启恢复、更多取消/并发驱逐拓扑、
+  其他角色/平台及 N3/100 seed/LONG/99% 仍开放，不关闭完整 LIFE/CONC/FILE/G0 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
@@ -1415,6 +1428,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **8/8**、Runtime **195/195**、Wave2 **22/22**、Engine **33 通过 / 1 ignored**、App host **5/5**。
   本批未调用模型或正式 UI。Windows 通用 ConPTY close 仍明确不声称可证明 generic EOF，PROC-028、
   尺寸实际生效的应用级观测、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
+
+- S-D04-30（PROC-040、LIFE-029、A03/A11/A13/A17/A19 进程 owner 关闭与长 poll 子断言）：W168
+  的真实 pipe child 已发布独立 PID，60 秒 poll 已进入等待后，shutdown 在 6 秒内无法发起清理；
+  释放 poll 才取得唯一 Cancelled/reaped。证据根为外部 `2026-09-30/windows/w168-process-start-shutdown`，
+  产品首败保留于 `01-first-long-poll`。修复 registry：所有操作仍保护 lease/容量，
+  只读 poll 单独不阻塞 shutdown retirement；stdin/close/resize 等写操作保留原关闭屏障。
+  默认 1/1/3 秒 stop 预算下首次及重复 **21/21**，独立 PID/report 核对 **21/21**、helper 残留 0；
+  shutdown **5/5**、natural exit **5/5**、cancel-first **1/1**、registry **13/13**，fmt/diff 通过。
+  旧 75 毫秒夹具重复第 13 轮返回 Lost/reaped=false，首败和独立兜底清理单列保留；恢复生产默认
+  预算后仍要求原 6 秒上界、唯一 Cancelled/reaped、同一 poll/report 和精确 PID 消失，未放宽断言。
+  真实 start/shutdown、start future drop、正式 Tauri、ConPTY 父死亡、其他平台/角色及完整
+  N3/100 seed/LONG/99% 仍开放；只通过该子断言，不关闭完整 PROC/LIFE 或共享阶段。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
