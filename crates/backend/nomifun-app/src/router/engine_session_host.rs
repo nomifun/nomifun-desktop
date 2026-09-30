@@ -696,6 +696,73 @@ impl EngineSessionHost {
         })
     }
 
+    /// Confirm the immutable cancellation of an accepted root that never
+    /// acquired a native execution claim. This supplies no running authority
+    /// and cannot substitute for cleanup after a Turn resource was opened.
+    pub(super) async fn confirm_cancelled_before_execution(
+        &self,
+        options: &AgentRuntimeBuildOptions,
+        binding: &RuntimeBuildBinding,
+        expected_snapshot: &ResolvedSnapshotRef,
+        message: &SendMessageData,
+    ) -> Result<bool, AppError> {
+        let conflict = |reason: &str| AppError::Conflict(format!("Engine cancellation receipt: {reason}"));
+        let session = self.resolve(options, binding).await?;
+        if &session.snapshot.snapshot_ref != expected_snapshot {
+            return Err(conflict("Snapshot differs from the open engine Session"));
+        }
+        let root = message.source_message_id.as_deref().unwrap_or(&message.msg_id);
+        let operations: Vec<String> = sqlx::query_scalar(
+            "SELECT operation_id FROM agent_turns WHERE session_id=? AND source_message_id=? LIMIT 2",
+        ).bind(&options.conversation_id).bind(root).fetch_all(&self.pool).await
+            .map_err(|error| conflict(&error.to_string()))?;
+        let [operation] = operations.as_slice() else {
+            return Err(conflict("accepted root has no unique canonical Turn"));
+        };
+        let session_id = options.conversation_id.clone().into();
+        let operation_id = operation.clone().into();
+        let store = self.canonical_store()?;
+        let receipt = store.read_turn_receipt(&session_id, &operation_id).await
+            .map_err(|error| conflict(&error.to_string()))?;
+        if receipt.status != nomifun_agent_session::TurnReceiptStatus::Cancelled { return Ok(false); }
+        let started = receipt.started_event.ok_or_else(|| conflict("cancelled Turn has no started event"))?;
+        let terminal = receipt.terminal_event.ok_or_else(|| conflict("cancelled Turn has no terminal event"))?;
+        if started.agent_session_id != session_id || started.kind.0 != "turn/started"
+            || started.correlation_id.as_ref() != operation || started.causation_event_id.as_ref().map(|id|id.as_ref()) != Some(root)
+            || terminal.agent_session_id != session_id || terminal.kind.0 != "turn/cancelled"
+            || terminal.correlation_id.as_ref() != operation || terminal.causation_event_id.as_ref() != Some(&started.event_id) {
+            return Err(conflict("cancellation does not belong to the exact accepted Turn"));
+        }
+        let facts = store.chat_causality_facts(&session_id, &operation_id).await
+            .map_err(|error| conflict(&error.to_string()))?;
+        if facts.execution_generation != 0 || facts.head.status != "ready" || facts.head.active_turn_id.is_some()
+            || facts.session.owner_ref != session.principal || facts.session.agent_binding.resolved_snapshot_ref != *expected_snapshot {
+            return Err(conflict("cancelled Turn was claimed or its Session scope changed"));
+        }
+        let source = facts.events.iter().find(|event| event.event_id.as_ref() == root)
+            .ok_or_else(|| conflict("accepted source message is missing"))?;
+        let source_payload = facts.event_payloads.get(root).ok_or_else(|| conflict("accepted source payload is missing"))?;
+        let started_payload = facts.event_payloads.get(started.event_id.as_ref())
+            .ok_or_else(|| conflict("accepted Turn payload is missing"))?;
+        if source.agent_session_id != session_id || source.kind.0 != "message/user-accepted"
+            || source.correlation_id.as_ref() != root
+            || source_payload.get("content").and_then(serde_json::Value::as_str) != Some(message.content.as_str())
+            || started_payload.get("source_message_id").and_then(serde_json::Value::as_str) != Some(root) {
+            return Err(conflict("message differs from its durable accepted root"));
+        }
+        let route = session.snapshot.content.chat_route_identity.as_ref()
+            .ok_or_else(|| conflict("accepted Session has no exact route"))?;
+        let snapshot_value = serde_json::to_value(expected_snapshot).map_err(|error| conflict(&error.to_string()))?;
+        let route_value = serde_json::to_value(route).map_err(|error| conflict(&error.to_string()))?;
+        for payload in [source_payload, started_payload] {
+            let admission = payload.get("admission").ok_or_else(|| conflict("accepted root has no frozen admission scope"))?;
+            if admission.get("resolved_snapshot_ref") != Some(&snapshot_value) || admission.get("route_identity") != Some(&route_value) {
+                return Err(conflict("accepted root Snapshot or route differs from the frozen engine scope"));
+            }
+        }
+        Ok(true)
+    }
+
     pub async fn resolve(
         &self,
         options: &AgentRuntimeBuildOptions,
