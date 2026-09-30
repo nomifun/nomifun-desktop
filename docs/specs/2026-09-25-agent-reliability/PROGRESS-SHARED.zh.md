@@ -35,7 +35,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
-| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过；S-D02-22 已修 startup quarantine 暂停列表单播并完成 macOS 冷 UI 复核；完整控制/观测矩阵待验 |
+| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过；S-D02-22/23 已修 startup quarantine 单播及暂停清理投影竞态；M04-24 尚未做付费模型复跑，完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
@@ -812,6 +812,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   “活跃状态 运行中”变为精确“活跃状态 执行已暂停”。产品按钮结束回合后 head ready、seq 71
   cancelled，原 unknown receipt 保留；最终 DB `ok`，App PID 与 listener 归零。其他平台、断线时事件
   丢失与完整 OBS/LIFE 矩阵仍开放。
+
+- S-D02-23（`OBS-006/007/014/015`、`LIFE-015/016` 的暂停清理状态投影子断言，**代码与确定性
+  回归已验证**）：macOS M04-23 的正式 StepFun 限额暂停已持久化
+  `execution_pause.cleanup_proven=true`、Runtime idle/head paused，UI 却显示“资源清理状态尚未确认”。
+  根因不是清理失败，而是 `turn.paused` 后的立即 authority GET 可先读到结构完整但清理字段尚未升级的
+  暂停投影；reconciler 原先在首个 pause snapshot 立即退出，后续 canonical `true` 再无机会被采用。
+- authority reconciler 现只暂存首个未证明快照；同一 Turn/reason/paused-at 的下一次 snapshot 若已
+  cleanup-proven 则以升级值为准，若连续两次仍未证明才按真实未知状态展示。不同暂停会重新确认，
+  durable 未证明状态不会被吞掉，既有 pause fence、发送禁用与 capped backoff 均不放宽。首次错误测试
+  调用因未加载 UI Happy DOM 出现 2 个 `document is not defined`，原样保存在
+  `2026-09-30/macos/m04-pause-cleanup-projection/run-001-tests/`；改用仓库 `ui/bunfig.toml` 后相关
+  reconcile/hook/notice **18/18**、UI typecheck、desktop UI boundary 与 diff check 通过。
+- 本批未再调用付费 Provider，也未以组件测试代替 post-fix 正式 Tauri 视觉复核；因此只关闭公共竞态
+  根因及确定性子断言，M04-23 的 terminal、N3/20/99%、断线/多窗口投影与完整 D02/OBS/LIFE 仍开放。
 
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但

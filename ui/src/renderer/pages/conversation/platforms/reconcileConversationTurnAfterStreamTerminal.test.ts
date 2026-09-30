@@ -4,6 +4,7 @@ import type { TChatConversation } from '@/common/config/storage';
 import type { ConversationId } from '@/common/types/ids';
 import { parseConversationId, parseMessageId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
+import { getConversationPauseNotice } from '../utils/conversationRuntime';
 import {
   AUTHORITATIVE_RUNTIME_RESYNC_DELAYS_MS,
   TERMINAL_RECONCILE_DELAYS_MS,
@@ -58,6 +59,57 @@ describe('terminal stream runtime reconciliation', () => {
       expect(unknownCalls).toBe(0);
       expect(settled).toEqual([]);
     } finally { emitter.off('conversation.turn.settled', onSettled); }
+  });
+
+  test('a cleanup-proven canonical pause supersedes one transient unproven snapshot', async () => {
+    const unproven = {
+      status: 'running',
+      extra: { execution_phase: 'paused', execution_pause: {
+        reason: 'EXECUTION_MODEL_RATE_LIMITED', cleanup_proven: false, paused_at_ms: 123,
+      } },
+      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } as TChatConversation;
+    const proven = { ...unproven, extra: { ...unproven.extra, execution_pause: {
+      ...unproven.extra!.execution_pause!, cleanup_proven: true,
+    } } } as TChatConversation;
+    const snapshots = [unproven, proven];
+    const observed: TChatConversation[] = [];
+
+    expect(await reconcileConversationAuthoritativeRuntime(conversationId, {
+      isCurrent: () => true,
+      onIdle: () => { throw new Error('pause must not settle the turn'); },
+      onPaused: conversation => { observed.push(conversation); },
+      delaysMs: [0, 0],
+      getConversation: async () => snapshots.shift() ?? proven,
+      retryForever: false,
+      announceSettled: false,
+    })).toBe(false);
+    expect(observed).toEqual([proven]);
+    expect(snapshots).toHaveLength(0);
+  });
+
+  test('two identical unproven pause snapshots still surface cleanupRequired', async () => {
+    const paused = {
+      status: 'running',
+      extra: { execution_phase: 'paused', execution_pause: {
+        reason: 'EXECUTION_PAUSED', cleanup_proven: false, paused_at_ms: 456,
+      } },
+      runtime: { state: 'idle', is_processing: false, can_send_message: false, active_turn_id: activeTurnId },
+    } as TChatConversation;
+    let reads = 0;
+    let observed: TChatConversation | undefined;
+
+    expect(await reconcileConversationAuthoritativeRuntime(conversationId, {
+      isCurrent: () => true,
+      onIdle: () => { throw new Error('pause must not settle the turn'); },
+      onPaused: conversation => { observed = conversation; },
+      delaysMs: [0, 0, 0],
+      getConversation: async () => { reads += 1; return paused; },
+      retryForever: false,
+      announceSettled: false,
+    })).toBe(false);
+    expect(reads).toBe(2);
+    expect(getConversationPauseNotice(observed)).toMatchObject({ cleanupProven: false });
   });
 
   test('reconnect settles a turn whose terminal events were lost after turn.started', async () => {
