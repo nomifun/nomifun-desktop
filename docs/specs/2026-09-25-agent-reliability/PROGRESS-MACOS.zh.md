@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～20 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen；live held-cancel/IME、packaged Browser UI 与扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～21 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen 及正式 packaged Browser UI；live held-cancel/IME、close-to-tray/nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -848,3 +848,34 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   覆盖 native Tauri/CEF window、runtime/tab/ref 与 pending-dialog owner；正式 packaged NomiFun
   AgentSession UI、close-to-tray renderer attach/detach、nested frame 及真实模型仍须单独验证。因此只
   关闭 `BROW-017/MAC-017` 的本批平台 lifecycle 子断言，不关闭完整 Browser、D06 或 M04。
+
+- **M04-21 formal packaged NomiFun Browser AgentSession**（`BROW-001/003/015/017`、`MAC-017` 的
+  本批正式产品子断言）：用户解锁后以 current-source Developer ID-signed arm64 NomiFun、固定 CEF
+  152.0.6 / Chromium 152.0.7977.83、fresh data/Agent/Session 和正式 Tauri UI 提交
+  `Verify the packaged native Browser surface.`。此前 `run-002` 锁屏运行保持零 Turn；本次首个
+  `run-008-formal-ui` 已真实 navigate/type/click 并收到 trusted witness，但 fixture 的
+  `report_completion` 漏必填 `observed_tool_error_count=1` 且发送空 `requirement_ids`，产品正确拒绝；
+  最终 Turn failed，完整 DB/UI/status 保留，未改记 PASS。
+- 同一首败还暴露正式产品的 macOS CEF profile 根因：CEF 要求 disk profile 是
+  `root_cache_path` 的直接子目录；产品 root 为 `browser-v3`，canonical Session profile 却在
+  `browser-v3/agent-sessions/<hash>`，CEF 因此明确记录 `Cannot create profile` 并退回 OffTheRecord。
+  修复只把 macOS CEF root 移到既有 canonical profile 父目录 `browser-v3/agent-sessions`；共享
+  `BrowserProfileStore`、hash identity、清理边界及 Windows 路径不变。fixture completion 另补精确累计
+  tool-error count、在 summary 公开披露，并省略空 requirement 数组。
+- 最终 `run-011-formal-ui`（Session `01a0f0b1-7e6d-7113-aead-5a2b099c5457`，host executable
+  SHA-256 `ce1890564f853902224f83707c3afa58490885844393a385dd8d073d633a9622`）为
+  **10 model steps / 148 events**；2 次 navigate、Unicode type、trusted click 四个唯一 Effect 全
+  returned，零 pending/unknown。页面独立 witness 为 count 1 / exact `Agent 主界面真实输入` /
+  `trusted=true`；正式 UI 同时显示计数 1、文本和“已收到真实点击”，关闭 Browser panel 后显示完成总结
+  及累计 **1** 个 plan-guard tool error。
+- canonical completion 为 plan revision 1 / observation revision 9，两个 criterion 均由 final observe
+  `gui-native-7` 支持并覆盖 `input_0`；`turn/completed`、head ready。唯一 64-hex Session profile 已在
+  新 root 直接落盘，冷读 `History` 为 `ok` 且只在该 profile 记录 loopback URL（visit count 2），global
+  Default 无该 URL；App 日志不再出现 profile/CEF/process-requirement 错误。backend DB `ok`、inline PNG
+  0，最终 App/Helper/fixture/listener 为 0。完整证据：
+  `2026-09-30/macos/m04-browser-packaged/run-008-formal-ui/`、`run-009-fix-build/`、
+  `run-010-fixed-product/`、`run-011-formal-ui/`。
+- 该 profile 根因是 macOS CEF host 专属，未改共享层，故不改 `PROGRESS-SHARED`。本批关闭正式 packaged
+  Browser navigation/input/trusted-page-result 与精确 persistent profile 子断言；真实 StepFun、产品
+  close-to-tray renderer attach/detach、nested frame/popup 的正式 UI 以及 release/notarized artifact 仍开放，
+  不关闭完整 `BROW-017/MAC-017`、D06 或 M04。

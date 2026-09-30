@@ -203,21 +203,20 @@ fn native_operation(
             ]}))));
         }
         9 => return Ok(Some(("report_completion".into(), json!({
-            "summary":"The packaged native Browser navigated, typed Unicode text and delivered a trusted click witness.",
+            "summary":"One initial guarded Browser effect was rejected before planning. The packaged native Browser then navigated, typed Unicode text and delivered a trusted click witness.",
+            "observed_tool_error_count":1,
             "criteria":[
                 {
                     "step":"Verify packaged native Browser navigation and input",
                     "disposition":"supported",
                     "evidence_call_ids":["gui-native-7"],
-                    "rationale":"The final observation reflects the native type action result after all effects settled.",
-                    "requirement_ids":[]
+                    "rationale":"The final observation reflects the native type action result after all effects settled."
                 },
                 {
                     "step":"Verify packaged native Browser page result",
                     "disposition":"supported",
                     "evidence_call_ids":["gui-native-7"],
-                    "rationale":"The final observation contains the trusted click result.",
-                    "requirement_ids":["req-native-browser"]
+                    "rationale":"The final observation contains the trusted click result."
                 }
             ]
         })))),

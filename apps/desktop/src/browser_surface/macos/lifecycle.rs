@@ -40,9 +40,10 @@ fn packaged_paths(executable: &Path, data_dir: &Path) -> Result<Paths, String> {
             .join("Contents/MacOS")
             .join(HELPER_NAME),
         main_bundle: bundle.to_path_buf(),
-        // BrowserProfileStore derives persistent resources below browser-v3.
-        // CEF's root_cache_path must be their canonical ancestor.
-        data_root: data_dir.join("browser-v3"),
+        // CEF Chrome requires every disk-backed request-context profile to be
+        // a direct child of root_cache_path. BrowserProfileStore owns the
+        // hashed AgentSession directories immediately below this root.
+        data_root: data_dir.join("browser-v3").join("agent-sessions"),
     })
 }
 
@@ -71,7 +72,23 @@ mod tests {
             )
         );
         assert_eq!(paths.main_bundle, root.path().join("NomiFun.app"));
-        assert_eq!(paths.data_root, data.join("browser-v3"));
+        assert_eq!(
+            paths.data_root,
+            data.join("browser-v3").join("agent-sessions")
+        );
+        let key = nomifun_browser_platform::runtime::BrowserResourceKey {
+            principal_id: "fixture-user".into(),
+            agent_session_id: "fixture-session".into(),
+            resource_binding_id: "browser:managed-browser".into(),
+        };
+        let nomifun_browser_platform::runtime::BrowserProfile::Persistent(profile) =
+            nomifun_browser_platform::runtime::BrowserProfile::for_agent_session(
+                &data, &key, false,
+            )
+        else {
+            panic!("persistent Browser policy returned an ephemeral profile")
+        };
+        assert_eq!(profile.parent(), Some(paths.data_root.as_path()));
 
         assert!(packaged_paths(&root.path().join("nomifun-desktop"), &data).is_err());
         assert!(packaged_paths(
