@@ -512,25 +512,6 @@
   flex: 1 1 auto;
 }
 
-.bottomPanel {
-  z-index: 35;
-  display: flex;
-  height: min(34vh, 300px);
-  min-width: 0;
-  min-height: 160px;
-  margin: 0 16px 16px;
-  grid-column: 2;
-  grid-row: 1;
-  align-self: end;
-  flex-direction: column;
-  overflow: hidden;
-  border: 1px solid var(--color-border-2);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--color-bg-2) 95%, transparent);
-  box-shadow: none;
-  backdrop-filter: blur(18px) saturate(125%);
-}
-
 .iconButton {
   height: 30px;
   padding: 0;
@@ -830,10 +811,6 @@
 
   .projectIdentity h1 {
     max-width: 24vw;
-  }
-
-  .bottomPanel {
-    margin-inline: 10px;
   }
 
 }
