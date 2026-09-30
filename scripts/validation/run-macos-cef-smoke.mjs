@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const args = process.argv.slice(2);
 const option = (key, fallback) => args.includes(key) ? args[args.indexOf(key) + 1] : fallback;
+const soakOnly = args.includes('--soak-only');
 const environment = Object.fromEntries(['PATH', 'HOME', 'TMPDIR', 'LANG', 'DEVELOPER_DIR', 'CEF_PATH', 'CARGO_HOME', 'RUSTUP_HOME', 'RUST_MIN_STACK'].filter(key => process.env[key]).map(key => [key, process.env[key]]));
 const run = (command, argv, capture = false) => new Promise((resolve, reject) => {
   const child = spawn(command, argv, { cwd: root, env: environment, stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit' });
@@ -71,6 +72,10 @@ try {
     const suffix = name.replace('NomiCEFSmoke Helper', '').replace(/[^A-Za-z]/g, '').toLowerCase();
     await writeFile(join(helperApp, 'Contents/Info.plist'), plist({ ...common, CFBundleIdentifier: `com.nomifun.cef-native-smoke.helper${suffix ? `.${suffix}` : ''}`, CFBundleName: name, CFBundleExecutable: name, LSUIElement: true }));
   }
+  await run('/usr/bin/plutil', ['-convert', 'xml1', join(contents, 'Info.plist')]);
+  for (const name of helperNames) {
+    await run('/usr/bin/plutil', ['-convert', 'xml1', join(contents, 'Frameworks', `${name}.app`, 'Contents/Info.plist')]);
+  }
   const entitlements = join(stage, 'helper-entitlements.plist');
   await writeFile(entitlements, plist({ 'com.apple.security.cs.allow-jit': true }));
   // Hardened runtime enforces library validation. A Developer ID build signs
@@ -110,9 +115,12 @@ try {
   const report = join(stage, 'native-result.json');
   const helpers = [];
   for (const name of helperNames) helpers.push({ name, sha256: await hash(join(contents, 'Frameworks', `${name}.app`, 'Contents/MacOS', name)) });
-  const receipt = { scope: 'tauri-native-cef-input', productAcceptance: false, app, report, executableSha256: await hash(executable), helpers, architecture: await run('lipo', ['-archs', executable], true) };
+  const receipt = { scope: soakOnly ? 'tauri-native-cef-100-cycle-soak' : 'tauri-native-cef-input', productAcceptance: false, app, report, executableSha256: await hash(executable), helpers, architecture: await run('lipo', ['-archs', executable], true), infoPlistSerialization: 'canonical-xml' };
   await writeFile(join(stage, 'artifact.json'), JSON.stringify(receipt, null, 2));
-  const launch = spawn('open', ['-W', '-n', '--env', `NOMIFUN_CEF_REPORT=${report}`, '-o', join(stage, 'stdout.log'), '--stderr', join(stage, 'stderr.log'), app], { cwd: root, env: environment, stdio: 'inherit' });
+  const launchArgs = ['-W', '-n', '--env', `NOMIFUN_CEF_REPORT=${report}`];
+  if (soakOnly) launchArgs.push('--env', 'NOMIFUN_CEF_SOAK_ONLY=1');
+  launchArgs.push('-o', join(stage, 'stdout.log'), '--stderr', join(stage, 'stderr.log'), app);
+  const launch = spawn('open', launchArgs, { cwd: root, env: environment, stdio: 'inherit' });
   const exited = new Promise((resolve, reject) => { launch.once('error', reject); launch.once('exit', resolve); });
   let timer;
   try {
