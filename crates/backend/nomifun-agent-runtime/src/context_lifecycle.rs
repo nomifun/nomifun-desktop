@@ -237,9 +237,26 @@ impl ContextLifecycle {
             self.observed_tokens.saturating_sub(self.observed_estimate),
         );
         let token_pressure = estimated_tokens >= input_limit;
+        let soft_byte_trigger = self.resource.max_context_bytes * 3 / 4;
+        let byte_trigger = if bytes >= soft_byte_trigger {
+            let mut mandatory = request.input.clone();
+            mandatory.provider_round_parent = None;
+            mandatory.messages = requirements.to_vec();
+            let mandatory_bytes = encoded_size(&mandatory)?;
+            if mandatory_bytes >= soft_byte_trigger {
+                // Fixed instructions/schema cannot be summarized away. Keep
+                // half of the remaining hard-byte envelope for transcript
+                // growth instead of repeatedly compacting the same overhead.
+                mandatory_bytes + self.resource.max_context_bytes.saturating_sub(mandatory_bytes) / 2
+            } else {
+                soft_byte_trigger
+            }
+        } else {
+            soft_byte_trigger
+        };
         if !self.force_compaction
             && !token_pressure
-            && bytes < self.resource.max_context_bytes * 3 / 4
+            && bytes < byte_trigger
             && request.input.messages.len() <= self.resource.max_history_messages
         {
             self.last_request_estimate = estimate;
@@ -464,6 +481,38 @@ impl ContextLifecycle {
                 "\n[Automatic summary incomplete for transcript bytes {start}..{}. The accepted user request and active task state remain authoritative; earlier tool outcomes in this range are unverified here. Re-read relevant files and rerun checks before reporting completion. Do not assume a prior action succeeded.]",
                 source.len(),
             ));
+        }
+        if let Some(mut exchange) = crate::context_tail::latest(&request.input.messages)? {
+            if !exchange.requires_original_images() {
+                // The pre-inference reservation uses the worst-case summary
+                // size. Once the actual note is known, reclaim fitting exact
+                // settled exchanges; never replace failed results with prose.
+                let mut fixed = request.input.clone();
+                fixed.provider_round_parent = None;
+                fixed.messages = vec![summary_message(&previous)];
+                fixed.messages.extend_from_slice(requirements);
+                let fixed_tokens = crate::media_context::estimate_tokens(&fixed, encoded_size(&fixed)?);
+                let retained_token_limit = (input_limit * 4 / 5)
+                    .max(fixed_tokens + input_limit.saturating_sub(fixed_tokens) / 2)
+                    .min(input_limit);
+                loop {
+                    if !exchange.fits_text_bound(requirements)? { break; }
+                    let messages = exchange.with_required_inputs(requirements)?;
+                    let mut candidate = fixed.clone();
+                    candidate.messages = vec![summary_message(&previous)];
+                    candidate.messages.extend(messages.clone());
+                    let candidate_bytes = encoded_size(&candidate)?;
+                    if candidate_bytes >= bytes
+                        || candidate_bytes > self.resource.max_context_bytes
+                        || candidate.messages.len() > self.resource.max_history_messages
+                        || crate::media_context::estimate_tokens(&candidate, candidate_bytes) >= retained_token_limit
+                    { break; }
+                    mandatory_messages = messages;
+                    retained_tool_call_ids = exchange.call_ids.clone();
+                    let Some(earlier) = exchange.earlier()? else { break; };
+                    exchange = earlier;
+                }
+            }
         }
         let mut replacement = request.input.clone();
         replacement.provider_round_parent = None;
