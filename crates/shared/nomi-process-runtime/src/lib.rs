@@ -36,7 +36,7 @@ pub use request::{
 };
 pub use supervisor::{
     ProcessHandle, PollResult, ProcessSupervisor, QuiesceReport, QuiesceSessionReport,
-    ShutdownReport, ShutdownSessionReport, SupervisorConfig,
+    ShutdownReport, ShutdownSessionReport, StartupCleanupReport, SupervisorConfig,
 };
 
 /// Returns true only when cleanup can no longer be retried safely because its
