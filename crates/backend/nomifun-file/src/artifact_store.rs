@@ -553,7 +553,19 @@ fn stage_source<F: FnOnce()>(workspace: &Dir, source: &Path, namespace: &Artifac
     let (mut staged, mut staged_file) = create_staging_file(namespace)?;
     after_source_open();
     let mut whole = Sha256::new(); let mut chunks = Vec::new(); let mut total = 0_u64; let mut buffer = vec![0_u8; ARTIFACT_CHUNK_BYTES];
-    loop { let read = read_fixed_chunk(&mut source_file, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?; if read == 0 { break; } total += read as u64; if total > MAX_ARTIFACT_BYTES { return Err(AppError::BadRequest("workspace artifact source exceeds its byte limit".into())); } counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed); whole.update(&buffer[..read]); chunks.push(format!("{:x}", Sha256::digest(&buffer[..read]))); staged_file.write_all(&buffer[..read]).map_err(|error| AppError::Internal(error.to_string()))?; }
+    let mut bounded = std::io::Read::by_ref(&mut source_file).take(before.len() + 1);
+    loop {
+        let read = read_fixed_chunk(&mut bounded, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?;
+        if read == 0 { break; }
+        total += read as u64;
+        counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed);
+        if total > before.len() {
+            return Err(AppError::Conflict("workspace artifact source grew while publishing".into()));
+        }
+        whole.update(&buffer[..read]);
+        chunks.push(format!("{:x}", Sha256::digest(&buffer[..read])));
+        staged_file.write_all(&buffer[..read]).map_err(|error| AppError::Internal(error.to_string()))?;
+    }
     staged_file.sync_all().map_err(|error| AppError::Internal(error.to_string()))?; drop(staged_file);
     validate_open_source(workspace, source, &source_identity)?;
     let after = source_file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?;
@@ -637,37 +649,21 @@ fn publish_content_addressed_with_hook<F: FnOnce()>(
     after_link();
     let finalized = (|| {
         sync_directory(&namespace.dir)?;
-        let file = namespace
-            .dir
-            .open_with(target, &read_options())
-            .map_err(|error| AppError::Conflict(error.to_string()))?
-            .into_std();
-        let identity = SameFileHandle::from_file(
-            file.try_clone()
-                .map_err(|error| AppError::Conflict(error.to_string()))?,
-        )
-        .map_err(|error| AppError::Conflict(error.to_string()))?;
+        // An unchanged inode and length cannot attest the bytes copied during
+        // staging. Reuse the reader's bounded full verification before
+        // returning a publication receipt or caching its chunk index.
+        let verified = load_verified_artifact(namespace, target, counters)?;
         if staged
             .identity
             .as_ref()
-            .is_none_or(|expected| expected != &identity)
-            || file
-                .metadata()
-                .map_err(|error| AppError::Conflict(error.to_string()))?
-                .len()
-                != staged.size_bytes
+            .is_none_or(|expected| expected != &verified.identity)
+            || verified.size_bytes != staged.size_bytes
         {
             return Err(AppError::Conflict(
                 "published artifact differs from staged bytes".into(),
             ));
         }
-        Ok(VerifiedArtifact {
-            file,
-            identity,
-            size_bytes: staged.size_bytes,
-            sha256: staged.digest.clone(),
-            chunk_hashes: staged.chunk_hashes.clone(),
-        })
+        Ok(verified)
     })();
     match finalized {
         Ok(verified) => Ok((true, verified)),
@@ -681,11 +677,27 @@ fn publish_content_addressed_with_hook<F: FnOnce()>(
 }
 
 fn load_verified_artifact(namespace: &ArtifactNamespace, id: &str, counters: &ArtifactIoCounters) -> Result<VerifiedArtifact, AppError> {
+    load_verified_artifact_with_hook(namespace, id, counters, || {})
+}
+
+fn load_verified_artifact_with_hook(namespace: &ArtifactNamespace, id: &str, counters: &ArtifactIoCounters, after_metadata: impl FnOnce()) -> Result<VerifiedArtifact, AppError> {
     let mut file = namespace.dir.open_with(id, &read_options()).map_err(|error| if error.kind() == std::io::ErrorKind::NotFound { AppError::NotFound("workspace artifact was not found".into()) } else { AppError::BadRequest(error.to_string()) })?.into_std();
     let identity = SameFileHandle::from_file(file.try_clone().map_err(|error| AppError::BadRequest(error.to_string()))?).map_err(|error| AppError::BadRequest(error.to_string()))?;
     let metadata = file.metadata().map_err(|error| AppError::BadRequest(error.to_string()))?; if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ARTIFACT_BYTES { return Err(AppError::Conflict("workspace artifact has an invalid stored size".into())); }
+    after_metadata();
     let mut whole = Sha256::new(); let mut chunks = Vec::new(); let mut total = 0_u64; let mut buffer = vec![0_u8; ARTIFACT_CHUNK_BYTES];
-    loop { let read = read_fixed_chunk(&mut file, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?; if read == 0 { break; } counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed); total += read as u64; whole.update(&buffer[..read]); chunks.push(format!("{:x}", Sha256::digest(&buffer[..read]))); }
+    let mut bounded = std::io::Read::by_ref(&mut file).take(metadata.len() + 1);
+    loop {
+        let read = read_fixed_chunk(&mut bounded, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?;
+        if read == 0 { break; }
+        counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed);
+        total += read as u64;
+        if total > metadata.len() {
+            return Err(AppError::Conflict("workspace artifact grew beyond its observed size".into()));
+        }
+        whole.update(&buffer[..read]);
+        chunks.push(format!("{:x}", Sha256::digest(&buffer[..read])));
+    }
     let digest = format!("{:x}", whole.finalize()); if total != metadata.len() || digest != id { return Err(AppError::Conflict("workspace artifact no longer matches its content identity".into())); }
     verify_target_identity(namespace, id, &identity, total)?; file.seek(SeekFrom::Start(0)).map_err(|error| AppError::BadRequest(error.to_string()))?;
     Ok(VerifiedArtifact { file, identity, size_bytes: total, sha256: digest, chunk_hashes: chunks })
@@ -880,6 +892,107 @@ mod tests {
             publication_temp_count(&workspace.path().join(ARTIFACT_RELATIVE_ROOT)),
             0
         );
+    }
+
+    #[test]
+    fn publication_bytes_reject_same_inode_corruption_before_link() {
+        publication_bytes_race(false);
+    }
+
+    #[test]
+    fn artifact_growth_budget_bounds_source_staging() {
+        artifact_growth_budget(false);
+    }
+
+    #[test]
+    fn artifact_growth_budget_bounds_verified_blob_loading() {
+        artifact_growth_budget(true);
+    }
+
+    fn artifact_growth_budget(blob: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if blob {"blob-growth"} else {"source-growth"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let source = workspace.join("source");
+        fs::write(&source, b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let append = |path: &Path| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            file.write_all(&vec![b'x'; ARTIFACT_CHUNK_BYTES * 2]).unwrap();
+            file.sync_all().unwrap();
+        };
+        let (rejected, altered_path) = if blob {
+            let published = store.publish("source", None).unwrap();
+            let path = workspace.join(&published.relative_path);
+            let result = load_verified_artifact_with_hook(&namespace, &published.artifact_id, &counters,
+                || append(&path));
+            (result.is_err(), path)
+        } else {
+            let result = stage_source(&store.workspace, Path::new("source"), &namespace, &counters,
+                || append(&source));
+            (result.is_err(), source.clone())
+        };
+        let scanned = counters.full_scan_bytes.load(Ordering::Acquire);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blob":blob, "observed_bytes":8, "growth_bytes":ARTIFACT_CHUNK_BYTES * 2,
+            "scanned_bytes":scanned, "rejected":rejected,
+            "altered_relative_path":altered_path.strip_prefix(&workspace).unwrap(),
+            "actual_size":fs::metadata(&altered_path).unwrap().len(),
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert!(rejected, "a growing source must be rejected rather than published or cached");
+        assert_eq!(fs::metadata(&altered_path).unwrap().len(), 8 + 2 * ARTIFACT_CHUNK_BYTES as u64);
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        assert!(scanned <= 9, "growth beyond observed size consumed {scanned} bytes instead of a bounded overflow probe");
+    }
+
+    #[test]
+    fn publication_bytes_reject_same_inode_corruption_after_link() {
+        publication_bytes_race(true);
+    }
+
+    fn publication_bytes_race(after_link: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if after_link {"after-link"} else {"before-link"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let counters = ArtifactIoCounters::default();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &counters, || {}).unwrap();
+        let target = staged.digest.clone();
+        let staged_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let target_path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&target);
+        if !after_link { fs::write(&staged_path, b"corrupt!").unwrap(); }
+        verify_staged_identity(&staged).unwrap();
+        let result = publish_content_addressed_with_hook(&namespace, &target, &staged, &counters, || {
+            if after_link { fs::write(&target_path, b"corrupt!").unwrap(); }
+        });
+        let same_inode = staged.identity.as_ref().unwrap() == &SameFileHandle::from_path(&staged_path).unwrap();
+        assert!(same_inode, "fault must keep the original staged inode");
+        let rejected = result.is_err();
+        let unknown = result.as_ref().err().is_some_and(artifact_publication_outcome_unknown);
+        let target_before_drop = fs::read(&target_path).ok();
+        drop(result);
+        drop(staged);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "after_link":after_link, "same_inode":same_inode, "same_size":true,
+            "rejected":rejected, "unknown":unknown, "digest":target,
+            "target_bytes_before_drop":target_before_drop, "target_exists":target_path.exists(),
+            "remaining_temps":publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)),
+        })).unwrap()).unwrap();
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+        assert!(rejected, "artifact publication accepted bytes inconsistent with its declared digest");
+        assert!(!unknown, "confirmed rollback must remain a known rejection");
+        assert!(!target_path.exists(), "corrupt publication must be rolled back");
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
     }
 
     #[test] fn publish_and_read_round_trip() {
