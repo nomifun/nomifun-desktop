@@ -733,6 +733,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   连续多进程写、上限512MiB样本、staging/drop及rollback名称竞态、真实IO fault、完整UI/角色平台
   和长期门槛仍开放，不关闭完整ART或共享阶段。
 
+- S-D03-62（ART-001/002/005/007、FILE-038/039、A04/A05/A07/A13/A14/A17/A19 stage名称
+  清理子断言）：W176 三项产品首败：旧 StagedArtifact Drop 按名称删除，外来异字节或同字节异
+  inode 都被误删，公开 staging失败仍known rejection。首败/现场留在外部 W176 `01`/`02`。
+  stage清理保留原identity，拒绝外来名称；Windows以relative Dir打开deny-delete guard，身份核对后
+  原生handle删除；Unix核对observed inode但最窄check→unlink仍未关闭。publish及stage failure显式
+  检查cleanup，未确认返回原unknown前缀并保留原原因/残留，Drop不再盲删或吞掉失败。
+  Windows模块 **24/24**、新四项 **20/20 × 4**、独立磁盘/identity **84/84**；WSL ext4模块
+  **26/26**及3个原生场景核对、fmt/diff通过，不代判macOS。Windows最后核对→delete remap以32
+  拒绝，释放后相同remap可执行。startup stale cleanup、Unix最终窗口、rollback check→unlink、
+  真IO fault、完整UI/模型/其他平台角色和长期门槛仍开放；不关闭完整Case或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
