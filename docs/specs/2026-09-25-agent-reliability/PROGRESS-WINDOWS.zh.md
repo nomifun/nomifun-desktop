@@ -2756,6 +2756,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖全池失步、并发驱逐/池关闭、fsync/WAL 损坏、正式 shutdown、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0 或共享阶段。
 
+### 全池失步并发恢复及 receipt 时间幂等（W163，基线 `b7bd9b231`）
+
+- S-D09-43 / LIFE-008/011/024、CONC-014、G0-025/030、A03/A04/A06/A07/A08/A09/A17/A19：
+  三连接 pool 全部因正式 terminal 写的 `SQLITE_FULL` 失步；每 seed 改变连接归还顺序与并发调度，
+  解除预算后各 Session 正确归约。但相同已结算 receipt 重送因新的 `recorded_at` 被误报冲突/未决。
+- 修复 Store terminal API：在同一写事务中保留首次提交时间，原精确去重继续比较全部身份及 owner
+  结果。结果、operation、owner、digest、resource、producer、cause 或终态变化仍冲突；原 ack 不变。
+- 首版载荷 oracle 错误与产品首败分别保留于外部 `2026-09-30/windows/w163-all-desynced-pool` 的
+  01/02；02 数据库保留。独立 SQL oracle 列名错误亦保留。修复后 **100/100 seed**、完整重复
+  **20/20 × 100 seed**；21 份独立 SQLite 核对各为 300 条精确 owner 原因/唯一 Rejected receipt、
+  2,400 条连续事件，重放新增事件为 0；Session Store **76/76**、相邻满盘 **7/7**，fmt/diff 通过。
+- 未覆盖池关闭/取消与驱逐组合、fsync/WAL 损坏、正式 Tauri shutdown、其他平台及完整
+  N3/LONG/99%；本批无 UI/模型，不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

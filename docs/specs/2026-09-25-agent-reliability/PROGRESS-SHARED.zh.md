@@ -605,6 +605,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   全池失步、并发驱逐/池关闭、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/100 seed/LONG/99%
   仍开放，不关闭完整 LIFE/CONC/G0 或共享阶段。
 
+- S-D09-43（LIFE-008/011/024、CONC-014、G0-025/030、A03/A04/A06/A07/A08/A09/A17/A19
+  全池失步与 terminal receipt 重放子断言）：W163 每 seed 让三连接 pool 全部因正式 terminal 写的
+  `SQLITE_FULL` 失步，解除预算后改变连接顺序与调度时长，并发恢复三个独立 Session。恢复正确，
+  但再次提交相同已结算 receipt 因新的 `recorded_at` 被误报 IdempotencyConflict，且称 effect 未决。
+  `record_effect_terminal` 现于同一写事务中保留首次提交时间，再由原精确去重比较全部身份及 owner
+  结果；八类身份/结果/终态变更仍冲突，原 ack 与时间不变。首版载荷 oracle 错误及产品首败分别保留于
+  外部 W163 的 01/02；独立 SQL oracle 列名错误亦保留。修复后 **100/100 seed**、完整重复
+  **20/20 × 100 seed**；独立核对 21 份 SQLite 快照，每份 300 条精确 owner 原因/唯一 Rejected receipt、
+  2,400 条连续事件，重放新增事件为 0。Session Store **76/76**、相邻满盘 **7/7**，fmt/diff 通过。
+  无正式 UI/模型。池关闭/取消与驱逐组合、fsync/WAL 损坏、正式 shutdown、其他平台及完整
+  N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
