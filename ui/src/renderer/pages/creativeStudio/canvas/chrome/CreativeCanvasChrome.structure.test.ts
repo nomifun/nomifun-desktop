@@ -29,7 +29,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(component.includes('props.slots?.canvas')).toBe(true);
     expect(component.includes('props.slots?.left')).toBe(true);
     expect(component.includes('props.slots?.right')).toBe(true);
-    expect(component.includes('props.slots?.bottom')).toBe(true);
+    expect(component.includes('props.slots?.bottom')).toBe(false);
   });
 
   test('emits actions without persistence, API, model, or fake-asset logic', () => {
@@ -42,7 +42,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
       'onRedo',
       'onLeftViewChange',
       'onRightViewChange',
-      'onBottomViewChange',
     ]) {
       expect(types.includes(callback)).toBe(true);
     }
@@ -61,6 +60,7 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     expect(types.includes('onFitView')).toBe(false);
     expect(types.includes('onToggleMiniMap')).toBe(false);
     expect(types.includes('isMiniMapOpen')).toBe(false);
+    expect(types.includes('onBottomViewChange')).toBe(false);
   });
 
   test('keeps the canonical background vocabulary without a legacy fourth mode', () => {
@@ -140,6 +140,6 @@ describe('CreativeCanvasChrome architecture boundaries', () => {
     );
     expect(/\.topPrimaryActions,[\s\S]*?\.topActions\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
     expect(/\.leftPanel\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
-    expect(/\.bottomPanel\s*\{[\s\S]*?box-shadow:\s*none;/.test(css)).toBe(true);
+    expect(css.includes('.bottomPanel')).toBe(false);
   });
 });

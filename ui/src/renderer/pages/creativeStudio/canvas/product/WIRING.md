@@ -36,8 +36,10 @@ the retained canvas has no dependency on an independent generation page or its
 history controller. The resource boundary supplies `resource-page-portal-root`
 without a second product sidebar.
 
-Panel open/view changes call the Editor's canonical `setPanels` port; saved
-width/height values also drive the product layout. Properties dispatch the
+Visible panel open/view changes call the Editor's canonical `setPanels` port;
+the saved right-panel width drives the product layout. The v1 document's retired
+bottom-panel state remains compatibility-only and is ignored by the renderer.
+Properties dispatch the
 type-safe core `node/update` command and therefore participate in normal undo,
 CAS save, conflict, and reload behavior. Background changes use the same CAS
 port. The right-side Agent uses the owner-only Creative Studio session resolver,

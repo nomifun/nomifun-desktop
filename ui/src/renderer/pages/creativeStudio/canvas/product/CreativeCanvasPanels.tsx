@@ -10,10 +10,8 @@ import {
   Info,
   Lock,
   Pic,
-  Redo,
   Robot,
   Timeline,
-  Undo,
   VideoTwo,
   Voice,
   Workbench,
@@ -1148,93 +1146,6 @@ export const CreativeCanvasPropertiesPanel: React.FC<CreativeCanvasPropertiesPan
           );
         })()
       )}
-    </section>
-  );
-};
-
-export interface CreativeCanvasHistoryPanelProps {
-  state: CanvasState;
-  onUndo(): void;
-  onRedo(): void;
-  className?: string;
-}
-
-/** Shows only reducer snapshot counts; no fabricated action names or timestamps. */
-export const CreativeCanvasHistoryPanel: React.FC<CreativeCanvasHistoryPanelProps> = ({
-  state,
-  onUndo,
-  onRedo,
-  className,
-}) => {
-  const { t } = useTranslation();
-  return (
-    <section
-      className={classNames(styles.panel, styles.historyPanel, className)}
-      data-canvas-product-panel='history'
-      aria-label={t('creativeStudio.canvas.history.label', {
-        defaultValue: '编辑历史',
-      })}
-    >
-      <header className={styles.panelHeader}>
-        <div>
-          <h2>
-            {t('creativeStudio.canvas.history.title', {
-              defaultValue: '编辑历史',
-            })}
-          </h2>
-          <p>
-            {t('creativeStudio.canvas.history.subtitle', {
-              defaultValue: '当前会话的 reducer 快照',
-            })}
-          </p>
-        </div>
-      </header>
-      <div className={styles.historySummary}>
-        <div>
-          <span>
-            {t('creativeStudio.canvas.history.undoable', {
-              defaultValue: '可撤销',
-            })}
-          </span>
-          <strong>{state.history.past.length}</strong>
-        </div>
-        <div>
-          <span>
-            {t('creativeStudio.canvas.history.redoable', {
-              defaultValue: '可重做',
-            })}
-          </span>
-          <strong>{state.history.future.length}</strong>
-        </div>
-        <div className={styles.historyActions}>
-          <button
-            type='button'
-            disabled={state.history.past.length === 0}
-            onClick={onUndo}
-          >
-            <Undo {...iconProps} />
-            {t('creativeStudio.canvas.history.undo', {
-              defaultValue: '撤销',
-            })}
-          </button>
-          <button
-            type='button'
-            disabled={state.history.future.length === 0}
-            onClick={onRedo}
-          >
-            <Redo {...iconProps} />
-            {t('creativeStudio.canvas.history.redo', {
-              defaultValue: '重做',
-            })}
-          </button>
-        </div>
-      </div>
-      <p className={styles.historyDisclosure}>
-        {t('creativeStudio.canvas.history.disclosure', {
-          defaultValue:
-            '核心只保存文档快照，没有操作名称和时间戳；本面板不会臆造历史记录。',
-        })}
-      </p>
     </section>
   );
 };

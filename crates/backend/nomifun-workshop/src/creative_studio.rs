@@ -1296,6 +1296,7 @@ pub struct CreativeChatPendingTurn {
 pub struct CreativePanels {
     pub left: CreativeLeftPanel,
     pub right: CreativeRightPanel,
+    /// Deprecated v1 compatibility field. Current Canvas renderers ignore it.
     pub bottom: CreativeBottomPanel,
 }
 

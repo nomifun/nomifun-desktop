@@ -324,6 +324,7 @@ export interface CreativeStudioPanelState {
     width: number;
     activeView: CreativeRightPanelView;
   };
+  /** Deprecated v1 compatibility field. The Canvas renderer intentionally ignores it. */
   bottom: {
     open: boolean;
     height: number;
