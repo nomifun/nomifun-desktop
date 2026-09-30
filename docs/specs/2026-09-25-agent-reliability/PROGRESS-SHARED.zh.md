@@ -626,6 +626,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   terminal 身份/删除 fence **2/2**，fmt/diff 通过。无正式 UI/模型；confirmed outcome 完整矩阵、
   真实外部 owner、池关闭/取消、正式 shutdown、其他平台和完整 N3/LONG/99% 仍开放。
 
+- S-D09-45（LIFE-015/019/029、FILE-038、A04/A06/A11/A13/A17/A19 Desktop shutdown 顺序
+  子断言）：W165 用正式 `DesktopServer`、真实 TCP provider/产品 API/Runtime/FileService，在唯一写入
+  Returned 后保留活动模型流，再走完整 `shutdown_all`。首次及 **20/20**：流释放、唯一 cancelled、
+  Returned/文件字节保留、listener 关闭，重复 shutdown 不增事件；21 个独立 DB/文件核对通过。
+  正式 Tauri 1280×832、隔离 data/work/profile 的三个 UI 回合另保留：一次有效隐藏/单实例再显示时，
+  同一 Turn/模型流继续且没有新调用/effect；全部三次写入最终保留，暂停回合经正式结束按钮取消。
+  provider 的正常 120 秒超时、过晚停止导致的 stale UI index、夹具借用编译失败/未注册测试目标均保留，
+  不计作 UI N3/完整退出通过。新增仅为最小回归及等待流夹具，无产品修复/真实模型。工具未暴露托盘
+  窗口，托盘退出仍缺夹具；隔离 GUI 的最终强制进程清理单列，不代替 graceful shutdown。满盘/IO fault
+  下 shutdown、真实子进程、其他角色/平台及完整 N3/100 seed/LONG/99% 仍开放，不关闭共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
