@@ -244,6 +244,8 @@ export interface CreativeCanvasNodeDataByKind {
 interface CreativeCanvasNodeBase<K extends CreativeCanvasNodeKind> {
   id: string;
   type: K;
+  /** User-defined label shown above the node; absent keeps the derived fallback name. */
+  name?: string;
   position: CreativePoint;
   size: CreativeSize;
   groupId: string | null;

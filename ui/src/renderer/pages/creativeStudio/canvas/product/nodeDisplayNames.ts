@@ -34,7 +34,13 @@ export function canvasNodeDisplayNames(
       : node.type === 'audio' || node.type === 'timeline' || node.type === 'group'
         ? node.data.title
         : '';
-    names.set(node.id, asset?.title.trim() || localName.trim() || `${t(KIND_LABELS[node.type])}${ordinal}`);
+    names.set(
+      node.id,
+      node.name?.trim() ||
+        asset?.title.trim() ||
+        localName.trim() ||
+        `${t(KIND_LABELS[node.type])}${ordinal}`
+    );
   }
   return names;
 }

@@ -10,10 +10,11 @@ const t = ((key: string) => ({ text: '文本', image: '图片', video: '视频',
 test('numbers node kinds independently and uses a real filename when available', () => {
   const text = testNode('text', 1), image = testNode('image', 2), second = testNode('image', 3);
   image.data.assetId = 'asset';
+  image.name = '主视觉';
   image.zIndex = 999;
   const nodes = [text, image, second, testNode('text', 4), testNode('video', 5)];
   const names = canvasNodeDisplayNames(nodes, new Map([['asset', { title: 'portrait.png' } as CreativeAsset]]), t);
-  expect([...names.values()]).toEqual(['文本1', 'portrait.png', '图片2', '文本2', '视频1']);
+  expect([...names.values()]).toEqual(['文本1', '主视觉', '图片2', '文本2', '视频1']);
 });
 test('empty media nodes start square while the timeline uses its editing layout', () => {
   const state = createInitialCanvasState();
