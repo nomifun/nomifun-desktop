@@ -17,7 +17,7 @@
 | C04 文件与步骤结果 | M01-02/M03 文件原子性、权限和真实 receipt 回归 | MAC-B 连续写改/复制移动/回读/hash/精确删除，最终字节与回答一致 |
 | C05 进程与停止 | M01-04 正式 start/poll/cancel；M06-01～09 精确 owner/清理 fence | MAC-B 交互 stdin/close 与长 helper/后代停止；不继续组合穷举启动故障 |
 | C06 过程与交付真实性 | M01-04 取消成功投影、M02 completion；M04-26/27 正式暂停/取消 | 在 MAC-A/B/C 同次核对 UI/API/canonical、错误类别、实际结果与完成证据 |
-| C07 连续会话与纠正 | M02 Session/steering/Skill、native recovery；M04-26 页外 pause | MAC-C 追加纠正、一次实际 compaction、取消冷读；组件不替代正式会话 |
+| C07 连续会话与纠正 | M02/M04-26；MAC-A-01 已修固定开销反复压缩及精确收据丢失，正式修后完成链有证据 | MAC-C 追加纠正/取消冷读及当前命令首发仍待验，不由组件或单样本代替 |
 | C08 模型协议接合 | M01/M02 正式 StepFun → 实际 owner；Schema/decoder/预算护栏 | 与 MAC-A/B/C 同次核对原生 tool 参数和结果回配，不另跑 wire-only 扩样 |
 
 以上是候选复用，不代表三组综合任务已通过。先核对原始断言、制品和相关源码差异；只有受变更影响、
@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | 待补综合正式任务，优先执行；已有单项按原构建复用，不能拼成整组 PASS |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-01 首轮限额暂停，修后完成但保留 not_started 和退出清理失败；完整首发及逐项证据仍待修/验，不记整组 PASS |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1192,3 +1192,25 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 证据 `2026-09-30/macos/m04-live-terminal/`；该 live 正向任务为 transport 阻断，M04-23 terminal、
   真实模型效率/N3/20/99%、其他角色/平台与旧 MM retry spinner 仍开放；本批没有新公共产品根因，
   不改共享进度或 Windows 结果，不关闭完整 Case、M04 或阶段二、三。
+
+- **MAC-A-01 command / compaction continuity**（C01/C02/C03/C06/C07/C08；`CTRL-006`、
+  `ACOD-017` 等对应子断言）：用户切网后同域 HTTPS 恢复；原 transport 首败未覆盖。macOS 26.6.2 /
+  原生 arm64 / APFS，官方 `coding.codex`、隔离 Session/work、现有加密 StepFun Plan / `step-3.7-flash`。
+  首轮及独立修后轮各冻结 **1 Session / 16 上游请求（含摘要）/ 4096 output tokens / 360 秒窗口**。
+- 首轮 `run-002` 实际 **16 requests / 687 events**，三个 command 整行字面形态被真实 owner 证明
+  not_started；两个指定测试各只执行一次、exit **0/1**，读搜和 Git 已有真实结果，但三次压缩只保留
+  accepted input、零原工具收据，随后重复检查。fixture cap 触发 `EXECUTION_MODEL_RATE_LIMITED` /
+  `cleanup_proven=true`，不是供应商实际限流或余额证据；正式 UI 结束后 cancelled/head ready。
+- 公共根因/修复见 **C07-01**：固定 instructions/schema 本身超过软字节触发点时反复压缩，另以最大
+  摘要预留丢弃实际放得下的已结算交换。最小反例首败 `run-003` 保留；现只调整可压缩历史余量，并按
+  实际摘要保留有界完整后缀，原 token/byte/message/调用上限及失败/freshness/authority 语义不变。
+  压缩定向 **15/15**、Runtime **200/200**、fixture **5/5**、正式 Tauri build 和 deep/strict 验签通过。
+- 修后 App `b366fe1f091d…` 的 `run-006` 实际 **11 requests / 403 events**，两次压缩分别保留精确
+  exit-1 原收据及 plan 更新；不再重复两个测试，`report_completion` 接受、UI 披露 exit **0/1** 和历史
+  `2 tool errors / 1 command failure`，canonical completed/head ready。仍有 **1 not_started**，因此
+  只验证修后压缩/完成链，不记首发零错误或完整 MAC-A PASS；cwd/逐项 evidence 映射仍需独立核对。
+- 两轮 **7/7** 原件 hash、原 dirty Git/HEAD 均不变，禁跑哨兵不存在，DB/备份 `ok`，凭据 exact
+  match **0**；请求/SSE/事件/UI/数据库在 `2026-10-01/macos/mac-a-observe/`。修后正常 App 退出另
+  **30 秒 backend cleanup timeout**，TERM 后仍活；核对 exact PID/executable 后 KILL，最终 owned
+  App/Helper/fixture/listener **0**。原超时与人工清理记录保留，**不算产品清理通过**，列为 C05 接续。
+  不改 Windows 结果，不扩模型 context 额度或权限；首发形态、退出等待、MAC-A N3、MAC-B/C 仍开放。
