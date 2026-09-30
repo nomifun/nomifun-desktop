@@ -1624,6 +1624,20 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   其他 fork callback、正式 Tauri/父死亡与 sleep/wake、未知恢复、其他平台/角色及完整 Case/统计
   仍开放；Linux/Windows 分支不增加该初始化，也不改写已有 Windows 验收结果。
 
+- **S-D04-36**（`PROC-040/050`、A08/A11/A13/A19，Unix 已 exec 的 commit failure）：M06-06
+  首败证明 native transaction 握手错误已转交底层清理器，但 Supervisor 丢失该 owner/预留，
+  shutdown 在 PID 未回收时空报告完成。现已执行 transaction 的错误携带 cleanup-only owner，
+  复用原 Session retirement；startup failure 与机器回收证明分开，不发布可用进程 handle，
+  普通错误保留原 code/PID/reap，shutdown 保留取消优先及原 owner 报告。standalone raw/drop 不变。
+- 清理证明只在精确 direct-child reap + group quiescence 时产生；失去 group anchor 仍为未证明。
+  中间收据 **2/4** 两次首败另发现普通退出等待覆盖了历史 cleanup 诊断，已保留并修复；最终
+  收据携带原握手错误和最近实际诊断，而非吞错换 PASS。macOS Pipe/PTY 四场景 **84/84**，
+  独立 marker/错误/报告 **84/84**、物理 PID 消失 **168/168**，fallback 0；anchor 负向 **1/1**、
+  Runtime **162/162**、registry **13/13**、boundary/fmt/diff 通过。证据
+  `2026-09-30/macos/m06-commit-failure/`，付费模型 0。仅关闭该窗口；caller-drop/握手失败组合、
+  pre-exec deferred cleanup、其他 transfer failure、worker panic/未知恢复、Linux/Windows 原生、
+  正式 Tauri/更多角色及完整 Case/长期统计仍开放，Windows 原验收未改写。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
