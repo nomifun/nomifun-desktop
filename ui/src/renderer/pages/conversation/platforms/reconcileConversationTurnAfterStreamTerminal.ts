@@ -82,7 +82,6 @@ export const reconcileConversationAuthoritativeRuntime = async (
   }: AuthoritativeRuntimeReconciliationOptions
 ): Promise<boolean> => {
   let attempt = 0;
-  let pendingUnprovenPause: ReturnType<typeof getConversationPauseNotice> = null;
   while (retryForever || attempt < delaysMs.length) {
     if (!isCurrent()) return false;
     const delayMs = terminalReconcileDelayForAttempt(attempt, delaysMs);
@@ -99,25 +98,11 @@ export const reconcileConversationAuthoritativeRuntime = async (
         queryTimeoutMs
       );
       if (!isCurrent()) return false;
-      const pause = getConversationPauseNotice(conversation);
-      if (pause) {
-        const sameUnprovenPause = pendingUnprovenPause != null
-          && pendingUnprovenPause.turnId === pause.turnId
-          && pendingUnprovenPause.reason === pause.reason
-          && pendingUnprovenPause.pausedAt === pause.pausedAt;
-        const finalBoundedAttempt = !retryForever && attempt >= delaysMs.length;
-        if (pause.cleanupProven || sameUnprovenPause || finalBoundedAttempt) {
-          onPaused?.(conversation!);
-          // Pause ends this stream, but never releases the turn or its queue.
-          return false;
-        }
-        // A turn.paused notification can race the canonical pause transaction.
-        // Confirm one unproven snapshot before presenting cleanup as unknown;
-        // an upgraded cleanup-proven snapshot wins on the next authority read.
-        pendingUnprovenPause = pause;
-        continue;
+      if (getConversationPauseNotice(conversation)) {
+        onPaused?.(conversation!);
+        // Pause ends this stream, but never releases the turn or its queue.
+        return false;
       }
-      pendingUnprovenPause = null;
       const runtimeAuthority = getConversationRuntimeAuthority(conversation);
       if (runtimeAuthority === 'processing') {
         if (conversation) onProcessing?.(conversation);
