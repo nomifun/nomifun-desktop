@@ -1283,6 +1283,10 @@ pub(crate) async fn run_turn(
                             state.work_status.observe_deferred();
                         }
                         if failed_process {
+                            let reportable_failure = state.execution_plan.revision == 0
+                                && (!state.execution_plan.needs_replan || state.completion.settled_failure_gate())
+                                && !request.unscoped_tool_hooks
+                                && crate::execution_policy::settled_nonzero_process(binding, &result);
                             adaptive.activate(
                                 crate::adaptive::LONG_HORIZON_MODULES,
                                 crate::AgentRuntimeActivationReason::EffectfulToolCall,
@@ -1298,6 +1302,7 @@ pub(crate) async fn run_turn(
                                 state.execution_plan.needs_replan = true;
                             }
                             state.completion.invalidate();
+                            state.completion.set_settled_failure_gate(reportable_failure);
                         }
                         if process_not_applied {
                             // A typed non-start or rejected control proves this
@@ -1344,6 +1349,11 @@ pub(crate) async fn run_turn(
                             binding, &result, attempted, state.execution_plan.revision,
                         ) || (request.unscoped_tool_hooks && attempted && result.is_error) {
                             state.execution_plan.needs_replan = true;
+                            if !failed_process || request.unscoped_tool_hooks
+                                || !crate::execution_policy::settled_nonzero_process(binding, &result)
+                            {
+                                state.completion.set_settled_failure_gate(false);
+                            }
                             // Expose the recovery control before asking the
                             // model for another expensive proposed effect.
                             if crate::execution_policy::requires_task_ledger(binding) {
@@ -2104,7 +2114,7 @@ async fn invoke_tool_calls(
         // can be accidentally repeated when the model repairs the batch.
         if cancellation.is_cancelled() { return Err(AgentEngineError::Cancelled); }
         if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
-            completion.invalidate();
+            completion.invalidate_report();
         }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
@@ -3476,6 +3486,7 @@ mod tests {
     #[derive(Default)]
     struct FailedProcessTool {
         calls: std::sync::Mutex<Vec<String>>,
+        is_error: bool,
     }
 
     struct NonStartProcessTool;
@@ -3521,7 +3532,7 @@ mod tests {
                 invocation.call.call_id,
                 json!({"process_id":"failed-process","state":"exited",
                     "exit_code":1,"cleanup":{"reaped":true},"success":false}).to_string(),
-                false,
+                self.is_error,
             ))
         }
     }
@@ -4350,6 +4361,63 @@ mod tests {
             "a root source read must not be deferred by instructions that should already be loaded");
         assert_eq!(tool.instruction_reads.load(Ordering::SeqCst), loaded,
             "the first source read must reuse the pre-model root instruction observation");
+    }
+
+    #[tokio::test]
+    async fn settled_nonzero_can_report_without_reopening_an_optional_plan() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("account", "report_completion", json!({
+                    "summary":"The diagnostic command exited with code 1; no success claim.",
+                    "observed_command_failure_count":1,
+                    "observed_tool_error_count":1,
+                    "criteria":[{"disposition":"unverified","rationale":"The observed diagnostic ended with code 1; no broader verification is claimed."}]
+                })),
+                text_step("No more work is authorized"),
+                text_step("No more work is authorized"),
+            ]),
+            requests: Default::default(),
+        });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), tools.clone())
+            .run_turn(AgentTurnRequest::new(request(), plan, principal(), 0)).await
+            .expect("a truthful settled diagnostic can close its completion account");
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(model.requests.lock().unwrap().len(), 2);
+        assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert!(result.output_text.contains("no success claim"));
+    }
+
+    #[tokio::test]
+    async fn corrected_report_arguments_keep_the_settled_failure_gate() {
+        let report = |count| json!({"summary":"Diagnostic exit 1; no extra effect was run.",
+            "observed_tool_error_count":count, "observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"Only the recorded diagnostic result is disclosed."}]});
+        let model = Arc::new(ObservingModel { requests:Default::default(),
+            steps:std::sync::Mutex::new(vec![
+                control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
+                control_step("wrong-count", "report_completion", report(0)),
+                control_step("correct-count", "report_completion", report(1)),
+                text_step("No more work is authorized"), text_step("No more work is authorized"),
+            ]) });
+        let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file", "workspace.files", "workspace.files/read", AgentEffectClass::ReadOnly, true),
+            tool_binding("exec_command", "workspace.process", "workspace.process/exec", AgentEffectClass::ExternalUncertainEffect, false),
+        ]).unwrap();
+        let result = open_session(model.clone(), tools.clone()).run_turn(
+            AgentTurnRequest::new(request(), plan, principal(), 0)).await.unwrap();
+        assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
+        assert_eq!(model.requests.lock().unwrap().len(), 3);
+        assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
     }
 
     #[tokio::test]

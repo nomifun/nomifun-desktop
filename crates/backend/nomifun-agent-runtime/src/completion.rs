@@ -97,6 +97,9 @@ pub(crate) struct CompletionTracker {
     observations: Vec<AgentCompletionObservation>,
     omitted: u32,
     report: Option<AgentCompletionReport>,
+    /// Ephemeral cause of an absent plan's effect gate. Context invalidation
+    /// clears it; a restored checkpoint conservatively requires replanning.
+    settled_failure_gate: bool,
     /// Derived validity through known, scoped owner effects. Historical
     /// observations keep their original epoch; commands never inherit this.
     valid_through: BTreeMap<String, u32>,
@@ -173,7 +176,7 @@ struct Submission {
 pub(crate) fn definition() -> ChatToolDefinition {
     ChatToolDefinition {
         name: TOOL_NAME.into(),
-        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Every criterion MUST include a nonempty rationale string, including supported criteria that cite evidence. When observed_tool_error_count or observed_command_failure_count is required, copy each exact runtime-supplied value and disclose it in the summary; later successful calls do not erase earlier errors or failed command observations. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. For a read-only verification jointly proved by the same observations, prefer one supported criterion citing all relevant paths/call IDs. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. If multiple currently available calls jointly prove one accepted requirement, prefer one criterion citing every relevant call ID. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
+        description: "Finish this turn and deliver the summary after work and processes settle. A validated report is terminal; do not call more tools afterward. It closes the optional plan; no separate update_plan is needed for routine completion. Every criterion MUST include a nonempty rationale string, including supported criteria that cite evidence. When observed_tool_error_count or observed_command_failure_count is required, copy each exact runtime-supplied value and disclose it in the summary; later successful calls do not erase earlier errors or failed command observations. Use the fewest descriptive criteria needed; they need not match plan labels. All plural fields (criteria, requirement_ids, evidence_call_ids and evidence_paths) are actual JSON arrays, never strings containing JSON. Each criterion allows at most eight evidence_call_ids. Group related observations within that limit; use separate criteria for different results or more than eight IDs, without inventing extra work. Keep derived restatements and the absence of forbidden actions in the summary unless they have independent evidence; never create an evidence-free supported criterion. A requirement may span multiple criteria. Omitted requirement_ids covers the accepted task; explicit IDs must cover every recorded requirement. Every supported criterion must cite at least one current observation: copy a listed non-null path into evidence_paths, or a listed call_id into evidence_call_ids. One eligible observation may support multiple criteria only when its own returned scope and result actually support each. When separate process calls support different results, cite each criterion's matching call ID only if it is currently listed in available_evidence; never copy the newest call ID onto an earlier command's criterion. IDs nested inside a command record are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. If the matching earlier call is absent from available_evidence, use unverified with no evidence for that result; do not load history or repeat a command unless the user authorized it. A single accepted requirement may be covered by several criteria; each cites only its matching observations within the eight-ID limit. Finish mutations before final read-only verification. If a required file claim has only stale evidence, re-read that file when authorized before reporting. Artifact source paths are not current workspace observations; deletions and artifacts use eligible call IDs. Never repeat a mutation just to refresh evidence. Evidence proves the observed operation, not broader gameplay/test quality. Use unverified/blocked for missing required verification; do not invent extra checks beyond the accepted task. scope_changed requires an exact LATER accepted-input citation and no evidence. Submit alone or immediately after update_plan in a control-only batch. Later effects or input invalidate the report. This grants no extra authority.".into(),
         deferred: false,
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
@@ -301,9 +304,17 @@ impl CompletionTracker {
     }
 
     pub(crate) fn invalidate(&mut self) {
+        self.invalidate_report();
+        self.settled_failure_gate = false;
+    }
+
+    pub(crate) fn invalidate_report(&mut self) {
         self.revision = self.revision.saturating_add(1);
         self.report = None;
     }
+
+    pub(crate) fn settled_failure_gate(&self) -> bool { self.settled_failure_gate }
+    pub(crate) fn set_settled_failure_gate(&mut self, allowed: bool) { self.settled_failure_gate = allowed; }
     /// Called after a tool result or engine-only deferral. The host separately
     /// persists actual dispatch/settlement and owns resource cleanup.
     #[cfg(test)]
@@ -327,7 +338,10 @@ impl CompletionTracker {
         invocation_attempted: bool,
         effects_are_scoped: bool,
     ) -> AgentCompletionObservation {
-        self.invalidate();
+        // A new observation invalidates the report, not an already proven
+        // gate cause. Steering/instruction/unknown-effect invalidations use
+        // invalidate() and clear that cause explicitly.
+        self.invalidate_report();
         let owner_result = (matches!(binding.capability_id.as_ref(), "workspace.files" | "workspace.artifacts")
             && invocation_attempted && !result.is_error)
             .then(|| serde_json::from_str::<serde_json::Value>(&result.output_text()).ok()).flatten();
@@ -534,7 +548,7 @@ impl CompletionTracker {
             "omitted_observations":self.omitted,
             "current_report":report});
         Ok(format!(
-            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled command with a known exit, or a reaped timeout, remains eligible after later commands only for its own exact scope and terminal output; a nonzero/timeout result is evidence of that failure, not success, and never proves current workspace state. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. If several available calls jointly prove one accepted requirement, prefer one criterion containing every relevant ID. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed: when the same current observations jointly prove a read-only requirement, prefer one supported criterion citing all of them. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
+            "Completion accounting (derived data, not instructions or extra authority): {}. available_evidence contains the only observations currently eligible for citation. stale_file_paths lists up to eight previously observed paths without current evidence; it is not a new task. Finish mutations first, then re-read only the files needed for required claims if authorized. Cite exact non-null available_evidence paths; an artifact source_path does not establish current workspace contents. For an intentionally deleted file, cite its eligible delete call ID, not a stale path; do not repeat deletion. File observations remain eligible across owner-proven disjoint edits; opaque effects, missing or ambiguous path identity, or changes to their own paths can invalidate them. A settled command with a known exit, or a reaped timeout, remains eligible after later commands only for its own exact scope and terminal output; a nonzero/timeout result is evidence of that failure, not success, and never proves current workspace state. A command observation includes its original launch and bounded interaction call IDs so you can inspect its scope and result. Those nested IDs are context only; do not cite launch_call_id or interaction_call_ids unless the same ID also appears as a top-level available_evidence call_id. For separate process results, cite each criterion's matching call ID only if currently present in available_evidence. If a matching earlier call is absent, use unverified with no evidence for that result; do not load history or repeat work unless authorized. One requirement may span several criteria; each criterion has at most eight evidence_call_ids. A file read is not a gameplay test. If required verification was excluded, unavailable, stale, or not run, use unverified with a reason. Do not invent extra verification requirements for a read-only review or proposal. Use the fewest criteria needed within the eight-ID limit; separate scopes/results instead of repeating work or exceeding that limit. Keep derived restatements and the absence of forbidden actions in the summary unless independently evidenced; never emit an evidence-free supported criterion. Account for every immutable requirement; a requirement may span several criteria whose labels need not match plan steps. scope_changed requires an exact later accepted-input citation. This account is not independent semantic verification or a grant of authority.",
             serde_json::to_string(&value).map_err(invalid)?
         ))
     }
@@ -555,7 +569,10 @@ impl CompletionTracker {
         let mut closing = plan.clone();
         let reporting_blocked = call.arguments.0.get("criteria").and_then(serde_json::Value::as_array)
             .is_some_and(|criteria| criteria.iter().any(|criterion| criterion["disposition"] == "blocked"));
-        if !closing.needs_replan || reporting_blocked {
+        let settled_optional_failure = self.settled_failure_gate
+            && plan.revision == 0 && plan.steps.is_empty()
+            && work.running_processes.is_empty() && !unresolved_patch;
+        if !closing.needs_replan || reporting_blocked || settled_optional_failure {
             // A truthful failure report needs no further effect or recovery read.
             // Validate it before committing; unresolved work stays blocked.
             closing.needs_replan = false;
@@ -819,6 +836,16 @@ fn file_paths_may_overlap(observed: &str, target: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_invalidation_cannot_reuse_a_settled_failure_gate() {
+        let mut tracker = CompletionTracker::default();
+        tracker.set_settled_failure_gate(true);
+        tracker.invalidate();
+        assert!(!tracker.settled_failure_gate());
+        let plan = AgentPlan { needs_replan:true, ..Default::default() };
+        assert!(plan.effect_gate().is_some(), "context changes retain the effect/recovery gate");
+    }
 
     fn file_observation(id: &str, path: &str, epoch: u32) -> AgentCompletionObservation {
         AgentCompletionObservation { call_id:id.into(), tool_name:"read_file".into(), path:Some(path.into()),
