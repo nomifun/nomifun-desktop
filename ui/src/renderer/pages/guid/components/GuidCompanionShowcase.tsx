@@ -170,7 +170,8 @@ export function GuidCompanionShowcaseView({ companions, loading, error, openingI
           const meta = customFigureMetaOf(companion);
           const figureHeight = fitShowcaseFigure(meta?.aspect ?? 1, Math.min(slotWidth - 18, 210), meta ? 216 : 136);
           const selected = selectedId === companion.companion_id;
-          return <div key={`${companion.companion_id}-${collapsed}`} className={collapsed ? styles.compactTile : styles.tile}>
+          return <div key={`${companion.companion_id}-${collapsed}`} className={collapsed ? styles.compactTile : styles.tile}
+            data-selected={collapsed ? selected : undefined}>
             <GuidPopover open={detailId === companion.companion_id}
               onOpenChange={(open) => { setDetailId(open ? companion.companion_id : null); if (open) setSelectedId(companion.companion_id); }}
               label={companion.name} pressed={selected} placement={collapsed ? 'top' : 'right-start'} anchorToFigure={!collapsed}
