@@ -5,7 +5,7 @@
  */
 
 import { Dropdown } from '@arco-design/web-react';
-import { Delete, Download, EditTwo, MoreOne, PreviewOpen } from '@icon-park/react';
+import { Delete, Download, EditTwo, More, PreviewOpen } from '@icon-park/react';
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
@@ -136,7 +136,7 @@ const CreativeAssetActionsMenu: React.FC<CreativeAssetActionsMenuProps> = ({
           }
         }}
       >
-        <MoreOne theme='outline' size={18} fill='currentColor' strokeWidth={3} />
+        <More theme='outline' size={18} fill='currentColor' strokeWidth={3} />
       </button>
     </Dropdown>
   );
