@@ -880,12 +880,25 @@ const NODE_KINDS: readonly CreativeCanvasNodeKind[] = [
 const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
-  exactKeys(record, ['id', 'type', 'position', 'size', 'groupId', 'zIndex', 'locked', 'data'], [], path, code);
+  exactKeys(
+    record,
+    ['id', 'type', 'position', 'size', 'groupId', 'zIndex', 'locked', 'data'],
+    ['name'],
+    path,
+    code
+  );
   const type = asLiteral(record.type, NODE_KINDS, `${path}.type`, code);
   const position = asRecord(record.position, `${path}.position`, code);
   exactKeys(position, ['x', 'y'], [], `${path}.position`, code);
+  const name = record.name === undefined
+    ? undefined
+    : asString(record.name, `${path}.name`, code, { maxLength: 80 });
+  if (name !== undefined && name !== name.trim()) {
+    fail(code, `${path}.name`, 'trimmed non-empty string <= 80 chars');
+  }
   const base = {
     id: asId(record.id, `${path}.id`, code),
+    ...(name === undefined ? {} : { name }),
     position: {
       x: asNumber(position.x, `${path}.position.x`, code),
       y: asNumber(position.y, `${path}.position.y`, code),

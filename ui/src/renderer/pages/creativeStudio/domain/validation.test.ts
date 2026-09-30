@@ -387,6 +387,7 @@ describe('Creative Studio v1 document contract', () => {
     const group: CreativeCanvasNode = {
       id: 'group-1',
       type: 'group',
+      name: '第一幕节点',
       position: { x: 10, y: 20 },
       size: { width: 640, height: 480 },
       groupId: null,
@@ -447,8 +448,17 @@ describe('Creative Studio v1 document contract', () => {
       ],
     };
 
+    expect(parseCreativeProjectDocument(document).nodes[0]).toEqual(group);
     expect(parseCreativeProjectDocument(document).nodes[1]).toEqual(text);
     expect(parseCreativeProjectDocument(document).nodes[2]).toEqual(image);
+
+    const untrimmedName = structuredClone(document);
+    untrimmedName.nodes[0].name = ' 第一幕节点 ';
+    expectContractError(
+      () => parseCreativeProjectDocument(untrimmedName),
+      'INVALID_DOCUMENT',
+      '$.nodes[0].name'
+    );
 
     const missingTarget = structuredClone(document);
     missingTarget.connections[0].targetNodeId = 'missing';
