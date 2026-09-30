@@ -97,8 +97,10 @@ describe('Creative Canvas Agent context', () => {
   });
 
   test('orders selected nodes before one-hop neighbors and excludes unrelated nodes', () => {
+    const document = fixture();
+    document.nodes[0]!.name = '开场旁白';
     const context = buildCreativeCanvasAgentContext({
-      document: fixture(),
+      document,
       canvasRevision: '7',
       selectedNodeIds: [nodeId(3), nodeId(1), nodeId(3), nodeId(999)],
     });
@@ -109,6 +111,8 @@ describe('Creative Canvas Agent context', () => {
       nodeId(2),
     ]);
     expect(context.nodes.map((node) => node.selected)).toEqual([true, true, false]);
+    expect(context.nodes[0]?.label).toBe('开场旁白');
+    expect(context.nodes[0]?.details.name).toBe('开场旁白');
     expect(context.connections.map((connection) => connection.id)).toEqual([connectionId(1)]);
     expect(context.totalNodeCount).toBe(4);
     expect(context.totalConnectionCount).toBe(2);

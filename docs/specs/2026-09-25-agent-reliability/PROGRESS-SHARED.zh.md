@@ -744,6 +744,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   拒绝，释放后相同remap可执行。startup stale cleanup、Unix最终窗口、rollback check→unlink、
   真IO fault、完整UI/模型/其他平台角色和长期门槛仍开放；不关闭完整Case或共享阶段。
 
+- S-D03-63（ART-001/002/005/007、FILE-038/039、A04/A05/A07/A13/A14/A17/A19 rollback
+  最后名称窗口）：W177 首次 **1/2**，原 helper核对identity后仍按路径unlink；真实POSIX remap
+  置换目标后删除外来对象却返回confirmed。证据根为外部 `2026-09-30/windows/w177-artifact-rollback-window`，
+  首败/磁盘留在 `01-first-product-run`，已有foreign precheck旧码通过。Windows
+  回滚改为pinned Dir相对DELETE/metadata、deny-delete guard，核对同句柄identity后原生删除；
+  保留preexisting foreign拒绝和missing target/unknown分支，未扩大权限。
+  Windows模块 **26/26**、新两项 **20/20 × 2**、42个独立磁盘核对、fmt/diff通过；WSL ext4原
+  模块 **26/26**兼容回归通过，不计Unix新窗口或macOS。失败原源保留、零unowned deletion。
+  startup stale cleanup、Unix stage/rollback check→unlink、真IO fault、完整UI/角色平台和完整
+  长期门槛仍开放，不关闭完整Case或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

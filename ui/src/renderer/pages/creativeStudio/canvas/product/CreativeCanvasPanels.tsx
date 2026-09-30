@@ -97,6 +97,8 @@ export function creativeCanvasNodeDisplayName(
   node: CreativeCanvasUserNode,
   t: TFunction = fallbackTranslate as TFunction
 ): string {
+  const customName = compactText(node.name ?? '');
+  if (customName) return customName;
   switch (node.type) {
     case 'text':
       return (

@@ -112,7 +112,7 @@ const nodeLabel = (
   node: CreativeCanvasNode,
   details: Record<string, CreativeCanvasAgentContextValue>
 ): string => {
-  const candidate = ['title', 'caption', 'text', 'prompt']
+  const candidate = ['name', 'title', 'caption', 'text', 'prompt']
     .map((key) => details[key])
     .find((value): value is string => typeof value === 'string' && Boolean(value));
   if (!candidate) return `${node.type} · ${node.id.slice(0, 8)}`;
@@ -122,7 +122,7 @@ const nodeLabel = (
 
 const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedNode => {
   const details: Record<string, CreativeCanvasAgentContextValue> = {};
-  let truncated = false;
+  let truncated = addText(details, 'name', node.name);
   switch (node.type) {
     case 'text':
       truncated = addText(details, 'text', node.data.text) || truncated;
