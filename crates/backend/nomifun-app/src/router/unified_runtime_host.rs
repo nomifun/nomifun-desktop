@@ -348,6 +348,8 @@ pub(crate) fn factory(
             )
             .map_err(error)?;
             let host = Arc::new_cyclic(|weak| ConversationRuntimeHost {
+                self_reference: weak.clone(),
+                preparation: tokio::sync::Mutex::new(None),
                 session_host,
                 options: options.clone(),
                 binding: binding.clone(),
@@ -397,7 +399,19 @@ struct ActiveTurn {
     assistant_text_by_step: BTreeMap<u16, String>,
 }
 
+struct PreparationFlight {
+    root: String,
+    done: tokio::sync::watch::Receiver<bool>,
+}
+
+struct PreparationCompletion(tokio::sync::watch::Sender<bool>);
+impl Drop for PreparationCompletion {
+    fn drop(&mut self) { self.0.send_replace(true); }
+}
+
 struct ConversationRuntimeHost {
+    self_reference: std::sync::Weak<ConversationRuntimeHost>,
+    preparation: tokio::sync::Mutex<Option<PreparationFlight>>,
     session_host: Arc<super::engine_session_host::EngineSessionHost>,
     options: AgentRuntimeBuildOptions,
     binding: RuntimeBuildBinding,
@@ -462,6 +476,43 @@ impl ConversationRuntimeHost {
         message: &SendMessageData,
         cancellation: CancellationToken,
     ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
+        let mut preparation = self.preparation.lock().await;
+        if preparation.as_ref().is_some_and(|flight| !*flight.done.borrow()) {
+            return Err(error("another Turn preparation still owns admission"));
+        }
+        let host = self.self_reference.upgrade().ok_or_else(|| error("preparation host has closed"))?;
+        let message = message.clone();
+        let (done, receiver) = tokio::sync::watch::channel(false);
+        *preparation = Some(PreparationFlight { root: self.root(&message).to_owned(), done: receiver });
+        // The task retains an in-flight claim even when the driver drops its
+        // waiter. Cleanup joins it before inspecting or releasing ownership.
+        let task = tokio::spawn(async move {
+            let _completion = PreparationCompletion(done);
+            host.admit_preparation_owned(&message, cancellation).await
+        });
+        drop(preparation);
+        task.await.map_err(|error| AppError::Internal(format!("Turn preparation task failed: {error}")))?
+    }
+
+    async fn wait_preparation(&self, root: &str) -> Result<(), AppError> {
+        let mut done = {
+            let preparation = self.preparation.lock().await;
+            let Some(flight) = preparation.as_ref() else { return Ok(()); };
+            if *flight.done.borrow() { return Ok(()); }
+            if flight.root != root { return Err(error("cleanup targets another pending preparation")); }
+            flight.done.clone()
+        };
+        while !*done.borrow() {
+            done.changed().await.map_err(|_| error("preparation owner lost its completion witness"))?;
+        }
+        Ok(())
+    }
+
+    async fn admit_preparation_owned(
+        &self,
+        message: &SendMessageData,
+        cancellation: CancellationToken,
+    ) -> Result<super::engine_session_host::EngineTurnReceipt, AppError> {
         let root = self.root(message);
         let mut admitted = self.session_host.read_turn_receipt(
             &self.options,
@@ -470,12 +521,8 @@ impl ConversationRuntimeHost {
             message,
         ).await?;
         let operation = admitted.operation_id().to_owned();
-        let journal = self.session_host.open_journal(&admitted, cancellation.clone()).await?;
-        if journal.generation() != admitted.admission_epoch() as u64 {
-            admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
-            journal.validate_receipt(&admitted)?;
-        }
-        let epoch = admitted.admission_epoch();
+        let journal = self.session_host.claim_journal(&admitted, cancellation.clone()).await?;
+        let epoch = i64::try_from(journal.generation()).map_err(error)?;
         let mut active = self.active.lock().await;
         if active.is_some() {
             return Err(error("previous turn has not reached its recorded terminal"));
@@ -489,7 +536,7 @@ impl ConversationRuntimeHost {
             journal: journal.clone(),
             cleanup_started: false,
             cleanup_proven: false,
-            cancellation,
+            cancellation: cancellation.clone(),
             event_buffer: Default::default(),
             cleanup_records: Default::default(),
             assistant_text_by_step: BTreeMap::new(),
@@ -498,6 +545,13 @@ impl ConversationRuntimeHost {
         *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
         *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = None;
         drop(active);
+        // Publish the exact journal before the next awaited budget/read so
+        // storage errors and cancellation cannot discard a committed claim.
+        journal.refresh_budget().await?;
+        if cancellation.is_cancelled() { return Ok(admitted); }
+        admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
+        journal.validate_receipt(&admitted)?;
+        if cancellation.is_cancelled() { return Ok(admitted); }
         // EngineKernelSession retains its own partial-open state before any
         // owner can fail, so leaving ActiveTurn installed is intentional.
         self.resources.open_turn(&admitted, journal)?;
@@ -1072,6 +1126,7 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
         let root = self.root(message);
+        self.wait_preparation(root).await?;
         let unstarted = self.unstarted_cancelled_root.lock()
             .map_err(|_| error("unstarted cancellation state poisoned"))?.as_deref() == Some(root);
         if unstarted {

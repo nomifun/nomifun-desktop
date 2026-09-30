@@ -157,6 +157,81 @@ async fn cancellation_receipt_identity_rejects_altered_empty_delivery() {
 }
 
 #[tokio::test]
+async fn claimed_preparation_cancel_keeps_same_cleanup_owner() {
+    claimed_preparation_scenario(true).await;
+}
+
+#[tokio::test]
+async fn claimed_preparation_drop_keeps_same_cleanup_owner() {
+    claimed_preparation_scenario(false).await;
+}
+
+#[tokio::test]
+async fn claimed_preparation_cannot_confirm_another_execution_owner() {
+    let fixture = Fixture::new("claimed-foreign-owner").await;
+    let store = fixture.host.session_host.canonical_store().unwrap();
+    let foreign = uuid::Uuid::now_v7().to_string();
+    let lease = store.claim_native_execution(nomifun_agent_session::NativeExecutionClaim {
+        owner:fixture.host.principal.clone(), agent_session_id:fixture.host.options.conversation_id.clone().into(),
+        operation_id:"cleanup-retry-turn".into(), snapshot:fixture.host.snapshot_ref.clone(),
+        active_set_generation:0, holder:foreign.clone(), expected_fence:0, checkpoint:None,
+    }).await.unwrap();
+    store.cancel_active_turn(&fixture.host.options.conversation_id.clone().into(),
+        "cancel-foreign-execution".into(), "session_api".into()).await.unwrap();
+    let before = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
+    assert!(fixture.host.cleanup_turn(&fixture.message).await.is_err());
+    assert!(fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.is_err());
+    assert!(fixture.host.active.lock().await.is_none());
+    assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before);
+    let actual: (i64, Option<String>, i64) = sqlx::query_as("SELECT execution_generation,execution_owner,execution_fence FROM agent_turns WHERE session_id=?")
+        .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(actual, (lease.generation() as i64, Some(foreign), 0));
+    fixture.assert_settled().await;
+    fixture.finish().await;
+}
+
+async fn claimed_preparation_scenario(canonical_cancel: bool) {
+    use std::{future::Future, task::Poll};
+    let fixture = Fixture::new(if canonical_cancel {"claimed-canonical-cancel"} else {"claimed-driver-drop"}).await;
+    let cancellation = CancellationToken::new();
+    let mut preparation = Box::pin(fixture.host.admit_preparation(&fixture.message, cancellation.clone()));
+    let claimed: (i64, Option<String>) = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let pending = std::future::poll_fn(|context| Poll::Ready(preparation.as_mut().poll(context).is_pending())).await;
+            assert!(pending, "preparation must expose its real database await before caller drop");
+            let claim: (i64, Option<String>) = sqlx::query_as("SELECT execution_generation,execution_owner FROM agent_turns WHERE session_id=?")
+                .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+            if claim.0 > 0 && claim.1.is_some() { break claim; }
+        }
+    }).await.expect("native claim must become visible within the preparation budget");
+    let active_at_claim = fixture.host.active.lock().await.is_some();
+    let store = fixture.host.session_host.canonical_store().unwrap();
+    if canonical_cancel {
+        store.cancel_active_turn(&fixture.host.options.conversation_id.clone().into(),
+            "cancel-during-native-claim".into(), "session_api".into()).await.unwrap();
+    }
+    cancellation.cancel();
+    drop(preparation);
+    println!("CLAIMED_PREPARATION canonical_cancel={canonical_cancel} generation={} active_at_claim={active_at_claim}", claimed.0);
+    fixture.host.cleanup_turn(&fixture.message).await
+        .expect("the original claimed preparation must retain its cleanup owner");
+    fixture.host.record_event(&fixture.message, &AgentEngineEvent::TurnCancelled {model_steps:0}).await.unwrap();
+    fixture.assert_settled().await;
+    let final_claim: (i64, Option<String>, i64) = sqlx::query_as("SELECT execution_generation,execution_owner,execution_fence FROM agent_turns WHERE session_id=?")
+        .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(final_claim.0, claimed.0);
+    assert_eq!(final_claim.1, claimed.1);
+    assert_eq!(final_claim.2, 0, "cleanup must not recover or replace the original execution fence");
+    let claim_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='runtime/execution-claimed'")
+        .bind(&fixture.host.options.conversation_id).fetch_one(fixture.pool()).await.unwrap();
+    assert_eq!(claim_count, 1);
+    let before_repeat = store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap();
+    fixture.host.cleanup_turn(&fixture.message).await.unwrap();
+    assert_eq!(store.current_cursor(&fixture.host.options.conversation_id.clone().into()).await.unwrap(), before_repeat);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn cancellation_receipt_identity_preserves_unopened_attachment_delivery() {
     cancellation_identity_scenario(true).await;
 }
