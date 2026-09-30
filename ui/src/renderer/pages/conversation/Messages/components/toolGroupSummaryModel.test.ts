@@ -21,6 +21,26 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
+  test('separates command exit codes from system failures and retains raw detail', () => {
+    const tools = [
+      tool({ key: 'pass', name: 'exec_command', commandExitCode: 0 }),
+      tool({ key: 'diagnostic', name: 'exec_command', status: 'error', nonFatalFailure: true,
+        commandExitCode: 1, output: 'intentional test failure' }),
+      tool({ key: 'system', name: 'exec_command', status: 'error', output: 'launch failed' }),
+    ];
+    const parts = buildToolReceiptSummaryParts(tools, 'failed');
+    expect(parts.map(({ state, commandExitCode }) => ({ state, commandExitCode }))).toEqual([
+      { state: 'completed', commandExitCode: 0 },
+      { state: 'completed', commandExitCode: 1 },
+      { state: 'failed', commandExitCode: undefined },
+    ]);
+    expect(countNonFatalToolFailures(tools)).toBe(0);
+    const rows = buildToolReceiptDetailRows(tools);
+    expect(rows[1]?.commandExitCode).toBe(1);
+    expect(rows[1]?.output).toBe('intentional test failure');
+    expect(rows[2]?.state).toBe('failed');
+  });
+
   test('counts only exact bounded search results for the dedicated warning summary', () => {
     const tools = [
       tool({ key: 'limited', name: 'search_files', status: 'error', nonFatalFailure: true,

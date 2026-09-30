@@ -21,6 +21,8 @@ export interface NormalizedToolCall {
   kind?: string;
   /** Tool reported an error-like outcome, but it should not fail the turn-level process receipt. */
   nonFatalFailure?: boolean;
+  /** Exit status of a native command whose completion and cleanup are proven. */
+  commandExitCode?: number;
   /** Exact local Runtime result whose data was intentionally withheld at a documented bound. */
   boundedResult?: NormalizedToolBoundedResult;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
@@ -142,6 +144,29 @@ const isOrdinaryShellExit = (name: unknown, status: unknown, output: unknown): b
   );
 };
 
+const nativeProcessToolNames = new Set(['exec_command', 'start_process', 'poll_process']);
+
+const getNativeCommandExitCode = (name: unknown, status: unknown, output: unknown): number | undefined => {
+  if (!nativeProcessToolNames.has(toDisplayText(name).trim())) return undefined;
+  if (status !== 'completed' && status !== 'error') return undefined;
+  try {
+    const receipt = JSON.parse(toDisplayText(output).trim());
+    if (!receipt || receipt.state !== 'exited' || receipt.signal !== null
+      || !Number.isInteger(receipt.exit_code) || receipt.exit_code < 0
+      || typeof receipt.process_id !== 'string' || !receipt.process_id
+      || typeof receipt.output?.text !== 'string'
+      || receipt.success !== (receipt.exit_code === 0)
+      || receipt.cleanup?.reaped !== true
+      || receipt.cleanup.interrupt_attempted !== false
+      || receipt.cleanup.terminate_attempted !== false
+      || receipt.cleanup.force_kill_attempted !== false
+      || !Array.isArray(receipt.cleanup.errors) || receipt.cleanup.errors.length !== 0) return undefined;
+    return receipt.exit_code;
+  } catch {
+    return undefined;
+  }
+};
+
 const directProbeToolTitles = new Set(['read', 'glob', 'grep', 'search', 'find']);
 
 const isExplicitProbeMiss = (name: unknown, output: unknown): boolean => {
@@ -200,12 +225,13 @@ const localRuntimeToolNames = new Set([
   'close_process_stdin', 'resize_process', 'cancel_process',
   'git_status', 'git_diff', 'git_stage', 'git_commit', 'git_push',
   'update_plan', 'report_completion',
+  'search_tool_history', 'read_tool_history', 'load_tool_history',
 ]);
 
 const isRuntimePreflightNotExecuted = (name: unknown, status: unknown, output: unknown): boolean => {
   if (status !== 'error' || !localRuntimeToolNames.has(toDisplayText(name).trim())) return false;
   const text = toDisplayText(output).trimStart();
-  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |The plan needs reconsideration after |Capability Kernel rejected Agent Runtime Tool \(CAPABILITY_UNAVAILABLE\): Process launch failed\. The command field must contain only the executable;)/.test(text);
+  return /^(?:No tools executed: |Operations? not executed: |Requested calls deferred[:;]|Not executed: |Call update_plan with an in_progress step before |Call update_plan alone first; report_completion cannot close a missing or stale plan|The plan needs reconsideration after |Capability Kernel rejected Agent Runtime Tool \(CAPABILITY_UNAVAILABLE\): Process launch failed\. The command field must contain only the executable;)/.test(text);
 };
 
 /**
@@ -218,6 +244,16 @@ const isInvalidArgumentsNotExecuted = (name: unknown, status: unknown, output: u
 
   const toolName = toDisplayText(name).trim();
   const text = toDisplayText(output).trim();
+  if (localRuntimeToolNames.has(toolName)) {
+    try {
+      const rejection = JSON.parse(text);
+      if (rejection?.status === 'not_executed' && rejection.code === 'INVALID_TOOL_ARGUMENTS'
+        && rejection.tool === toolName && Array.isArray(rejection.issues) && rejection.issues.length > 0
+        && typeof rejection.message === 'string' && rejection.message.length > 0) return true;
+    } catch {
+      // Legacy rejections use plain text.
+    }
+  }
   if (!toolName || !text.startsWith(`Invalid arguments for tool '${toolName}':`)) return false;
   if (!text.endsWith(invalidArgumentsNotExecutedSuffix)) return false;
 
@@ -251,7 +287,9 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
   const invalidArgumentsNotExecuted = isInvalidArgumentsNotExecuted(name, status, output);
   const runtimePreflightNotExecuted = !skipped && isRuntimePreflightNotExecuted(name, status, output);
   const searchContextWithheld = isSearchContextWithheld(name, status, output);
+  const commandExitCode = getNativeCommandExitCode(name, status, output);
   const nonFatalFailure = searchContextWithheld
+    || (status === 'error' && commandExitCode !== undefined && commandExitCode !== 0)
     || isOrdinaryShellExit(name, status, output)
     || isOrdinaryDirectProbeFailure(name, status, output);
 
@@ -264,6 +302,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     ...(runtimePreflightNotExecuted ? { notExecutedReason: 'runtime_preflight' as const } : {}),
     ...(searchContextWithheld ? { boundedResult: 'search_context_withheld' as const } : {}),
     ...(nonFatalFailure ? { nonFatalFailure: true } : {}),
+    ...(commandExitCode !== undefined ? { commandExitCode } : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
     output:
