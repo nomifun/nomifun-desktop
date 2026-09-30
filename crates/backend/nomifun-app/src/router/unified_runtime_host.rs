@@ -370,6 +370,8 @@ pub(crate) fn factory(
                 resources: resources.clone(),
                 supervision,
             });
+            #[cfg(test)]
+            reliability_tests::capture_host(&host);
             let model = host.session_host.compose_model_port(host.clone())?;
             let model = resources.wrap_model_middleware(model)?;
             let runtime =
@@ -515,6 +517,15 @@ impl ConversationRuntimeHost {
             else if turn.cleanup_started { EngineJournalWrite::Cleanup }
             else { EngineJournalWrite::Progress };
         turn.journal.append(payload, model_operation.map(str::to_owned), kind).await
+    }
+
+    async fn flush_cleanup_records(&self, turn: &mut ActiveTurn) -> Result<(), AppError> {
+        while let Some(event) = turn.cleanup_records.front() {
+            let payload = serde_json::to_string(event).map_err(error)?;
+            self.append_locked_record(turn, payload, None, false).await?;
+            turn.cleanup_records.pop_front();
+        }
+        Ok(())
     }
 }
 
@@ -884,7 +895,6 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
         );
-        let root = self.root(message);
         let operation = self
             .active
             .lock()
@@ -943,22 +953,6 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                     "turn-final Knowledge write-back could not run"
                 ),
             }
-        }
-        if terminal_event && self.active.lock().await.is_none() {
-            // No canonical receipt could be re-resolved during cleanup. No
-            // Runtime resource was opened, but the Hosted SDK still requires
-            // one explicit terminal acknowledgement instead of quarantining
-            // the transport for a missing in-memory ActiveTurn.
-            *self
-                .last_terminal_root
-                .lock()
-                .map_err(|_| error("terminal root state poisoned"))? = Some(root.to_owned());
-            self.supervision.note_progress(
-                &self.options.conversation_id,
-                operation.as_deref(),
-                nomifun_idmm::IdmmProgressPhase::Terminal,
-            );
-            return Ok(());
         }
         if matches!(event, AgentEngineEvent::TurnInputScope { .. } | AgentEngineEvent::SteeringInputs { .. } | AgentEngineEvent::SteeringDeferred { .. }) {
             return Err(error("control records must be committed by the platform owner"));
@@ -1049,8 +1043,6 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
     }
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
-        use super::engine_journal::EngineJournalWrite;
-
         let root = self.root(message);
         if self.terminal_already_recorded(root)? {
             return Ok(());
@@ -1058,37 +1050,31 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         if self.active.lock().await.is_none() {
             // The shared SDK may select cancellation before polling run_turn.
             // Re-resolve the already accepted root so cleanup/terminal still
-            // use canonical authority. Failure means no Runtime-owned resource
-            // could have been opened, so cleanup remains an idempotent no-op.
-            let _ = self
+            // use canonical authority. Claim failure must remain visible so
+            // a later teardown can retry rather than close a running Turn.
+            self
                 .admit_preparation(message, CancellationToken::new())
-                .await;
+                .await?;
         }
         {
             let mut active = self.active.lock().await;
-            let Some(turn) = active.as_mut() else {
-                return Ok(());
-            };
+            let turn = active.as_mut().ok_or_else(|| error("cleanup has no admitted turn authority"))?;
             if turn.root != root {
                 return Err(error("cleanup targets a different accepted root"));
             }
-            if turn.journal.sequence() == 0 {
-                let started = serde_json::to_string(&AgentEngineEvent::TurnStarted {
+            turn.cleanup_started = true;
+            if turn.journal.sequence() == 0 && turn.cleanup_records.is_empty() {
+                turn.cleanup_records.push_back(AgentEngineEvent::TurnStarted {
                     binding: self.engine_binding.clone(),
                     turn_operation_id: turn.operation.clone().into(),
-                })
-                .map_err(error)?;
-                turn.journal
-                    .append(started, None, EngineJournalWrite::Cleanup)
-                    .await?;
-                let input_scope = serde_json::to_string(&AgentEngineEvent::TurnInputScope {
+                });
+                turn.cleanup_records.push_back(AgentEngineEvent::TurnInputScope {
                     wire_turn_id: turn.wire_id.clone(),
-                })
-                .map_err(error)?;
-                turn.journal
-                    .append(input_scope, None, EngineJournalWrite::Cleanup)
-                    .await?;
+                });
             }
+            // Initialization can commit only its first record. Keep the
+            // remaining exact record independently of the journal sequence.
+            self.flush_cleanup_records(turn).await?;
         }
         // Always attempt owned-effect cleanup even if inbox journaling fails.
         let steering = nomifun_ai_agent::engine_effect_scope::guard_effect_settlement(|| self.close_steering()).await;
@@ -1098,16 +1084,13 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
         // crash between cleanup and terminal publication retains its text.
         let mut pending = Vec::new();
         if let Some(turn) = self.active.lock().await.as_mut() {
-            turn.cleanup_started = true;
             turn.event_buffer.flush(&mut pending);
             turn.cleanup_records.extend(pending);
         }
-        loop {
+        {
             let mut active = self.active.lock().await;
             let turn = active.as_mut().ok_or_else(||error("cleanup lost its active turn authority"))?;
-            let Some(event) = turn.cleanup_records.front() else { break; };
-            self.append_locked_record(turn,serde_json::to_string(event).map_err(error)?,None,false).await?;
-            turn.cleanup_records.pop_front();
+            self.flush_cleanup_records(turn).await?;
         }
         // Joined tool tasks have already persisted every settlement before this cleanup witness.
         self.tools.discard_closed_observations()?;
@@ -1182,6 +1165,10 @@ impl AgentToolInvoker for JoinedTools {
         nomifun_engine_core::EngineToolInvoker::invoke(self.0.as_ref(), invocation, cancellation).await.map_err(Into::into)
     }
 }
+
+#[cfg(test)]
+#[path = "unified_runtime_host_reliability_tests.rs"]
+mod reliability_tests;
 
 #[cfg(test)]
 mod build_identity_tests {

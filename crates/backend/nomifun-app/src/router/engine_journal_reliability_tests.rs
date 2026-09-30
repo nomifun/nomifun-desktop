@@ -18,6 +18,46 @@ fn owner(journal:&EngineTurnJournal) -> nomifun_agent_contracts::PrincipalRef {
 }
 
 #[tokio::test]
+async fn cleanup_retry_preserves_completed_previous_assistant_step() {
+    let (journal, pool) = if let Some(root) = std::env::var_os("NOMIFUN_RELIABILITY_EVIDENCE_DIR") {
+        let data = std::path::PathBuf::from(root).join("previous-assistant-step").join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        test_fixture_at(&data.join("journal.db")).await
+    } else {
+        test_fixture().await
+    };
+    journal.append(serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
+        step: 1, text: "first response".into(),
+    }).unwrap(), None, EngineJournalWrite::Progress).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_previous_completion BEFORE INSERT ON agent_events WHEN NEW.kind='message/completed' BEGIN SELECT RAISE(FAIL,'fixture previous step completion failure'); END")
+        .execute(&pool).await.unwrap();
+    let second = serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
+        step: 2, text: "second response".into(),
+    }).unwrap();
+    let failure = journal.append(second.clone(), None, EngineJournalWrite::Cleanup).await.unwrap_err();
+    assert!(failure.to_string().contains("fixture previous step completion failure"));
+    assert_eq!(journal.sequence(), 1);
+    let before = journal.0.store.current_cursor(&journal.0.session).await.unwrap();
+    assert!(journal.append(serde_json::to_string(&AgentEngineEvent::OutputTextDelta {
+        step: 2, text: "different response".into(),
+    }).unwrap(), None, EngineJournalWrite::Cleanup).await.is_err());
+    assert_eq!(journal.0.store.current_cursor(&journal.0.session).await.unwrap(), before);
+    sqlx::query("DROP TRIGGER reject_previous_completion").execute(&pool).await.unwrap();
+    journal.append(second, None, EngineJournalWrite::Cleanup).await.unwrap();
+    let first_id = canonical_assistant_step_message_id(journal.0.root.as_ref(), 1).unwrap();
+    let completion: Vec<String> = sqlx::query_scalar("SELECT inline_json FROM agent_events WHERE session_id=? AND kind='message/completed' AND correlation_id=?")
+        .bind(journal.0.session.as_ref()).bind(first_id).fetch_all(&pool).await.unwrap();
+    assert_eq!(completion.len(), 1, "cleanup retry lost the previous response completion");
+    let completed: Value = serde_json::from_str(&completion[0]).unwrap();
+    assert_eq!(completed["part_count"], 1);
+    assert_eq!(completed["content_digest"], digest_bytes(b"first response").as_ref());
+    let parts: Vec<String> = sqlx::query_scalar("SELECT json_extract(inline_json,'$.content') FROM agent_events WHERE session_id=? AND kind='message/content-part' ORDER BY seq")
+        .bind(journal.0.session.as_ref()).fetch_all(&pool).await.unwrap();
+    assert_eq!(parts, vec!["first response", "second response"]);
+    assert_eq!(journal.sequence(), 2);
+}
+
+#[tokio::test]
 async fn failed_cleanup_write_allows_only_its_exact_receipt_retry() {
     let (journal,pool)=test_fixture().await;
     let cleanup=json!({"event":"host_cleanup_proven","source":"exact-owner"}).to_string();
