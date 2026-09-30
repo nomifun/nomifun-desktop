@@ -49,7 +49,7 @@ pub(crate) trait PlatformProcess: Send + Sync {
 
 pub(crate) struct SpawnedPlatformProcess {
     pub(crate) owner: Arc<dyn PlatformProcess>,
-    /// A committed native process whose caller-facing IO setup failed.
+    /// A committed native process whose caller-facing setup failed.
     /// The supervisor must retain this exact owner through cleanup before
     /// returning the startup error; it is never a successful user start.
     pub(crate) startup_failure: Option<crate::SpawnFailure>,
@@ -61,6 +61,7 @@ pub(crate) struct StartCancellation {
     native: Arc<windows::StartCancellation>,
     #[cfg(not(windows))]
     native: Arc<std::sync::atomic::AtomicBool>,
+    setup_expired: tokio_util::sync::CancellationToken,
 }
 
 impl StartCancellation {
@@ -70,6 +71,7 @@ impl StartCancellation {
             native: Arc::new(windows::StartCancellation::new()),
             #[cfg(not(windows))]
             native: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            setup_expired: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -85,6 +87,25 @@ impl StartCancellation {
         { self.native.is_cancelled() }
         #[cfg(not(windows))]
         { self.native.load(std::sync::atomic::Ordering::Acquire) }
+    }
+
+    pub(crate) fn setup_expired(&self) -> tokio_util::sync::CancellationToken {
+        self.setup_expired.clone()
+    }
+}
+
+pub(crate) fn setup_deadline_error() -> ProcessError {
+    ProcessError::StartLost {
+        failure: crate::SpawnFailure {
+            code: "spawn_transaction_deadline".to_owned(),
+            message: "Unix spawn transaction exceeded its single setup deadline".to_owned(),
+        },
+        last_known: None,
+        cleanup: crate::CleanupReport {
+            reaped: false,
+            errors: vec!["the supervisor still owns the original startup transaction".to_owned()],
+            ..Default::default()
+        },
     }
 }
 
@@ -106,7 +127,7 @@ pub(crate) async fn spawn_pipe(
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     #[cfg(unix)]
     {
-        unix::spawn_pipe(request, output, cancellation.native).await
+        unix::spawn_pipe(request, output, cancellation.native, cancellation.setup_expired).await
     }
 
     #[cfg(windows)]
@@ -132,7 +153,7 @@ pub(crate) async fn spawn_pty(
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     #[cfg(unix)]
     {
-        unix::spawn_pty(request, output, cols, rows, cancellation.native).await
+        unix::spawn_pty(request, output, cols, rows, cancellation.native, cancellation.setup_expired).await
     }
 
     #[cfg(windows)]
