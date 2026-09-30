@@ -14,6 +14,9 @@ mod browser_frame_input;
 #[cfg(target_os = "macos")]
 #[path = "support/browser_upload_frames.rs"]
 mod browser_upload_frames;
+#[cfg(target_os = "macos")]
+#[path = "support/browser_window_reopen.rs"]
+mod browser_window_reopen;
 #[cfg(not(target_os = "macos"))]
 fn main() { eprintln!("This native fixture requires macOS. Windows uses browser_workspace_smoke."); std::process::exit(2); }
 
@@ -26,6 +29,7 @@ fn main() {
     let report = std::env::var_os("NOMIFUN_CEF_REPORT").map(std::path::PathBuf::from)
         .unwrap_or_else(|| { eprintln!("NOMIFUN_CEF_REPORT is required"); std::process::exit(2) });
     let soak_only = std::env::var_os("NOMIFUN_CEF_SOAK_ONLY").is_some();
+    let window_reopen_only = std::env::var_os("NOMIFUN_CEF_WINDOW_REOPEN_ONLY").is_some();
     std::fs::write(report.with_extension("pid"), std::process::id().to_string()).expect("fixture PID receipt");
     let root = tempfile::Builder::new().prefix("nomi-cef-smoke-").tempdir().expect("disposable CEF profile");
     let data = root.path().to_path_buf();
@@ -96,6 +100,13 @@ fn main() {
     let app = tauri::Builder::default().setup(move |app| {
         tauri::window::WindowBuilder::new(app, "main").title("NomiFun — macOS CEF native conformance")
             .inner_size(1100.0, 720.0).min_inner_size(880.0, 600.0).build()?;
+        if window_reopen_only {
+            let guard = tauri::window::WindowBuilder::new(app, "lifecycle-guard")
+                .title("NomiFun native lifecycle guard")
+                .inner_size(1.0, 1.0)
+                .build()?;
+            guard.hide()?;
+        }
         let engine = setup_engine.get().expect("CEF initialized before app run").clone();
         let handle = app.handle().clone();
         let parent_handle = handle.clone();
@@ -118,6 +129,13 @@ fn main() {
         });
         tauri::async_runtime::spawn(async move {
             let result = async {
+                if window_reopen_only {
+                    return browser_window_reopen::verify(
+                        &engine,
+                        &handle,
+                        &format!("http://{address}"),
+                    ).await;
+                }
                 if soak_only {
                     return verify_runtime_soak(
                         &engine,
