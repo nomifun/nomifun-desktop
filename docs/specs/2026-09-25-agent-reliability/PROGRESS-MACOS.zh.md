@@ -27,11 +27,11 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～21 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen 及正式 packaged Browser UI；live held-cancel/IME、close-to-tray/nested frame 与扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
-| D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015 的本批子断言已验；其余待走查 |
+| D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
 
@@ -879,3 +879,23 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   Browser navigation/input/trusted-page-result 与精确 persistent profile 子断言；真实 StepFun、产品
   close-to-tray renderer attach/detach、nested frame/popup 的正式 UI 以及 release/notarized artifact 仍开放，
   不关闭完整 `BROW-017/MAC-017`、D06 或 M04。
+
+- **M04-22 formal close-to-tray Browser lifecycle**（`BROW-017`、`MAC-017`）：使用另一个 fresh
+  data/Agent/Session `01a0f0bb-b05f-7442-b59f-2fb84bb4ce92`，由正式 signed Tauri UI 提交相同 Browser
+  Turn；native child 已显示页面且 Agent 仍为 running 时点击 macOS 主窗口关闭按钮。产品按既有合同
+  隐藏到 tray 而不退出：CUA inventory 明确 App 仍 running，隐藏期间 Turn 到达 completed/head ready，
+  loopback witness 为 count 1 / exact Unicode text / `trusted=true`。
+- 当前 macOS CUA 没有 `computer.launch_app` 函数，该首次 runner 尝试原样失败且未影响 App；随后按
+  支持的绝对 bundle path 重新取得同一 running App，正式主窗口恢复。重开后 Browser page 精确保留原
+  URL、计数 1、`Agent 主界面真实输入` 和“已收到真实点击”，没有新模型调用或 Effect。随后通过正式
+  Session tool 关闭/重开 Browser panel，renderer detach/reattach 后仍只显示一个 tab 与同一页面状态。
+- reattach 后 0 秒与 5 秒两次独立核对均为 **10 model calls / 148 events / 4 returned Effects / 0
+  unsettled / 1 witness**，无重放或重复 surface；App 日志无 profile/CEF/process-requirement 错误。停止后
+  backend DB 与 Session profile History 均 `ok`，目标 URL 仍只在绑定 profile，最终
+  App/Helper/fixture/listener 为 0。完整证据：
+  `2026-09-30/macos/m04-browser-close-to-tray/run-001-formal/`。
+- 本批未发现产品或共享根因，只提交本页结论。结合 M04-20 的真正 Tauri window 销毁/重建、唯一
+  NSWindow/runtime/tab identity、旧 target/ref fence 与 pending-dialog drain，以及 M04-21 的正式
+  packaged AgentSession/profile，`BROW-017` 与 `MAC-017` 的 macOS 功能验收槽现为 **PASS**。这不关闭
+  其他 Browser Case、完整 D06/M04；真实 StepFun、nested frame/popup 正式 UI、release/notarization 与
+  LONG/99% 仍按各自槽开放。
