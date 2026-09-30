@@ -593,6 +593,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   同一 pool 内多连接同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/LONG/99% 仍开放，
   不关闭完整 LIFE/CONC/G0 或共享阶段。
 
+- S-D09-42（LIFE-006/024、CONC-014、G0-030、A04/A07/A08/A17/A19 同 pool 交错失步连接
+  子断言）：W162 在三连接 production Store pool 内让两条 terminal 写真实命中 `SQLITE_FULL`，
+  保留各自 Pending；解除限制后按坏/健康/坏顺序归还连接，首次重试仍报 non-zero transaction depth。
+  根因是 W157 丢失报错连接所有权后另行扫描，遇首个健康连接即退出，下一次取连接仍可命中坏连接。
+  `begin_write_transaction` 现保留取得的连接，ping 等待排队回滚，再只关闭深度仍非零的连接；同一
+  健康连接直接进入 `BEGIN IMMEDIATE`，有界取得替代连接，业务写事务及错误不重放、不吞掉。
+  两条显式 terminal 重试各归约为唯一 Rejected，健康连接的临时表标记保留。首版 admission 夹具
+  未跨页分配的失败及 terminal 夹具的真实产品首败分别保留于外部 W162；修复后首次及连续
+  **20/20**，Wave2 host **77/77**、Session Store **76/76**，fmt/diff 通过。无正式 UI/模型。
+  全池失步、并发驱逐/池关闭、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/100 seed/LONG/99%
+  仍开放，不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
