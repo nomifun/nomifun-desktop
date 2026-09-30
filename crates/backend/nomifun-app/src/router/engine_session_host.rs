@@ -750,6 +750,17 @@ impl EngineSessionHost {
             || started_payload.get("source_message_id").and_then(serde_json::Value::as_str) != Some(root) {
             return Err(conflict("message differs from its durable accepted root"));
         }
+        let delivery = super::runtime_attachments::delivery(source_payload);
+        let origin = match delivery.get("origin") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(origin)) => Some(origin.as_str()),
+            Some(_) => return Err(conflict("accepted origin is not a string")),
+        };
+        if super::runtime_attachments::references(source_payload)? != message.files
+            || super::runtime_attachments::selected_skills(source_payload)? != message.inject_skills
+            || origin != message.origin.as_deref() {
+            return Err(conflict("delivery metadata differs from its durable accepted root"));
+        }
         let route = session.snapshot.content.chat_route_identity.as_ref()
             .ok_or_else(|| conflict("accepted Session has no exact route"))?;
         let snapshot_value = serde_json::to_value(expected_snapshot).map_err(|error| conflict(&error.to_string()))?;

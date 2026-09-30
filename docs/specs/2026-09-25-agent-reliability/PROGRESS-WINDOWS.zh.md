@@ -2877,6 +2877,20 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖 startup failure/unknown/worker panic、ConPTY 本组真实 start 竞态、正式 Tauri、其他
   平台/角色及完整 N3/100 seed/LONG/99%；不关闭完整 Case 或共享阶段。
 
+### 取消回执附件/技能提示/origin 匹配（W171，基线 `254d3c3f1`）
+
+- S-D09-49 / G0-025、CTRL-018、LIFE-019/029、A03/A06/A09/A10/A14/A17/A19：同一 cancelled
+  root 的 files/inject_skills/origin 改动后，原 cleanup 与 terminal均返回成功；两反例 **0/2** 首败
+  保留于外部 `2026-09-30/windows/w171-cancel-delivery-identity/01-first-product-run`，DB/日志不覆盖。
+- gen0 取消证明复用有界 delivery 解析器，精确比较完整数组/顺序及 origin Option；合法附件引用和
+  origin 经真实 SDK send→cancel→teardown保持原取消，无附件读取、Skill激活、claim或新模型。
+  既有 legacy text-only fixture 载荷保持，explicit 空数组/null 与非空附件/origin独立验证。
+- 修后首次 **2/2**、同构建 **20/20 × 2**，42份独立 SQL 核对原 terminal/source metadata、连续事件、
+  ready head、gen0/无owner、零模型/effect/增量；原清理相邻 **9/9**、fmt/diff通过。日志/DB/源码和
+  binary身份均在外部，单 agent 仅两次定向构建；未跑无关全库或正式 UI。
+- wrapped delivery、非空已选择 Skill、claim 后未安装 ActiveTurn、其他平台/角色和完整
+  N3/100 seed/LONG/99%仍开放；不关闭完整 Case 或共享阶段。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。
