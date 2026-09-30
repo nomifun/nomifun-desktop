@@ -986,6 +986,71 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "explicit 512 MiB publication and complete pagination acceptance"]
+    fn artifact_exact_512_mib_publication_and_pagination() {
+        const EXPECTED: &str = "9acca8e8c22201155389f65abbf6bc9723edc7384ead80503839f49dcc56d767";
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("exact-512-mib"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        let source = workspace.join("source");
+        let file = File::create(&source).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::{IO::DeviceIoControl, Ioctl::FSCTL_SET_SPARSE};
+            let mut returned = 0;
+            let ok = unsafe { DeviceIoControl(file.as_raw_handle(), FSCTL_SET_SPARSE,
+                std::ptr::null(), 0, std::ptr::null_mut(), 0, &mut returned, std::ptr::null_mut()) };
+            assert_ne!(ok, 0, "cannot create sparse boundary source: {}", std::io::Error::last_os_error());
+        }
+        file.set_len(MAX_ARTIFACT_BYTES).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let published = store.publish("source", Some(EXPECTED)).unwrap();
+        assert_eq!(published.size_bytes, MAX_ARTIFACT_BYTES);
+        assert_eq!(published.artifact_id, EXPECTED);
+        assert_eq!(published.sha256, EXPECTED);
+        let before_pages = store.io_counts();
+        let mut offset = 0;
+        let mut pages = 0;
+        let mut whole = Sha256::new();
+        loop {
+            let page = store.read(&published.artifact_id, offset, MAX_ARTIFACT_READ_BYTES).unwrap();
+            assert_eq!(page.offset, offset);
+            assert_eq!(page.size_bytes, MAX_ARTIFACT_BYTES);
+            assert_eq!(page.sha256, EXPECTED);
+            let bytes = base64::engine::general_purpose::STANDARD.decode(page.data_base64).unwrap();
+            assert!(bytes.iter().all(|byte| *byte == 0));
+            assert_eq!(bytes.len(), MAX_ARTIFACT_READ_BYTES);
+            whole.update(&bytes);
+            assert_eq!(page.next_offset, offset + bytes.len() as u64);
+            offset = page.next_offset;
+            pages += 1;
+            if page.complete { break; }
+        }
+        assert_eq!(offset, MAX_ARTIFACT_BYTES);
+        assert_eq!(pages, 512);
+        assert_eq!(format!("{:x}", whole.finalize()), EXPECTED);
+        let after_pages = store.io_counts();
+        assert_eq!(before_pages.0, after_pages.0, "cached pages must not repeat a full verification");
+        assert_eq!(after_pages.1 - before_pages.1, MAX_ARTIFACT_BYTES);
+        let eof = store.read(&published.artifact_id, offset, MAX_ARTIFACT_READ_BYTES).unwrap();
+        assert!(eof.complete && eof.data_base64.is_empty());
+        assert_eq!(eof.next_offset, MAX_ARTIFACT_BYTES);
+        assert_eq!(publication_temp_count(&workspace.join(ARTIFACT_RELATIVE_ROOT)), 0);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "published_bytes":published.size_bytes, "relative_path":published.relative_path,
+            "artifact_id":published.artifact_id, "sha256":published.sha256, "pages":pages,
+            "concatenated_bytes":offset, "full_scan_before_pages":before_pages.0,
+            "full_scan_after_pages":after_pages.0, "page_read_bytes":after_pages.1 - before_pages.1,
+            "eof_empty":true, "remaining_temps":0,
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
     fn artifact_size_admission_rejects_blob_above_512_mib_without_reading() {
         artifact_size_admission(true);
     }
