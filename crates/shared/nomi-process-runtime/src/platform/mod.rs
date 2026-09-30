@@ -49,6 +49,10 @@ pub(crate) trait PlatformProcess: Send + Sync {
 
 pub(crate) struct SpawnedPlatformProcess {
     pub(crate) owner: Arc<dyn PlatformProcess>,
+    /// A committed native process whose caller-facing IO setup failed.
+    /// The supervisor must retain this exact owner through cleanup before
+    /// returning the startup error; it is never a successful user start.
+    pub(crate) startup_failure: Option<crate::SpawnFailure>,
 }
 
 #[derive(Clone)]

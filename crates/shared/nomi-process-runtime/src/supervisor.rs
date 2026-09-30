@@ -335,14 +335,31 @@ impl ProcessSupervisor {
             None => OutputBuffer::with_activity(request.policy.output_limit_bytes, activity),
         });
         let spawned = crate::platform::spawn(request.clone(), output.clone(), cancellation).await?;
-        self.register_reserved(
+        let startup_failure = spawned.startup_failure;
+        let (handle, session) = self.register_reserved(
             request,
             spawned.owner,
             output,
             &mut reservation,
             session_id,
         )
-        .await
+        .await?;
+        if let Some(failure) = startup_failure {
+            let mut last_known = session.snapshot();
+            last_known.state = ProcessState::Lost;
+            let outcome = retire_session(session).await;
+            let cleanup = match outcome {
+                ProcessOutcome::Exited { cleanup, .. }
+                | ProcessOutcome::Cancelled { cleanup, .. }
+                | ProcessOutcome::TimedOut { cleanup, .. }
+                | ProcessOutcome::Lost { cleanup, .. } => cleanup,
+                ProcessOutcome::SpawnFailed(_) => unreachable!("native owner was already committed"),
+            };
+            return Err(ProcessError::StartLost {
+                failure, last_known: Some(last_known), cleanup,
+            });
+        }
+        Ok((handle, session))
     }
 
     #[cfg(test)]
