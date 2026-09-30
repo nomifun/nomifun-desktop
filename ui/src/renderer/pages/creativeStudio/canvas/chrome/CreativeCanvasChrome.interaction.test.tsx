@@ -13,7 +13,6 @@ import React, { useState } from 'react';
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeCanvasChrome from './CreativeCanvasChrome';
 import type {
-  CreativeCanvasBottomView,
   CreativeCanvasChromeProps,
   CreativeCanvasChromeTool,
 } from './types';
@@ -33,16 +32,12 @@ const baseProps = (
   leftView: 'canvas',
   resourceView: null,
   rightView: null,
-  bottomView: null,
   backgroundMenuOpen: false,
   slots: {
     canvas: <div>canvas</div>,
     left: {
       canvas: <div>outline</div>,
       assets: <div>assets</div>,
-    },
-    bottom: {
-      history: <div>HISTORY CONTENT</div>,
     },
   },
   onBackToCanvases: noop,
@@ -56,7 +51,6 @@ const baseProps = (
   onLeftViewChange: noop,
   onResourceViewChange: noop,
   onRightViewChange: noop,
-  onBottomViewChange: noop,
   ...overrides,
 });
 
@@ -194,19 +188,15 @@ describe('CreativeCanvasChrome floating resource rail interaction', () => {
 });
 
 describe('CreativeCanvasChrome top action interactions', () => {
-  test('uses one hand toggle and one top-right entry for the shared bottom panel', () => {
+  test('uses one hand toggle without retired bottom-panel entries', () => {
     const ToolbarHarness: React.FC = () => {
       const [tool, setTool] = useState<CreativeCanvasChromeTool>('select');
-      const [bottomView, setBottomView] =
-        useState<CreativeCanvasBottomView | null>(null);
 
       return (
         <CreativeCanvasChrome
           {...baseProps({
             tool,
-            bottomView,
             onToolChange: setTool,
-            onBottomViewChange: setBottomView,
           })}
         />
       );
@@ -227,6 +217,9 @@ describe('CreativeCanvasChrome top action interactions', () => {
     expect(
       container.querySelector('[aria-label="creativeStudio.canvas.panels.bottom.timeline"]')
     ).toBeNull();
+    expect(
+      container.querySelector('[aria-label="creativeStudio.canvas.panels.bottom.history"]')
+    ).toBeNull();
 
     const panButton = getByRole('button', {
       name: 'creativeStudio.canvas.actions.panTool',
@@ -236,27 +229,6 @@ describe('CreativeCanvasChrome top action interactions', () => {
     expect(panButton.getAttribute('aria-pressed')).toBe('true');
     fireEvent.click(panButton);
     expect(panButton.getAttribute('aria-pressed')).toBe('false');
-
-    const historyButton = getByRole('button', {
-      name: 'creativeStudio.canvas.panels.bottom.history',
-    });
-    expect(historyButton.getAttribute('aria-pressed')).toBe('false');
-    fireEvent.click(historyButton);
-
-    const historyPanel = container.querySelector<HTMLElement>(
-      'section[aria-label="creativeStudio.canvas.panels.bottom.history"]'
-    );
-    expect(historyPanel).not.toBeNull();
-    expect(historyButton.getAttribute('aria-pressed')).toBe('true');
-    expect(historyPanel?.textContent?.includes('HISTORY CONTENT')).toBe(true);
-
-    fireEvent.click(historyButton);
-    expect(
-      container.querySelector(
-        'section[aria-label="creativeStudio.canvas.panels.bottom.history"]'
-      )
-    ).toBeNull();
-    expect(historyButton.getAttribute('aria-pressed')).toBe('false');
   });
 
   test('keeps direct node creation in source order on the side rail', () => {

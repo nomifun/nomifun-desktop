@@ -20,7 +20,6 @@ import {
   creativeCanvasProductSelectionCapabilities,
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
-  withCreativeCanvasBottomView,
   withCreativeCanvasLeftPanelOpen,
   withCreativeCanvasLeftView,
   withCreativeCanvasRightView,
@@ -49,7 +48,7 @@ const asset = (overrides: Partial<CreativeAsset> = {}): CreativeAsset => ({
 });
 
 describe('Creative Canvas product controller helpers', () => {
-  test('projects and updates canonical panel views without losing persisted dimensions', () => {
+  test('projects and updates visible panel views without losing compatibility state', () => {
     const document = createEmptyCreativeProjectDocument(
       '019b0000-0000-7000-8000-000000000001'
     );
@@ -57,18 +56,23 @@ describe('Creative Canvas product controller helpers', () => {
 
     const left = withCreativeCanvasLeftView(initial, 'assets');
     const right = withCreativeCanvasRightView(left, 'properties');
-    const bottom = withCreativeCanvasBottomView(right, 'history');
-    const closed = withCreativeCanvasRightView(bottom, null);
+    const closed = withCreativeCanvasRightView(right, null);
+    const legacyBottomOpen = {
+      ...right,
+      bottom: { ...right.bottom, open: true },
+    };
 
     expect(creativeCanvasProductPanelViews(initial)).toEqual({
       left: 'canvas',
       right: null,
-      bottom: null,
     });
-    expect(creativeCanvasProductPanelViews(bottom)).toEqual({
+    expect(creativeCanvasProductPanelViews(right)).toEqual({
       left: 'assets',
       right: 'properties',
-      bottom: 'history',
+    });
+    expect(creativeCanvasProductPanelViews(legacyBottomOpen)).toEqual({
+      left: 'assets',
+      right: 'properties',
     });
     expect(creativeCanvasProductPanelViews(closed).right).toBeNull();
     expect(closed.right.activeView).toBe('properties');

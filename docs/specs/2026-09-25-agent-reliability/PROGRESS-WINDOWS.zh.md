@@ -2891,6 +2891,34 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - wrapped delivery、非空已选择 Skill、claim 后未安装 ActiveTurn、其他平台/角色和完整
   N3/100 seed/LONG/99%仍开放；不关闭完整 Case 或共享阶段。
 
+### 已 claim 的准备等待方取消与原 owner 收尾（W172，基线 `c5d615d60`）
+
+- S-D09-50 / LIFE-011/013/014/019/029、G0-025/030、A03/A04/A06/A07/A10/A12/A13/A14/A17/A19：
+  原实际 SQLite await 中 generation=5/owner 已持久化但 ActiveTurn 为空；canonical cancel 后
+  caller drop，原 cleanup 无法重新解析 Running authority。首次 **1/2**，日志及 DB保留于外部
+  `2026-09-30/windows/w172-claimed-preparation-cleanup/01-first-product-run`，普通 drop 对照旧码已通过。
+- 宿主持有 prepare task，cleanup 先等完成；原 journal 在后续 budget/receipt await 前安装，
+  取消后只保留清理身份并跳过资源打开，原 root/holder/generation/fence不替换。不同 execution
+  owner 仍拒绝；read/claim 错误、预算、公开 open_journal 和已有恢复入口保持严格行为。
+- 最终 **3/3**、同构建 **20/20 × 3**，独立 SQL **63/63** 验证42个原 owner cleanup witness、
+  21个foreign拒绝、唯一 claim、fence0、ready head/连续事件、零running lease/模型/effect。原清理/
+  metadata相邻 **11/11**，实际 API pause/resume及冷启动恢复 **2/2**，fmt/diff通过；完整证据及
+  binary/源码身份在外部，单 agent仅直接相关构建/检查。
+- preparation panic/commit ack失落、长附件准备与超时、更多恢复并发、正式 UI、其他平台/角色及
+  N3/100 seed/LONG/99%仍开放；不关闭完整 Case 或共享阶段。
+
+### 文件恢复最后名称窗口（W173，基线 `82478c3e3`）
+
+- S-D03-59 / FILE-020/025/039、A05/A13/A14/A17/A19：在 native restore 最后身份检查后尝试
+  原 backup 重命名和外来对象覆盖 backup，真实 POSIX remap 均以sharing violation=32拒绝；
+  同一 remap 在 guard释放后成功，证明夹具能实施竞态。并发创建的foreign hardlink target
+  使no-replace恢复返回AlreadyExists，原 backup与并发对象字节/身份不变。
+- 首次 **2/2**、同构建 **20/20 × 2**，42份独立磁盘/目录项及hardlink身份核对通过；cleanup
+  模块 **4/4**、fmt/diff通过。现有生产实现首次即满足，本批只有最小回归，无新产品FAIL/模型/UI。
+  全部现场、日志、源码/binary身份保留于外部 `2026-09-30/windows/w173-file-recovery-window`。
+- 未覆盖真实IO fault与更多partial restore组合、macOS、完整应用/UI/角色及长期门槛；不关闭
+  完整FILE Case或共享阶段。单agent只做一次小package定向构建，其余复用binary。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。

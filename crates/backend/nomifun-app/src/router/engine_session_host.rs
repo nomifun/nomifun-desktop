@@ -546,6 +546,16 @@ impl EngineSessionHost {
         receipt: &EngineTurnReceipt,
         cancellation: tokio_util::sync::CancellationToken,
     ) -> Result<super::engine_journal::EngineTurnJournal, AppError> {
+        let journal = self.claim_journal(receipt, cancellation).await?;
+        journal.refresh_budget().await?;
+        Ok(journal)
+    }
+
+    pub(super) async fn claim_journal(
+        &self,
+        receipt: &EngineTurnReceipt,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<super::engine_journal::EngineTurnJournal, AppError> {
         use super::engine_journal::EngineTurnJournal;
         if !Arc::ptr_eq(&self.source, &receipt.source) {
             return Err(AppError::Conflict(
@@ -593,7 +603,6 @@ impl EngineSessionHost {
             }
             Err(error) => return Err(AppError::Conflict(format!("Engine execution lease: {error}"))),
         };
-        journal.refresh_budget().await?;
         journals.insert(key, journal.downgrade());
         Ok(journal)
     }
