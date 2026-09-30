@@ -4129,21 +4129,39 @@ mod tests {
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn real_start_shutdown_waits_for_in_flight_owned_spawn() {
-        real_start_shutdown_scenario(false).await;
+        real_start_shutdown_scenario(false, crate::Transport::Pipe).await;
     }
 
     #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn real_start_drop_keeps_shutdown_cleanup_witness() {
-        real_start_shutdown_scenario(true).await;
+        real_start_shutdown_scenario(true, crate::Transport::Pipe).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_pty_start_shutdown_waits_for_in_flight_owned_spawn() {
+        real_start_shutdown_scenario(false, crate::Transport::Pty { cols: 80, rows: 24 }).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_pty_start_drop_keeps_shutdown_cleanup_witness() {
+        real_start_shutdown_scenario(true, crate::Transport::Pty { cols: 80, rows: 24 }).await;
     }
 
     #[cfg(any(unix, windows))]
-    async fn real_start_shutdown_scenario(drop_caller: bool) {
+    async fn real_start_shutdown_scenario(drop_caller: bool, transport: crate::Transport) {
         let temporary = tempfile::tempdir().expect("native start fixture should have a work root");
+        let scenario = match (&transport, drop_caller) {
+            (crate::Transport::Pipe, false) => "retained-caller",
+            (crate::Transport::Pipe, true) => "drop-caller",
+            (crate::Transport::Pty { .. }, false) => "pty-retained-caller",
+            (crate::Transport::Pty { .. }, true) => "pty-drop-caller",
+        };
         let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
             .map(std::path::PathBuf::from)
-            .map(|root| root.join(if drop_caller { "drop-caller" } else { "retained-caller" }));
+            .map(|root| root.join(scenario));
         let directory = evidence.as_deref().unwrap_or(temporary.path());
         std::fs::create_dir_all(directory).expect("native start evidence root should exist");
         let marker = directory.join("owned-start.pid");
@@ -4151,7 +4169,8 @@ mod tests {
             max_sessions: 1,
             reaper_interval: Duration::from_secs(30),
         });
-        let request = native_start_request(directory, &marker);
+        let mut request = native_start_request(directory, &marker);
+        request.transport = transport;
         let expected_owner = request.owner.clone();
         let mut start = Box::pin(supervisor.start(request));
         // Keep the public future unpolled after its first real Pending so the
