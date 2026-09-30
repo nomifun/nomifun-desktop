@@ -531,6 +531,27 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   PORT-012 watcher 丢批/乱序对账、该场景的 WS lag/resync 注入、其他平台及 N3/LONG/99%
   仍开放，不关闭完整 PORT/OBS 或共享阶段。
 
+- S-D09-37（LIFE-003/006/024、FILE-038、G0-029/030、A04/A05/A07/A17/A19 真实磁盘满与
+  journal IO fault 子断言）：W157 以 `PRAGMA page_size=512`+`VACUUM`+`max_page_count`
+  在 canonical Store 的真实写路径产生 SQLITE_FULL（非 mock），并以目录占用
+  `agent.db-journal` 让 rollback-journal 写事务在 journal 创建处拿到真实 CANTOPEN。
+  测试发现真正的产品缺陷：写事务中 SQLITE_FULL 时 SQLite 自动回滚事务，被 drop 的
+  sqlx Transaction 排队的 ROLLBACK 找不到活动事务而失败，连接 worker 的
+  transaction_depth 永远停留在 1——该池化连接此后所有 `begin_with` 都以
+  InvalidSavePointStatement 永久失败，磁盘恢复后重试仍被 `CAPABILITY_UNAVAILABLE
+  （误报为 unsettled 文本）`拒绝。修复：`AgentSessionStore::begin_write_transaction`
+  识别该 desync 错误后探测并剔除失步的池化连接，再重试一次；健康连接经
+  BEGIN IMMEDIATE+rollback 探测后原样归还。五条回归：admission 满盘时
+  CAPABILITY_UNAVAILABLE 且磁盘零文件、零 Effect，恢复后同 key 恰一次执行；
+  owner 已写文件的 success terminal 落库失败保留 Pending 且重放由 fence 拒绝（文件
+  未被二次写），恢复后显式重试结算恰一次；owner 失败 terminal 落库失败保留 Pending
+  与 owner 错误；uncertain terminal 落库失败保留 owner 原因，恢复后进入 Unknown；
+  journal 目录占位下读路径健康、写事务 CANTOPEN，移除后同池恢复恰一次。首败保留
+  （pre-fix 3/4 在恢复重试处失败、报误导性 depth 错误），修复后新增 **5/5**、
+  `agent_wave2_host` 模块 **72/72**、`nomifun-agent-session` lib **76/76**，fmt 通过。
+  fsync 中途故障、WAL 文件级损坏、写锁并发+满盘、正式应用 shutdown 竞态、多连接池
+  拓扑、其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/G0/FILE 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
