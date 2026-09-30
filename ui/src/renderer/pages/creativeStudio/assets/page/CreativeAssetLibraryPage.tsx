@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { creativeAssetClient } from '../client';
 import { subscribeCreativeAssetDeletion } from '../assetDeletion';
+import { saveCreativeAssetAs } from '../saveCreativeAsset';
 import {
   CreateCreativeTextAssetModal,
   CreativeAssetLibrary,
@@ -28,7 +29,6 @@ import {
   CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT,
   EMPTY_CREATIVE_TEXT_ASSET_FORM,
   buildGlobalCreativeAssetQuery,
-  creativeAssetDownloadName,
   creativeAssetEditDraft,
   creativeAssetPageCount,
   creativeAssetPageIsLoaded,
@@ -65,13 +65,13 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
-const downloadAsset = (asset: CreativeAsset): void => {
+const saveAssetAs = async (asset: CreativeAsset): Promise<void> => {
   if (isCreativeAssetDeleted(asset)) return;
-  const anchor = document.createElement('a');
-  anchor.href = asset.originalUrl;
-  anchor.download = creativeAssetDownloadName(asset);
-  anchor.rel = 'noopener noreferrer';
-  anchor.click();
+  try {
+    await saveCreativeAssetAs(asset);
+  } catch (reason) {
+    Message.error(errorText(reason));
+  }
 };
 
 interface EditAssetModalProps {
@@ -465,7 +465,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         }}
         onOpenAsset={setPreviewAsset}
         onEditAsset={openEdit}
-        onDownloadAsset={downloadAsset}
+        onDownloadAsset={saveAssetAs}
         onRemoveAsset={(asset) => {
           if (deleteSubmittingRef.current) return;
           setDeleteError(null);
@@ -491,7 +491,7 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
       <CreativeAssetPreviewModal
         asset={previewAsset}
         locale={locale}
-        onDownload={downloadAsset}
+        onSaveAs={saveAssetAs}
         onClose={() => setPreviewAsset(null)}
       />
 

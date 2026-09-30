@@ -8,6 +8,7 @@ import type {
   CreativeTimelineClip,
   CreativeTimelineNodeData,
 } from '../../domain';
+import { saveBlobAs } from '@/renderer/utils/file/saveAs';
 import { compactTimelineClips, timelineDurationMs } from './timelineModel';
 
 const DEFAULT_EXPORT_FPS = 30;
@@ -585,17 +586,12 @@ export async function exportTimelineComposition(
   }
 }
 
-export function downloadTimelineComposition(
+export async function downloadTimelineComposition(
   result: TimelineCompositionExportResult,
   title: string
-): void {
-  const url = URL.createObjectURL(result.blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `${safeFileName(title)}.${result.extension}`;
-  anchor.rel = 'noopener noreferrer';
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+): Promise<void> {
+  await saveBlobAs(result.blob, {
+    suggestedName: `${safeFileName(title)}.${result.extension}`,
+    mimeType: result.mimeType,
+  });
 }

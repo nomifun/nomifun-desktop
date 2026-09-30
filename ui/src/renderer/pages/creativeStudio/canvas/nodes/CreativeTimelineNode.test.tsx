@@ -391,18 +391,22 @@ describe('CreativeTimelineNode interactions', () => {
     expect(view.getByRole('menuitem', { name: '从资产库添加' })).not.toBeNull();
   });
 
-  test('downloads a composed video result with the timeline title', () => {
-    const originalCreateObjectUrl = URL.createObjectURL;
-    const originalRevokeObjectUrl = URL.revokeObjectURL;
-    const originalAnchorClick = HTMLAnchorElement.prototype.click;
-    let download: { href: string; fileName: string } | null = null;
-    URL.createObjectURL = () => 'blob:timeline-export';
-    URL.revokeObjectURL = () => undefined;
-    HTMLAnchorElement.prototype.click = function click() {
-      download = { href: this.href, fileName: this.download };
+  test('saves a composed video result with the timeline title', async () => {
+    const browserWindow = window as Window & { showSaveFilePicker?: (options: { suggestedName?: string }) => Promise<unknown> };
+    const originalPicker = browserWindow.showSaveFilePicker;
+    let suggestedName: string | undefined;
+    let written: Blob | null = null;
+    browserWindow.showSaveFilePicker = async (options) => {
+      suggestedName = options.suggestedName;
+      return {
+        createWritable: async () => ({
+          write: async (blob: Blob) => { written = blob; },
+          close: async () => undefined,
+        }),
+      };
     };
     try {
-      downloadTimelineComposition({
+      await downloadTimelineComposition({
         blob: new Blob(['video'], { type: 'video/mp4' }),
         mimeType: 'video/mp4',
         extension: 'mp4',
@@ -410,14 +414,11 @@ describe('CreativeTimelineNode interactions', () => {
         height: 720,
         durationMs: 5_000,
       }, '时间线1');
-      expect(download).toEqual({
-        href: 'blob:timeline-export',
-        fileName: '时间线1.mp4',
-      });
+      expect(suggestedName).toBe('时间线1.mp4');
+      expect((written as Blob | null)?.type).toBe('video/mp4');
     } finally {
-      URL.createObjectURL = originalCreateObjectUrl;
-      URL.revokeObjectURL = originalRevokeObjectUrl;
-      HTMLAnchorElement.prototype.click = originalAnchorClick;
+      if (originalPicker) browserWindow.showSaveFilePicker = originalPicker;
+      else delete browserWindow.showSaveFilePicker;
     }
   });
 });

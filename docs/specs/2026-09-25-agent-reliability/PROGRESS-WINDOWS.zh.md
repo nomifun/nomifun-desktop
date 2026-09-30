@@ -2846,6 +2846,41 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖真实 start/shutdown、start future drop、正式 Tauri 正常/强退、ConPTY 父死亡、macOS、
   其他角色及 N3/100 seed/LONG/99%；不关闭完整 PROC/LIFE 或共享阶段。
 
+### pending steering 清理重试与已取消 root（W169，基线 `c3b3dc9ac`）
+
+- S-D09-48 / LIFE-011/019/023/024/029、CTRL-018、A04/A06/A07/A10/A13/A17/A19：三项产品首败
+  是 private/public 正文写失败后原记录丢失，以及 canonical 已取消、SDK 首次 driver poll 前 cancel
+  被 W167 的严格 Running admission 挡住。Cleanup 正文改按 ack 消费原队列；gen0 的取消只读验证
+  同 root/operation、正文、principal/当前及 accepted Snapshot-route、真实 terminal 因果链和 ready
+  head，确认原 Cancelled0，零新 claim/模型/资源。不同 root/正文/步数和 Completed 仍拒绝。
+- 外部 `2026-09-30/windows/w169-steering-cleanup-retry` 的 `01` 三项产品首败/DB、Deferred 空 Vec
+  序列化 oracle 夹具失败和 `02` sqlx 错误映射编译失败分别保留；typed 空 Vec 断言保留原业务事实。
+  Root 独立 oracle 的 partial/Cancelled completion 口径错误日志另留，不计产品失败。
+- 最终新旧 **9/9**、新五项 **20/20 × 5**，独立 SQL **105/105**：63 个正文/Deferred/Cancelled
+  场景、21 个 SDK pre-cancel 零增量场景、21 个 Completed 拒绝；journal **11/11**、build identity
+  **1/1**、fmt/diff/安全复核通过。最终 W169+W170 源组合的正式 Desktop shutdown **2/2**、两份独立
+  DB/文件核对通过；源码及二进制身份在外部记录，完整日志/DB未进 Git。
+- 未覆盖其他消息字段、claim 后尚未安装 ActiveTurn、跨重启/lease、正式 UI、其他平台角色及完整
+  N3/100 seed/LONG/99%；不关闭完整 Case 或共享阶段。
+
+### 原生 start/交付丢弃与关闭 fence（W170，基线 `c3b3dc9ac`）
+
+- S-D04-31 / PROC-039/040/042、CONC-004、A03/A10/A11/A13/A17/A19：原生 await 已创建 child，
+  caller drop 后 shutdown 空报告且 exact handle 仍 live。宿主持有 start worker、准入 read/预留与
+  结果 ACK；未 ACK 同一 Session 继续清理，Windows resume_gate/Unix flag 原生取消和预算保留。
+  中间实现的 quiesce 空 exact fence 后旧 start 继续执行首败另留，最终 public first poll 已取得
+  read_owned/预留并移交 worker，ACK 阶段释放 gate。
+- 外部 `2026-09-30/windows/w170-process-start-shutdown-race` 的 `01` 原始产品首败、`02` 测试
+  借用编译失败、`04-first-quiesce-regression` 引入失败均保留。最终 `05` **5/5**、`06` **20/20 × 5**，
+  独立 PID/磁盘 **105/105**、自有 helper 0；原生取消/deadline/关闭相邻 **11/11**、API **21/21**、
+  WSL Linux lib 单包兼容编译及 fmt/diff/安全复核通过，不计 macOS 验收。
+- 未覆盖 startup failure/unknown/worker panic、ConPTY 本组真实 start 竞态、正式 Tauri、其他
+  平台/角色及完整 N3/100 seed/LONG/99%；不关闭完整 Case 或共享阶段。
+
+执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
+现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
+任务可独立交付且有实际收益时才并发。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

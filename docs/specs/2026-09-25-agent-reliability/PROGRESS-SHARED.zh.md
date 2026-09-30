@@ -670,6 +670,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   pending steering 的局部 flush、commit 后 ack 丢失、跨重启/lease 过期、真实满盘/WAL/fsync、正式 UI、
   其他平台/角色和 N3/100 seed/LONG/99% 仍开放；不关闭完整 LIFE/CONC 或共享阶段。
 
+- S-D09-48（LIFE-011/019/023/024/029、CTRL-018、A04/A06/A07/A10/A13/A17/A19）：W169
+  的 pending steering 关闭路径仍把缓冲正文消费进临时 Vec，private/public 写失败及 pause 写失败后
+  丢失 exact retry 来源；仅 Cleanup 分支改为按 ack 消费原保留队列。另执行 W167 相邻回归：canonical
+  Cancelled 已提交、SDK 首次 driver poll 前取消时，严格 Running admission 拒绝合法收尾。新增只读
+  取消证明，要求同 session/root/operation、正文、principal、frozen route/Snapshot、真实因果链、
+  ready head 及 generation 0；仅确认 Cancelled0，不新 claim 或打开资源。原 Running/不同 root/
+  正文/Completed 拒绝保留。三个产品首败、serde 空 Vec oracle 和编译夹具失败均保留于外部 W169。
+  最终新旧相邻 **9/9**，新五项 **20/20 × 5**；独立 SQLite **105/105**，journal **11/11**、
+  build identity **1/1**、fmt/diff 通过；最终组合 Desktop shutdown **2/2** 与 DB/文件独立核对通过。
+  其他消息字段、claim 后未安装 ActiveTurn、跨重启、正式 UI/其他平台及完整长期门槛仍开放。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生
@@ -1476,6 +1487,16 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   修复后首次 + 20 repeats **21/21**，独立 PID/report **21/21**，6 秒上界、原 poll 唤醒与相同 report
   全满足；普通 shutdown **3/3**，helper 残留 0。证据位于 `2026-09-30/macos/m06-native-shutdown/`；
   该原生子断言通过，正式 Tauri/更多拓扑与完整统计门槛仍开放。
+
+- S-D04-31（PROC-039/040/042、CONC-004、A03/A10/A11/A13/A17/A19）：W170 手动首次 poll
+  命中原生 spawn 的真实 await，PID 标记和精确 OS handle 证明 child 已执行；drop caller 后 shutdown
+  空报告且 child 当时仍活，平台后续 Drop 清理不能替代该时点的证明。启动改为宿主持有的 worker，
+  保留原原生取消、准入租约/预留与结果 ACK；未交付结果仍清理同一 Session，ACK 不持准入锁。
+  中间实现把准入放到 worker 后又被真实 quiesce 反例揭示：空 exact fence 后旧 start 继续执行。
+  该引入失败保留并修为 public 首次 poll 取得 read_owned/预留后连续移交。最终五项首轮及
+  **20/20 × 5**、独立 PID/磁盘 **105/105**、自有 helper 0；直接相邻 **11/11**、API **21/21**，
+  WSL Linux 单包兼容编译与 fmt/diff 通过，未代判 macOS。原生失败/unknown/worker panic 组合、
+  ConPTY 本组真实竞态、正式 Tauri/其他平台角色及 N3/100 seed/LONG/99% 仍开放。证据见外部 W170。
 
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从

@@ -5,7 +5,7 @@
  */
 
 import '../../../../../../test/setup-dom.ts';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -15,6 +15,7 @@ import { cloneTemplateRunAggregate } from '../domain';
 import { IDS, createTemplateRunFixture } from '../domain/testFixtures';
 import TemplateRunCenter from './TemplateRunCenter';
 import type { CreativeAsset } from '../../assets';
+import common from '../../../../services/i18n/locales/en-US/common.json';
 
 afterEach(cleanup);
 
@@ -22,12 +23,12 @@ const testI18n = createInstance();
 testI18n.use(initReactI18next).init({
   lng: 'en-US',
   fallbackLng: 'en-US',
-  resources: { 'en-US': { translation: {} } },
+  resources: { 'en-US': { translation: { common } } },
   interpolation: { escapeValue: false },
 });
 
 describe('Template Run Center', () => {
-  test('renders an available image result while preserving its original link and accessible name', async () => {
+  test('renders an available image result and opens it in the shared preview', async () => {
     const run = createTemplateRunFixture();
     run.record.status = 'succeeded';
     run.record.resultAssetIds = [IDS.asset];
@@ -47,13 +48,15 @@ describe('Template Run Center', () => {
 
     await waitFor(() => expect(view.container.querySelector('img')).not.toBeNull());
     const image = view.container.querySelector('img')!;
-    const link = image.closest('a')!;
+    const trigger = image.closest('button')!;
     expect(image.getAttribute('src')).toBe(originalUrl);
     expect(image.getAttribute('alt')).toBe(`${run.templateSnapshot.metadata.name} result 1`);
-    expect(link.getAttribute('href')).toBe(originalUrl);
-    expect(link.getAttribute('target')).toBe('_blank');
-    expect(link.getAttribute('rel')).toBe('noreferrer');
-    expect(link.getAttribute('title')).toBe('View result 1');
+    expect(trigger.getAttribute('title')).toBe('View result 1');
+    fireEvent.click(trigger);
+    const dialog = await view.findByRole('dialog', { name: 'View image' });
+    expect(dialog.className).toContain('nomifun-modal-fullscreen');
+    expect(view.getAllByRole('img').at(-1)?.getAttribute('src')).toBe(originalUrl);
+    expect(view.getByRole('button', { name: 'Save image as' })).not.toBeNull();
   });
 
   test('renders durable status and recovery while awaiting result metadata', () => {

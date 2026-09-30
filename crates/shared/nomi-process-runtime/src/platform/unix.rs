@@ -345,8 +345,11 @@ impl Drop for StartCancellationGuard {
 pub(super) async fn spawn_pipe(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_pipe_inner(request, output, SpawnOptions::default()).await
+    spawn_inner_with_cancellation(
+        request, output, SpawnOptions::default(), SpawnTransport::Pipe, Some(cancellation),
+    ).await
 }
 
 #[derive(Clone)]
@@ -1634,16 +1637,19 @@ pub(super) async fn spawn_pty(
     output: Arc<OutputBuffer>,
     cols: u16,
     rows: u16,
+    cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_inner(
+    spawn_inner_with_cancellation(
         request,
         output,
         SpawnOptions::default(),
         SpawnTransport::Pty { cols, rows },
+        Some(cancellation),
     )
     .await
 }
 
+#[cfg(test)]
 async fn spawn_pipe_inner(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
@@ -1658,11 +1664,22 @@ enum SpawnTransport {
     Pty { cols: u16, rows: u16 },
 }
 
+#[cfg(test)]
 async fn spawn_inner(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
     options: SpawnOptions,
     transport: SpawnTransport,
+) -> Result<SpawnedPlatformProcess, ProcessError> {
+    spawn_inner_with_cancellation(request, output, options, transport, None).await
+}
+
+async fn spawn_inner_with_cancellation(
+    request: NormalizedProcessRequest,
+    output: Arc<OutputBuffer>,
+    options: SpawnOptions,
+    transport: SpawnTransport,
+    external_cancellation: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     enforce_sandbox(&request)?;
 
@@ -1694,7 +1711,10 @@ async fn spawn_inner(
     let blocking_worker_finished = options.blocking_worker_finished.clone();
     let deadline = Deadline::after(setup_timeout).map_err(protocol_spawn_failed)?;
     let async_deadline = tokio::time::Instant::now() + setup_timeout;
-    let mut cancellation = StartCancellationGuard::new();
+    let mut cancellation = match external_cancellation {
+        Some(cancelled) => StartCancellationGuard { cancelled, armed: true },
+        None => StartCancellationGuard::new(),
+    };
     let worker_cancelled = cancellation.worker_flag();
     let runtime = tokio::runtime::Handle::current();
     let transaction_output = Arc::clone(&output);

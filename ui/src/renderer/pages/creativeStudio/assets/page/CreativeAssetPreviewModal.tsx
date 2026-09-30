@@ -5,7 +5,7 @@
  */
 
 import { Button, Tag } from '@arco-design/web-react';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
@@ -25,7 +25,7 @@ interface CreativeAssetPreviewModalProps {
   asset: CreativeAsset | null;
   locale?: string;
   onClose: () => void;
-  onDownload: (asset: CreativeAsset) => void;
+  onSaveAs: (asset: CreativeAsset) => Promise<void>;
 }
 
 const formatDate = (timestamp: number, locale: string): string => {
@@ -39,9 +39,11 @@ const formatDate = (timestamp: number, locale: string): string => {
 };
 
 const CreativeAssetPreviewModal: React.FC<CreativeAssetPreviewModalProps> = ({
-  asset, locale, onClose, onDownload,
+  asset, locale, onClose, onSaveAs,
 }) => {
   const { t, i18n } = useTranslation();
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setSaving(false), [asset?.id]);
   const title = asset ? creativeAssetDisplayTitle(asset) : '';
   const tags = asset ? creativeAssetTags(asset) : [];
   const collection = asset?.collection?.trim();
@@ -84,8 +86,17 @@ const CreativeAssetPreviewModal: React.FC<CreativeAssetPreviewModalProps> = ({
           footer={(
             <>
               {asset.kind !== 'text' ? (
-                <Button type='primary' disabled={deleted} onClick={() => { if (!deleted) onDownload(asset); }}>
-                  {t('creativeStudio.assets.preview.downloadOriginal', { defaultValue: '下载原始文件' })}
+                <Button
+                  type='primary'
+                  loading={saving}
+                  disabled={deleted || saving}
+                  onClick={() => {
+                    if (deleted || saving) return;
+                    setSaving(true);
+                    void onSaveAs(asset).finally(() => setSaving(false));
+                  }}
+                >
+                  {t('creativeStudio.assets.preview.downloadOriginal', { defaultValue: '原始文件另存为' })}
                 </Button>
               ) : null}
               <Button onClick={onClose}>{t('creativeStudio.assets.preview.close', { defaultValue: '关闭' })}</Button>

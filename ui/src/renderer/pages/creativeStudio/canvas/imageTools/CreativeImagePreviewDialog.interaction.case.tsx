@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { act, cleanup, fireEvent, render, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { useState } from 'react';
@@ -115,28 +115,35 @@ describe('canvas image preview', () => {
     const previewButton = view.getByRole('button', { name: '预览图片' });
     previewButton.focus();
     fireEvent.click(previewButton);
-    const image = await view.findByRole('img', { name: '猫咪原图' });
+    const image = await view.findByAltText('猫咪原图');
     const dialog = view.getByRole('dialog');
     expect(view.getByTestId('canvas-content').contains(dialog)).toBe(false);
     expect(dialog.querySelector('.arco-modal-footer')).toBeNull();
-    expect(dialog.querySelectorAll('[role="button"], button').length).toBe(1);
+    expect(view.getByRole('group', { name: '图片缩放' })).not.toBeNull();
+    expect(within(dialog).getByRole('button', { name: '图片另存为' })).not.toBeNull();
     expect(image.getAttribute('src')).toBe('/original.png');
+    Object.defineProperties(image, { naturalWidth: { value: 1920 }, naturalHeight: { value: 1080 } });
     fireEvent.load(image);
-    const container = image.parentElement!;
-    expect(container.style.transform).toBe('scale(1, 1)');
-    fireEvent.keyDown(view.getByRole('button', { name: 'Close' }), { key: 'ArrowUp' });
-    expect(container.style.transform).toBe('scale(1.1, 1.1)');
-    fireEvent.wheel(image, { deltaY: 100 });
-    expect(container.style.transform).toBe('scale(1, 1)');
-    fireEvent.keyDown(view.getByRole('button', { name: 'Close' }), { key: 'Delete' });
+    const fitButton = view.getByRole('button', { name: '适应窗口' });
+    const fitted = fitButton.textContent;
+    const zoomInButton = view.getByRole('button', { name: '放大图片' });
+    fireEvent.click(zoomInButton);
+    fireEvent.click(zoomInButton);
+    expect(fitButton.textContent).not.toBe(fitted);
+    fireEvent.click(fitButton);
+    expect(fitButton.textContent).toBe(fitted);
+    const closeButton = view.getByRole('button', { name: '关闭图片预览' });
+    fireEvent.keyDown(closeButton, { key: 'Delete' });
     expect(canvasInputs).toBe(0);
-    fireEvent.keyDown(view.getByRole('button', { name: 'Close' }), { key: 'Escape' });
+    fireEvent.keyDown(closeButton, { key: 'Escape' });
     await waitFor(() => expect(view.queryByRole('dialog')).toBeNull());
     await waitFor(() => expect(document.activeElement).toBe(previewButton));
     fireEvent.click(previewButton);
-    const reopened = await view.findByRole('img', { name: '猫咪原图' });
-    expect(reopened.parentElement!.style.transform).toBe('scale(1, 1)');
-    fireEvent.click(view.getByRole('button', { name: 'Close' }));
+    const reopened = await view.findByAltText('猫咪原图');
+    Object.defineProperties(reopened, { naturalWidth: { value: 1920 }, naturalHeight: { value: 1080 } });
+    fireEvent.load(reopened);
+    expect(view.getByRole('button', { name: '适应窗口' }).textContent).toBe(fitted);
+    fireEvent.click(view.getByRole('button', { name: '关闭图片预览' }));
     expect(view.queryByRole('dialog')).toBeNull();
   });
 
@@ -145,11 +152,11 @@ describe('canvas image preview', () => {
     const pending = new Promise<CreativeAsset>((resolve) => { finish = resolve; });
     const view = render(<Harness resolveAsset={() => pending} />);
     fireEvent.click(view.getByRole('button', { name: '预览图片' }));
-    expect(view.getByRole('status').textContent?.includes(common.loading)).toBe(true);
-    fireEvent.click(view.getByRole('button', { name: 'Close' }));
+    expect(view.getByRole('status').textContent?.includes(common.imagePreview.loading)).toBe(true);
+    fireEvent.click(view.getByRole('button', { name: '关闭图片预览' }));
     await act(async () => { finish(asset); await pending; });
     expect(view.queryByRole('dialog')).toBeNull();
-    expect(view.queryByRole('img', { name: '猫咪原图' })).toBeNull();
+    expect(view.queryByAltText('猫咪原图')).toBeNull();
   });
 
   test('recovers from asset lookup and original image loading failures', async () => {
@@ -162,10 +169,10 @@ describe('canvas image preview', () => {
     fireEvent.click(view.getByRole('button', { name: '预览图片' }));
     expect((await view.findByRole('alert')).textContent?.includes('图片加载失败')).toBe(true);
     fireEvent.click(view.getByRole('button', { name: '重试' }));
-    fireEvent.error(await view.findByRole('img', { name: '猫咪原图' }));
+    fireEvent.error(await view.findByAltText('猫咪原图'));
     expect(view.getByRole('alert').textContent?.includes('图片加载失败')).toBe(true);
     fireEvent.click(view.getByRole('button', { name: '重试' }));
-    fireEvent.load(await view.findByRole('img', { name: '猫咪原图' }));
+    fireEvent.load(await view.findByAltText('猫咪原图'));
     expect(view.queryByRole('alert')).toBeNull();
     expect(attempts).toBe(3);
   });

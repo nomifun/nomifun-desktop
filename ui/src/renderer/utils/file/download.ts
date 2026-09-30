@@ -6,6 +6,7 @@
 
 import { ipcBridge } from '@/common';
 import { base64ToBlob, BINARY_MIME_MAP } from './base64';
+import { saveBlobAs } from './saveAs';
 
 function triggerBlobDownload(blob: Blob, file_name: string): void {
   const url = URL.createObjectURL(blob);
@@ -30,7 +31,7 @@ export async function downloadFileFromPath(file_path: string, file_name: string,
   const ext = file_name.split('.').pop()?.toLowerCase() ?? '';
   const mimeType = BINARY_MIME_MAP[ext] ?? 'application/octet-stream';
   const blob = base64ToBlob(dataUrl, mimeType);
-  triggerBlobDownload(blob, file_name);
+  await saveBlobAs(blob, { suggestedName: file_name, mimeType });
 }
 
 /**

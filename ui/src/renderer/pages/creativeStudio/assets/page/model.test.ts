@@ -130,6 +130,8 @@ describe('creative asset library route model', () => {
       kind: 'image',
     } satisfies Pick<CreativeAsset, 'title' | 'mimeType' | 'kind'>;
     expect(creativeAssetDownloadName(asset)).toBe('Hero- 01.jpg');
+    expect(creativeAssetDownloadName({ ...asset, title: 'Hero.jpg' })).toBe('Hero.jpg');
+    expect(creativeAssetDownloadName({ ...asset, title: 'Hero.jpeg' })).toBe('Hero.jpeg');
   });
 
   test('upload queue only reports completion after a real upload resolution action', () => {
