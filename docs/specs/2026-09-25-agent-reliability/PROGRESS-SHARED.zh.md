@@ -670,6 +670,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   pending steering 的局部 flush、commit 后 ack 丢失、跨重启/lease 过期、真实满盘/WAL/fsync、正式 UI、
   其他平台/角色和 N3/100 seed/LONG/99% 仍开放；不关闭完整 LIFE/CONC 或共享阶段。
 
+- S-D09-48（LIFE-011/019/023/024/029、CTRL-018、A04/A06/A07/A10/A13/A17/A19）：W169
+  的 pending steering 关闭路径仍把缓冲正文消费进临时 Vec，private/public 写失败及 pause 写失败后
+  丢失 exact retry 来源；仅 Cleanup 分支改为按 ack 消费原保留队列。另执行 W167 相邻回归：canonical
+  Cancelled 已提交、SDK 首次 driver poll 前取消时，严格 Running admission 拒绝合法收尾。新增只读
+  取消证明，要求同 session/root/operation、正文、principal、frozen route/Snapshot、真实因果链、
+  ready head 及 generation 0；仅确认 Cancelled0，不新 claim 或打开资源。原 Running/不同 root/
+  正文/Completed 拒绝保留。三个产品首败、serde 空 Vec oracle 和编译夹具失败均保留于外部 W169。
+  最终新旧相邻 **9/9**，新五项 **20/20 × 5**；独立 SQLite **105/105**，journal **11/11**、
+  build identity **1/1**、fmt/diff 通过；最终组合 Desktop shutdown **2/2** 与 DB/文件独立核对通过。
+  其他消息字段、claim 后未安装 ActiveTurn、跨重启、正式 UI/其他平台及完整长期门槛仍开放。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

@@ -2846,6 +2846,23 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖真实 start/shutdown、start future drop、正式 Tauri 正常/强退、ConPTY 父死亡、macOS、
   其他角色及 N3/100 seed/LONG/99%；不关闭完整 PROC/LIFE 或共享阶段。
 
+### pending steering 清理重试与已取消 root（W169，基线 `c3b3dc9ac`）
+
+- S-D09-48 / LIFE-011/019/023/024/029、CTRL-018、A04/A06/A07/A10/A13/A17/A19：三项产品首败
+  是 private/public 正文写失败后原记录丢失，以及 canonical 已取消、SDK 首次 driver poll 前 cancel
+  被 W167 的严格 Running admission 挡住。Cleanup 正文改按 ack 消费原队列；gen0 的取消只读验证
+  同 root/operation、正文、principal/当前及 accepted Snapshot-route、真实 terminal 因果链和 ready
+  head，确认原 Cancelled0，零新 claim/模型/资源。不同 root/正文/步数和 Completed 仍拒绝。
+- 外部 `2026-09-30/windows/w169-steering-cleanup-retry` 的 `01` 三项产品首败/DB、Deferred 空 Vec
+  序列化 oracle 夹具失败和 `02` sqlx 错误映射编译失败分别保留；typed 空 Vec 断言保留原业务事实。
+  Root 独立 oracle 的 partial/Cancelled completion 口径错误日志另留，不计产品失败。
+- 最终新旧 **9/9**、新五项 **20/20 × 5**，独立 SQL **105/105**：63 个正文/Deferred/Cancelled
+  场景、21 个 SDK pre-cancel 零增量场景、21 个 Completed 拒绝；journal **11/11**、build identity
+  **1/1**、fmt/diff/安全复核通过。最终 W169+W170 源组合的正式 Desktop shutdown **2/2**、两份独立
+  DB/文件核对通过；源码及二进制身份在外部记录，完整日志/DB未进 Git。
+- 未覆盖其他消息字段、claim 后尚未安装 ActiveTurn、跨重启/lease、正式 UI、其他平台角色及完整
+  N3/100 seed/LONG/99%；不关闭完整 Case 或共享阶段。
+
 ### 原生 start/交付丢弃与关闭 fence（W170，基线 `c3b3dc9ac`）
 
 - S-D04-31 / PROC-039/040/042、CONC-004、A03/A10/A11/A13/A17/A19：原生 await 已创建 child，

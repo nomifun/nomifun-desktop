@@ -366,6 +366,7 @@ pub(crate) fn factory(
                 capability_state: active,
                 active: tokio::sync::Mutex::new(None),
                 last_terminal_root: std::sync::Mutex::new(None),
+                unstarted_cancelled_root: std::sync::Mutex::new(None),
                 tools: tools.clone(),
                 resources: resources.clone(),
                 supervision,
@@ -415,6 +416,7 @@ struct ConversationRuntimeHost {
     capability_state: Arc<SessionCapabilityState>,
     active: tokio::sync::Mutex<Option<ActiveTurn>>,
     last_terminal_root: std::sync::Mutex<Option<String>>,
+    unstarted_cancelled_root: std::sync::Mutex<Option<String>>,
     tools: Arc<JoinedTools>,
     resources: Arc<super::engine_kernel_session::EngineKernelSession>,
     supervision: Arc<dyn nomifun_idmm::IdmmProgressSink>,
@@ -433,6 +435,22 @@ impl ConversationRuntimeHost {
             .lock()
             .map(|last| last.as_deref() == Some(root))
             .map_err(|_| error("terminal root state poisoned"))
+    }
+
+    async fn confirm_unstarted_cancellation(&self, message: &SendMessageData) -> Result<bool, AppError> {
+        // Keep publication of ActiveTurn excluded until the read-only proof
+        // and its local acknowledgement are complete. This opens no resource
+        // and claims no lease; a running or previously claimed Turn cannot
+        // use this cancellation-before-first-poll path.
+        let active = self.active.lock().await;
+        if active.is_some() { return Ok(false); }
+        if !self.session_host.confirm_cancelled_before_execution(
+            &self.options, &self.binding, &self.snapshot_ref, message,
+        ).await? { return Ok(false); }
+        let root = self.root(message).to_owned();
+        *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = Some(root.clone());
+        *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = Some(root);
+        Ok(true)
     }
 
     /// Acquire the canonical receipt/journal and publish in-memory ownership
@@ -478,6 +496,7 @@ impl ConversationRuntimeHost {
         });
         journal.attach_runtime(active.as_ref().expect("published above").cancellation.clone())?;
         *self.last_terminal_root.lock().map_err(|_| error("terminal root state poisoned"))? = None;
+        *self.unstarted_cancelled_root.lock().map_err(|_| error("unstarted cancellation state poisoned"))? = None;
         drop(active);
         // EngineKernelSession retains its own partial-open state before any
         // owner can fail, so leaving ActiveTurn installed is intentional.
@@ -895,6 +914,15 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
                 | AgentEngineEvent::TurnPaused { .. }
                 | AgentEngineEvent::TurnFailed { .. }
         );
+        if terminal_event && self.active.lock().await.is_none() {
+            if matches!(event, AgentEngineEvent::TurnCancelled { model_steps: 0 })
+                && self.confirm_unstarted_cancellation(message).await? {
+                self.supervision.note_progress(&self.options.conversation_id, None,
+                    nomifun_idmm::IdmmProgressPhase::Terminal);
+                return Ok(());
+            }
+            return Err(error("terminal has no admitted Turn or exact unstarted cancellation witness"));
+        }
         let operation = self
             .active
             .lock()
@@ -1044,10 +1072,17 @@ impl UnifiedRuntimeHost for ConversationRuntimeHost {
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
         let root = self.root(message);
+        let unstarted = self.unstarted_cancelled_root.lock()
+            .map_err(|_| error("unstarted cancellation state poisoned"))?.as_deref() == Some(root);
+        if unstarted {
+            return if self.confirm_unstarted_cancellation(message).await? { Ok(()) }
+                else { Err(error("unstarted cancellation no longer matches its durable proof")) };
+        }
         if self.terminal_already_recorded(root)? {
             return Ok(());
         }
         if self.active.lock().await.is_none() {
+            if self.confirm_unstarted_cancellation(message).await? { return Ok(()); }
             // The shared SDK may select cancellation before polling run_turn.
             // Re-resolve the already accepted root so cleanup/terminal still
             // use canonical authority. Claim failure must remain visible so
