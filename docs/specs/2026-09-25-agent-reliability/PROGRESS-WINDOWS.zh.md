@@ -2660,6 +2660,37 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
   （contributor 为 fire-and-forget）、macOS 及 N3/100 seed/LONG/99%；不关闭完整
   FILE-040、PORT-012 或共享阶段。
 
+### 真实磁盘满与 journal IO fault（W157，基线 `9c6cbdf97`）
+
+- S-D09-37 / LIFE-003/006/024、FILE-038、G0-029/030、A04/A05/A07/A17/A19：以
+  `PRAGMA page_size=512`+`VACUUM`+`max_page_count` 在 canonical Store 真实写路径产生
+  SQLITE_FULL（非 mock），并以目录占用 `agent.db-journal` 让 rollback-journal 写事务
+  在 journal 创建处拿到真实 CANTOPEN，读路径不受影响。
+- 发现产品缺陷：写事务中 SQLITE_FULL 使 SQLite 自动回滚事务，被 drop 的 sqlx
+  Transaction 排队的 ROLLBACK 找不到活动事务而失败，连接 worker 的
+  transaction_depth 永久停留在 1——该池化连接此后所有 `begin_with` 均以
+  InvalidSavePointStatement 失败，磁盘恢复后重试仍被 `CAPABILITY_UNAVAILABLE`
+  （误报为 unsettled 文本）拒绝，连接不驱逐就永不恢复。
+- 修复：`AgentSessionStore::begin_write_transaction` 捕获该 desync 错误后探测并
+  `close()` 剔除失步连接（池自动补新连接），再重试一次；健康连接经
+  BEGIN IMMEDIATE+rollback 探测后原样归还。仅扩展该唯一写事务入口，所有
+  admission/terminal/reconcile/普通写共享同一恢复路径，无吞错、无权限放宽。
+- 五条回归：admission 满盘 CAPABILITY_UNAVAILABLE（含真实 “database or disk is
+  full” 原因）且零文件零 Effect，恢复后同 key 恰一次执行；owner 已写文件的
+  success terminal 落库失败保留 Pending、期间重放由 fence 拒绝（文件未二次写）、
+  恢复后显式重试恰一次 Returned；owner 失败 terminal 落库失败保留 Pending 与
+  owner 错误；uncertain terminal 落库失败保留 owner 原因，恢复后进入 Unknown；
+  journal 目录占位下读健康、写 CANTOPEN，移除后同连接池恢复恰一次。
+- **首败已保留**（`phase-2-3\2026-09-29\windows\W157\run-2-prefix-red.log`）：
+  pre-fix 3/4 在“恢复后显式重试”处失败且均报误导性 `non-zero transaction
+  depth`；failed-terminal（只验证满盘时 fence 保 pending）与 journal IO fault
+  两项在旧码上即通过，记录既有正确语义。
+- 修复后新增 **5/5**、`agent_wave2_host` 模块 **72/72**、`nomifun-agent-session`
+  lib **76/76**，`cargo fmt --check` 通过。
+- 未覆盖 fsync 中途故障、WAL 文件级损坏、写锁并发+满盘、正式应用 shutdown
+  竞态、多连接池拓扑下的驱逐路径、macOS 及 N3/100 seed/LONG/99%；不关闭完整
+  LIFE/G0/FILE 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
