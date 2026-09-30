@@ -2963,6 +2963,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - startup stale cleanup、Unix最终check→unlink、rollback名称窗口、真IO fault、完整UI/平台/角色
   及N3/100 seed/LONG/99%仍开放；不关闭完整Case或共享阶段。
 
+### Artifact rollback最后核对→删除窗口（W177，基线 `532f15e63`）
+
+- S-D03-63 / ART-001/002/005/007、FILE-038/039、A04/A05/A07/A13/A14/A17/A19：真实native
+  identity后的POSIX remap把已发布路径置换成foreign对象，旧回滚误删foreign并报confirmed；首次
+  **1/2**，preexisting foreign对照已通过。日志/实际误删现场保留于外部
+  `2026-09-30/windows/w177-artifact-rollback-window/01-first-product-run`。
+- Windows通过相对Dir打开DELETE/metadata且不share delete，持续保留原目标句柄到unlink；
+  identity核对同一handle后原生删除，不再二次解析目标名称。最窄remap以32拒绝，guard释放后
+  同一remap成功；preexisting foreign仍拒绝，missing/unknown判定保持。
+- 模块 **26/26**、新两项 **20/20 × 2**、42份独立磁盘/目录项核对、fmt/diff通过；WSL Ubuntu
+  ext4原模块 **26/26**兼容回归通过，未验证新Unix窗口/代判macOS。无模型/UI；完整现场与源码/
+  binary身份均外部，生产修改仅Windows删除分支与保留原核对handle。
+- startup stale cleanup、Unix stage/rollback check→unlink、更多IO fault、完整应用/UI/角色平台
+  及N3/100 seed/LONG/99%仍开放；不关闭完整Case或共享阶段。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。
