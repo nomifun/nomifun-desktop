@@ -2782,6 +2782,21 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 无正式 UI/模型；confirmed outcome 完整矩阵、真实外部 owner、池关闭/取消、正式 shutdown、其他
   平台及完整 N3/LONG/99% 仍开放，不关闭完整 LIFE/G0 或共享阶段。
 
+### 正式 Desktop host shutdown 与真实窗口隐藏/再显示（W165，基线 `48f7c6f06`）
+
+- S-D09-45 / LIFE-015/019/029、FILE-038、A04/A06/A11/A13/A17/A19：真实 TCP 受控 provider 经
+  正式 DesktopServer API/Runtime/FileService 完成唯一写入，再保持模型流；完整 shutdown 首次及
+  **20/20** 为流释放、唯一 cancelled、Returned/文件保留、listener 关闭、重复 shutdown 零新事件。
+  21 个独立 DB/文件核对通过，fmt/diff 通过；新增仅最小回归和等待流夹具，无产品修复。
+- 最新配对前端/正式 Tauri、1280×832、隔离 data/work/profile 共三个 UI 回合；一次有效隐藏和同根
+  单实例再显示后，同一运行 Turn/流、调用数和 effect 数保持。三次写入均 Returned；全部暂停回合
+  经正式结束按钮取消。原 120 秒 provider 超时、过晚停止的 stale UI index、夹具借用编译失败及
+  `autotests=false` 导致未注册目标的首败均保留于外部 `2026-09-30/windows/w165-tauri-shutdown`。
+- UI N3/20 次及托盘真正退出未达：工具没有返回托盘窗口。最终只对匹配隔离数据根的 GUI PID 做
+  强制清理，provider 通过自有 HTTP shutdown，owned/profile 进程清零；强制清理不计 graceful PASS。
+  无真实模型；满盘/IO fault 下 shutdown、真实子进程、其他角色/平台、N3/100 seed/LONG/99% 仍开放，
+  不关闭完整 LIFE/FILE Case 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。
