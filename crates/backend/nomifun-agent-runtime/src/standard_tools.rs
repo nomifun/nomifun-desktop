@@ -41,8 +41,8 @@ impl StandardTool {
             };
             let host_guidance = match std::env::consts::OS {
                 "windows" => "For the exact current directory, use cmd=\"(Get-Location).Path\". Plain Get-Location returns an object whose default table formatting truncates long paths with ...; never infer missing path components from that display. For a top-level listing including Hidden/System entries, use cmd=\"Get-ChildItem -LiteralPath . -Force | ForEach-Object { [pscustomobject]@{Name=$_.Name;Attributes=$_.Attributes.ToString();Hidden=[bool]($_.Attributes -band [IO.FileAttributes]::Hidden);System=[bool]($_.Attributes -band [IO.FileAttributes]::System);LinkType=$_.LinkType} } | ConvertTo-Json -Compress\". These are shell-script forms; omit command and args. Write scripts for Windows PowerShell 5.1; do not assume pwsh or PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Do not recurse or follow links unless requested. A leading dot does not imply the Windows Hidden attribute. Only Hidden=true or System=true establishes that flag; an Archive-only entry has neither. For Windows Command Prompt syntax, invoke command=cmd.exe with args beginning [\"/d\",\"/c\"]; dir /a /b returns names only and cannot prove attributes.",
-                "macos" => "For a top-level listing including dot entries, use command=/bin/ls and args=[\"-a\"]. Do not put the entire command line in command. Omit . and .. from business entry counts.",
-                "linux" => "For a top-level listing including dot entries, use command=/usr/bin/ls and args=[\"-a\"]. Do not put the entire command line in command. Omit . and .. from business entry counts.",
+                "macos" => "For the physical current directory, use {\"command\":\"/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts.",
+                "linux" => "For the physical current directory, use {\"command\":\"/usr/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/usr/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts.",
                 _ => "Select native commands for this process host; the UI client's OS does not determine command syntax.",
             };
             format!("Workspace process host OS: {}. {} {shell} {host_guidance}", std::env::consts::OS, self.description)
@@ -123,7 +123,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "exec_command",
         capability_id: "workspace.process",
         action_id: "workspace.process/exec",
-        description: "Run a workspace process using exactly one input form. For an ordinary executable, use {command:\"program\",args:[\"literal\",\"tokens\"]}; for example, Command Prompt is {command:\"cmd.exe\",args:[\"/d\",\"/c\",\"echo ready\"]}. For shell syntax, use {cmd:\"script text\"} with no args field. Never put an executable name in cmd when supplying args, and never combine cmd with command or args. With command, args must be an actual JSON array, never a quoted string containing JSON. Command alone never gets silently split or evaluated as shell text. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
+        description: "Run a workspace process using exactly one input form. For an ordinary executable, use {\"command\":\"program\",\"args\":[\"literal\",\"tokens\"]}; for example, Git status is {\"command\":\"git\",\"args\":[\"status\",\"--short\"]}. For shell syntax, use {\"cmd\":\"script text\"} with no args field. Never put an executable name in cmd when supplying args, and never combine cmd with command or args. With command, args must be an actual JSON array, never a quoted string containing JSON. Command alone never gets silently split or evaluated as shell text. Prefer read_file/search_files for file contents and text search; instruction_scope reports instruction locations, not directory entries or OS file attributes. A zero exit is an observation, not proof that verification passed.",
         schema: process_launch_schema,
     },
     StandardTool {
@@ -379,10 +379,20 @@ fn process_launch(include_wait: bool) -> Value {
     } else {
         "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
     };
+    let executable_examples = if cfg!(target_os = "windows") {
+        "git, bun, powershell.exe, or cmd.exe"
+    } else {
+        "git, bun, or /bin/ls"
+    };
+    let argv_examples = if cfg!(target_os = "windows") {
+        "[\"status\",\"--short\"] for git, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe"
+    } else {
+        "[\"status\",\"--short\"] for git, or [\"-a\"] for /bin/ls"
+    };
     let mut properties = json!({
         "cmd":{"type":"string","minLength":1,"maxLength":32768,"description":format!("Shell-script form only: supply {{\"cmd\":\"script text\"}} and omit both command and args. Never use cmd for an executable plus an args array. {cmd_description}")},
-        "command":{"type":"string","minLength":1,"maxLength":32768,"description":"Executable form: supply {\"command\":\"program\",\"args\":[...]} and omit cmd. This field is the executable name or path only, for example git, bun, /bin/ls, powershell.exe, or cmd.exe. Never include arguments such as ls -la in this field."},
-        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":"Valid only with command, never with cmd. Literal separate argument tokens as an actual JSON array value, for example [\"status\",\"--short\"] for git, [\"-a\"] for /bin/ls, or [\"/d\",\"/c\",\"echo ready\"] for command=cmd.exe; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\"."},
+        "command":{"type":"string","minLength":1,"maxLength":32768,"description":format!("Executable form: supply {{\"command\":\"program\",\"args\":[...]}} and omit cmd. This field is the executable name or path only, for example {executable_examples}. Never include arguments such as git status in this field.")},
+        "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":format!("Valid only with command, never with cmd. Literal separate argument tokens as an actual JSON array value, for example {argv_examples}; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\".")},
         "cwd":{"type":"string","maxLength":4096,"description":"Normalized workspace-relative directory only, for example src or tests. Omit cwd or use '.' for the bound workspace root. Never pass an absolute OS path, a drive prefix, backslashes, or '..'. Command arguments may contain the literal path format required by the executable."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
         "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
@@ -504,6 +514,19 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+
+    #[test]
+    fn process_examples_prefer_valid_json_argv_without_foreign_host_commands() {
+        let exec = standard_agent_tool_exposures().into_iter()
+            .find(|tool| tool.definition.name == "exec_command").unwrap();
+        assert!(exec.definition.description.contains(r#"{"command":"git","args":["status","--short"]}"#));
+        if cfg!(target_os = "macos") {
+            assert!(!exec.definition.description.contains("cmd.exe"));
+            assert!(exec.definition.description.contains(r#"{"command":"/bin/ls","args":["-a"]}"#));
+            assert!(exec.definition.description.contains(r#"{"command":"/bin/pwd","args":["-P"]}"#));
+        }
+        assert!(exec.definition.description.contains("never gets silently split"));
+    }
 
     #[test]
     fn read_formats_accept_neutral_defaults_but_reject_incompatible_options() {
@@ -637,9 +660,9 @@ mod tests {
             process
                 .definition
                 .description
-                .contains("{command:\"program\",args:[\"literal\",\"tokens\"]}")
+                .contains(r#"{"command":"program","args":["literal","tokens"]}"#)
         );
-        assert!(process.definition.description.contains("{cmd:\"script text\"} with no args field"));
+        assert!(process.definition.description.contains(r#"{"cmd":"script text"} with no args field"#));
         assert!(process.definition.input_schema.0["description"]
             .as_str().is_some_and(|description| description.contains("cmd plus args is invalid")));
         let properties = &process.definition.input_schema.0["properties"];
@@ -647,13 +670,16 @@ mod tests {
             .as_str().is_some_and(|description| description.contains("omit both command and args")
                 && description.contains("Never use cmd for an executable plus an args array")));
         assert!(properties["command"]["description"]
-            .as_str().is_some_and(|description| description.contains("omit cmd")
-                && description.contains("cmd.exe")));
+            .as_str().is_some_and(|description| description.contains("omit cmd")));
         assert!(properties["args"]["description"]
             .as_str()
             .is_some_and(|description| description.contains("Valid only with command, never with cmd")
-                && description.contains("actual JSON array value")
-                && description.contains("command=cmd.exe")));
+                && description.contains("actual JSON array value")));
+        for field in ["command", "args"] {
+            let description = properties[field]["description"].as_str().unwrap();
+            assert_eq!(description.contains("cmd.exe"), cfg!(target_os = "windows"));
+            assert_eq!(description.contains("/bin/ls"), !cfg!(target_os = "windows"));
+        }
     }
 
     #[test]
