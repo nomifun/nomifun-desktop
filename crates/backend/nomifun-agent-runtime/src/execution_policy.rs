@@ -88,6 +88,19 @@ pub(crate) fn process_did_not_start(binding: &AgentToolBinding, result: &AgentTo
                 && value["success"] == false && value.get("process_id").is_none())
 }
 
+/// A command outcome that can be reported without another effect/recovery
+/// step. Lost ownership, signals and unproven cleanup never qualify.
+pub(crate) fn settled_nonzero_process(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
+    binding.capability_id.as_ref() == "workspace.process"
+        && serde_json::from_str::<serde_json::Value>(&result.output_text()).is_ok_and(|value|
+            value["state"] == "exited"
+                && value["exit_code"].as_i64().is_some_and(|code| code != 0)
+                && value.get("signal").is_none_or(serde_json::Value::is_null)
+                && value.pointer("/cleanup/reaped") == Some(&serde_json::json!(true))
+                && value.pointer("/cleanup/errors").is_none_or(|errors|
+                    errors.as_array().is_some_and(Vec::is_empty)))
+}
+
 /// A trusted owner fact that the named control was rejected before native I/O.
 /// This says nothing about whether another, already started process is alive.
 pub(crate) fn process_operation_not_applied(binding: &AgentToolBinding, result: &AgentToolResult) -> bool {
@@ -146,6 +159,24 @@ mod tests {
     use nomifun_chat_model_broker::ChatToolDefinition;
     use nomifun_engine_core::{EngineEffectClass, EngineToolBinding};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn reportable_nonzero_excludes_lost_signalled_or_unreaped_processes() {
+        let process = binding("workspace.process", "workspace.process/exec");
+        let known = serde_json::json!({"state":"exited","exit_code":1,"signal":null,
+            "cleanup":{"reaped":true,"errors":[]},"success":false});
+        let result = crate::AgentToolResult::text("diagnostic".into(), known.to_string(), true);
+        assert!(settled_nonzero_process(&process, &result));
+        for invalid in [
+            serde_json::json!({"state":"lost","exit_code":1,"cleanup":{"reaped":true}}),
+            serde_json::json!({"state":"exited","exit_code":1,"signal":9,"cleanup":{"reaped":true}}),
+            serde_json::json!({"state":"exited","exit_code":1,"cleanup":{"reaped":false}}),
+            serde_json::json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true,"errors":["unproven"]}}),
+        ] {
+            let result = crate::AgentToolResult::text("diagnostic".into(), invalid.to_string(), true);
+            assert!(!settled_nonzero_process(&process, &result));
+        }
+    }
 
     fn binding_with_effect(
         capability: &str,
