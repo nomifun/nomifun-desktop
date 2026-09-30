@@ -40,6 +40,8 @@ mod tests {
         terminal_count: AtomicUsize,
         session_cleanup_count: AtomicUsize,
         fail_turn_cleanup: AtomicBool,
+        fail_terminal: AtomicBool,
+        complete_without_cancel: AtomicBool,
     }
 
     impl FakeDriver {
@@ -50,6 +52,8 @@ mod tests {
                 terminal_count: AtomicUsize::new(0),
                 session_cleanup_count: AtomicUsize::new(0),
                 fail_turn_cleanup: AtomicBool::new(fail_turn_cleanup),
+                fail_terminal: AtomicBool::new(false),
+                complete_without_cancel: AtomicBool::new(false),
             }
         }
     }
@@ -63,6 +67,10 @@ mod tests {
             _output: NomiRuntimeTurnOutput,
         ) -> Result<NomiRuntimeTurnOutcome, AppError> {
             self.started.notify_waiters();
+            if self.complete_without_cancel.load(Ordering::Acquire) {
+                return Ok(NomiRuntimeTurnOutcome {model_steps:3,terminal:EngineTurnTerminal::Completed {
+                    finish_reason:nomifun_chat_model_broker::ChatFinishReason::Completed}});
+            }
             cancellation.cancelled().await;
             Ok(NomiRuntimeTurnOutcome::cancelled(0))
         }
@@ -81,6 +89,9 @@ mod tests {
             outcome: &NomiRuntimeTurnOutcome,
         ) -> Result<(), AppError> {
             assert!(matches!(outcome.terminal, EngineTurnTerminal::Cancelled));
+            if self.fail_terminal.load(Ordering::Acquire) {
+                return Err(AppError::Conflict("fixture terminal receipt unavailable".into()));
+            }
             self.terminal_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
@@ -146,5 +157,48 @@ mod tests {
         assert!(!runtime.is_transport_healthy());
         assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire), 1);
         assert_eq!(driver.terminal_count.load(Ordering::Acquire), 0);
+        assert!(runtime.kill_and_wait(None).await.is_err());
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),0);
+        driver.fail_turn_cleanup.store(false,Ordering::Release);
+        runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(driver.terminal_count.load(Ordering::Acquire),1);
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),1);
+        assert!(!runtime.is_transport_healthy());
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_receipt_stays_owned_until_explicit_teardown_retry() {
+        let driver=Arc::new(FakeDriver::new(false));
+        driver.fail_terminal.store(true,Ordering::Release);
+        let started=driver.started.notified();
+        let runtime=HostedNomiRuntime::new(&options(),driver.clone()).unwrap();
+        runtime.send_message(message("failed-receipt")).await.unwrap();
+        started.await;
+        assert!(runtime.cancel().await.is_err());
+        assert!(runtime.kill_and_wait(None).await.is_err());
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),0);
+        assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire),1);
+        assert!(runtime.send_message(message("must-not-restart")).await.is_err());
+        driver.fail_terminal.store(false,Ordering::Release);
+        runtime.kill_and_wait(None).await.unwrap();
+        runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(driver.terminal_count.load(Ordering::Acquire),1);
+        assert_eq!(driver.turn_cleanup_count.load(Ordering::Acquire),1);
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),1);
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_failed_cleanup_wins_before_the_first_terminal_commit() {
+        let driver=Arc::new(FakeDriver::new(true));
+        driver.complete_without_cancel.store(true,Ordering::Release);
+        let runtime=HostedNomiRuntime::new(&options(),driver.clone()).unwrap();
+        runtime.send_message(message("completed-before-cleanup-fault")).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2),async {
+            while runtime.is_transport_healthy() {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        driver.fail_turn_cleanup.store(false,Ordering::Release);
+        runtime.kill_and_wait(None).await.unwrap();
+        assert_eq!(driver.terminal_count.load(Ordering::Acquire),1);
+        assert_eq!(driver.session_cleanup_count.load(Ordering::Acquire),1);
     }
 }
