@@ -87,6 +87,9 @@ impl CreativeProjectDocument {
             if !node_ids.insert(node.id.as_str()) {
                 return Err(format!("duplicate node id {:?}", node.id));
             }
+            if let Some(name) = node.name.as_deref() {
+                require_trimmed_string(&format!("nodes[{index}].name"), name, 80)?;
+            }
             require_finite(&format!("nodes[{index}].position.x"), node.position.x)?;
             require_finite(&format!("nodes[{index}].position.y"), node.position.y)?;
             node.size.validate(&format!("nodes[{index}].size"))?;
@@ -303,6 +306,8 @@ pub struct CreativeNode {
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: CreativeNodeType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub position: CreativePoint,
     pub size: CreativeSize,
     pub group_id: Option<String>,
@@ -317,6 +322,8 @@ struct CreativeNodeWire {
     id: String,
     #[serde(rename = "type")]
     node_type: CreativeNodeWireType,
+    #[serde(default)]
+    name: Option<String>,
     position: CreativePoint,
     size: CreativeSize,
     group_id: Option<String>,
@@ -408,6 +415,7 @@ impl<'de> Deserialize<'de> for CreativeNode {
         Ok(Self {
             id: wire.id,
             node_type,
+            name: wire.name,
             position: wire.position,
             size: wire.size,
             group_id: wire.group_id,
@@ -1939,7 +1947,8 @@ mod tests {
             "timeline",
             "group",
         ] {
-            let parsed = node(&format!("node-{kind}"), kind);
+            let mut parsed = node(&format!("node-{kind}"), kind);
+            parsed.name = Some(format!("{kind} label"));
             let round_trip: CreativeNode =
                 serde_json::from_value(serde_json::to_value(&parsed).unwrap()).unwrap();
             assert_eq!(round_trip, parsed, "{kind} payload must round-trip");
@@ -1949,6 +1958,15 @@ mod tests {
             doc.validate_for_project(PROJECT_ID)
                 .unwrap_or_else(|error| panic!("{kind} payload must validate: {error}"));
         }
+
+        let mut invalid_name = node("bad-name", "text");
+        invalid_name.name = Some(" untrimmed ".into());
+        let mut document = CreativeProjectDocument::empty(PROJECT_ID.to_owned());
+        document.nodes.push(invalid_name);
+        assert!(document
+            .validate_for_project(PROJECT_ID)
+            .unwrap_err()
+            .contains("nodes[0].name"));
     }
 
     #[test]

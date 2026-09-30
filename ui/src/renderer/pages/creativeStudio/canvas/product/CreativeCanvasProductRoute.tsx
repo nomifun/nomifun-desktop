@@ -4482,6 +4482,22 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [dispatch]
   );
 
+  const handleRenameNode = useCallback((nodeId: string, name: string) => {
+    const editor = editorRef.current;
+    const nextName = name.trim();
+    if (!editor || !nextName || nextName.length > 80) return;
+    const node = editor.getState().document.nodes.find(
+      (candidate) => candidate.id === nodeId
+    );
+    if (!node || node.locked || node.type === 'config' || node.name === nextName) return;
+    editor.dispatch(
+      canvasCommands.updateNode(
+        { ...node, name: nextName },
+        { mergeKey: `node:${node.id}:name` }
+      )
+    );
+  }, []);
+
   const handleToggleAsset = useCallback((assetId: string) => {
     setSelectedAssetIds((current) => {
       const next = new Set(current);
@@ -4937,6 +4953,7 @@ const CreativeCanvasProductRoute: React.FC = () => {
                       }
                       onActivate={onActivate}
                       onOpen={onOpen}
+                      onRename={(_, title) => handleRenameNode(node.id, title)}
                       onToggleLock={onToggleLock}
                       onPointerDown={dragHandleProps.onPointerDown}
                       textEditing={
@@ -4979,14 +4996,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
                                 )
                               );
                             }
-                          : undefined
-                      }
-                      onTimelineDelete={
-                        node.type === 'timeline'
-                          ? () =>
-                              dispatch(
-                                canvasCommands.deleteSelection({ nodeIds: [node.id] })
-                              )
                           : undefined
                       }
                       onTimelineAddAsset={

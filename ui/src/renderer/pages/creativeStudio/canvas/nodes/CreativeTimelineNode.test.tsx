@@ -8,6 +8,7 @@ import '../../../../../../test/setup-dom.ts';
 
 import { cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
 import CreativeTimelineNode, {
   type CreativeTimelineAssetPresentation,
@@ -86,7 +87,11 @@ describe('CreativeTimelineNode interactions', () => {
 
     expect(view.container.querySelector('[data-timeline-node]')).not.toBeNull();
     expect(view.container.querySelector('[data-timeline-clip-id="clip-1"]')).not.toBeNull();
-    expect(view.container.querySelector('img[src="/assets/city-thumb.png"]')).not.toBeNull();
+    const filmstrip = view.container.querySelector<HTMLElement>(
+      '[data-timeline-clip-filmstrip="true"]'
+    );
+    expect(filmstrip).not.toBeNull();
+    expect(filmstrip?.style.backgroundImage).toContain('/assets/city-thumb.png');
     expect((view.getByRole('button', { name: '播放' }) as HTMLButtonElement).disabled).toBe(false);
     expect(view.getByRole('slider', { name: '播放头' })).not.toBeNull();
     expect(
@@ -95,6 +100,19 @@ describe('CreativeTimelineNode interactions', () => {
     ).toBe('1.5');
     expect(view.getAllByText('00:05').length).toBeGreaterThan(0);
     expect(view.getByText('01:00')).not.toBeNull();
+    expect(view.queryByRole('button', { name: '删除时间线节点' })).toBeNull();
+  });
+
+  test('anchors and repeats clip thumbnails instead of stretching them with the clip', () => {
+    const css = readFileSync(
+      new URL('./CreativeTimelineNode.module.css', import.meta.url),
+      'utf8'
+    );
+
+    expect(css).toContain(".clipMedia[data-timeline-clip-filmstrip='true']");
+    expect(css).toContain('background-position: left center');
+    expect(css).toContain('background-repeat: repeat-x');
+    expect(css).toContain('background-size: auto 100%');
   });
 
   test('loads a gapped timeline as a continuous sequence without changing durations', () => {
