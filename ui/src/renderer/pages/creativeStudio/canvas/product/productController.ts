@@ -6,7 +6,6 @@
 
 import { isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import type {
-  CreativeBottomPanelView,
   CreativeCanvasNode,
   CreativeLeftPanelView,
   CreativeRightPanelView,
@@ -26,7 +25,6 @@ export interface CreativeCanvasProductSelectionCapabilities {
 export interface CreativeCanvasProductPanelViews {
   left: CreativeLeftPanelView;
   right: CreativeRightPanelView | null;
-  bottom: CreativeBottomPanelView | null;
 }
 
 export const CREATIVE_CANVAS_SOURCE_LEFT_PANEL_WIDTH = 280;
@@ -54,7 +52,6 @@ export function creativeCanvasProductPanelViews(
   return {
     left: panels.left.activeView,
     right: panels.right.open ? panels.right.activeView : null,
-    bottom: panels.bottom.open ? panels.bottom.activeView : null,
   };
 }
 
@@ -120,20 +117,6 @@ export function withCreativeCanvasRightPanelWidth(
     right: {
       ...panels.right,
       width: clampCreativeCanvasRightPanelWidth(width),
-    },
-  };
-}
-
-export function withCreativeCanvasBottomView(
-  panels: CreativeStudioPanelState,
-  view: CreativeBottomPanelView | null
-): CreativeStudioPanelState {
-  return {
-    ...panels,
-    bottom: {
-      ...panels.bottom,
-      open: view !== null,
-      activeView: view ?? panels.bottom.activeView,
     },
   };
 }

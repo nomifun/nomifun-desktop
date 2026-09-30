@@ -155,7 +155,6 @@ import CreativeCanvasInteractionOverlays, {
   type CreativeCanvasContextMenuState,
 } from './CreativeCanvasInteractionOverlays';
 import {
-  CreativeCanvasHistoryPanel,
   CreativeCanvasOutlinePanel,
   CreativeCanvasPropertiesPanel,
   CreativeCanvasUnavailablePanel,
@@ -240,7 +239,6 @@ import {
   creativeCanvasSaveDisplayMessage,
   resolveCreativeNodeAssetPresentation,
   withCreativeCanvasLeftPanelOpen,
-  withCreativeCanvasBottomView,
   withCreativeCanvasLeftView,
   withCreativeCanvasRightPanelWidth,
   withCreativeCanvasRightView,
@@ -1498,13 +1496,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       persistPanels(
         withCreativeCanvasRightPanelWidth(panelsRef.current, width)
       );
-    },
-    [persistPanels]
-  );
-
-  const handleBottomViewChange = useCallback(
-    (view: CreativeStudioPanelState['bottom']['activeView'] | null) => {
-      persistPanels(withCreativeCanvasBottomView(panelsRef.current, view));
     },
     [persistPanels]
   );
@@ -4793,7 +4784,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
   const compact = viewportSize.width < 760;
   const canvasLayoutStyle = {
     '--creative-canvas-right-panel-width': `${panels.right.width}px`,
-    '--creative-canvas-bottom-panel-height': `${panels.bottom.height}px`,
   } as React.CSSProperties;
 
   const renderCanvasState = canvasState;
@@ -4833,24 +4823,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     />
   );
 
-  const history = renderCanvasState ? (
-    <CreativeCanvasHistoryPanel
-      state={renderCanvasState}
-      onUndo={() => dispatch(canvasCommands.undo())}
-      onRedo={() => dispatch(canvasCommands.redo())}
-    />
-  ) : (
-    <CreativeCanvasUnavailablePanel
-      kind="generic"
-      title={t('creativeStudio.canvas.loading.historyTitle', {
-        defaultValue: '正在载入撤销状态',
-      })}
-      description={t('creativeStudio.canvas.loading.historyDescription', {
-        defaultValue: '历史面板仅展示当前编辑会话的真实撤销栈。',
-      })}
-    />
-  );
-
   return (
     <main
       className={styles.root}
@@ -4873,7 +4845,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         resourceDialogPopupContainer={resourceDialogPopupContainer}
         rightView={panelViews.right}
         rightPanelWidth={panels.right.width}
-        bottomView={panelViews.bottom}
         compact={compact}
         disabled={productDisabled}
         onBackToCanvases={() => void handleBackToCanvases()}
@@ -4886,7 +4857,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
         onResourceViewChange={handleResourceViewChange}
         onRightViewChange={handleRightViewChange}
         onRightPanelWidthChange={handleRightPanelWidthChange}
-        onBottomViewChange={handleBottomViewChange}
         slots={{
           canvas: (
             <div ref={canvasHostRef} className={styles.canvasHost}>
@@ -5816,9 +5786,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
               />
             ),
             properties,
-          },
-          bottom: {
-            history,
           },
         }}
       />

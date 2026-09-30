@@ -85,11 +85,6 @@
     0;
 }
 
-.root :global([data-creative-canvas-chrome] > section[aria-label='编辑历史']),
-.root :global([data-creative-canvas-chrome] > section[aria-label='时间线']) {
-  height: min(60vh, var(--creative-canvas-bottom-panel-height, 240px));
-}
-
 .canvasHost {
   position: relative;
 }

@@ -15,8 +15,8 @@ describe('Creative Canvas product panel boundaries', () => {
     expect(source.includes("import type { CanvasState } from '../core'")).toBe(true);
     expect(source.includes('state: CanvasState')).toBe(true);
     expect(source.includes("mode: 'replace' | 'toggle'")).toBe(true);
-    expect(source.includes('onUndo(): void')).toBe(true);
-    expect(source.includes('onRedo(): void')).toBe(true);
+    expect(source.includes('onUndo(): void')).toBe(false);
+    expect(source.includes('onRedo(): void')).toBe(false);
     expect(source.includes('useState')).toBe(false);
     expect(source.includes('useReducer')).toBe(false);
     expect(source.includes('useEffect')).toBe(false);
@@ -37,7 +37,7 @@ describe('Creative Canvas product panel boundaries', () => {
       expect(source.includes(forbidden)).toBe(false);
     }
     expect(source.includes("data-unavailable-kind={kind}")).toBe(true);
-    expect(source.includes('creativeStudio.canvas.history.disclosure')).toBe(true);
+    expect(source.includes('creativeStudio.canvas.history')).toBe(false);
     expect(source.includes('creativeStudio.canvas.unavailable.agentDescription')).toBe(true);
     expect(source.includes('creativeStudio.canvas.properties.editLabel')).toBe(true);
   });
