@@ -111,10 +111,12 @@
     },
     "delete": {
       "activeTask": "素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。",
+      "batchDescription": "确定永久删除选中的 {{assetCount}} 项素材吗？原始文件及缩略图将被删除，且无法恢复。使用这些素材的画布和生成历史会保留记录，并显示“素材已删除”。",
       "cancel": "取消",
       "confirm": "永久删除",
       "retryCleanup": "删除或文件清理尚未完成，请重试删除。",
       "description": "确定永久删除“{{title}}”吗？原始文件及缩略图将被删除，且无法恢复。使用此素材的画布和生成历史会保留记录，并显示“素材已删除”。",
+      "partialFailure": "已删除 {{deletedCount}} 项，{{failedCount}} 项未能删除。请重试剩余素材。",
       "title": "删除素材"
     },
     "deleted": "素材已删除",
@@ -188,6 +190,7 @@
     },
     "messages": {
       "assetDeleted": "素材已删除。",
+      "assetsDeleted": "已删除 {{assetCount}} 项素材。",
       "assetUpdated": "素材已更新。",
       "collectionUnused": "没有找到使用该合集的素材。",
       "collectionUpdated": "已更新 {{assetCount}} 个素材。",

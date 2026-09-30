@@ -8,20 +8,21 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 describe('CreativeAssetLibraryPage wiring', () => {
-  test('composes the canonical asset client, hook and presentation without fake batch callbacks', () => {
+  test('composes the canonical asset client, hook and presentation with controlled batch deletion', () => {
     const source = readFileSync(new URL('./CreativeAssetLibraryPage.tsx', import.meta.url), 'utf8');
     expect(source.includes("client = creativeAssetClient")).toBe(true);
     expect(source.includes('useCreativeAssets({ client, query, pageSize: SOURCE_ASSET_PAGE_SIZE })')).toBe(true);
     expect(source.includes('<CreativeAssetLibrary')).toBe(true);
     expect(source.includes("appearance='source-page'")).toBe(true);
-    expect(source.includes('selectable={false}')).toBe(true);
+    expect(source.includes('selectedIds={selectedIds}')).toBe(true);
+    expect(source.includes('onSelectionChange={setSelectedIds}')).toBe(true);
     expect(source.includes('pagination={{')).toBe(true);
     expect(source.includes('<CreateCreativeTextAssetModal')).toBe(true);
-    expect(source.includes('asset.originalUrl')).toBe(true);
+    expect(source.includes('onDownloadAsset={saveAssetAs}')).toBe(true);
     expect(source.includes('onSetSelectedLibrary=')).toBe(false);
     expect(source.includes('onInsertSelected=')).toBe(false);
     expect(source.includes('onDownloadSelected=')).toBe(false);
-    expect(source.includes('onRemoveSelected=')).toBe(false);
+    expect(source.includes('onRemoveSelected={openDelete}')).toBe(true);
   });
 
   test('matches the measured source-page geometry without changing default component styles', () => {

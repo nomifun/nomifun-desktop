@@ -4,9 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Button, Checkbox } from '@arco-design/web-react';
 import {
   AllApplication,
-  Check,
   Close,
   Delete,
   Download,
@@ -167,21 +167,19 @@ const AssetItem: React.FC<AssetItemProps> = ({
       data-selectable={selectable || undefined}
     >
       {selectable ? (
-        <label className={styles.assetSelect} title={labels.select}>
-          <input type='checkbox' checked={selected} disabled={disabled} onChange={onToggle} />
-          <span aria-hidden='true'>
-            <Check theme='outline' size={13} fill='currentColor' strokeWidth={4} />
-          </span>
-          <span className={styles.srOnly}>{labels.select}</span>
-        </label>
+        <div className={styles.assetSelect}>
+          <Checkbox
+            className={styles.assetCheckbox}
+            title={labels.select}
+            aria-label={`${labels.select}: ${title}`}
+            checked={selected}
+            disabled={disabled}
+            onChange={onToggle}
+          />
+        </div>
       ) : null}
 
       <div className={styles.assetCover} data-asset-cover>
-        {collection ? (
-          <span className={styles.collectionBadge} data-asset-collection title={collection}>
-            {collection}
-          </span>
-        ) : null}
         <button
           type='button'
           className={styles.assetPreviewButton}
@@ -191,10 +189,17 @@ const AssetItem: React.FC<AssetItemProps> = ({
         >
           <CreativeAssetMedia asset={asset} unavailableLabel={labels.mediaUnavailable} compact={view === 'list'} />
         </button>
-        <span className={styles.kindBadge} data-kind={asset.kind}>
-          <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, 13)}</span>
-          {kindLabel(asset.kind, labels)}
-        </span>
+        <div className={styles.assetBadges}>
+          {collection ? (
+            <span className={styles.collectionBadge} data-asset-collection title={collection}>
+              {collection}
+            </span>
+          ) : null}
+          <span className={styles.kindBadge} data-kind={asset.kind}>
+            <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, 13)}</span>
+            <span>{kindLabel(asset.kind, labels)}</span>
+          </span>
+        </div>
       </div>
 
       <div className={styles.assetContent}>
@@ -495,6 +500,42 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         </div>
         {sourceAppearance ? (
           <div className={styles.sourceActions}>
+            {selectable && state.assets.length > 0 ? (
+              <div className={styles.sourceSelection} data-asset-selection-toolbar>
+                <Checkbox
+                  className={styles.sourceSelectAll}
+                  checked={allVisibleSelected}
+                  indeterminate={selectedAssets.length > 0 && !allVisibleSelected}
+                  disabled={busy || state.loading}
+                  onChange={selectAllVisible}
+                >
+                  <span className={styles.selectAllLabel}>{labels.selectAll}</span>
+                </Checkbox>
+                {selectedAssets.length > 0 ? (
+                  <>
+                    <span>{labels.selectedCount(selectedAssets.length)}</span>
+                    <Button type='text' size='mini' disabled={busy} onClick={() => onSelectionChange(new Set())}>
+                      {labels.clearSelection}
+                    </Button>
+                    {onInsertSelected ? (
+                      <Button type='text' size='mini' disabled={busy} onClick={() => onInsertSelected(selectedAssets)}>
+                        {labels.insertIntoCanvas}
+                      </Button>
+                    ) : null}
+                    {onDownloadSelected ? (
+                      <Button type='text' size='mini' disabled={busy} onClick={() => onDownloadSelected(selectedAssets)}>
+                        {labels.downloadSelected}
+                      </Button>
+                    ) : null}
+                    {onRemoveSelected ? (
+                      <Button type='text' status='danger' size='mini' disabled={busy} onClick={() => onRemoveSelected(selectedAssets)}>
+                        {labels.deleteSelected}
+                      </Button>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+            ) : null}
             {onUploadFiles ? (
               <button
                 type='button'
@@ -516,7 +557,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
         )}
       </div>
 
-      {selectable && selectedAssets.length > 0 ? (
+      {!sourceAppearance && selectable && selectedAssets.length > 0 ? (
         <div className={styles.selectionBar} data-asset-selection-bar>
           <strong>{labels.selectedCount(selectedAssets.length)}</strong>
           <button type='button' className={styles.textButton} disabled={busy} onClick={selectAllVisible}>
@@ -541,7 +582,7 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 {labels.deleteSelected}
               </button>
             ) : null}
-            <button type='button' className={styles.iconButton} aria-label={labels.clearSelection} onClick={() => onSelectionChange(new Set())}>
+            <button type='button' className={styles.iconButton} aria-label={labels.clearSelection} disabled={busy} onClick={() => onSelectionChange(new Set())}>
               <Close theme='outline' size={14} fill='currentColor' strokeWidth={3} />
             </button>
           </div>
