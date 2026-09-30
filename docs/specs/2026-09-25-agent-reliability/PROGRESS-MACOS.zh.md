@@ -30,7 +30,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～04 已验 shutdown/写锁、start 取消/IO failure/deadline 所有权子断言；其余故障边界及 LONG 待验 |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～05 已验 shutdown/写锁、start 取消/IO failure/deadline 所有权及 macOS fork 初始化子断言；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
@@ -1023,7 +1023,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   原 caller 350 ms/cleanup 6 秒断言未放宽。原生报告在 worker live 时均未完成，最后准确回收。
   最终 Runtime lib **153/153**、session registry **13/13**、fmt/diff 通过，付费模型调用 0。
   中间 raw PTY watchdog-after-COMMITTED 检查曾 PeerClosed（152/153），首败保留在 `run-007`，
-  该独立注入窗口仍开放，未用最终快照通过关闭它。
+  该独立注入窗口在本批仍开放，未用最终快照通过关闭它；接续根因与结果见 M06-05。
 - 全证据 `2026-09-30/macos/m06-start-deadline/`；本批只有组件/原生证据，未跑正式 Tauri、Linux/
   Windows 原生；commit handshake 失败、worker panic、清理失败/unknown recovery、更多角色/
   descendants、完整 N3/100 seed/LONG/99% 与全部阶段门槛继续开放。
+
+- **M06-05 macOS watchdog fork initialization**（`PROC-041/046/047` 的 native watchdog
+  异常、精确回收与未开始 deadline 子断言）：宿主 macOS 26.6.2 / 原生 arm64 / APFS，付费调用 0。
+  旧 raw PTY PeerClosed 单跑及 20 repeats 均通过，未据此覆盖首败；同时间系统 crash report
+  证明 watchdog PID 13729 在 `fork → libSystem_atfork_child → _notify_fork_child` 内因
+  `os_once_t is corrupt` 被终止，尚未进入 BootReady/COMMITTED。原日志和 crash 另存保留。
+- 公共合同修复见 `S-D04-35`：两个 macOS watchdog 启动入口均在宿主、fork 前完成 libnotify
+  无注册副作用的初始化，等待仍消耗原 setup budget；耗尽后零 watchdog/user fork。确定性夹具
+  只固定初始化未完成窗口，不篡改私有系统锁；Pipe/PTY 修复前 **0/2**，先完成原 owner 清理再失败。
+- 修复后初始化等待/预算耗尽四场景首次 + 20 repeats **84/84**；pipe/PTY COMMITTED 后
+  watchdog 失效 **42/42**，其中历史 PTY 用例 **21/21**，仍为 lifecycle failure、精确 SIGKILL
+  和 leader/watchdog 各一次 reap。独立进程探测 **126/126** PID 消失，零 fork 窗口 **42/42**，
+  100 ms setup 下 caller 最大 **103 ms**，原 350 ms/cleanup 3 秒上界未放宽；Runtime **157/157**、
+  registry **13/13**、process boundary、定向 fmt/diff 通过。证据 `2026-09-30/macos/m06-pty-watchdog/`。
+- 仅收敛该首次失败的 macOS 通知库初始化根因；未验证其他系统 fork callback、真实 Tauri 强退/
+  sleep-wake、失控 descendants、worker panic/unknown recovery、其他平台/角色、release 与
+  N3/100 seed/LONG/99%。不关闭完整 PROC/M06 或阶段二、三，Windows 原结果未改写。
