@@ -40,6 +40,7 @@
   "copyFullId": "Copy full ID",
   "copyPath": "Copy path",
   "download": "Download",
+  "saveAs": "Save as",
   "close": "Close",
   "retry": "Retry",
   "reload": "Reload",
@@ -114,6 +115,17 @@
   "processing": "Processing...",
   "optional": "(optional)",
   "clear": "Clear",
+  "imagePreview": {
+    "title": "View image",
+    "saveAs": "Save image as",
+    "close": "Close image preview",
+    "loading": "Loading image…",
+    "loadFailed": "Image failed to load",
+    "zoom": "Image zoom",
+    "zoomOut": "Zoom out",
+    "fit": "Fit to window",
+    "zoomIn": "Zoom in"
+  },
   "unit": {
     "hour_short": "h",
     "minute_short": "m",

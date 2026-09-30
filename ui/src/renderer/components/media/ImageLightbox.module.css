@@ -5,7 +5,7 @@
 .modal :global(.arco-modal-content) { box-sizing: border-box; height: 100%; padding: 0; background: transparent; }
 .viewport { position: absolute; inset: 76px 32px 88px; display: flex; overflow: auto; scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, .3) transparent; }
 .image { display: block; flex: none; max-width: none; max-height: none; margin: auto; border-radius: 10px; object-fit: contain; }
-.status { margin: auto; font-size: 14px; }
+.status { display: flex; align-items: center; flex-direction: column; gap: 12px; margin: auto; font-size: 14px; }
 .actions { position: absolute; top: 24px; right: 24px; display: flex; gap: 8px; }
 .actions button, .actions a, .zoom button { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; box-sizing: border-box; padding: 0; border: 0; border-radius: 50%; background: #f5f5f5; color: #202124; cursor: pointer; text-decoration: none; }
 .actions button:hover, .actions a:hover, .zoom button:hover { background: #dedede; }
