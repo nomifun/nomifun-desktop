@@ -35,7 +35,7 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
 | 队列 | 共享 Case 数 | 测试 → 排查 → 修复任务 | 后续门槛 / 状态 |
 | --- | ---: | --- | --- |
 | S-D01 | 85 | 工具/模型协议、注册/激活与版本；先找 Schema/admission 断点，再做生产 owner 修复 | P0 本轮；完整传输/故障矩阵待走查 |
-| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过；S-D02-22/23 已修 startup quarantine 单播及暂停清理投影竞态；M04-24 尚未做付费模型复跑，完整控制/观测矩阵待验 |
+| S-D02 | 70 | 控制状态、完成证据、事件和真实体验；保留首次失败，核对 canonical/UI 一致性 | Windows GEN 文件/产物/删除及失败停止场景 N3 通过；S-D02-22/24 已修 startup quarantine 单播及页外暂停证据投影，M04-26 正式 UI 复核通过；完整控制/观测矩阵待验 |
 | S-D03 | 45 | 文件/Artifact 合同、原子边界、source digest、负向隔离 | Windows 新建/既有暂存源等定向回归；macOS APFS identity、Unix 清理与扩展 ACL 保留已有原生验证；完整入口/矩阵待验 |
 | S-D04 | 120 | 公共 command/args/cmd Schema、进程 owner 与清理协议 | P0 边界本轮；原生实现转 W01/M01 |
 | S-D05 | 27 | Git/SSH 授权与副作用核对；独立 remote/host 夹具 | Unix/Git 与 macOS 四类 hook/receipt 已验；隔离 macOS loopback sshd 的 transport/owner/搜索已验，外部 host 与正式 UI 条件资源准备后继续，禁止共享生产 remote |
@@ -880,6 +880,21 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   reconcile/hook/notice **18/18**、UI typecheck、desktop UI boundary 与 diff check 通过。
 - 本批未再调用付费 Provider，也未以组件测试代替 post-fix 正式 Tauri 视觉复核；因此只关闭公共竞态
   根因及确定性子断言，M04-23 的 terminal、N3/20/99%、断线/多窗口投影与完整 D02/OBS/LIFE 仍开放。
+
+- **S-D02-24**（`OBS-006/007/014/015`、`LIFE-015/016` 的页外暂停证据子断言）：后续 M04-26
+  纠正 S-D02-23 的竞态假设。canonical head/事件页来自同一事务，`get()` 却只读前 500 事件；
+  M04-23 pause 在 seq 635，页外记录一直缺失，重复 GET 无法升级。新原生反例确认 pause 已 cleanup-proven，
+  `/projection.extra.execution_pause` 仍为 null，首败保留。现 Store 按 exact Session/Turn、已观察
+  head cursor 单独读取至多一条 immutable pause event；不扩大分页、不读全历史或取更乐观状态。
+  同一 Turn 的后续 pause 也不会替换旧 cursor 对应证据。撤去前端双读推测，真实 unproven 仍立即展示。
+- pause/resume/唯一写入原回归修复后首次 + 20 repeats **21/21**，Store exact/cursor/foreign/false
+  子断言 **1/1**，相关 UI **18/18**、typecheck、desktop boundary、正式构建和签名通过。loopback
+  Browser 夹具先保留 ID 重用与压缩后缺历史的失败，随后使用单调 call ID 与不依赖旧观察的 readonly
+  调用；正式 Tauri 前后均 pause seq 605 / 41 model steps / 48 local requests / 4 returned effects，
+  首败三个 projection 均缺字段，修复后三个均为精确 reason + cleanup-proven。正式 UI 从错误清理提示
+  改为任务未完成/操作保留，暂停发送禁用，UI 结束回合后 cancelled/ready/可发送；DB/备份 `ok`，
+  owned App/Helper/fixture/listener 0。证据 `2026-09-30/macos/m04-pause-event-page/`；付费调用 0。
+  其他平台/角色、多窗口/断线、真实 Provider terminal、N3/99% 与完整 Case/阶段仍开放。
 
 - S-D03-48（`ART-001/003/007`、`CTRL-007`、`CMD-132`、A01/A05/A17 文字观测与 Artifact
   边界）：macOS 正式 Tauri 的两个独立首发中，`ls -a` 均已成功且模型正确解释，但

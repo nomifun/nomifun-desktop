@@ -248,7 +248,18 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     let execution = format!("/api/agent-sessions/{id}/execution");
     call(&router,"POST",&format!("/api/agent-sessions/{id}/turns"),json!({"idempotency_key":"one-task","input":{"content":"Create answer.txt containing PAUSE_RESUME_OK, verify it, and report the result."}})).await;
     tokio::time::timeout(Duration::from_secs(30),entered.notified()).await.unwrap();
+    // The consumer's ordinary event page ends at 500. A durable pause after
+    // that boundary must still carry its exact cleanup evidence.
     let running = call(&router,"GET",&execution,Value::Null).await;
+    let store = AgentSessionStore::from_pool(app.database.pool().clone()).await.unwrap();
+    let principal = nomifun_agent_contracts::PrincipalRef {
+        principal_kind: "user".into(), principal_id: app.authoritative_user_id.as_ref().into(),
+    };
+    for index in 0..500 {
+        store.request_native_pause(&principal, &id.to_owned().into(),
+            &running["operation_id"].as_str().unwrap().to_owned().into(),
+            &format!("pause-page-boundary:{index}"), "inspect work").await.unwrap();
+    }
     let pause = json!({"operation_id":running["operation_id"],"idempotency_key":"pause-once","reason":"inspect work"});
     let ack = call(&router,"POST",&format!("{execution}/pause"),pause.clone()).await;
     assert_eq!(call(&router,"POST",&format!("{execution}/pause"),pause).await,ack);
@@ -267,6 +278,8 @@ async fn owner_pause_resume_keeps_one_turn_and_one_write_across_generations() {
     let projection = call(&router,"GET",&format!("/api/agent-sessions/{id}/projection"),Value::Null).await;
     assert_eq!(projection["status"],"running");
     assert_eq!(projection["extra"]["execution_phase"],"paused");
+    assert_eq!(projection["extra"]["execution_pause"]["cleanup_proven"], true,
+        "a pause beyond the first event page must retain its canonical cleanup proof");
     assert_eq!(projection["runtime"]["can_send_message"],false);
     assert_eq!(projection["runtime"]["is_processing"],false);
     assert!(projection["runtime"]["active_turn_id"].is_string());

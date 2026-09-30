@@ -23,7 +23,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | 领域 | 槽数 | 批次 | 原生测试、排查与修复任务 | 状态 |
 | --- | ---: | --- | --- | --- |
 | D01 | 425 | M02 | Session/Broker、系统代理/loopback、模型/工具 Schema 与冻结版本 | M02-01 冻结/准入与 M02-02 正式 UI/live 只读 Session 子断言通过；完整领域未验收 |
-| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影，M04-13 crash 冷启动暂停/列表及 M04-24 清理投影确定性子断言通过；M04-24 未做付费模型复跑，完整 Case 未验收 |
+| D02 | 291 | M02/M04 | 控制/完成、原生 UI、停止/纠正及错误可见性 | M01-03/04 正式 Tauri `CMD-132/139`；M02-01/02 计划、完成与 UI 投影，M04-13 冷暂停列表及 M04-26 页外暂停证据正式 UI 子断言通过；完整 Case 未验收 |
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
@@ -967,3 +967,18 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   清理投影与未准入回执拒绝 **4/4**，Rust fmt/diff 通过。
 - 全证据：`2026-09-30/macos/m06-native-shutdown/`。本批只修证据夹具根绑定，付费请求 0；没有正式
   Tauri renderer、真实满盘/fsync、跨重启/lease 过期或其他角色证据，因此不关闭完整 PROC/LIFE/M06。
+
+- **M04-26 pause evidence beyond event page**（`OBS-006/007/014/015`、`LIFE-015/016`）：修正
+  M04-24 的竞态归因；实际是前 500 事件页缺少 seq 635 的 pause，公共根因/修复见 `S-D02-24`。
+  原生 pause/resume/唯一写入反例首次 field=null，修复后 **21/21**；Store exact/cursor/foreign/false
+  **1/1**，相关 UI **18/18**、typecheck/desktop boundary/build 通过。初始两个测试夹具编译/事件注册
+  失败、GUI ID 重用/压缩后缺历史均单独保留，未改写为产品 PASS。
+- 正式 Developer ID arm64 前后样本均 pause **seq 605 / 41 model steps / 48 loopback requests**，
+  4 effects 全 returned、零 pending/unknown；首败三个 projection 缺 `execution_pause`，当前源码 App
+  `19634d451f452d97185a4cba3f8a6f0c8e445c881adf99700c5f3e986dcd3251` 三次均返回 exact reason/
+  `cleanup_proven=true`。正式截图从“资源清理状态尚未确认”改为“任务尚未完成，已完成的操作会保留”，
+  暂停时输入禁用；UI 结束回合后 head ready/Turn cancelled，输入及 API 发送能力恢复。
+- macOS 26.6.2 / arm64 / APFS；deep/strict 签名、DB/备份 `ok`，最终 owned App/Helper/fixture/
+  listener 0。49 份普通证据的签名凭据匹配 0，付费 Provider 调用 0。全证据：
+  `2026-09-30/macos/m04-pause-event-page/`；只关闭该投影子断言，M04-23 live terminal、其他角色/
+  平台、多窗口/断线、N3/99%、release/notarization 与完整 D02/M04 仍开放。

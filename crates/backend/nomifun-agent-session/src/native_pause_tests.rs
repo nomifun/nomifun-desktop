@@ -6,6 +6,38 @@ fn evidence() -> NativeOwnerEvidence {
     NativeOwnerEvidence { verified: true, evidence_digest: digest('a'), reference: "fixture-owner-inspection".into() }
 }
 
+#[tokio::test]
+async fn pause_event_lookup_keeps_exact_session_turn_and_observed_cursor() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (f, _, request) = paused(&store, "pause-lookup").await;
+    let session = &f.session.agent_session_id;
+    let first_seq = store.head(session).await.unwrap().last_seq;
+    let first = store.read_native_pause_event_at(session, &request.operation_id, first_seq)
+        .await.unwrap().unwrap();
+    assert_eq!(first.kind.0, "turn/paused");
+    assert_eq!(first.correlation_id.as_ref(), request.operation_id.as_ref());
+    assert!(store.read_native_pause_event_at(session, &request.operation_id, first.seq - 1)
+        .await.unwrap().is_none());
+    assert!(store.read_native_pause_event_at(session, &"foreign-turn".into(), first_seq)
+        .await.unwrap().is_none());
+    let foreign = fixture(&store, "pause-lookup-foreign").await;
+    assert!(store.read_native_pause_event_at(&foreign.session.agent_session_id, &request.operation_id, first_seq)
+        .await.unwrap().is_none());
+
+    store.commit_native_resume(&owner(), session, &request, prepare(&store, &f).await).await.unwrap();
+    let inspection = store.inspect_latest_native_execution(&owner(), session).await.unwrap().unwrap();
+    let checkpoint = store.load_native_checkpoint(&owner(), session, &request.operation_id).await.unwrap().unwrap();
+    let resumed = store.claim_native_execution(claim(&f, "resumed", inspection.execution_fence, Some(&checkpoint))).await.unwrap();
+    store.pause_native_execution(&resumed, "CLEANUP_UNKNOWN", false).await.unwrap();
+    let latest_seq = store.head(session).await.unwrap().last_seq;
+    assert_eq!(store.read_native_pause_event_at(session, &request.operation_id, first_seq)
+        .await.unwrap().unwrap(), first, "later pause must not upgrade or replace an old snapshot");
+    let latest = store.read_native_pause_event_at(session, &request.operation_id, latest_seq)
+        .await.unwrap().unwrap();
+    let SessionEventPayloadRef::InlineJson(payload) = latest.payload else { panic!("pause must be inline") };
+    assert_eq!(payload.0["pause"]["cleanup_proven"], false);
+}
+
 async fn paused(store: &AgentSessionStore, key: &str) -> (Fixture, NativeExecutionLease, NativeResumeRequest) {
     let f = fixture(store, key).await;
     let lease = store.claim_native_execution(claim(&f, "initial", 0, None)).await.unwrap();
