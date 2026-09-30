@@ -1425,6 +1425,18 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   本批未调用模型或正式 UI。Windows 通用 ConPTY close 仍明确不声称可证明 generic EOF，PROC-028、
   尺寸实际生效的应用级观测、其他平台及 N3/LONG/99% 仍开放，不关闭完整 PROC 或共享阶段。
 
+- S-D04-30（PROC-040、LIFE-029、A03/A11/A13/A17/A19 进程 owner 关闭与长 poll 子断言）：W168
+  的真实 pipe child 已发布独立 PID，60 秒 poll 已进入等待后，shutdown 在 6 秒内无法发起清理；
+  释放 poll 才取得唯一 Cancelled/reaped。证据根为外部 `2026-09-30/windows/w168-process-start-shutdown`，
+  产品首败保留于 `01-first-long-poll`。修复 registry：所有操作仍保护 lease/容量，
+  只读 poll 单独不阻塞 shutdown retirement；stdin/close/resize 等写操作保留原关闭屏障。
+  默认 1/1/3 秒 stop 预算下首次及重复 **21/21**，独立 PID/report 核对 **21/21**、helper 残留 0；
+  shutdown **5/5**、natural exit **5/5**、cancel-first **1/1**、registry **13/13**，fmt/diff 通过。
+  旧 75 毫秒夹具重复第 13 轮返回 Lost/reaped=false，首败和独立兜底清理单列保留；恢复生产默认
+  预算后仍要求原 6 秒上界、唯一 Cancelled/reaped、同一 poll/report 和精确 PID 消失，未放宽断言。
+  真实 start/shutdown、start future drop、正式 Tauri、ConPTY 父死亡、其他平台/角色及完整
+  N3/100 seed/LONG/99% 仍开放；只通过该子断言，不关闭完整 PROC/LIFE 或共享阶段。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider

@@ -435,7 +435,7 @@ impl ProcessSupervisor {
         yield_until: Instant,
         break_on_output: bool,
     ) -> Result<PollResult, ProcessError> {
-        let action = self.session(owner, session_id)?;
+        let action = self.session_action(owner, session_id, false)?;
         let session = action.session_arc();
         let mut exits = session.exit.subscribe();
         let mut lifecycle = session.lifecycle.subscribe();
@@ -714,10 +714,21 @@ impl ProcessSupervisor {
         owner: &ProcessOwner,
         session_id: &SessionId,
     ) -> Result<SessionAction, ProcessError> {
-        match self
-            .registry
-            .begin_action(session_id, owner, Instant::now())
-        {
+        self.session_action(owner, session_id, true)
+    }
+
+    fn session_action(
+        &self,
+        owner: &ProcessOwner,
+        session_id: &SessionId,
+        blocks_shutdown: bool,
+    ) -> Result<SessionAction, ProcessError> {
+        let action = if blocks_shutdown {
+            self.registry.begin_action(session_id, owner, Instant::now())
+        } else {
+            self.registry.begin_poll(session_id, owner, Instant::now())
+        };
+        match action {
             Ok(action) => Ok(action),
             Err(LookupError::NotFound) => {
                 Err(ProcessError::SessionNotFound {
