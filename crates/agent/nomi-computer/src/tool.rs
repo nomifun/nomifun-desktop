@@ -1240,6 +1240,64 @@ mod tests {
         }
     }
 
+    struct TruncatedSnapshotEngine;
+
+    impl A11yEngine for TruncatedSnapshotEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("unexpected capability probe")
+        }
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            let entries: Vec<_> = (0..120)
+                .map(|index| ElementEntry {
+                    r#ref: index + 1,
+                    role: "button".into(),
+                    name: Some(format!("AX_ITEM_{index:03}")),
+                    value: None,
+                    states: vec![],
+                    bounds: nomi_a11y::Rect {
+                        x: 10.0,
+                        y: 20.0 + f64::from(index),
+                        w: 30.0,
+                        h: 20.0,
+                    },
+                    source: Source::A11y,
+                })
+                .collect();
+            let text = entries
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "[{}] button \"{}\"",
+                        entry.r#ref,
+                        entry.name.as_deref().unwrap()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(nomi_a11y::Snapshot {
+                generation: SnapshotGen(10),
+                entries,
+                overlay: None,
+                text,
+                truncated: true,
+                pid: Some(2),
+                app_name: Some("Large Fixture".into()),
+                window_title: Some("Large Fixture Window".into()),
+            })
+        }
+        fn invoke(
+            &self,
+            _: &Target,
+            _: SnapshotGen,
+            _: ElementAction,
+        ) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected element action")
+        }
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected window activation")
+        }
+    }
+
     fn tool_with_snapshot(outcome: AxOutcome) -> ComputerTool {
         let t = tool();
         *t.a11y.lock().unwrap() = Some(Ok(Arc::new(FakeEngine(outcome))));
@@ -1560,6 +1618,30 @@ mod tests {
         assert!(result.content.contains("Pixel overlay intentionally omitted"));
         assert!(t.last_capture.lock().unwrap().is_none());
         assert!(t.resolve_ref(1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn canonical_a11y_observe_marks_an_incomplete_node_budget_without_tail_refs() {
+        let t = tool();
+        *t.a11y.lock().unwrap() = Some(Ok(Arc::new(TruncatedSnapshotEngine)));
+
+        let result = t
+            .execute_authorized(
+                crate::capability::COMPUTER_A11Y_OBSERVE_ACTION_ID,
+                json!({"action":"observe"}),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.images.is_empty());
+        assert!(result.content.contains("120 element(s)"));
+        assert!(result.content.contains("a11y tree truncated to the node budget"));
+        assert!(result.content.contains("AX_ITEM_000"));
+        assert!(result.content.contains("AX_ITEM_119"));
+        assert!(!result.content.contains("AX_OMITTED_SENTINEL_199"));
+        assert!(result.content.len() <= 64 * 1024);
+        assert!(t.resolve_ref(120).is_ok());
+        assert!(t.resolve_ref(121).is_err());
     }
 
     #[tokio::test]
