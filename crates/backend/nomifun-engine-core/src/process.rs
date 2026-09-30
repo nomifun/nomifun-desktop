@@ -5,10 +5,10 @@
 //! it to implement `workspace.process/exec` and interactive process-session actions
 //! without duplicating process ownership.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use nomi_process_runtime::{
@@ -228,6 +228,7 @@ pub struct EngineCleanupReport {
 pub struct ManagedEngineProcessOwner {
     workspace_root: PathBuf,
     supervisor: Arc<ProcessSupervisor>,
+    pending_starts: Mutex<HashMap<ProcessOwner, bool>>,
 }
 
 /// Start failed, with the owner's structured cleanup fact preserved before
@@ -261,6 +262,7 @@ impl ManagedEngineProcessOwner {
         Ok(Self {
             workspace_root,
             supervisor: ProcessSupervisor::new(config),
+            pending_starts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -287,6 +289,11 @@ impl ManagedEngineProcessOwner {
             return Err(before_spawn(EngineProcessError::Cancelled));
         }
         let normalized = self.normalized_request(request).map_err(before_spawn)?;
+        let native_owner = normalized.owner.clone();
+        // Stamp before the first native await. Dropping this adapter future
+        // cannot erase the identity needed to reconcile its retained worker.
+        self.pending_starts.lock().expect("process startup tracking is poisoned")
+            .insert(native_owner.clone(), false);
         // Complete the ownership transaction even when cancellation races
         // spawn; callers must never lose a newly committed process handle.
         let handle = self
@@ -313,8 +320,12 @@ impl ManagedEngineProcessOwner {
                     | ProcessError::CapacityExhausted { .. }
                     | ProcessError::SupervisorShuttingDown
                     | ProcessError::SpawnFailed { .. });
+                if no_live_process_proven {
+                    self.pending_starts.lock().expect("process startup tracking is poisoned").remove(&native_owner);
+                }
                 EngineProcessStartError { error: process_error(cause), no_live_process_proven, user_code_not_started }
             })?;
+        self.pending_starts.lock().expect("process startup tracking is poisoned").remove(&native_owner);
         let session = EngineProcessSession {
             owner: handle.owner,
             session_id: handle.session_id,
@@ -324,6 +335,15 @@ impl ManagedEngineProcessOwner {
         // Even on cancellation return the handle. wait/poll observes the
         // token and the caller retains ownership if cleanup itself fails.
         Ok(session)
+    }
+
+    /// Reconcile starts that never produced an adapter handle using their
+    /// exact host-generated owners, not an empty handle map or another call.
+    pub async fn quiesce_unregistered_starts(&self) -> bool {
+        if self.pending_starts.lock().expect("process startup tracking is poisoned").is_empty() { return false; }
+        let report = self.supervisor.quiesce().await;
+        let mut tracked = self.pending_starts.lock().expect("process startup tracking is poisoned");
+        settle_pending_starts_from_fence(&mut tracked, &report)
     }
 
     pub async fn execute(
@@ -566,6 +586,23 @@ impl ManagedEngineProcessOwner {
     }
 }
 
+fn settle_pending_starts_from_fence(pending: &mut HashMap<ProcessOwner, bool>, report: &nomi_process_runtime::QuiesceReport) -> bool {
+    if pending.is_empty() { return false; }
+    for (owner, proven) in pending.iter_mut() {
+        *proven |= report.startups.iter().any(|entry| &entry.owner == owner && entry.cleanup.reaped)
+            || report.sessions.iter().any(|entry| &entry.owner == owner && match &entry.outcome {
+                ProcessOutcome::Exited { cleanup, .. } | ProcessOutcome::Cancelled { cleanup, .. }
+                | ProcessOutcome::TimedOut { cleanup, .. } | ProcessOutcome::Lost { cleanup, .. } => cleanup.reaped,
+                ProcessOutcome::SpawnFailed(_) => false,
+            });
+    }
+    // Preserve partial exact receipts across cleanup retries. Quiesce consumes
+    // completed native startup reports, so forgetting one would strand its ID.
+    if !report.is_exact() || !pending.values().all(|proven| *proven) { return false; }
+    pending.clear();
+    true
+}
+
 fn invalid_relative_path(value: &str) -> bool {
     let path = Path::new(value);
     value.trim().is_empty()
@@ -642,6 +679,96 @@ const fn default_output_limit_bytes() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn startup_fence_report(owner: ProcessOwner, reaped: bool) -> nomi_process_runtime::QuiesceReport {
+        nomi_process_runtime::QuiesceReport {
+            sessions: Vec::new(), errors: Vec::new(),
+            startups: vec![nomi_process_runtime::StartupCleanupReport {
+                session_id: SessionId::new(), owner,
+                failure: nomi_process_runtime::SpawnFailure { code: "spawn_cleanup_deferred".into(), message: "controlled receipt".into() },
+                cleanup: CleanupReport { reaped, ..CleanupReport::default() }, user_code_not_started: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn startup_fence_requires_exact_native_owner_not_an_empty_or_foreign_report() {
+        let owner = ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7());
+        let mut pending = HashMap::from([(owner.clone(), false)]);
+        let empty = nomi_process_runtime::QuiesceReport { sessions: Vec::new(), startups: Vec::new(), errors: Vec::new() };
+        assert!(!settle_pending_starts_from_fence(&mut pending, &empty));
+        let foreign = ProcessOwner::new(owner.invocation_id, Uuid::now_v7());
+        assert!(!settle_pending_starts_from_fence(&mut pending, &startup_fence_report(foreign, true)));
+        assert!(!settle_pending_starts_from_fence(&mut pending, &startup_fence_report(owner.clone(), false)));
+        assert_eq!(pending.get(&owner), Some(&false));
+        assert!(settle_pending_starts_from_fence(&mut pending, &startup_fence_report(owner, true)));
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn startup_fence_retains_partial_exact_receipts_until_all_starts_are_proven() {
+        let first = ProcessOwner::new(Uuid::now_v7(), Uuid::now_v7());
+        let second = ProcessOwner::new(first.invocation_id, Uuid::now_v7());
+        let mut pending = HashMap::from([(first.clone(), false), (second.clone(), false)]);
+        assert!(!settle_pending_starts_from_fence(&mut pending, &startup_fence_report(first.clone(), true)));
+        assert_eq!(pending.get(&first), Some(&true));
+        assert_eq!(pending.get(&second), Some(&false));
+        assert!(settle_pending_starts_from_fence(&mut pending, &startup_fence_report(second, true)));
+        assert!(pending.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_pipe_unregistered_start_is_reconciled_by_its_exact_owner_fence() {
+        native_unregistered_start_fence(EngineProcessTransport::Pipe).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_pty_unregistered_start_is_reconciled_by_its_exact_owner_fence() {
+        native_unregistered_start_fence(EngineProcessTransport::Pty { cols: 80, rows: 24 }).await;
+    }
+
+    #[cfg(unix)]
+    async fn native_unregistered_start_fence(transport: EngineProcessTransport) {
+        let temporary = tempfile::tempdir().unwrap();
+        let scenario = if matches!(transport, EngineProcessTransport::Pipe) { "engine-pipe-drop" } else { "engine-pty-drop" };
+        let root = std::env::var_os("NOMI_ENGINE_FENCE_EVIDENCE").map(PathBuf::from)
+            .map(|root| root.join(scenario)).unwrap_or_else(|| temporary.path().to_path_buf());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let marker = root.join("executed.pid");
+        let owner = ManagedEngineProcessOwner::new(&root, SupervisorConfig::default()).unwrap();
+        let mut request = EngineProcessRequest::pipe("/bin/sh");
+        request.args = vec!["-c".into(), "printf '%s\\n' \"$$\" > \"$1\"; exec /bin/sleep 60".into(),
+            "engine-fence-fixture".into(), marker.to_string_lossy().to_string()];
+        request.transport = transport;
+        let mut start = Box::pin(owner.start_with_evidence(request, CancellationToken::new()));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(start.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        }).await;
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(&marker) {
+                    if contents.ends_with('\n') { break contents.trim().parse::<u32>().unwrap(); }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let before = owner.pending_starts.lock().unwrap().clone();
+        drop(start);
+        let exact = tokio::time::timeout(Duration::from_secs(6), owner.quiesce_unregistered_starts()).await.unwrap();
+        let gone = nomi_process_runtime::probe_process_identity(pid).unwrap().is_none();
+        let tracked_after = owner.pending_starts.lock().unwrap().len();
+        std::fs::write(root.join("assertions.json"), serde_json::json!({
+            "pid":pid,"native_tracking_count":before.len(),
+            "native_owners":before.keys().map(|owner| format!("{}:{}",owner.invocation_id,owner.call_id)).collect::<Vec<_>>(),
+            "caller_future_dropped":true,"exact_owner_fence":exact,"physical_pid_gone":gone,
+            "tracked_after":tracked_after,
+        }).to_string()).unwrap();
+        assert!(before.len() == 1 && exact && gone && tracked_after == 0);
+    }
 
     fn echo_request() -> EngineProcessRequest {
         #[cfg(windows)]
