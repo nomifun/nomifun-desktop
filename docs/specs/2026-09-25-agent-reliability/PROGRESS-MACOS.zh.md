@@ -938,3 +938,19 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   `2026-09-30/macos/m04-pause-cleanup-projection/run-001-tests/`、`run-002-tests/`。
 - 为冻结真实模型预算，本批没有再次调用 StepFun，也没有 post-fix 正式 Tauri 截图，故只记公共竞态修复
   与确定性验证；M04-23 terminal、真实 Provider N3/20/99%、完整暂停/断线 UI 矩阵仍开放。
+
+- **M04-25 native drag cancellation/release**（`COMP-012` 的有界 drag 期间真实取消子断言）：
+  macOS 26.6.2 / arm64 / APFS 上复用 Developer ID-signed 正式 Tauri App
+  `ce1890564f853902224f83707c3afa58490885844393a385dd8d073d633a9622`；相关 Computer/cancel/retained
+  effect 源码与当前分支无 diff。前两次 runner 分别缺 Browser feature、Computer host materialization，
+  在 Turn 前 fail closed；第三次中断仅有 3 条 Session 初始化事件，首次失败均保留。
+- fresh Session `01a0f112-5e48-7d80-bf2f-be65e77ea170` 由正式会话 UI 提交任务。仓库外监视器只读隔离
+  owner 的既有签名凭据，在内存生成短期 JWT，经原鉴权向产品 `/turns/cancel` 发送唯一请求；未认证
+  对照为 403，已认证读取/取消为 200。seq 101 已取消后的 **17 ms** 独立采样仍为 pressed；目标唯一
+  mouseDown/mouseUp、7 个 drag 事件，最终释放，实测按住 **106.6 ms**。input effect returned，seq 105
+  `host_cleanup_proven`，8 model steps / 106 events，零 pending/unknown；正式 UI 显示“已取消执行”
+  并保留真实拖拽结果。取消后无模型重开，退出前后 DB/备份均 `ok`。
+- UI runner 在关闭目标后读取 AX 曾重新启动目标，已核对唯一新 PID 后定向 TERM；最终
+  App/Helper/target/fixture 与两个 listener 为 0。普通证据 45 文件签名凭据匹配为 0，全部制品在
+  `2026-09-30/macos/m04-computer-held-cancel/`。本批无产品根因/源码改动、付费请求为 0；只关闭
+  有界 drag 的取消/释放子断言，长时 hold、key hold、原生 release-failure、N3 与完整 COMP-012 仍开放。
