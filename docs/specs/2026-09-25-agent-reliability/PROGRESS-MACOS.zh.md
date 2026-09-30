@@ -30,7 +30,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13～22 已验 owner crash/result-loss、Unicode、大型 A11y、Computer soak/click variants、packaged CEF 动态签名、native Browser soak/window reopen、正式 packaged Browser UI/close-to-tray；M04-23 真实 StepFun Browser/Workspace 功能链通过但限额暂停，terminal gate 保持开放；live held-cancel/IME、nested frame 与扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
-| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01 shutdown/写锁、M06-02 start 取消及 M06-03 post-commit IO failure 所有权子断言通过；其余故障边界及 LONG 待验 |
+| D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | M06-01～04 已验 shutdown/写锁、start 取消/IO failure/deadline 所有权子断言；其余故障边界及 LONG 待验 |
 | D10 | 33 | M01/M06 | MAC-001～018、PORT；arm64 主 lane，x86 按发布范围 | MAC-005～010/013/015/017 的本批功能断言已验；其余待走查 |
 | D11 | 75 | M01/M03 | symlink、Seatbelt/ACL、旧授权和秘密隔离 | M01-01/02、M03-04～07 已验 Seatbelt/symlink/mode/旧授权/ACL/xattr/uchg；末端竞态仍待验 |
 | **合计** | **2366** | M01～M06 | 平台结果独立保留 | 本 Windows 执行者不代判 PASS |
@@ -1010,3 +1010,20 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   process Runtime lib **149/149**、session registry **13/13**、Rust fmt/diff 通过，付费调用 0。
   证据 `2026-09-30/macos/m06-start-failure/`。本批只有原生组件证据；setup deadline/commit handshake
   失败、worker panic、清理失败与未知恢复、更多角色/descendants、正式 Tauri 及完整 Case/LONG 仍开放。
+
+- **M06-04 startup deadline ownership**（`PROC-039/040/047`、`CONC-004`、`LIFE-029` 的本批
+  子断言）：macOS arm64 / APFS 固定原生 COMMITTED 后的 worker 窗口。首败 caller 在约 105 ms
+  收到 StartLost，但 worker 仍被持有时 shutdown 已空报告返回，PID 未回收；原 worker 后续清理，
+  首败日志/JSON/PID 保留于 `run-001-first-failure`。
+- 公共根因/修复见 `S-D04-34`：setup deadline 通知只结束 caller 等待，Supervisor 原 worker 继续
+  持有 JoinHandle/预留/准入租约；迟到 commit 只交原 owner 做 retirement，不能成为成功 start。
+  standalone deadline/drop 合同和原 setup budget 不变，未开始的原 worker 放行后仍不得 fork。
+- Pipe/PTY committed shutdown、PTY quiesce、Pipe pre-fork 四场景首次 + 20 repeats **84/84**；
+  独立 PID **63/63**、零 fork/零 marker **21/21**，100 ms setup budget 下 caller 最大 **105 ms**，
+  原 caller 350 ms/cleanup 6 秒断言未放宽。原生报告在 worker live 时均未完成，最后准确回收。
+  最终 Runtime lib **153/153**、session registry **13/13**、fmt/diff 通过，付费模型调用 0。
+  中间 raw PTY watchdog-after-COMMITTED 检查曾 PeerClosed（152/153），首败保留在 `run-007`，
+  该独立注入窗口仍开放，未用最终快照通过关闭它。
+- 全证据 `2026-09-30/macos/m06-start-deadline/`；本批只有组件/原生证据，未跑正式 Tauri、Linux/
+  Windows 原生；commit handshake 失败、worker panic、清理失败/unknown recovery、更多角色/
+  descendants、完整 N3/100 seed/LONG/99% 与全部阶段门槛继续开放。
