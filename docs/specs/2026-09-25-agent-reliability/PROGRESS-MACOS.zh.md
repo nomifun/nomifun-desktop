@@ -27,7 +27,7 @@ Agent 槽数：GEN 601、COD 584、PAL 323、MM 568、CS 242、HOST 48。
 | D03 | 145 | M01/M03 | APFS 大小写/NFC/NFD、权限、原子文件与 Artifact | M01-02、M03-01、M03-05～07 APFS/发布/ACL/xattr/immutable 子断言已验证；其余待走查 |
 | D04 | 476 | M01 | /bin/sh/zsh、字面 argv、PTY/process group、Seatbelt 与退出码 | M01-01/03～05 已验 owner、`CMD-132/139`、host 映射及 login-shell 子断言；CMD 全集待验 |
 | D05 | 69 | M03 | 隔离 Git remote/SSH、凭据/权限与未知结果 | M03-02/03/08～13 本地 Git/四类 hook/receipt 与隔离 loopback sshd 已验；消息 hook 的 production dependency 亦经正式 desktop build 复核；外部 host/UI 待准备 |
-| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13 已验 owner crash/result-loss；live held-cancel/扩展待验 |
+| D06 | 250 | M04/M05 | WKWebView、A11y/Screen Recording、MCP/Plugin/Skill | M04-01～04 已验 native CEF、Computer 权限/media/input 与 MM cold history；M04-05～08 已验 stale A11y ref，M04-09～11 已验 raw pointer、缺失绝对 launch 与用户并发输入；M04-12 修复 input cleanup 组件缺陷，M04-13 已验 owner crash/result-loss，M04-14 已验 Unicode 直接文本输入；live held-cancel/IME/扩展待验 |
 | D07 | 124 | M02/M04 | 精确伙伴/画布/知识/客服 owner 和资源 | M02-01 伙伴/画布精确绑定与 Skill 锁定向通过；正式入口 UI 待验 |
 | D08 | 103 | M02/M05 | 五类 Agent 专属入口/任务；独立产物断言 | M02-01 覆盖 GEN/COD/PAL/MM 的 Session/入口子断言；原生全矩阵待走查 |
 | D09 | 375 | M06 | watchdog、setsid/丢失 ownership、sleep/wake、恢复/并发/LONG | 故障边界优先，最后 soak |
@@ -704,3 +704,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   正式 UI 的详情页仍显示暂停/发送禁用，侧栏悬浮卡精确显示“活跃状态 执行已暂停”；产品按钮结束
   回合后 head ready、seq 71 cancelled，unknown receipt 保留。最终 DB `ok`，App 与 `63143` listener
   为 0。证据在 `m04-computer-crash/run-009～011-*`；该 OBS 冷启动投影子断言通过。
+
+- **M04-14 macOS Unicode direct text input**（`COMP-004` 的 Unicode scalar、组合字符、emoji 与零
+  shortcut 副作用子断言）：新增最小 `--computer-unicode-input` fixture 与仓库外 Developer ID-signed
+  arm64 AppKit 文本目标；目标以 exact content、UTF-8 bytes、Unicode scalar、UTF-16 units、文本变化、
+  modifier/shortcut 事件作独立 oracle。输入固定为 precomposed `é`、decomposed `e + U+0301`、中文、
+  かな、普通/ZWJ+肤色 emoji 及非 BMP 音符的混合串，不切换系统输入法或键盘布局。
+- 首个 data setup 因 fixture 漏编 `computer-use` feature 而被 `CAPABILITY_NOT_MATERIALIZED` 拒绝，零
+  模型/目标副作用，保留于 `run-002-formal/`。feature-correct 首次正式 Turn 已物理输入正确内容，但
+  fixture 错把 A11y 对不可见 U+0301/U+200D 的可审计 `\\u{...}` 展示转义当作内容丢失，Turn 以
+  `EXECUTION_MODEL_INVALID_REQUEST` 暂停；target 此时已精确记录 **58 UTF-8 bytes / 31 scalars /
+  36 UTF-16 units / 2 changes / 0 modifier / 0 shortcut**，失败完整保留于 `run-004-formal/`。修复仅把
+  A11y 断言改为精确匹配其既有转义合同，原始 target content/三种长度与零副作用断言不放宽。
+- 最终 `run-006-formal`（Session `01a0f016-f09d-7922-94cc-0372b8044a6e`）为 **9 model steps /
+  113 events**；唯一 launch/input effect 各 returned，input args 保留原始 scalar，最终 A11y 结果保留
+  `\\u{301}` / `\\u{200d}`，target exact content 与三种长度全部一致、modifier/shortcut 仍为 0。
+  Turn completed，正式 UI 明确完成，运行中及停止后 DB `ok`，target/app/fixture 与 `53368/53299`
+  listener 均为 0。fixture 双 feature build、fmt/diff 通过；完整证据：
+  `2026-09-30/macos/m04-computer-unicode/`。
+- 本批未发现共享产品代码根因，不改 `PROGRESS-SHARED`。真实 IME composition/候选窗、切换输入源、
+  Dvorak/其他 layout、dead key 与 shortcut 组合仍开放；因此只关闭 `COMP-004` 的 macOS Unicode 直接
+  文本子断言，不关闭完整 `COMP-004`、Computer、D06 或 M04。
