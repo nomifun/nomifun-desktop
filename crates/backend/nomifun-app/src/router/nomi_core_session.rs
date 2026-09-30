@@ -2132,6 +2132,17 @@ impl NomiCoreSessionOwner {
         {
             observed.events.push(started);
         }
+        // A later pause of the same Turn may be outside the first event page,
+        // even when that page already contains an older pause.
+        if observed.head.status == "paused"
+            && let Some(operation) = observed.head.active_turn_id.as_deref()
+            && let Some(paused) = self.canonical.store().read_native_pause_event_at(
+                session_id, &OperationId::from(operation), observed.head.last_seq,
+            ).await.map_err(agent_session_store_error)?
+            && !observed.events.iter().any(|event| event.event_id == paused.event_id)
+        {
+            observed.events.push(paused);
+        }
         let control_plane = self
             .runtime_control_plane
             .get()
