@@ -2947,6 +2947,22 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 连续多进程写、512MiB边界样本、staging/drop与rollback名称竞态、真实IO fault、完整应用/UI/
   角色及N3/100 seed/LONG/99%仍开放，不关闭完整Case或共享阶段。
 
+### Artifact stage名称复用与明确cleanup unknown（W176，基线 `295686954`）
+
+- S-D03-62 / ART-001/002/005/007、FILE-038/039、A04/A05/A07/A13/A14/A17/A19：Drop清理
+  原stage名时误删已占用该名的外来对象（不同字节/同字节异inode），public staging failure又吞
+  清理未确认。三个产品首败及坏现场留在外部 `2026-09-30/windows/w176-artifact-stage-cleanup`
+  的 `01-first-product-run`、`02-first-public-product-run`，没有覆盖。
+- stage保留identity到删除结束；Windows通过pinned Dir相对打开DELETE/metadata guard并拒绝
+  delete sharing，核对后对原handle删除。publish与stage error显式cleanup，异常返回unknown原原因
+  并保留原stage/外来对象，Drop只做同样的有身份清理并保留诊断。未增加模型权限或忽略失败。
+- Windows模块 **24/24**、新四项 **20/20 × 4**、84份独立磁盘/对象核对；原生核对→delete的
+  POSIX remap被32拒绝，guard释放后相同操作成功。WSL Ubuntu ext4模块 **26/26**、3原生场景
+  核对及fmt/diff通过；未计macOS。原publishing/hash/growth/page/cache断言保持，完整日志/源码/
+  binary和磁盘在外部，无模型/UI；脚本格式失败另留工具输出，不计产品FAIL。
+- startup stale cleanup、Unix最终check→unlink、rollback名称窗口、真IO fault、完整UI/平台/角色
+  及N3/100 seed/LONG/99%仍开放；不关闭完整Case或共享阶段。
+
 执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
 现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
 任务可独立交付且有实际收益时才并发。

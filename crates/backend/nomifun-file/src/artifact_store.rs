@@ -241,50 +241,59 @@ impl WorkspaceArtifactStore {
         }
         after_namespace();
         verify_namespace(&self.workspace, &namespace)?;
-        let staged = stage_source(
+        let mut staged = stage_source(
             &self.workspace,
             &relative,
             &namespace,
             &self.io_counters,
             after_source,
         )?;
-        self.verify_workspace()?;
-        let digest = staged.digest.clone();
-        if expected.is_some_and(|value| value != digest.as_str()) {
-            return Err(AppError::Conflict(format!("workspace artifact source digest changed (expected {}, observed {digest})", expected.unwrap())));
-        }
-        let (created, verified) = publish_content_addressed(&namespace, &digest, &staged, &self.io_counters)?;
-        if let Err(error) = verify_namespace(&self.workspace, &namespace) {
-            drop(verified);
-            if created {
-                rollback_confirmed_published(&namespace.dir, &digest, &staged).map_err(|cleanup| {
-                    AppError::Conflict(format!(
-                        "{PUBLICATION_OUTCOME_UNKNOWN}: namespace changed and rollback failed: {cleanup}"
-                    ))
-                })?;
+        let publication = (|| {
+            self.verify_workspace()?;
+            let digest = staged.digest.clone();
+            if expected.is_some_and(|value| value != digest.as_str()) {
+                return Err(AppError::Conflict(format!("workspace artifact source digest changed (expected {}, observed {digest})", expected.unwrap())));
             }
-            return Err(error);
-        }
-        if let Err(error) = self.verify_workspace() {
-            drop(verified);
-            if created {
-                rollback_confirmed_published(&namespace.dir, &digest, &staged).map_err(|cleanup| {
-                    AppError::Conflict(format!(
-                        "{PUBLICATION_OUTCOME_UNKNOWN}: workspace changed and rollback failed: {cleanup}"
-                    ))
-                })?;
+            let (created, verified) = publish_content_addressed(&namespace, &digest, &staged, &self.io_counters)?;
+            if let Err(error) = verify_namespace(&self.workspace, &namespace) {
+                drop(verified);
+                if created {
+                    rollback_confirmed_published(&namespace.dir, &digest, &staged).map_err(|cleanup| {
+                        AppError::Conflict(format!(
+                            "{PUBLICATION_OUTCOME_UNKNOWN}: namespace changed and rollback failed: {cleanup}"
+                        ))
+                    })?;
+                }
+                return Err(error);
             }
-            return Err(error);
+            if let Err(error) = self.verify_workspace() {
+                drop(verified);
+                if created {
+                    rollback_confirmed_published(&namespace.dir, &digest, &staged).map_err(|cleanup| {
+                        AppError::Conflict(format!(
+                            "{PUBLICATION_OUTCOME_UNKNOWN}: workspace changed and rollback failed: {cleanup}"
+                        ))
+                    })?;
+                }
+                return Err(error);
+            }
+            self.verified
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(digest.clone(), Arc::new(Mutex::new(verified)));
+            Ok(PublishedWorkspaceArtifact {
+                workspace_root_sha256: crate::workspace_observation::canonical_root_sha256(&self.workspace_path),
+                artifact_id: digest.clone(), source_path: source.into(), relative_path: format!("{ARTIFACT_RELATIVE_ROOT}/{digest}"),
+                mime_type: mime_guess::from_path(source).first_or_octet_stream().essence_str().into(), size_bytes: staged.size_bytes, sha256: digest,
+            })
+        })();
+        match staged.cleanup() {
+            Ok(()) => publication,
+            Err(cleanup) => Err(AppError::Conflict(format!(
+                "{PUBLICATION_OUTCOME_UNKNOWN}: staging cleanup could not be proven ({cleanup}); publication result: {}",
+                publication.as_ref().map_or_else(|error| error.to_string(), |_| "published".to_owned()),
+            ))),
         }
-        self.verified
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(digest.clone(), Arc::new(Mutex::new(verified)));
-        Ok(PublishedWorkspaceArtifact {
-            workspace_root_sha256: crate::workspace_observation::canonical_root_sha256(&self.workspace_path),
-            artifact_id: digest.clone(), source_path: source.into(), relative_path: format!("{ARTIFACT_RELATIVE_ROOT}/{digest}"),
-            mime_type: mime_guess::from_path(source).first_or_octet_stream().essence_str().into(), size_bytes: staged.size_bytes, sha256: digest,
-        })
     }
 
     pub fn read(&self, artifact_id: &str, offset: u64, limit: usize) -> Result<WorkspaceArtifactRead, AppError> {
@@ -360,15 +369,50 @@ struct StagedArtifact {
     digest: String,
     size_bytes: u64,
     chunk_hashes: Vec<String>,
+    cleanup_attempted: bool,
+}
+
+impl StagedArtifact {
+    fn cleanup(&mut self) -> Result<(), AppError> {
+        if self.cleanup_attempted { return Ok(()); }
+        self.cleanup_attempted = true;
+        remove_owned_staging_name(self, || {})
+    }
 }
 
 impl Drop for StagedArtifact {
     fn drop(&mut self) {
-        drop(self.identity.take());
-        if self.dir.remove_file(&self.name).is_ok() {
-            let _ = sync_directory(&self.dir);
+        if let Err(error) = self.cleanup() {
+            tracing::warn!(%error, "artifact staging cleanup remains unconfirmed");
         }
     }
+}
+
+fn remove_owned_staging_name(staged: &StagedArtifact, after_identity: impl FnOnce()) -> Result<(), AppError> {
+    let expected = staged.identity.as_ref().ok_or_else(|| AppError::Conflict("staging object identity is unavailable".into()))?;
+    let options = read_options();
+    #[cfg(windows)]
+    let mut options = options;
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE};
+        options.access_mode(DELETE | FILE_READ_ATTRIBUTES).share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+    }
+    let current = match staged.dir.open_with(&staged.name, &options) {
+        Ok(file) => file.into_std(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(AppError::Conflict(format!("cannot pin staging cleanup name: {error}"))),
+    };
+    let identity = SameFileHandle::from_file(current.try_clone().map_err(|error| AppError::Conflict(error.to_string()))?)
+        .map_err(|error| AppError::Conflict(error.to_string()))?;
+    if expected != &identity { return Err(AppError::Conflict("staging cleanup name belongs to another object".into())); }
+    after_identity();
+    #[cfg(windows)]
+    crate::windows_cleanup::remove_handle(&current).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging handle: {error}")))?;
+    #[cfg(not(windows))]
+    staged.dir.remove_file(&staged.name).map_err(|error| AppError::Conflict(format!("cannot unlink owned staging name: {error}")))?;
+    sync_directory(&staged.dir)
 }
 
 fn open_artifact_namespace(workspace: &Dir, create: bool) -> Result<ArtifactNamespace, AppError> {
@@ -551,29 +595,41 @@ fn stage_source<F: FnOnce()>(workspace: &Dir, source: &Path, namespace: &Artifac
     if !before.is_file() || before.len() == 0 || before.len() > MAX_ARTIFACT_BYTES { return Err(AppError::BadRequest(format!("workspace artifact source must contain 1..={MAX_ARTIFACT_BYTES} bytes"))); }
     let modified = before.modified().ok();
     let (mut staged, mut staged_file) = create_staging_file(namespace)?;
-    after_source_open();
-    let mut whole = Sha256::new(); let mut chunks = Vec::new(); let mut total = 0_u64; let mut buffer = vec![0_u8; ARTIFACT_CHUNK_BYTES];
-    let mut bounded = std::io::Read::by_ref(&mut source_file).take(before.len() + 1);
-    loop {
-        let read = read_fixed_chunk(&mut bounded, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?;
-        if read == 0 { break; }
-        total += read as u64;
-        counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed);
-        if total > before.len() {
-            return Err(AppError::Conflict("workspace artifact source grew while publishing".into()));
+    let staged_result = (|| {
+        after_source_open();
+        let mut whole = Sha256::new(); let mut chunks = Vec::new(); let mut total = 0_u64; let mut buffer = vec![0_u8; ARTIFACT_CHUNK_BYTES];
+        let mut bounded = std::io::Read::by_ref(&mut source_file).take(before.len() + 1);
+        loop {
+            let read = read_fixed_chunk(&mut bounded, &mut buffer).map_err(|error| AppError::BadRequest(error.to_string()))?;
+            if read == 0 { break; }
+            total += read as u64;
+            counters.full_scan_bytes.fetch_add(read as u64, Ordering::Relaxed);
+            if total > before.len() {
+                return Err(AppError::Conflict("workspace artifact source grew while publishing".into()));
+            }
+            whole.update(&buffer[..read]);
+            chunks.push(format!("{:x}", Sha256::digest(&buffer[..read])));
+            staged_file.write_all(&buffer[..read]).map_err(|error| AppError::Internal(error.to_string()))?;
         }
-        whole.update(&buffer[..read]);
-        chunks.push(format!("{:x}", Sha256::digest(&buffer[..read])));
-        staged_file.write_all(&buffer[..read]).map_err(|error| AppError::Internal(error.to_string()))?;
+        staged_file.sync_all().map_err(|error| AppError::Internal(error.to_string()))?; drop(staged_file);
+        validate_open_source(workspace, source, &source_identity)?;
+        let after = source_file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?;
+        if total != before.len() || after.len() != before.len() || after.modified().ok() != modified { return Err(AppError::Conflict("workspace artifact source changed while publishing".into())); }
+        staged.digest = format!("{:x}", whole.finalize());
+        staged.size_bytes = total;
+        staged.chunk_hashes = chunks;
+        verify_staged_identity(&staged)?;
+        Ok(())
+    })();
+    if let Err(cause) = staged_result {
+        return match staged.cleanup() {
+            Ok(()) => Err(cause),
+            Err(cleanup) => Err(AppError::Conflict(format!(
+                "{PUBLICATION_OUTCOME_UNKNOWN}: staging failed ({cause}) and cleanup could not be proven ({cleanup})"
+            ))),
+        };
     }
-    staged_file.sync_all().map_err(|error| AppError::Internal(error.to_string()))?; drop(staged_file);
-    validate_open_source(workspace, source, &source_identity)?;
-    let after = source_file.metadata().map_err(|error| AppError::Conflict(error.to_string()))?;
-    if total != before.len() || after.len() != before.len() || after.modified().ok() != modified { return Err(AppError::Conflict("workspace artifact source changed while publishing".into())); }
-    staged.digest = format!("{:x}", whole.finalize());
-    staged.size_bytes = total;
-    staged.chunk_hashes = chunks;
-    verify_staged_identity(&staged)?; Ok(staged)
+    Ok(staged)
 }
 
 fn create_staging_file(namespace: &ArtifactNamespace) -> Result<(StagedArtifact, File), AppError> {
@@ -597,6 +653,7 @@ fn create_staging_file(namespace: &ArtifactNamespace) -> Result<(StagedArtifact,
                     digest: String::new(),
                     size_bytes: 0,
                     chunk_hashes: Vec::new(),
+                    cleanup_attempted: false,
                 };
                 let identity = SameFileHandle::from_file(
                     file.try_clone()
@@ -897,6 +954,114 @@ mod tests {
     #[test]
     fn publication_bytes_reject_same_inode_corruption_before_link() {
         publication_bytes_race(false);
+    }
+
+    #[test]
+    fn staging_cleanup_preserves_a_foreign_reused_name() {
+        staging_cleanup_name_race(false);
+    }
+
+    #[test]
+    fn staging_cleanup_preserves_same_bytes_under_a_foreign_inode() {
+        staging_cleanup_name_race(true);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staging_cleanup_locks_identity_until_native_delete() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("locked-cleanup"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let path = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let foreign = workspace.join("foreign");
+        fs::write(&foreign, b"foreign!").unwrap();
+        let mut blocked = None;
+        remove_owned_staging_name(&staged, || {
+            let failure = crate::windows_test_support::rename_with_posix_semantics(&foreign, &path, true).unwrap_err();
+            blocked = failure.raw_os_error();
+            assert_eq!(blocked, Some(32));
+        }).unwrap();
+        assert!(!path.exists());
+        assert_eq!(fs::read(&foreign).unwrap(), b"foreign!");
+        drop(staged);
+        fs::write(&path, b"later file").unwrap();
+        crate::windows_test_support::rename_with_posix_semantics(&foreign, &path, true).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"foreign!");
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "blocked_native_code":blocked, "owned_name_removed":true,
+            "foreign_preserved":true, "same_remap_possible_after_release":true,
+            "reused_relative_path":path.strip_prefix(&workspace).unwrap(),
+        })).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn staging_cleanup_preserves_foreign_name_and_reports_uncertainty() {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join("public-stage-failure"))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let reused = std::cell::RefCell::new(PathBuf::new());
+        let retained = workspace.join("retained-owned-stage");
+        let result = store.publish_with_hooks("source", None, || {
+            let current = fs::read_dir(workspace.join(ARTIFACT_RELATIVE_ROOT)).unwrap()
+                .map(|entry| entry.unwrap().path()).find(|path| path.file_name().unwrap().to_str().unwrap().starts_with(".publish-")).unwrap();
+            fs::rename(&current, &retained).unwrap();
+            fs::write(&current, b"foreign!").unwrap();
+            *reused.borrow_mut() = current;
+        }, || {});
+        let error = result.unwrap_err();
+        let unknown = artifact_publication_outcome_unknown(&error);
+        let actual = fs::read(reused.borrow().as_path()).ok();
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "unknown":unknown, "error":error.to_string(), "actual_after_failure":actual,
+            "reused_relative_path":reused.borrow().strip_prefix(&workspace).unwrap(),
+            "retained_owned_bytes":fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(actual.as_deref(), Some(b"foreign!".as_slice()), "public failure cleanup deleted an unowned stage name");
+        assert!(unknown, "unconfirmed staging cleanup must be explicit in the public receipt");
+        assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+        assert_eq!(fs::read(workspace.join("source")).unwrap(), b"artifact");
+    }
+
+    fn staging_cleanup_name_race(same_bytes: bool) {
+        let temporary = tempfile::tempdir().unwrap();
+        let workspace = std::env::var_os("NOMIFUN_ARTIFACT_EVIDENCE_DIR")
+            .map(PathBuf::from).map(|root| root.join(if same_bytes {"same-bytes"} else {"different-bytes"}))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("source"), b"artifact").unwrap();
+        let store = WorkspaceArtifactStore::new(&workspace).unwrap();
+        let namespace = open_artifact_namespace(&store.workspace, true).unwrap();
+        let _lease = PublicationLease::acquire(&namespace.dir).unwrap();
+        let staged = stage_source(&store.workspace, Path::new("source"), &namespace, &ArtifactIoCounters::default(), || {}).unwrap();
+        let reused = workspace.join(ARTIFACT_RELATIVE_ROOT).join(&staged.name);
+        let retained = workspace.join("retained-owned-stage");
+        fs::rename(&reused, &retained).unwrap();
+        let foreign_bytes: &[u8] = if same_bytes {b"artifact"} else {b"foreign!"};
+        fs::write(&reused, foreign_bytes).unwrap();
+        let foreign = SameFileHandle::from_path(&reused).unwrap();
+        assert_ne!(staged.identity.as_ref().unwrap(), &foreign);
+        drop(staged);
+        let actual = fs::read(&reused).ok();
+        let foreign_identity_preserved = SameFileHandle::from_path(&reused).ok().as_ref() == Some(&foreign);
+        fs::write(workspace.join("assertions.json"), serde_json::to_vec(&serde_json::json!({
+            "same_bytes":same_bytes, "reused_relative_path":reused.strip_prefix(&workspace).unwrap(),
+            "foreign_bytes":foreign_bytes, "actual_after_drop":actual,
+            "foreign_identity_preserved":foreign_identity_preserved,
+            "retained_owned_bytes":fs::read(&retained).unwrap(),
+        })).unwrap()).unwrap();
+        assert_eq!(fs::read(&retained).unwrap(), b"artifact");
+        assert_eq!(actual.as_deref(), Some(foreign_bytes), "cleanup deleted an unowned file at the old stage name");
+        assert!(foreign_identity_preserved);
     }
 
     #[test]
