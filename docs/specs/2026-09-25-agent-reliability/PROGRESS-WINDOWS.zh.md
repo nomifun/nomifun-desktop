@@ -2729,6 +2729,19 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及
   N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0/OBS 或共享阶段。
 
+### 两个独立 Store pool 同时失步与并发恢复（W161，基线 `fb35d3b57`）
+
+- S-D09-41 / LIFE-003/024、CONC-014、G0-029、A04/A05/A07/A17/A19：同一 SQLite 文件上的
+  两个独立单连接 production Store pool 分别服务独立 Session 与 workspace resource；各自设置连接级
+  page budget 后，两条 admission 均真实命中 `SQLITE_FULL`，保持零文件/零 Effect，并让两个连接失步。
+- 分别解除预算后并发显式重试，两个 Store 各自驱逐自己的坏连接并各生成唯一 Returned Effect；改写
+  文件后同 key 并发重放不覆盖用户字节，Effect count 仍各为 1。
+- 前三版夹具依次触发精确 tool causation、连接级 PRAGMA 与物理资源唯一 fence 的正确拒绝，另一次
+  补丁定位导致编译失败；日志均保留且不计产品失败。纠正后首次及连续 **20/20**；单 pool 满盘、
+  busy→full、资源 fence 相邻回归 **3/3**，fmt/diff 通过。生产代码无需修改，无 UI/模型。
+- 未覆盖同一 pool 内多连接同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及
+  N3/100 seed/LONG/99%；不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

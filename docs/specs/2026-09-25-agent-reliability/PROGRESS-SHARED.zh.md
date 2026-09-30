@@ -582,6 +582,17 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   **3/3**。生产代码无需修改，无 UI/模型。多个受限 pool 同时失步、fsync/WAL 损坏、正式 shutdown、
   其他平台及 N3/LONG/99% 仍开放，不关闭完整 LIFE/CONC/G0/OBS 或共享阶段。
 
+- S-D09-41（LIFE-003/024、CONC-014、G0-029、A04/A05/A07/A17/A19 多 Store pool 失步恢复
+  子断言）：W161 在同一 SQLite 文件上建立两个独立单连接 production Store pool、两个 Session 与
+  两个物理 workspace resource，分别设置连接级 page budget；两条 admission 均真实命中
+  `SQLITE_FULL`，保持零文件/零 Effect，并让各自 sqlx 连接失步。分别解除预算后并发显式重试，两个
+  Store 各自驱逐自己的坏连接并各生成唯一 Returned Effect；随后改写文件再同 key 并发重放，用户字节
+  保持且 Effect count 仍各为 1。前三版夹具依次触发精确 tool causation、连接级 PRAGMA 与物理资源唯一
+  fence 的正确拒绝，另一次补丁定位导致编译失败；日志均保留且不计产品失败。纠正后首次及连续
+  **20/20**，单 pool 满盘、busy→full、资源 fence 相邻回归 **3/3**。生产代码无需修改，无 UI/模型。
+  同一 pool 内多连接同时失步、fsync/WAL 损坏、正式 shutdown、其他平台及 N3/LONG/99% 仍开放，
+  不关闭完整 LIFE/CONC/G0 或共享阶段。
+
 - S-D03-52（FILE-040、PORT-012、A05/A15/A17/A19 watcher 残余丢失信号子断言）：W156 修复
   `NomiWorkspaceWatchContext`/`WatchQueue` 两处静默丢失。其一：native change 事件不带任何
   path、或全部 path 落在 watched root 之外时（可能是跨越边界的 rename 尾部），原先不产生

@@ -6442,6 +6442,109 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor="multi_thread",worker_threads=4)]
+    async fn two_desynced_store_pools_recover_without_cross_pool_duplicates() {
+        let directory=tempfile::tempdir().unwrap();
+        let workspace_a=directory.path().join("workspace-a");
+        let workspace_b=directory.path().join("workspace-b");
+        let database_path=directory.path().join("agent.db");
+        std::fs::create_dir(&workspace_a).unwrap();
+        std::fs::create_dir(&workspace_b).unwrap();
+        let database=nomifun_db::init_database(&database_path).await.unwrap();
+        let pool_a=single_connection_pool(&database_path).await;
+        let pool_b=single_connection_pool(&database_path).await;
+        let store_a=nomifun_agent_session::AgentSessionStore::from_pool(pool_a.clone()).await.unwrap();
+        let store_b=nomifun_agent_session::AgentSessionStore::from_pool(pool_b.clone()).await.unwrap();
+        let observer=nomifun_agent_session::AgentSessionStore::from_pool(database.pool().clone()).await.unwrap();
+        let host_a=Wave2ApplicationHost::for_workspace_root(&workspace_a)
+            .with_effect_store(store_a.clone());
+        let host_b=Wave2ApplicationHost::for_workspace_root(&workspace_b)
+            .with_effect_store(store_b.clone());
+        let mut call_a=context(&workspace_a);
+        call_a.idempotency_key=IdempotencyKey::from("two-pools-disk-full-a");
+        call_a.operation_id=OperationId::from("two-pools-disk-full-a-operation");
+        let mut call_b=context(&workspace_b);
+        call_b.idempotency_key=IdempotencyKey::from("two-pools-disk-full-b");
+        call_b.operation_id=OperationId::from("two-pools-disk-full-b-operation");
+        let session_a=call_a.agent_session_id.clone();
+        let session_b=call_b.agent_session_id.clone();
+        ensure_test_effect_context(&store_a,&call_a).await;
+        ensure_test_effect_context(&store_b,&call_b).await;
+        let effect_a=wave2_effect_id(&call_a).unwrap();
+        let effect_b=wave2_effect_id(&call_b).unwrap();
+        let input_a=StrictJsonValue(json!({
+            "path":"pool-a.txt","content":"pool a executes after storage recovery"
+        }));
+        let input_b=StrictJsonValue(json!({
+            "path":"pool-b.txt","content":"pool b executes after storage recovery"
+        }));
+
+        set_database_page_budget(&pool_a,true).await;
+        set_database_page_budget(&pool_b,true).await;
+        for (host,call,input) in [(&host_a,&call_a,&input_a),(&host_b,&call_b,&input_b)] {
+            let error=host.invoke(Wave2HostRequest {
+                context:call.clone(),
+                operation:Wave2CapabilityOperation::WorkspaceExecution { input:input.clone() },
+            }).await.unwrap_err();
+            assert_eq!(error.code,"CAPABILITY_UNAVAILABLE");
+            assert!(error.message.contains("full"),"{error:?}");
+        }
+        assert!(!workspace_a.join("pool-a.txt").exists());
+        assert!(!workspace_b.join("pool-b.txt").exists());
+        assert!(observer.read_effect(&call_a.agent_session_id,&effect_a).await.unwrap().is_none());
+        assert!(observer.read_effect(&call_b.agent_session_id,&effect_b).await.unwrap().is_none());
+
+        // Lift each connection-local cap. Each production Store must
+        // independently evict its own desynchronized connection;
+        // neither recovery may consume or duplicate the other's operation.
+        set_database_page_budget(&pool_a,false).await;
+        set_database_page_budget(&pool_b,false).await;
+        let retry_a=host_a.invoke(Wave2HostRequest {
+            context:call_a.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_a.clone() },
+        });
+        let retry_b=host_b.invoke(Wave2HostRequest {
+            context:call_b.clone(),
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_b.clone() },
+        });
+        let (result_a,result_b)=tokio::join!(retry_a,retry_b);
+        assert_eq!(result_a.unwrap().0["written"],true);
+        assert_eq!(result_b.unwrap().0["written"],true);
+        assert_eq!(std::fs::read(workspace_a.join("pool-a.txt")).unwrap(),b"pool a executes after storage recovery");
+        assert_eq!(std::fs::read(workspace_b.join("pool-b.txt")).unwrap(),b"pool b executes after storage recovery");
+        for session_id in [&session_a,&session_b] {
+            let effects=observer.list_effects(session_id).await.unwrap();
+            assert_eq!(effects.len(),1);
+            assert_eq!(effects[0].state,nomifun_agent_session::AgentEffectState::Returned);
+        }
+
+        std::fs::write(workspace_a.join("pool-a.txt"),b"user edit a").unwrap();
+        std::fs::write(workspace_b.join("pool-b.txt"),b"user edit b").unwrap();
+        let replay_a=host_a.invoke(Wave2HostRequest {
+            context:call_a,
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_a },
+        });
+        let replay_b=host_b.invoke(Wave2HostRequest {
+            context:call_b,
+            operation:Wave2CapabilityOperation::WorkspaceExecution { input:input_b },
+        });
+        let (replay_a,replay_b)=tokio::join!(replay_a,replay_b);
+        assert_eq!(replay_a.unwrap().0["written"],true);
+        assert_eq!(replay_b.unwrap().0["written"],true);
+        assert_eq!(std::fs::read(workspace_a.join("pool-a.txt")).unwrap(),b"user edit a");
+        assert_eq!(std::fs::read(workspace_b.join("pool-b.txt")).unwrap(),b"user edit b");
+        assert_eq!(observer.list_effects(&session_a).await.unwrap().len(),1);
+        assert_eq!(observer.list_effects(&session_b).await.unwrap().len(),1);
+        drop(host_a);
+        drop(host_b);
+        drop(store_a);
+        drop(store_b);
+        drop(observer);
+        pool_a.close().await;
+        pool_b.close().await;
+        database.close().await;
+    }
+
     #[tokio::test]
     async fn disk_full_successful_terminal_keeps_pending_until_explicit_retry() {
         let directory = tempfile::tempdir().unwrap();
