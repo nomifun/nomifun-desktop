@@ -40,6 +40,11 @@ impl Inbox {
     pub(super) fn permits_resource_dispatch(&self) -> bool {
         self.open && self.pending.is_empty()
     }
+
+    #[cfg(test)]
+    pub(super) fn pending_receipt_ids(&self) -> Vec<String> {
+        self.pending.iter().map(|input| input.receipt_operation_id.clone()).collect()
+    }
 }
 
 pub(super) struct HostPort(pub(super) Weak<ConversationRuntimeHost>);
@@ -394,6 +399,13 @@ impl ConversationRuntimeHost {
     async fn flush_steering_buffer(&self, turn: &mut ActiveTurn) -> Result<(), AppError> {
         let mut records = Vec::new();
         turn.event_buffer.flush(&mut records);
+        if turn.cleanup_started {
+            // Cleanup may retry only its exact durable record. Retain each
+            // projected tail until acknowledgement instead of consuming a
+            // temporary vector before a fallible write.
+            turn.cleanup_records.extend(records);
+            return self.flush_cleanup_records(turn).await;
+        }
         for event in records {
             self.append_locked_record(
                 turn,

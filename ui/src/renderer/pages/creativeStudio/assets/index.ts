@@ -7,6 +7,7 @@
 export {  creativeAssetClient } from './client';
 export { isCreativeAssetDeleted } from './types';
 export { CreativeAssetDeletedError, subscribeCreativeAssetDeletion } from './assetDeletion';
+export { saveCreativeAssetAs } from './saveCreativeAsset';
 export { useCreativeAssetAvailability } from './useCreativeAssetAvailability';
 export type { CreativeAssetAvailability } from './useCreativeAssetAvailability';
 export { invalidateCreativeAssetQueryCache } from './creativeAssetQueryCache';

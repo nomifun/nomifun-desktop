@@ -32,16 +32,14 @@ import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import {
   creativeAssetClient,
   isCreativeAssetDeleted,
+  saveCreativeAssetAs,
   subscribeCreativeAssetDeletion,
   type CreativeAsset,
   type CreativeAssetKind,
   useCreativeAssetPickerDialog,
   useCreativeAssets,
 } from '../../assets';
-import {
-  creativeAssetDownloadName,
-  type CreativeAssetUploadRejection,
-} from '../../assets/page/model';
+import type { CreativeAssetUploadRejection } from '../../assets/page/model';
 import {
   CANVASES_PATH,
   TEMPLATES_PATH,
@@ -2226,17 +2224,16 @@ const CreativeCanvasProductRoute: React.FC = () => {
       try {
         const asset = await resolveCanvasImageAsset(node);
         if (activeProjectIdRef.current !== projectId) return;
-        const anchor = document.createElement('a');
-        anchor.href = asset.originalUrl;
-        anchor.download = creativeAssetDownloadName(asset);
-        anchor.rel = 'noopener noreferrer';
-        anchor.click();
+        await saveCreativeAssetAs(
+          asset,
+          t('common.saveAs', { defaultValue: '另存为' })
+        );
       } catch (error) {
         if (activeProjectIdRef.current !== projectId) return;
         setNotice(error instanceof Error ? error.message : String(error));
       }
     },
-    [projectId, resolveCanvasImageAsset]
+    [projectId, resolveCanvasImageAsset, t]
   );
 
   const handleOpenImageSplit = useCallback(

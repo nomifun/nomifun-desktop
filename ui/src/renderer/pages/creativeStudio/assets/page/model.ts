@@ -213,6 +213,13 @@ export function creativeAssetDownloadName(asset: Pick<CreativeAsset, 'title' | '
     : mimeExtension === 'quicktime'
       ? 'mov'
       : mimeExtension || fallbackExtension(asset.kind);
+  const existingExtension = safeTitle.split('.').pop()?.toLocaleLowerCase();
+  if (
+    existingExtension === extension ||
+    (extension === 'jpg' && (existingExtension === 'jpeg' || existingExtension === 'jpe'))
+  ) {
+    return safeTitle;
+  }
   return `${safeTitle}.${extension}`;
 }
 
