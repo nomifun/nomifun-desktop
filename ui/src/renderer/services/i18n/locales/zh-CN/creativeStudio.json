@@ -429,9 +429,7 @@
       "addNode": "添加节点",
       "backToLibrary": "返回画布库",
       "backgroundLabel": "画布背景：{{background}}",
-      "bottomPanel": "底部面板",
       "canvasBackground": "画布背景",
-      "closeBottomPanel": "关闭底部面板",
       "closeRightPanel": "关闭右侧面板",
       "collapseResources": "收起画布资源面板",
       "resetRightPanelWidth": "恢复右侧面板默认宽度",
@@ -641,16 +639,6 @@
       "videoSourceChangedBeforeTask": "视频节点或其直接引用已变化，未创建视频创作任务。",
       "videoTaskBusy": "已有视频任务正在处理，请等待完成。"
     },
-    "history": {
-      "disclosure": "核心只保存文档快照，没有操作名称和时间戳；本面板不会臆造历史记录。",
-      "label": "编辑历史",
-      "redo": "重做",
-      "redoable": "可重做",
-      "subtitle": "当前会话的 reducer 快照",
-      "title": "编辑历史",
-      "undo": "撤销",
-      "undoable": "可撤销"
-    },
     "image": {
       "aspectRatioLabel": "宽高比",
       "autoQuality": "自动",
@@ -841,8 +829,6 @@
     },
     "loading": {
       "documentValidation": "等待画布文档通过 canonical v1 校验。",
-      "historyDescription": "历史面板仅展示当前编辑会话的真实撤销栈。",
-      "historyTitle": "正在载入撤销状态",
       "outlineTitle": "正在载入画布结构",
       "propertiesDescription": "选择真实节点后才能查看 canonical 属性。",
       "propertiesTitle": "正在载入属性"
@@ -1003,9 +989,6 @@
       "title": "画布结构"
     },
     "panels": {
-      "bottom": {
-        "history": "历史"
-      },
       "left": {
         "assets": "资产库",
         "canvas": "画布",
