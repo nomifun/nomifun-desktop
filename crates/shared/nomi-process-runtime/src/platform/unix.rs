@@ -311,6 +311,21 @@ struct SpawnOptions {
     registration_fault: TestRegistrationFault,
 }
 
+#[cfg(test)]
+static TEST_SUPERVISED_SPAWNS: OnceLock<Mutex<HashMap<uuid::Uuid, SpawnOptions>>> = OnceLock::new();
+
+fn supervised_spawn_options(request: &NormalizedProcessRequest) -> SpawnOptions {
+    #[cfg(test)]
+    if let Some(options) = TEST_SUPERVISED_SPAWNS.get_or_init(Default::default)
+        .lock().expect("test spawn options must remain available").remove(&request.owner.call_id)
+    {
+        return options;
+    }
+    #[cfg(not(test))]
+    let _ = request;
+    SpawnOptions::default()
+}
+
 struct StartCancellationGuard {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     armed: bool,
@@ -347,8 +362,9 @@ pub(super) async fn spawn_pipe(
     output: Arc<OutputBuffer>,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
+    let options = supervised_spawn_options(&request);
     spawn_inner_with_cancellation(
-        request, output, SpawnOptions::default(), SpawnTransport::Pipe, Some(cancellation),
+        request, output, options, SpawnTransport::Pipe, Some(cancellation),
     ).await
 }
 
@@ -1639,10 +1655,11 @@ pub(super) async fn spawn_pty(
     rows: u16,
     cancellation: Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
+    let options = supervised_spawn_options(&request);
     spawn_inner_with_cancellation(
         request,
         output,
-        SpawnOptions::default(),
+        options,
         SpawnTransport::Pty { cols, rows },
         Some(cancellation),
     )
@@ -1775,10 +1792,9 @@ async fn spawn_inner_with_cancellation(
     let CommittedSpawn { pid, io, lifecycle } = committed;
     #[cfg(test)]
     if async_wrap_failure {
-        lifecycle.shutdown();
-        return Err(async_wrap_start_lost(io::Error::other(
+        return failed_committed_spawn(pid, lifecycle, io::Error::other(
             "injected async stdio wrap failure",
-        )));
+        ), retain_committed_owner);
     }
     let (io, readers) = match io {
         CommittedIo::Pipe {
@@ -1789,22 +1805,19 @@ async fn spawn_inner_with_cancellation(
             let stdin = match ChildStdin::from_std(stdin) {
                 Ok(value) => value,
                 Err(error) => {
-                    lifecycle.shutdown();
-                    return Err(async_wrap_start_lost(error));
+                    return failed_committed_spawn(pid, lifecycle, error, retain_committed_owner);
                 }
             };
             let stdout = match ChildStdout::from_std(stdout) {
                 Ok(value) => value,
                 Err(error) => {
-                    lifecycle.shutdown();
-                    return Err(async_wrap_start_lost(error));
+                    return failed_committed_spawn(pid, lifecycle, error, retain_committed_owner);
                 }
             };
             let stderr = match ChildStderr::from_std(stderr) {
                 Ok(value) => value,
                 Err(error) => {
-                    lifecycle.shutdown();
-                    return Err(async_wrap_start_lost(error));
+                    return failed_committed_spawn(pid, lifecycle, error, retain_committed_owner);
                 }
             };
             (
@@ -1827,6 +1840,29 @@ async fn spawn_inner_with_cancellation(
             lifecycle,
             io,
             readers: Mutex::new(readers),
+        }),
+        startup_failure: None,
+    })
+}
+
+fn failed_committed_spawn(
+    pid: u32,
+    lifecycle: LifecycleHandle,
+    error: io::Error,
+    retain_owner: bool,
+) -> Result<SpawnedPlatformProcess, ProcessError> {
+    if !retain_owner {
+        lifecycle.shutdown();
+        return Err(async_wrap_start_lost(error));
+    }
+    Ok(SpawnedPlatformProcess {
+        owner: Arc::new(UnixOwner {
+            pid, lifecycle, io: UnixIo::Unavailable,
+            readers: Mutex::new(Vec::new()),
+        }),
+        startup_failure: Some(SpawnFailure {
+            code: "async_process_wrap_failed".to_owned(),
+            message: error.to_string(),
         }),
     })
 }
@@ -3744,6 +3780,7 @@ struct UnixOwner {
 enum UnixIo {
     Pipe(tokio::sync::Mutex<Option<ChildStdin>>),
     Pty(Arc<super::unix_pty::AsyncPtyMaster>),
+    Unavailable,
 }
 
 struct SignalGate {
@@ -4267,7 +4304,7 @@ impl Drop for UnixOwner {
             UnixIo::Pipe(stdin) => {
                 stdin.get_mut().take();
             }
-            UnixIo::Pty(_) => {}
+            UnixIo::Pty(_) | UnixIo::Unavailable => {}
         }
         self.lifecycle.shutdown();
         let readers = match self.readers.get_mut() {
@@ -4297,6 +4334,8 @@ impl PlatformProcess for UnixOwner {
                 stdin.flush().await
             }
             UnixIo::Pty(master) => master.write_all(bytes).await,
+            UnixIo::Unavailable => Err(io::Error::new(io::ErrorKind::BrokenPipe,
+                "process IO setup failed before delivery")),
         }
     }
 
@@ -4307,6 +4346,8 @@ impl PlatformProcess for UnixOwner {
                 Ok(())
             }
             UnixIo::Pty(master) => master.close_input().await,
+            UnixIo::Unavailable => Err(io::Error::new(io::ErrorKind::BrokenPipe,
+                "process IO setup failed before delivery")),
         }
     }
 
@@ -4323,7 +4364,7 @@ impl PlatformProcess for UnixOwner {
             ));
         }
         match &self.io {
-            UnixIo::Pipe(_) => Err(io::Error::new(
+            UnixIo::Pipe(_) | UnixIo::Unavailable => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "pipe transport does not support terminal resize",
             )),
@@ -5475,6 +5516,129 @@ mod tests {
             heartbeats.load(Ordering::SeqCst) > 0,
             "Tokio worker made no progress during the spawn transaction"
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_stdio_wrap_failure_retains_shutdown_cleanup() {
+        supervised_stdio_wrap_failure_scenario(true, Transport::Pipe).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_stdio_wrap_failure_returns_exact_start_error() {
+        supervised_stdio_wrap_failure_scenario(false, Transport::Pipe).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_pty_wrap_failure_retains_shutdown_cleanup() {
+        supervised_stdio_wrap_failure_scenario(true, Transport::Pty { cols: 80, rows: 24 }).await;
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(unix_spawn)]
+    async fn supervised_pty_wrap_failure_returns_exact_start_error() {
+        supervised_stdio_wrap_failure_scenario(false, Transport::Pty { cols: 80, rows: 24 }).await;
+    }
+
+    async fn supervised_stdio_wrap_failure_scenario(shutdown_first: bool, transport: Transport) {
+        let temporary = tempfile::tempdir().unwrap();
+        let scenario = match (&transport, shutdown_first) {
+            (Transport::Pipe, true) => "pipe-shutdown",
+            (Transport::Pipe, false) => "pipe-start-error",
+            (Transport::Pty { .. }, true) => "pty-shutdown",
+            (Transport::Pty { .. }, false) => "pty-start-error",
+        };
+        let root = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|path| path.join(scenario))
+            .unwrap_or_else(|| temporary.path().to_path_buf());
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let marker = root.join("owned-start.pid");
+        let mut request = request("/bin/sh".into(), vec!["-c".into(),
+            "printf '%s\\n' \"$$\" > \"$1\"; exec sleep 60".into(),
+            "supervised-wrap-fixture".into(), marker.as_os_str().to_owned()]);
+        request.cwd = root.clone();
+        request.capability = CapabilityPolicy::local_owner(root.clone());
+        request.transport = transport;
+        let owner = request.owner.clone();
+        let audit = TestSpawnAudit::default();
+        let pause = super::TestStartPause {
+            entered: Arc::new(tokio::sync::Notify::new()),
+            release: Arc::new(tokio::sync::Notify::new()),
+        };
+        super::TEST_SUPERVISED_SPAWNS.get_or_init(Default::default).lock().unwrap()
+            .insert(owner.call_id, SpawnOptions {
+                audit: audit.clone(), async_wrap_failure: true,
+                lifecycle_start_delay: Some(Duration::from_millis(500)),
+                start_pause: Some(pause.clone()), ..SpawnOptions::default()
+            });
+        let supervisor = crate::ProcessSupervisor::new(crate::SupervisorConfig::default());
+        let starter = supervisor.clone();
+        let start = tokio::spawn(async move { starter.start(request).await });
+        tokio::time::timeout(Duration::from_secs(2), pause.entered.notified()).await.unwrap();
+        let pid = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(value) = std::fs::read_to_string(&marker) {
+                    // Creation/truncation can precede printf's complete PID
+                    // write. Only the terminating newline publishes this fact.
+                    if value.ends_with('\n') {
+                        break value.trim().parse::<u32>().unwrap();
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        assert_eq!(audit.leader_pid.load(Ordering::SeqCst), pid as libc::pid_t);
+        let mut shutdown = Box::pin(supervisor.shutdown());
+        if shutdown_first {
+            std::future::poll_fn(|context| {
+                assert!(std::future::Future::poll(shutdown.as_mut(), context).is_pending());
+                std::task::Poll::Ready(())
+            }).await;
+        }
+        pause.release.notify_one();
+        let (start, report_sessions, reported) = if shutdown_first {
+            let (start, report) = tokio::time::timeout(Duration::from_secs(6), async {
+                tokio::join!(start, shutdown.as_mut())
+            }).await.unwrap();
+            let reported = report.sessions.iter().any(|entry| entry.owner == owner
+                && matches!(&entry.outcome, crate::ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped));
+            (start.unwrap(), report.sessions.len(), reported)
+        } else {
+            let start = tokio::time::timeout(Duration::from_secs(6), start).await.unwrap().unwrap();
+            let ProcessError::StartLost { failure, last_known, cleanup } = start.as_ref().unwrap_err()
+                else { panic!("IO failure after native commit must remain StartLost") };
+            assert_eq!(failure.code, "async_process_wrap_failed");
+            assert_eq!(last_known.as_ref().unwrap().pid, pid);
+            assert!(cleanup.reaped && !process_exists(pid as libc::pid_t),
+                "start error cannot precede exact native cleanup");
+            let report = supervisor.quiesce().await;
+            let reported = report.is_exact() && report.sessions.iter().any(|entry| entry.owner == owner
+                && matches!(&entry.outcome, crate::ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped));
+            (start, report.sessions.len(), reported)
+        };
+        let start_failed = start.is_err();
+        let gone_at_report = !process_exists(pid as libc::pid_t);
+        let exact_cleanup = tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(pid as libc::pid_t)
+                || audit.leader_reaps.load(Ordering::SeqCst) != 1
+                || audit.watchdog_reaps.load(Ordering::SeqCst) != 1
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.is_ok();
+        std::fs::write(root.join("assertions.json"), serde_json::json!({
+            "pid":pid,"start_failed":start_failed,"report_sessions":report_sessions,
+            "exact_owner_cleanup_reported":reported,"process_gone_at_report":gone_at_report,
+            "exact_cleanup_finished":exact_cleanup
+        }).to_string()).unwrap();
+        assert!(exact_cleanup, "clean the native child before reporting the first failure");
+        assert!(start_failed, "stdio failure must not become a successful start");
+        assert!(reported && report_sessions==1,
+            "shutdown omitted the exact failed-start cleanup authority");
+        assert!(gone_at_report, "shutdown returned before the failed start was exactly reaped");
     }
 
     #[tokio::test]

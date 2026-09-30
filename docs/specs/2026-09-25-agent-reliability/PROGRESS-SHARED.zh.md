@@ -1552,6 +1552,19 @@ Canvas 首次 readiness 修复未覆盖创建入口，重新编译后仍失败�
   仅关闭该 Unix 取消窗口根因；Linux 原生执行、native failure/unknown/worker panic、正式 Tauri、
   其他角色及完整 Case/长期统计仍开放，Windows 原结果未改写，付费模型调用 0。
 
+- **S-D04-33**（`PROC-039/040/042/047`、`CONC-004`、`LIFE-029`，Unix 已提交进程 IO setup
+  failure 子断言）：M06-03 注入真实 child COMMITTED 后的 stdio 转换失败；旧路径只把 native
+  lifecycle 交给平台 poller，Supervisor 释放 reservation 后 shutdown 空报告，PID 当时未回收。
+  首败保留。内部交付现区分成功与带原 startup failure 的 native owner；后者注册原 Session，
+  按原 retirement 证明清理或保留 Lost/unproven，普通错误返回原 StartLost/code/PID，并发 shutdown
+  保留取消优先及 owner 清理报告，未变成成功或 not-started。
+  独立底层 wrap/drop 合同不变；Windows 构造只补 None，不代判其原生结果。
+- macOS Pipe/PTY × 原错误返回/shutdown 四场景 **84/84**，独立 PID/磁盘/报告 **84/84**；
+  Runtime lib **149/149**、registry **13/13**、fmt/diff 通过。完整 PID 行作为 marker 发布条件，
+  保留空文件解析夹具首败且不改原期限。证据 `2026-09-30/macos/m06-start-failure/`，付费模型 0。
+  native setup deadline/commit failure、worker panic、cleanup failure/unknown recovery、Linux 原生、
+  正式 Tauri/更多角色及完整统计门槛仍开放，仅关闭该 IO 转换失败所有权窗口。
+
 - S-D09-05（LIFE-020、A10/A12/A17/A19 cancel 后重启子断言）：新增完整 AppServices 重建回归。
   先在 429/Retry-After 等待中取消 Turn，确认 canonical cancelled 后关闭首个 App/数据库，再从
   同一隔离 data root 重建服务与 Router。路由发布前的 startup recovery 候选精确为 0，provider
