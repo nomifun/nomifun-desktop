@@ -24,7 +24,7 @@ test('fits the original image, zooms, resets, downloads and closes', async () =>
   let downloads = 0;
   let closes = 0;
   try {
-    const page = render(<ImageLightbox src='/original.png' title='原始图片' onClose={() => closes++} onDownload={async () => { downloads++; }} />);
+    const page = render(<ImageLightbox src='/original.png' title='原始图片' onClose={() => closes++} onSaveAs={async () => { downloads++; }} />);
     const image = await page.findByAltText('原始图片');
     Object.defineProperties(image.parentElement!, { clientWidth: { value: 1000 }, clientHeight: { value: 700 } });
     Object.defineProperties(image, { naturalWidth: { value: 1200 }, naturalHeight: { value: 800 } });
@@ -36,7 +36,7 @@ test('fits the original image, zooms, resets, downloads and closes', async () =>
     expect(page.getByRole('button', { name: '适应窗口' }).textContent).toBe('101%');
     fireEvent.click(page.getByRole('button', { name: '适应窗口' }));
     expect(page.getByRole('button', { name: '适应窗口' }).textContent).toBe('81%');
-    fireEvent.click(page.getByRole('button', { name: '下载图片' }));
+    fireEvent.click(page.getByRole('button', { name: '图片另存为' }));
     await waitFor(() => expect(downloads).toBe(1));
     fireEvent.click(page.getByRole('button', { name: '关闭图片预览' }));
     expect(closes).toBe(1);

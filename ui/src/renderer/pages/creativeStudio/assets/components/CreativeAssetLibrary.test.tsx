@@ -136,7 +136,7 @@ describe('CreativeAssetLibrary', () => {
 
     expect(html.includes('data-asset-selection-bar="true"')).toBe(true);
     expect(html.includes('已选择 2 项')).toBe(true);
-    for (const label of ['插入画布', '下载', '删除']) {
+    for (const label of ['插入画布', '批量另存为', '删除']) {
       expect(html.includes(label)).toBe(true);
     }
     expect(html.match(/type="checkbox"/g)?.length).toBe(4);

@@ -489,7 +489,7 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
         },
       });
       if (exportSequenceRef.current !== sequence || controller.signal.aborted) return;
-      downloadTimelineComposition(result, node.data.title);
+      await downloadTimelineComposition(result, node.data.title);
     } catch (error) {
       if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
         return;

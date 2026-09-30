@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "creative-save",
+  "description": "Allow the main renderer to write files selected through the native Save As dialog.",
+  "webviews": ["main"],
+  "permissions": ["fs:write-files"]
+}

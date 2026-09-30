@@ -4,17 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Button, Image, Modal, Spin } from '@arco-design/web-react';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { creativeAssetClient, isCreativeAssetDeleted, subscribeCreativeAssetDeletion, type CreativeAsset } from '../../assets';
-import type { CreativeCanvasNode } from '../../domain';
+import ImageLightbox from '@/renderer/components/media/ImageLightbox';
 import {
-  CREATIVE_CANVAS_MODAL_LAYER_STYLE,
-  getCreativeCanvasModalPopupContainer,
-} from '../canvasOverlayLayers';
-import styles from './CreativeImageTools.module.css';
+  creativeAssetClient,
+  isCreativeAssetDeleted,
+  saveCreativeAssetAs,
+  subscribeCreativeAssetDeletion,
+  type CreativeAsset,
+} from '../../assets';
+import type { CreativeCanvasNode } from '../../domain';
+import { CREATIVE_CANVAS_MODAL_Z_INDEX } from '../canvasOverlayLayers';
 
 type ImageNode = Extract<CreativeCanvasNode, { type: 'image' }>;
 
@@ -37,8 +39,6 @@ const CreativeImagePreviewDialog: React.FC<CreativeImagePreviewDialogProps> = ({
   const [asset, setAsset] = useState<CreativeAsset | null>(null);
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
-  const [stage, setStage] = useState<HTMLDivElement | null>(null);
-  const getStage = useCallback(() => stage!, [stage]);
 
   useEffect(() => {
     const refresh = () => setAttempt((current) => current + 1);
@@ -79,63 +79,30 @@ const CreativeImagePreviewDialog: React.FC<CreativeImagePreviewDialogProps> = ({
   }, []);
 
   const title = t('creativeStudio.canvas.imageTools.toolbar.previewLabel');
+  const deleted = Boolean(asset && isCreativeAssetDeleted(asset));
+  const error = deleted
+    ? t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })
+    : failed
+      ? t('creativeStudio.canvas.imageTools.preview.loadFailed')
+      : null;
 
   return (
-    <Modal
-      visible
+    <ImageLightbox
+      key={`${node.id}:${attempt}`}
+      src={asset && !deleted ? asset.originalUrl : null}
       title={title}
-      aria-label={title}
-      className={styles.previewModal}
-      // Escape the canvas shell's clipping/stacking context, including its
-      // viewport-portaled composers (1600) and node toolbars (1601).
-      getPopupContainer={getCreativeCanvasModalPopupContainer}
-      maskStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
-      wrapStyle={CREATIVE_CANVAS_MODAL_LAYER_STYLE}
-      alignCenter
-      autoFocus
-      focusLock
-      escToExit
-      maskClosable
-      unmountOnExit
-      onCancel={onClose}
-      footer={null}
-    >
-      <div ref={setStage} className={styles.previewStage} data-creative-image-preview>
-        {asset && isCreativeAssetDeleted(asset) ? (
-          <div className={styles.previewStatus} role='status'>
-            {t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}
-          </div>
-        ) : failed ? (
-          <div className={styles.previewStatus} role='alert'>
-            <span>{t('creativeStudio.canvas.imageTools.preview.loadFailed')}</span>
-            <Button onClick={() => setAttempt((current) => current + 1)}>
-              {t('common.retry')}
-            </Button>
-          </div>
-        ) : asset && stage ? (
-          <Image.Preview
-            key={`${asset.id}:${attempt}`}
-            visible
-            src={asset.originalUrl}
-            imgAttributes={{
-              alt: asset.title || node.data.alt || node.data.caption || title,
-              draggable: false,
-              onError: () => setFailed(true),
-            }}
-            getPopupContainer={getStage}
-            closable={false}
-            escToExit={false}
-            maskClosable={false}
-            actionsLayout={['zoomIn', 'zoomOut', 'originalSize', 'rotateLeft', 'rotateRight']}
-          />
-        ) : (
-          <div className={styles.previewStatus} role='status'>
-            <Spin />
-            <span>{t('common.loading')}</span>
-          </div>
-        )}
-      </div>
-    </Modal>
+      alt={asset?.title || node.data.alt || node.data.caption || title}
+      loading={!asset && !failed}
+      error={error}
+      onRetry={!deleted ? () => setAttempt((current) => current + 1) : undefined}
+      onSaveAs={asset && !deleted
+        ? () => saveCreativeAssetAs(asset, t('common.saveAs', { defaultValue: '另存为' }))
+        : undefined}
+      // Escape the canvas shell's viewport-portaled composers (1600) and
+      // node toolbars (1601), while staying in the shared preview container.
+      zIndex={CREATIVE_CANVAS_MODAL_Z_INDEX}
+      onClose={onClose}
+    />
   );
 };
 

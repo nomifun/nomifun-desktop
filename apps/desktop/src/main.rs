@@ -2880,6 +2880,7 @@ fn main() -> std::process::ExitCode {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
+        .plugin(tauri_plugin_fs::init())
         .plugin(native_api_plugins::dialog())
         .plugin(native_api_plugins::notification())
         .plugin(tauri_plugin_updater::Builder::new().build())
