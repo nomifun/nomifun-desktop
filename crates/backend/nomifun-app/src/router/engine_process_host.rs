@@ -15,7 +15,7 @@ use nomifun_engine_core::{
     EngineProcessPoll, EngineProcessRequest, EngineProcessSession, EngineProcessTransport,
     MAX_PTY_DIMENSION, ManagedEngineProcessOwner,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -29,7 +29,7 @@ fn outcome_unknown(value: impl std::fmt::Display) -> Wave2HostPortError {
     Wave2HostPortError::new("EFFECT_OUTCOME_UNKNOWN", value.to_string())
 }
 
-#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Operation {
     #[default]
@@ -322,9 +322,16 @@ impl EngineProcessScope {
                 .clone()
                 .ok_or_else(|| error("process control requires process_id"))?
         };
-        let entry = sessions
-            .get_mut(&id)
-            .ok_or_else(|| error("process_id is not owned by this exact turn"))?;
+        let entry = match sessions.get_mut(&id) {
+            Some(entry) => entry,
+            None if !launch => return Ok(StrictJsonValue(serde_json::json!({
+                "schema":"nomifun.process-control-observation.v1",
+                "state":"not_executed", "success":false, "control_applied":false,
+                "operation":params.operation, "code":"PROCESS_REFERENCE_INVALID",
+                "message":"The process_id is not available in this exact turn. No process control was applied. Copy the exact process_id from start_process or its later receipt, then correct this call. Process capability remains available. Do not start a replacement merely to recover a mistyped reference; the original process may still be running."
+            }))),
+            None => return Err(error("process_id is not owned by this exact turn")),
+        };
         if let Some(poll) = &entry.terminal {
             if params.operation == Operation::Cancel {
                 return process_output(&id, poll, params.operation);
@@ -491,6 +498,73 @@ fn process_output(
 mod tests {
     use super::*;
     use nomifun_engine_core::{EngineCleanupReport, EngineProcessOutput};
+
+    #[tokio::test]
+    async fn invalid_process_reference_preserves_the_original_owned_process() {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, pool) = super::super::engine_journal::test_fixture().await;
+        let scope = EngineProcessScope::new(root.path(), journal).unwrap();
+        let (command, args) = if cfg!(windows) {
+            ("powershell.exe", vec!["-NoProfile", "-Command",
+                "$line=[Console]::ReadLine(); [Console]::WriteLine('ORIGINAL:'+$line)"])
+        } else {
+            ("/bin/sh", vec!["-c", "IFS= read -r line; printf 'ORIGINAL:%s\\n' \"$line\""])
+        };
+        let started = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"start", "command":command, "args":args, "timeout_ms":10000, "wait_ms":0
+        })), "start-original").await.unwrap();
+        let id = started.0["process_id"].as_str().unwrap().to_owned();
+        let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"stdin", "process_id":"not-owned-by-this-turn", "input":"must-not-be-sent", "append_newline":true
+        })), "reject-wrong-reference").await;
+        if let Err(cause) = &rejected {
+            scope.cleanup().await.unwrap();
+            panic!("an unowned reference must return an explicit not-executed observation: {cause}");
+        }
+        let rejected = rejected.unwrap().0;
+        assert_eq!(rejected["code"], "PROCESS_REFERENCE_INVALID");
+        assert_eq!(rejected["state"], "not_executed");
+        assert_eq!(rejected["control_applied"], false);
+        assert!(!scope.is_quiescent().await, "rejecting a reference must not claim that the original child was reaped");
+
+        let (other_journal, other_pool) = super::super::engine_journal::test_fixture().await;
+        let other = EngineProcessScope::new(root.path(), other_journal).unwrap();
+        let foreign = other.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"cancel", "process_id":id
+        })), "reject-foreign-reference").await.unwrap();
+        assert_eq!(foreign.0["code"], "PROCESS_REFERENCE_INVALID");
+        assert!(other.is_quiescent().await);
+
+        scope.invoke(StrictJsonValue(serde_json::json!({
+            "operation":"stdin", "process_id":id, "input":"ok", "append_newline":true
+        })), "write-original").await.unwrap();
+        let (finished, text) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut cursor = 0;
+            let mut text = String::new();
+            let mut ordinal = 0;
+            loop {
+                let observed = scope.invoke(StrictJsonValue(serde_json::json!({
+                    "operation":"poll", "process_id":id, "cursor":cursor, "wait_ms":30000
+                })), &format!("poll-original-{ordinal}")).await.unwrap();
+                text.push_str(observed.0["output"]["text"].as_str().unwrap());
+                cursor = observed.0["output"]["next_cursor"].as_u64().unwrap();
+                if observed.0["state"] != "running" { break (observed, text); }
+                ordinal += 1;
+            }
+        }).await.expect("original child must finish within the bounded poll");
+        assert_eq!(finished.0["state"], "exited");
+        assert_eq!(finished.0["exit_code"], 0);
+        assert!(text.contains("ORIGINAL:ok"));
+        assert!(!text.contains("must-not-be-sent"));
+        assert_eq!(finished.0["cleanup"]["reaped"], true);
+        assert!(scope.is_quiescent().await);
+        scope.cleanup().await.unwrap();
+        other.cleanup().await.unwrap();
+        drop(scope);
+        drop(other);
+        pool.close().await;
+        other_pool.close().await;
+    }
 
     #[tokio::test]
     async fn exact_owner_startup_fence_releases_unregistered_start_uncertainty() {
