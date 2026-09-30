@@ -60,7 +60,7 @@ pub struct ProcessSupervisor {
     /// A read lease spans a complete spawn/ownership transaction. A terminal
     /// fence takes the write lease, waits for admitted starts, and prevents a
     /// later start until the exact cleanup snapshot has drained.
-    admission_gate: tokio::sync::RwLock<()>,
+    admission_gate: Arc<tokio::sync::RwLock<()>>,
     reaper_started: AtomicBool,
     reaper_stop: tokio_util::sync::CancellationToken,
     shutdown: Arc<ShutdownState>,
@@ -70,6 +70,19 @@ pub struct ProcessSupervisor {
 struct ShutdownState {
     started: AtomicBool,
     report: tokio::sync::watch::Sender<Option<ShutdownReport>>,
+}
+
+struct StartWaiter {
+    cancellation: crate::platform::StartCancellation,
+    armed: bool,
+}
+
+impl Drop for StartWaiter {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+        }
+    }
 }
 
 pub(crate) struct Session {
@@ -220,7 +233,7 @@ impl ProcessSupervisor {
     pub fn new(config: SupervisorConfig) -> Arc<Self> {
         Arc::new(Self {
             registry: Arc::new(Registry::new(config.max_sessions)),
-            admission_gate: tokio::sync::RwLock::new(()),
+            admission_gate: Arc::new(tokio::sync::RwLock::new(())),
             reaper_started: AtomicBool::new(false),
             reaper_stop: tokio_util::sync::CancellationToken::new(),
             shutdown: Arc::new(ShutdownState {
@@ -253,11 +266,59 @@ impl ProcessSupervisor {
         request: NormalizedProcessRequest,
         observer: Option<OutputObserver>,
     ) -> Result<ProcessHandle, ProcessError> {
+        let cancellation = crate::platform::StartCancellation::new();
+        let mut waiter = StartWaiter { cancellation: cancellation.clone(), armed: true };
+        // Acquire admission in this first-polled caller before posting the
+        // worker. A quiesce fence must also wait for a worker not yet scheduled.
+        let admission = self.admission_gate.clone().read_owned().await;
+        self.ensure_reaper_started();
+        let reservation = self.reserve_start_capacity().await?;
+        let (deliver, delivered) = tokio::sync::oneshot::channel();
+        let (acknowledge, acknowledged) = tokio::sync::oneshot::channel();
+        let supervisor = self.clone();
+        tokio::spawn(async move {
+            let (result, session) = match supervisor.start_owned(
+                request, observer, cancellation, admission, reservation,
+            ).await {
+                Ok((handle, session)) => (Ok(handle), Some(session)),
+                Err(error) => (Err(error), None),
+            };
+            if deliver.send(result).is_err() || acknowledged.await.is_err() {
+                if let Some(session) = session {
+                    // The caller may drop after its result was queued. Keep
+                    // the same Session until delivery is acknowledged or its
+                    // single cleanup flight has reached a terminal outcome.
+                    let _ = retire_session(session).await;
+                }
+            }
+        });
+        let result = delivered.await.map_err(|_| start_delivery_lost(None))?;
+        if acknowledge.send(()).is_err() {
+            return Err(start_delivery_lost(result.as_ref().ok()));
+        }
+        // No await can separate acknowledgement from returning the result.
+        waiter.armed = false;
+        result
+    }
+
+    async fn start_owned(
+        self: &Arc<Self>,
+        request: NormalizedProcessRequest,
+        observer: Option<OutputObserver>,
+        cancellation: crate::platform::StartCancellation,
+        _admission: tokio::sync::OwnedRwLockReadGuard<()>,
+        mut reservation: StartReservation,
+    ) -> Result<(ProcessHandle, Arc<Session>), ProcessError> {
         // Hold through platform spawn and registry commit. An exact turn fence
         // can therefore neither miss this start nor race a post-snapshot start.
-        let _admission = self.admission_gate.read().await;
-        self.ensure_reaper_started();
-        let mut reservation = self.reserve_start_capacity().await?;
+        if cancellation.is_cancelled() {
+            return Err(ProcessError::SpawnFailed {
+                failure: crate::SpawnFailure {
+                    code: "start_cancelled_before_admission".to_owned(),
+                    message: "start caller was cancelled before platform admission".to_owned(),
+                },
+            });
+        }
         let activity_registry = Arc::downgrade(&self.registry);
         let session_id = SessionId::new();
         let activity: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -273,7 +334,7 @@ impl ProcessSupervisor {
             ),
             None => OutputBuffer::with_activity(request.policy.output_limit_bytes, activity),
         });
-        let spawned = crate::platform::spawn(request.clone(), output.clone()).await?;
+        let spawned = crate::platform::spawn(request.clone(), output.clone(), cancellation).await?;
         self.register_reserved(
             request,
             spawned.owner,
@@ -300,7 +361,7 @@ impl ProcessSupervisor {
             &mut reservation,
             SessionId::new(),
         )
-        .await
+        .await.map(|(handle, _session)| handle)
     }
 
     async fn register_reserved(
@@ -310,7 +371,7 @@ impl ProcessSupervisor {
         output: Arc<OutputBuffer>,
         reservation: &mut StartReservation,
         session_id: SessionId,
-    ) -> Result<ProcessHandle, ProcessError> {
+    ) -> Result<(ProcessHandle, Arc<Session>), ProcessError> {
         let started_at = Instant::now();
         let pid = process.pid();
         let owner = request.owner;
@@ -347,13 +408,13 @@ impl ProcessSupervisor {
         start_waiter(Arc::clone(&session));
         match commit {
             CommitResult::Active => {
-                start_process_deadline(session);
-                Ok(ProcessHandle {
+                start_process_deadline(session.clone());
+                Ok((ProcessHandle {
                     owner,
                     session_id,
                     pid,
                     started_at,
-                })
+                }, session))
             }
             CommitResult::Retiring(retirement) => {
                 self.start_retirement(retirement.clone());
@@ -795,6 +856,25 @@ impl ProcessSupervisor {
 
     fn start_retirement(&self, retirement: Arc<Retirement>) {
         start_retirement_driver(self.registry.clone(), retirement);
+    }
+}
+
+fn start_delivery_lost(handle: Option<&ProcessHandle>) -> ProcessError {
+    ProcessError::StartLost {
+        failure: crate::SpawnFailure {
+            code: "start_delivery_owner_lost".to_owned(),
+            message: "owned start worker ended before caller delivery was acknowledged".to_owned(),
+        },
+        last_known: handle.map(|handle| ProcessSnapshot {
+            pid: handle.pid,
+            state: ProcessState::Lost,
+            started_at: handle.started_at,
+            last_activity_at: handle.started_at,
+        }),
+        cleanup: CleanupReport {
+            errors: vec!["start delivery ended without an exact cleanup acknowledgement".to_owned()],
+            ..CleanupReport::default()
+        },
     }
 }
 
@@ -4044,6 +4124,340 @@ mod tests {
             std::task::Poll::Ready(_) => panic!("future unexpectedly completed on its first poll"),
         })
         .await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_shutdown_waits_for_in_flight_owned_spawn() {
+        real_start_shutdown_scenario(false).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_drop_keeps_shutdown_cleanup_witness() {
+        real_start_shutdown_scenario(true).await;
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn real_start_shutdown_scenario(drop_caller: bool) {
+        let temporary = tempfile::tempdir().expect("native start fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from)
+            .map(|root| root.join(if drop_caller { "drop-caller" } else { "retained-caller" }));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).expect("native start evidence root should exist");
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig {
+            max_sessions: 1,
+            reaper_interval: Duration::from_secs(30),
+        });
+        let request = native_start_request(directory, &marker);
+        let expected_owner = request.owner.clone();
+        let mut start = Box::pin(supervisor.start(request));
+        // Keep the public future unpolled after its first real Pending so the
+        // native worker can start independently of caller delivery.
+        poll_once_pending(start.as_mut()).await;
+        let pid = wait_native_start_marker(&marker).await;
+        let process = NativeStartProbe::new(pid);
+        assert!(!process.is_gone(), "real owned child should be alive at the barrier");
+        let published_before_shutdown = supervisor.registry.counts().0 == 1;
+        let mut shutdown = Box::pin(supervisor.shutdown());
+        poll_once_pending(shutdown.as_mut()).await;
+        let (report, delivery_order_valid) = if drop_caller {
+            drop(start);
+            let report = tokio::time::timeout(Duration::from_secs(6), shutdown.as_mut())
+                .await.expect("shutdown must settle the physically owned cancelled start");
+            (report, true)
+        } else {
+            let (started, report) = tokio::time::timeout(Duration::from_secs(6), async {
+                tokio::join!(start.as_mut(), shutdown.as_mut())
+            }).await.expect("start and shutdown must settle their original ownership transaction");
+            let valid = match started {
+                Ok(handle) => published_before_shutdown && handle.owner == expected_owner && handle.pid == pid,
+                Err(crate::ProcessError::SupervisorShuttingDown) => !published_before_shutdown,
+                _ => false,
+            };
+            (report, valid)
+        };
+        let matching = report.sessions.iter().find(|session| session.owner == expected_owner);
+        let reported_reaped = matching.is_some_and(|session| matches!(
+            &session.outcome, ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped
+        ));
+        let gone_at_shutdown = process.is_gone();
+        let eventual_gone = tokio::time::timeout(Duration::from_secs(6), async {
+            while !process.is_gone() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.is_ok();
+        let fallback_used = !eventual_gone;
+        if fallback_used {
+            process.force_kill();
+        }
+        let repeated = supervisor.shutdown().await;
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "pid": pid,
+                "marker_pid": std::fs::read_to_string(&marker).expect("PID marker must survive cleanup").trim().parse::<u32>().unwrap(),
+                "session_id": matching.map(|session| session.session_id.to_string()),
+                "public_start_first_poll_pending": true,
+                "published_before_shutdown": published_before_shutdown,
+                "caller_dropped": drop_caller,
+                "delivery_order_valid": delivery_order_valid,
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+                "report_sessions": report.sessions.len(),
+                "exact_owner_cleanup_reported": reported_reaped,
+                "exact_process_gone_at_shutdown": gone_at_shutdown,
+                "exact_process_eventually_gone": eventual_gone,
+                "exact_handle_fallback_used": fallback_used,
+                "repeated_shutdown_same_report": repeated == report,
+            }).to_string()).expect("native start assertions should be retained");
+        }
+        assert!(eventual_gone, "owned child required independent fallback; not formal cleanup PASS");
+        assert!(delivery_order_valid, "start delivery must match the observed publication order");
+        assert_eq!(report.sessions.len(), 1, "shutdown omitted the physically owned precommit start");
+        assert!(reported_reaped, "shutdown must preserve the original owner/session cleanup witness");
+        assert!(gone_at_shutdown, "shutdown cannot complete before exact process cleanup");
+        assert_eq!(repeated, report);
+        assert_eq!(std::fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{pid}\n"));
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_pending_admission_cannot_cross_quiesce() {
+        let temporary = tempfile::tempdir().expect("quiesce fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join("quiesce-gap"));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).unwrap();
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let mut start = Box::pin(supervisor.start(native_start_request(directory, &marker)));
+        poll_once_pending(start.as_mut()).await;
+        let report = tokio::time::timeout(Duration::from_secs(6), supervisor.quiesce())
+            .await.expect("quiesce must include an admitted start in its bounded cleanup");
+        let handle = tokio::time::timeout(Duration::from_secs(6), start.as_mut())
+            .await.expect("original start delivery must remain bounded").unwrap();
+        let pid = wait_native_start_marker(&marker).await;
+        assert_eq!(pid, handle.pid);
+        let process = NativeStartProbe::new(pid);
+        let gone_when_delivered = process.is_gone();
+        let matching = report.sessions.iter().find(|session| {
+            session.session_id == handle.session_id && session.owner == handle.owner
+        });
+        let owned_cleanup_reported = matching.is_some_and(|session| outcome_reaped(&session.outcome));
+        // Clean the real process through the original supervisor before a
+        // first failure is reported, while retaining the earlier empty fence.
+        let cleanup = supervisor.cancel(&handle.owner, &handle.session_id).await.unwrap();
+        let final_gone = process.is_gone();
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "pid": pid,
+                "marker_pid": std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap(),
+                "quiesce_report_exact": report.is_exact(),
+                "quiesce_report_sessions": report.sessions.len(),
+                "exact_owner_cleanup_reported": owned_cleanup_reported,
+                "process_gone_when_start_delivered_after_quiesce": gone_when_delivered,
+                "formal_followup_reaped": outcome_reaped(&cleanup),
+                "formal_followup_process_gone": final_gone,
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+            }).to_string()).unwrap();
+        }
+        assert!(outcome_reaped(&cleanup) && final_gone, "formal followup must clean before FAIL");
+        assert_eq!(report.sessions.len(), 1, "empty quiesce allowed an old admitted start to execute later");
+        assert!(owned_cleanup_reported && report.is_exact());
+        assert!(gone_when_delivered, "an admitted start cannot stay live after its quiesce fence");
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_queued_result_drop_cleans_without_shutdown() {
+        let temporary = tempfile::tempdir().expect("drop-alone fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join("drop-alone"));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).unwrap();
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig {
+            max_sessions: 1,
+            reaper_interval: Duration::from_secs(30),
+        });
+        let request = native_start_request(directory, &marker);
+        let expected_owner = request.owner.clone();
+        let mut start = Box::pin(supervisor.start(request));
+        poll_once_pending(start.as_mut()).await;
+        let pid = wait_native_start_marker(&marker).await;
+        let process = NativeStartProbe::new(pid);
+        let session_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (sessions, _) = supervisor.registry.quiesce_snapshot();
+                if let Some(session) = sessions.iter().find(|session| session.owner == expected_owner) {
+                    break session.id;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("owned worker must publish while its caller result remains unpolled");
+        assert!(!process.is_gone());
+        drop(start);
+        let gone_without_shutdown = tokio::time::timeout(Duration::from_secs(6), async {
+            loop {
+                let terminal = supervisor.terminal_outcome_if_ready(
+                    &expected_owner, &session_id, OutputCursor::START,
+                ).expect("unacknowledged result must retain its original Session");
+                if let Some(ProcessOutcome::Cancelled { cleanup, .. }) = terminal {
+                    break cleanup.reaped && process.is_gone();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.unwrap_or(false);
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "pid": pid,
+                "marker_pid": std::fs::read_to_string(&marker).unwrap().trim().parse::<u32>().unwrap(),
+                "queued_result_unpolled": true,
+                "exact_cancelled_reaped_without_shutdown": gone_without_shutdown,
+                "exact_handle_fallback_used": !gone_without_shutdown,
+                "physical_start_count": std::fs::read_to_string(marker.with_extension("starts")).unwrap().lines().count(),
+            }).to_string()).unwrap();
+        }
+        if !gone_without_shutdown {
+            process.force_kill();
+        }
+        assert!(gone_without_shutdown, "unacknowledged start must not wait for shutdown or lease expiry");
+        assert_eq!(std::fs::read_to_string(marker.with_extension("starts")).unwrap(), format!("{pid}\n"));
+        let next_marker = directory.join("capacity-reuse.pid");
+        let next = supervisor.start(native_start_request(directory, &next_marker))
+            .await.expect("reaped abandoned start must release the sole capacity slot");
+        let next_pid = wait_native_start_marker(&next_marker).await;
+        let next_process = NativeStartProbe::new(next_pid);
+        let outcome = supervisor.cancel(&next.owner, &next.session_id).await.unwrap();
+        assert!(matches!(outcome, ProcessOutcome::Cancelled { cleanup, .. } if cleanup.reaped));
+        assert!(next_process.is_gone());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn real_start_never_polled_has_no_dispatch() {
+        let temporary = tempfile::tempdir().expect("never-polled fixture should have a work root");
+        let evidence = std::env::var_os("NOMI_PROCESS_START_EVIDENCE")
+            .map(std::path::PathBuf::from).map(|root| root.join("never-polled"));
+        let directory = evidence.as_deref().unwrap_or(temporary.path());
+        std::fs::create_dir_all(directory).unwrap();
+        let marker = directory.join("owned-start.pid");
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        drop(supervisor.start(native_start_request(directory, &marker)));
+        tokio::task::yield_now().await;
+        let no_dispatch = supervisor.registry.counts() == (0, 0, 0)
+            && !marker.exists() && !marker.with_extension("starts").exists();
+        assert!(supervisor.shutdown().await.sessions.is_empty());
+        if let Some(root) = &evidence {
+            std::fs::write(root.join("assertions.json"), serde_json::json!({
+                "never_polled_zero_dispatch": no_dispatch,
+            }).to_string()).unwrap();
+        }
+        assert!(no_dispatch);
+    }
+
+    #[cfg(any(unix, windows))]
+    fn native_start_request(directory: &std::path::Path, marker: &std::path::Path) -> NormalizedProcessRequest {
+        let mut request = fake_request(ProcessPolicy::default());
+        request.cwd = directory.to_owned();
+        request.capability = CapabilityPolicy::local_owner(directory.to_owned());
+        #[cfg(windows)]
+        {
+            let system_root = std::env::var_os("SystemRoot").expect("Windows has SystemRoot");
+            let escaped_marker = marker.to_string_lossy().replace('\'', "''");
+            let escaped_count = marker.with_extension("starts").to_string_lossy().replace('\'', "''");
+            request.command = CommandSpec::Program {
+                program: std::path::PathBuf::from(system_root)
+                    .join("System32/WindowsPowerShell/v1.0/powershell.exe").into_os_string(),
+                args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
+                    .into_iter().map(std::ffi::OsString::from)
+                    .chain(std::iter::once(std::ffi::OsString::from(format!(
+                        "[System.IO.File]::AppendAllText('{escaped_count}', [string]$PID+[char]10); [System.IO.File]::WriteAllText('{escaped_marker}', [string]$PID); Start-Sleep -Seconds 60"
+                    )))).collect(),
+            };
+        }
+        #[cfg(unix)]
+        {
+            request.command = CommandSpec::Program {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(),
+                    "printf '%s\\n' \"$$\" >> \"$2\"; printf '%s\\n' \"$$\" > \"$1\"; sleep 60".into(),
+                    "native-start-fixture".into(), marker.as_os_str().to_owned(),
+                    marker.with_extension("starts").into_os_string()],
+            };
+        }
+        request
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn wait_native_start_marker(marker: &std::path::Path) -> u32 {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(contents) = std::fs::read_to_string(marker) {
+                    break contents.trim().parse::<u32>().expect("real helper PID marker should parse");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("owned helper must physically execute before cancellation")
+    }
+
+    #[cfg(any(unix, windows))]
+    struct NativeStartProbe {
+        #[cfg(windows)]
+        handle: windows_sys::Win32::Foundation::HANDLE,
+        #[cfg(unix)]
+        pid: libc::pid_t,
+    }
+
+    #[cfg(any(unix, windows))]
+    impl NativeStartProbe {
+        fn new(pid: u32) -> Self {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
+                // SAFETY: open a non-inheritable exact handle while this owned helper is live.
+                let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, 0, pid) };
+                assert!(!handle.is_null(), "exact native child process handle should open");
+                Self { handle }
+            }
+            #[cfg(unix)]
+            { Self { pid: pid as libc::pid_t } }
+        }
+
+        fn is_gone(&self) -> bool {
+            #[cfg(windows)]
+            {
+                use windows_sys::Win32::{Foundation::WAIT_OBJECT_0, System::Threading::WaitForSingleObject};
+                // SAFETY: this probe retains its exact process handle until Drop.
+                unsafe { WaitForSingleObject(self.handle, 0) == WAIT_OBJECT_0 }
+            }
+            #[cfg(unix)]
+            {
+                // SAFETY: signal zero inspects the directly owned helper without signalling it.
+                (unsafe { libc::kill(self.pid, 0) == -1 })
+                    && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            }
+        }
+
+        fn force_kill(&self) {
+            #[cfg(windows)]
+            // SAFETY: the retained exact handle has terminate access only to this test's child.
+            unsafe { windows_sys::Win32::System::Threading::TerminateProcess(self.handle, 1); }
+            #[cfg(unix)]
+            // SAFETY: this PID came from this fixture's direct real platform spawn.
+            unsafe { libc::kill(self.pid, libc::SIGKILL); }
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    impl Drop for NativeStartProbe {
+        fn drop(&mut self) {
+            if !self.is_gone() { self.force_kill(); }
+            #[cfg(windows)]
+            // SAFETY: this test closes its retained non-inherited process handle exactly once.
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle); }
+        }
     }
 
     async fn register_fake(

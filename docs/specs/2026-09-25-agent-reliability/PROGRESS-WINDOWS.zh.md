@@ -2846,6 +2846,24 @@ data/work/profile；共 8 个新回合、40 个模型步骤，未超 8 回合/80
 - 未覆盖真实 start/shutdown、start future drop、正式 Tauri 正常/强退、ConPTY 父死亡、macOS、
   其他角色及 N3/100 seed/LONG/99%；不关闭完整 PROC/LIFE 或共享阶段。
 
+### 原生 start/交付丢弃与关闭 fence（W170，基线 `c3b3dc9ac`）
+
+- S-D04-31 / PROC-039/040/042、CONC-004、A03/A10/A11/A13/A17/A19：原生 await 已创建 child，
+  caller drop 后 shutdown 空报告且 exact handle 仍 live。宿主持有 start worker、准入 read/预留与
+  结果 ACK；未 ACK 同一 Session 继续清理，Windows resume_gate/Unix flag 原生取消和预算保留。
+  中间实现的 quiesce 空 exact fence 后旧 start 继续执行首败另留，最终 public first poll 已取得
+  read_owned/预留并移交 worker，ACK 阶段释放 gate。
+- 外部 `2026-09-30/windows/w170-process-start-shutdown-race` 的 `01` 原始产品首败、`02` 测试
+  借用编译失败、`04-first-quiesce-regression` 引入失败均保留。最终 `05` **5/5**、`06` **20/20 × 5**，
+  独立 PID/磁盘 **105/105**、自有 helper 0；原生取消/deadline/关闭相邻 **11/11**、API **21/21**、
+  WSL Linux lib 单包兼容编译及 fmt/diff/安全复核通过，不计 macOS 验收。
+- 未覆盖 startup failure/unknown/worker panic、ConPTY 本组真实 start 竞态、正式 Tauri、其他
+  平台/角色及完整 N3/100 seed/LONG/99%；不关闭完整 Case 或共享阶段。
+
+执行模式：本轮两代码通道存在上游依赖和共享 Cargo 缓存，重复编译/协调抵消并发收益。按用户要求，
+现有子 agent 已完成当前批次、清理并交接，停止派发新工作；后续由单 agent 继续共享队列，只在确认
+任务可独立交付且有实际收益时才并发。
+
 下一步优先共享：完成证据及其他恢复/范围变更矩阵、FILE 发布/回滚的剩余竞态、watcher rescan/dropped 的完整 UI 对账，以及 S-D01～11 剩余合同、恢复、资源和产品
 入口；相关 Windows 行为一起验证。共享阶段验收后再继续 Windows 专属余项。完整 N3/LONG/99%
 门槛保留，不重建 2,374 行日志/状态文件到 Git。

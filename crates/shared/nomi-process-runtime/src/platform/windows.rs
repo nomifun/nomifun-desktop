@@ -597,8 +597,11 @@ impl WindowsProcessJob {
 pub(super) async fn spawn_pipe(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
+    cancellation: Arc<StartCancellation>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_pipe_inner(request, output, Arc::new(SystemWin32)).await
+    spawn_inner_with_cancellation(
+        request, output, Arc::new(SystemWin32), SpawnTransport::Pipe, Some(cancellation),
+    ).await
 }
 
 #[derive(Clone)]
@@ -1582,20 +1585,23 @@ pub(super) async fn spawn_pty(
     output: Arc<OutputBuffer>,
     cols: u16,
     rows: u16,
+    cancellation: Arc<StartCancellation>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
-    spawn_inner(
+    spawn_inner_with_cancellation(
         request,
         output,
         Arc::new(SystemWin32),
         SpawnTransport::Pty { cols, rows },
+        Some(cancellation),
     )
     .await
 }
 
-    async fn spawn_pipe_inner(
-        request: NormalizedProcessRequest,
-        output: Arc<OutputBuffer>,
-        api: Arc<dyn Win32Facade>,
+#[cfg(test)]
+async fn spawn_pipe_inner(
+    request: NormalizedProcessRequest,
+    output: Arc<OutputBuffer>,
+    api: Arc<dyn Win32Facade>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     spawn_inner(request, output, api, SpawnTransport::Pipe).await
 }
@@ -1617,11 +1623,22 @@ async fn spawn_pty_inner(
     .await
 }
 
+#[cfg(test)]
 async fn spawn_inner(
     request: NormalizedProcessRequest,
     output: Arc<OutputBuffer>,
     api: Arc<dyn Win32Facade>,
     transport: SpawnTransport,
+) -> Result<SpawnedPlatformProcess, ProcessError> {
+    spawn_inner_with_cancellation(request, output, api, transport, None).await
+}
+
+async fn spawn_inner_with_cancellation(
+    request: NormalizedProcessRequest,
+    output: Arc<OutputBuffer>,
+    api: Arc<dyn Win32Facade>,
+    transport: SpawnTransport,
+    external_cancellation: Option<Arc<StartCancellation>>,
 ) -> Result<SpawnedPlatformProcess, ProcessError> {
     enforce_sandbox(&request)?;
     let prepared = PreparedCommand::new(&request)?;
@@ -1645,7 +1662,10 @@ async fn spawn_inner(
         .map_err(spawn_failed)?
         .reserve()
         .map_err(spawn_failed)?;
-    let mut cancellation = StartCancellationGuard::new();
+    let mut cancellation = match external_cancellation {
+        Some(state) => StartCancellationGuard { state, armed: true },
+        None => StartCancellationGuard::new(),
+    };
     let cancelled = cancellation.worker_flag();
     let mut transaction = tokio::task::spawn_blocking(move || {
         spawn_transaction(
@@ -2147,10 +2167,7 @@ struct StartCancellationGuard {
 impl StartCancellationGuard {
     fn new() -> Self {
         Self {
-            state: Arc::new(StartCancellation {
-                cancelled: AtomicBool::new(false),
-                resume_gate: Mutex::new(()),
-            }),
+            state: Arc::new(StartCancellation::new()),
             armed: true,
         }
     }
@@ -2168,13 +2185,24 @@ impl StartCancellationGuard {
     }
 }
 
-struct StartCancellation {
+pub(super) struct StartCancellation {
     cancelled: AtomicBool,
     resume_gate: Mutex<()>,
 }
 
 impl StartCancellation {
-    fn cancel(&self) {
+    pub(super) fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            resume_gate: Mutex::new(()),
+        }
+    }
+
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(AtomicOrdering::Acquire)
+    }
+
+    pub(super) fn cancel(&self) {
         let _gate = match self.resume_gate.lock() {
             Ok(gate) => gate,
             Err(poisoned) => poisoned.into_inner(),
