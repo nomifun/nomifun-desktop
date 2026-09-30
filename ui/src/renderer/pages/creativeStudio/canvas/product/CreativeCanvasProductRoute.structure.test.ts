@@ -163,6 +163,8 @@ describe('Creative Canvas product route composition', () => {
       'const flush = await editor.flush()',
       'imageToolBusyRef.current',
       'onOpen={onOpen}',
+      'onRename={(_, title) => handleRenameNode(node.id, title)}',
+      '{ ...node, name: nextName }',
       'onToggleLock={onToggleLock}',
       "intent.mode === 'edit-text'",
       'setEditingTextNodeId(node.id)',
@@ -174,6 +176,7 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('creativeStudioDirectorProjectPath(projectId)')).toBe(false);
     expect(source.includes("state.document.nodes.filter((node) => node.type === 'director')")).toBe(false);
     expect(source.includes("handleBottomViewChange('timeline')")).toBe(false);
+    expect(source.includes('onTimelineDelete')).toBe(false);
     expect(source.includes('URL.createObjectURL')).toBe(false);
     expect(source.includes('data:image/')).toBe(false);
   });

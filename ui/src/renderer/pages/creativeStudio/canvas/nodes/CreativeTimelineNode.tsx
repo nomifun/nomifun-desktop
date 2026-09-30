@@ -6,7 +6,6 @@
 
 import {
   Add,
-  CloseOne,
   Delete,
   Download,
   FolderOpen,
@@ -66,11 +65,11 @@ const iconProps = {
 
 interface CreativeTimelineNodeProps
   extends CreativeNodePresentationProps<'timeline'> {
+  title?: string;
   assets: ReadonlyMap<string, CreativeTimelineAssetPresentation>;
   libraryAssets?: readonly CreativeTimelineAssetPresentation[];
   libraryLoading?: boolean;
   onChange?(data: CreativeTimelineNodeData, mergeKey?: string): void;
-  onDelete?(): void;
   onAddAsset?(assetId: string): void;
   onRequestAssets?(popupContainer: HTMLElement | null): void;
   onUploadFiles?(files: readonly File[]): void | Promise<void>;
@@ -132,6 +131,7 @@ const mediaAspectRatio = (
 
 const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
   node: sourceNode,
+  title: suppliedTitle,
   assets,
   libraryAssets = [],
   libraryLoading = false,
@@ -144,11 +144,11 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
   outputHandle,
   onActivate,
   onOpen,
+  onRename,
   onToggleLock,
   onPointerDown,
   onContextMenu,
   onChange,
-  onDelete,
   onAddAsset,
   onRequestAssets,
   onUploadFiles,
@@ -489,7 +489,7 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
         },
       });
       if (exportSequenceRef.current !== sequence || controller.signal.aborted) return;
-      await downloadTimelineComposition(result, node.data.title);
+      await downloadTimelineComposition(result, title);
     } catch (error) {
       if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
         return;
@@ -542,29 +542,9 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
     onAddAsset(assetId);
   };
 
-  const title = node.data.title || t('creativeStudio.canvas.nodeKinds.timeline');
+  const title = suppliedTitle || node.data.title || t('creativeStudio.canvas.nodeKinds.timeline');
   const exporting = exportProgress !== null;
   const exportPercent = Math.round((exportProgress ?? 0) * 100);
-  const frameActions = onDelete ? (
-    <button
-      type='button'
-      className={styles.headerButton}
-      disabled={node.locked}
-      aria-label={t('creativeStudio.canvas.timeline.close', {
-        defaultValue: '删除时间线节点',
-      })}
-      title={t('creativeStudio.canvas.timeline.close', {
-        defaultValue: '删除时间线节点',
-      })}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => {
-        event.stopPropagation();
-        onDelete();
-      }}
-    >
-      <CloseOne {...iconProps} />
-    </button>
-  ) : null;
 
   return (
     <CreativeNodeFrame
@@ -575,11 +555,11 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
       runtime={runtime}
       className={className}
       style={style}
-      headerActions={frameActions}
       inputHandle={inputHandle}
       outputHandle={outputHandle}
       onActivate={onActivate ? () => onActivate(node) : undefined}
       onOpen={onOpen ? () => onOpen(node) : undefined}
+      onRename={onRename ? (nextTitle) => onRename(node, nextTitle) : undefined}
       onToggleLock={onToggleLock ? () => onToggleLock(node) : undefined}
       onPointerDown={onPointerDown}
       onContextMenu={onContextMenu}
@@ -1011,6 +991,9 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
 
               {node.data.clips.map((clip) => {
                 const asset = assets.get(clip.assetId);
+                const filmstripSrc = asset && !asset.deleted
+                  ? asset.thumbnailSrc || (asset.kind === 'image' ? asset.src : null)
+                  : null;
                 const left = (clip.startMs / scaleDurationMs) * 100;
                 const width = Math.max(1.2, (clip.durationMs / scaleDurationMs) * 100);
                 const isSelected = selectedClipId === clip.id;
@@ -1068,16 +1051,15 @@ const CreativeTimelineNode: React.FC<CreativeTimelineNodeProps> = ({
                       onPointerUp={finishGesture}
                       onPointerCancel={finishGesture}
                     />
-                    <div className={styles.clipMedia} aria-hidden='true'>
-                      {asset && !asset.deleted && asset.thumbnailSrc ? (
-                        <img
-                          src={asset.thumbnailSrc}
-                          alt=''
-                          draggable={false}
-                        />
-                      ) : asset && !asset.deleted && asset.kind === 'image' && asset.src ? (
-                        <img src={asset.src} alt='' draggable={false} />
-                      ) : asset && !asset.deleted && asset.kind === 'video' && asset.src ? (
+                    <div
+                      className={styles.clipMedia}
+                      data-timeline-clip-filmstrip={filmstripSrc ? true : undefined}
+                      aria-hidden='true'
+                      style={filmstripSrc
+                        ? { backgroundImage: `url(${JSON.stringify(filmstripSrc)})` }
+                        : undefined}
+                    >
+                      {filmstripSrc ? null : asset && !asset.deleted && asset.kind === 'video' && asset.src ? (
                         <video
                           src={asset.src}
                           muted

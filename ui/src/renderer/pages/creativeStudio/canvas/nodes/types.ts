@@ -47,6 +47,7 @@ export interface CreativeNodePresentationProps<K extends CreativeCanvasNodeKind>
   outputHandle?: React.ReactNode;
   onActivate?: (node: CreativeNodeOfKind<K>) => void;
   onOpen?: (node: CreativeNodeOfKind<K>) => void;
+  onRename?: (node: CreativeNodeOfKind<K>, title: string) => void;
   onToggleLock?: (node: CreativeNodeOfKind<K>) => void;
   onPointerDown?: React.PointerEventHandler<HTMLElement>;
   onContextMenu?: React.MouseEventHandler<HTMLElement>;
