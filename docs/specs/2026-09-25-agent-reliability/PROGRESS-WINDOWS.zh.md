@@ -9,7 +9,7 @@
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
 | A 观察、只读、小测试 | W188 COD五项；W189 GEN完成复核后无重做N1 | 报告的证据关联及业务失败语言仍待修；综合A N3未达 |
-| B 文件、进程、停止 | 文件步骤、stdio/helper/cancel；W105及process/File回归 | 基线待核对，补代表性真实停止和结果；未整组结案 |
+| B 文件、进程、停止 | W194正式GEN中文stdin/EOF及真实UI停止；W105/process/File回归 | 原始字节、父子清理已有N1；游标重复/取消后残留文本、完整文件步骤与N3待验 |
 | C 连续、纠正、恢复 | 压缩/最新纠正/取消冷读；W95/W98/W182等 | 组件及取消冷读已有证据，真实连续/压缩接合待补 |
 
 关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
@@ -3252,3 +3252,23 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 同步结算：源码f6d93ba00，正常合并远端4f13f7b2e为8980fdd19，保留固定前缀压缩余量实现及macOS记录。
   合并后单值计数/抹零/压缩收据/typed overflow/usage余量/硬限8项回归通过，fmt/diff通过；正式样本仍是合并前构建。
   最终profile子进程0，所有旧/新Turn终态；新合并压缩的真实Windows长任务另验，不将计数N3等同共享达标。
+
+### W194 正式进程输入、总期限及UI停止（2026-10-01；基线978cd5ae9）
+
+- Case/子断言：B/C05/C06/C08；PROC-027/033/036、REAL-005/010及A04/A05/A08/A10/A11/A13/A17/A19的相关子断言。
+- 发现与修复：start_process未说明owner默认30秒总期限，GEN首发hold省略timeout_ms后超时。
+  现说明默认30000、poll不续期、按已接受任务明确总期限及最大600000；超时区别于用户停止。
+  timeout schema只新增default/description元数据，owner参数及权限/硬限/错误语义不变。
+- 验证：既有native pipe stdin/EOF与5秒后代清理2/2、工具生命周期/宿主schema2/2，fmt/diff及正式Tauri构建通过。
+  新隔离data/work/profile通过已有加密StepFun配置正式GEN：echo 7步/0压缩，精确6调用链，独立oracle 11/11；
+  UTF-8中文+LF 16 bytes、hex、EOF、exit0/reaped、最终说明及原件hash一致，没有预读、listing或重复启动。
+  后续UI停止前CIM独立确认父/子均存活和亲缘；约39秒时点击产品停止，canonical cancelled/host_cleanup_proven、两PID消失、心跳不再变化，echo原结果保留。
+  停止独立oracle 15/16；a11文本缺截图上可见的“已取消执行”，机器UI断言FAIL保留，不能记录整组PASS。
+- 首败：02-hold-timeout-first-fail保留默认30秒超时与完成复核阻塞；03-hold-timeout-before-stop-fail保留120秒过期后操作者才点击Stop。
+  后者不是产品停止证明，不抹成修后成功。04-user-stop-terminal另记真实Stop；600000为现有硬限内显式操作窗口。
+- 新缺口：04模型14步/1压缩，12次poll均省略cursor，重复READY输出；用户明确wait_ms=30000仍不足以避免忙轮询。
+  取消卡片正确可见，但此前“进程仍在运行，等待点击停止”的文本继续显示；超时分支仍出现update_plan未暴露的自诊断及内部字段。
+- 未覆盖：正式UI清理5秒时限、正确游标等待、取消文本一致性、timeout后计划/完成恢复、B文件步骤及N3、完整C/macOS。
+  不以native通过替代正式UI时限，不关闭完整PROC/REAL或共享阶段。
+- 证据：仓库外2026-10-01/windows/w194-process-stdio-stop；首败/修后分目录，完整events/tools/model/DB/UI、
+  构建/源码身份、stdin原字节、磁盘hash和独立CIM/心跳核对均保留；Git只含提示源码及本页/共享简短进度。
