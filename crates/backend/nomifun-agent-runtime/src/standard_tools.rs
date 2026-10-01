@@ -132,7 +132,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "poll_process",
         capability_id: "workspace.process",
         action_id: "workspace.process/poll",
-        description: "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
+        description: "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. For each following poll, copy the previous receipt's output.next_cursor into cursor and use wait_ms for bounded waiting. Omitting cursor means 0 and replays retained output; unread output returns immediately even with wait_ms=30000, so it cannot serve as a wait loop. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. Report readiness once, then wait without repeating the same running-status narration. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
         schema: process_poll_schema,
     },
     StandardTool {
@@ -419,8 +419,8 @@ fn process_start_schema() -> Value {
 fn process_poll_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
-        "cursor":{"type":"integer","minimum":0,"default":0},
-        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0}
+        "cursor":{"type":"integer","minimum":0,"default":0,"description":"For a following poll, pass the previous output.next_cursor. Default 0 deliberately replays retained output; it does not resume at the last observation."},
+        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0,"description":"Wait up to this duration for new output or terminal state. Retained output after cursor returns immediately. Advance cursor before waiting again; 0 only observes current state."}
     },"required":["process_id"]})
 }
 

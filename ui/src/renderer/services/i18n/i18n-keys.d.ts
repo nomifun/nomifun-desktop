@@ -4238,6 +4238,7 @@ export type I18nKey =
   | 'messages.turnDurationUnknown'
   | 'messages.turnProcess.collapse'
   | 'messages.turnProcess.expand'
+  | 'messages.turnProcess.interruptedReply'
   | 'messages.turnProcess.runningSummary'
   | 'messages.unknownMessageType'
   | 'modelFailover.add'

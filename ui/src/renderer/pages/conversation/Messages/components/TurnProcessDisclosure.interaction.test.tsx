@@ -53,6 +53,39 @@ test('a cancelled disclosure names its outcome even while collapsed', () => {
   expect(page.container.querySelector('.turn-process-disclosure__label')?.textContent).toContain('Execution canceled');
 });
 
+test('a stopped partial reply remains readable with its historical status', () => {
+  const reply = 'The process is still running; waiting for you to stop it.';
+  const snapshot = { ...disclosure(false, steps), state: 'canceled' as const, hasInterruptedReply: true };
+  const page = render(<I18nextProvider i18n={i18n}><>
+    <TurnProcessDisclosure item={snapshot}
+      renderProcessItem={step => <span>{step.id}</span>}
+      getProcessItemKey={step => step.id} getProcessItemState={step => step.state} />
+    <p>{reply}</p>
+  </></I18nextProvider>);
+  expect(page.container.querySelector('[data-testid="interrupted-reply-notice"]')?.textContent)
+    .toBe('The reply below was written before stopping and is incomplete.');
+  expect(page.container.textContent).toContain(reply);
+  expect(snapshot.state).toBe('canceled');
+  expect(snapshot.processItems).toEqual(steps);
+});
+
+test('the interrupted reply notice is limited to a closed cancellation with partial text', () => {
+  for (const variant of [
+    { state: 'completed' as const, running: false, hasInterruptedReply: true },
+    { state: 'failed' as const, running: false, hasInterruptedReply: true },
+    { state: 'canceled' as const, running: true, hasInterruptedReply: true },
+    { state: 'canceled' as const, running: false, hasInterruptedReply: false },
+  ]) {
+    const page = render(<I18nextProvider i18n={i18n}><TurnProcessDisclosure
+      item={{ ...disclosure(false, steps), ...variant }}
+      renderProcessItem={step => <span>{step.id}</span>}
+      getProcessItemKey={step => step.id} getProcessItemState={step => step.state}
+    /></I18nextProvider>);
+    expect(page.container.querySelector('[data-testid="interrupted-reply-notice"]')).toBeNull();
+    page.unmount();
+  }
+});
+
 test('only the latest running process row is current; no row animates after the turn finishes', () => {
   const { container, rerender } = render(view(true));
   expect(container.querySelector('.turn-process-disclosure__body')).not.toBeNull();
