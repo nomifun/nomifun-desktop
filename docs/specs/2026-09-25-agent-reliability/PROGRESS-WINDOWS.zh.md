@@ -3419,3 +3419,16 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   已停止继续付费重试；下一批从实际模型定义和上述真实反例定位，不加预算、补目录、松路径/次数断言或删除首败。
 - 证据：仓库外2026-10-01/windows/w202-files-step-chain；01-first与02-fixed的原任务、磁盘/严格oracle、事件/模型/调用/DB/UI及构建身份分别保留。
 - 同步结算：源码1695b3277，正常合并远端b530d751f为a435abe35；远端仅进度，本批源码hash与正式构建一致，两个FAIL及覆盖限制保持。
+
+### W203 参数说明的正式装配投影（2026-10-01；基线0d423eaf7）
+
+- Case/子断言：C01/C04/C08，MODEL工具定义、CMD-140、FILE-025及A01/A02/A19；沿W202真实反例检查接合，不再盲跑模型。
+- 发现与修复：顶层description在OpenAI编码器原样保留；App换入canonical Schema时却只投影少数参数说明，cmd/command/args/cwd及嵌套patch说明未到参数位置。
+  01最小装配反例在exec_command/cmd处先红后绿。现固定白名单JSON pointer只复制description到已存在字段；包含路径、来源SHA及hunk说明。
+  标准参数说明补充Cmdlet使用cmd脚本、LiteralPath/引号/错误保留、准确相对路径及完整SHA逐字复制；不改参数、Schema约束、owner或权限。
+- 验证：App装配10/10、Runtime工具合同14/14、fmt/diff通过；去说明后结构与原canonical逐项完全相同，原注册Schema再读取仍相同。
+  恶意默认/模式/required/上限及不存在的authority字段不能混入，其他Module不投影；旧换行回归恢复新增路径description后保持完整结构断言。
+  02的旧回归说明恢复列表缺path所致首败另留，03修后通过，不放宽字节/字段结构断言。本批未构建新Tauri或调用真实模型。
+- 未覆盖：新参数定义的正式模型效果、W202前缀/SHA/Cmdlet/重复及完成语义、完整B/N3/GEN/C/macOS。
+  仅关闭已证实的参数说明投影丢失；不声称它是W202所有失败的唯一根因，不用24项组件检查代替正式任务通过。
+- 证据：仓库外2026-10-01/windows/w203-model-parameter-guidance；01/02首败及03/04修后日志分开，W202两轮FAIL和原件不变。
