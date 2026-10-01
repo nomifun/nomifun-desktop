@@ -4738,6 +4738,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_account_with_an_explicit_open_plan_keeps_authorized_repair_available() {
+        let report = |count| json!({"summary":"Requested repair finished; broader quality was not checked.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"No broader verification is claimed."}]});
+        let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"in_progress"}]})),
+            control_step("bad-report","report_completion",report(0)),
+            control_step("repair","write_file",json!({"path":"a","content":"after"})),
+            control_step("close-plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"completed"}]})),
+            control_step("report","report_completion",report(1)),
+            text_step("must not restart completed work"),
+        ])});
+        let tools = Arc::new(ProcessThenWriteTool {writes:AtomicUsize::new(0)});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(tools.writes.load(Ordering::SeqCst),1,"an explicit unfinished plan still permits its requested repair");
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[3].input.tools.iter().any(|tool|tool.name=="write_file"));
+        assert_eq!(requests[3].input.tool_choice,ChatToolChoice::Auto);
+        assert_eq!(requests.len(),6);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
     async fn failed_process_exit_activates_replanning_before_a_terminal_reply() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![

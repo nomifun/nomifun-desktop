@@ -115,6 +115,11 @@
   `2026-10-01/macos/mac-a-report-repair/`；结构改动未进入冻结 live App，完整 MAC-A/B/C、交付
   与 N3 待正式重验，未以组件结果或被拒 summary 关闭场景，也未移植 Windows 平台 PASS。
 
+- macOS MAC-C06-01 补反向边界 **1/1**：显式未完成计划下的非法 report 不收掉已授权修复，
+  write 实际一次，闭合计划后才报告；已有 terminal、running-process、unresolved-patch guards
+  各 **1/1**。首个 fixture 使用未广告控制的错误顺序保留/纠正，未修改产品逻辑或降低断言。
+  当前锁屏只阻断正式 UI/live，组件结果不替代修后 N3；证据 `2026-10-01/macos/c06-terminal-boundary/`。
+
 ## 历史全产品口径快照（已停止本轮排程）
 
 - 公共 P0 为 **5/5 任务已验证**。本文213个去重问题编号属于问题簇，不是已通过的Case数量。
