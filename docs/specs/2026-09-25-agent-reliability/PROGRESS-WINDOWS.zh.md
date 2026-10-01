@@ -3531,3 +3531,17 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   正式Tauri、新profile冷读W209原completed会话，独立14/14：同路径两调用、准确摘要、可展开详情、最终字节/hash说明、11回合终态、全事件/投影/效果和三组磁盘不变，新增事件0。
 - 未覆盖：运行中及多文件patch没有新增模型样本，相关标签/文件清单分支由源码与既有检查覆盖；W206拒绝修正真实触发、进程/超时、完整A/C和共享门槛仍缺。
 - 证据：仓库外2026-10-01/windows/w210-file-operation-count-ui；首败、定向日志、before/after DB、03/04正式UI与oracle独立保留，无新增付费调用。
+
+### W211 综合A首败与历史记录ID说明（2026-10-02；正式基线a2d1d0777，首败始于10-01）
+
+- Case/子断言：C01/C02/C03/C06/C07/C08，CMD-134～138、REAL-003/004与A05/A08/A09/A17/A19；原五项任务和严格断言不缩减。
+- 正式GEN/StepFun新workspace/profile：cwd/Hidden、中文读搜、Git及两个Bun的实际结果正确，两测试各一次exit0/1、全部4命令reaped，十文件/Git状态不变。
+  显式计划后收尾重复读样本两次，再将chatcmpl-tool调用ID当read_tool_history的记录ID，九次预检拒绝；最终report还引用旧搜索证据被拒，20步/10压缩后正式Stop为cancelled。
+  原22项oracle17/22、报告首发拒绝，整体FAIL保留；读取/hash两断言因重复读失败，不能用首次内容正确代判通过。业务exit1是正常诊断，另10次参数拒绝不混成业务失败。
+- 修复：历史工具顶层及字段说明区分hits[].id（64位记录ID）、hits[].call_id（原调用/搜索过滤）和next_after_id（翻页游标）；已知调用先query空串+call_id搜索，再复制记录ID。
+  仅description改变，pattern/required/范围、查询/读取/身份隔离、原失败和freshness保持，不自动转换调用ID、不重新执行原工具。
+- 验证：模型实际工具面最小回归先红后绿，ID/游标正负Schema与冻结工具表2/2，fmt/diff通过；正式停止/host清理、exit0/1、旧事件和无假交付独立8/8。
+- 未覆盖：新说明的真实模型效果；显式计划收尾/重复回读/旧引用、完整A首发/N3及B进程/超时/C仍未闭合。未重复付费循环或把取消/组件通过当A PASS。
+- 证据：首败在仓库外2026-10-01/windows/w211-comprehensive-a-closure（03/04中途、05终态DB/轨迹/严格oracle、06 UI）；修前/修后和清理核对在2026-10-02/windows/w211-tool-history-id-guidance。
+- 同步结算：源码7f986ee01，正常合并248feb461为041d3564e，保留退出清理证明与macOS进度；受影响的桌面未验证退出/重启状态两项通过，fmt/diff通过。
+  正式A样本仍为同步前FAIL，退出状态机测试不替代真实应用关闭/进程清理验收，未再调用模型。
