@@ -174,6 +174,15 @@
   证据在2026-10-01/windows/w203-model-parameter-guidance；组件通过不代判真实任务或共享阶段。
 - 正常同步1095a185e为3b1b06c3c；参数投影源码未变，正式模型验收仍待补。
 
+### C04-03 参数投影后的实际文件效果（2026-10-01，W204；Coding N1，整组FAIL）
+
+- 正式Coding/StepFun原样文件任务14步/两次压缩完成，创建/read/来源SHA保护patch/复制移动/限定删除/最终read均实际正确。
+  用户相对路径没有项目名前缀；Copy/Move采用cmd中的带引号LiteralPath，错误保留；三条实际exec均exit0/reaped/无清理错误。
+  最终正确路径18-byte/3行/末尾LF/整文件SHA、原件/相似名及旧事件一致；只新增文件效果N1，不以组件检查代判真实执行。
+- 整组仍FAIL 15/18：未要求的listing实际执行，收尾另两个补查提议未dispatch被拒，summary却称没有额外操作。
+  首次报告接受不证明范围遵守；真实2/0错误计数、内部警告及所有历史首败保留。
+  下一缺口为禁止额外操作和真实交付，完整B/N3/GEN/C未闭合；证据在2026-10-01/windows/w204-parameter-guidance-live。
+
 ### C07-01 固定开销与压缩后原收据（2026-10-01）
 
 - macOS MAC-A-01 的真实 StepFun 首败：两个指定测试已 exit 0/1，三次压缩却只留下 accepted input，
