@@ -36,6 +36,7 @@ export interface ToolReceiptSummaryPart {
   skipped?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
   commandExitCode?: number;
+  commandNotStarted?: boolean;
 }
 
 export interface ToolReceiptDetailRow {
@@ -50,6 +51,7 @@ export interface ToolReceiptDetailRow {
   skipped?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
   commandExitCode?: number;
+  commandNotStarted?: boolean;
   retryCount?: number;
   attempts?: ToolReceiptAttemptRow[];
 }
@@ -69,6 +71,7 @@ interface ToolReceiptAttemptRow {
   output?: string;
   truncated?: boolean;
   notExecutedReason?: NormalizedToolNotExecutedReason;
+  commandNotStarted?: boolean;
 }
 
 interface ToolRetryGroup {
@@ -436,6 +439,7 @@ export const buildToolReceiptSummaryParts = (
       states: TurnDisclosureProcessState[];
       notExecutedReason?: NormalizedToolNotExecutedReason;
       commandExitCode?: number;
+      commandNotStarted?: boolean;
     }
   >();
 
@@ -444,7 +448,7 @@ export const buildToolReceiptSummaryParts = (
     const target = getToolReceiptTarget(tool, action);
     // A pre-dispatch rejection is a different receipt outcome from a tool that
     // actually ran. Keep them separate even when their semantic action matches.
-    const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}:${tool.commandExitCode ?? 'unknown'}`;
+    const groupKey = `${action}:${tool.notExecutedReason ?? 'executed'}:${tool.commandExitCode ?? 'unknown'}:${tool.commandNotStarted === true}`;
     const current = grouped.get(groupKey) ?? {
       action,
       count: 0,
@@ -453,6 +457,7 @@ export const buildToolReceiptSummaryParts = (
       states: [],
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
+      ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
     };
     current.count += 1;
     if (tool.skipped) current.skippedCount += 1;
@@ -469,6 +474,7 @@ export const buildToolReceiptSummaryParts = (
     ...(value.skippedCount === value.count ? { skipped: true } : {}),
     ...(value.notExecutedReason ? { notExecutedReason: value.notExecutedReason } : {}),
     ...(value.commandExitCode !== undefined ? { commandExitCode: value.commandExitCode } : {}),
+    ...(value.commandNotStarted ? { commandNotStarted: true } : {}),
   }));
 };
 
@@ -500,6 +506,7 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
       ...(tool.skipped ? { skipped: true } : {}),
       ...(tool.notExecutedReason ? { notExecutedReason: tool.notExecutedReason } : {}),
       ...(tool.commandExitCode !== undefined ? { commandExitCode: tool.commandExitCode } : {}),
+      ...(tool.commandNotStarted ? { commandNotStarted: true } : {}),
       ...(attempts.length > 1
         ? {
             retryCount: attempts.length - 1,
@@ -511,6 +518,7 @@ export const buildToolReceiptDetailRows = (tools: NormalizedToolCall[]): ToolRec
               ...(attempt.output ? { output: attempt.output } : {}),
               ...(attempt.truncated ? { truncated: attempt.truncated } : {}),
               ...(attempt.notExecutedReason ? { notExecutedReason: attempt.notExecutedReason } : {}),
+              ...(attempt.commandNotStarted ? { commandNotStarted: true } : {}),
             })),
           }
         : {}),

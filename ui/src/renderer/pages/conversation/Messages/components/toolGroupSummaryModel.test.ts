@@ -21,6 +21,30 @@ const tool = (item: Partial<NormalizedToolCall> & Pick<NormalizedToolCall, 'key'
 });
 
 describe('buildToolReceiptSummaryParts', () => {
+  test('separates a proven launch refusal from other failures and keeps it in retry history', () => {
+    const first = tool({ key: 'not-started', name: 'exec_command', status: 'error',
+      commandNotStarted: true, output: 'original launch diagnostic' });
+    const other = tool({ key: 'system', name: 'exec_command', status: 'error', output: 'unknown failure' });
+    const parts = buildToolReceiptSummaryParts([first, other], 'failed');
+    expect(parts.map(({ state, commandNotStarted }) => ({ state, commandNotStarted }))).toEqual([
+      { state: 'failed', commandNotStarted: true },
+      { state: 'failed', commandNotStarted: undefined },
+    ]);
+    const rows = buildToolReceiptDetailRows([first, other]);
+    expect(rows[0]?.commandNotStarted).toBe(true);
+    expect(rows[0]?.output).toBe('original launch diagnostic');
+    const retried = buildToolReceiptDetailRows([
+      { ...first, retry: { retryGroupId: first.key, attemptNo: 1 } },
+      tool({ key: 'started', name: 'exec_command', commandExitCode: 0,
+        retry: { retryGroupId: first.key, attemptNo: 2, retryOfCallId: first.key } }),
+    ]);
+    expect(retried[0]?.state).toBe('completed');
+    expect(retried[0]?.commandNotStarted).toBeUndefined();
+    expect(retried[0]?.attempts?.[0]).toMatchObject({
+      state: 'failed', commandNotStarted: true, output: 'original launch diagnostic',
+    });
+  });
+
   test('separates command exit codes from system failures and retains raw detail', () => {
     const tools = [
       tool({ key: 'pass', name: 'exec_command', commandExitCode: 0 }),

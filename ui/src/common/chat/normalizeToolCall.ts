@@ -23,6 +23,8 @@ export interface NormalizedToolCall {
   nonFatalFailure?: boolean;
   /** Exit status of a native command whose completion and cleanup are proven. */
   commandExitCode?: number;
+  /** The local process owner proved that the requested executable did not start. */
+  commandNotStarted?: boolean;
   /** Exact local Runtime result whose data was intentionally withheld at a documented bound. */
   boundedResult?: NormalizedToolBoundedResult;
   /** Tool was not executed because an earlier call in the same assistant turn failed. */
@@ -145,6 +147,24 @@ const isOrdinaryShellExit = (name: unknown, status: unknown, output: unknown): b
 };
 
 const nativeProcessToolNames = new Set(['exec_command', 'start_process', 'poll_process']);
+
+const isNativeCommandNotStarted = (name: unknown, status: unknown, output: unknown): boolean => {
+  if (status !== 'error' || !['exec_command', 'start_process'].includes(toDisplayText(name).trim())) return false;
+  const text = toDisplayText(output).trim();
+  if (!text || text.length > 4096) return false;
+  try {
+    const receipt = JSON.parse(text);
+    return receipt?.schema === 'nomifun.process-start-observation.v1'
+      && receipt.state === 'not_started' && receipt.code === 'PROCESS_NOT_STARTED'
+      && receipt.user_code_started === false && receipt.success === false
+      && !Object.hasOwn(receipt, 'process_id') && !Object.hasOwn(receipt, 'exit_code')
+      && !Object.hasOwn(receipt, 'signal')
+      && typeof receipt.message === 'string' && receipt.message.trim().length > 0
+      && receipt.message.length <= 2048;
+  } catch {
+    return false;
+  }
+};
 
 const getNativeCommandExitCode = (name: unknown, status: unknown, output: unknown): number | undefined => {
   if (!nativeProcessToolNames.has(toDisplayText(name).trim())) return undefined;
@@ -310,6 +330,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
   const searchContextWithheld = isSearchContextWithheld(name, status, output);
   const processReferenceNotExecuted = isProcessReferenceNotExecuted(name, status, output);
   const commandExitCode = getNativeCommandExitCode(name, status, output);
+  const commandNotStarted = isNativeCommandNotStarted(name, status, output);
   const nonFatalFailure = searchContextWithheld
     || (status === 'error' && commandExitCode !== undefined && commandExitCode !== 0)
     || isOrdinaryShellExit(name, status, output)
@@ -327,6 +348,7 @@ export function normalizeToolCall(message: IMessageToolCall): NormalizedToolCall
     ...(searchContextWithheld ? { boundedResult: 'search_context_withheld' as const } : {}),
     ...(nonFatalFailure ? { nonFatalFailure: true } : {}),
     ...(commandExitCode !== undefined ? { commandExitCode } : {}),
+    ...(commandNotStarted ? { commandNotStarted: true } : {}),
     description: description ? formatValue(description) : undefined,
     input: displayInput,
     output:
