@@ -877,7 +877,24 @@ impl CompletionTracker {
                     && exact_terminal
                     && command.cleanup_proven
                     && command.omitted_interactions == 0
-                    && command.launch_call_id.as_deref() == Some(observation.call_id.as_str())
+                    && command.launch_call_id.as_deref().is_some_and(|launch| {
+                        // A terminal poll has its own call ID. Preserve only
+                        // that exact result with a retained, bound launch and
+                        // matching owner process, never earlier interactions
+                        // or current workspace contents. Missing old scope
+                        // metadata remains conservative.
+                        launch == observation.call_id
+                            || (!launch.is_empty()
+                                && command.interaction_call_ids.last() == Some(&observation.call_id)
+                                && self.observations.iter().any(|item| item.call_id == launch && item.invocation_attempted)
+                                && self.scopes.get(launch).is_some_and(|scope|
+                                    scope["capability"] == "workspace.process"
+                                        && matches!(scope["action"].as_str(), Some("workspace.process/start" | "workspace.process/exec")))
+                                && self.scopes.get(&observation.call_id).is_some_and(|scope|
+                                    scope["capability"] == "workspace.process"
+                                        && scope["action"] == "workspace.process/poll"
+                                        && scope["requested_arguments"]["process_id"].as_str() == Some(command.process_id.as_str())))
+                    })
                     && command.observed_workspace_epoch == observation.workspace_epoch
             });
         observation.invocation_attempted
@@ -1425,6 +1442,120 @@ mod tests {
         let context = tracker.context(&AgentPlan::default(), &work, 1).unwrap();
         assert!(context.contains("\"call_id\":\"alpha-call\""));
         assert!(context.contains("\"call_id\":\"beta-call\""));
+    }
+
+    fn settled_poll_fixture(state: &str, exit_code: Option<i32>) -> (CompletionTracker, AgentWorkStatus) {
+        let mut tracker = CompletionTracker::default();
+        let mut work = AgentWorkStatus::default();
+        let mut commands = crate::workflow::CommandTracker::default();
+        let read = ChatToolCall {
+            call_id: "before-read".into(), name: "read_file".into(),
+            arguments: StrictJsonValue(serde_json::json!({"path":"sample.txt"})), provider_metadata: None,
+        };
+        tracker.observe(&work, &file_binding("workspace.files/read"), &read,
+            &AgentToolResult::text(read.call_id.clone(), "earlier sample", false), true);
+        for (id, name, action, arguments, receipt, error) in [
+            ("start-call", "start_process", "workspace.process/start",
+                serde_json::json!({"command":"diagnostic","args":["sample.txt"]}),
+                serde_json::json!({"process_id":"owned-process","state":"running","success":null}), false),
+            ("terminal-poll", "poll_process", "workspace.process/poll",
+                serde_json::json!({"process_id":"owned-process","cursor":0,"wait_ms":30000}),
+                serde_json::json!({"process_id":"owned-process","state":state,"exit_code":exit_code,
+                    "signal":null,"cleanup":{"reaped":true,"errors":[]},"success":exit_code==Some(0)}),
+                exit_code != Some(0)),
+            ("later-command", "exec_command", "workspace.process/exec",
+                serde_json::json!({"command":"later-effect"}),
+                serde_json::json!({"process_id":"later-process","state":"exited","exit_code":0,
+                    "cleanup":{"reaped":true},"success":true}), false),
+        ] {
+            let call = ChatToolCall {call_id:id.into(), name:name.into(),
+                arguments:StrictJsonValue(arguments), provider_metadata:None};
+            let mut binding = process_binding(action);
+            binding.model_name = name.into();
+            binding.definition.name = name.into();
+            let result = AgentToolResult::text(call.call_id.clone(), receipt.to_string(), error);
+            work.observe(&binding, &call, &result, &mut commands);
+            tracker.observe(&work, &binding, &call, &result, true);
+        }
+        (tracker, work)
+    }
+
+    #[tokio::test]
+    async fn settled_poll_results_survive_later_commands_without_refreshing_workspace_evidence() {
+        for (state, exit_code) in [("exited", Some(0)), ("exited", Some(1)), ("timed_out", None)] {
+            let (mut tracker, work) = settled_poll_fixture(state, exit_code);
+            assert_eq!(work.workspace_observation_epoch, 2);
+            assert!(work.running_processes.is_empty());
+            let terminal = &tracker.observations[2];
+            assert_eq!(terminal.command.as_ref().unwrap().launch_call_id.as_deref(), Some("start-call"));
+            assert!(tracker.is_usable(terminal, 2),
+                "the original reaped {state}/{exit_code:?} poll remains evidence of its own terminal result");
+            assert!(!tracker.is_usable(&tracker.observations[0], 2), "later opaque effects still invalidate file contents");
+            assert!(!tracker.is_usable(&tracker.observations[1], 2), "the launch is not a later terminal observation");
+            let definition = tracker.definition_with_evidence(&AgentPlan::default(), &work, false);
+            let validator = jsonschema::validator_for(&definition.input_schema.0).unwrap();
+            let summary = format!("The diagnostic {state} with exit {exit_code:?}; this describes its earlier terminal, not current file state.");
+            let report = serde_json::json!({"summary":summary,
+                "observed_tool_error_count":work.failed_tools,"observed_command_failure_count":work.failed_commands,
+                "criteria":[{"disposition":"supported","evidence_call_ids":["terminal-poll"],
+                    "rationale":"The matching owned-process poll records this settled terminal."}]});
+            assert!(validator.is_valid(&report));
+            for stale in ["before-read", "start-call"] {
+                let mut wrong = report.clone();
+                wrong["criteria"][0]["evidence_call_ids"] = serde_json::json!([stale]);
+                assert!(!validator.is_valid(&wrong));
+            }
+            let context = context_value(&tracker, &work);
+            let entry = context["available_evidence"].as_array().unwrap().iter()
+                .find(|entry| entry["call_id"] == "terminal-poll").unwrap();
+            assert_eq!(entry["scope"]["action"], "workspace.process/poll");
+            assert_eq!(entry["scope"]["requested_arguments"]["process_id"], "owned-process");
+            assert_eq!(entry["command"]["state"], state);
+            assert_eq!(entry["command_exit_code"], serde_json::json!(exit_code));
+            assert_eq!(entry["path"], serde_json::Value::Null);
+            let call = ChatToolCall {call_id:"report".into(), name:TOOL_NAME.into(),
+                arguments:StrictJsonValue(report), provider_metadata:None};
+            let inputs = vec![crate::context_lifecycle::text_message(
+                nomifun_chat_model_broker::ChatRole::User, "Report the diagnostic terminal and later command.".into())];
+            let mut plan = AgentPlan::default();
+            let result = tracker.submit(&call, &mut plan, &work, &inputs, false, None, &crate::NoopAgentEventSink)
+                .await.unwrap();
+            assert!(!result.is_error, "{}", result.output_text());
+            let accepted = tracker.current(&plan, &work, 1).unwrap();
+            assert_eq!(accepted.criteria[0].evidence_call_ids, ["terminal-poll"]);
+            assert_eq!(accepted.observed_command_failure_count, u32::from(exit_code != Some(0)));
+            assert_eq!(accepted.observed_tool_error_count, u32::from(exit_code != Some(0)));
+        }
+    }
+
+    #[test]
+    fn incomplete_or_unbound_polls_do_not_become_immutable_completion_evidence() {
+        for defect in ["unreaped", "lost", "wrong-exit", "wrong-call", "wrong-epoch", "no-launch",
+            "empty-launch", "unknown-launch", "omitted-interaction", "wrong-interaction", "wrong-process",
+            "wrong-action", "wrong-capability", "missing-scope", "not-dispatched"] {
+            let (mut tracker, _) = settled_poll_fixture("exited", Some(1));
+            let observation = &mut tracker.observations[2];
+            let command = observation.command.as_mut().unwrap();
+            match defect {
+                "unreaped" => command.cleanup_proven = false,
+                "lost" => command.state = "lost".into(),
+                "wrong-exit" => command.exit_code = Some(7),
+                "wrong-call" => command.observation_call_id = "other-poll".into(),
+                "wrong-epoch" => command.observed_workspace_epoch = 99,
+                "no-launch" => command.launch_call_id = None,
+                "empty-launch" => command.launch_call_id = Some(String::new()),
+                "unknown-launch" => command.launch_call_id = Some("other-start".into()),
+                "omitted-interaction" => command.omitted_interactions = 1,
+                "wrong-interaction" => command.interaction_call_ids = vec!["other-poll".into()],
+                "wrong-process" => command.process_id = "other-process".into(),
+                "wrong-action" => tracker.scopes.get_mut("terminal-poll").unwrap()["action"] = serde_json::json!("workspace.process/input"),
+                "wrong-capability" => tracker.scopes.get_mut("terminal-poll").unwrap()["capability"] = serde_json::json!("workspace.files"),
+                "missing-scope" => { tracker.scopes.remove("terminal-poll"); }
+                "not-dispatched" => observation.invocation_attempted = false,
+                _ => unreachable!(),
+            }
+            assert!(!tracker.is_usable(&tracker.observations[2], 2), "{defect} is not a usable terminal receipt");
+        }
     }
 
     #[tokio::test]
