@@ -3723,6 +3723,7 @@ fn std_command_for(request: &NormalizedProcessRequest) -> Result<StdCommand, Pro
     validate_explicit_unix_program(&request.command, &request.cwd)?;
     #[cfg(target_os = "macos")]
     if let SandboxPolicy::MacSeatbelt { write_roots } = &request.capability.sandbox {
+        validate_seatbelt_bare_program(request)?;
         let trusted_temporary = trusted_macos_user_temp(&request.cwd)?;
         let profile = seatbelt_profile(
             write_roots,
@@ -3743,6 +3744,44 @@ fn std_command_for(request: &NormalizedProcessRequest) -> Result<StdCommand, Pro
     command.args(args);
     harden_subprocess_environment(&mut command);
     Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_seatbelt_bare_program(request: &NormalizedProcessRequest) -> Result<(), ProcessError> {
+    use std::{ffi::{CString, OsStr}, os::unix::ffi::OsStrExt};
+    let CommandSpec::Program { program, .. } = &request.command else { return Ok(()); };
+    if program.as_bytes().contains(&b'/') { return Ok(()); }
+    let path = request.env.get(OsStr::new("PATH")).cloned().or_else(|| std::env::var_os("PATH"));
+    // An absent PATH has platform execvp defaults; do not invent a replacement
+    // search list or claim failure without checking the actual environment.
+    let Some(path) = path else { return Ok(()); };
+    let mut permission_denied = false;
+    let mut uncertain = false;
+    for directory in std::env::split_paths(&path) {
+        let candidate = request.cwd.join(directory).join(program);
+        let encoded = CString::new(candidate.as_os_str().as_bytes()).map_err(|_| ProcessError::InvalidCommand {
+            reason: "executable search path contains a NUL byte".to_owned(),
+        })?;
+        // SAFETY: encoded remains a valid NUL-terminated path. This check runs
+        // before any watchdog/wrapper is created. Successful candidates are
+        // not substituted into argv; eventual execvp remains authoritative.
+        if unsafe { libc::access(encoded.as_ptr(), libc::X_OK) } == 0 { return Ok(()); }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::ENOENT | libc::ENOTDIR) => {}
+            Some(libc::EACCES) => permission_denied = true,
+            _ => uncertain = true,
+        }
+    }
+    // An unusual access error is not proof that execvp cannot resolve the
+    // request. Preserve its original behavior rather than short-circuiting a
+    // later candidate or turning filesystem uncertainty into a known absence.
+    if uncertain { return Ok(()); }
+    Err(spawn_failed(io::Error::from_raw_os_error(if permission_denied {
+        libc::EACCES
+    } else {
+        libc::ENOENT
+    })))
 }
 
 fn validate_explicit_unix_program(
@@ -5198,17 +5237,38 @@ mod tests {
         no_exec_request.capability = CapabilityPolicy {
             cwd_roots: vec![workspace.clone()],
             sandbox: SandboxPolicy::MacSeatbelt {
-                write_roots: vec![workspace],
+                write_roots: vec![workspace.clone()],
             },
+        };
+
+        let mut missing_bare_request = request("literal program --not-an-argument".into(), Vec::new());
+        missing_bare_request.cwd = workspace.clone();
+        missing_bare_request.env.insert("PATH".into(), workspace.as_os_str().to_owned());
+        missing_bare_request.capability = CapabilityPolicy {
+            cwd_roots: vec![workspace.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt { write_roots: vec![workspace.clone()] },
+        };
+        let mut denied_bare_request = request("not executable.sh".into(), Vec::new());
+        denied_bare_request.cwd = workspace.clone();
+        denied_bare_request.env.insert("PATH".into(), workspace.as_os_str().to_owned());
+        denied_bare_request.capability = CapabilityPolicy {
+            cwd_roots: vec![workspace.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt { write_roots: vec![workspace] },
         };
 
         for (request, expected) in [
             (tmpdir_request, "invalid_command"),
             (no_exec_request, "spawn_failed"),
+            (missing_bare_request, "spawn_failed"),
+            (denied_bare_request, "spawn_failed"),
         ] {
             let audit = TestSpawnAudit::default();
             let error = match spawn_with_fault(request, TestSpawnFault::None, &audit).await {
-                Ok(_) => panic!("Seatbelt preflight must reject before physical spawn"),
+                Ok(spawned) => {
+                    spawned.owner.wait_reaped(Instant::now() + Duration::from_secs(2)).await
+                        .expect("retain and reap an unexpectedly started wrapper before failing the regression");
+                    panic!("Seatbelt preflight must reject before physical spawn");
+                }
                 Err(error) => error,
             };
             assert_eq!(error.code(), expected);
@@ -5218,6 +5278,21 @@ mod tests {
             assert_eq!(audit.leader_reaps.load(Ordering::SeqCst), 0);
             assert_eq!(audit.cleanup_attempts.load(Ordering::SeqCst), 0);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_bare_preflight_preserves_execvp_for_uncertain_access_errors() {
+        let fixture = tempfile::tempdir().unwrap();
+        let cwd = fixture.path().canonicalize().unwrap();
+        let name = "looped literal helper";
+        std::os::unix::fs::symlink(name, cwd.join(name)).unwrap();
+        let mut request = request(name.into(), Vec::new());
+        request.cwd = cwd.clone();
+        request.env.insert("PATH".into(), cwd.as_os_str().to_owned());
+        request.capability = CapabilityPolicy { cwd_roots: vec![cwd.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt { write_roots: vec![cwd] } };
+        assert!(super::std_command_for(&request).is_ok(), "ELOOP is not a known missing/permission-denied candidate");
     }
 
     #[cfg(target_os = "macos")]

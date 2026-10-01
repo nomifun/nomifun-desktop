@@ -159,6 +159,22 @@
   后续 exit 0/reaped；日志在 `2026-10-01/macos/c01-literal-guidance/`。正式 UI 被当前锁屏阻断，
   不以组件结果关闭 C01/MAC-A/N3，不代判 Windows 原生验收，也不把模型预算恢复为 0。
 
+### C01-02 macOS Seatbelt 裸名准备与未启动合同（2026-10-01，确定性子合同已修）
+
+- MAC-B-02 的 literal 错整行启动 sandbox wrapper 后返回71，形成 failed-command/重规划；
+  正确 argv 下一步因此被拒。既有显式路径有 pre-spawn access 检查，裸 PATH 名没有。
+  真实 native 最小反例先失败且已 reap；不能从类似 stderr、exit71 或文本声称未启动。
+- 仅对 macOS Seatbelt 的裸名按请求 PATH/cwd 检查实际可执行准备条件，在 watchdog/wrapper
+  创建前失败才能进入既有 typed spawn failure→PROCESS_NOT_STARTED。成功不改 program/args，
+  权限/Sandbox/贡献指纹不变；空格合法名、相对/空 PATH、前项 EACCES 后项可执行仍原样 execvp。
+  未配置 PATH、ELOOP 等不确定访问错误或检查后变化不虚构证明，直接 Unix exec/Windows 路径不改。
+- macOS zero-authority preflight1/1、native process6/6（最后 PATH 边界复核1/1）、App typed恢复1/1、
+  Runtime既有非启动计数/控制1/1、direct exec ABORT1/1；failed tool1/command failure0/无假成功
+  和原安全边界继续核对。没有增加模型调用、读取凭据或把原模型首败改成通过。
+  最终 Seatbelt 相关4/4（含不确定访问仍保留实际 execvp、原 profile/TMPDIR）通过。
+- 证据 `2026-10-01/macos/mac-c01-seatbelt-start/`；真实 UI/live是否避免原恢复开销、模型参数/
+  B内容/GEN/N3/A/B/C及C05仍待验。只关闭准备/typed owner子合同，不代判另一平台。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，

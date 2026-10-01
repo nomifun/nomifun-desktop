@@ -505,14 +505,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (journal, pool) = super::super::engine_journal::test_fixture().await;
         let scope = EngineProcessScope::new(root.path(), journal).unwrap();
-        let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
-            "operation":"exec", "command":"/bin/ls -a", "timeout_ms":5000
-        })), "reject-unsplit-command").await.unwrap().0;
-        assert_eq!(rejected["code"], "PROCESS_NOT_STARTED");
-        assert_eq!(rejected["state"], "not_started");
-        assert_eq!(rejected["success"], false);
-        assert_eq!(rejected["user_code_started"], false);
-        assert!(scope.is_quiescent().await);
+        for (index, command) in ["/bin/ls -a", "ls -a"].into_iter().enumerate() {
+            let rejected = scope.invoke(StrictJsonValue(serde_json::json!({
+                "operation":"exec", "command":command, "env":{"PATH":"/usr/bin:/bin"}, "timeout_ms":5000
+            })), &format!("reject-unsplit-command-{index}")).await.unwrap().0;
+            assert_eq!(rejected["code"], "PROCESS_NOT_STARTED");
+            assert_eq!(rejected["state"], "not_started");
+            assert_eq!(rejected["success"], false);
+            assert_eq!(rejected["user_code_started"], false);
+            assert!(scope.is_quiescent().await);
+            let message = rejected["message"].as_str().unwrap();
+            assert!(message.contains("For an ordinary executable, use command"));
+            assert!(message.contains("never splits command"));
+            assert!(message.contains("Use cmd only when shell syntax is required"));
+        }
 
         let corrected = scope.invoke(StrictJsonValue(serde_json::json!({
             "operation":"exec", "command":"/bin/ls", "args":["-a"], "timeout_ms":5000
@@ -525,11 +531,6 @@ mod tests {
         scope.cleanup().await.unwrap();
         drop(scope);
         pool.close().await;
-
-        let message = rejected["message"].as_str().unwrap();
-        assert!(message.contains("For an ordinary executable, use command"));
-        assert!(message.contains("never splits command"));
-        assert!(message.contains("Use cmd only when shell syntax is required"));
     }
 
     #[tokio::test]
