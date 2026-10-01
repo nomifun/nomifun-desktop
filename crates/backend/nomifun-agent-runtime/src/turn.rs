@@ -3119,6 +3119,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn advertised_history_tools_distinguish_archive_ids_from_call_ids() {
+        let mut request = request();
+        configure_tools(&mut request, &tool_plan(), true, true, true, true, true, true, false, &Default::default()).unwrap();
+        let read = request.input.tools.iter().find(|tool| tool.name == crate::tool_archive::READ).unwrap();
+        let id = &read.input_schema.0["properties"]["id"];
+        assert!(id["description"].as_str().unwrap_or_default().contains("hits[].id"));
+        assert!(id["description"].as_str().unwrap().contains("call_id"));
+        let read_validator = jsonschema::options().build(&read.input_schema.0).unwrap();
+        assert!(!read_validator.is_valid(&json!({"id":"chatcmpl-tool-af97a43944baef29"})));
+        assert!(read_validator.is_valid(&json!({"id":"c".repeat(64)})));
+        let search = request.input.tools.iter().find(|tool| tool.name == crate::tool_archive::SEARCH).unwrap();
+        assert!(search.input_schema.0["properties"]["call_id"]["description"].as_str().unwrap_or_default().contains("filter"));
+        assert!(search.input_schema.0["properties"]["after_id"]["description"].as_str().unwrap_or_default().contains("next_after_id"));
+        let search_validator = jsonschema::options().build(&search.input_schema.0).unwrap();
+        assert!(search_validator.is_valid(&json!({"query":"","call_id":"chatcmpl-tool-af97a43944baef29"})));
+        assert!(!search_validator.is_valid(&json!({"query":"","after_id":"chatcmpl-tool-af97a43944baef29"})));
+    }
+
     #[tokio::test]
     async fn imported_task_plan_gate_survives_requested_tool_choice_normalization() {
         let source = crate::AgentInputCitation {
