@@ -1268,6 +1268,12 @@ pub(crate) async fn run_turn(
                     }
                 }
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                    // Internal controls have no platform binding. Count their
+                    // paired failures here, including schema refusals, without
+                    // implying a command launch or a workspace mutation.
+                    if request.tool_plan.binding(&call.name).is_none() && result.is_error {
+                        state.work_status.observe_deferred();
+                    }
                     if let Some(binding) = request.tool_plan.binding(&call.name) {
                         let attempted = dispatch.attempted(&expected_call_id)?;
                         let failed_process = attempted
@@ -2144,11 +2150,6 @@ async fn invoke_tool_calls(
         // No control, discovery, admission or owner effect ran. A rejected
         // proposed name cannot change the trusted cause of a settled gate.
         completion.invalidate_report();
-        for call in &completed {
-            if plan.binding(&call.name).is_none() {
-                work_status.observe_deferred();
-            }
-        }
         return finish_tool_results(results, event_sink, model_step, cancellation).await;
     }
     if let Some(results) = argument_validators.reject_invalid_batch(&completed, plan, &model_request.input.tools)? {
@@ -4691,7 +4692,7 @@ mod tests {
             steps:std::sync::Mutex::new(vec![
                 control_step("diagnostic", "exec_command", json!({"command":"bun","args":["test"]})),
                 control_step("wrong-count", "report_completion", report(0)),
-                control_step("correct-count", "report_completion", report(1)),
+                control_step("correct-count", "report_completion", report(2)),
                 text_step("No more work is authorized"), text_step("No more work is authorized"),
             ]) });
         let tools = Arc::new(FailedProcessTool { is_error:true, ..Default::default() });
@@ -4704,7 +4705,49 @@ mod tests {
         assert!(matches!(result.terminal, AgentTurnTerminal::Completed { .. }));
         assert_eq!(model.requests.lock().unwrap().len(), 3);
         assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+    }
+
+    #[tokio::test]
+    async fn rejected_control_arguments_count_once_without_replaying_the_settled_command() {
+        let report = |count| json!({"summary":"The diagnostic exit was observed; no repair or repeated command is claimed.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"Earlier results are disclosed without a current-state claim."}]});
+        let model = Arc::new(ObservingModel { requests:Default::default(), steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("wrong-account","report_completion",report(0)),
+            control_step("correct-account","report_completion",report(2)),
+            control_step("old-undercount","report_completion",report(1)),
+            text_step("must not replay settled work"),
+        ]) });
+        let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result = open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        let requests = model.requests.lock().unwrap();
+        let definition = requests[2].input.tools.iter().find(|tool|tool.name==crate::completion::TOOL_NAME).unwrap();
+        assert_eq!(definition.input_schema.0["properties"]["observed_tool_error_count"]["const"],2);
+        assert_eq!(definition.input_schema.0["properties"]["observed_command_failure_count"]["const"],1);
+        let feedback = requests[2].input.messages.iter().flat_map(|message| &message.content)
+            .find_map(|part| match part {
+                ChatContentPart::ToolResult { call_id, output, .. } if call_id.as_ref()=="wrong-account" =>
+                    output.iter().find_map(|part| match part {
+                        nomifun_chat_model_broker::ChatToolResultPart::Text {text} => serde_json::from_str::<serde_json::Value>(text).ok(),
+                        _ => None,
+                    }),
+                _ => None,
+            }).expect("paired correction feedback");
+        assert_eq!(feedback["correction_counters_after_rejected_batch"],json!({
+            "observed_tool_error_count":2,"observed_command_failure_count":1}));
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(requests.len(),3);
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
+        assert_eq!(model.steps.lock().unwrap().len(),2);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
     }
 
     #[tokio::test]
@@ -4716,7 +4759,7 @@ mod tests {
             control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
             control_step("bad-report","report_completion",report(0)),
             control_step("reopen","update_plan",json!({"plan":[{"step":"Repeat the settled diagnostic","status":"in_progress"}]})),
-            control_step("fixed-report","report_completion",report(2)),
+            control_step("fixed-report","report_completion",report(3)),
             text_step("must not request more work"),
         ])});
         let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
@@ -4733,8 +4776,8 @@ mod tests {
             [crate::completion::TOOL_NAME],"a rejected terminal account must not advertise a plan reset or repeat effect");
         assert_eq!(requests[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
         assert_eq!(model.steps.lock().unwrap().len(),1);
-        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"),
-            "the rejected plan reset remains a counted unsuccessful attempt");
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"),
+            "the rejected account and plan reset each remain a counted unsuccessful attempt");
     }
 
     #[tokio::test]
@@ -4748,7 +4791,7 @@ mod tests {
             control_step("bad-report","report_completion",report(0)),
             control_step("repair","write_file",json!({"path":"a","content":"after"})),
             control_step("close-plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"completed"}]})),
-            control_step("report","report_completion",report(1)),
+            control_step("report","report_completion",report(2)),
             text_step("must not restart completed work"),
         ])});
         let tools = Arc::new(ProcessThenWriteTool {writes:AtomicUsize::new(0)});
