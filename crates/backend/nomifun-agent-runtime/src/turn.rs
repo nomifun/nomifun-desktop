@@ -4619,6 +4619,10 @@ mod tests {
         assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
         assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
         assert!(result.output_text.contains("no success claim"));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.instructions.iter().any(|text|
+            text.contains("requested expected diagnostic nonzero result")
+                && text.contains("repair only when the accepted task authorizes it")));
     }
 
     #[tokio::test]
