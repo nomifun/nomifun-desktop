@@ -3188,3 +3188,18 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   此批没有新COD、macOS、正式shutdown或发布认证；仅把重做子断言记GEN正式N1，不把其他运行移植为该修复N3。
 - 证据：仓库外2026-10-01/windows/w189-completion-review-compaction；01-first内01～05分别保存原始事件、模型轨迹及oracle，
   多次构建/patch/宿主身份、终态DB、UI及独立磁盘/Git/属性结果均保留，完整日志/凭据不入Git。
+
+### W190 调用范围、旧记录与编码首败（2026-10-01；基线b0ab39f19）
+
+- Case/子断言：C02/C03/C06/C07/C08，CTRL-006/007，A05/A08/A17/A18/A19；复用原五项和仅文本收尾任务。
+- 修复：账本增加有界原请求参数及owner文件hash/字节信息，旧记录明确是否尝试、是否返回成功及当前不具证据资格。
+  env/stdin/文件与patch正文不进入新范围信息；大参数整体省略、窗口与旧记录总量有界。当前证据及精确计数校验不放宽。
+- 验证：3个新回归加5个相关保护共8/8通过，fmt及正式构建通过；范围信息缺失的首红及编译中间失败另存。
+  正式Tauri/加密StepFun GEN11模型步/2压缩、1报告首次接受；文件criterion对应实际Get-Content/Get-FileHash命令，未借目录ID。
+  两个Bun各执行一次、exit0/1；Git原始status/diff与独立CLI一致，磁盘9文件hash不变，无unrelated哨兵。
+- 新首败及未闭合：Get-Content默认解码把UTF-8中文变为乱码，最终回答原样误报内容；SHA/行数正确不代表内容正确。
+  Select-String使用.\**\*及2>$null，未证明完整搜索且隐藏错误，不接受该0 exit为完整搜索通过。
+  7条exec分别对应cwd/list/读/hash/两个搜索/两测试，没有重复执行；原oracle仍失败，不改只认read_file/search_files的断言制造通过。
+  Git仍标unverified、语言仍含内部术语；本批只记录引用范围子断言GEN N1，完整A/N3与B/C、UI体验继续开放。
+- 证据：仓库外2026-10-01/windows/w190-completion-operation-scopes，01-first独立data/work/profile及01-gen-terminal；
+  编码与搜索首败、报告到原调用的映射、真实UI、原事件/模型轨迹、不可覆盖oracle及最终磁盘结果均保留，未将completed记整组PASS。
