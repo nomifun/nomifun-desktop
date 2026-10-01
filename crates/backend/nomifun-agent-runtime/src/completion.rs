@@ -129,11 +129,20 @@ fn observation_scope(
     let selected = fields.iter().filter_map(|key| call.arguments.0.get(*key).map(|value| (*key,value)))
         .collect::<BTreeMap<_,_>>();
     let retained = crate::stream_limits::serialized_size(&selected,1024).is_ok();
-    let owner_observation = owner_result.filter(|_| has_owner_path && effects_are_scoped
+    let absence = owner_result.filter(|value| effects_are_scoped
+        && binding.capability_id.as_ref()=="workspace.files"
+        && binding.action_id.as_ref()=="workspace.files/read"
+        && matches!(call.arguments.0.get("format").and_then(serde_json::Value::as_str),None|Some("text"))
+        && call.arguments.0.get("missing_ok").and_then(serde_json::Value::as_bool)==Some(true)
+        && value.get("kind").and_then(serde_json::Value::as_str)==Some("workspace_file_absent")
+        && value.get("path").and_then(serde_json::Value::as_str).is_some_and(|path|
+            call.arguments.0.get("path").and_then(serde_json::Value::as_str)==Some(path)))
+        .map(|_| serde_json::json!({"kind":"workspace_file_absent","file_exists":false}));
+    let owner_observation = absence.or_else(|| owner_result.filter(|_| has_owner_path && effects_are_scoped
         && binding.action_id.as_ref()=="workspace.files/read")
         .filter(|value| value.get("sha256").and_then(serde_json::Value::as_str).is_some_and(valid_sha256))
         .map(|value| serde_json::json!({"sha256":value["sha256"],"total_bytes":value.get("total_bytes").and_then(serde_json::Value::as_u64),
-            "offset":value.get("offset").and_then(serde_json::Value::as_u64),"eof":value.get("eof").and_then(serde_json::Value::as_bool)}));
+            "offset":value.get("offset").and_then(serde_json::Value::as_u64),"eof":value.get("eof").and_then(serde_json::Value::as_bool)})));
     serde_json::json!({"capability":binding.capability_id,"action":binding.action_id,
         "requested_arguments":if retained { serde_json::to_value(selected).ok() } else { None },
         "requested_arguments_omitted":!retained,"effects_are_scoped":effects_are_scoped,
@@ -966,6 +975,50 @@ mod tests {
         assert_eq!(schema["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"],serde_json::json!(["directory-list"]));
         let serialized = context.to_string();
         assert!(!serialized.contains("PRIVATE_FILE_CONTENT") && !serialized.contains("PRIVATE_ENV_SECRET"));
+    }
+
+    #[test]
+    fn missing_file_scope_retains_absence_without_claiming_content_or_freshness() {
+        let mut tracker=CompletionTracker::default();
+        let call=ChatToolCall {call_id:"absent-copy".into(),name:"read_file".into(),provider_metadata:None,
+            arguments:StrictJsonValue(serde_json::json!({"path":"副本 结果.txt","missing_ok":true}))};
+        let result=AgentToolResult::text(call.call_id.clone(),
+            serde_json::json!({"kind":"workspace_file_absent","path":"副本 结果.txt"}).to_string(),false);
+        let work=AgentWorkStatus::default();
+        let observation=tracker.observe(&work,&file_binding("workspace.files/read"),&call,&result,true);
+        let current=context_value(&tracker,&work);
+        assert_eq!(current["available_evidence"][0]["scope"]["owner_observation"],
+            serde_json::json!({"kind":"workspace_file_absent","file_exists":false}));
+        assert!(tracker.is_usable(&observation,0));
+        let later=AgentWorkStatus {workspace_observation_epoch:1,..Default::default()};
+        let stale=context_value(&tracker,&later);
+        assert_eq!(stale["available_evidence"],serde_json::json!([]));
+        assert_eq!(stale["ineligible_observations"][0]["scope"]["owner_observation"]["file_exists"],false);
+        assert!(!tracker.is_usable(&observation,1));
+        for invalid in [
+            serde_json::json!({"kind":"workspace_file_absent","path":"unrelated.txt"}),
+            serde_json::json!({"content":"{\"kind\":\"workspace_file_absent\"}"}),
+        ] {
+            assert!(observation_scope(&file_binding("workspace.files/read"),&call,Some(&invalid),false,true)["owner_observation"].is_null());
+        }
+        let marker=serde_json::json!({"kind":"workspace_file_absent","path":"副本 结果.txt"});
+        assert!(observation_scope(&file_binding("workspace.files/read"),&call,Some(&marker),false,false)["owner_observation"].is_null());
+        for arguments in [
+            serde_json::json!({"path":"副本 结果.txt"}),
+            serde_json::json!({"path":"副本 结果.txt","missing_ok":true,"format":"image"}),
+            serde_json::json!({"path":"副本 结果.txt","missing_ok":true,"format":"instruction_scope"}),
+        ] {
+            let mut wrong=call.clone();wrong.arguments=StrictJsonValue(arguments);
+            assert!(observation_scope(&file_binding("workspace.files/read"),&wrong,Some(&marker),false,true)["owner_observation"].is_null());
+        }
+        for (attempted,is_error) in [(false,false),(true,true)] {
+            let mut rejected=CompletionTracker::default();
+            let output=AgentToolResult::text(call.call_id.clone(),marker.to_string(),is_error);
+            rejected.observe(&work,&file_binding("workspace.files/read"),&call,&output,attempted);
+            let value=context_value(&rejected,&work);
+            assert!(value["available_evidence"].as_array().unwrap().is_empty());
+            assert!(value["ineligible_observations"][0]["scope"]["owner_observation"].is_null());
+        }
     }
 
     #[test]
