@@ -110,6 +110,27 @@ async fn native_recovery_never_replays_across_a_possible_effect_after_checkpoint
     assert!(store.verify_native_execution(&lease).await.is_ok());
 }
 
+#[tokio::test]
+async fn rejected_compaction_draft_is_observation_only_and_fenced_on_takeover() {
+    let store=AgentSessionStore::open_in_memory().await.unwrap();
+    let f=fixture(&store,"compaction-protocol-rejection").await;
+    let old=store.claim_native_execution(claim(&f,"old",0,None)).await.unwrap();
+    let cp=checkpoint(&store,&f,&old).await;
+    let rejected=progress(&f,"summary-draft-rejected",json!({"event":"compaction_summary_rejected",
+        "operation_id":"lease-turn:compact:1","reason":"TOOL_SHAPED_TEXT"}));
+    store.append_native_event(&old,&rejected,None).await.unwrap();
+    expire(&store,&f).await;
+    let fresh=store.claim_native_execution(claim(&f,"fresh",0,Some(&cp))).await.unwrap();
+    assert_eq!(fresh.fence(),old.fence()+1);
+    assert!(store.append_native_observation(&old,&rejected,None).await.is_err());
+    store.cancel_active_turn(&f.session.agent_session_id,"cancel-compaction".into(),"session-api".into()).await.unwrap();
+    let cancelled_rejection=progress(&f,"cancelled-summary-draft",json!({"event":"compaction_summary_rejected",
+        "operation_id":"lease-turn:compact:2","reason":"TOOL_CALL_EVENT"}));
+    assert!(store.append_native_observation(&fresh,&cancelled_rejection,None).await.is_ok());
+    let new_tool=progress(&f,"new-tool-after-cancel",json!({"event":"tool_started"}));
+    assert!(store.append_native_observation(&fresh,&new_tool,None).await.is_err());
+}
+
 #[tokio::test(flavor="multi_thread", worker_threads=2)]
 async fn native_recovery_race_has_exactly_one_winner() {
     let store = AgentSessionStore::open_in_memory_with_connections(2).await.unwrap();

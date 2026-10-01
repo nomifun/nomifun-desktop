@@ -26,6 +26,7 @@ pub(crate) fn discardable_model_event(event: &AgentEngineEvent) -> bool {
         | AgentEngineEvent::ReasoningDelta { .. } | AgentEngineEvent::ToolCallDelta { .. }
         | AgentEngineEvent::ToolCallCompleted { .. } | AgentEngineEvent::Usage { .. }
         | AgentEngineEvent::CompactionStarted { .. } | AgentEngineEvent::CompactionUsage { .. }
+        | AgentEngineEvent::CompactionSummaryRejected { .. }
         | AgentEngineEvent::ContextCompacted { .. } | AgentEngineEvent::ContextLimitRecoveryStarted { .. }
         | AgentEngineEvent::ModelOutputTruncated { .. } | AgentEngineEvent::ModelResponseRejected { .. }
         | AgentEngineEvent::ExecutionResumed { .. } | AgentEngineEvent::ExecutionBudgetPrepared { .. }

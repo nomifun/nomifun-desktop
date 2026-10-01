@@ -106,6 +106,9 @@ impl AgentCompactionSummary {
     }
 
     pub fn validate(&self) -> Result<(), AgentEngineError> {
+        if tool_shaped_summary(&self.task_summary) {
+            return Err(AgentEngineError::CompactionInvalidSummary);
+        }
         if self.agent_session_id.trim().is_empty()
             || self.runtime_binding_id.trim().is_empty()
             || self.engine_build_id.trim().is_empty()
@@ -121,6 +124,18 @@ impl AgentCompactionSummary {
         }
         Ok(())
     }
+}
+
+fn tool_shaped_summary(text: &str) -> bool {
+    let text = text.trim_start();
+    let lower = text.to_ascii_lowercase();
+    if lower.starts_with("<tool_call>") || lower.starts_with("<function=") {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(text).ok().is_some_and(|value|
+        value.is_object() && value.get("name").is_some_and(serde_json::Value::is_string)
+            && value.get("arguments").is_some_and(serde_json::Value::is_object)
+            && value.get("call_id").is_some_and(serde_json::Value::is_string))
 }
 
 pub async fn run_compaction(
@@ -178,6 +193,7 @@ pub(crate) async fn run_compaction_recorded(
     if cancellation.is_cancelled() {
         return Err(AgentEngineError::Cancelled);
     }
+    let operation_id = request.model_request.causality.operation_id.clone();
     let open_stream = model.open_stream(request.model_request, cancellation.clone());
     let mut stream = tokio::select! {
         _ = cancellation.cancelled() => return Err(AgentEngineError::Cancelled),
@@ -234,9 +250,13 @@ pub(crate) async fn run_compaction_recorded(
             | ChatModelEvent::ProviderReasoningBlock { .. }
             | ChatModelEvent::ProviderRoundId { .. } => {}
             ChatModelEvent::ToolCallDelta { .. } | ChatModelEvent::ToolCallCompleted { .. } => {
-                return Err(AgentEngineError::Compaction(
-                    "compaction route attempted a Tool Call".to_owned(),
-                ));
+                if let Some(sink) = sink {
+                    sink.emit(crate::AgentEngineEvent::CompactionSummaryRejected {
+                        operation_id: operation_id.clone(),
+                        reason: "TOOL_CALL_EVENT".into(),
+                    }).await?;
+                }
+                return Err(AgentEngineError::CompactionInvalidSummary);
             }
             ChatModelEvent::NativeResponsesItem { .. }
             | ChatModelEvent::OutputAudioDelta { .. } => {
@@ -259,7 +279,7 @@ pub(crate) async fn run_compaction_recorded(
         }
     }
 
-    AgentCompactionSummary::new(
+    let result = AgentCompactionSummary::new(
         binding,
         request.source_event_cursor,
         summary,
@@ -267,7 +287,16 @@ pub(crate) async fn run_compaction_recorded(
         request.completed_tools,
         request.outstanding_work,
         request.retained_facts,
-    )
+    );
+    if matches!(&result, Err(AgentEngineError::CompactionInvalidSummary)) {
+        if let Some(sink) = sink {
+            sink.emit(crate::AgentEngineEvent::CompactionSummaryRejected {
+                operation_id,
+                reason: "TOOL_SHAPED_TEXT".into(),
+            }).await?;
+        }
+    }
+    result
 }
 
 #[cfg(test)]
@@ -406,6 +435,27 @@ mod tests {
         assert_eq!(summary.source_event_cursor, 9);
         assert_eq!(summary.engine_build_digest, binding.build_digest().as_ref());
         assert!(summary.validate().is_ok());
+    }
+
+    #[test]
+    fn summary_rejects_bare_tool_payloads_without_rejecting_documentation() {
+        let binding = binding();
+        let summary = |text: &str| AgentCompactionSummary::new(&binding,9,text,
+            "workspace unchanged",vec![],"finish original task",vec![]);
+        for text in [
+            "<tool_call>\n<exec_command>\n<args><cmd>Get-Content sample.txt</cmd></args>",
+            "<tool_call><function=write_file><parameter=content>private payload",
+            "<function=exec_command>",
+            r#"{"call_id":"made-up","name":"exec_command","arguments":{"cmd":"unexpected"}}"#,
+        ] {
+            assert!(summary(text).is_err(),"a bare invocation is not a continuation summary");
+        }
+        for text in ["The original command exited with code 1. No more work was executed.",
+            "The user is documenting the <tool_call> marker; no invocation was made.",
+            "Example preserved as data:\n```xml\n<tool_call><exec_command>example</exec_command></tool_call>\n```",
+            r#"{"goal":"Explain JSON","completed":["read reference"],"pending":["write answer"]}"#] {
+            assert!(summary(text).is_ok(),"legitimate summary data remains valid");
+        }
     }
 
     #[tokio::test]
