@@ -108,9 +108,15 @@ const MessageText: React.FC<{
   }, [message.content.content, message.position]);
   const completion = useMemo(() => presentation.hasToolPayload ? undefined
     : projectCompletionOutcomes(message, presentation.text, messageList), [message, presentation, messageList]);
+  const completionKey = completion?.kind === 'native_nonzero' ? 'messages.completionSummary.nativeNonzero'
+    : completion?.kind === 'native_nonzero_and_arguments' ? 'messages.completionSummary.nativeNonzeroAndArguments'
+    : completion?.kind === 'native_nonzero_and_unclassified' ? 'messages.completionSummary.nativeNonzeroAndOther'
+    : completion?.kind === 'arguments_not_executed' ? 'messages.completionSummary.argumentsNotExecuted'
+    : 'messages.completionSummary.counts';
   const contentToRender = completion
-    ? `${completion.body}\n\n${t(completion.kind === 'native_nonzero' ? 'messages.completionSummary.nativeNonzero' : 'messages.completionSummary.counts',
-      { toolCount: completion.toolCount, commandCount: completion.commandCount, codes: completion.exitCodes.join(', ') })}`
+    ? `${completion.body}\n\n${t(completionKey,
+      { toolCount: completion.toolCount, commandCount: completion.commandCount,
+        argumentCount: completion.argumentCount, otherCount: completion.otherCount, codes: completion.exitCodes.join(', ') })}`
     : presentation.text;
 
   const { text, files } = parseMessageFileMarker(contentToRender, message.position);
