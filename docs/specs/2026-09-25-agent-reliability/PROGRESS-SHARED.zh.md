@@ -237,6 +237,19 @@
 - `2026-10-01/macos/mac-b-stdin-eof/`保存原参数、独立243-row快照/首败/采样/截图；无新产品
   改动或付费重试，完整文件/长helper后代/C/N3/MM等仍开放，Windows原件与结果未改。
 
+### C05-06 macOS UI Stop / parent-child 原生清理（2026-10-01，N1）
+
+- MAC-B-04 正式Tauri/StepFun：12-call/4096/360秒原预算，实际7 requests/228 events/无压缩。
+  start一次、六poll正确cursor，父子真实关系/同组及双心跳在UI Stop前独立ps/文件证明。
+  User明确10分钟等待期限，在现有600000硬限内，非扩大权限或由timeout制造停止通过。
+- UI原生Stop点击→两PID都无 **141ms**（5秒断言内），心跳后续不增；cancelled/headready/
+  host_cleanup_proven及被中断poll的原call原生cancelled/reaped回执一致、is_error=false，
+  native cleanup148ms/只interrupt，原输出/已发生效果与三原件保留，无新效果/孤儿。
+- UI取消/旧回复提示可见，实际Cmd-Q0/无App Helper/fixture/listener；closed228-row快照逐项
+  一致/ok、真实key match0。只记停止/后代N1，不代替完整B/C/N3或C05旧退出失败。
+- 英文/重复状态/内部cursor叙述仍在，完整语言/过程体验未通过；无新修复假设或复制底层矩阵。
+  证据 `2026-10-01/macos/mac-b-stop-descendants/`，原Windows/先前首败未改写。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
