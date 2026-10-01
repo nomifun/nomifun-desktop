@@ -1,6 +1,6 @@
 # 命令与会话可靠性共享进度
 
-更新：2026-10-01。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
+更新：2026-10-02。调度规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)。
 2026-09-30按用户明确目的收敛为[八个命令问题簇、三组正式会话](IMPLEMENTATION-PLAN.zh.md)。
 本轮处理简单命令、步骤衔接、过程状态及结果可信性；通用/编程入口各保留真实执行证据。
 旧675共享＋82 Windows全产品队列停止排程，原目录/首败/已修代码保留；范围外、手测和复用分开记录。
@@ -349,6 +349,19 @@
   改用exact receipt且canonical同目录、零模型/零effect断言保持，alias/nonalias/纯数据各通过。
   本平台不改Windows验收；native退出CEF未确认/owned TERM等仍记失败，详见Mac进度。
   全证据 `2026-10-01/macos/mac-b-file-delivery/`；无预算扩大、权限变化、正文重写或新模型循环。
+
+### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
+
+- B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
+  patch漏path与wire参数一致，原schema已要求path，非owner改写。C06-09未被实际调用，仍待验。
+- 原Main fallback在未验证清理后设置cleanup_verified并返回正常0，独立于CEF是否已返回。
+  现分离forced-handoff permission；无清理证明的normal0/未指定码返回1，已有非零、原intent及
+  Tauri重启归属保持，fatal仍需真实清理。无期限扩大、吞错、权限/保护或Browser engine修改。
+  首红0vs1保留；新增2、coordinator4、相关cleanup15全通过，Windows原生未验，不改其记录。
+- 修后零模型正式冷读529 rows/原件/状态全同，当前Cmd-Q0无清理错误；用户报告已授权但系统项
+  未识别，不能据此关闭native旧失败。整个probe准备95.9秒超冻结90秒、runner未及时止，仍
+  NOT PASS；只保留正常退出子观察。原cap/CEF/备份/时间首败在仓库外
+  `2026-10-01/macos/mac-b-combined-recheck/`（跨午夜）；完整B/C/N3及报告说明live仍开放。
 
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 

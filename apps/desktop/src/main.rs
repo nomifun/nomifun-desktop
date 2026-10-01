@@ -1401,6 +1401,8 @@ struct ExitCoordinator {
     shutdown_started: AtomicBool,
     fatal_dialog_started: AtomicBool,
     cleanup_verified: AtomicBool,
+    /// Permission to finish a bounded failed handoff, not cleanup proof.
+    forced_handoff_allowed: AtomicBool,
     /// Single-flight guard for the F42 deferred exit waiter (repeated Cmd-Q
     /// while the backend is still Starting must not stack waiter threads).
     deferred_exit_wait_started: AtomicBool,
@@ -1419,6 +1421,7 @@ impl Default for ExitCoordinator {
             shutdown_started: AtomicBool::new(false),
             fatal_dialog_started: AtomicBool::new(false),
             cleanup_verified: AtomicBool::new(false),
+            forced_handoff_allowed: AtomicBool::new(false),
             deferred_exit_wait_started: AtomicBool::new(false),
             original_code: Mutex::new(None),
             backend: Mutex::new(BackendRegistration::Starting),
@@ -1519,7 +1522,8 @@ impl ExitCoordinator {
     }
 
     fn is_exit_allowed(&self) -> bool {
-        self.cleanup_verified.load(Ordering::Acquire)
+        (self.cleanup_verified.load(Ordering::Acquire)
+            || self.forced_handoff_allowed.load(Ordering::Acquire))
             && matches!(
                 self.phase.load(Ordering::Acquire),
                 EXIT_PHASE_COMPLETE | EXIT_PHASE_FATAL
@@ -1541,6 +1545,24 @@ impl ExitCoordinator {
             .ok()
             .and_then(|code| *code)
             .unwrap_or(0)
+    }
+
+    fn allow_unverified_handoff(&self) {
+        self.forced_handoff_allowed.store(true, Ordering::Release);
+        self.phase.store(EXIT_PHASE_COMPLETE, Ordering::Release);
+    }
+
+    fn final_exit_code(&self) -> i32 {
+        let original = self.original_code();
+        if original == 0
+            && self.forced_handoff_allowed.load(Ordering::Acquire)
+            && !self.cleanup_verified.load(Ordering::Acquire)
+            && !self.is_restart_requested()
+        {
+            1
+        } else {
+            original
+        }
     }
 
     fn mark_no_cleanup_needed(&self) {
@@ -1825,15 +1847,16 @@ where
 
 /// Force a pending exit/restart handoff to proceed after bounded cleanup
 /// attempts were exhausted (or no cleanup authority ever became available).
-/// Marks cleanup verified — the coordinator's "may proceed" signal — even
-/// though the backend cleanup is NOT verified, and returns the exit code to
-/// use. Callers must log loudly BEFORE calling this: an unkillable or
+/// Allows the handoff without claiming cleanup proof. A normal zero-code
+/// request becomes a failure status; existing failure codes and restart
+/// ownership remain unchanged. Callers must log loudly BEFORE calling this:
+/// an unkillable or
 /// permanently frozen app is strictly worse than an unclean close (the data
 /// layer is crash-safe).
 fn allow_handoff_without_verified_cleanup(coordinator: &ExitCoordinator) -> i32 {
     coordinator.mark_backend_failed_unverified();
-    coordinator.mark_cleanup_verified();
-    coordinator.original_code()
+    coordinator.allow_unverified_handoff();
+    coordinator.final_exit_code()
 }
 
 /// A restart request is a non-cancellable Tauri sentinel.  If the first
@@ -1923,7 +1946,7 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
             return;
         }
         if coordinator.is_exit_allowed() {
-            app.exit(coordinator.original_code());
+            app.exit(coordinator.final_exit_code());
             return;
         }
         tracing::error!(
@@ -1940,8 +1963,7 @@ fn spawn_deferred_exit_shutdown(app: tauri::AppHandle, coordinator: Arc<ExitCoor
 /// return the exit code to use. Only the deferred-exit path may call this,
 /// and only after positively establishing that no cleanup authority exists.
 fn allow_exit_without_backend_cleanup(coordinator: &ExitCoordinator) -> i32 {
-    coordinator.mark_cleanup_verified();
-    coordinator.original_code()
+    allow_handoff_without_verified_cleanup(coordinator)
 }
 
 fn start_shutdown_if_needed(
@@ -3846,6 +3868,41 @@ mod tests {
             coordinator.backend_server().is_none(),
             "no observer may re-acquire the backend after the forced handoff"
         );
+    }
+
+    #[test]
+    fn unverified_normal_exit_does_not_claim_cleanup_or_zero_status() {
+        for handoff in [allow_handoff_without_verified_cleanup, allow_exit_without_backend_cleanup] {
+            for (requested, expected) in [(None, 1), (Some(0), 1), (Some(9), 9)] {
+                let coordinator = ExitCoordinator::default();
+                assert!(coordinator.request_normal_exit(requested));
+                let code = handoff(&coordinator);
+                assert_eq!(code, expected, "an unverified exit is not success");
+                assert!(coordinator.is_exit_allowed(), "bounded quit must still proceed");
+                assert!(!coordinator.cleanup_verified.load(Ordering::Acquire),
+                    "exit permission must not manufacture physical cleanup proof");
+                assert_eq!(coordinator.original_code(), requested.unwrap_or(0));
+                assert!(!coordinator.claim_fatal_exit(), "fatal dialogs still require cleanup proof");
+            }
+        }
+        let verified = ExitCoordinator::default();
+        assert!(verified.request_normal_exit(Some(0)));
+        verified.mark_cleanup_verified();
+        assert_eq!(verified.final_exit_code(), 0, "real cleanup still permits success");
+        assert!(verified.is_exit_allowed());
+    }
+
+    #[test]
+    fn unverified_restart_handoff_keeps_restart_ownership_without_cleanup_proof() {
+        for original in [0, 23, tauri::RESTART_EXIT_CODE] {
+            let coordinator = ExitCoordinator::default();
+            assert!(coordinator.request_normal_exit(Some(original)));
+            assert!(!coordinator.request_restart());
+            assert_eq!(allow_handoff_without_verified_cleanup(&coordinator), original);
+            assert!(coordinator.is_restart_requested());
+            assert!(coordinator.is_exit_allowed());
+            assert!(!coordinator.cleanup_verified.load(Ordering::Acquire));
+        }
     }
 
     #[test]
