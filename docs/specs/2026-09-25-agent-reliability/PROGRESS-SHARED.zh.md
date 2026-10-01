@@ -361,6 +361,16 @@
   最终截图/AX缺口明确保留。此失败不能被形态N1覆盖，完整A/B/C/N3及C06-08/原生/MM仍开放。
   全证据`2026-10-02/macos/mac-b-report-recheck/`，无追加paid循环/新权限/猜测性产品修复，Windows不代判。
 
+### C06-10 历史恢复提示的三处一致性（2026-10-02，确定性子根因）
+
+- W212已更新report tool总说明；参数说明和每轮Completion context仍有旧history恢复限制。
+  现两处与总说明一致：只有已展示的历史工具找回请求摘要所需既有输出，不能升格current/
+  eligible，不能为修account重放观察或效果。仅description变化，不改权限/接受集合/门禁/计数。
+- 复用旧结果交付/不复活stale的最小回归，语义首红保留，修后completion32/32；false-current
+  仍拒绝、epoch/资格不变，historical reporting仍合法，三处提示新增对齐断言。
+  零模型/无用户数据变动，证据`2026-10-02/macos/historical-guidance-consistency/`；正式live与
+  公开语言未验证，不能据此覆盖Mac/Windows已有失败或关闭完整A/B/C/N3。
+
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
 - B07原联合正式任务仍本地cap未交付：文件/单LF输入正确，close/EOF/report未达到；原write漏LF/
