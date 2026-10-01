@@ -1689,3 +1689,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   证据`2026-10-02/macos/mac-a-current-delivery/`。继续复核相关既有nonzero直接report、settled
   report不重放、explicit open-plan授权修复三项 **各1/1**，无新源码假设或全矩阵重复。
   仅该live前置受阻，实际cwd/中文交付及完整A/B/C/N3/旧问题未闭合，Windows结果未改写。
+
+- **MAC-A-08 前置复核／再次锁定**（2026-10-02）：只读console标记不足证明已解锁；owned
+  零模型run004实际UI一度可访问，截图/AX保留，但Cmd-Q未在90秒内结束、TERM/KILL，仍FAIL。
+  随后新源码`c2aa06028`/正式App`52197280cdd8…`/新隔离run006再次明确Mac locked，未发送任务。
+  两份前置均0请求/0Turn/3初始化events，原16-call预算未消费/扩大；7原件/Git/完整快照同/ok，
+  exact owned清理与listener无确认，key audit0/523，首败/短暂可访问/强制退出各自保留，不混为PASS。
+  证据沿用`2026-10-02/macos/mac-a-current-delivery/`；需人工持续解锁后再live，不再无依据重复
+  构建/启动/同构测试，未绕保护/假报provider故障或改Windows结果；未验项保持原状态。
+
+- **2026-10-02 阻断审计**：只读系统会话metadata明确`screen_locked=true`，同一手动解锁前置
+  连续三goal turns阻断正式UI；已有相关确定性检查和远端修复已核对，无新安全工作需重复。
+  停止自动续跑，目标标记blocked而非complete/paused；待人工持续解锁并继续后恢复，未验/首败
+  保留，0新模型/用户数据变更。依据`run-008-blocked-audit/`，不追加构建/UI启动/重复测试填进度。
