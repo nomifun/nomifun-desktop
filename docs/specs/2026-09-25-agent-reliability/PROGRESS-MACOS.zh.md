@@ -28,7 +28,7 @@
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-07 历史头尾/搜索已交付、九次请求正常完成/退出；实际 cwd 路径与公开语言仍缺，不记整组 PASS/N3 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-07 原联合任务达本地16-call cap后取消，文件32 bytes/输入13 bytes正确，未close/EOF/交付；03 EOF/04 Stop各N1，完整链/零失败/N3及原生条件仍开放 |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-08 原文件任务报告形态N1，公开交付/整体超时仍FAIL；B07联合未close/EOF/交付，03 EOF/04 Stop各N1，完整链/N3仍开放 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
@@ -1649,3 +1649,31 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - UI各调用先检查监督器live状态/剩余15秒且单调用5秒限制，结束后不访问closed绑定；可选
   listWindows在本机不可用的准备限制另保留，使用已确认live的明确App路径，不重启默认profile。
   不由此代验forced错误码分支、旧native RPC根因/授权项、完整A/B/C/N3或MM；Windows结果未改写。
+
+- **MAC-B-08 原文件任务报告说明live**（C04/C06/C07/C08）：新正式Tauri源`783b49a2c` /
+  App`23f153672553…`/新隔离Session，原task/seed/33→32-byte及LF断言不变；冻结1 task /
+  16 requests含摘要/4096/360秒，独立App480秒含UI准备/关闭。实际 **9 requests/305 events/
+  8主steps/一压缩**，首report接受且一次delivery/completed/headready，错误/命令失败均0。
+  write/patch/read各一次，cp/mv/rm各一次0/reaped，终版32/`6ab0c427…`、临时/副本无、原件不变。
+- 7组raw/canonical全同，criteria flat objects/summary root/无过期path；C06-09形态/空path
+  修后正式 **N1子断言通过**，不声称唯一因果或N3。没有missing_ok/archive调用，不代验对应live。
+  公开summary/rationales仍有available_evidence/read_file/earlier与三未验提示，原模型公开段
+  和最终控制summary均保留，非UI泄露private reasoning；交付语言/体验未达，不净化原文制造通过。
+- **整批FAIL_PUBLIC_DELIVERY_AND_RUNNER_TIMEOUT**：旧bytes/hash/状态/counter oracle首报PASS仅
+  覆盖那些字段、缺公开语言/原生期限断言，原结果保留，补充严格结果不放宽字节/安全。
+  任务已结束后观察者错过480秒，独立supervisor owned TERM/exit0/expiredtrue，仍FAIL；late
+  capture/Cmd-Q在UI API前被guard拒绝，未重启默认profile。最终截图/AX缺失另记，不伪造。
+- App47353/fixture47318/listener无，fixture shutdown200/0；完整WAL-aware305-row快照与原events
+  全同/ok、completed/ready，key audit0/264。证据`2026-10-02/macos/mac-b-report-recheck/`。
+  本批无可证实新产品根因，只收短进度；未新增模型或扩大预算，完整B/N3/A/C/公开语言、
+  C06-08/forced native branch/旧CEF/MM仍开放，不改写Windows结果。
+
+- **MAC-C06-10 历史恢复说明一致性**（2026-10-02，零模型）：复核W212发现tool总说明允许用
+  已展示history找回请求摘要所需既有输出，但evidence_call_ids说明及每轮Completion accounting
+  仍把history恢复和新观察/效果重放混禁，形成真实提示矛盾；不宣称它是B08语言问题唯一根因。
+- 只统一这两处description：仅already-advertised history/既有输出/请求summary；恢复不取得
+  current/eligible资格，不为修account重复观察/效果。类型/required/accept/epoch/计数/权限/
+  budget及dispatch未改，不翻译/删原文或复活旧证据。复用既有stale-report回归，首个测试签名
+  编译错误另保留，语义首红保留；修后completion **32/32**，old-read supported仍拒绝、原epoch
+  不变、historical unverified交付仍合法。证据`2026-10-02/macos/historical-guidance-consistency/`。
+  本批无native/StepFun重跑，正式交付/公开语言/完整A/B/C/N3及旧问题仍开放，Windows记录未改。
