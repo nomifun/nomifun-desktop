@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use nomifun_chat_model_broker::{
     ChatContentPart, ChatMessage, ChatRole, ChatToolResultPart, ToolCallId,
 };
+use serde::Serialize;
 
 use crate::AgentEngineError;
 
@@ -158,8 +159,8 @@ pub(crate) fn selected<'a>(
 }
 
 impl<'a> RecentToolExchange<'a> {
-    /// The suffix is retained verbatim, so only this older prefix needs an
-    /// inferred summary. Keep the boundary at complete message/batch records.
+    /// Call/result data in the suffix stays exact. Private reasoning is
+    /// projected after the round reset; summarize only this older prefix.
     pub fn prefix(&self) -> &'a [ChatMessage] { &self.source[..self.start] }
 
     /// Expand by one whole preceding batch, retaining intervening messages.
@@ -217,14 +218,32 @@ impl<'a> RecentToolExchange<'a> {
     /// optional tail budget. Count calls/results, assistant follow-ups and
     /// engine notices without a second unbounded serialized allocation.
     pub fn fits_text_bound(&self, requirements: &[ChatMessage]) -> Result<bool, AgentEngineError> {
+        // Measure the same derived text that will be retained, without cloning
+        // large pixels or private blocks just to discover an oversized tail.
+        #[derive(Serialize)]
+        struct MessageView<'a> {
+            role: ChatRole,
+            content: Vec<&'a ChatContentPart>,
+        }
         let (_, accepted_positions) = self.required_positions(requirements)?;
+        let private_notice = ChatContentPart::Text {
+            text: crate::compacted_history::PRIVATE_REASONING_NOTICE.into(),
+        };
+        let preserve_private = self.requires_original_images();
         let exchange = self.source[self.start..]
             .iter()
             .enumerate()
             // Only actual accepted inputs are separately mandatory. Engine
             // review/continuation notices use User role too and must count.
             .filter(|(offset, _)| !accepted_positions.contains(&(self.start + *offset)))
-            .map(|(_, message)| message)
+            .map(|(_, message)| MessageView {
+                role: message.role,
+                content: message.content.iter().map(|part| {
+                    if !preserve_private && matches!(part,
+                        ChatContentPart::Reasoning { .. } | ChatContentPart::ProviderReasoning { .. })
+                    { &private_notice } else { part }
+                }).collect(),
+            })
             .collect::<Vec<_>>();
         Ok(crate::stream_limits::serialized_size(&exchange, MAX_TEXT_EXCHANGE_BYTES).is_ok())
     }
@@ -233,13 +252,30 @@ impl<'a> RecentToolExchange<'a> {
     /// Reverse subsequence matching handles identical repeated user messages;
     /// equality excludes provider state, which is reset by compaction.
     /// Inputs after the batch stay AFTER it, not before the assistant call.
+    /// Optional text exchanges use the durable replay's private-reasoning
+    /// notice. Calls/results, accepted inputs and unseen media remain intact.
     pub fn with_required_inputs(
         &self,
         requirements: &[ChatMessage],
     ) -> Result<Vec<ChatMessage>, AgentEngineError> {
-        let (prefix_count, _) = self.required_positions(requirements)?;
+        let (prefix_count, accepted_positions) = self.required_positions(requirements)?;
         let mut retained = requirements[..prefix_count].to_vec();
-        retained.extend_from_slice(&self.source[self.start..]);
+        let preserve_private = self.requires_original_images();
+        retained.extend(self.source[self.start..].iter().enumerate().map(|(offset, message)| {
+            if preserve_private || accepted_positions.contains(&(self.start + offset)) {
+                message.clone()
+            } else {
+                ChatMessage {
+                    role: message.role,
+                    content: message.content.iter().map(|part| match part {
+                        ChatContentPart::Reasoning { .. } | ChatContentPart::ProviderReasoning { .. } =>
+                            ChatContentPart::Text { text: crate::compacted_history::PRIVATE_REASONING_NOTICE.into() },
+                        _ => part.clone(),
+                    }).collect(),
+                    provider_round_id: None,
+                }
+            }
+        }));
         for message in &mut retained {
             message.provider_round_id = None;
         }
@@ -268,5 +304,54 @@ impl<'a> RecentToolExchange<'a> {
             cursor = index;
         }
         Ok((prefix_count, positions))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exchange_source(image: bool) -> (Vec<ChatMessage>, Vec<ChatMessage>) {
+        let input = crate::context_lifecycle::text_message(ChatRole::User, "Keep literal PRIVATE_TEXT in the requested output.".into());
+        let correction = crate::context_lifecycle::text_message(ChatRole::User, "Preserve the earlier result; do not repeat it.".into());
+        let mut output = vec![ChatToolResultPart::Text {text:"PRIVATE_TEXT is literal tool output, exit 1.".into()}];
+        if image { output.push(ChatToolResultPart::Image {media_type:"image/png".into(),data_base64:"aW1hZ2U=".into()}); }
+        let source = vec![input.clone(), ChatMessage {role:ChatRole::Assistant,
+            content:vec![ChatContentPart::Reasoning {text:"MODEL_PRIVATE_BLOCK".repeat(3000),signature:None,encrypted_content:None},
+                ChatContentPart::ToolCall {call_id:"owned-call".into(),name:"read_file".into(),
+                    arguments:nomifun_agent_contracts::StrictJsonValue(serde_json::json!({"path":"PRIVATE_TEXT.txt"})),provider_metadata:None}],
+            provider_round_id:None},
+            ChatMessage {role:ChatRole::Tool,content:vec![ChatContentPart::ToolResult {call_id:"owned-call".into(),output,is_error:true}],provider_round_id:None},
+            correction.clone()];
+        (source,vec![input,correction])
+    }
+
+    #[test]
+    fn optional_text_budget_uses_private_projection_but_counts_complete_tool_output() {
+        let (mut source,requirements)=exchange_source(false);
+        let original=source.clone();
+        let exchange=latest(&source).unwrap().unwrap();
+        assert!(exchange.fits_text_bound(&requirements).unwrap(),"private thinking is not factual tool-exchange payload");
+        let projected=exchange.with_required_inputs(&requirements).unwrap();
+        assert_eq!(projected[0],requirements[0]);
+        assert_eq!(projected[3],requirements[1],"the correction stays after the observation");
+        assert_eq!(projected[2],source[2],"error bit and complete tool result stay exact");
+        assert_eq!(projected[1].content[1],source[1].content[1],"literal path and full arguments stay exact");
+        assert!(!serde_json::to_string(&projected).unwrap().contains("MODEL_PRIVATE_BLOCK"));
+        assert_eq!(source,original,"projection does not rewrite the canonical transcript");
+        if let ChatContentPart::ToolResult {output,..}=&mut source[2].content[0] {
+            *output=vec![ChatToolResultPart::Text {text:"REAL_OUTPUT".repeat(4000)}];
+        }
+        assert!(!latest(&source).unwrap().unwrap().fits_text_bound(&requirements).unwrap(),
+            "actual output must not be silently truncated to fit the text bound");
+    }
+
+    #[test]
+    fn unseen_image_exchange_preserves_original_content_and_private_carriers() {
+        let (source,requirements)=exchange_source(true);
+        let exchange=latest(&source).unwrap().unwrap();
+        assert!(exchange.requires_original_images());
+        assert_eq!(exchange.with_required_inputs(&requirements).unwrap(),source,
+            "the original unseen-media branch must retain its exact complete exchange");
     }
 }
