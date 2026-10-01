@@ -214,7 +214,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
         input_schema: StrictJsonValue(serde_json::json!({
             "type":"object", "additionalProperties":false, "required":["summary","criteria"],
             "properties":{
-                "summary":{"type":"string","minLength":1,"maxLength":2048,"description":"The complete final answer delivered verbatim to the user. This is the ONLY final reply: criteria rationales are internal and are not shown. Include every requested delivery detail, such as paths, artifact IDs, readback contents and deletion results, while following the user's requested language and output format. There is no later assistant reply after an accepted report."},
+                "summary":{"type":"string","minLength":1,"maxLength":2048,"description":"The complete final answer delivered verbatim to the user; there is no later reply. Include every requested result in the user's language, including earlier actual tool results (head/tail text, line counts, found/zero matches, paths and exit codes) already known from the transcript. Loss of current evidence eligibility does not delete an earlier observation: say what was observed at that time, then separately state what later state was not rechecked. Do not replace requested historical results with internal evidence-status terminology. Never invent missing results or claim historical data proves current state. Criteria track verification; unverified/blocked rationales may be appended as user-visible notices, so write them in plain user language too."},
                 "observed_tool_error_count":{"type":"integer","minimum":0,"maximum":4294967295_u64,"description":"Cumulative Runtime count of tool result errors in this turn, including calls rejected before dispatch. When required, copy the exact const value. Later successful calls do not reduce this count, and the summary must disclose it."},
                 "observed_command_failure_count":{"type":"integer","minimum":0,"maximum":4294967295_u64,"description":"Cumulative Runtime count of failed command observations in this turn, including nonzero exits, timeouts and lost terminals. When required, copy the exact const value. Later successful commands do not reduce this count, and the summary must disclose it."},
                 "criteria":{"type":"array","minItems":1,"maxItems":16,"description":"An actual JSON array value; never a JSON-encoded string.","items":{
@@ -252,7 +252,7 @@ impl CompletionTracker {
     ) -> ChatToolDefinition {
         let mut tool = definition();
         tool.description = format!("Use the user language and plain words in public summaries and rationales. Do not expose available_evidence, ineligible_observations, eligible evidence, unverified, call IDs or schema fields as user-facing diagnoses unless the user explicitly requests those internals. Explain what was actually observed and what later state remains unchecked; loss of current evidence eligibility does not mean the tool never ran or the application failed. Copy exact count fields in the JSON account; the runtime separately delivers the cumulative outcome counts. Describe actual exit codes and errors instead of repeating generic tool-error statistics as application-fault notices. {}",tool.description);
-        tool.description = format!("available_evidence includes bounded scope data for each exact call. Match the actual tool/action and requested arguments to the criterion; a directory listing is not a file read or digest. ineligible_observations describes retained calls that cannot currently support a criterion; it does not mean those calls never occurred. Describe an earlier observed result separately from current-state verification. Never borrow an eligible directory/command ID to replace an ineligible file/search/Git observation. {}",tool.description);
+        tool.description = format!("available_evidence is the current-support citation set, not a list of everything that ran. Match each actual scope; a directory listing never proves file text or a digest. If an earlier read/search/Git ID is ineligible, use unverified for current-state verification with no evidence; still deliver the earlier actual results requested by the user when known from the transcript, clearly as earlier observations. Do not claim later state is unchanged, borrow another ID, or rerun settled work only to fix the account. {}",tool.description);
         tool.input_schema.0["properties"]["observed_tool_error_count"]["const"] =
             serde_json::json!(work.failed_tools);
         tool.input_schema.0["properties"]["observed_command_failure_count"]["const"] =
@@ -2051,6 +2051,38 @@ mod tests {
                 &AgentToolResult::text(write.call_id.clone(),serde_json::json!({"workspace_path":write_owner}).to_string(),is_error),true);
             assert!(!tracker.is_usable(&tracker.observations[0],1));
         }
+    }
+
+    #[tokio::test]
+    async fn earlier_results_can_be_delivered_without_promoting_stale_current_evidence() {
+        let inputs=vec![crate::context_lifecycle::text_message(nomifun_chat_model_broker::ChatRole::User,
+            "Report the observed file head and search result.".into())];
+        let mut tracker=CompletionTracker {observations:vec![file_observation("old-read","sample.txt",0)],..Default::default()};
+        let work=AgentWorkStatus {workspace_observation_epoch:1,..Default::default()};
+        let mut plan=AgentPlan::default();
+        let definition=tracker.definition_with_evidence(&plan,&work,false);
+        let validator=jsonschema::validator_for(&definition.input_schema.0).unwrap();
+        let summary="At the earlier read, sample.txt began with alpha; the earlier search found one match. The file's later state was not rechecked.";
+        let args=serde_json::json!({"summary":summary,"criteria":[{
+            "disposition":"unverified","rationale":"The earlier results are reported separately from unverified current state."}]});
+        assert!(validator.is_valid(&args));
+        let mut false_current=args.clone();
+        false_current["criteria"][0]["disposition"]=serde_json::json!("supported");
+        false_current["criteria"][0]["evidence_call_ids"]=serde_json::json!(["old-read"]);
+        assert!(!validator.is_valid(&false_current),"historical reporting cannot make an old call eligible for current support");
+        let call=ChatToolCall {call_id:"report".into(),name:TOOL_NAME.into(),arguments:StrictJsonValue(args),provider_metadata:None};
+        let result=tracker.submit(&call,&mut plan,&work,&inputs,false,None,&crate::NoopAgentEventSink).await.unwrap();
+        assert!(!result.is_error,"{}",result.output_text());
+        let report=tracker.current(&plan,&work,1).unwrap();
+        assert_eq!(report.summary,summary);
+        assert_eq!(report.criteria[0].disposition,AgentCriterionDisposition::Unverified);
+        assert!(report.criteria[0].evidence_call_ids.is_empty());
+        assert_eq!(tracker.observations[0].workspace_epoch,0);
+        assert!(!tracker.is_usable(&tracker.observations[0],1));
+        let description=definition.input_schema.0["properties"]["summary"]["description"].as_str().unwrap();
+        assert!(description.contains("earlier actual tool results"));
+        assert!(description.contains("does not delete an earlier observation"));
+        assert!(definition.description.contains("unverified for current-state verification"));
     }
 
     #[tokio::test]

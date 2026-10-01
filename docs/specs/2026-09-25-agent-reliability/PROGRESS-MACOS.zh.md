@@ -27,15 +27,15 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-04 实际检查和两测试各一次已有证据；完成参数被拒后重复检查并触及 cap，无已接受交付，不记整组 PASS |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-06 九次请求已接受报告、无重跑并正常退出；仍漏头尾/搜索历史结果，C06-03 交付缺口未闭，不记整组 PASS/N3 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
 M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
-锁屏已解除，MAC-A-03 已再次经正式 UI 运行，但新增 C07-02 压缩失败，C05 Keychain/退出仍待系统
-条件核对。每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
+MAC-A-03～06 已经正式 UI 运行；解锁后 MAC-A-06 完成 C06-02 正式子样本及 completed-session Cmd-Q。
+每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
 
 ## 收敛处置与本轮结束条件
 
@@ -1338,3 +1338,68 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   不关闭此前 completed/failure Session 的 C05 Keychain 首败。普通 readonly 备份 SQLite 14/空库
   首败保留，闭库无 WAL 后 immutable 备份 **586 events** 对齐、`ok`；凭据 exact match **0**。
   正式完成提示修后、完整交付/N3、MAC-B/C 仍开放，未改 Windows 结果或额外全量走查。
+
+- **MAC-A-05 completion repair / terminal phase**（C01/C02/C03/C05/C06/C07/C08）：正式 App
+  `496fc4a1b76f…` / 源 `64eb7a2be`，macOS 26.6.2 / arm64 / APFS；顺序构建及 deep/strict
+  ad-hoc 验签通过，原 task/七文件/COD/StepFun Plan 不变，先冻结 **1 Session / 16 requests
+  （含摘要）/ 4096 output / 360 秒**。提示与单值计数进入该包，但未追加第二次 live 重试。
+- 第一轮检查与两测试真实执行，测试各 **1 次**、exit **0/1**。首次 report 的两个计数均正确为
+  **1**，只因两条历史 search ID 非当前 eligible 被严格拒绝。专门反馈在该结果中确实存在，
+  但下一轮仍接受新 plan，把任务重置 pending；五次压缩后累计 **16 process**（十次重复只读
+  检查，不含测试重跑）、**16 requests**触及本地 cap，无接受报告/已交付文本，不记整组 PASS。
+- 公共结构根因见 **C06-02**：单独结束报告被拒、无显式计划且已有 proved settled failure 的
+  窄路径进入已有 report-only 审查；无进程/未决补丁时，参数纠正不能再广告计划重置和普通工具。
+  不改变其他真实未完任务/进程/补丁路径，不改 schema/freshness/count，不把拒绝变成功。
+  首败保留；中间 fixture 错把被拒计划尝试计数维持 1 的失败也保留，改为真实 **2** 后通过；
+  Root diagnostic 只调用一次、计划重置未应用且计数不抹去。Runtime **220/220**；修复未在本轮
+  冻结 App 内，正式修后仍待验，不再追加提示层制造通过。
+- UI 结束暂停后 **cancelled/head ready**。随后 Mac 锁屏阻断 Cmd-Q；已请求人工解锁，exact
+  PID/path 的 TERM 仅清理测试资源、exit **0**，无 KILL，不算正式退出 PASS。App/Helper/
+  fixture/listener 最终 **0**；7/7 hash/Git/哨兵不变，凭据 exact match **0**。
+- WAL 存在时误用 immutable source 的首个 snapshot 留下 **940 events/running**，未作为验收；
+  另以正常 readonly、包含已提交 WAL 的备份得到 **960 events**，与取消后事件逐项一致、`ok`。
+  未编辑数据库状态，原失败制品保留。证据 `2026-10-01/macos/mac-a-report-repair/`；正常 UI
+  退出、完整交付/N3、MAC-B/C 与 C05 原 Keychain 现场仍开放，Windows 结果未改。
+
+- **MAC-C06-01 terminal boundary guard**（C06-02 的反向边界，非新增业务走查）：当前只读 CUA
+  再次确认 Mac locked、无运行验收 App；未启动 live/构建/读取模型凭据，不尝试自动解锁。
+  仅补新门控直接影响的显式未完成计划回归：报告参数被拒后仍广告/执行原授权 write_file 修复，
+  修复 **1 次**，闭合计划后才接受报告，已记录非零和失败不抹去；无额外模型步。
+- 最初 fixture 在控制未展示前直接发 update_plan，首败保留；按实际展示顺序先诊断、再建立
+  计划后通过，不把夹具顺序错误归因新门控。新反向 **1/1**；复用 settled-terminal、live-process
+  controls、unresolved-patch evidence/process 保护各 **1/1**。未改产品逻辑或任何接受集合。
+- 证据 `2026-10-01/macos/c06-terminal-boundary/`；本批只补测试/短进度。完整正式交付/N3、A/B/C
+  与正常 UI 退出仍待人工解锁后验证，不以 guards PASS 收尾完整 Case，不改 Windows 结果。
+
+- **MAC-A-06 terminal review formal sample**（C01/C02/C03/C05/C06/C07/C08）：解锁后 fast-forward
+  同步 `43cd16bee` 的进程寿命提示；正式 App `5bdf54681e83…`，macOS 26.6.2 / arm64 / APFS，
+  顺序构建与 deep/strict ad-hoc 验签通过。原 prompt/七文件/COD/加密 StepFun Plan 不变，先冻结
+  **1 Session / 16 requests（含摘要）/ 4096 output / 360 秒**，实际 **9 requests**，未加预算。
+- 首发 literal pwd/ls、读搜/Git 与两指定测试均有独立结果；**六 process**、exit **0/0/0/0/0/1**、
+  reaped，测试各一次，无额外命令/计划重置或本地 cap。一轮压缩、首个非法历史引用报告仍严格拒绝；
+  请求 **07/08/09** 原生只广告 report_completion、Specific tool_choice，修正报告接受，
+  **421 events / completed / head ready**。两固定计数真实保留为 **1/1**，supported ID 均映射原
+  settled receipt，缺当前文件/搜索证据的两项保持 unverified/no evidence，不冒充当前证明。
+- **完整任务仍 INCOMPLETE_DELIVERY**：最终 summary/正式 UI 漏原头尾与两个搜索实际结果，
+  改成 stale_file_paths/unverified 内部术语与当前缺证据警告；真实读搜已发生并不等于从未读取。
+  外部严格 acceptance 首败保留，不把 canonical completed 当整组 PASS。后续缺口见 **C06-03**。
+- 这是 C06-02 防重开/纠正链的正式 **N1 子样本**，不是 full MAC-A 或 N3；首次完成尝试仍有
+  参数拒绝，不声称零错误。正式 completed-session Cmd-Q 正常 **exit 0**，无 TERM/KILL、
+  timeout/forced-exit、App/Helper/fixture/listener 残留；仅该现场退出子断言通过，不关闭旧 Keychain
+  首败。原件 **7/7** hash/Git/哨兵保护，凭据 exact match **0**，DB/事件/交付引用独立复核。
+- 普通 readonly backup 再报 SQLite 14 并生成空库，首败保留；确认 writer 已退出且无 WAL 后，
+  另以 immutable source 备份 **421 events**、`ok`、completed/head ready，未编辑状态。
+  完整证据 `2026-10-01/macos/mac-a-terminal-review/`；本批只更新短进度，不额外重复测试/build。
+  历史结果交付/自然语言、完整 A/B/C/N3 与其余退出条件仍开放，Windows 结果未改。
+
+- **MAC-C06-02 historical delivery contract**（C06-03、`CMD-136` 结果表达子断言）：只读核对
+  MAC-A-06 原模型请求 **06～09**，四行原文及 NEEDLE-present/MAC_A_NO_MATCH 均仍存在，
+  不是实际读搜未发生或压缩把所有数据清空。无新模型/Session/凭据访问、无全量 build/UI 排程。
+- 修复完成接口的歧义说明，不改验收：summary 交付已知较早实际结果并标清时点，current-state
+  不确定另外披露；不可用旧 ID 仍不能支撑当前 supported，也不借目录/命令 ID。rationale 实际
+  可能追加用户可见警告，说明改为按用户语言表达，不再错误承诺“内部且不展示”。
+- 新说明首败保留，修后 **1/1**、completion **31/31**：历史 summary 未省略、unverified 无
+  引用且原 epoch 不变；stale current supported 仍拒绝。原正文/环境/输入排除断言继续通过。
+  没有在 context/scopes 复制原 Tool output，没有新增字段/工具/权限，没有降低 schema 或真假
+  结果断言。证据 `2026-10-01/macos/c06-historical-delivery/`；真实修后是否完整交付仍待验，
+  不把说明测试记作 full MAC-A/N3，不改 Windows 验收或关闭阶段二、三。

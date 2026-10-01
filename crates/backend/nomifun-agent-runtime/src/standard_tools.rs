@@ -125,14 +125,14 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "start_process",
         capability_id: "workspace.process",
         action_id: "workspace.process/start",
-        description: "Start one turn-owned background or interactive process. For a start/wait/stop lifecycle, call start_process once with wait_ms=0, then make at least one distinct poll_process call until the expected output, then cancel_process with the exact returned process_id, all in the same Turn. Even when a start receipt already contains output, do not skip poll_process. Do not pre-read a user-specified existing executable or manually probe instruction files solely to launch it; the host injects applicable workspace instructions. Do not run ls, pwd, test -x, or another process preflight solely for that launch; the owner validates executable and cwd. Never use shell backgrounding, raw PID or temporary-log indirection, or split the lifecycle across AgentExecution steps. No process survives turn cleanup.",
+        description: "Start one turn-owned background or interactive process. The process lifetime defaults to 30 seconds; polling does not renew this deadline. For a user-requested longer interaction or wait, set timeout_ms explicitly to cover that requested duration (maximum 600000 ms). A timeout ends the owned process and triggers cleanup; it is not a user stop. For a start/wait/stop lifecycle, call start_process once with wait_ms=0, then make at least one distinct poll_process call until the expected output, then cancel_process with the exact returned process_id, all in the same Turn. Even when a start receipt already contains output, do not skip poll_process. Do not pre-read a user-specified existing executable or manually probe instruction files solely to launch it; the host injects applicable workspace instructions. Do not run ls, pwd, test -x, or another process preflight solely for that launch; the owner validates executable and cwd. Never use shell backgrounding, raw PID or temporary-log indirection, or split the lifecycle across AgentExecution steps. No process survives turn cleanup.",
         schema: process_start_schema,
     },
     StandardTool {
         model_name: "poll_process",
         capability_id: "workspace.process",
         action_id: "workspace.process/poll",
-        description: "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
+        description: "Poll a turn-owned process from a bounded output cursor and observe its current state/cleanup evidence. For each following poll, copy the previous receipt's output.next_cursor into cursor and use wait_ms for bounded waiting. Omitting cursor means 0 and replays retained output; unread output returns immediately even with wait_ms=30000, so it cannot serve as a wait loop. After start_process, use poll_process with the exact process_id to wait for expected output before cancellation; do not infer readiness from a PID or temporary file. Report readiness once, then wait without repeating the same running-status narration. A terminal state=cancelled with cleanup.reaped=true is a successful poll observation, not a tool failure.",
         schema: process_poll_schema,
     },
     StandardTool {
@@ -390,7 +390,7 @@ fn process_launch(include_wait: bool) -> Value {
         "args":{"type":"array","maxItems":256,"items":{"type":"string","maxLength":65536},"description":format!("Valid only with command, never with cmd. Literal separate argument tokens as an actual JSON array value, for example {argv_examples}; never a JSON-encoded string such as \"[\\\"status\\\",\\\"--short\\\"]\".")},
         "cwd":{"type":"string","maxLength":4096,"description":"Normalized workspace-relative directory only, for example src or tests. Omit cwd or use '.' for the bound workspace root. Never pass an absolute OS path, a drive prefix, backslashes, or '..'. Command arguments may contain the literal path format required by the executable."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536}},
-        "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
+        "timeout_ms":{"type":"integer","minimum":1,"maximum":600000,"description":"Total owned process lifetime in milliseconds, starting at launch. Default 30000; polling does not reset it. Choose an explicit duration when the accepted task requires longer interaction or waiting. The owner terminates and cleans up on expiration; timeout is distinct from user cancellation."},
         "tty":{"type":"boolean","default":false},
         "cols":{"type":"integer","minimum":1,"maximum":32767},
         "rows":{"type":"integer","minimum":1,"maximum":32767}
@@ -419,8 +419,8 @@ fn process_start_schema() -> Value {
 fn process_poll_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
-        "cursor":{"type":"integer","minimum":0,"default":0},
-        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0}
+        "cursor":{"type":"integer","minimum":0,"default":0,"description":"For a following poll, pass the previous output.next_cursor. Default 0 deliberately replays retained output; it does not resume at the last observation."},
+        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0,"description":"Wait up to this duration for new output or terminal state. Retained output after cursor returns immediately. Advance cursor before waiting again; 0 only observes current state."}
     },"required":["process_id"]})
 }
 

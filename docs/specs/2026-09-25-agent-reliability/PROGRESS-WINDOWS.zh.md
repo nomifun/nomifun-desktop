@@ -9,7 +9,7 @@
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
 | A 观察、只读、小测试 | W188 COD五项；W189 GEN完成复核后无重做N1 | 报告的证据关联及业务失败语言仍待修；综合A N3未达 |
-| B 文件、进程、停止 | 文件步骤、stdio/helper/cancel；W105及process/File回归 | 基线待核对，补代表性真实停止和结果；未整组结案 |
+| B 文件、进程、停止 | W194输入/EOF；W195取消回复标注；W196新进程/正确游标等待及Stop5秒N1 | 其他首发/N3、等待重复播报、完整文件步骤；旧准入失败UI归因待修 |
 | C 连续、纠正、恢复 | 压缩/最新纠正/取消冷读；W95/W98/W182等 | 组件及取消冷读已有证据，真实连续/压缩接合待补 |
 
 关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
@@ -3252,3 +3252,60 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 同步结算：源码f6d93ba00，正常合并远端4f13f7b2e为8980fdd19，保留固定前缀压缩余量实现及macOS记录。
   合并后单值计数/抹零/压缩收据/typed overflow/usage余量/硬限8项回归通过，fmt/diff通过；正式样本仍是合并前构建。
   最终profile子进程0，所有旧/新Turn终态；新合并压缩的真实Windows长任务另验，不将计数N3等同共享达标。
+
+### W194 正式进程输入、总期限及UI停止（2026-10-01；基线978cd5ae9）
+
+- Case/子断言：B/C05/C06/C08；PROC-027/033/036、REAL-005/010及A04/A05/A08/A10/A11/A13/A17/A19的相关子断言。
+- 发现与修复：start_process未说明owner默认30秒总期限，GEN首发hold省略timeout_ms后超时。
+  现说明默认30000、poll不续期、按已接受任务明确总期限及最大600000；超时区别于用户停止。
+  timeout schema只新增default/description元数据，owner参数及权限/硬限/错误语义不变。
+- 验证：既有native pipe stdin/EOF与5秒后代清理2/2、工具生命周期/宿主schema2/2，fmt/diff及正式Tauri构建通过。
+  新隔离data/work/profile通过已有加密StepFun配置正式GEN：echo 7步/0压缩，精确6调用链，独立oracle 11/11；
+  UTF-8中文+LF 16 bytes、hex、EOF、exit0/reaped、最终说明及原件hash一致，没有预读、listing或重复启动。
+  后续UI停止前CIM独立确认父/子均存活和亲缘；约39秒时点击产品停止，canonical cancelled/host_cleanup_proven、两PID消失、心跳不再变化，echo原结果保留。
+  停止独立oracle 15/16；a11文本缺截图上可见的“已取消执行”，机器UI断言FAIL保留，不能记录整组PASS。
+- 首败：02-hold-timeout-first-fail保留默认30秒超时与完成复核阻塞；03-hold-timeout-before-stop-fail保留120秒过期后操作者才点击Stop。
+  后者不是产品停止证明，不抹成修后成功。04-user-stop-terminal另记真实Stop；600000为现有硬限内显式操作窗口。
+- 新缺口：04模型14步/1压缩，12次poll均省略cursor，重复READY输出；用户明确wait_ms=30000仍不足以避免忙轮询。
+  取消卡片正确可见，但此前“进程仍在运行，等待点击停止”的文本继续显示；超时分支仍出现update_plan未暴露的自诊断及内部字段。
+- 未覆盖：正式UI清理5秒时限、正确游标等待、取消文本一致性、timeout后计划/完成恢复、B文件步骤及N3、完整C/macOS。
+  不以native通过替代正式UI时限，不关闭完整PROC/REAL或共享阶段。
+- 证据：仓库外2026-10-01/windows/w194-process-stdio-stop；首败/修后分目录，完整events/tools/model/DB/UI、
+  构建/源码身份、stdin原字节、磁盘hash和独立CIM/心跳核对均保留；Git只含提示源码及本页/共享简短进度。
+- 同步结算：源码75a4f7127，正常合并远端03a508be6为1a1122104；保留他人的完成参数修复及显式未完成计划保护。
+  合并后rejected_ 6/6与固定计数1/1通过，fmt/diff通过；上述正式UI仍是合并前构建，不代判新完成恢复路径。
+
+### W195 取消前回复标注与轮询提示（2026-10-01；基线43cd16bee）
+
+- Case/子断言：B/C05/C06/C07/C08，REAL-005/010及A08/A10/A13/A17/A19的对应子断言。
+- 发现与修复：已取消回合仍显示最后的“进程运行中”文字。现同Turn取消且有回复时显示“下方是停止前尚未完成的回复”。
+  原文字、已发生效果/错误保留；其他终态及无回复取消不加该提示。只关闭该UI子根因，不能证明进程结果由文字给出。
+  poll工具说明next_cursor推进、wait有界、零游标重放会立即返回，不重复播报运行状态。
+- 验证：UI首败01-ui-first-red.log保留；修后UI76/76、工具4/4，类型/i18n/桌面边界、fmt/diff及UI/Tauri构建通过。
+  正式Tauri复用W194隔离data/work，新W195 profile：旧取消冷读和新取消均清楚显示历史回复提示；原事件digest和原件hash未改，16 bytes echo保留。
+  当前helper只启动一次，Stop前父子存活/关系确认，Stop后canonical cancelled/host_cleanup_proven、两PID消失、心跳停止。
+- 实跑首败：新Turn先引用旧process_id，owner拒绝且未执行；随后27次poll仍省略cursor，29模型步/四次压缩，整体独立oracle12/15。
+  没有删失败、松断言或把“正确取消”算“等待任务成功”；停止后不再付费重复此失败。即时CIM仍存活与后续消失分开保存，不证明5秒时限。
+- 定位补充：App装配用canonical schema覆盖展示层属性，单改standard_tools属性说明不会完整到达正式定义。
+  本次还将timeout默认30000及cursor/wait提示补到process_schema；原接受集合不变，canonical3/3与admission subset1/1通过。
+  此补充晚于正式binary，后续实跑另记；不能断言已证明旧引用/游标失败的唯一原因。
+- 未覆盖：canonical提示补充后的正式等待、旧引用首发修复、完整B文件步骤/C/N3、timeout完成计划恢复、UI清理5秒及macOS。
+- 证据：仓库外2026-10-01/windows/w195-poll-cursor-cancelled-reply；首败/修后日志、源码/UI/binary身份、旧DB基线、
+  新回合完整事件/调用/模型进度、DB、截图、独立CIM/心跳和12/15 oracle均保留；旧W194首败未覆盖。
+
+### W196 进程提示投影及旧合同恢复（2026-10-01；基线3ffffaaf6）
+
+- Case/子断言：C05/C07/C08，PROC-024/025/030/033/036、REAL-005/010及A01/A02/A03/A05/A08/A10/A13/A17/A19的相关断言。
+- 发现与修复：上一批修改canonical说明改变了注册贡献指纹；01-live正式旧Session在模型/工具前拒绝provenance drift，0模型步/0调用。
+  首败02-schema-current-first-result保留。现process_schema与43cd16bee逐文件完全相同；只把三个过程参数的description投影到App模型定义。
+  投影不复制default/范围/required/新字段，注册/Snapshot/贡献锁及owner校验照常，不通过扩权或忽略漂移恢复。
+- 验证：展示说明丢失断言04先红后绿，新App2/2、Runtime admission subset1/1，fmt/diff通过；正式Tauri构建通过。
+  02-live-presentation复用W194隔离data/work、新profile；同一旧Session通过正式“重试”回填/发送原要求恢复准入，旧失败Turn仍为failed，新Turn独立cancelled。
+  实际start一次，poll0读READY_PARENT/CHILD，后续都cursor25/wait30000且无重复READY；7模型步/一次压缩/6次poll，零工具结果错误。
+  最后一次poll未结算由用户Stop中断，未把缺结果补成成功。Stop前CIM确认父子存活/亲缘；点击起1,208.76ms内两PID消失，心跳随后不变。
+  canonical cancelled/host_cleanup_proven、无取消后新启动、原echo16 bytes、原件hash、旧事件digest及取消前回复标注均通过；独立oracle21/21，仅GEN N1。
+- 未覆盖：N3/COD及其他旧冻结合同、完整B文件步骤/C、timeout完成恢复；等待仍重复播报/暴露游标。
+  原准入失败UI写“上游Agent或模型服务商出错”，实际是本地合同漂移；此归因另修，不把业务非零或模型问题混记本地故障。
+- 证据：仓库外2026-10-01/windows/w196-owned-poll-context；01-live拒绝原始事件/截图、04断言首败、02-live-presentation修后模型轨迹/事件/调用/DB、
+  时间戳/独立CIM/心跳/磁盘/旧事件核对及构建/源码身份分别保存。03测试夹具编译错误另保留，不计产品反例。
+- 同步结算：源码0583086f9，正常合并远端a14b09cbb为9c84c36d4；远端只补macOS/共享进度，源码未变，不重复构建或模型调用。
