@@ -121,6 +121,9 @@ pub(crate) struct ContextLifecycle {
     overflow_recovery_used: bool,
     force_compaction: bool,
     recovered_input_limit: Option<usize>,
+    /// Last successful replacement, not permission to exceed the resource cap.
+    /// A large but fitting summary is part of the irreducible post-compact floor.
+    compacted_byte_floor: Option<usize>,
 }
 
 impl ContextLifecycle {
@@ -141,6 +144,7 @@ impl ContextLifecycle {
             overflow_recovery_used: false,
             force_compaction: false,
             recovered_input_limit: None,
+            compacted_byte_floor: None,
         })
     }
 
@@ -230,19 +234,35 @@ impl ContextLifecycle {
         // Provider limits/our byte estimator may be inaccurate. Require a
         // meaningful reduction from the rejected request, not merely another
         // send below the same inaccurate threshold.
-        let input_limit = self
+        let soft_input_limit = self
             .recovered_input_limit
             .unwrap_or(self.budget.compaction_trigger_tokens());
-        let estimated_tokens = estimate.saturating_add(
-            self.observed_tokens.saturating_sub(self.observed_estimate),
-        );
-        let token_pressure = estimated_tokens >= input_limit;
+        let mut mandatory = request.input.clone();
+        mandatory.provider_round_parent = None;
+        mandatory.messages = requirements.to_vec();
+        let mandatory_bytes = encoded_size(&mandatory)?;
+        let mandatory_tokens = crate::media_context::estimate_tokens(&mandatory, mandatory_bytes);
+        let reserved_summary_bytes = (soft_input_limit / 2).min(8 * 1024);
+        let summary_reserve_tokens = serde_json::to_vec(&summary_message(&"s".repeat(reserved_summary_bytes)))
+            .map_err(|error| AgentEngineError::ContextAssembly(error.to_string()))?.len().div_ceil(3);
+        let hard_input_limit = self.budget.input_tokens();
+        let token_trigger = if self.recovered_input_limit.is_none()
+            && mandatory_tokens.saturating_add(summary_reserve_tokens) >= soft_input_limit
+        {
+            // The soft trigger cannot summarize away fixed instructions/tools.
+            // Keep half the remaining frozen token envelope for real history;
+            // typed prompt-overflow recovery keeps its stricter cap unchanged.
+            mandatory_tokens.saturating_add(hard_input_limit.saturating_sub(mandatory_tokens) / 2)
+                .max(soft_input_limit).min(hard_input_limit)
+        } else {
+            soft_input_limit
+        };
+        let observed_extra = self.observed_tokens.saturating_sub(self.observed_estimate);
+        let input_limit = token_trigger.min(hard_input_limit.saturating_sub(observed_extra));
+        let estimated_tokens = estimate.saturating_add(observed_extra);
+        let token_pressure = estimated_tokens >= token_trigger;
         let soft_byte_trigger = self.resource.max_context_bytes * 3 / 4;
         let byte_trigger = if bytes >= soft_byte_trigger {
-            let mut mandatory = request.input.clone();
-            mandatory.provider_round_parent = None;
-            mandatory.messages = requirements.to_vec();
-            let mandatory_bytes = encoded_size(&mandatory)?;
             if mandatory_bytes >= soft_byte_trigger {
                 // Fixed instructions/schema cannot be summarized away. Keep
                 // half of the remaining hard-byte envelope for transcript
@@ -254,6 +274,9 @@ impl ContextLifecycle {
         } else {
             soft_byte_trigger
         };
+        let byte_trigger = byte_trigger.max(self.compacted_byte_floor.map_or(0, |floor|
+            floor + self.resource.max_context_bytes.saturating_sub(floor) / 2))
+            .min(self.resource.max_context_bytes);
         if !self.force_compaction
             && !token_pressure
             && bytes < byte_trigger
@@ -519,12 +542,16 @@ impl ContextLifecycle {
         replacement.messages = vec![summary_message(&previous)];
         replacement.messages.extend(mandatory_messages);
         let after = encoded_size(&replacement)?;
+        let after_tokens = crate::media_context::estimate_tokens(&replacement, after);
         if after >= bytes
             || after > self.resource.max_context_bytes
             || replacement.messages.len() > self.resource.max_history_messages
-            || crate::media_context::estimate_tokens(&replacement, after) >= input_limit
+            || after_tokens >= input_limit
         {
-            return Err(AgentEngineError::Compaction("compaction cannot fit the retained request/instructions/tools and pending image exchange within token, byte and message-count budgets; no history or unseen pixels were discarded".into()));
+            return Err(AgentEngineError::Compaction(format!(
+                "compaction cannot fit the retained request/instructions/tools and pending image exchange within token, byte and message-count budgets; bytes before={bytes}, after={after}, limit={}; estimated input tokens={after_tokens}, limit={input_limit}; messages={}, limit={}; no history or unseen pixels were discarded",
+                self.resource.max_context_bytes, replacement.messages.len(), self.resource.max_history_messages,
+            )));
         }
         let retained_context = crate::compacted_history::capture(
             &replacement.messages[1..],
@@ -540,6 +567,7 @@ impl ContextLifecycle {
         })
         .await?;
         request.input = replacement;
+        self.compacted_byte_floor = Some(after);
         self.force_compaction = false;
         self.observed_tokens = 0;
         self.observed_estimate = 0;
