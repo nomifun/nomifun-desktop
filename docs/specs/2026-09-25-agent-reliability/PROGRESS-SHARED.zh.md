@@ -14,7 +14,7 @@
 | C02 读取与搜索 | 工作区读搜、路径/输出回归 | 综合场景A的中文/空格、零匹配与只读结果 |
 | C03 Git观察与小测试 | W86；W184正式GEN的git_diff path=.及定向测试结果 | 综合A尚有未闭合调用；不因小复验通过结案整组 |
 | C04 文件与步骤结果 | 既有File/Artifact根因修复及定向回归 | 综合场景B的实际步骤、字节/hash与最终回答 |
-| C05 进程与停止 | W105、process/PTY/cancel/host清理回归；W194正式GEN输入/EOF及停止证明；W195取消回复提示已验 | B完整文件步骤/N3、轮询游标重复与新Turn引用旧进程；canonical提示补充待实跑 |
+| C05 进程与停止 | W105、process/PTY/cancel/host清理回归；W194正式输入/EOF；W195取消提示；W196展示层游标提示和停止5秒N1 | B完整文件步骤/N3、其他连续首发与等待播报；历史准入失败的UI归因 |
 | C06 过程与交付真实性 | W93/W94；W184业务退出码；W185错误进程引用未执行与完成历史完整性；W187已结算非零的直接报告 | 失败/未验披露的用户语言及连续任务重复/误报；A/B/C仍待验 |
 | C07 连续会话与纠正 | W95/W98；W182取消冷读；W185完成历史读取及同步后一次实压缩；744ca440b保留已结算检查 | 最新用户纠正、较长连续任务及完整C场景 |
 | C08 模型协议接合 | W99/W100；W184 GEN；W185 GEN/COD真实StepFun→CMD/控制引用owner | 各入口定向小样本已有；完整连续命令与N3门槛未达 |
@@ -49,6 +49,19 @@
   canonical3/3与展示schema admission subset1/1通过。该补充在上述正式构建之后，实际模型是否正确等待仍待重验。
 - 未覆盖：完整B/C/N3、新Turn正确首发、游标连续等待、正式UI清理5秒时限、timeout完成恢复及macOS。
   证据在2026-10-01/windows/w195-poll-cursor-cancelled-reply；只关闭取消前文字未标注的UI子根因。
+
+### C05-03 提示投影与冻结合同兼容（2026-10-01，W196）
+
+- W195把说明补入canonical schema后，workspace.process贡献指纹变化；本批正式旧Session在模型/工具前被准确拒绝为provenance drift。
+  此回归由上一批提示落点不当引入，首败保留：0模型步/0工具/0命令，不能归因于StepFun或用刷新授权绕过。
+- 现canonical process_schema恢复与43cd16bee完全相同；App装配只在模型展示定义投影timeout_ms/cursor/wait_ms的description。
+  不复制default/required/范围/新字段，不改注册指纹、Snapshot/贡献锁、准入或owner回放语义。说明有了正式入口且旧冻结合同保持有效。
+- App说明丢失的最小断言先红后绿，新增2/2；Runtime canonical admission subset1/1、fmt/diff及正式构建通过。
+  原Session经正式UI重试恢复：先start一次、首poll cursor0，后续cursor25/wait30000，READY只读一次；7模型步/一次实际压缩/6次poll，零工具结果错误。
+  最后一poll随UI Stop中断，无伪造结果；canonical cancelled与host_cleanup_proven、独立父子/心跳/原件/原echo及旧事件检查均通过。
+  点击前父子实际存活，点击起1,208.76ms内CIM确认两PID消失；独立oracle21/21，只记此GEN N1。
+- 未覆盖：N3/其他入口、完整B/C、其他历史合同、timeout后完成恢复；等待期间仍有重复播报/内部游标，准入失败UI仍误归“上游Agent或模型服务商”。
+  不由本次N1关闭共享阶段。原失败/新结果在2026-10-01/windows/w196-owned-poll-context分别保存，W195记录不改写为成功。
 
 ### C07-01 固定开销与压缩后原收据（2026-10-01）
 
