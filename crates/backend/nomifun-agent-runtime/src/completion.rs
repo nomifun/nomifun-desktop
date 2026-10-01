@@ -1524,7 +1524,8 @@ mod tests {
             ..Default::default()
         };
         let definition = tracker.definition_with_evidence(&plan, &work, false);
-        assert!(definition.description.contains("prefer one supported criterion"));
+        assert!(definition.description.contains("Each criterion allows at most eight evidence_call_ids"));
+        assert!(definition.description.contains("separate criteria for different results or more than eight IDs"));
         assert!(definition.description.contains("never create an evidence-free supported criterion"));
         assert!(definition.description.contains("separate process calls"));
         assert!(definition.description.contains("matching call ID"));
@@ -1552,6 +1553,9 @@ mod tests {
         };
         assert!(validator.is_valid(&report("evidence_paths", "current.txt")));
         assert!(validator.is_valid(&report("evidence_call_ids", "current")));
+        let mut too_many_calls = report("evidence_call_ids", "current");
+        too_many_calls["criteria"][0]["evidence_call_ids"] = serde_json::json!(vec!["current"; 9]);
+        assert!(!validator.is_valid(&too_many_calls));
         let mut empty_requirements = report("evidence_call_ids", "current");
         empty_requirements["criteria"][0]["requirement_ids"] = serde_json::json!([]);
         assert!(!validator.is_valid(&empty_requirements));
