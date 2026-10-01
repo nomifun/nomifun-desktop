@@ -2966,3 +2966,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 确定性首红：81,057 bytes/27,019估算tokens的最新完整回执可装入原81,920/28,160硬限，却因input_limit混入软token触发阈值被丢弃。现只对最新文本交换按原硬余量及实际usage核对，更旧历史仍保留软余量。
 - 额外1,500 usage tokens时同回执继续排除；实际typed PromptTooLong仍用更严格20,708恢复上限，不提升预算/权限、刷新文件资格或截断真实结果。未见图片和mandatory前置保护保持。
 - 两项新回归与七项原预算/恢复/私有投影/复核/媒体边界共9项通过，fmt配置/diff通过；首败另留。正式模型/N3、完整归因及A/B/C仍待验，证据在仓库外2026-10-02/windows/w222-latest-hard-token-envelope，共享未结案。
+
+### W223 正式保留、poll字段与精确搜索（2026-10-02，整体FAIL）
+
+- Windows正式COD原综合A 8步/6压缩，原交换7/2/2/2/2/2、原输入各一次，无零保留或读搜重做；cwd/Hidden、字节/hash、Git及两测试0/1效果正确。当前可引用集合含两个terminal poll，W218/保留/Hidden仅记N1。
+- 首次poll复制launch总期限120000作wait而预检拒绝，修正30000后取得终态；报告错引旧读搜/Git再拒绝，正式Stop为cancelled、A FAIL。搜索结果正确但父目录范围违背单文件要求，原独立12/13保留，不能因夹具只有一文件改判范围合格。
+- 模型说明澄清poll单次0～30000与总期限不同、search可用精确文件路径；原Schema接受集合/权限不变。三项既有lifecycle/shell/admission及搜索说明后的admission通过；首发/N3/交付及A/B/C仍缺，提示晚于本次binary。
+- 仓库外2026-10-02/windows/w223-hard-envelope-live保留原样本、事件/DB/参数、终态/分类UI及独立审计；无修后付费循环，共享未结案。

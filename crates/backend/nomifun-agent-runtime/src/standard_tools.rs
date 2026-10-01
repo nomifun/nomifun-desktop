@@ -276,7 +276,8 @@ fn search_schema() -> Value {
             "path": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 4096,
+                "description": "Accepts a workspace-relative file or directory. If the user limits search to one named file, copy that file's full relative path exactly; do not substitute its parent directory or expand the search scope."
             },
             "limit": {
                 "type": "integer",
@@ -432,7 +433,7 @@ fn process_poll_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
         "cursor":{"type":"integer","minimum":0,"default":0,"description":"For a following poll, pass the previous output.next_cursor. Default 0 deliberately replays retained output; it does not resume at the last observation."},
-        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0,"description":"Wait up to this duration for new output or terminal state. Retained output after cursor returns immediately. Advance cursor before waiting again; 0 only observes current state."}
+        "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0,"description":"Per-poll wait in milliseconds, from 0 through 30000 inclusive. This is separate from the process lifetime timeout_ms: never copy a launch timeout such as 120000 here. Use 0 for an immediate observation, 1000 for a short wait, or 30000 for the longest allowed poll. Wait up to this duration for new output or terminal state. Retained output after cursor returns immediately. Advance cursor before waiting again; 0 only observes current state."}
     },"required":["process_id"]})
 }
 
