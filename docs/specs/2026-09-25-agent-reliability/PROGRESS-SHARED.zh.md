@@ -212,6 +212,21 @@
 - evidence `2026-10-01/macos/mac-gen-observe/`；helper确切模式/最小回归新增，产品Schema/权限/
   断言不改，预算/模式/来源回归6/6。GEN已有这个有边界的实际样本，不能代替A/B/C、其他资源与入口、N3或旧失败关闭。
 
+### C05-05 macOS pipe stdin/EOF 正式子链（2026-10-01，N1）
+
+- MAC-B-03 隔离 fresh run003/正式 Tauri/StepFun：原12-call/4096/360秒不变，实际7 requests/
+  243 events/无压缩。start/write/close各一次，真实13-byte中文单LF及READY/ECHO/EOF正确，
+  final poll0/reaped/no cancel/kill/shell，report/UI/canonical与独立helper receipt、原件hash一致。
+  completed/headready、实际Cmd-Q0/无残留，只有输入/EOF/终态N1，不把原文件B首败记成功。
+- 另有真实限制：helper预读、末poll cursor0重放全输出、进度英文及内部字段；完整效率/语言/
+  B/N3仍未达标。外部verifier先误禁所有读文件（原任务允许规则/指定helper），首败保留，
+  仅纠正这项测试范围；无关读/其他命令/改文件/输入字节等实质断言不改。
+- 旧closed CUA绑定的被动读取会重启旧bundle/默认profile，UI-isolation事故单列，未手动删/改
+  用户数据或向其发任务，默认profile自动启动影响不能当no-change证明；今后先显式隔离启动并核对PID。空数据probe退出CEF仍阻在Security
+  decrypt，TERM未清后owned KILL137，C05首败不因后续实跑0关闭，未绕系统授权/保护。
+- `2026-10-01/macos/mac-b-stdin-eof/`保存原参数、独立243-row快照/首败/采样/截图；无新产品
+  改动或付费重试，完整文件/长helper后代/C/N3/MM等仍开放，Windows原件与结果未改。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
