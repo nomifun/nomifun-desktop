@@ -670,6 +670,10 @@ mod tests {
             .unwrap(),
             b" payload\r"
         );
+        assert_eq!(stdin_bytes(Some("你好 MAC-B"), true).unwrap(), "你好 MAC-B\n".as_bytes());
+        assert_eq!(stdin_bytes(Some("你好 MAC-B\n"), false).unwrap(), "你好 MAC-B\n".as_bytes());
+        assert_eq!(stdin_bytes(Some("你好 MAC-B\n"), true).unwrap(), "你好 MAC-B\n\n".as_bytes(),
+            "an existing LF and an appended LF must not be silently deduplicated");
     }
 
     #[test]

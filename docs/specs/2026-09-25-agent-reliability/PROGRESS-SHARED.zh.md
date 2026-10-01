@@ -22,6 +22,25 @@
 本表只列候选复用与缺口；是否受新代码影响需核对具体基线，不把源码测试存在当已跑通过。
 本轮结案按A/B/C正式任务、核心bad-case闭环及独立结果，不再按原Case×角色×OS计算完成率。
 
+### C04-01 / C05-04 精确末尾 LF 与模型参数（2026-10-01，macOS MAC-B-01；正式修后待验）
+
+- 正式 COD/StepFun，16 requests / 531 events / 一轮压缩，文件创建/精确 patch/copy/move/read/
+  hash/delete 及 managed start/poll/input/close/poll 已实际执行，原件和操作次数保持。独立严格
+  首败：模型 content 少一个末尾 LF，stdin 的 input 自带 LF 又 append_newline=true，得到两个
+  LF；owner 依照实际参数，原观察/hash/原生 ECHO/独立 helper receipt 相互一致，非平台改字节。
+- 最终 completed 报告只披露 31-byte hash 并称调用均成功，未识别要求的 32-byte 内容/单 LF。
+  不能把进程 exit0/reaped、正确复制和限定删除或后续说明测试当整个任务完成；旧首败不覆盖。
+- 仅改善现有 write_file / stdin 字段说明与 JSON 例子，不补写文件末尾、去重输入、扩大权限、
+  放宽字节断言或加入新控制表单。复用 C05-03 的模型说明投影，扩展限定 content/input/
+  append_newline description；canonical 注册合同与贡献指纹不改，default/required/范围/新字段
+  均不复制。input 已带 LF 且 append=true 仍合法，owner 回归继续要求两个 LF。
+- 最小说明/真实 App 投影首败保留；修后 Runtime 13/13，App newline/owner bytes/budget 3/3、
+  既有 cursor/期限投影 2/2；
+  这是接口说明与合同不变的确定性证据，尚未证明真实模型修后遵循。Mac 锁定阻断终态 UI/
+  Cmd-Q，owned TERM0 只作清理。完整 B/长 helper/GEN/N3 和公开语言仍待验，不改 Windows 结果。
+  完整参数、首败、模型轨迹、源字节、WAL-aware 531-row 快照在
+  `2026-10-01/macos/mac-b-files-stdin/`，未再调用模型或扩预算。
+
 ### C05-01 进程总期限提示与正式停止（2026-10-01，W194）
 
 - 正式GEN/StepFun的hold首发省略timeout_ms，默认30秒后timed_out并清理；轮询不会续期。
@@ -213,6 +232,12 @@
   被原提交逻辑允许；stale ID 的 current supported 仍拒绝、历史 epoch 不变，正文/环境/输入
   排除与计数保护不改。这验证接口分工/说明，不证明模型一定遵循；无新 live 请求。
   证据 `2026-10-01/macos/c06-historical-delivery/`，完整交付/N3/A/B/C 仍待正式修后验证。
+
+- macOS MAC-A-07 正式修后 **N1 子样本**：九次请求、一轮压缩、六命令无重复，历史四行原文/
+  行数 4/查有 1/零匹配 0 已按较早观察交付，当前缺资格项仍 unverified/no evidence，未借旧 ID。
+  提示的历史内容部分已有真实证据，不声称所有模型稳定遵循。整体独立验收仍失败：cwd 实际路径
+  没交付、内部术语未消失；原请求 06～09 包含路径，不能归因为信息丢失。证据
+  `2026-10-01/macos/mac-a-historical-results/`，路径/自然语言/N3/A/B/C 门槛不缩减，未再扩预算。
 
 ## 历史全产品口径快照（已停止本轮排程）
 
