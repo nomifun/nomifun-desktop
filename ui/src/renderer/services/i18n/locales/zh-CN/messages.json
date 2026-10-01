@@ -1,4 +1,8 @@
 {
+  "completionSummary": {
+    "nativeNonzero": "本轮 {{commandCount}} 次命令已结束并返回非零结果（退出码 {{codes}}）。这些结果计入了 {{toolCount}} 次未成功调用，请查看执行步骤中的命令输出。",
+    "counts": "本轮未成功结果：调用 {{toolCount}} 次，命令 {{commandCount}} 次。请在执行步骤中查看退出码、参数检查及错误详情。"
+  },
   "toolGroupViewSteps": "查看步骤",
   "toolDetailInput": "输入",
   "toolDetailOutput": "输出",

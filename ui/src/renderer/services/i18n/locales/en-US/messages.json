@@ -1,4 +1,8 @@
 {
+  "completionSummary": {
+    "nativeNonzero": "{{commandCount}} command(s) ended with nonzero results (exit codes: {{codes}}). These results are included in {{toolCount}} unsuccessful calls; see each command's output in the execution steps.",
+    "counts": "Unsuccessful results this turn: {{toolCount}} calls and {{commandCount}} command observations. See exit codes, argument checks and error details in the execution steps."
+  },
   "toolGroupViewSteps": "View Steps",
   "toolDetailInput": "Input",
   "toolDetailOutput": "Output",
