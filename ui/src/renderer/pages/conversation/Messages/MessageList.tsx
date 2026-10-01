@@ -110,6 +110,7 @@ type IRenderableItem = IMessageVO;
 type ITurnProcessDisclosureVO = {
   type: 'turn_process_disclosure';
   finalAnswer?: string;
+  hasInterruptedReply?: boolean;
   id: string;
   msg_id: MessageId;
   processItems: IRenderableItem[];
@@ -998,6 +999,7 @@ const MessageList: React.FC<{
         return {
           type: 'turn_process_disclosure',
           finalAnswer,
+          hasInterruptedReply: entry.state === 'canceled' && !entry.running && Boolean(finalAnswer?.trim()),
           id: entry.id,
           msg_id: entry.turnId,
           processItems,

@@ -14,13 +14,54 @@
 | C02 读取与搜索 | 工作区读搜、路径/输出回归 | 综合场景A的中文/空格、零匹配与只读结果 |
 | C03 Git观察与小测试 | W86；W184正式GEN的git_diff path=.及定向测试结果 | 综合A尚有未闭合调用；不因小复验通过结案整组 |
 | C04 文件与步骤结果 | 既有File/Artifact根因修复及定向回归 | 综合场景B的实际步骤、字节/hash与最终回答 |
-| C05 进程与停止 | W105、process/PTY/cancel/host清理回归 | 综合场景B的真实helper停止及无后代 |
+| C05 进程与停止 | W105、process/PTY/cancel/host清理回归；W194正式输入/EOF；W195取消提示；W196展示层游标提示和停止5秒N1 | B完整文件步骤/N3、其他连续首发与等待播报；历史准入失败的UI归因 |
 | C06 过程与交付真实性 | W93/W94；W184业务退出码；W185错误进程引用未执行与完成历史完整性；W187已结算非零的直接报告 | 失败/未验披露的用户语言及连续任务重复/误报；A/B/C仍待验 |
 | C07 连续会话与纠正 | W95/W98；W182取消冷读；W185完成历史读取及同步后一次实压缩；744ca440b保留已结算检查 | 最新用户纠正、较长连续任务及完整C场景 |
 | C08 模型协议接合 | W99/W100；W184 GEN；W185 GEN/COD真实StepFun→CMD/控制引用owner | 各入口定向小样本已有；完整连续命令与N3门槛未达 |
 
 本表只列候选复用与缺口；是否受新代码影响需核对具体基线，不把源码测试存在当已跑通过。
 本轮结案按A/B/C正式任务、核心bad-case闭环及独立结果，不再按原Case×角色×OS计算完成率。
+
+### C05-01 进程总期限提示与正式停止（2026-10-01，W194）
+
+- 正式GEN/StepFun的hold首发省略timeout_ms，默认30秒后timed_out并清理；轮询不会续期。
+  工具此前未说明该总期限，现start说明与timeout_ms元数据明示默认30000、最大600000及超时/用户停止的区别。
+  未改变owner默认值、硬限、参数必填/接受集合或取消策略。只有提示根因已修，不声称模型等待合同全部达标。
+- 正式echo链只启动一次：start/poll/stdin/close/poll/report；UTF-8中文加LF共16 bytes与实际文件一致，EOF/exit0/清理正确。
+  后续真实UI停止前独立证明父子均存活、父子关系正确；停止后canonical cancelled/host_cleanup_proven、两个PID消失、心跳停止，echo结果保留。
+- 首次30秒失败、第二次操作者未及时点击导致120秒先超时均保留，不能算用户停止成功。第三次明确600000的有界窗口仅用于允许用户操作，未扩产品硬限。
+- 仍有真实缺口：模型遗漏cursor，wait_ms=30000仍反复读相同READY输出，39秒内14步/12次poll/一次压缩；取消卡片下还显示此前“进程仍在运行”的模型文本。
+  停止独立oracle 15/16：机器a11文本未含截图上可见的“已取消执行”，该失败原样保留，视觉结果不覆盖机器断言。
+  正式UI清理5秒时限、完整B/N3、超时后完成复核的计划恢复及macOS仍待验；不关闭共享阶段。
+  Windows既有native stdin/后代清理2/2、工具生命周期/宿主schema2/2、fmt/diff通过；证据在2026-10-01/windows/w194-process-stdio-stop。
+
+### C05-02 取消前文字与重复轮询（2026-10-01，W195；UI子根因已验，模型等待仍失败）
+
+- 已取消卡片下的最后一段模型进度文字可能还说“进程仍在运行”，容易被当成当前状态。
+  现仅在同Turn的已关闭取消记录且仍有回复文本时标明“下方是停止前尚未完成的回复”；
+  原文字、已完成效果、复制/展开、canonical事件及错误仍保留，运行/完成/失败与无回复的取消不加此提示。
+- UI最小反例修前失败，修后76/76；类型/i18n/桌面边界及正式构建通过。正式Tauri冷读旧取消及新取消均看到提示，
+  独立旧事件digest、原件hash、早先echo和停止后父子/心跳核对通过。新正式任务总体12/15，仍FAIL。
+- 首败仍在：新Turn先poll上回合process_id被owner明确拒绝；随后只start一次，但27次poll仍无cursor，29步/四次压缩。
+  已停止并保留完整现场，不因UI提示或后代最终清理把模型等待任务记PASS，不追加模型循环掩盖失败。
+- poll说明已明示next_cursor→cursor、旧输出会立即返回、只报告一次准备状态。代码复核发现App装配以canonical schema替换展示层属性；
+  因此总期限/cursor/wait说明还补入wave2 canonical schema。默认值、必填字段、接受集合及owner回放行为不变；
+  canonical3/3与展示schema admission subset1/1通过。该补充在上述正式构建之后，实际模型是否正确等待仍待重验。
+- 未覆盖：完整B/C/N3、新Turn正确首发、游标连续等待、正式UI清理5秒时限、timeout完成恢复及macOS。
+  证据在2026-10-01/windows/w195-poll-cursor-cancelled-reply；只关闭取消前文字未标注的UI子根因。
+
+### C05-03 提示投影与冻结合同兼容（2026-10-01，W196）
+
+- W195把说明补入canonical schema后，workspace.process贡献指纹变化；本批正式旧Session在模型/工具前被准确拒绝为provenance drift。
+  此回归由上一批提示落点不当引入，首败保留：0模型步/0工具/0命令，不能归因于StepFun或用刷新授权绕过。
+- 现canonical process_schema恢复与43cd16bee完全相同；App装配只在模型展示定义投影timeout_ms/cursor/wait_ms的description。
+  不复制default/required/范围/新字段，不改注册指纹、Snapshot/贡献锁、准入或owner回放语义。说明有了正式入口且旧冻结合同保持有效。
+- App说明丢失的最小断言先红后绿，新增2/2；Runtime canonical admission subset1/1、fmt/diff及正式构建通过。
+  原Session经正式UI重试恢复：先start一次、首poll cursor0，后续cursor25/wait30000，READY只读一次；7模型步/一次实际压缩/6次poll，零工具结果错误。
+  最后一poll随UI Stop中断，无伪造结果；canonical cancelled与host_cleanup_proven、独立父子/心跳/原件/原echo及旧事件检查均通过。
+  点击前父子实际存活，点击起1,208.76ms内CIM确认两PID消失；独立oracle21/21，只记此GEN N1。
+- 未覆盖：N3/其他入口、完整B/C、其他历史合同、timeout后完成恢复；等待期间仍有重复播报/内部游标，准入失败UI仍误归“上游Agent或模型服务商”。
+  不由本次N1关闭共享阶段。原失败/新结果在2026-10-01/windows/w196-owned-poll-context分别保存，W195记录不改写为成功。
 
 ### C07-01 固定开销与压缩后原收据（2026-10-01）
 
@@ -100,6 +141,52 @@
   report gate **1/1**。本项只修反馈，不自动把旧 ID 变新、不抹去故意非零的真实观察，也未证明
   模型今后一定遵循。证据 `2026-10-01/macos/mac-a-post-headroom/`；完整完成/N3 仍待正式重验，
   不代判 Windows 或以原提议但被拒的 summary 宣称交付。
+
+### C06-02 被拒终结账号的窄路径审查（2026-10-01，结构修复已验证，正式修后待补）
+
+- MAC-A-05 已加载 C06-01 专门反馈与计数单值提示：两个计数正确为 1，首次 report 仍因两个
+  历史搜索 ID 被拒。摘要保留“不要重跑”文字，但随后计划可重置 pending、普通工具可继续，
+  后续又重复十次检查并触及 16-request 本地 cap。提示没有闭环，不用继续堆叠提示/扩大预算。
+- 确定性反例首败证明该结束路径仍广告 update_plan、exec/read/history。现仅在单独非法结束
+  report、revision=0、proved settled_failure_gate、无运行进程/未决补丁时复用 report-only review；
+  错误参数只能修账号、披露 unverified/blocked，不能重开计划或执行额外检查。其他有显式计划、
+  未决效果/进程/补丁、真实新输入路径不由此假定已完成；所有 schema/引用/计数拒绝继续有效。
+- 首败和中间反例均保留；被拒计划重置仍计入真实失败总数，修正后计数 2、诊断仅一次、终结
+  工具唯一展示、没有额外 owner dispatch。Runtime **220/220**。日志及真实失败数据在
+  `2026-10-01/macos/mac-a-report-repair/`；结构改动未进入冻结 live App，完整 MAC-A/B/C、交付
+  与 N3 待正式重验，未以组件结果或被拒 summary 关闭场景，也未移植 Windows 平台 PASS。
+
+- macOS MAC-C06-01 补反向边界 **1/1**：显式未完成计划下的非法 report 不收掉已授权修复，
+  write 实际一次，闭合计划后才报告；已有 terminal、running-process、unresolved-patch guards
+  各 **1/1**。首个 fixture 使用未广告控制的错误顺序保留/纠正，未修改产品逻辑或降低断言。
+  当前锁屏只阻断正式 UI/live，组件结果不替代修后 N3；证据 `2026-10-01/macos/c06-terminal-boundary/`。
+
+- macOS MAC-A-06 正式修后 **N1 子样本**：首个历史引用仍拒绝，后续原生请求只展示 report、
+  Specific tool_choice；9 次请求接受修正报告，六个已结算命令/两测试未重复，completed/head ready。
+  两个当前缺证据条目保持 unverified，计数 1/1 未抹去。只验证此纠错/防重开链；全任务交付仍缺
+  头尾与搜索历史结果，完整 N3/A/B/C 不因 canonical completed 通过。证据 `macos/mac-a-terminal-review/`。
+
+### C06-03 历史实际结果与当前证明的交付缺口（2026-10-01，歧义说明已修，正式重验待补）
+
+- MAC-A-06 的真实 read_file/search_files 已完成、独立源 hash/字节/匹配正确；后续 opaque commands
+  使其失去当前资格。修正报告正确不借旧 ID 作 current supported，却连原头尾/行数/两搜索结果
+  也未交付，输出内部 stale_file_paths/unverified 与英文 rationale。外部完整任务验收明确失败。
+- 当前资格丢失不表示历史观察不存在或命令没执行。后续须解决“如实交付已观察历史事实，分开
+  当前状态未复核”的数据/表达链路；不得放松 current freshness、借无关 ID、伪造检查或用
+  提议但未接受的报告关闭场景。不靠重跑所有检查、扩大 context/调用预算填补。
+- 本项只记录真实缺口，未提交额外产品假设或宣称根因已修。日志/原请求/SSE/UI/DB/严格首败在
+  `2026-10-01/macos/mac-a-terminal-review/`。C06-02 正式子链有证据不替代此交付门槛或 N3。
+
+- MAC-C06-02 核对原 request 06～09，四行原文与两个搜索名称仍在每个模型上下文中，排除
+  “压缩已把结果清空”的归因。完成接口一方面要求完整 summary，另一方面把缺当前资格表述成
+  “此结果未验证”，且称 rationale 不展示但实际会追加 warning，存在历史交付/当前证明歧义。
+- 仅替换 summary 属性与既有引用说明：已知较早实际结果仍须按用户要求交付，清楚标时点，
+  后续状态未核对另行披露；不拿历史事实作当前证明，不把未知结果编造出来，rationale 也按
+  用户语言写。无新增提示层、字段、原文副本、工具、权限或 schema 接受集合变化。
+- 最小说明回归首败保留；completion **31/31**。历史结果 summary+unverified/no evidence 已
+  被原提交逻辑允许；stale ID 的 current supported 仍拒绝、历史 epoch 不变，正文/环境/输入
+  排除与计数保护不改。这验证接口分工/说明，不证明模型一定遵循；无新 live 请求。
+  证据 `2026-10-01/macos/c06-historical-delivery/`，完整交付/N3/A/B/C 仍待正式修后验证。
 
 ## 历史全产品口径快照（已停止本轮排程）
 

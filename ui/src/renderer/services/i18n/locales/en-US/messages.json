@@ -88,7 +88,8 @@
   "turnProcess": {
     "expand": "Expand execution progress",
     "collapse": "Collapse execution progress",
-    "runningSummary": "Processing · {{duration}}"
+    "runningSummary": "Processing · {{duration}}",
+    "interruptedReply": "The reply below was written before stopping and is incomplete."
   },
   "knowledgeWriteback": {
     "started": "Preparing knowledge write-back",

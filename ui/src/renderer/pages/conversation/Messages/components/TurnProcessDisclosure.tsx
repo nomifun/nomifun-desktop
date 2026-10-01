@@ -18,6 +18,7 @@ export interface TurnProcessDisclosureView<T> {
   state: TurnDisclosureProcessState;
   running: boolean;
   defaultCollapsed: boolean;
+  hasInterruptedReply?: boolean;
 }
 
 interface TurnProcessDisclosureProps<T> {
@@ -177,6 +178,13 @@ function TurnProcessDisclosure<T>({
           </div>
         )}
       </div>
+      {item.state === 'canceled' && !item.running && item.hasInterruptedReply && (
+        <div data-testid='interrupted-reply-notice' className='mt-4px text-12px text-t-secondary'>
+          {t('messages.turnProcess.interruptedReply', {
+            defaultValue: 'The reply below was written before stopping and is incomplete.',
+          })}
+        </div>
+      )}
       {disclosureExpanded && (
         <div id={bodyId} className='turn-process-disclosure__body'>
           {item.processItems.map((processItem) => {
