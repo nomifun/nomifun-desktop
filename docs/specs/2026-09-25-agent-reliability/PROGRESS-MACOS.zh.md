@@ -32,6 +32,8 @@
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
+MAC-GEN-01 已有通用模板仅减去 Computer/自动化资源模块的正式目录观察 N1；不代表完整默认
+通用配置、完整 A/B/C 或 N3。原 persona/instructions/模型路由/其余授权逐项保持，未扩权限。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
 M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
 MAC-A-03～06 已经正式 UI 运行；解锁后 MAC-A-06 完成 C06-02 正式子样本及 completed-session Cmd-Q。
@@ -1486,3 +1488,22 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   不能保证 StepFun 首次参数正确，裸名 precheck 后变化、PATH 未配置和其他 wrapper 自身故障
   仍保守处理；真实 UI/live 修后、B 字节/完整链/GEN/N3/C、C05 退出和 MM spinner 均未关闭。
   未做额外全仓 build/UI/平台矩阵，Windows 结果未改写。
+
+- **MAC-GEN-01 scoped directory observe**（C01/C06/C08、`CMD-132/134` 子断言）：正式 Tauri
+  `56cdcdbde6b7…` / 产品源 `d8423c219`，新 UI 构建、隔离 data/work、StepFun Plan；先冻结
+  **1 task Session / 8 requests（含摘要）/ 4096 output / 180 秒**，实际 **3 requests / 126 events /
+  无压缩**。首次 native `/bin/pwd`+`[-P]`、`/bin/ls`+`[-a]` 各0/reaped，无模型 shell/读内容/副作用。
+- 实际完整 cwd、四目录项（含 .hidden-case/中文空格）、各退出码已在 canonical report 和正式
+  UI，completed/head ready、原件2/2 unchanged、Cmd-Q 正常0，无 TERM/KILL/强制退出或残留。
+  本命令小链 **N1 子样本通过**，不关闭此前 A 的完整交付/语言、B/C、N3、C05 或 MM 缺口。
+- 保留所有前置首次失败：browser-only helper 缺 computer role provider；补正式 feature 后完整
+  General 要求 Computer/Scheduler；API 不能同时传编辑 document 与 fork；依赖编译未结束时的
+  metadata 读取也保留。均在模型任务前，未当 StepFun/产品调用故障或“预算为0”。只给 runner
+  加确切 GEN 模式、feature 前检与正常 API 的减权 General；没有添资源/系统许可或改产品合同。
+- 独立 closed DB 比较证明 General persona/instructions/路由和其余能力全同，仅移除 computer/
+  automation.schedule；因此是 **官方模板派生的减权 GEN**，不伪称完整默认 General 已验。
+  原 oracle 首败保留：误将 host 指令读取算 model、误限 pwd 无 -P、漏中文“退出码为0”；
+  用 raw SSE ID 区分并核对实际路径/列表/字节后另记通过，没有改任务、真实结果或放宽安全断言。
+- 普通 readonly backup 失败/空库保留；确认 writer/WAL 无后另备份 **126 events**、逐项一致、
+  `ok`；凭据 exact match0。完整证据 `2026-10-01/macos/mac-gen-observe/`；源码身份另附仅 helper
+  dirty patch（不在产品 binary），helper 预算/模式/来源回归 **6/6**。Windows 结果未改写。
