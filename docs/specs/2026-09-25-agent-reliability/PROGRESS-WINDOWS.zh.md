@@ -3596,3 +3596,14 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 未覆盖：伪摘要的协议拒绝/有界恢复、重复补查及错误行数的根因、全批次保留、完整A首发/N3/COD及B进程/C。摘要文本不是真实调用或新授权；没有删除错误脚本输出，没有再付费循环。
 - 本批无新源码，正式构建与历史首败分开。证据在仓库外2026-10-02/windows/w215-latest-receipt-live；01构建、02完整事件/模型/DB/原oracle/加强audit、03取消UI与原任务基线保存。
 - 同步结算：证据be1819d61，正常合并8ae0f1197为352b58219，保留macOS锁屏审计；远端仅平台进度，本批源码未变，不重复编译/测试/模型请求，diff通过。
+
+### W216 伪摘要拒绝与一次纠正（2026-10-02；基线d4ee526a4）
+
+- Case/子断言：C06/C07/C08、MODEL协议及A01/A02/A08/A09/A17/A19；沿W215伪<tool_call>及W213裸调用JSON，不把摘要文本当任务授权。
+- 首败：AgentCompactionSummary原先把裸XML/JSON工具调用当合法summary；01最小反例失败另留。修复摘要校验，原生ToolCall事件也进入同类拒绝，正常说明/代码示例/任务JSON仍可用。
+- 修复：同次prepare仅一次协议纠正，原source消息不缩减、工具空/choice=None；有效草稿才写ContextCompacted，二次协议拒绝返回明确错误并保持原live input，不提交坏文本、不继续自重试。
+  新CompactionSummaryRejected记录operation_id及安全reason，不存伪参数；Store取消后只收观察、接管fence仍拒旧writer，恢复仅将此无效果事件作为可丢弃model前缀，不跨可能效果重放。
+- 验证：XML/JSON/原生调用三类各正/反纠正、拒绝事件codec/恢复、Store checkpoint接管/取消、模型端无工具、字节/空白/输出限与最新回执共8项不同定向通过，App编译检查及fmt/diff通过。
+  02新增记录时在移动request后读取operation_id编译失败，捕获ID后03通过，原编译日志另留；未放宽断言/权限/预算或隐藏失败。
+- 未覆盖：正式Tauri/StepFun修后/N3、非裸协议形态、已持久化旧伪摘要的历史处理、任务重做/错误统计的其他根因及完整A/B进程/C。二次拒绝不记任务完成，W215整体FAIL不覆盖，未新增付费模型或真实命令。
+- 证据：仓库外2026-10-02/windows/w216-compaction-protocol；01首红、02编译、03～09修后/恢复/Store/集成及既有边界分日志保留，Git只收源码/最小回归/短进度。

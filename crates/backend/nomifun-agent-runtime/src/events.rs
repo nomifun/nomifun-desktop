@@ -66,6 +66,12 @@ pub enum AgentEngineEvent {
         operation_id: OperationId,
         input_bytes: usize,
     },
+    /// A rejected summary draft is not a tool invocation or completion proof.
+    /// Do not persist its arguments or treat it as accepted task instructions.
+    CompactionSummaryRejected {
+        operation_id: OperationId,
+        reason: String,
+    },
     /// Typed prompt rejection before semantic output; only requests a bounded
     /// compaction. Does not assert that compaction or continuation succeeded.
     ContextLimitRecoveryStarted {

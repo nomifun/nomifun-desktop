@@ -4345,6 +4345,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_protocol_repair_is_bounded_and_rejects_drafts_before_commit() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self,event:AgentEngineEvent)->Result<(),AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let bad="<tool_call>\n<exec_command>\n<args><cmd>DO_NOT_PUBLISH_OR_EXECUTE</cmd></args>";
+        for invalid_kind in ["xml","json","native"] {
+        for invalid_twice in [false,true] {
+            let invalid_step = || match invalid_kind {
+                "native" => control_step("not-admitted","exec_command",json!({"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"})),
+                "json" => text_step(r#"{"call_id":"not-admitted","name":"exec_command","arguments":{"cmd":"DO_NOT_PUBLISH_OR_EXECUTE"}}"#),
+                _ => text_step(bad),
+            };
+            let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+                invalid_step(),if invalid_twice {invalid_step()} else {text_step("Earlier observations remain recorded; only the original pending work remains.")},
+            ])});
+            let mut request=request();
+            request.input.max_output_tokens=Some(4096);
+            let original=request.input.messages[0].clone();
+            for index in 0..6 {
+                request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,
+                    format!("Recorded context {index}; no new action requested.")));
+            }
+            let before=request.input.clone();
+            let resource=AgentContextBudget {max_context_bytes:64*1024,max_history_messages:4};
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(crate::AgentModelBudget::default(),resource).unwrap();
+            let sink=Sink::default();
+            let result=lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),
+                &sink,CancellationToken::new()).await;
+            let requests=model.requests.lock().unwrap();
+            assert_eq!(requests.len(),2,"a summary protocol fault gets only one correction");
+            assert!(requests.iter().all(|request|request.input.tools.is_empty() && request.input.tool_choice==ChatToolChoice::None));
+            assert_eq!(requests[0].input.messages,requests[1].input.messages,"repair preserves the exact source, not a reduced task");
+            assert!(requests[1].input.instructions.iter().any(|text|text.contains("previous summary draft was rejected")));
+            let events=sink.0.lock().unwrap();
+            assert_eq!(events.iter().filter(|event|matches!(event,AgentEngineEvent::CompactionSummaryRejected{..})).count(),
+                if invalid_twice {2} else {1});
+            for rejected in events.iter().filter(|event|matches!(event,AgentEngineEvent::CompactionSummaryRejected{..})) {
+                assert!(crate::recovery::discardable_model_event(rejected));
+                let encoded=serde_json::to_string(rejected).unwrap();
+                assert_eq!(serde_json::from_str::<AgentEngineEvent>(&encoded).unwrap(),*rejected);
+            }
+            assert!(!serde_json::to_string(&*events).unwrap().contains("DO_NOT_PUBLISH_OR_EXECUTE"));
+            if invalid_twice {
+                assert!(matches!(result,Err(AgentEngineError::CompactionInvalidSummary)));
+                assert_eq!(request.input,before,"two rejected drafts cannot replace the live context");
+                assert!(!events.iter().any(|event|matches!(event,AgentEngineEvent::ContextCompacted{..})));
+            } else {
+                result.unwrap();
+                assert!(!serde_json::to_string(&request.input.messages).unwrap().contains("DO_NOT_PUBLISH_OR_EXECUTE"));
+                assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+                assert!(events.iter().any(|event|matches!(event,AgentEngineEvent::ContextCompacted{..})));
+            }
+        }
+        }
+    }
+
+    #[tokio::test]
     async fn compaction_byte_overrun_retries_once_with_a_smaller_summary() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new(vec![

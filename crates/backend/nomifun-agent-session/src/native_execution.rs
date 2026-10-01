@@ -217,7 +217,7 @@ impl AgentSessionStore {
                 | "turn_started" | "turn_input_scope" | "steering_deferred" | "steering_inputs"
                 | "turn_completed" | "turn_failed" | "turn_cancelled" | "turn_paused" | "output_text_delta" | "reasoning_delta"
                 | "tool_completed" | "work_status" | "plan_updated" | "patch_recovery_updated"
-                | "model_response_rejected" | "model_output_truncated" | "context_compacted" | "compaction_usage"
+                | "model_response_rejected" | "model_output_truncated" | "context_compacted" | "compaction_usage" | "compaction_summary_rejected"
                 | "completion_observation" | "completion_reported" | "completion_delivered" | "instructions_updated" | "context_prepared"
                 | "runtime_modules_activated" | "completion_review" | "execution_budget_prepared" | "tool_results_ordered" | "usage"
             )) { return Err(SessionStoreError::ExecutionFenced); }
@@ -275,7 +275,7 @@ async fn verify_recovery_tail_tx(tx: &mut Transaction<'_, Sqlite>, session: &Age
         // replaying a stale checkpoint over work that may already have run.
         if !matches!(value.pointer("/event/event").and_then(Value::as_str), Some(
             "model_step_started" | "output_text_delta" | "reasoning_delta" | "tool_call_delta" | "tool_call_completed"
-            | "usage" | "compaction_started" | "compaction_usage" | "context_compacted"
+            | "usage" | "compaction_started" | "compaction_usage" | "context_compacted" | "compaction_summary_rejected"
             | "context_limit_recovery_started" | "model_output_truncated" | "model_response_rejected"
             | "execution_resumed" | "execution_budget_prepared" | "execution_segment_renewed"
             | "context_prepared" | "runtime_modules_activated"
