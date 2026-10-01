@@ -27,14 +27,14 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-05 计数已正确，但两个历史搜索 ID 被拒后又重开检查并触及 cap；C06-02 结构修复待正式验，不记整组 PASS |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-06 九次请求已接受报告、无重跑并正常退出；仍漏头尾/搜索历史结果，C06-03 交付缺口未闭，不记整组 PASS/N3 |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
 M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
-MAC-A-03～05 已经正式 UI 运行；当前 Mac 再次锁屏，阻断 C06-02 正式修后及 C05 UI 退出重验。
+MAC-A-03～06 已经正式 UI 运行；解锁后 MAC-A-06 完成 C06-02 正式子样本及 completed-session Cmd-Q。
 每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
 
 ## 收敛处置与本轮结束条件
@@ -1370,3 +1370,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   controls、unresolved-patch evidence/process 保护各 **1/1**。未改产品逻辑或任何接受集合。
 - 证据 `2026-10-01/macos/c06-terminal-boundary/`；本批只补测试/短进度。完整正式交付/N3、A/B/C
   与正常 UI 退出仍待人工解锁后验证，不以 guards PASS 收尾完整 Case，不改 Windows 结果。
+
+- **MAC-A-06 terminal review formal sample**（C01/C02/C03/C05/C06/C07/C08）：解锁后 fast-forward
+  同步 `43cd16bee` 的进程寿命提示；正式 App `5bdf54681e83…`，macOS 26.6.2 / arm64 / APFS，
+  顺序构建与 deep/strict ad-hoc 验签通过。原 prompt/七文件/COD/加密 StepFun Plan 不变，先冻结
+  **1 Session / 16 requests（含摘要）/ 4096 output / 360 秒**，实际 **9 requests**，未加预算。
+- 首发 literal pwd/ls、读搜/Git 与两指定测试均有独立结果；**六 process**、exit **0/0/0/0/0/1**、
+  reaped，测试各一次，无额外命令/计划重置或本地 cap。一轮压缩、首个非法历史引用报告仍严格拒绝；
+  请求 **07/08/09** 原生只广告 report_completion、Specific tool_choice，修正报告接受，
+  **421 events / completed / head ready**。两固定计数真实保留为 **1/1**，supported ID 均映射原
+  settled receipt，缺当前文件/搜索证据的两项保持 unverified/no evidence，不冒充当前证明。
+- **完整任务仍 INCOMPLETE_DELIVERY**：最终 summary/正式 UI 漏原头尾与两个搜索实际结果，
+  改成 stale_file_paths/unverified 内部术语与当前缺证据警告；真实读搜已发生并不等于从未读取。
+  外部严格 acceptance 首败保留，不把 canonical completed 当整组 PASS。后续缺口见 **C06-03**。
+- 这是 C06-02 防重开/纠正链的正式 **N1 子样本**，不是 full MAC-A 或 N3；首次完成尝试仍有
+  参数拒绝，不声称零错误。正式 completed-session Cmd-Q 正常 **exit 0**，无 TERM/KILL、
+  timeout/forced-exit、App/Helper/fixture/listener 残留；仅该现场退出子断言通过，不关闭旧 Keychain
+  首败。原件 **7/7** hash/Git/哨兵保护，凭据 exact match **0**，DB/事件/交付引用独立复核。
+- 普通 readonly backup 再报 SQLite 14 并生成空库，首败保留；确认 writer 已退出且无 WAL 后，
+  另以 immutable source 备份 **421 events**、`ok`、completed/head ready，未编辑状态。
+  完整证据 `2026-10-01/macos/mac-a-terminal-review/`；本批只更新短进度，不额外重复测试/build。
+  历史结果交付/自然语言、完整 A/B/C/N3 与其余退出条件仍开放，Windows 结果未改。

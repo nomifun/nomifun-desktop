@@ -161,6 +161,22 @@
   各 **1/1**。首个 fixture 使用未广告控制的错误顺序保留/纠正，未修改产品逻辑或降低断言。
   当前锁屏只阻断正式 UI/live，组件结果不替代修后 N3；证据 `2026-10-01/macos/c06-terminal-boundary/`。
 
+- macOS MAC-A-06 正式修后 **N1 子样本**：首个历史引用仍拒绝，后续原生请求只展示 report、
+  Specific tool_choice；9 次请求接受修正报告，六个已结算命令/两测试未重复，completed/head ready。
+  两个当前缺证据条目保持 unverified，计数 1/1 未抹去。只验证此纠错/防重开链；全任务交付仍缺
+  头尾与搜索历史结果，完整 N3/A/B/C 不因 canonical completed 通过。证据 `macos/mac-a-terminal-review/`。
+
+### C06-03 历史实际结果与当前证明的交付缺口（2026-10-01，待修/验）
+
+- MAC-A-06 的真实 read_file/search_files 已完成、独立源 hash/字节/匹配正确；后续 opaque commands
+  使其失去当前资格。修正报告正确不借旧 ID 作 current supported，却连原头尾/行数/两搜索结果
+  也未交付，输出内部 stale_file_paths/unverified 与英文 rationale。外部完整任务验收明确失败。
+- 当前资格丢失不表示历史观察不存在或命令没执行。后续须解决“如实交付已观察历史事实，分开
+  当前状态未复核”的数据/表达链路；不得放松 current freshness、借无关 ID、伪造检查或用
+  提议但未接受的报告关闭场景。不靠重跑所有检查、扩大 context/调用预算填补。
+- 本项只记录真实缺口，未提交额外产品假设或宣称根因已修。日志/原请求/SSE/UI/DB/严格首败在
+  `2026-10-01/macos/mac-a-terminal-review/`。C06-02 正式子链有证据不替代此交付门槛或 N3。
+
 ## 历史全产品口径快照（已停止本轮排程）
 
 - 公共 P0 为 **5/5 任务已验证**。本文213个去重问题编号属于问题簇，不是已通过的Case数量。
