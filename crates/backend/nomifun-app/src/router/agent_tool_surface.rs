@@ -81,7 +81,7 @@ pub(super) async fn compile(
                 exposure.capability_id.as_ref()
             )));
         }
-        exposure.definition.input_schema = process_presentation_schema(
+        exposure.definition.input_schema = standard_presentation_schema(
             exposure.capability_id.as_ref(), schema, &exposure.definition.input_schema,
         );
     }
@@ -267,7 +267,7 @@ pub(super) async fn compile(
     compile_agent_tool_plan(snapshot, active, registry, exposures).map_err(error)
 }
 
-fn process_presentation_schema(
+fn standard_presentation_schema(
     capability_id: &str,
     mut canonical: nomifun_agent_contracts::StrictJsonValue,
     presentation: &nomifun_agent_contracts::StrictJsonValue,
@@ -275,14 +275,17 @@ fn process_presentation_schema(
     // Guidance belongs to this model projection. Changing the registered
     // canonical schema also changes frozen contribution provenance for old
     // Sessions, even when only a description changed.
-    if capability_id == "workspace.process" {
-        for name in ["timeout_ms", "cursor", "wait_ms"] {
-            if let Some(description) = presentation.0["properties"][name]["description"].as_str()
-                && let Some(property) = canonical.0["properties"].get_mut(name)
-                    .and_then(serde_json::Value::as_object_mut)
-            {
-                property.insert("description".into(), serde_json::Value::String(description.to_owned()));
-            }
+    let fields: &[&str] = match capability_id {
+        "workspace.process" => &["timeout_ms", "cursor", "wait_ms", "input", "append_newline"],
+        "workspace.files" => &["content"],
+        _ => &[],
+    };
+    for name in fields {
+        if let Some(description) = presentation.0["properties"][name]["description"].as_str()
+            && let Some(property) = canonical.0["properties"].get_mut(name)
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            property.insert("description".into(), serde_json::Value::String(description.to_owned()));
         }
     }
     canonical
@@ -433,7 +436,7 @@ mod tests {
         let original = canonical.clone();
         let presentation = standard_agent_tool_exposures().into_iter()
             .find(|tool| tool.definition.name == "poll_process").unwrap().definition.input_schema;
-        let projected = process_presentation_schema("workspace.process", canonical, &presentation);
+        let projected = standard_presentation_schema("workspace.process", canonical, &presentation);
         assert!(projected.0["properties"]["cursor"]["description"].as_str()
             .is_some_and(|value| value.contains("output.next_cursor")));
         assert_eq!(original, canonical_process_schema("workspace.process/poll"));
@@ -456,6 +459,39 @@ mod tests {
     }
 
     #[test]
+    fn newline_guidance_is_model_only_and_keeps_registered_byte_contracts() {
+        for (capability_id, action_id, name, field, expected) in [
+            ("workspace.process", "workspace.process/input", "write_process_stdin", "append_newline", "even if input already ends in LF"),
+            ("workspace.files", "workspace.files/write", "write_file", "content", "no trailing newline is added"),
+        ] {
+            let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+            let capability = registration.metadata.manifest.payload.contributions.capabilities.into_iter()
+                .find(|capability| capability.id.as_ref() == capability_id).unwrap();
+            let reference = &capability.contributions.actions.iter()
+                .find(|action| action.action_id.as_ref() == action_id).unwrap().input_schema;
+            let canonical = nomifun_agent_domain_wave2::resolve_action_schema(capability_id, reference).unwrap();
+            let original = canonical.clone();
+            let presentation = standard_agent_tool_exposures().into_iter()
+                .find(|tool| tool.definition.name == name).unwrap().definition.input_schema;
+            let projected = standard_presentation_schema(capability_id, canonical, &presentation);
+            assert!(projected.0["properties"][field]["description"].as_str().is_some_and(|text| text.contains(expected)));
+            let mut structural = projected.0.clone();
+            // Restore only whitelisted descriptions, then require exact
+            // identity, including defaults, limits and required fields.
+            for property in ["input", "append_newline", "content"] {
+                if let Some(value) = structural["properties"].get_mut(property) {
+                    if let Some(description) = original.0["properties"][property].get("description") {
+                        value["description"] = description.clone();
+                    } else { value.as_object_mut().unwrap().remove("description"); }
+                }
+            }
+            assert_eq!(structural, original.0);
+            assert_eq!(nomifun_agent_domain_wave2::resolve_action_schema(capability_id, reference).unwrap(), original);
+            assert_eq!(standard_presentation_schema("other.module", original.clone(), &presentation), original);
+        }
+    }
+
+    #[test]
     fn process_presentation_never_copies_defaults_constraints_or_foreign_module_guidance() {
         let canonical = canonical_process_schema("workspace.process/start");
         let presentation = StrictJsonValue(json!({"properties":{
@@ -463,13 +499,13 @@ mod tests {
             "wait_ms":{"description":false,"maximum":999999},
             "process_id":{"description":"invented field","type":"string"}
         },"required":["invented"]}));
-        let projected = process_presentation_schema("workspace.process", canonical.clone(), &presentation);
+        let projected = standard_presentation_schema("workspace.process", canonical.clone(), &presentation);
         assert_eq!(projected.0["properties"]["timeout_ms"]["maximum"], 600000);
         assert!(projected.0["properties"]["timeout_ms"].get("default").is_none());
         assert_eq!(projected.0["properties"]["wait_ms"], canonical.0["properties"]["wait_ms"]);
         assert!(projected.0["properties"].get("process_id").is_none());
         assert_eq!(projected.0.get("required"), canonical.0.get("required"));
-        assert_eq!(process_presentation_schema("other.module", canonical.clone(), &presentation), canonical);
+        assert_eq!(standard_presentation_schema("other.module", canonical.clone(), &presentation), canonical);
         assert_eq!(canonical, canonical_process_schema("workspace.process/start"));
     }
 

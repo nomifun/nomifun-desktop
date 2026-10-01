@@ -90,7 +90,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "write_file",
         capability_id: "workspace.files",
         action_id: "workspace.files/write",
-        description: "Write a complete UTF-8 text file (at most 8 MiB) through the workspace owner. Missing parent directories are created automatically; no shell mkdir is needed. The receipt includes published bytes, line_count and sha256, so a command solely to count the file is unnecessary. These facts are not functional-test results. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
+        description: "Write exact complete UTF-8 text (at most 8 MiB) through the workspace owner; no trailing newline is added. Include any requested final line break in content itself. Missing parent directories are created automatically; no shell mkdir is needed. The receipt includes published bytes, line_count and sha256, so a command solely to count the file is unnecessary. These facts are not functional-test results. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
         schema: write_schema,
     },
     StandardTool {
@@ -139,7 +139,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
         model_name: "write_process_stdin",
         capability_id: "workspace.process",
         action_id: "workspace.process/input",
-        description: "Write bounded input to a turn-owned process. The input text is sent exactly without trimming or normalization. When the request requires one trailing line feed, set append_newline=true to append exactly one LF byte (0x0A) after input. This is an effect and invalidates older workspace evidence.",
+        description: "Write bounded input to a turn-owned process without trimming or normalization. For exactly one trailing LF, either use input without the LF and append_newline=true, or include the LF in input and omit append_newline/set it false. Combining a final LF in input with true sends two LFs, not one. This is an effect and invalidates older workspace evidence.",
         schema: process_input_schema,
     },
     StandardTool {
@@ -292,7 +292,8 @@ fn write_schema() -> Value {
             "path": workspace_path_value(),
             "content": {
                 "type": "string",
-                "maxLength": 8_388_608
+                "maxLength": 8_388_608,
+                "description":"Exact complete UTF-8 text; no trailing newline is added. For two lines with a requested final LF use {\"content\":\"first\\nsecond\\n\"}. Include the final LF in content, not just between lines. Host also enforces an 8 MiB byte limit. Prefer apply_patch for focused edits."
             }
         },
         "required": ["path", "content"]
@@ -428,9 +429,9 @@ fn process_input_schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{
         "process_id":{"type":"string","minLength":1,"maxLength":128},
         "input":{"type":"string","maxLength":1048576,
-            "description":"Exact UTF-8 text to write without trimming or normalization."},
+            "description":"Exact UTF-8 text to write without trimming or normalization. If input already contains the requested final LF, omit append_newline or set it false."},
         "append_newline":{"type":"boolean","default":false,
-            "description":"When true, append exactly one LF byte (0x0A) after input. Use this for a requested trailing line feed."}
+            "description":"When true, always append one LF byte (0x0A), even if input already ends in LF. To send exactly one final LF use {\"input\":\"hello\",\"append_newline\":true} or {\"input\":\"hello\\n\",\"append_newline\":false}. Including LF in input with true sends two LFs; use that only when two are requested."}
     },"required":["process_id","input"]})
 }
 
@@ -675,6 +676,28 @@ mod tests {
             assert_eq!(description.contains("cmd.exe"), cfg!(target_os = "windows"));
             assert_eq!(description.contains("/bin/ls"), !cfg!(target_os = "windows"));
         }
+    }
+
+    #[test]
+    fn text_tool_guidance_distinguishes_exact_content_from_appended_newlines() {
+        let tools = standard_agent_tool_exposures();
+        let schema = |name: &str| &tools.iter().find(|tool| tool.definition.name == name)
+            .unwrap().definition.input_schema.0;
+        let content = schema("write_file")["properties"]["content"]["description"].as_str().unwrap_or_default();
+        assert!(content.contains("no trailing newline is added"));
+        assert!(content.contains(r#"{"content":"first\nsecond\n"}"#));
+        let append = schema("write_process_stdin")["properties"]["append_newline"]["description"].as_str().unwrap();
+        assert!(append.contains("even if input already ends in LF"));
+        assert!(append.contains(r#"{"input":"hello","append_newline":true}"#));
+        assert!(append.contains(r#"{"input":"hello\n","append_newline":false}"#));
+        let validator = jsonschema::validator_for(schema("write_process_stdin")).unwrap();
+        // These remain distinct, legal byte requests; guidance must not turn
+        // them into trimming, deduplication or a new admission restriction.
+        for args in [
+            json!({"process_id":"owned","input":"你好 MAC-B","append_newline":true}),
+            json!({"process_id":"owned","input":"你好 MAC-B\n","append_newline":false}),
+            json!({"process_id":"owned","input":"你好 MAC-B\n","append_newline":true}),
+        ] { assert!(validator.is_valid(&args), "{args}"); }
     }
 
     #[test]
