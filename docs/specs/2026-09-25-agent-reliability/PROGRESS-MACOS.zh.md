@@ -17,7 +17,7 @@
 | C04 文件与步骤结果 | M01-02/M03 文件原子性、权限和真实 receipt 回归 | MAC-B 连续写改/复制移动/回读/hash/精确删除，最终字节与回答一致 |
 | C05 进程与停止 | M01-04 正式 start/poll/cancel；M06-01～09 精确 owner/清理 fence | MAC-B 交互 stdin/close 与长 helper/后代停止；不继续组合穷举启动故障 |
 | C06 过程与交付真实性 | M01-04 取消成功投影、M02 completion；M04-26/27 正式暂停/取消 | 在 MAC-A/B/C 同次核对 UI/API/canonical、错误类别、实际结果与完成证据 |
-| C07 连续会话与纠正 | M02/M04-26；MAC-A-01 已修固定开销反复压缩及精确收据丢失，正式修后完成链有证据 | MAC-C 追加纠正/取消冷读及当前命令首发仍待验，不由组件或单样本代替 |
+| C07 连续会话与纠正 | MAC-A-01 旧正式压缩/完成链；MAC-C07-01 修 soft/hard 余量及有效摘要重复触发 | MAC-A-03 同类失败正式修后重验、MAC-C 纠正/取消冷读仍待补，不由组件或单样本代替 |
 | C08 模型协议接合 | M01/M02 正式 StepFun → 实际 owner；Schema/decoder/预算护栏 | 与 MAC-A/B/C 同次核对原生 tool 参数和结果回配，不另跑 wire-only 扩样 |
 
 以上是候选复用，不代表三组综合任务已通过。先核对原始断言、制品和相关源码差异；只有受变更影响、
@@ -1298,3 +1298,20 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   最终 **0**；这是强制清理，不是 C05 PASS。已请求人工查看是否有系统提示，未操作 SecurityAgent
   或改授权/加密。独立闭库/备份 `ok`、456 events 相同、7/7 hash/Git/哨兵保护、凭据 exact match
   **0**。证据 `2026-10-01/macos/mac-a-current/`；完整 A/B/C、交付/N3、压缩和正常退出仍开放。
+
+- **MAC-C07-01 fixed-prefix headroom**（C07、`CMD-143` 的有界续行/原回执子断言）：接续
+  MAC-A-03 压缩首败，macOS 26.6.2 / arm64 / APFS，未追加 live Session 或调用。最小 native
+  Runtime 反例首败保留：replacement bytes **64,371 < 65,536**，估算输入 **21,457** 连同
+  4096 output/512 reserve 仍小于 32,768，却被 **21,120** soft trigger 当 hard cap 拒绝。
+- 公共修复见 **C07-02**：固定前缀及摘要预留无软余量时，触发策略仅利用原硬 token 余量；
+  成功压缩的 byte floor 为下一段保留半数剩余硬 byte 空间，避免有效摘要自身立即重触发。
+  不改模型 metadata/default limits 或 output/byte/message 上限，不重标失败或赋予摘要权威；
+  原失败回执和 call/result ID、唯一 accepted input 保留，未读图片/usage 校准/typed rejection
+  继续受原硬边界保护。失败诊断仅加数值，不回显正文、路径或参数。
+- 修后 near-prefix、byte hard-cap、provider usage 余量、typed overflow 单次/收紧保护通过；
+  压缩定向 **18/18**、Runtime **217/217**。首次完整 Runtime 另为旧 review 夹具失败，旧预算
+  对照同样失败：当前 review 只广告 report_completion，旧夹具先发未暴露 update_plan。
+  仅改为有效直接报告，仍断言 current evidence、终结控制唯一暴露及零额外模型步；原对照保留。
+- 完整证据 `2026-10-01/macos/c07-prefix-headroom/`。这关闭确定性子根因，不把 synthetic 几何
+  反例当作原完整请求重放或正式 UI/StepFun 成功；MAC-A-03 首败、两测试/完整交付/N3、MAC-B/C
+  与 C05 系统条件/正常退出仍开放。无 renderer 改动，不重跑 UI/build/全业务矩阵，不代判 Windows。
