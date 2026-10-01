@@ -502,6 +502,7 @@
       "audio": {
         "cancelled": "Audio generation was canceled.",
         "connectConfigFailed": "Could not save the audio-generation task link: {{code}}.",
+        "connectResultFailed": "Could not connect the audio-generation result: {{code}}.",
         "emptyNodeOnly": "TTS is currently supported only on empty audio nodes.",
         "failed": "Audio generation failed.",
         "formatUnsupported": "Audio generation currently supports MP3 and WAV only.",
@@ -512,6 +513,7 @@
         "missingConfig": "The audio task is missing its required task record.",
         "missingSourceNodeId": "The audio-generation configuration is missing sourceNodeId.",
         "nodeMissing": "The audio node no longer exists.",
+        "nodeConstructionFailed": "The audio result could not be turned into an audio node.",
         "nonTerminalRemovalRejected": "Cannot remove an audio task that has not reached a terminal state from the pending list.",
         "referencesUnsupported": "TTS audio generation does not accept reference assets.",
         "resultRequiresEmptyNode": "TTS results can only be written to an empty audio node.",
@@ -527,7 +529,7 @@
       "audioModelUnavailable": "The selected speech model is unavailable, so generation was not started.",
       "audioNodeRemovedBeforeTask": "The audio node was deleted, so no audio task was created.",
       "audioSourceChangedBeforeTask": "The audio node or its direct reference changed, so no audio task was created.",
-      "audioTaskBusy": "An audio task is already in progress. Wait for it to finish.",
+      "audioTaskBusy": "This audio node still has an unfinished task. Wait for it to finish before generating again.",
       "clipboardUnavailable": "System clipboard access is not available in this environment.",
       "closedAfterUpload": "The canvas was closed, but the image remains in the asset library.",
       "concurrentUpload": "Another asset upload is in progress. Wait for it to finish and try again.",
@@ -570,7 +572,7 @@
       "imagePickerUnavailable": "The image file picker is temporarily unavailable.",
       "imageReferenceUnavailable": "The current references cannot be submitted safely.",
       "imageSourceChangedBeforeTask": "The source image node was deleted or replaced, so no image task was created.",
-      "imageTaskBusy": "An image task is already in progress. Wait for it to finish.",
+      "imageTaskBusy": "This image node still has an unfinished task. Wait for it to finish before generating again.",
       "mask": {
         "cancelled": "Local image editing was canceled.",
         "configRemoved": "The local-edit task record was lost before the result could be written.",
@@ -640,7 +642,7 @@
       "videoNodeRemovedBeforeTask": "The video node was deleted, so no video task was created.",
       "videoReferenceResolutionFailed": "The I2V reference could not be resolved to an image asset.",
       "videoSourceChangedBeforeTask": "The video node or its direct reference changed, so no video task was created.",
-      "videoTaskBusy": "A video task is already in progress. Wait for it to finish."
+      "videoTaskBusy": "This video node still has an unfinished task. Wait for it to finish before generating again."
     },
     "image": {
       "aspectRatioLabel": "Aspect ratio",
@@ -959,7 +961,7 @@
       "imageTaskSubmitted": "Image task submitted. Its input node will continue to show the backend status.",
       "imageToolBusyLeave": "The image tool is still processing. Wait for it to finish before leaving.",
       "maskReferenceRecovered": "Recovered the marked reference image after the upload response was interrupted and submitted the local-edit task.",
-      "maskTaskBusy": "A local-edit task is running, recovering, or awaiting confirmation. Resolve it before starting another.",
+      "maskTaskBusy": "This image node has a task running, recovering, or awaiting confirmation. Resolve that task first.",
       "maskTaskSubmitted": "The local-edit task was submitted. Its input node will continue to show the backend status.",
       "nodeCreatedAndConnected": "Node created and connected.",
       "nodeCreatedAtPosition": "Node created at the specified position.",
@@ -1066,7 +1068,7 @@
         "editorUnavailable": "The canvas has not loaded, so the audio task cannot be synchronized.",
         "failed": "Audio generation failed.",
         "orphaned": "No matching audio task was found on the server. Only its recovery marker was cleared.",
-        "succeeded": "Audio generation completed. The result was saved to the canvas in place."
+        "succeeded": "Audio generation completed. The result was saved to the canvas."
       },
       "image": {
         "composeCancelled": "Image generation was canceled.",

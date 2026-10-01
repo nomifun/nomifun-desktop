@@ -71,7 +71,7 @@ describe('Creative Canvas product route Agent context projection', () => {
     ).toBe(true);
     expect(
       source.includes(
-        'agentContextDocument,\n    agentContextSelectedNodeIds,\n    projectId,\n    save.revision,'
+        'agentContextDocument,\n    agentContextSelectedNodeIds,\n    projectId,\n    project.detail?.project.projectId,\n    project.detail?.project.title,\n    save.revision,'
       )
     ).toBe(true);
     expect(

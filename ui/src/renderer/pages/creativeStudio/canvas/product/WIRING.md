@@ -178,6 +178,22 @@ Mount recovery accepts only either exact operation marker. A
 transport-ambiguous create keeps the same config and idempotency key for safe
 retry; only an authoritative 404 may clear an orphaned pending reference.
 
+New image, video, and audio runs append independent task slots to each runtime.
+Admission, uncertain submissions, and retry state are scoped to the authored
+node, so queued/running tasks and recovery never disable other nodes' composers.
+The same source remains serial: a new run is rejected while its earlier task is
+submitting, queued, running, recovering, or awaiting durable terminal settlement.
+The runtime resolves each generated config owner back to the authored source
+node, and the composer checks all pending configs for that source, including
+image mask edits. Other source nodes can submit and run concurrently.
+Prompt editing remains available while that node's generation is running;
+submission becomes available again after completion. A transport-ambiguous
+submission permits only a same-key retry until its outcome is confirmed.
+Confirming a missing submission retires that slot without
+remounting the runtime or interrupting other workers. Cancel targets only the
+selected task; cancel-all captures existing tasks and excludes later runs.
+Task config nodes and results are inserted without changing the user's selection.
+
 The video runtime owns only `video-node-compose`. It accepts an empty video
 node as exact `video_generation` / `t2v`, or the same empty node with directly
 connected real images as `i2v`. References are deduplicated and ordered by
@@ -195,8 +211,10 @@ real audio result. Exact adapter protocol profiles decide whether Voice ID and
 MP3/WAV format controls are exposed, whether voice is required, and the text
 limit; unknown protocols receive prompt only. Speed, instructions, reference
 audio, VoiceClone, AAC, and PCM are never sent by this slice. Successful
-settlement fills the same audio node ID, clears only the now-inapplicable draft
-model, and removes pending last. Failed/canceled configs remain auditable, and
+settlement fills an empty source audio node, or creates a config-linked output
+if the source gained an asset before completion or during legacy task recovery.
+It clears the filled source's
+now-inapplicable draft model and removes pending last. Failed/canceled configs remain auditable, and
 ambiguous submission offers same-key retry plus an explicit status check that
 cleans only an authoritative 404 orphan.
 
@@ -206,9 +224,10 @@ a viewport portal when the canvas column cannot contain them.
 
 The inline composer opens only for one selected image. A successful empty-node
 `t2i` task idempotently fills that source node with the first real result; any
-additional results become config-linked image nodes. If the empty source gains
-a different asset before completion, settlement fails closed instead of
-overwriting it. Existing-image `i2i` always writes new config-linked results and
+additional results become config-linked image nodes. If the source gains
+a different asset before completion, the result becomes a new config-linked
+node, preserving both outputs. Video and audio follow the same rule.
+Existing-image `i2i` always writes new config-linked results and
 never mutates the source asset.
 
 The same single-selection boundary owns the reference-style image toolbar.

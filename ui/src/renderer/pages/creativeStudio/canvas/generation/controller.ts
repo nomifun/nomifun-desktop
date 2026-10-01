@@ -33,6 +33,8 @@ import { GenerationError } from "./types";
 
 export interface CanvasGenerationRuntimeControllerOptions {
   poll?: Omit<CreativeTaskPollOptions, "signal" | "onTask">;
+  /** Resolve the authored node when the backend owner is a generated config node. */
+  nodeIdForTask?: (reference: CreativeTaskReference) => string;
   /** Must durably record the known idempotency task reference before POST. */
   onPendingTask?: (
     reference: CreativeTaskReference,
@@ -252,10 +254,14 @@ export class CanvasGenerationRuntimeController {
   private readonly onPendingTask: CanvasGenerationRuntimeControllerOptions["onPendingTask"];
   private readonly onSettledTask: CanvasGenerationRuntimeControllerOptions["onSettledTask"];
   private readonly onRecoveryFailure: CanvasGenerationRuntimeControllerOptions["onRecoveryFailure"];
+  private readonly nodeIdForTask: CanvasGenerationRuntimeControllerOptions["nodeIdForTask"];
+  private readonly taskNodeKeys = new Map<string, string>();
+  private readonly recoveryFailureTaskIds = new Set<string>();
   private current: CanvasGenerationRuntimeSnapshot = INITIAL_SNAPSHOT;
   private generation = 0;
+  private nextOrder = 0;
   private operationController: AbortController | null = null;
-  private cancelAllRequested = false;
+  private readonly submittingTaskIds = new Set<string>();
   private readonly cancelRequestedIds = new Set<string>();
   private readonly cancelDispatchedIds = new Set<string>();
   private readonly terminalTaskIds = new Set<string>();
@@ -275,6 +281,7 @@ export class CanvasGenerationRuntimeController {
     this.onPendingTask = options.onPendingTask;
     this.onSettledTask = options.onSettledTask;
     this.onRecoveryFailure = options.onRecoveryFailure;
+    this.nodeIdForTask = options.nodeIdForTask;
   }
 
   snapshot(): CanvasGenerationRuntimeSnapshot {
@@ -333,33 +340,6 @@ export class CanvasGenerationRuntimeController {
 
   private isCurrent(generation: number, controller: AbortController): boolean {
     return generation === this.generation && !controller.signal.aborted;
-  }
-
-  private begin(
-    submittingCount: number,
-    recoveringCount: number,
-  ): {
-    generation: number;
-    controller: AbortController;
-  } {
-    this.operationController?.abort();
-    const controller = new AbortController();
-    this.operationController = controller;
-    this.cancelAllRequested = false;
-    this.cancelRequestedIds.clear();
-    this.cancelDispatchedIds.clear();
-    this.terminalTaskIds.clear();
-    this.activeWorkerTaskIds.clear();
-    this.recoveringRequests.clear();
-    this.generation += 1;
-    this.emit({
-      entries: [],
-      submissionFailures: [],
-      submittingCount,
-      recoveringCount,
-      requestError: null,
-    });
-    return { generation: this.generation, controller };
   }
 
   private upsert(entry: CanvasGenerationRuntimeEntry): void {
@@ -486,12 +466,25 @@ export class CanvasGenerationRuntimeController {
     this.update({ [field]: Math.max(0, this.current[field] - 1) });
   }
 
+  private clearSubmissionFailure(order: number): void {
+    const previous = this.current.submissionFailures.find((failure) => failure.order === order);
+    if (!previous) return;
+    const submissionFailures = this.current.submissionFailures.filter((failure) => failure.order !== order);
+    this.update({
+      submissionFailures,
+      requestError: this.current.requestError === previous.error
+        ? (submissionFailures.at(-1)?.error ?? null)
+        : this.current.requestError,
+    });
+  }
+
   private async notifySettled(
     task: CreativeTask,
     controller: AbortController,
   ): Promise<void> {
     if (!isTerminalCreativeTaskStatus(task.status) || !this.onSettledTask)
       return;
+    controller.signal.throwIfAborted();
     await this.onSettledTask(cloneTask(task), controller.signal);
   }
 
@@ -502,29 +495,21 @@ export class CanvasGenerationRuntimeController {
     input: CreateCreativeTaskInput,
     outputKind: "image" | "video" | "audio",
   ): Promise<void> {
+    if (!this.isCurrent(generation, controller)) return;
     let task: CreativeTask | null = null;
     let submissionReleased = false;
+    this.submittingTaskIds.add(input.idempotencyKey);
+    this.activeWorkerTaskIds.add(input.idempotencyKey);
     try {
       await this.onPendingTask?.(pendingReference(input), controller.signal);
-      task = await this.tasks.create(cloneInput(input), controller.signal);
       if (!this.isCurrent(generation, controller)) return;
-      this.activeWorkerTaskIds.add(task.taskId);
-      const previousFailure = this.current.submissionFailures.find(
-        (failure) => failure.order === order,
-      );
-      if (previousFailure) {
-        const submissionFailures = this.current.submissionFailures.filter(
-          (failure) => failure.order !== order,
-        );
-        this.update({
-          submissionFailures,
-          requestError:
-            this.current.requestError === previousFailure.error
-              ? (submissionFailures.at(-1)?.error ?? null)
-              : this.current.requestError,
-        });
-      }
+      const created = await this.tasks.create(cloneInput(input), controller.signal);
+      if (!this.isCurrent(generation, controller)) return;
+      assertCreativeTaskReference(created, pendingReference(input));
+      task = created;
+      this.clearSubmissionFailure(order);
       this.publishTask(generation, controller, order, task, input, outputKind);
+      this.submittingTaskIds.delete(input.idempotencyKey);
       this.decrement("submittingCount");
       submissionReleased = true;
       if (isTerminalCreativeTaskStatus(task.status)) {
@@ -532,14 +517,17 @@ export class CanvasGenerationRuntimeController {
         return;
       }
       if (
-        (this.cancelAllRequested || this.cancelRequestedIds.has(task.taskId)) &&
+        this.cancelRequestedIds.has(task.taskId) &&
         !this.cancelDispatchedIds.has(task.taskId)
       ) {
         this.cancelDispatchedIds.add(task.taskId);
-        task = await this.tasks.cancel(
+        const canceled = await this.tasks.cancel(
           creativeTaskReference(task),
           controller.signal,
         );
+        if (!this.isCurrent(generation, controller)) return;
+        assertCreativeTaskReference(canceled, pendingReference(input));
+        task = canceled;
         this.publishTask(
           generation,
           controller,
@@ -590,7 +578,11 @@ export class CanvasGenerationRuntimeController {
         submissionReleased = true;
       }
     } finally {
-      if (task) this.activeWorkerTaskIds.delete(task.taskId);
+      if (this.isCurrent(generation, controller)) {
+        this.submittingTaskIds.delete(input.idempotencyKey);
+        this.activeWorkerTaskIds.delete(input.idempotencyKey);
+        this.update({});
+      }
     }
   }
 
@@ -630,7 +622,7 @@ export class CanvasGenerationRuntimeController {
     }
   }
 
-  private supplementalOperation(): {
+  private ensureOperation(): {
     generation: number;
     controller: AbortController;
   } {
@@ -651,26 +643,78 @@ export class CanvasGenerationRuntimeController {
     outputKind: "image" | "video" | "audio",
   ): Promise<CanvasGenerationRuntimeSnapshot> {
     this.assertUsable();
-    this.assertNotBusy();
-    const { generation, controller } = this.begin(repeat, 0);
+    if (
+      this.activeWorkerTaskIds.has(input.idempotencyKey) ||
+      this.current.entries.some((entry) => entry.task.taskId === input.idempotencyKey) ||
+      this.current.submissionFailures.some((failure) => failure.input.idempotencyKey === input.idempotencyKey)
+    ) {
+      throw new GenerationError("busy", "This canvas generation request already exists; retry its existing task", "idempotencyKey");
+    }
+    const nodeKey = this.assertNodeIdle(pendingReference(input));
+    const { generation, controller } = this.ensureOperation();
+    const firstOrder = this.nextOrder;
+    this.nextOrder += repeat;
     const cloned = cloneInput(input);
+    const inputs = Array.from({ length: repeat }, (_, index) => index === 0
+      ? cloned
+      : { ...cloneInput(cloned), idempotencyKey: createCreativeTaskIdempotencyKey() });
+    for (const request of inputs) {
+      this.taskNodeKeys.set(request.idempotencyKey, nodeKey);
+      this.submittingTaskIds.add(request.idempotencyKey);
+      this.activeWorkerTaskIds.add(request.idempotencyKey);
+    }
+    this.update({ submittingCount: this.current.submittingCount + repeat });
     await Promise.all(
-      Array.from({ length: repeat }, (_, order) =>
+      inputs.map((request, index) =>
         this.createWorker(
           generation,
           controller,
-          order,
-          order === 0
-            ? cloned
-            : {
-                ...cloneInput(cloned),
-                idempotencyKey: createCreativeTaskIdempotencyKey(),
-              },
+          firstOrder + index,
+          request,
           outputKind,
         ),
       ),
     );
     return this.snapshot();
+  }
+
+  private nodeKey(reference: CreativeTaskReference): string {
+    if (reference.owner.kind !== "canvas_node") {
+      throw new GenerationError("invalid_parameters", "Canvas generation requires a canvas node owner", "owner");
+    }
+    return JSON.stringify([
+      reference.owner.canvasId,
+      this.nodeIdForTask?.(reference) ?? reference.owner.nodeId,
+    ]);
+  }
+
+  private assertNodeIdle(reference: CreativeTaskReference, excludeTaskId?: string): string {
+    const nodeKey = this.nodeKey(reference);
+    if (this.hasUnfinishedNodeTask(nodeKey, excludeTaskId)) {
+      throw new GenerationError("busy", "This canvas node already has an unfinished generation task", "nodeId");
+    }
+    return nodeKey;
+  }
+
+  /** Includes submission, recovery, and the final canvas persistence step. */
+  isNodeBusy(canvasId: string, nodeId: string): boolean {
+    return this.hasUnfinishedNodeTask(JSON.stringify([canvasId, nodeId]));
+  }
+
+  private hasUnfinishedNodeTask(nodeKey: string, excludeTaskId?: string): boolean {
+    for (const [taskId, key] of this.taskNodeKeys) {
+      if (key !== nodeKey || taskId === excludeTaskId) continue;
+      const entry = this.current.entries.find((candidate) => candidate.task.taskId === taskId);
+      if (
+        this.activeWorkerTaskIds.has(taskId) ||
+        this.recoveryFailureTaskIds.has(taskId) ||
+        this.current.submissionFailures.some((failure) => failure.input.idempotencyKey === taskId) ||
+        (entry && (!isTerminalCreativeTaskStatus(entry.task.status) || entry.requestError !== null))
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   async run(
@@ -687,18 +731,23 @@ export class CanvasGenerationRuntimeController {
     order: number,
     request: CanvasGenerationResumeRequest,
   ): Promise<void> {
+    if (!this.isCurrent(generation, controller)) return;
     let task: CreativeTask | null = null;
     let firstResponse = true;
     const releaseRecovery = (): void => {
-      if (this.recoveringRequests.delete(request.reference.taskId)) {
+      if (this.isCurrent(generation, controller) && this.recoveringRequests.delete(request.reference.taskId)) {
         this.decrement("recoveringCount");
       }
       firstResponse = false;
     };
     try {
       this.activeWorkerTaskIds.add(request.reference.taskId);
-      task = await this.tasks.get(request.reference, controller.signal);
-      assertCreativeTaskReference(task, request.reference);
+      const recovered = await this.tasks.get(request.reference, controller.signal);
+      if (!this.isCurrent(generation, controller)) return;
+      assertCreativeTaskReference(recovered, request.reference);
+      task = recovered;
+      this.recoveryFailureTaskIds.delete(request.reference.taskId);
+      this.clearSubmissionFailure(order);
       this.publishTask(
         generation,
         controller,
@@ -713,12 +762,14 @@ export class CanvasGenerationRuntimeController {
         return;
       }
       if (
-        (this.cancelAllRequested || this.cancelRequestedIds.has(task.taskId)) &&
+        this.cancelRequestedIds.has(task.taskId) &&
         !this.cancelDispatchedIds.has(task.taskId)
       ) {
         this.cancelDispatchedIds.add(task.taskId);
-        task = await this.tasks.cancel(request.reference, controller.signal);
-        assertCreativeTaskReference(task, request.reference);
+        const canceled = await this.tasks.cancel(request.reference, controller.signal);
+        if (!this.isCurrent(generation, controller)) return;
+        assertCreativeTaskReference(canceled, request.reference);
+        task = canceled;
         this.publishTask(
           generation,
           controller,
@@ -753,6 +804,9 @@ export class CanvasGenerationRuntimeController {
       await this.notifySettled(task, controller);
     } catch (reason) {
       if (reason instanceof TaskSettledElsewhereError) return;
+      if (task === null && this.isCurrent(generation, controller)) {
+        this.recoveryFailureTaskIds.add(request.reference.taskId);
+      }
       if (
         task === null &&
         this.onRecoveryFailure &&
@@ -763,6 +817,8 @@ export class CanvasGenerationRuntimeController {
           controller.signal,
         ))
       ) {
+        this.recoveryFailureTaskIds.delete(request.reference.taskId);
+        this.clearSubmissionFailure(order);
         return;
       }
       this.publishWorkerError(
@@ -777,9 +833,11 @@ export class CanvasGenerationRuntimeController {
       if (this.isCurrent(generation, controller) && firstResponse)
         releaseRecovery();
     } finally {
-      this.activeWorkerTaskIds.delete(request.reference.taskId);
-      if (this.isCurrent(generation, controller) && firstResponse)
-        releaseRecovery();
+      if (this.isCurrent(generation, controller)) {
+        this.activeWorkerTaskIds.delete(request.reference.taskId);
+        if (firstResponse) releaseRecovery();
+        this.update({});
+      }
     }
   }
 
@@ -788,7 +846,6 @@ export class CanvasGenerationRuntimeController {
   ): Promise<CanvasGenerationRuntimeSnapshot> {
     this.assertUsable();
     if (requests.length === 0) return this.snapshot();
-    this.assertWorkersIdle();
     const ids = requests.map((request) => request.reference.taskId);
     if (new Set(ids).size !== ids.length) {
       throw new GenerationError(
@@ -814,12 +871,22 @@ export class CanvasGenerationRuntimeController {
       }
       assertRetryIdentity(request);
     }
-    const { generation, controller } = this.begin(0, requests.length);
-    requests.forEach((request, order) => {
-      this.recoveringRequests.set(request.reference.taskId, { request, order });
+    const { generation, controller } = this.ensureOperation();
+    const workers = requests.filter((request) => !this.activeWorkerTaskIds.has(request.reference.taskId)).map((request) => {
+      const existing = this.current.entries.find((entry) => entry.task.taskId === request.reference.taskId);
+      if (existing) assertCreativeTaskReference(existing.task, request.reference);
+      const failure = this.current.submissionFailures.find((candidate) => candidate.input.idempotencyKey === request.reference.taskId);
+      const order = existing?.order ?? failure?.order ?? this.nextOrder++;
+      return { request, order, nodeKey: this.nodeKey(request.reference) };
     });
+    for (const { request, order, nodeKey } of workers) {
+      this.taskNodeKeys.set(request.reference.taskId, nodeKey);
+      this.recoveringRequests.set(request.reference.taskId, { request, order });
+      this.activeWorkerTaskIds.add(request.reference.taskId);
+    }
+    this.update({ recoveringCount: this.current.recoveringCount + workers.length });
     await Promise.all(
-      requests.map((request, order) =>
+      workers.map(({ request, order }) =>
         this.resumeWorker(generation, controller, order, request),
       ),
     );
@@ -828,8 +895,21 @@ export class CanvasGenerationRuntimeController {
 
   async cancel(taskId?: string): Promise<CanvasGenerationRuntimeSnapshot> {
     this.assertUsable();
-    if (taskId) this.cancelRequestedIds.add(taskId);
-    else this.cancelAllRequested = true;
+    if (taskId) {
+      if (!this.activeWorkerTaskIds.has(taskId) && !this.current.entries.some(
+        (entry) => entry.task.taskId === taskId && !isTerminalCreativeTaskStatus(entry.task.status)
+      )) {
+        throw new GenerationError("task_not_found", `No active canvas generation task ${taskId}`, "taskId");
+      }
+      this.cancelRequestedIds.add(taskId);
+    }
+    else {
+      for (const id of this.submittingTaskIds) this.cancelRequestedIds.add(id);
+      for (const id of this.recoveringRequests.keys()) this.cancelRequestedIds.add(id);
+      for (const entry of this.current.entries) {
+        if (!isTerminalCreativeTaskStatus(entry.task.status)) this.cancelRequestedIds.add(entry.task.taskId);
+      }
+    }
     const targets = new Map<
       string,
       {
@@ -891,6 +971,7 @@ export class CanvasGenerationRuntimeController {
             target.reference,
             controller.signal,
           );
+          if (!this.isCurrent(generation, controller)) return;
           assertCreativeTaskReference(task, target.reference);
           this.publishTask(
             generation,
@@ -952,8 +1033,7 @@ export class CanvasGenerationRuntimeController {
         retryInput: entry.retryInput,
       };
       assertRetryIdentity(request, false);
-      const { generation, controller } = this.supplementalOperation();
-      this.cancelAllRequested = false;
+      const { generation, controller } = this.ensureOperation();
       this.cancelRequestedIds.delete(taskId);
       this.cancelDispatchedIds.delete(taskId);
       this.recoveringRequests.set(taskId, { request, order: entry.order });
@@ -962,7 +1042,7 @@ export class CanvasGenerationRuntimeController {
       return this.snapshot();
     }
     if (entry.task.status === "succeeded" && entry.requestError) {
-      const { controller } = this.supplementalOperation();
+      const { controller } = this.ensureOperation();
       let replacement: CanvasGenerationRuntimeEntry;
       try {
         const outputs = committedCanvasOutputs(
@@ -986,7 +1066,7 @@ export class CanvasGenerationRuntimeController {
       entry.requestError &&
       (entry.task.status === "failed" || entry.task.status === "canceled")
     ) {
-      const { controller } = this.supplementalOperation();
+      const { controller } = this.ensureOperation();
       try {
         await this.notifySettled(entry.task, controller);
         this.update({
@@ -1017,17 +1097,16 @@ export class CanvasGenerationRuntimeController {
         "taskId",
       );
     }
-    const { generation, controller } = this.supplementalOperation();
-    const order =
-      this.current.entries.reduce(
-        (maximum, candidate) => Math.max(maximum, candidate.order),
-        -1,
-      ) + 1;
+    const { generation, controller } = this.ensureOperation();
+    const nodeKey = this.assertNodeIdle(creativeTaskReference(entry.task), taskId);
+    const order = this.nextOrder++;
     const retryInput = {
       ...cloneInput(entry.retryInput),
       idempotencyKey: createCreativeTaskIdempotencyKey(),
     };
-    this.cancelAllRequested = false;
+    this.taskNodeKeys.set(retryInput.idempotencyKey, nodeKey);
+    this.submittingTaskIds.add(retryInput.idempotencyKey);
+    this.activeWorkerTaskIds.add(retryInput.idempotencyKey);
     this.cancelRequestedIds.delete(taskId);
     this.cancelDispatchedIds.delete(taskId);
     this.update({ submittingCount: this.current.submittingCount + 1 });
@@ -1056,7 +1135,10 @@ export class CanvasGenerationRuntimeController {
         "order",
       );
     }
-    const { generation, controller } = this.supplementalOperation();
+    this.assertNodeIdle(pendingReference(failure.input), failure.input.idempotencyKey);
+    const { generation, controller } = this.ensureOperation();
+    this.submittingTaskIds.add(failure.input.idempotencyKey);
+    this.activeWorkerTaskIds.add(failure.input.idempotencyKey);
     const submissionFailures = this.current.submissionFailures.filter(
       (candidate) => candidate.order !== order,
     );
@@ -1072,6 +1154,20 @@ export class CanvasGenerationRuntimeController {
       cloneInput(failure.input),
       failure.outputKind,
     );
+    return this.snapshot();
+  }
+
+  /** Caller must first confirm that this exact submission does not exist on the backend. */
+  dismissSubmission(order: number): CanvasGenerationRuntimeSnapshot {
+    this.assertUsable();
+    const failure = this.current.submissionFailures.find((candidate) => candidate.order === order);
+    if (!failure) throw new GenerationError("task_not_found", `Unknown canvas generation submission slot ${order}`, "order");
+    if (this.activeWorkerTaskIds.has(failure.input.idempotencyKey)) {
+      throw new GenerationError("busy", "Cannot dismiss an active canvas generation submission", "order");
+    }
+    this.clearSubmissionFailure(order);
+    this.recoveryFailureTaskIds.delete(failure.input.idempotencyKey);
+    this.cancelRequestedIds.delete(failure.input.idempotencyKey);
     return this.snapshot();
   }
 
@@ -1113,7 +1209,10 @@ export class CanvasGenerationRuntimeController {
     this.operationController?.abort();
     this.operationController = null;
     this.generation += 1;
-    this.cancelAllRequested = false;
+    this.nextOrder = 0;
+    this.submittingTaskIds.clear();
+    this.taskNodeKeys.clear();
+    this.recoveryFailureTaskIds.clear();
     this.cancelRequestedIds.clear();
     this.cancelDispatchedIds.clear();
     this.terminalTaskIds.clear();
@@ -1129,6 +1228,10 @@ export class CanvasGenerationRuntimeController {
     this.operationController = null;
     this.generation += 1;
     this.disposed = true;
+    this.nextOrder = 0;
+    this.submittingTaskIds.clear();
+    this.taskNodeKeys.clear();
+    this.recoveryFailureTaskIds.clear();
     this.cancelRequestedIds.clear();
     this.cancelDispatchedIds.clear();
     this.terminalTaskIds.clear();
