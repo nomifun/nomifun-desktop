@@ -336,6 +336,8 @@
 
 ### C06-09 完成报告层级与空路径提示（2026-10-01，macOS MAC-B-06；提示修后live待验）
 
+以下保留B06当时首败与修复；后续B08形态N1及剩余交付限制见本段末，不能据此改写首败。
+
 - W207/正式Tauri/StepFun原文件任务：12 requests/367 events/两压缩，真实32 bytes/正确SHA/
   copy-move-delete及一次accepted报告，原件不变、四命令各0/reaped，报告纠正无副作用重放。
   仍FAIL_RECOVERED：criteria套数组、root summary/count错层；后续过期path两次预检拒绝，
@@ -349,6 +351,25 @@
   改用exact receipt且canonical同目录、零模型/零effect断言保持，alias/nonalias/纯数据各通过。
   本平台不改Windows验收；native退出CEF未确认/owned TERM等仍记失败，详见Mac进度。
   全证据 `2026-10-01/macos/mac-b-file-delivery/`；无预算扩大、权限变化、正文重写或新模型循环。
+
+- **2026-10-02 MAC-B-08 修后正式N1子断言**：源783b49a2c/正式Tauri/StepFun原文件任务，
+  9 requests/305 events/一压缩，首report接受、错误0，flat criteria/root summary/omit stale paths，
+  7组raw参数/canonical全同，32-byte/正确SHA/copy-move-delete/原件保护均通过，不归因唯一改动。
+  公开report仍有内部字段/earlier及三未验提示，原文来自上游report参数而非UI reasoning串出，
+  不能净化/放宽或代验完整交付。旧oracle缺语言/原生限时断言的PASS首结果保留，严格补充FAIL。
+- 观察者错过独立480秒App边界，owned TERM后0仍expired/FAIL，late UI guard不访问closed绑定；
+  最终截图/AX缺口明确保留。此失败不能被形态N1覆盖，完整A/B/C/N3及C06-08/原生/MM仍开放。
+  全证据`2026-10-02/macos/mac-b-report-recheck/`，无追加paid循环/新权限/猜测性产品修复，Windows不代判。
+
+### C06-10 历史恢复提示的三处一致性（2026-10-02，确定性子根因）
+
+- W212已更新report tool总说明；参数说明和每轮Completion context仍有旧history恢复限制。
+  现两处与总说明一致：只有已展示的历史工具找回请求摘要所需既有输出，不能升格current/
+  eligible，不能为修account重放观察或效果。仅description变化，不改权限/接受集合/门禁/计数。
+- 复用旧结果交付/不复活stale的最小回归，语义首红保留，修后completion32/32；false-current
+  仍拒绝、epoch/资格不变，historical reporting仍合法，三处提示新增对齐断言。
+  零模型/无用户数据变动，证据`2026-10-02/macos/historical-guidance-consistency/`；正式live与
+  公开语言未验证，不能据此覆盖Mac/Windows已有失败或关闭完整A/B/C/N3。
 
 ### C05-07 有界退出许可不是清理证明（2026-10-02，macOS MAC-C05-03）
 
