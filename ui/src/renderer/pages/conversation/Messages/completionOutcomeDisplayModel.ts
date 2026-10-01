@@ -6,8 +6,10 @@ export interface CompletionOutcomeDisplay {
   toolCount: number;
   commandCount: number;
   /** Only exact same-turn native outcomes can establish this presentation. */
-  kind: 'native_nonzero' | 'counts';
+  kind: 'native_nonzero' | 'native_nonzero_and_arguments' | 'native_nonzero_and_unclassified' | 'arguments_not_executed' | 'counts';
   exitCodes: number[];
+  argumentCount?: number;
+  otherCount?: number;
 }
 
 const toolFooter = String.raw`Unsuccessful tool attempts in this turn: ([1-9]\d{0,9}) \(including argument checks and command outcomes\)\. Details remain available in the execution steps\.`;
@@ -50,11 +52,31 @@ export function projectCompletionOutcomes(
   const ordinaryExits = tools.filter((tool) => tool.nonFatalFailure === true
     && tool.commandExitCode !== undefined && tool.commandExitCode > 0);
   const ordinaryKeys = new Set(ordinaryExits.map((tool) => tool.key));
-  const otherFailures = tools.some((tool) => !ordinaryKeys.has(tool.key)
+  const rejectedArguments = tools.filter((tool) => tool.notExecutedReason === 'invalid_arguments');
+  const argumentKeys = new Set(rejectedArguments.map((tool) => tool.key));
+  const otherFailures = tools.some((tool) => !ordinaryKeys.has(tool.key) && !argumentKeys.has(tool.key)
     && (tool.status === 'error' || tool.notExecutedReason !== undefined
       || tool.boundedResult !== undefined || tool.nonFatalFailure === true));
+  // Classify only a fully reconciled breakdown from the same turn. A missing
+  // receipt or another failure must keep the generic counts and full details.
+  const breakdownMatches = commandCount === ordinaryExits.length
+    && toolCount === ordinaryExits.length + rejectedArguments.length && !otherFailures;
+  if (rejectedArguments.length > 0 && breakdownMatches) {
+    return { body, toolCount, commandCount,
+      kind: ordinaryExits.length > 0 ? 'native_nonzero_and_arguments' : 'arguments_not_executed',
+      exitCodes: [...new Set(ordinaryExits.map((tool) => tool.commandExitCode!))],
+      argumentCount: rejectedArguments.length };
+  }
+  if (ordinaryExits.length > 0 && commandCount === ordinaryExits.length
+    && toolCount > ordinaryExits.length + rejectedArguments.length && !otherFailures) {
+    // History may omit internal controls. Identify only the proven command
+    // outcomes; the remaining total does not prove an argument or host fault.
+    return { body, toolCount, commandCount, kind: 'native_nonzero_and_unclassified',
+      exitCodes: [...new Set(ordinaryExits.map((tool) => tool.commandExitCode!))],
+      otherCount: toolCount - ordinaryExits.length };
+  }
   const nativeOnly = ordinaryExits.length > 0 && commandCount === ordinaryExits.length
-    && (toolCount === 0 || toolCount === ordinaryExits.length) && !otherFailures;
+    && (toolCount === 0 || toolCount === ordinaryExits.length) && rejectedArguments.length === 0 && !otherFailures;
   return { body, toolCount, commandCount, kind: nativeOnly ? 'native_nonzero' : 'counts',
     exitCodes: nativeOnly ? [...new Set(ordinaryExits.map((tool) => tool.commandExitCode!))] : [] };
 }
