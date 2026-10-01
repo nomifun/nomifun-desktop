@@ -3559,3 +3559,15 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 证据：仓库外2026-10-02/windows/w212-diagnostic-report-guidance；01/02首红、03～05定向、06构建、07取消事件/DB/原参数/失败oracle及08正式UI保存。
 - 同步结算：源码10bdefd79，正常合并783b49a2c为6865cb180，保留macOS独立deadline夹具及进度；本批Rust源码未变，未重复构建/模型请求。
   新macOS原生deadline夹具未在Windows代跑，不影响上述6项定向和正式失败的覆盖结论；diff检查通过。
+
+### W213 指令范围用途与压缩重做（2026-10-02；基线8ea8b9a9b，正式仍FAIL）
+
+- Case/子断言：C02/C06/C07/C08、A05/A08/A17/A19；核对W212原摘要，entries_scanned=0的指令定位元数据被误当目录条目缺失，随后要求重新枚举并称没有实际命令。
+- 修复：真实File owner返回observation_kind=instruction_scope、is_directory_listing=false，保留原kind/路径/权限/递归和计数；明确非递归零扫描不是空目录。
+  摘要模型区分指令定位、计划状态与实际调用回执；截断提示移除无条件重读/重跑，继续保留未知、原限制和安全重放约束，不改硬预算/证据资格/工具面。
+- 验证：三个首次失败另存；非空目录/文件/缺失元数据、根路径/隐藏及链接边界、实际压缩/截断、指令缓存和硬预算共9项通过，fmt/diff及正式custom-protocol构建通过。
+- 正式GEN/StepFun、新workspace/profile、原五项任务：8步/5压缩后正式Stop，cwd3次、listing2次、样本读2次、搜索4次、Git status/diff各2次，仅第一个Bun一次exit0；整体FAIL、未交付。
+  原oracle11/22保留；搜索按query建字典掩盖重复调用，另增原调用次数审计为10/22，不覆盖原结果或松断言。6命令exit0/reaped，十文件/Git/旧事件与取消清理等9/9保持。
+- 新证据：五个ContextCompacted的retained_context只有原输入、无原工具交换，摘要将已做事项重新列待办，另一次产出伪工具调用JSON；不把这些文本当新授权或已执行证明。
+- 未覆盖：本轮模型未调用instruction_scope，新增用途字段只有真实owner回归证明；元数据/摘要说明没有闭合整体连续任务。下一步核对固定上下文占用与原回执保留，完整A/N3/COD及B进程/C仍缺，不继续付费循环。
+- 证据：仓库外2026-10-02/windows/w213-instruction-scope-compaction；01～03首红、04～08定向、09构建、10事件/DB/原oracle及加强audit、11正式取消UI分开保留。
