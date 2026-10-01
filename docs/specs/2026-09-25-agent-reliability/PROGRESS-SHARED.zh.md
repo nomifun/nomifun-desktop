@@ -175,6 +175,20 @@
 - 证据 `2026-10-01/macos/mac-c01-seatbelt-start/`；真实 UI/live是否避免原恢复开销、模型参数/
   B内容/GEN/N3/A/B/C及C05仍待验。只关闭准备/typed owner子合同，不代判另一平台。
 
+### C01-03 macOS 减权 GEN 正式目录观察（2026-10-01，N1 子链）
+
+- MAC-GEN-01 正式 Tauri/加密 StepFun Plan，8-call/4096/180秒先冻结；实际3 requests/126 events/
+  无压缩。首次 pwd-P/ls-a 各0/reaped，精确 cwd/隐藏及中文空格列表/退出码进入 report和正式UI，
+  无模型文件内容读取/其他命令/改文件，原件hash不变；正常Cmd-Q0、无残留。只记该命令 N1。
+- 完整通用 template 在准备阶段要求 Computer/Scheduler 资源，不能为只读命令补授权来通过。
+  用既有正常编辑 API 派生减权 GEN，仅删除这两个模块；closed DB 逐项证明 persona、instructions、
+  route和其他 grants相同，不使用Coding模板冒名，也不声称默认通用完整配置已验。
+- helper缺feature/provider、正常API互斥错误和过早读取编译metadata首次错误均保留，0模型请求。
+  oracle先误算宿主指令读取/限制pwd选项/漏中文为0，raw SSE ID和实际字节/路径另核对纠正；
+  原任务/独立结果/安全要求不变。普通备份首败后closed126-row快照完整；真实key matches0。
+- evidence `2026-10-01/macos/mac-gen-observe/`；helper确切模式/最小回归新增，产品Schema/权限/
+  断言不改，预算/模式/来源回归6/6。GEN已有这个有边界的实际样本，不能代替A/B/C、其他资源与入口、N3或旧失败关闭。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
