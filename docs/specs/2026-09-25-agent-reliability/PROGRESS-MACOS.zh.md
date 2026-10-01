@@ -1518,3 +1518,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   这是未发任务的清理，不是 Cmd-Q或EOF通过。原件、预算、准备状态、UI拒绝和凭据 exact
   audit0保留于 `2026-10-01/macos/mac-b-stdin-eof/`；本批只有短进度，未额外修源码/重复回归/
   发模型或改 Windows 结果，MAC-B/长helper/后代/N3/C/旧失败仍开放。
+
+- **MAC-B-03 pipe EOF live N1**：复核时对 CLOSED 旧 CUA 绑定读 AX 出现 timeout，并观察到
+  旧 GEN bundle 被重启/占单例，browser handles 在默认 dev profile；不能当安全被动锁屏探针。
+  未向它发任务/读取用户 DB 内容/删除目录；确认 probe-created PID6027 后 TERM 回收。后续
+  只显式设置隔离 data/work、确认确切 PID 运行后才选 UI，事故/默认启动影响不作隔离 PASS。
+- 隔离无模型 UI 确已可操作，锁屏不再是当前阻断；其 Cmd-Q 再现 CEF shutdown 未确认，
+  sample 指向 SecItemCopyMatching→SecKeychainItemCopyContent→SecurityServer decrypt；TERM
+  不退出，精确 owned PID6887 后 KILL **exit137**，保留 **C05 FAIL**。无解锁/Keychain授权绕过。
+- fresh run003 使用原任务/helper/13-byte断言，正式 App `8bb20b2fc160…` / frozen产品源
+  `9aab28584`，原 **1 task / 12 requests / 4096 output / 360秒**不变；实际 **7 requests /
+  243 events / 无压缩**，completed/head ready。start/write/close各一次，pipe/no shell，输入
+  `你好 MAC-B`+单 LF **13 bytes**；实测 READY/ECHO/EOF、最终0/reaped，无取消/信号/timeout。
+- raw SSE的8个参数对象与canonical全同；helper独立receipt/原始output/byte count/report/UI
+  相互一致，三原件不变，仅指定helper instrumentation生成receipt；实跑 Cmd-Q正常 **exit0**、
+  App/Helper/fixture/listener无残留。本输入/EOF/终态 **N1子链通过**，原B01/B02错误不改写。
+- verifier最初误加“不可读任何文件”限制，首败保留；原任务允许读规则/指定helper，按两者精确
+  路径核对后另记事实，仍禁止无关读取/其他命令/编辑/kill或shell代替EOF。实际有helper预读、
+  末poll未推进cursor（重放完整输出），且进度英文/summary带内部字段；效率/语言完整门槛
+  **未达标**，不能记完整B/C05/N3。closed243-row快照逐项相同/ok，普通备份首败保留、key audit0。
+- 证据 `2026-10-01/macos/mac-b-stdin-eof/`（UI-recheck事故及probe失败单列）；本批仅短进度，
+  无新产品假设/重复底层回归。完整文件/后代停止/C/N3/C05与MM仍开放，Windows结果未改写。
