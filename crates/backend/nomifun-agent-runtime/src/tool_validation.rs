@@ -66,20 +66,35 @@ impl ToolArgumentValidators {
             }
         }
         if failures.is_empty() { return Ok(None); }
+        // The issue values belong to the schema before this refusal. Every
+        // paired result below is unsuccessful and will be counted once; give
+        // account repair the following totals, without admitting any effect.
+        let correction_counters = exposed.iter().find(|tool|tool.name == crate::completion::TOOL_NAME)
+            .and_then(|tool| {
+                let properties = &tool.input_schema.0["properties"];
+                let tools = u32::try_from(properties["observed_tool_error_count"]["const"].as_u64()?).ok()?;
+                let commands = u32::try_from(properties["observed_command_failure_count"]["const"].as_u64()?).ok()?;
+                Some(json!({"observed_tool_error_count":tools.saturating_add(u32::try_from(calls.len()).unwrap_or(u32::MAX)),
+                    "observed_command_failure_count":commands}))
+            });
         Ok(Some(calls.iter().map(|call| {
             let issues = failures.get(&call.call_id);
             let message = if calls.len() == 1 && issues.is_some() && call.name == crate::completion::TOOL_NAME {
-                "No call in this batch was executed. Repair only the completion arguments using the current advertised schema and a fresh call ID; do not rerun settled commands or tests, reset their plan steps, or infer that earlier work disappeared. Copy the current runtime count constants even for an intentionally nonzero test. For an ineligible read/search/Git ID, describe the earlier observation separately and use unverified with no evidence for current-state claims; never substitute an unrelated eligible ID. Do not repeat observations solely to repair this account unless the user explicitly requires fresh verification. This parameter error alone does not require replanning."
+                "No call in this batch was executed. Repair only the completion arguments using the current advertised schema and a fresh call ID; do not rerun settled commands or tests, reset their plan steps, or infer that earlier work disappeared. Counter issues describe the old schema before this refusal. Copy correction_counters_after_rejected_batch, including this rejected batch, then the next advertised runtime count constants; do not copy an old issue's expected count. An intentionally nonzero test still counts. For an ineligible read/search/Git ID, describe the earlier observation separately and use unverified with no evidence for current-state claims; never substitute an unrelated eligible ID. Do not repeat observations solely to repair this account unless the user explicitly requires fresh verification. This parameter error alone does not require replanning."
             } else {
                 "No call in this batch was executed. Correct the arguments using the advertised schema, then propose the batch with fresh call IDs. For unions, field issues describe the closest candidate variant; the entire original schema still applies. Earlier batches are unchanged; do not repeat their effects. This parameter error alone does not require replanning."
             };
-            let result = AgentToolResult::text(call.call_id.clone(), json!({
+            let mut payload = json!({
                 "status":"not_executed",
                 "code":if issues.is_some() { "INVALID_TOOL_ARGUMENTS" } else { "BATCH_ARGUMENTS_REJECTED" },
                 "tool":call.name,
                 "issues":issues,
                 "message":message,
-            }).to_string(), true);
+            });
+            if let Some(counters) = &correction_counters {
+                payload["correction_counters_after_rejected_batch"] = counters.clone();
+            }
+            let result = AgentToolResult::text(call.call_id.clone(), payload.to_string(), true);
             (call.call_id.clone(), Ok(result))
         }).collect()))
     }
@@ -223,6 +238,7 @@ mod tests {
     fn rejected_completion_repairs_the_account_without_replaying_settled_work() {
         let mut definition = crate::completion::definition();
         definition.input_schema.0["properties"]["observed_tool_error_count"]["const"] = json!(1);
+        definition.input_schema.0["properties"]["observed_command_failure_count"]["const"] = json!(1);
         definition.input_schema.0["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"] = json!(["current-command"]);
         let mut invalid = call("bad-report", json!({"summary":"PRIVATE_REPORT_BODY",
             "observed_tool_error_count":0,"criteria":[{"disposition":"supported",
@@ -232,6 +248,11 @@ mod tests {
         let rejected = validators.reject_invalid_batch(&[invalid], &AgentToolPlan::default(), &[definition.clone()])
             .unwrap().unwrap();
         let text = rejected[0].1.as_ref().unwrap().output_text();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["correction_counters_after_rejected_batch"], json!({
+            "observed_tool_error_count":2,"observed_command_failure_count":1
+        }));
+        assert!(text.contains("including this rejected batch"));
         assert!(text.contains("INVALID_TOOL_ARGUMENTS"));
         assert!(text.contains("/criteria/*/evidence_call_ids/*"));
         assert!(text.contains("/observed_tool_error_count"));
