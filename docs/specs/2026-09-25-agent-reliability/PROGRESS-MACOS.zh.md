@@ -1677,3 +1677,15 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   编译错误另保留，语义首红保留；修后completion **32/32**，old-read supported仍拒绝、原epoch
   不变、historical unverified交付仍合法。证据`2026-10-02/macos/historical-guidance-consistency/`。
   本批无native/StepFun重跑，正式交付/公开语言/完整A/B/C/N3及旧问题仍开放，Windows记录未改。
+
+- **MAC-A-08 当前综合任务前置**（2026-10-02）：源`b53fce0b4`，正式App`2a6596e9e800…` /
+  已核对UI，原A任务/7文件/dirty Git/两指定测试/独立断言不变，新隔离Session；冻结1 task/
+  16 requests含摘要/4096/360秒、独立App480秒/5秒grace，构建/runner/签名均完成。
+- 正式UI工具返回 **Mac locked，需人工解锁**；没有发送任务，0上游请求/0Turn，仅3初始化
+  events/ready。记 **BLOCKED_HOST_LOCK_PRE_SEND**，不算provider/认证/额度故障或PASS，已请求手动
+  解锁，未绕锁屏/改系统保护。exact owned App TERM0、fixture shutdown200/0，无App/helper/
+  listener残留；信号清理不替代Cmd-Q/UI验证，隔离首败保留。
+- readonly WAL-aware完整3-row快照同/ok，7原件hash/GitHEAD/status不变，sentinel无，key audit0/283；
+  证据`2026-10-02/macos/mac-a-current-delivery/`。继续复核相关既有nonzero直接report、settled
+  report不重放、explicit open-plan授权修复三项 **各1/1**，无新源码假设或全矩阵重复。
+  仅该live前置受阻，实际cwd/中文交付及完整A/B/C/N3/旧问题未闭合，Windows结果未改写。
