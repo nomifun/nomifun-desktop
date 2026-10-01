@@ -2939,3 +2939,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 首红证明终态引用谓词仅接受launch==result，合法start→poll的精确exit0/非零/timeout被排除。现仅为保留原launch及完整匹配过程的已清理poll保持自身终态引用；当前文件、启动及旧交互不因后续命令重新变新。
 - 实际WorkStatus/CommandTracker、15种反例及既有终态/Schema/历史/文件失效共9项定向通过；修后正式模型/N3、完整A的事实与引用交付及B/C仍待验，不关闭共享阶段。
 - 证据在仓库外2026-10-02/windows/w218-terminal-poll-evidence；无新付费或正式UI样本。
+
+### W219 Coding压缩后读搜/Git重做（2026-10-02，正式FAIL）
+
+- Windows正式COD、原综合A、新workspace/profile、StepFun/step-3.7-flash；10步/4压缩。两Bun一次exit0/1、四命令reaped，但首个测试后重复读搜/Git，随后报告旧ID预检拒绝；正式Stop为cancelled，原14/22 FAIL保留。
+- 磁盘/Git/完整读及测试顺序、清理/旧事件/分类UI独立9项通过；取消截图可见而AX树缺字，原自动9/10另附复核，不改PASS。未交付完成。
+- 压缩原交换2/0/0/0，输入仍74.5～78.1k bytes；重复早于报告拒绝。W216拒绝和W218终态poll分支未触发；不由此关闭完整A/N3或共享阶段。后续核对固定上下文/定义开销，不扩预算或继续付费盲重试。
+- 仓库外2026-10-02/windows/w219-coding-a-terminal-report保留构建、原调用、时序、DB、UI及独立审计；本批仅短进度。
