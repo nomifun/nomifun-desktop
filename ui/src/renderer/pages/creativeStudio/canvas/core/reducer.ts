@@ -242,7 +242,7 @@ export function canvasReducer(state: CanvasState, command: CanvasCommand): Canva
         state,
         { ...state.document, nodes: [...state.document.nodes, structuredClone(command.node)] },
         command.history,
-        {
+        command.select === false ? state.selection : {
           ...emptySelection(),
           nodeIds: [command.node.id],
         }
@@ -350,7 +350,7 @@ export function canvasReducer(state: CanvasState, command: CanvasCommand): Canva
           connections: [...state.document.connections, structuredClone(command.edge)],
         },
         command.history,
-        {
+        command.select === false ? state.selection : {
           ...emptySelection(),
           edgeIds: [command.edge.id],
         }

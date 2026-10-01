@@ -38,6 +38,19 @@ impl ClassifiedError {
 }
 
 impl AgentSendError {
+    pub fn session_configuration_changed(detail: impl Into<String>) -> Self {
+        Self::new(
+            "The tool configuration no longer matches this session",
+            AgentErrorCode::NomifunSessionConfigurationChanged,
+            AgentErrorOwnership::Nomifun,
+            Some(detail.into()),
+            false,
+            false,
+            resolution(AgentErrorResolutionKind::StartNewSession,
+                Some(AgentErrorResolutionTarget::NewConversation)),
+        )
+    }
+
     /// An unrecoverable loss of the manager's permanent event relay. This is
     /// deliberately distinct from provider/API errors: Conversation evicts
     /// the cached runtime on this code before admitting another turn.
@@ -192,6 +205,7 @@ impl AgentSendError {
     pub fn from_app_error_ref(err: &AppError) -> Self {
         let detail = strip_error_prefix(&err.to_string());
         match err {
+            AppError::SessionConfigurationChanged(_) => Self::session_configuration_changed(detail),
             AppError::WorkspacePathEdgeWhitespaceRuntimeUnsupported(path) => Self {
                 stream_error: AgentStreamErrorData {
                     message: "This workspace path is no longer supported for execution".into(),
@@ -1094,6 +1108,37 @@ mod tests {
         assert_eq!(err.code(), Some(AgentErrorCode::UnknownUpstreamError));
         assert_eq!(err.ownership(), Some(AgentErrorOwnership::UnknownUpstream));
         assert_eq!(err.stream_error().feedback_recommended, Some(true));
+    }
+
+    #[test]
+    fn local_session_configuration_change_does_not_blame_or_retry_the_provider() {
+        let error = AgentSendError::from_app_error(AppError::SessionConfigurationChanged(
+            "Nomi Plugin Tool Kernel admission failed: capability provenance drifted; nested reason mentions provider error 503".into(),
+        ));
+        let stream = error.stream_error();
+        assert_eq!(serde_json::to_value(stream.code).unwrap(), serde_json::json!("NOMIFUN_SESSION_CONFIGURATION_CHANGED"));
+        assert_eq!(stream.ownership, Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(stream.retryable, Some(false));
+        assert_eq!(stream.feedback_recommended, Some(false));
+        assert_eq!(stream.resolution, Some(AgentErrorResolution::new(
+            AgentErrorResolutionKind::StartNewSession, Some(AgentErrorResolutionTarget::NewConversation))));
+        assert!(stream.detail.as_ref().unwrap().contains("provenance drifted"));
+        let typed = AppError::SessionConfigurationChanged("provider error 503 mentioned inside a local guard reason".into());
+        assert_eq!(typed.status_code().as_u16(), 409);
+        assert_eq!(typed.error_code(), "NOMIFUN_SESSION_CONFIGURATION_CHANGED");
+        let error = AgentSendError::from_app_error(typed);
+        assert_eq!(error.code(), Some(AgentErrorCode::NomifunSessionConfigurationChanged));
+        assert_eq!(error.ownership(), Some(AgentErrorOwnership::Nomifun));
+        assert_eq!(error.stream_error().retryable, Some(false));
+    }
+
+    #[test]
+    fn provider_diagnostic_cannot_impersonate_a_typed_local_configuration_refusal() {
+        let error = AgentSendError::from_app_error(AppError::BadGateway(
+            "NOMIFUN_SESSION_CONFIGURATION_CHANGED: provider error 503".into(),
+        ));
+        assert_eq!(error.code(), Some(AgentErrorCode::UserLlmProviderGatewayError));
+        assert_eq!(error.ownership(), Some(AgentErrorOwnership::UserLlmProvider));
     }
 
     #[test]

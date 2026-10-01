@@ -167,6 +167,10 @@
         "title": "会话状态不一致",
         "body": "当前对话状态和后台记录不同步。请重新打开应用或新建会话后再试。"
       },
+      "NOMIFUN_SESSION_CONFIGURATION_CHANGED": {
+        "title": "会话配置已变更",
+        "body": "应用当前的工具配置与本会话不同，已阻止继续执行。请新建会话后继续；此前完成的结果仍然保留。"
+      },
       "NOMIFUN_AGENT_SESSION_INCONSISTENT": {
         "title": "Agent 会话无法安全恢复",
         "body": "应用已拒绝未经验证的完成结果，但无法安全恢复已保存的 Agent 会话。请新建会话后再继续。"

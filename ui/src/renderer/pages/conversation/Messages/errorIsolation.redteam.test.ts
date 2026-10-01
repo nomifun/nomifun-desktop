@@ -82,6 +82,57 @@ const errorMessage = (
   }) as TMessage;
 
 describe('conversation error isolation red-team contracts', () => {
+  test('historical local provenance refusals retain their failure with local ownership', () => {
+    const detail = 'Conflict: Nomi Plugin Tool Kernel admission failed: capability CapabilityId("workspace.process") exact provenance drifted: Revision contribution lock does not match the materialized target';
+    const original = errorMessage('local-provenance', messageId(9), 400, 'The upstream Agent failed');
+    if (original.type !== 'tips') throw new Error('expected error tip');
+    const persisted = { ...original, content: { ...original.content,
+      error: { message:'The upstream Agent failed', code:'UNKNOWN_UPSTREAM_ERROR', ownership:'unknown_upstream',
+        detail, retryable:true, feedback_recommended:true } } } as TMessage;
+    const normalized = normalizeDbMessage(persisted);
+    if (normalized.type !== 'tips') throw new Error('expected error tip');
+    expect(normalized.content.type).toBe('error');
+    expect(normalized.content.error?.code).toBe('NOMIFUN_SESSION_CONFIGURATION_CHANGED');
+    expect(normalized.content.error?.ownership).toBe('nomifun');
+    expect(normalized.content.error?.retryable).toBe(false);
+    expect(normalized.content.error?.resolution).toEqual({kind:'start_new_session',target:'new_conversation'});
+    expect(normalized.content.error?.detail).toBe(detail);
+    expect(normalized.turn_id).toBe(persisted.turn_id);
+    expect(normalized.conversation_id).toBe(persisted.conversation_id);
+    expect((persisted.content as any).error.code).toBe('UNKNOWN_UPSTREAM_ERROR');
+  });
+
+  test('unrelated upstream diagnostics and quoted provenance text keep their original attribution', () => {
+    for (const detail of [
+      'OpenAI-compatible provider returned HTTP 503; exact provenance drifted',
+      'User example: Nomi Plugin Tool Kernel admission failed: capability CapabilityId("workspace.process") exact provenance drifted: example',
+      'Nomi Plugin Tool Kernel admission failed: resource binding belongs to another principal',
+    ]) {
+      const original = errorMessage('not-provenance', messageId(9), 400, 'The upstream Agent failed');
+      if (original.type !== 'tips') throw new Error('expected error tip');
+      const normalized = normalizeDbMessage({ ...original, content:{...original.content,
+        error:{message:'The upstream Agent failed',code:'UNKNOWN_UPSTREAM_ERROR',ownership:'unknown_upstream',detail}} } as TMessage);
+      if (normalized.type !== 'tips') throw new Error('expected error tip');
+      expect(normalized.content.error?.code).toBe('UNKNOWN_UPSTREAM_ERROR');
+    }
+  });
+
+  test('HTTP and nested configuration codes keep the same non-retryable recovery advice', () => {
+    for (const fields of [
+      {source:'send_failed',code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',error:undefined},
+      {error:{code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',message:'Configuration changed',detail:'Original local diagnostic'}},
+    ]) {
+      const original=errorMessage('coded-local-config',messageId(9),400,'Configuration changed');
+      if(original.type!=='tips') throw new Error('expected error tip');
+      const normalized=normalizeDbMessage({...original,content:{...original.content,...fields}} as TMessage);
+      if(normalized.type!=='tips') throw new Error('expected error tip');
+      expect(normalized.content.error?.code).toBe('NOMIFUN_SESSION_CONFIGURATION_CHANGED');
+      expect(normalized.content.error?.ownership).toBe('nomifun');
+      expect(normalized.content.error?.retryable).toBe(false);
+      expect(normalized.content.error?.resolution).toEqual({kind:'start_new_session',target:'new_conversation'});
+    }
+  });
+
   test('historical engine guard failures are no longer presented as unknown upstream faults', () => {
     const old = errorMessage('old-guard', messageId(9), 400, 'The upstream Agent failed');
     if (old.type !== 'tips') throw new Error('expected error tip');
