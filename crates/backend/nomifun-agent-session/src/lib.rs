@@ -9,6 +9,7 @@
 
 mod checkpoint;
 mod error;
+mod history_tool_projection;
 mod projector;
 mod registry;
 mod store;
