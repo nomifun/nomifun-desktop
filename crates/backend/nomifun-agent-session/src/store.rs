@@ -2779,6 +2779,18 @@ impl AgentSessionStore {
         Ok(history)
     }
 
+    /// Resolve one derived Runtime history message without mutating canonical
+    /// events or requiring it to remain in the newest renderer page.
+    pub async fn runtime_tool_history_message(
+        &self, session_id: &AgentSessionId, message_id: &str,
+    ) -> Result<Option<MessageProjection>, SessionStoreError> {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let projection = crate::history_tool_projection::by_message_id(&mut tx, session_id, message_id).await?;
+        tx.commit().await?;
+        Ok(projection)
+    }
+
     /// Read the renderer-facing conversation history. In addition to canonical
     /// message/tool/thinking projections, expose one derived lifecycle summary for every
     /// durable Turn. The summary is reconstructed from `agent_turns`, so older
@@ -2837,6 +2849,10 @@ impl AgentSessionStore {
             .into_iter()
             .map(projection_from_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let (runtime_tools, runtime_tool_total) = crate::history_tool_projection::page(
+            &mut tx, session_id, as_i64(boundary, "before_seq")?, query_limit,
+        ).await?;
+        history.extend(runtime_tools);
         for row in turn_rows {
             if let Some(summary) = turn_history_projection_from_row(row)? {
                 history.push(summary);
@@ -2864,7 +2880,7 @@ impl AgentSessionStore {
         .bind(session_id.as_ref())
         .fetch_one(&mut *tx)
         .await?;
-        let total = message_total.checked_add(turn_total).ok_or_else(|| {
+        let total = message_total.checked_add(turn_total).and_then(|value| value.checked_add(runtime_tool_total)).ok_or_else(|| {
             SessionStoreError::InvalidSession("message history total overflowed".to_owned())
         })?;
         tx.commit().await?;
