@@ -28,7 +28,7 @@
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-07 历史头尾/搜索已交付、九次请求正常完成/退出；实际 cwd 路径与公开语言仍缺，不记整组 PASS/N3 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-02 正式修后仍 FAIL/cap cancelled：新说明已进 wire，上游参数仍漏 LF/把脚本放进 command；说明不足以闭环，wrapper 启动失败合同与完整链待修/验 |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-06 原文件任务正确交付但两次报告预检拒绝，FAIL_RECOVERED；03 输入/EOF、04 后代Stop各N1，完整链/零失败/N3及原生退出仍未关闭 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
@@ -1593,3 +1593,25 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   readonly备份首败/空库保留，writer/WAL无后另作436-row全相同/ok/failed快照。证据
   `2026-10-01/macos/mac-b-file-results/`，原产物未修/覆盖、Windows失败/结果未改写。
   其他wrong命令/报告生成、完整B/N3/C、A交付、语言/效率、C05/MM等仍开放，未追加paid循环。
+
+- **MAC-B-06 原文件任务交付复测**（C04/C06/C07/C08）：同步W207，正式Tauri源`335e33c6b` /
+  App `d56d34055f4f…`，原task/seed/32-byte末LF断言不变，新隔离Session；预算仍1 task /
+  16 requests含摘要 /4096/360秒。实际 **12 requests /367 events /10主steps /两压缩**，
+  completed/headready且一次accepted交付，终版精确32 bytes/`6ab0c427…`，临时/副本无、三原件不变。
+  cp/mv/shasum/rm各一次exit0/reaped，write/patch/read各一次；10组raw参数与canonical全同，
+  报告纠正后零副作用重放、无cwd/list无关probe，正式UI错误/报告及文件预览均保留。
+- **整组FAIL_RECOVERED**：首次report的criteria嵌套数组并把summary/count放入其中；第二次形态
+  已修但引用rm后过期path，均预检未执行。第三次引用相应历史call作用范围、保留error2/
+  commandfailure0获接受；不能用最终正确覆盖首败。实际没有missing_ok read，故不代验C06-08。
+  summary原含字面反斜杠n，未自动反转义/删原文，输出格式仍待验。
+- 只补现有description：flat criterion objects、summary/count为根字段，无可用path则omit/[]、
+  仅引用匹配eligible call范围；类型/required/接受集合/期限/权限/计数不变。首红保留，
+  completion **32/32**，这项新说明尚无修后live，不宣称已解决供应商所有报告形态错误。
+- W207本机定向回归首次因`/var`与`/private/var`别名错用原options路径失败；产品原准入已正确
+  canonicalize。cfg(test)改用真实receipt且核对同目录，精确context一次/零模型/零效果不放宽；
+  aliased/nonaliased各1通过，纯数据1通过。runner data-module预备失败另保留，0live调用。
+- Cmd-Q后CEF shutdown未确认/有界清理失败，sample主线程在native cef_shutdown/Mach RPC；
+  无确定RPC对象，不将本次直接归因Keychain。仅owned PID TERM后退出0，**非正常UI退出PASS**。
+  fixture shutdown200/0，App/Helper/三listener无；完整367-row WAL-aware backup与原events全同/ok，
+  普通readonly image SQLite14首败保留；key audit0/283。证据`2026-10-01/macos/mac-b-file-delivery/`。
+  完整B/N3、A/C、格式/效率、C05/MM仍开放，未追加paid循环或改写Windows结果。
