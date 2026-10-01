@@ -4127,6 +4127,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_preserves_a_latest_receipt_that_fits_beyond_the_soft_margin() {
+        #[derive(Default)]
+        struct Sink(std::sync::Mutex<Vec<AgentEngineEvent>>);
+        #[async_trait]
+        impl AgentEventSink for Sink {
+            async fn emit(&self, event: AgentEngineEvent) -> Result<(), AgentEngineError> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step("Earlier work was summarized; the latest command already exited.")]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(76_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(1600),
+        ));
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: vec![ChatContentPart::ToolCall {
+                call_id: "already-exited".into(), name: "exec_command".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test","diagnostic.test.ts"]})),
+                provider_metadata: None,
+            }], provider_round_id: None,
+        });
+        let receipt = ChatMessage {
+            role: ChatRole::Tool,
+            content: vec![ChatContentPart::ToolResult {
+                call_id: "already-exited".into(), is_error: true,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                    text: json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true},
+                        "success":false,"output":{"text":"d".repeat(2100)}}).to_string(),
+                }],
+            }], provider_round_id: None,
+        };
+        request.input.messages.push(receipt.clone());
+        let mut oversized = request.clone();
+        if let ChatContentPart::ToolResult { output,.. } = &mut oversized.input.messages.last_mut().unwrap().content[0] {
+            *output = vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                text: json!({"state":"exited","exit_code":1,"cleanup":{"reaped":true},
+                    "success":false,"output":{"text":"d".repeat(6000)}}).to_string(),
+            }];
+        }
+        let oversized_receipt = oversized.input.messages.last().unwrap().clone();
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let budget = crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+        let resource = AgentContextBudget { max_context_bytes:80*1024,max_history_messages:64 };
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+        let sink = Sink::default();
+        lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),
+            &sink,CancellationToken::new()).await.unwrap();
+        assert!(serde_json::to_vec(&request.input).unwrap().len() < before);
+        assert!(serde_json::to_vec(&request.input).unwrap().len() <= resource.max_context_bytes);
+        assert!(request.input.messages.contains(&receipt),"a fitting settled result must not disappear solely to reserve optional headroom");
+        assert!(request.input.messages.iter().flat_map(|message|&message.content).any(|part|
+            matches!(part,ChatContentPart::ToolCall{call_id,..} if call_id.as_ref()=="already-exited")));
+        assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+        assert_eq!(model.requests.lock().unwrap().len(),1);
+        let events = sink.0.lock().unwrap();
+        let compacted = events.iter().find_map(|event| match event {
+            AgentEngineEvent::ContextCompacted { retained_context:Some(context),retained_tool_call_ids,.. }
+                => Some((context,retained_tool_call_ids)), _ => None,
+        }).expect("durable compaction must record the retained exchange");
+        assert_eq!(compacted.1.as_slice(),[nomifun_chat_model_broker::ToolCallId::from("already-exited")]);
+        let restored = crate::compacted_history::restore(compacted.0,std::slice::from_ref(&original),compacted.1).unwrap();
+        assert_eq!(restored,request.input.messages[1..],"replay preserves the exact rejected diagnostic, not inferred success");
+        request.validate().unwrap();
+        println!("LATEST_RECEIPT_BUDGET before={before} after={} byte_cap={} fixed_instruction_bytes=76000 retained_ids={}",
+            serde_json::to_vec(&request.input).unwrap().len(),resource.max_context_bytes,compacted.1.len());
+        let oversized_model = Arc::new(ObservingModel {
+            steps:std::sync::Mutex::new(vec![text_step("Large output was summarized; no new execution is claimed.")]),
+            requests:Default::default(),
+        });
+        let mut oversized_lifecycle = crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+        oversized_lifecycle.prepare(&mut oversized,std::slice::from_ref(&original),&binding(),oversized_model.clone(),
+            &NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+        assert!(serde_json::to_vec(&oversized.input).unwrap().len() <= resource.max_context_bytes);
+        assert!(!oversized.input.messages.contains(&oversized_receipt),"latest retention cannot bypass the frozen input cap");
+        assert_eq!(oversized.input.messages.iter().filter(|message|**message==original).count(),1);
+        assert_eq!(oversized_model.requests.lock().unwrap().len(),1);
+    }
+
+    #[tokio::test]
     async fn typed_prompt_overflow_cap_cannot_be_raised_for_a_large_fixed_prefix() {
         let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
         let mut request = request();
