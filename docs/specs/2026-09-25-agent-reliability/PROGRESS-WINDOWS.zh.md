@@ -3217,3 +3217,19 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   本批编码/完整搜索只记GEN正式N1，不代替COD/N3、A全体验、B/C、macOS或正式shutdown验收；共享门槛未达。
 - 证据：仓库外2026-10-01/windows/w191-utf8-read-search，01-first独立data/work/profile、01-gen-terminal及independent-observations.json，
   原始DB/事件/模型轨迹/截图、构建身份、原oracle及补充操作核对分开保留；原生测试不改变文件，缺失错误未静默。
+
+### W192 非零诊断及完成统计展示（2026-10-01；基线6f89612ed）
+
+- Case/子断言：C06/C07/C08，REAL-004、CTRL-006/007、A08/A09/A17/A19；正式入口冷读和双诊断小任务。
+- 修复：最终消息的Runtime英文统计在展示层本地化，原文/canonical计数保持不变。只有同回合原生已退出、
+  无信号且清理已证明的非零结果能对应全部统计，才显示命令非零；混合/缺少证据保留次数与错误详情。
+  用户文本、代码示例、被改写尾段和超范围数字不转换；不把真正基础设施/参数/清理错误改成正常业务结果。
+  模型说明增加自然语言要求，不以available/ineligible字段诊断系统问题；Runtime仍自动交付历史累计计数。
+- 验证：UI72、Rust计数/收尾3、类型/i18n/desktop边界及正式UI/Tauri构建通过；Shadow DOM展示核对通过，runner中间失败另存。
+  使用W191隔离data/work、新W192 profile冷读旧回合；UI显示exit1、1/1统计，原事件逐字一致，不计新的实际执行样本。
+  原正式GEN会话新双诊断任务completed，7模型步/3压缩；两次实际执行exit0/1、均reaped、9文件hash不变，无unrelated。
+  模型额外提议2次检查均未dispatch；2次report计数参数拒绝保留；最终正文简短中文说明正常退出/清理，UI保留调用3/命令1。
+- 未闭合：报告首发计数错误和多余提议仍待修；旧A消息中的当前证据/内部字段警告不重写，完整A N3及B/C未完成。
+  本批只有GEN展示N1与真实原会话连续样本，无新COD/macOS/正式shutdown/发布认证；共享阶段未达标。
+- 证据：仓库外2026-10-01/windows/w192-completion-outcome-ui，01-ui-replay保存旧DB快照/宿主/冷读图，02-live-result保存
+  新原始事件、调用、DB、独立退出/清理/磁盘及旧事件比较结果；数据仍在独立W191夹具，新操作未触及原用户数据。
