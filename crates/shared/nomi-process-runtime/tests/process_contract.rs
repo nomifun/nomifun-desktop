@@ -543,6 +543,40 @@ async fn macos_posix_shell_preserves_literal_environment_and_exit_status() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 #[serial_test::serial(unix_process_contract)]
+async fn macos_seatbelt_bare_program_keeps_requested_path_and_literal_spaces() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = tempfile::tempdir().expect("isolated executable fixture");
+    let cwd = fixture.path().canonicalize().expect("canonical workspace");
+    let blocked = cwd.join("blocked");
+    let runnable = cwd.join("bin");
+    fs::create_dir(&blocked).unwrap();
+    fs::create_dir(&runnable).unwrap();
+    let name = "literal helper with spaces";
+    fs::copy(helper_binary(), blocked.join(name)).unwrap();
+    fs::set_permissions(blocked.join(name), fs::Permissions::from_mode(0o644)).unwrap();
+    fs::copy(helper_binary(), runnable.join(name)).unwrap();
+    fs::copy(helper_binary(), cwd.join(name)).unwrap();
+    // A non-executable earlier PATH entry must not shadow a later executable.
+    // Relative entries resolve under the requested cwd, not the host checkout.
+    for path in [std::env::join_paths([&blocked, &runnable]).unwrap(), OsString::from("blocked:bin"), OsString::new()] {
+        let mut process = request(name, [OsString::from("exit"), OsString::from("7")]);
+        process.cwd = cwd.clone();
+        process.env.insert("PATH".into(), path);
+        process.capability = CapabilityPolicy { cwd_roots: vec![cwd.clone()],
+            sandbox: SandboxPolicy::MacSeatbelt { write_roots: vec![cwd.clone()] } };
+        let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+        let handle = supervisor.start(process).await.expect("literal spaced name must retain execvp semantics");
+        let ProcessOutcome::Exited { code, cleanup, .. } = wait_for_terminal(&supervisor, &handle).await else {
+            panic!("literal helper must exit with its actual status");
+        };
+        assert_eq!(code, Some(7));
+        assert!(cleanup.reaped);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[serial_test::serial(unix_process_contract)]
 async fn macos_seatbelt_program_pipe_allows_only_declared_write_roots() {
     // Darwin's trusted temporary directories are intentionally writable in
     // the profile. Keep both fixtures beside the checkout so `outside` really

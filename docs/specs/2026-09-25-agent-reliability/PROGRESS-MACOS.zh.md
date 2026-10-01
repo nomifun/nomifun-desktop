@@ -28,7 +28,7 @@
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-07 历史头尾/搜索已交付、九次请求正常完成/退出；实际 cwd 路径与公开语言仍缺，不记整组 PASS/N3 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-01 正式首败：文件漏末尾 LF、stdin 多一 LF；模型参数说明/投影已修，真实修后与长 helper/后代 stop 待补，不记整组 PASS |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-02 正式修后仍 FAIL/cap cancelled：新说明已进 wire，上游参数仍漏 LF/把脚本放进 command；说明不足以闭环，wrapper 启动失败合同与完整链待修/验 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
@@ -1443,3 +1443,46 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   保留不使用；另作 WAL-aware readonly 备份，**531 events** 逐项匹配、`ok`、completed。
   证据 `2026-10-01/macos/mac-b-files-stdin/`；真实修后/GEN/N3、长 helper/完整 B/C 仍开放，
   MAC-A cwd/语言和旧 MM spinner 未关闭，Windows 结果未改写。
+
+- **MAC-B-02 unchanged-task newline recheck**（C01/C04/C05/C06/C07/C08）：正式 App
+  `267019c81a5a…` / 源 `929dae3bb`，同一原任务/三原件 hash/独立字节断言，新隔离 COD；
+  冻结 **1 Session / 16 requests（含摘要）/ 4096 output / 360 秒**，实际 **16 requests /
+  三轮压缩**，本机 guard 429 后正式 UI 结束，**499 events / cancelled / head ready**。
+- **修后仍 FAIL**：request-01 确认新的 content/append_newline 字段说明已在正式模型请求中；
+  原 SSE→canonical 的 **8 个参数对象全同**，两次 write_file 的上游 content 均缺末尾 LF。
+  未见 NomiFun 解码/owner 改字节；说明回归通过不等于真实生成已修，停止叠加同类提示。
+- 六个 exec 提议中五个实际 native 终态 **71/0/71/0/0**、全部 reaped；另一个正确 `/bin/ls`
+  被 needs_replan 拒于派发前，独立 verifier 最初误计六个执行，首败保留后逐项纠正。两个 71
+  是上游把 `ls -la`/整段 printf 脚本放入 literal command，wrapper 报 execvp 找不到程序；
+  未自动拆 argv/改 shell。后续显式 cmd 仅修出 **32-byte 临时文件**，无终版/复制移动删除/
+  helper 启动及有效完成报告。预算未增加，cap 429 不是本机账号额度不足证据。
+- 本批再现“wrapper 已退出但请求程序未启动”进入 command failure/replan 的合同缺口；下批
+  复核 wrapper 前真实可执行准备失败能否给 not_started。不能只凭 stderr 字符串推断、扩大
+  权限或放宽清理/证据条件；不把未派发的正确重试当第二次实际 ls 或新增丢 receipt 故障。
+- 无模型空数据预检 UI 可用，Cmd-Q 最终 exit0 却有 CEF cleanup 未确认/forced-exit 告警，
+  **退出 FAIL** 保留，PID 已终止无法 sample 也保留。实跑 cancelled Session Cmd-Q **exit0**，
+  无强制/timeout、App/Helper/fixture/listener 残留；不由实跑良好子样本关闭前置/旧 C05 条件。
+- 原件 3/3 不变，partial 临时文件按取消合同保留；凭据 exact match **0**。普通 readonly
+  backup 失败/空库保留；确认 writer/WAL 都无后另备份 **499 rows**、逐项相同、`ok`、cancelled。
+  证据 `2026-10-01/macos/mac-b-newline-recheck/`；仅更新短进度，不提交新产品假设或重复测试。
+  完整 B/GEN/N3/C、A cwd/公开语言与旧 MM spinner 均未关闭，Windows 验收未改写。
+
+- **MAC-C01-02 Seatbelt bare-program pre-spawn**（C01/C06；`PROC-001/004`、启动失败恢复子断言）：
+  从 MAC-B-02 两个 wrapper exit71 及随后正确 argv 的 needs_replan 拒绝定位；本批无模型/
+  Session/凭据读取，macOS 26.6.2 / native arm64 / APFS。最小真实 native 首败保留：缺失裸名
+  仍物理启动 wrapper，未满足零-authority preflight；先等待其 reaped 再使测试失败，未留孤儿。
+- 只补 macOS Seatbelt 原有启动准备：按请求实际 PATH（override 优先、否则继承）和 cwd 做
+  裸名字面 executable access 检查，缺失/不可执行在 watchdog/wrapper 前返回 spawn failure。
+  不拆参、不猜 shell、不从 stderr 判未启动；成功不替换 argv，真实 execvp 仍为最后依据。
+  PATH 未配置/访问 ELOOP 等不确定错误保留实际 execvp，不虚构缺失；绝对/相对/空 PATH、前项 EACCES 后项可执行及合法
+  空格程序名保持原语义，未改 Sandbox/写根、注册 Schema/贡献锁或 Windows/Linux 路径。
+- 原生 preflight **1/1**（含 TMPDIR/显式不可执行/裸名缺失和无执行权限，全部 watchdog/leader/
+  reap/cleanup 调用为0）、macOS process **6/6**；扩展 PATH 边界另复核 **1/1**，非统计 N3。
+  最终 Seatbelt 准备/不确定 access/原 profile 与 TMPDIR **4/4**，安全合同未降级。
+  App 既有同 scope 字面恢复 **1/1**：裸/显式整行均 `PROCESS_NOT_STARTED/user_code_started=false`，
+  正确 `/bin/ls` + args 后真实0/reaped，scope 可清理。Runtime 原非启动计数/控制 **1/1**，
+  仍记录 tool error1、command failure0，拒绝假最终完成；原 direct exec ABORT/精确 reap **1/1**。
+- 证据 `2026-10-01/macos/mac-c01-seatbelt-start/`。仅闭合该确定性准备/typed owner 子合同，
+  不能保证 StepFun 首次参数正确，裸名 precheck 后变化、PATH 未配置和其他 wrapper 自身故障
+  仍保守处理；真实 UI/live 修后、B 字节/完整链/GEN/N3/C、C05 退出和 MM spinner 均未关闭。
+  未做额外全仓 build/UI/平台矩阵，Windows 结果未改写。
