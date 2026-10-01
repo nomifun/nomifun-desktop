@@ -61,6 +61,21 @@
   后续 exit 0/reaped；日志在 `2026-10-01/macos/c01-literal-guidance/`。正式 UI 被当前锁屏阻断，
   不以组件结果关闭 C01/MAC-A/N3，不代判 Windows 原生验收，也不把模型预算恢复为 0。
 
+### C07-02 动态前缀与压缩余量（2026-10-01，待定位/修复）
+
+- macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
+  但测试前重复目录观察；15 次请求中六次压缩仅保留 accepted input，最终 `compaction cannot fit`
+  failed，无完成报告。完整原始请求/SSE/事件/UI 在 `2026-10-01/macos/mac-a-current/`，不追加
+  模型重试或通过扩 context/byte/输出额度制造通过，先定位实际 ContextLifecycle 的失败条件。
+- 固定工具从 22/26,239 bytes 增至 27/约 38,729 bytes，system 前缀从 5,344 增至 20,777 bytes；
+  这些是原 OpenAI 请求的字段尺寸，不是 tokenizer 或 SDK encoded_size 的替代。八个主请求 usage
+  input 最大 14,977 tokens，冻结 context/output 仍 32,768/4,096。现有 byte trigger 修复未覆盖
+  当前动态前缀/余量现场；不能用 C07-01 的旧组件 PASS 关闭此新反例。soft token/硬字节、摘要大小、
+  suffix 保留与动态完成数据的具体因果仍需最小确定性反例核对，不先声明唯一根因。
+- 复核共享新提示时发现一个旧测试仍要求单个 criterion，已对齐八 ID 分组并补九 ID 拒绝，
+  completion **29/29**；原 stale/missing/failed/no-evidence admission 断言不变。这只修回归
+  文案，不是 C07-02 产品修复，不代判 Windows 的完整正式场景。
+
 ## 历史全产品口径快照（已停止本轮排程）
 
 - 公共 P0 为 **5/5 任务已验证**。本文213个去重问题编号属于问题簇，不是已通过的Case数量。
