@@ -1539,3 +1539,21 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   **未达标**，不能记完整B/C05/N3。closed243-row快照逐项相同/ok，普通备份首败保留、key audit0。
 - 证据 `2026-10-01/macos/mac-b-stdin-eof/`（UI-recheck事故及probe失败单列）；本批仅短进度，
   无新产品假设/重复底层回归。完整文件/后代停止/C/N3/C05与MM仍开放，Windows结果未改写。
+
+- **MAC-B-04 formal UI Stop / descendants N1**（C05/C06/C08、`PROC-033/036/039` 子断言）：
+  正式 Tauri `e362de1265e9…` / frozen源 `b530d751f`，当前UI构建/验签，隔离COD/加密StepFun；
+  冻结 **1 task / 12 requests / 4096 output / 360秒**，实际 **7 requests / 228 events / 无压缩**。
+  用户任务明确10分钟进程期限供UI Stop，不改变既有600000上限/权限，不用timeout关闭场景。
+- 首次 start一次、literal bun+长helper/pipe，独立poll读READY，后续六次poll全部接正确cursor
+  0→60，wait30000真实等待，无重启/模型cancel/close/其他命令或改文件。独立ps在点击前证明
+  父PID34131/子34132、真实ppid关系、同PGID34131，双PID心跳增长；并非只相信helper文本。
+- 正式UI Stop后独立 **141ms** 内两PID消失、随后1秒心跳不增，机器5秒断言通过。canonical
+  cancelled/headready、host_cleanup_proven，受中断poll仍有原call的native cancelled/reaped/
+  interrupt-only **148ms** 回执，is_error=false，原READY/CHILD_READY输出保留，无新副作用或孤儿。
+  三原件hash不变、仪器文件保存，UI显示操作已取消和“下方是停止前尚未完成的回复”。
+- 本停止/后代清理 **N1子链通过**；模型进度仍有英文/重复状态/内部cursor等，完整语言与
+  过程体验 **未通过**，不由物理清理关闭完整B/N3/C或旧Keychain/C05。实际Cmd-Q正常0、
+  App/Helper/fixture/listener无残留，key exact audit0。普通备份首败保留，闭合后无WAL另备份
+  **228 rows**逐项相同/ok。编译结束前读artifact的helper前置失败也保留，0模型、不当产品故障。
+- 证据 `2026-10-01/macos/mac-b-stop-descendants/`；仅短进度，无新产品假设/重复进程矩阵。
+  仍缺完整文件步骤/综合B/C/N3和语言效率，MM旧retry不关闭，Windows结果未改写。
