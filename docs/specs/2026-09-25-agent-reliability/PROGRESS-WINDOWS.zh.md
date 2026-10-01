@@ -3667,3 +3667,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   两项新回归及既有硬字节/usage/typed拒绝/私有投影/报告复核/未见图片共9项不同定向通过，首败/修后分日志；fmt配置/diff通过。无新真实模型/命令/构建样本。
 - 未覆盖：正式Tauri/StepFun修后/N3及W221两次零保留的完整归因；Windows属性提示效果、完整A/B/C和共享门槛仍缺。不用组件通过覆盖W221首败，也不称所有压缩丢失已修。
 - 证据：仓库外2026-10-02/windows/w222-latest-hard-token-envelope；01首红、02实际余量及03 typed恢复、04～12定向日志，Git仅源码、两项回归和短进度。
+
+### W223 正式回执保留与轮询期限混用（2026-10-02；正式基线b4e91e80b，FAIL）
+
+- Case/子断言：综合A、C01/C02/C03/C05/C06/C07/C08及A05/A08/A09/A15/A17/A19；正式Tauri、原任务、新workspace/profile、已有隔离data/work、StepFun/step-3.7-flash。
+- 首败：将start的timeout_ms=120000复制为poll的wait_ms=120000，超过原maximum=30000，整批预检拒绝/无owner执行。后续30000修正取得exit0；第二Bun一次exit1/reaped。报告又以supported引用旧读搜/Git ID被拒；原两参数拒绝及业务非零分开保留，及时正式Stop为cancelled，整体A FAIL。
+- 操作事实：一个本机脚本合法合并实际cwd与9项枚举，Hidden/System全对；完整43 bytes/4行/hash、status/diff各一次且字节正确，两测试启动各一次、终态按原process_id配对/依序0/1，无原件或Git变化。搜索各一次且结果正确，但path用了父目录而非指定文件，独立范围断言FAIL不放宽；原审计12/13保留。
+- 正式子证据：8步/6压缩保留原交换7/2/2/2/2/2、原输入各一次；本例没有零保留/读搜重做，W221 Hidden误判未重现，仅N1。首次报告Schema的eligible IDs包含两个真实terminal poll，W218终态保留分支实证N1；无伪摘要，不代判W216纠正分支。
+- 指引调整：poll wait描述明确0～30000、独立于进程总期限，给0/1000/30000合法例值；search path明确文件/目录及只搜指定文件时不得用父目录。范围/默认/权限/原接受集合不改，不截断参数或改写输出；既有lifecycle/shell/admission三项通过，搜索描述变更后admission另验通过，fmt配置/diff通过，无新同构测试。
+- 未覆盖：新说明正式效果/首发N3、精确搜索范围、历史结果/报告资格交付及完整A/B/C/共享门槛；提示晚于正式binary，修后不再付费循环，不把恢复或组件通过当整组通过。
+- 证据：仓库外2026-10-02/windows/w223-hard-envelope-live，01构建、02原事件/DB/参数/独立audit、03/04取消及混合错误UI、05～08合同；一脚本合并cwd/list与start/poll合法，不由旧位置假设或字段名限制代判。
