@@ -101,6 +101,38 @@
   增强终结控制断言，未改 review 产品逻辑。日志 `2026-10-01/macos/c07-prefix-headroom/`，
   无新模型调用；完整 MAC-A/B/C、实际模型压缩后续行/N3 与 C05 原生退出仍待验。
 
+### C06-01 完成参数纠正不重开已完成工作（2026-10-01，提示已修，正式修后待补）
+
+- MAC-A-04 正式 StepFun 已完成读搜/Git/两指定测试，各真实 exit 0/1；首次完成报告却把三条
+  当前不可用的读搜 ID 标 supported，并填累计 tool error **0** 而不是当前 const **1**。原
+  preflight 正确拒绝，无报告被接受；随后模型重开整个计划、重复目录检查并触及本地 cap。
+- 保留所有 schema/计数/freshness 拒绝，单独非法 report 的反馈现在明确只修完成参数、不要
+  重跑已结算命令/测试或把计划步骤重置。历史观察与当前缺证据分开，当前未证实项用 unverified
+  且无证据；不能用无关 eligible ID 替代。混合未执行效果批次仍用整批纠正指引，不能跳过其写入。
+- 最小反例首败保留；validation **7/7**（含两错误同拒/隐私、整批持有与合法修正）、settled-failure
+  report gate **1/1**。本项只修反馈，不自动把旧 ID 变新、不抹去故意非零的真实观察，也未证明
+  模型今后一定遵循。证据 `2026-10-01/macos/mac-a-post-headroom/`；完整完成/N3 仍待正式重验，
+  不代判 Windows 或以原提议但被拒的 summary 宣称交付。
+
+### C06-02 被拒终结账号的窄路径审查（2026-10-01，结构修复已验证，正式修后待补）
+
+- MAC-A-05 已加载 C06-01 专门反馈与计数单值提示：两个计数正确为 1，首次 report 仍因两个
+  历史搜索 ID 被拒。摘要保留“不要重跑”文字，但随后计划可重置 pending、普通工具可继续，
+  后续又重复十次检查并触及 16-request 本地 cap。提示没有闭环，不用继续堆叠提示/扩大预算。
+- 确定性反例首败证明该结束路径仍广告 update_plan、exec/read/history。现仅在单独非法结束
+  report、revision=0、proved settled_failure_gate、无运行进程/未决补丁时复用 report-only review；
+  错误参数只能修账号、披露 unverified/blocked，不能重开计划或执行额外检查。其他有显式计划、
+  未决效果/进程/补丁、真实新输入路径不由此假定已完成；所有 schema/引用/计数拒绝继续有效。
+- 首败和中间反例均保留；被拒计划重置仍计入真实失败总数，修正后计数 2、诊断仅一次、终结
+  工具唯一展示、没有额外 owner dispatch。Runtime **220/220**。日志及真实失败数据在
+  `2026-10-01/macos/mac-a-report-repair/`；结构改动未进入冻结 live App，完整 MAC-A/B/C、交付
+  与 N3 待正式重验，未以组件结果或被拒 summary 关闭场景，也未移植 Windows 平台 PASS。
+
+- macOS MAC-C06-01 补反向边界 **1/1**：显式未完成计划下的非法 report 不收掉已授权修复，
+  write 实际一次，闭合计划后才报告；已有 terminal、running-process、unresolved-patch guards
+  各 **1/1**。首个 fixture 使用未广告控制的错误顺序保留/纠正，未修改产品逻辑或降低断言。
+  当前锁屏只阻断正式 UI/live，组件结果不替代修后 N3；证据 `2026-10-01/macos/c06-terminal-boundary/`。
+
 ## 历史全产品口径快照（已停止本轮排程）
 
 - 公共 P0 为 **5/5 任务已验证**。本文213个去重问题编号属于问题簇，不是已通过的Case数量。

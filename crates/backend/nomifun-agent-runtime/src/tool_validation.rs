@@ -68,12 +68,17 @@ impl ToolArgumentValidators {
         if failures.is_empty() { return Ok(None); }
         Ok(Some(calls.iter().map(|call| {
             let issues = failures.get(&call.call_id);
+            let message = if calls.len() == 1 && issues.is_some() && call.name == crate::completion::TOOL_NAME {
+                "No call in this batch was executed. Repair only the completion arguments using the current advertised schema and a fresh call ID; do not rerun settled commands or tests, reset their plan steps, or infer that earlier work disappeared. Copy the current runtime count constants even for an intentionally nonzero test. For an ineligible read/search/Git ID, describe the earlier observation separately and use unverified with no evidence for current-state claims; never substitute an unrelated eligible ID. Do not repeat observations solely to repair this account unless the user explicitly requires fresh verification. This parameter error alone does not require replanning."
+            } else {
+                "No call in this batch was executed. Correct the arguments using the advertised schema, then propose the batch with fresh call IDs. For unions, field issues describe the closest candidate variant; the entire original schema still applies. Earlier batches are unchanged; do not repeat their effects. This parameter error alone does not require replanning."
+            };
             let result = AgentToolResult::text(call.call_id.clone(), json!({
                 "status":"not_executed",
                 "code":if issues.is_some() { "INVALID_TOOL_ARGUMENTS" } else { "BATCH_ARGUMENTS_REJECTED" },
                 "tool":call.name,
                 "issues":issues,
-                "message":"No call in this batch was executed. Correct the arguments using the advertised schema, then propose the batch with fresh call IDs. For unions, field issues describe the closest candidate variant; the entire original schema still applies. Earlier batches are unchanged; do not repeat their effects. This parameter error alone does not require replanning.",
+                "message":message,
             }).to_string(), true);
             (call.call_id.clone(), Ok(result))
         }).collect()))
@@ -215,6 +220,32 @@ mod tests {
     }
 
     #[test]
+    fn rejected_completion_repairs_the_account_without_replaying_settled_work() {
+        let mut definition = crate::completion::definition();
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["const"] = json!(1);
+        definition.input_schema.0["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"] = json!(["current-command"]);
+        let mut invalid = call("bad-report", json!({"summary":"PRIVATE_REPORT_BODY",
+            "observed_tool_error_count":0,"criteria":[{"disposition":"supported",
+                "evidence_call_ids":["stale-file-id"],"rationale":"PRIVATE_RATIONALE"}]}));
+        invalid.name = crate::completion::TOOL_NAME.into();
+        let mut validators = ToolArgumentValidators::default();
+        let rejected = validators.reject_invalid_batch(&[invalid], &AgentToolPlan::default(), &[definition.clone()])
+            .unwrap().unwrap();
+        let text = rejected[0].1.as_ref().unwrap().output_text();
+        assert!(text.contains("INVALID_TOOL_ARGUMENTS"));
+        assert!(text.contains("/criteria/*/evidence_call_ids/*"));
+        assert!(text.contains("/observed_tool_error_count"));
+        assert!(!text.contains("PRIVATE_REPORT_BODY") && !text.contains("PRIVATE_RATIONALE") && !text.contains("stale-file-id"));
+        assert!(text.contains("Repair only the completion arguments"));
+        assert!(text.contains("do not rerun settled commands or tests"));
+        assert!(text.contains("unverified with no evidence"));
+        let mut corrected = call("fixed-report",json!({"summary":"Earlier read observed; later state not rechecked.",
+            "observed_tool_error_count":1,"criteria":[{"disposition":"unverified","rationale":"No current file evidence"}]}));
+        corrected.name = crate::completion::TOOL_NAME.into();
+        assert!(validators.reject_invalid_batch(&[corrected], &AgentToolPlan::default(), &[definition]).unwrap().is_none());
+    }
+
+    #[test]
     fn control_tools_receive_nested_schema_feedback_without_private_argument_values() {
         let mut call = call("report", json!({"summary":"Ready","criteria":[{
             "disposition":"supported","rationale":42,"PRIVATE_FIELD":"PRIVATE_VALUE"
@@ -272,5 +303,7 @@ mod tests {
         let results = ToolArgumentValidators::default().reject_invalid_batch(&calls, &plan, &exposed)
             .unwrap().expect("a malformed completion report must hold the entire batch");
         assert!(results.iter().all(|(_, result)| result.as_ref().unwrap().is_error));
+        assert!(results.iter().all(|(_, result)| !result.as_ref().unwrap().output_text().contains("Repair only the completion arguments")),
+            "a mixed batch must not imply that its unexecuted requested write can be discarded");
     }
 }

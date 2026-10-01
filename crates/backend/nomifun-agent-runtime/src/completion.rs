@@ -1643,7 +1643,8 @@ mod tests {
             ..Default::default()
         };
         let definition = tracker.definition_with_evidence(&AgentPlan::default(), &work, false);
-        assert!(definition.description.contains("exactly 5 tool result error(s)"));
+        assert!(definition.description.contains("exactly 5 unsuccessful tool result(s)"));
+        assert!(definition.description.contains("including returned nonzero command outcomes even when expected"));
         let schema = definition.input_schema.0;
         assert_eq!(schema["properties"]["observed_tool_error_count"]["const"], 5);
         assert!(schema["required"].as_array().unwrap().contains(
