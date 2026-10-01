@@ -22,7 +22,7 @@
 本表只列候选复用与缺口；是否受新代码影响需核对具体基线，不把源码测试存在当已跑通过。
 本轮结案按A/B/C正式任务、核心bad-case闭环及独立结果，不再按原Case×角色×OS计算完成率。
 
-### C04-01 / C05-04 精确末尾 LF 与模型参数（2026-10-01，macOS MAC-B-01；正式修后待验）
+### C04-01 / C05-04 精确末尾 LF 与模型参数（2026-10-01，macOS MAC-B-01；MAC-B-02 正式修后仍失败）
 
 - 正式 COD/StepFun，16 requests / 531 events / 一轮压缩，文件创建/精确 patch/copy/move/read/
   hash/delete 及 managed start/poll/input/close/poll 已实际执行，原件和操作次数保持。独立严格
@@ -40,6 +40,18 @@
   Cmd-Q，owned TERM0 只作清理。完整 B/长 helper/GEN/N3 和公开语言仍待验，不改 Windows 结果。
   完整参数、首败、模型轨迹、源字节、WAL-aware 531-row 快照在
   `2026-10-01/macos/mac-b-files-stdin/`，未再调用模型或扩预算。
+
+- MAC-B-02 原任务/原件/断言不变的正式修后：新字段说明已进 native request，原 SSE 和
+  canonical **8 组参数全同**；两个 file content 仍缺 LF，排除 NomiFun 解码/owner 改字节归因，
+  **说明不足以闭环**，不能把 13/3/2 确定性结果升级为 live PASS。16 requests/三次压缩达原 cap，
+  UI 结束为499 events/cancelled/head ready，helper/完整文件链未到达，没有加预算或第二任务。
+- 两个 literal command 错装整条 ls/printf 脚本，macOS sandbox wrapper exit71；一个后续正确
+  argv 的提议因 needs_replan 未派发。五个实际 process 71/0/71/0/0 都 reaped，非六次执行或
+  丢 canonical receipt。下一根因核对 wrapper 前真实准备失败/not_started，不按 stderr 猜测、
+  默拆参数或把脚本自动交 shell。原五次执行/取消部分产物和首次 verifier 计数错误分别保留。
+- 空数据无模型 Cmd-Q 有 CEF 未确认/forced-exit 告警（虽 exit0 仍 FAIL）；实跑 Cmd-Q 正常0
+  只记独立子样本。原件/键值隔离、499-row closed snapshot 与无孤儿核对通过；完整 B/GEN/N3/
+  C、公开语言和旧 C05 条件仍开放。证据 `2026-10-01/macos/mac-b-newline-recheck/`；本批仅短进度。
 
 ### C05-01 进程总期限提示与正式停止（2026-10-01，W194）
 
