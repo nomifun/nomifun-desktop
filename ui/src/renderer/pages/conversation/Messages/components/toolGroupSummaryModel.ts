@@ -30,6 +30,7 @@ export type ToolReceiptIcon = 'tool' | 'file' | 'edit';
 
 export interface ToolReceiptSummaryPart {
   action: ToolReceiptAction;
+  /** Logical tool calls with explicit retries collapsed, not a count of distinct files. */
   count: number;
   state: TurnDisclosureProcessState;
   target?: string;
