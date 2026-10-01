@@ -164,6 +164,15 @@
   证据在2026-10-01/windows/w202-files-step-chain；独立路径/次数断言不因说明调整而放宽。
 - 正常同步b530d751f为a435abe35；源码hash与正式构建一致，两轮失败及未闭合状态保留。
 
+### C08-03 路径、shell及patch参数说明投影（2026-10-01，W203）
+
+- W202后核对接合：顶层工具说明原样编码，参数Schema却在App装配时被canonical替换，cmd/argv/cwd与嵌套patch说明未投影；装配反例01首红保留。
+  扩展既有固定白名单至已存在参数节点，只复制description；路径/完整SHA/hunk及Cmdlet脚本说明到达模型参数位置。
+  不复制default/required/范围/分支或新增字段，不改注册Schema/贡献锁、权限、owner及原参数；不通过自动改路径或吞错制造通过。
+- App10/10、Runtime14/14、fmt/diff通过，结构和canonical原件一致，恶意约束/authority与其他Module说明隔离。
+  仅关闭说明投影缺口，尚无新正式模型样本；W202两轮FAIL、完整B/N3与其他行为根因仍保留。
+  证据在2026-10-01/windows/w203-model-parameter-guidance；组件通过不代判真实任务或共享阶段。
+
 ### C07-01 固定开销与压缩后原收据（2026-10-01）
 
 - macOS MAC-A-01 的真实 StepFun 首败：两个指定测试已 exit 0/1，三次压缩却只留下 accepted input，

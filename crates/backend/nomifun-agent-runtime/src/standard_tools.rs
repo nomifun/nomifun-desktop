@@ -211,7 +211,8 @@ fn workspace_path_value() -> Value {
         "type": "string",
         "minLength": 1,
         "maxLength": 4096,
-        "pattern": "\\S"
+        "pattern": "\\S",
+        "description":"Exact path relative to the selected workspace root, already the project directory. Copy the user's relative path without prepending the project/conversation display name. Use '.' for root instruction discovery. Do not invent another project folder or compensate with mkdir."
     })
 }
 
@@ -332,7 +333,7 @@ fn patch_schema() -> Value {
                             "oneOf":[
                                 {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"any"}},"required":["kind"]},
                                 {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"absent"}},"required":["kind"]},
-                                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"existing"},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["kind","sha256"]}
+                                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"existing"},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$","description":"Copy the entire sha256 from the matching read_file result verbatim, all 64 lowercase hex characters. Do not calculate it from remembered text, guess, shorten or substitute another file's digest. On conflict re-read and replan; keep the source guard."}},"required":["kind","sha256"]}
                             ]
                         },
                         "hunks": {
@@ -375,7 +376,7 @@ fn patch_schema() -> Value {
 
 fn process_launch(include_wait: bool) -> Value {
     let cmd_description = if cfg!(target_os = "windows") {
-        "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. The supplied string runs directly through Windows PowerShell 5.1 on this process host. Do not prefix cmd with powershell.exe or pwsh; to invoke an executable, set command=powershell.exe with a separate args array. Do not assume PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Do not use Command Prompt-only syntax such as dir /b or dir /s here; use PowerShell cmdlets, or set command=cmd.exe with separate args beginning [\"/d\",\"/c\"]. For an ordinary single executable use command plus args. Never combine the forms."
+        "Runs script text directly through Windows PowerShell 5.1. PowerShell cmdlets such as Copy-Item, Move-Item, Remove-Item and New-Item are shell operations, not executables: use cmd, not command=Copy-Item or tokenized powershell.exe -Command arguments. For example {\"cmd\":\"Copy-Item -LiteralPath 'a path/source.txt' -Destination 'a path/copy.txt' -ErrorAction Stop\"}. Keep each quoted literal path in this script and preserve errors. Do not add mkdir when the accepted task says the directory already exists. Use exact workspace-relative paths without a project-name prefix. Do not prefix cmd with powershell.exe or pwsh. Do not assume PowerShell 7-only syntax such as ??, ??=, ?:, &&, or ||. Command Prompt syntax such as dir /b requires command=cmd.exe with args beginning [\"/d\",\"/c\"]. Ordinary executables such as bun/git use command plus args. Never combine the forms."
     } else {
         "Use cmd only when shell semantics such as pipelines, redirection, globbing, compound syntax, or a shell script are required. Runs through /bin/sh -c on this process host. For an ordinary single executable use command plus args. Never combine the forms."
     };
@@ -400,6 +401,12 @@ fn process_launch(include_wait: bool) -> Value {
         "cols":{"type":"integer","minimum":1,"maximum":32767},
         "rows":{"type":"integer","minimum":1,"maximum":32767}
     });
+    if cfg!(target_os = "windows") {
+        for name in ["command", "args"] {
+            let original = properties[name]["description"].as_str().expect("standard process description");
+            properties[name]["description"] = json!(format!("{original} PowerShell cmdlets such as Copy-Item and Move-Item need cmd script text, not a literal executable or tokenized -Command arguments; see cmd's quoted-path example."));
+        }
+    }
     if include_wait {
         properties["wait_ms"] = json!({"type":"integer","minimum":0,"maximum":30000,"default":0});
     }
