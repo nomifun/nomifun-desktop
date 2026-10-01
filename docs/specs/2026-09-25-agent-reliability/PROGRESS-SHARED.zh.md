@@ -61,7 +61,7 @@
   后续 exit 0/reaped；日志在 `2026-10-01/macos/c01-literal-guidance/`。正式 UI 被当前锁屏阻断，
   不以组件结果关闭 C01/MAC-A/N3，不代判 Windows 原生验收，也不把模型预算恢复为 0。
 
-### C07-02 动态前缀与压缩余量（2026-10-01，待定位/修复）
+### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
   但测试前重复目录观察；15 次请求中六次压缩仅保留 accepted input，最终 `compaction cannot fit`
@@ -75,6 +75,18 @@
 - 复核共享新提示时发现一个旧测试仍要求单个 criterion，已对齐八 ID 分组并补九 ID 拒绝，
   completion **29/29**；原 stale/missing/failed/no-evidence admission 断言不变。这只修回归
   文案，不是 C07-02 产品修复，不代判 Windows 的完整正式场景。
+
+- MAC-C07-01 原生确定性反例进一步确认：replacement **64,371/65,536 bytes**、估算输入
+  **21,457 tokens** 加原输出/预留仍在冻结 **32,768** 内，却按 **21,120** 软触发点拒绝。
+  这证明同类 soft/hard 混用，不声称已逐字段重放 MAC-A-03 或证明其所有失败条件都已消失。
+- 固定前缀连摘要预留已占满软触发时，现在仅在原硬 token 余量内留一半给历史；成功 replacement
+  作为 byte floor，避免有效摘要本身立即再触发压缩。原 output、硬 byte/message/token、未读图片、
+  provider usage 正偏差与 typed prompt-overflow 收紧约束不扩；新错误只补有界尺寸，不含正文/参数。
+- 首败保留；拟合的原 failed receipt、原 call/result 身份及 accepted input 保留，小幅续行不再摘要；
+  硬 byte 超限、实测 usage 余量和 typed rejection 均保持拒绝/原状态/零摘要调用。压缩 **18/18**、
+  Runtime **217/217**。旧预算对照另复现已有 review 夹具越过“仅 report”展示的失败；仅校正夹具并
+  增强终结控制断言，未改 review 产品逻辑。日志 `2026-10-01/macos/c07-prefix-headroom/`，
+  无新模型调用；完整 MAC-A/B/C、实际模型压缩后续行/N3 与 C05 原生退出仍待验。
 
 ## 历史全产品口径快照（已停止本轮排程）
 
