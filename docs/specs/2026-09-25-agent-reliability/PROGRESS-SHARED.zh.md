@@ -2932,3 +2932,10 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 完整A仍缺：cwd完整值和历史/当前状态披露不足，criteria用两个测试poll ID支持前四项，证据范围错误；不把账本接受或动作正确当完整语义验收。
   原仅识别exec的16/22另留，合法start/poll按原真实进程/调用数独立审计，不覆盖旧结果、不放宽要求。
 - 仓库外2026-10-02/windows/w217-summary-protocol-live保存全部证据，本批无新源码或付费复跑；完整A/N3/COD、B进程/C与共享门槛未达。
+
+### W218 start/poll终态与后续命令（2026-10-02）
+
+- 更正W217关联：五项criteria使用的是cwd/目录枚举exec的两个ID；目录项匹配，其余读搜/Git/测试错引。上一批误写为测试poll，原调用/制品/失败记录不覆盖。
+- 首红证明终态引用谓词仅接受launch==result，合法start→poll的精确exit0/非零/timeout被排除。现仅为保留原launch及完整匹配过程的已清理poll保持自身终态引用；当前文件、启动及旧交互不因后续命令重新变新。
+- 实际WorkStatus/CommandTracker、15种反例及既有终态/Schema/历史/文件失效共9项定向通过；修后正式模型/N3、完整A的事实与引用交付及B/C仍待验，不关闭共享阶段。
+- 证据在仓库外2026-10-02/windows/w218-terminal-poll-evidence；无新付费或正式UI样本。
