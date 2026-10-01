@@ -22,6 +22,8 @@ pub struct AgentInstructionScopeRequest {
 
 #[derive(Serialize)]
 pub struct AgentInstructionScope {
+    pub observation_kind: &'static str,
+    pub is_directory_listing: bool,
     pub path: String,
     pub canonical_path: String,
     pub kind: &'static str,
@@ -89,10 +91,11 @@ impl FileService {
                 _ => return Err(invalid()),
             };
             let mut result = AgentInstructionScope {
+                observation_kind: "instruction_scope", is_directory_listing: false,
                 path: request.path, canonical_path: relative(&root, &canonical)?, kind,
                 recursive: request.recursive, directories: BTreeSet::from([relative(&root, &directory)?]),
                 complete: true, incomplete_reasons: BTreeSet::new(), entries_scanned: 0,
-                notice: "Metadata observation only, not a snapshot, permission grant or proof of shell access scope. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Recursive discovery includes hidden/ignored directories, never follows descendant symlinks and reports them as incomplete. Use canonical paths and recheck after effects; external concurrent renames remain possible.",
+                notice: "Instruction-location metadata, not a filesystem entry listing, snapshot, permission grant or proof of shell access scope. entries_scanned counts discovery traversal; nonrecursive metadata has zero scans even for a nonempty directory. complete describes instruction discovery, not directory contents. Load ancestor AGENTS.override.md/AGENTS.md for each directory. Recursive discovery includes hidden/ignored directories, never follows descendant symlinks and reports them as incomplete. Use canonical paths and refresh applicable instruction discovery when needed after effects; external concurrent renames remain possible.",
             };
             if request.recursive && kind == "directory" {
                 let started = Instant::now();
@@ -298,6 +301,7 @@ mod tests {
     async fn instruction_metadata_preserves_file_directory_and_deep_missing_scope() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("directory")).unwrap();
+        std::fs::write(root.path().join("directory/existing.txt"), b"not an empty directory").unwrap();
         std::fs::write(root.path().join("source.txt"), b"source").unwrap();
         let binding = crate::workspace_binding(nomifun_common::generate_id(), "binding", "workspace", "owner", [WORKSPACE_READ_OPERATION], root.path()).unwrap();
         let service = FileService::new(Arc::new(NullEvents), vec![]);
@@ -309,6 +313,9 @@ mod tests {
             assert_eq!(observed.directories, BTreeSet::from([directory.into()]));
             assert!(observed.complete);
             assert_eq!(observed.entries_scanned, 0);
+            let metadata = serde_json::to_value(&observed).unwrap();
+            assert_eq!(metadata["observation_kind"], "instruction_scope");
+            assert_eq!(metadata["is_directory_listing"], false);
         }
         for path in ["source.txt/child", "../outside", ".nomifun/internal"] {
             assert!(service.instruction_scope_for_agent_session(&binding,

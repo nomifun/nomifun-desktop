@@ -4054,6 +4054,8 @@ mod tests {
                 if call_id.as_ref()=="check-expected-nonzero")), "failed-check semantics must remain failed");
         assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
         assert_eq!(model.requests.lock().unwrap().len(), 1);
+        assert!(model.requests.lock().unwrap()[0].input.instructions.iter().any(|text|
+            text.contains("entries_scanned=0") && text.contains("not an empty directory")));
         request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,
             "Continue to report the observed checks.".into()));
         lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
@@ -4353,7 +4355,8 @@ mod tests {
         assert_eq!(request.input.messages.last(), Some(&current));
         let summary = format!("{:?}", request.input.messages[0]);
         assert!(summary.contains("Automatic summary incomplete"));
-        assert!(summary.contains("Re-read relevant files and rerun checks"));
+        assert!(summary.contains("does not authorize re-reading or rerunning"));
+        assert!(!summary.contains("Re-read relevant files and rerun checks"));
         assert!(!summary.contains("partial"), "a truncated model draft must not be committed");
         let requests = model.requests.lock().unwrap();
         assert!(!requests.is_empty() && requests.len() <= 16);
