@@ -1557,3 +1557,19 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   **228 rows**逐项相同/ok。编译结束前读artifact的helper前置失败也保留，0模型、不当产品故障。
 - 证据 `2026-10-01/macos/mac-b-stop-descendants/`；仅短进度，无新产品假设/重复进程矩阵。
   仍缺完整文件步骤/综合B/C/N3和语言效率，MM旧retry不关闭，Windows结果未改写。
+
+- **MAC-C-01 cancelled restart cold-read**（C07、`LIFE-020/OBS-014` 冷读子断言）：只复用原
+  MAC-B-04 已隔离 cancelled Session/228事件和正式 App `e362de1265e9…`（源b530d751f），
+  显式原测试 data/work 重启，未建新Turn/Session/模型请求/读取凭据，原B事件与效果作基线。
+- 正式UI选择原Session、展开 cancelled poll；原READY/CHILD_READY/60 cursor、reaped/148ms
+  输出全部可见，旧未完成回复提示保留、活跃状态空闲。运行时只读及关闭后另读均 **228行
+  全字节一致**、唯一Turn仍cancelled/headready；心跳长度/三原件hash不变，原两PID/forwarder
+  不复活。Cmd-Q正常0/无App Helper或forced/timeout，本取消重启冷读 **N1子链通过**。
+- 同批只读定位英文重复：raw response04～06英文在 reasoning，Runtime/Journal正确分流为
+  thinking；response07也在公开content自我规划，公开196 chars/思考194 chars、trim不全同。
+  不是UI把thinking串正文，也没有精确重复的去重依据。原字段/事件/UI文字不删、不译、不
+  模糊匹配隐藏以制造通过，生成层语言/叙述门槛仍 **FAIL/open**，未交新产品假设。
+- 关闭后普通readonly读取再SQLite14，首败保留；确认writer/WAL无后用immutable只读原库，
+  与先前live readonly结果逐项一致，未编辑DB/WAL/原cancelled记录。证据
+  `2026-10-01/macos/mac-c-cancel-cold/`；完整连续追加/纠正/实压缩/C/N3和A/B/旧C05/MM仍开放。
+  本批仅短进度，不复制native/UI矩阵或发新模型，Windows结果未改写。
