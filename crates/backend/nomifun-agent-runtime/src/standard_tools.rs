@@ -40,7 +40,7 @@ impl StandardTool {
                 "linux" => "cmd invokes /bin/sh -c; command plus args invokes a literal executable. For the physical current directory, use {\"command\":\"/usr/bin/pwd\",\"args\":[\"-P\"]}. For a top-level listing including dot entries, use {\"command\":\"/usr/bin/ls\",\"args\":[\"-a\"]}. These are executable forms; omit cmd. Do not put the entire command line in command. Omit . and .. from business entry counts.",
                 _ => "Select native commands for this process host; the UI client's OS does not determine command syntax.",
             };
-            format!("Workspace process host OS: {}. {host_guidance} {}", std::env::consts::OS, self.description)
+            format!("Workspace process host OS: {}. The following command examples describe input syntax only. Run them only when the accepted task requires their operation; do not add a directory listing, cwd probe or other preflight solely to prepare an exact-path file task. {host_guidance} {}", std::env::consts::OS, self.description)
         } else {
             self.description.to_owned()
         };
