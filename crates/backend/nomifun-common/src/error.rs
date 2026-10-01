@@ -23,6 +23,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Session configuration changed: {0}")]
+    SessionConfigurationChanged(String),
+
     /// A compare-and-swap write used a stale authoritative revision.
     #[error("Revision conflict: {0}")]
     RevisionConflict(String),
@@ -90,6 +93,7 @@ impl AppError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::SessionConfigurationChanged(_) => StatusCode::CONFLICT,
             Self::RevisionConflict(_) => StatusCode::CONFLICT,
             Self::ProviderInUse(_) => StatusCode::CONFLICT,
             Self::ProviderUnavailable(_) => StatusCode::BAD_REQUEST,
@@ -119,6 +123,7 @@ impl AppError {
                 }
             }
             Self::Conflict(_) => "CONFLICT",
+            Self::SessionConfigurationChanged(_) => "NOMIFUN_SESSION_CONFIGURATION_CHANGED",
             Self::RevisionConflict(_) => "REVISION_CONFLICT",
             Self::ProviderInUse(_) => "PROVIDER_IN_USE",
             Self::ProviderUnavailable(_) => "PROVIDER_UNAVAILABLE",
