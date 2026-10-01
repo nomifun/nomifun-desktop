@@ -4026,6 +4026,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_near_fixed_prefix_keeps_the_hard_envelope_and_fitting_receipt() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![text_step(&"s".repeat(1800)), text_step(&"s".repeat(1800))]),
+            requests: Default::default(),
+        });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        // Same late-turn geometry as MAC-A-03: the fixed prefix fits the
+        // hard envelope, but leaves less than one summary at the soft trigger.
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(
+            ChatRole::Assistant, "OLDER_HISTORY ".repeat(400),
+        ));
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: vec![ChatContentPart::ToolCall {
+                call_id: "settled-check".into(), name: "exec_command".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"command":"bun","args":["test","one"]})),
+                provider_metadata: None,
+            }], provider_round_id: None,
+        });
+        request.input.messages.push(ChatMessage {
+            role: ChatRole::Tool,
+            content: vec![ChatContentPart::ToolResult {
+                call_id: "settled-check".into(), is_error: true,
+                output: vec![nomifun_chat_model_broker::ChatToolResultPart::Text {
+                    text: "exit 1, reaped; intentionally failing check".into(),
+                }],
+            }], provider_round_id: None,
+        });
+        let resource = AgentContextBudget { max_context_bytes: 64 * 1024, max_history_messages: 256 };
+        let before = serde_json::to_vec(&request.input).unwrap().len();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), resource,
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        let after = serde_json::to_vec(&request.input).unwrap().len();
+        assert!(after < before && after <= resource.max_context_bytes);
+        assert!(crate::media_context::estimate_tokens(&request.input, after) + 4096 + 512 < 32_768);
+        assert_eq!(request.input.max_output_tokens, Some(4096));
+        assert!(request.input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult {call_id,is_error:true,..} if call_id.as_ref()=="settled-check")),
+            "a fitting settled failure must remain exact, not only a model-authored summary");
+        assert_eq!(request.input.messages.iter().filter(|message| **message == original).count(), 1);
+        assert_eq!(model.requests.lock().unwrap().len(), 1);
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant, "small continuation".into()));
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        assert_eq!(model.requests.lock().unwrap().len(), 1,
+            "a summary already within the unchanged hard envelope must not trigger another summary immediately");
+        request.input.instructions.push("new mandatory state".repeat(300));
+        let over_budget = request.input.clone();
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(_)));
+        assert_eq!(request.input, over_budget, "hard-budget rejection must not discard accepted state or receipts");
+        assert_eq!(model.requests.lock().unwrap().len(), 1, "a previous compacted floor must not permit a hard-byte overrun");
+    }
+
+    #[tokio::test]
+    async fn typed_prompt_overflow_cap_cannot_be_raised_for_a_large_fixed_prefix() {
+        let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        request.input.instructions = vec!["x".repeat(62_000)];
+        let original = request.input.messages[0].clone();
+        let before = request.input.clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
+        ).unwrap();
+        let rejection = ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::PromptTooLong,
+            "typed provider rejection", nomifun_chat_model_broker::ChatRetryDirective::Never);
+        assert!(!lifecycle.request_overflow_recovery(&rejection, true, &request.input).unwrap());
+        assert!(lifecycle.request_overflow_recovery(&rejection, false, &request.input).unwrap());
+        assert!(!lifecycle.request_overflow_recovery(&rejection, false, &request.input).unwrap());
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(_)));
+        assert_eq!(request.input, before);
+        assert!(model.requests.lock().unwrap().is_empty(), "no adaptive widening of a typed rejected prompt");
+    }
+
+    #[tokio::test]
+    async fn observed_usage_margin_still_bounds_compaction_with_a_large_fixed_prefix() {
+        let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let original = request.input.messages[0].clone();
+        let mut lifecycle = crate::context_lifecycle::ContextLifecycle::new(
+            crate::AgentModelBudget::default(), AgentContextBudget {max_context_bytes:64 * 1024,max_history_messages:256},
+        ).unwrap();
+        lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap();
+        lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage {input_tokens:8000,..Default::default()});
+        request.input.instructions.push("x".repeat(62_000));
+        let before = request.input.clone();
+        let error = lifecycle.prepare(&mut request, std::slice::from_ref(&original), &binding(), model.clone(),
+            &NoopAgentEventSink, CancellationToken::new()).await.unwrap_err();
+        assert!(matches!(error, AgentEngineError::Compaction(_)));
+        assert_eq!(request.input, before);
+        assert!(model.requests.lock().unwrap().is_empty(), "provider-observed input margin must not be reset to manufacture fit");
+    }
+
+    #[tokio::test]
     async fn completion_review_survives_compaction_when_the_tool_suffix_cannot_fit() {
         let model = Arc::new(ObservingModel {
             steps: std::sync::Mutex::new((0..8).map(|_| text_step("The accepted checks already ended; report their actual results.")).collect()),
@@ -5619,7 +5725,6 @@ mod tests {
         reads.extend(control_step("fresh-b","read_file",json!({"path":"b"})));
         let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![
             reads,text_step("Current files inspected"),
-            control_step("settle-plan","update_plan",json!({"plan":[{"step":"Inspect current files","status":"completed"}]})),
             control_step("report","report_completion",json!({"summary":"Current files inspected",
                 "criteria":[{"disposition":"supported","evidence_call_ids":["fresh-a","fresh-b"],"rationale":"Fresh reads of both files"}]})),
             text_step("must not ask for more work"),
@@ -5631,7 +5736,9 @@ mod tests {
         ).await.unwrap();
         assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
         let requests=model.requests.lock().unwrap();
-        assert_eq!(requests.len(),4);
+        assert_eq!(requests.len(),3);
+        assert_eq!(requests[2].input.tools.iter().map(|tool| tool.name.as_str()).collect::<Vec<_>>(),
+            ["report_completion"], "the current review phase exposes only the valid terminal control");
         assert!(requests[2].input.messages.iter().flat_map(|message|&message.content).any(|part|
             matches!(part,ChatContentPart::Text{text} if text.starts_with("Engine execution observations"))),
             "resolved recovery still requires a supported completion account");
