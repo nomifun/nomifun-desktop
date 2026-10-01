@@ -3,10 +3,12 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
-import type { IMessageText } from '@/common/chat/chatLib';
+import type { IMessageText, TMessage } from '@/common/chat/chatLib';
 import { parseConversationId } from '@/common/types/ids';
 import MessageText from './MessageText';
 import zhMessages from '@/renderer/services/i18n/locales/zh-CN/messages.json';
+import enMessages from '@/renderer/services/i18n/locales/en-US/messages.json';
+import { MessageListProvider } from '../hooks';
 
 const i18n = createInstance();
 await i18n.use(initReactI18next).init({
@@ -32,6 +34,47 @@ const renderMessage = (content: string, position: IMessageText['position']) => {
 };
 
 describe('MessageText internal tool payload display', () => {
+  test('renders business nonzero and rejected parameters separately in both languages', async () => {
+    const raw = 'The diagnostic returned exit 1.\n\nUnsuccessful tool attempts in this turn: 2 (including argument checks and command outcomes). Details remain available in the execution steps.\n\nUnsuccessful command attempts in this turn: 1. Each command\'s exit status and output explain the result.';
+    const original = { id:'mixed-footer',type:'text',position:'left',turn_id:'turn-mixed',conversation_id:conversationId,
+      created_at:1,content:{content:raw} } as IMessageText;
+    const rows = [
+      { id:'diagnostic',type:'tool_call',turn_id:original.turn_id,conversation_id:conversationId,content:{
+        call_id:'diagnostic',name:'exec_command',status:'error',output:JSON.stringify({
+          state:'exited',exit_code:1,signal:null,success:false,process_id:'owned',output:{text:'0 pass, 1 fail'},
+          cleanup:{reaped:true,errors:[],interrupt_attempted:false,terminate_attempted:false,force_kill_attempted:false},
+        }) } },
+      { id:'account',type:'tool_call',turn_id:original.turn_id,conversation_id:conversationId,content:{
+        call_id:'account',name:'report_completion',status:'error',output:JSON.stringify({
+          status:'not_executed',code:'INVALID_TOOL_ARGUMENTS',tool:'report_completion',
+          issues:[{instance_path:'/criteria',error:'stale reference'}],message:'No call in this batch was executed.',
+        }) } },
+    ] as TMessage[];
+    for (const [language,messages,expected] of [
+      ['zh-CN',zhMessages,['退出码 1','1 次调用因参数检查未通过而未执行','共计 2 次未成功结果']],
+      ['en-US',enMessages,['exit codes: 1','another 1 call(s) did not run','2 unsuccessful results']],
+    ] as const) {
+      const localized = createInstance();
+      await localized.use(initReactI18next).init({lng:language,resources:{[language]:{translation:{messages}}}});
+      const view = render(<MemoryRouter><I18nextProvider i18n={localized}><MessageListProvider initialValue={rows}>
+        <MessageText message={original} />
+      </MessageListProvider></I18nextProvider></MemoryRouter>);
+      const visible = () => `${view.container.textContent}${view.container.querySelector('.markdown-shadow')?.shadowRoot?.textContent ?? ''}`;
+      await waitFor(() => expected.forEach(text => expect(visible()).toContain(text)));
+      expect(visible()).not.toContain('Unsuccessful tool attempts');
+      expect(original.content.content).toBe(raw);
+      view.unmount();
+      const cold = render(<MemoryRouter><I18nextProvider i18n={localized}><MessageListProvider initialValue={[rows[0]]}>
+        <MessageText message={original} />
+      </MessageListProvider></I18nextProvider></MemoryRouter>);
+      const coldText = () => `${cold.container.textContent}${cold.container.querySelector('.markdown-shadow')?.shadowRoot?.textContent ?? ''}`;
+      await waitFor(() => expect(coldText()).toContain(language === 'zh-CN' ? '其类别尚未确认' : 'have not been classified'));
+      expect(coldText()).toContain(language === 'zh-CN' ? '退出码 1' : 'exit codes: 1');
+      expect(coldText()).not.toContain(language === 'zh-CN' ? '参数检查未通过' : 'arguments failed validation');
+      expect(original.content.content).toBe(raw);
+      cold.unmount();
+    }
+  });
   test('localizes the exact runtime count footer without changing the canonical message', async () => {
     const localized = createInstance();
     await localized.use(initReactI18next).init({ lng:'zh-CN', resources:{'zh-CN':{translation:{messages:zhMessages}}} });
