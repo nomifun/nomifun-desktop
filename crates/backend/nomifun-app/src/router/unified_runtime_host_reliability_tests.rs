@@ -154,8 +154,17 @@ impl Fixture {
 #[tokio::test]
 async fn admitted_workspace_context_reaches_the_formal_turn_without_a_probe() {
     let fixture=Fixture::new("admitted-workspace-context").await;
+    let admitted=fixture.host.session_host.read_turn_receipt(
+        &fixture.host.options,&fixture.host.binding,&fixture.host.snapshot_ref,&fixture.message,
+    ).await.unwrap();
+    // macOS temp roots may use /var while admission resolves /private/var.
+    // Verify the exact admitted data, not the pre-admission path spelling.
+    let admitted_root=admitted.session().workspace();
+    assert_eq!(std::fs::canonicalize(admitted_root).unwrap(),
+        std::fs::canonicalize(&fixture.host.options.workspace).unwrap());
+    println!("WORKSPACE_CONTEXT_ROOT options={} admitted={admitted_root}",fixture.host.options.workspace);
     let prepared=fixture.host.prepare_turn(&fixture.message,CancellationToken::new()).await.unwrap();
-    let expected=admitted_workspace_context(&fixture.host.options.workspace).unwrap();
+    let expected=admitted_workspace_context(admitted_root).unwrap();
     assert_eq!(prepared.model_request.input.instructions.iter().filter(|instruction|*instruction==&expected).count(),1);
     let session=&fixture.host.options.conversation_id;
     let models:i64=sqlx::query_scalar("SELECT COUNT(*) FROM agent_events WHERE session_id=? AND kind='context/model-visible-applied'")
