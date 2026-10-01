@@ -2870,3 +2870,4 @@ W185同步结算：源码062fc9f2e，正常合并09357314f为8ffc71ba5，保留7
 - 两首红另存，6项相关定向、fmt/diff及正式构建通过；显式计划本已有有效报告直接关闭路径，不凭猜测改写合同。
 - 原五项正式Windows GEN/StepFun仍FAIL：9步/4压缩后cwd/listing各执行两次，尚未完成后续项，正式取消。工具error0不能代判通过；十文件/Git/旧事件与host清理等独立11/11。
 - 指导效果未证，继续核对报告前的压缩续接/执行进度；完整A/N3及B进程/C和共享门槛仍缺。证据在仓库外2026-10-02/windows/w212-diagnostic-report-guidance。
+- 正常同步783b49a2c为6865cb180，保留macOS独立deadline与进度；本批Rust未变、未重复模型/构建，Windows结果不代判macOS原生夹具。
