@@ -27,7 +27,7 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-04 实际检查和两测试各一次已有证据；完成参数被拒后重复检查并触及 cap，无已接受交付，不记整组 PASS |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-05 计数已正确，但两个历史搜索 ID 被拒后又重开检查并触及 cap；C06-02 结构修复待正式验，不记整组 PASS |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
@@ -1338,3 +1338,25 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   不关闭此前 completed/failure Session 的 C05 Keychain 首败。普通 readonly 备份 SQLite 14/空库
   首败保留，闭库无 WAL 后 immutable 备份 **586 events** 对齐、`ok`；凭据 exact match **0**。
   正式完成提示修后、完整交付/N3、MAC-B/C 仍开放，未改 Windows 结果或额外全量走查。
+
+- **MAC-A-05 completion repair / terminal phase**（C01/C02/C03/C05/C06/C07/C08）：正式 App
+  `496fc4a1b76f…` / 源 `64eb7a2be`，macOS 26.6.2 / arm64 / APFS；顺序构建及 deep/strict
+  ad-hoc 验签通过，原 task/七文件/COD/StepFun Plan 不变，先冻结 **1 Session / 16 requests
+  （含摘要）/ 4096 output / 360 秒**。提示与单值计数进入该包，但未追加第二次 live 重试。
+- 第一轮检查与两测试真实执行，测试各 **1 次**、exit **0/1**。首次 report 的两个计数均正确为
+  **1**，只因两条历史 search ID 非当前 eligible 被严格拒绝。专门反馈在该结果中确实存在，
+  但下一轮仍接受新 plan，把任务重置 pending；五次压缩后累计 **16 process**（十次重复只读
+  检查，不含测试重跑）、**16 requests**触及本地 cap，无接受报告/已交付文本，不记整组 PASS。
+- 公共结构根因见 **C06-02**：单独结束报告被拒、无显式计划且已有 proved settled failure 的
+  窄路径进入已有 report-only 审查；无进程/未决补丁时，参数纠正不能再广告计划重置和普通工具。
+  不改变其他真实未完任务/进程/补丁路径，不改 schema/freshness/count，不把拒绝变成功。
+  首败保留；中间 fixture 错把被拒计划尝试计数维持 1 的失败也保留，改为真实 **2** 后通过；
+  Root diagnostic 只调用一次、计划重置未应用且计数不抹去。Runtime **220/220**；修复未在本轮
+  冻结 App 内，正式修后仍待验，不再追加提示层制造通过。
+- UI 结束暂停后 **cancelled/head ready**。随后 Mac 锁屏阻断 Cmd-Q；已请求人工解锁，exact
+  PID/path 的 TERM 仅清理测试资源、exit **0**，无 KILL，不算正式退出 PASS。App/Helper/
+  fixture/listener 最终 **0**；7/7 hash/Git/哨兵不变，凭据 exact match **0**。
+- WAL 存在时误用 immutable source 的首个 snapshot 留下 **940 events/running**，未作为验收；
+  另以正常 readonly、包含已提交 WAL 的备份得到 **960 events**，与取消后事件逐项一致、`ok`。
+  未编辑数据库状态，原失败制品保留。证据 `2026-10-01/macos/mac-a-report-repair/`；正常 UI
+  退出、完整交付/N3、MAC-B/C 与 C05 原 Keychain 现场仍开放，Windows 结果未改。
