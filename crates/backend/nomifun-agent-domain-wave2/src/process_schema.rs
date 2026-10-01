@@ -23,7 +23,8 @@ fn launch(include_wait: bool) -> StrictJsonValue {
             "description":"Optional workspace-relative directory; omit to use the bound workspace root."},
         "env":{"type":"object","maxProperties":128,"additionalProperties":{"type":"string","maxLength":65536},
             "description":"Optional string-valued environment overrides. Omit when empty; never send null."},
-        "timeout_ms":{"type":"integer","minimum":1,"maximum":600000},
+        "timeout_ms":{"type":"integer","minimum":1,"maximum":600000,"default":30000,
+            "description":"Total owned process lifetime in milliseconds, starting at launch. Default 30000; polling does not reset it. Choose an explicit duration when the accepted task requires longer interaction or waiting. The owner terminates and cleans up on expiration; timeout is distinct from user cancellation."},
         "tty":{"type":"boolean","default":false},
         "cols":{"type":"integer","minimum":1,"maximum":32767},
         "rows":{"type":"integer","minimum":1,"maximum":32767}
@@ -45,8 +46,10 @@ pub fn process_action_input_schema(action_id: &str) -> Option<StrictJsonValue> {
         "workspace.process/poll" => object(
             json!({
                 "process_id":{"type":"string","minLength":1,"maxLength":128},
-                "cursor":{"type":"integer","minimum":0,"default":0},
-                "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0}
+                "cursor":{"type":"integer","minimum":0,"default":0,
+                    "description":"For a following poll, pass the previous output.next_cursor. Default 0 deliberately replays retained output; it does not resume at the last observation."},
+                "wait_ms":{"type":"integer","minimum":0,"maximum":30000,"default":0,
+                    "description":"Wait up to this duration for new output or terminal state. Retained output after cursor returns immediately. Advance cursor before waiting again; 0 only observes current state."}
             }),
             &["process_id"],
         ),
