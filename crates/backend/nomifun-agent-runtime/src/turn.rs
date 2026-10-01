@@ -1787,7 +1787,7 @@ fn synchronize_completion_review(
         // suffix. Keep this host-owned phase in mandatory instructions; the
         // original inputs, evidence and authority remain unchanged.
         upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
-            "Completion review is active for this same accepted task. The closing answer or completion call lacks a valid current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
+            "Completion review is active for this same accepted task. The closing answer or completion call lacks a valid current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Do not add file reads or directory listings to repair this account. When report_completion is the only advertised tool, submit that report alone; the unavailable action tools are intentionally closed for this phase, not missing capabilities to discover or test. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
         if can_report && request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME) {
             // Select the already exposed control after a terminal answer.
             // Some compatible providers ignore tool_choice, so expose only
@@ -4161,12 +4161,17 @@ mod tests {
                     output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text { text:"diagnostic output ".repeat(2400) }] }] },
             crate::context_lifecycle::text_message(ChatRole::Assistant, "The diagnostic exited with code 1.".into()),
         ]);
+        request.input.instructions.push(crate::workflow::MINIMAL_EXECUTION_INSTRUCTIONS.into());
         let work = crate::AgentWorkStatus { failed_commands:1, failed_tools:1, ..Default::default() };
         let transcript_review = work.completion_review_message().unwrap();
         request.input.messages.push(transcript_review.clone());
         let mut slots = AdaptiveContextSlots::default();
         synchronize_completion_review(&mut request, &mut slots, true, false);
         assert!(slots.completion_review.is_some(), "active review must have a host instruction independent of the transcript");
+        assert!(request.input.instructions.iter().any(|instruction| instruction.contains("explicit prohibitions, including read-only probes")),
+            "user restrictions must be explicit in the preserved model policy");
+        assert!(request.input.instructions.iter().any(|instruction| instruction.contains("Do not add file reads or directory listings")),
+            "closing review must not invite extra observations to repair the account");
         let instructions = request.input.instructions.clone();
         let tools = request.input.tools.clone();
         let resource = AgentContextBudget { max_context_bytes:64*1024, max_history_messages:256 };
