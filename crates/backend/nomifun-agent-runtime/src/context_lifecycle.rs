@@ -258,7 +258,8 @@ impl ContextLifecycle {
             soft_input_limit
         };
         let observed_extra = self.observed_tokens.saturating_sub(self.observed_estimate);
-        let input_limit = token_trigger.min(hard_input_limit.saturating_sub(observed_extra));
+        let observed_input_limit = hard_input_limit.saturating_sub(observed_extra);
+        let input_limit = token_trigger.min(observed_input_limit);
         let estimated_tokens = estimate.saturating_add(observed_extra);
         let token_pressure = estimated_tokens >= token_trigger;
         let soft_byte_trigger = self.resource.max_context_bytes * 3 / 4;
@@ -517,6 +518,7 @@ impl ContextLifecycle {
                 source.len(),
             ));
         }
+        let mut replacement_input_limit = input_limit;
         if let Some(mut exchange) = crate::context_tail::latest(&request.input.messages)? {
             if !exchange.requires_original_images() {
                 // The pre-inference reservation uses the worst-case summary
@@ -530,6 +532,16 @@ impl ContextLifecycle {
                 let retained_token_limit = (input_limit * 4 / 5)
                     .max(fixed_tokens + input_limit.saturating_sub(fixed_tokens) / 2)
                     .min(input_limit);
+                // A normal compaction trigger reserves room for future input;
+                // it is not the frozen model's acceptance ceiling. Preserve a
+                // fitting latest receipt up to that ceiling, including the
+                // actual-usage margin. A typed rejection keeps its stricter
+                // recovery ceiling; older history still uses soft headroom.
+                let latest_input_limit = if self.recovered_input_limit.is_some() {
+                    input_limit
+                } else {
+                    observed_input_limit
+                };
                 let mut retaining_latest = true;
                 loop {
                     if !exchange.fits_text_bound(requirements)? { break; }
@@ -538,7 +550,7 @@ impl ContextLifecycle {
                     candidate.messages = vec![summary_message(&previous)];
                     candidate.messages.extend(messages.clone());
                     let candidate_bytes = encoded_size(&candidate)?;
-                    let candidate_token_limit = if retaining_latest { input_limit } else { retained_token_limit };
+                    let candidate_token_limit = if retaining_latest { latest_input_limit } else { retained_token_limit };
                     if candidate_bytes >= bytes
                         || candidate_bytes > self.resource.max_context_bytes
                         || candidate.messages.len() > self.resource.max_history_messages
@@ -550,6 +562,7 @@ impl ContextLifecycle {
                     // input envelope. Keep its exact call/result and error.
                     mandatory_messages = messages;
                     retained_tool_call_ids = exchange.call_ids.clone();
+                    if retaining_latest { replacement_input_limit = latest_input_limit; }
                     retaining_latest = false;
                     let Some(earlier) = exchange.earlier()? else { break; };
                     exchange = earlier;
@@ -565,10 +578,10 @@ impl ContextLifecycle {
         if after >= bytes
             || after > self.resource.max_context_bytes
             || replacement.messages.len() > self.resource.max_history_messages
-            || after_tokens >= input_limit
+            || after_tokens >= replacement_input_limit
         {
             return Err(AgentEngineError::Compaction(format!(
-                "compaction cannot fit the retained request/instructions/tools and pending image exchange within token, byte and message-count budgets; bytes before={bytes}, after={after}, limit={}; estimated input tokens={after_tokens}, limit={input_limit}; messages={}, limit={}; no history or unseen pixels were discarded",
+                "compaction cannot fit the retained request/instructions/tools and pending image exchange within token, byte and message-count budgets; bytes before={bytes}, after={after}, limit={}; estimated input tokens={after_tokens}, limit={replacement_input_limit}; messages={}, limit={}; no history or unseen pixels were discarded",
                 self.resource.max_context_bytes, replacement.messages.len(), self.resource.max_history_messages,
             )));
         }
