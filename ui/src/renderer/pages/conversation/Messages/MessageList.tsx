@@ -368,23 +368,23 @@ const formatToolReceiptPart = (
   switch (part.action) {
     case 'read_files':
       return part.state === 'running'
-        ? t('messages.processReceipt.readingFiles', {
+        ? t('messages.processReceipt.readingFileOperations', {
             count: part.count,
-            defaultValue: 'Reading {{count}} files',
+            defaultValue: 'File reads in progress: {{count}}',
           })
-        : t('messages.processReceipt.readFiles', {
+        : t('messages.processReceipt.fileReadOperations', {
             count: part.count,
-            defaultValue: 'Read {{count}} files',
+            defaultValue: 'File reads completed: {{count}}',
           });
     case 'edit_files':
       return part.state === 'running'
-        ? t('messages.processReceipt.editingFiles', {
+        ? t('messages.processReceipt.editingFileOperations', {
             count: part.count,
-            defaultValue: 'Editing {{count}} files',
+            defaultValue: 'File edits in progress: {{count}}',
           })
-        : t('messages.processReceipt.fileEdits', {
+        : t('messages.processReceipt.fileEditOperations', {
             count: part.count,
-            defaultValue: 'Edited {{count}} files',
+            defaultValue: 'File edits completed: {{count}}',
           });
     case 'run_commands':
       return part.state === 'running'
