@@ -276,14 +276,24 @@ fn standard_presentation_schema(
     // canonical schema also changes frozen contribution provenance for old
     // Sessions, even when only a description changed.
     let fields: &[&str] = match capability_id {
-        "workspace.process" => &["timeout_ms", "cursor", "wait_ms", "input", "append_newline"],
-        "workspace.files" => &["content"],
+        "workspace.process" => &[
+            "/properties/cmd", "/properties/command", "/properties/args", "/properties/cwd",
+            "/properties/timeout_ms", "/properties/cursor", "/properties/wait_ms",
+            "/properties/input", "/properties/append_newline",
+        ],
+        "workspace.files" => &[
+            "/properties/path", "/properties/content",
+            "/properties/files/items/properties/path",
+            "/properties/files/items/properties/expected_source",
+            "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256",
+            "/properties/files/items/properties/hunks/items",
+        ],
         _ => &[],
     };
-    for name in fields {
-        if let Some(description) = presentation.0["properties"][name]["description"].as_str()
-            && let Some(property) = canonical.0["properties"].get_mut(name)
-                .and_then(serde_json::Value::as_object_mut)
+    for pointer in fields {
+        if let Some(description) = presentation.0.pointer(pointer)
+                .and_then(|property| property.get("description")).and_then(serde_json::Value::as_str)
+            && let Some(property) = canonical.0.pointer_mut(pointer).and_then(serde_json::Value::as_object_mut)
         {
             property.insert("description".into(), serde_json::Value::String(description.to_owned()));
         }
@@ -431,6 +441,45 @@ mod tests {
     }
 
     #[test]
+    fn model_parameter_guidance_survives_canonical_schema_assembly() {
+        let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+        let presentations = standard_agent_tool_exposures();
+        for (capability_id,action_id,name,pointers) in [
+            ("workspace.process","workspace.process/exec","exec_command",vec!["/properties/cmd","/properties/command","/properties/args","/properties/cwd"]),
+            ("workspace.files","workspace.files/write","write_file",vec!["/properties/path","/properties/content"]),
+            ("workspace.files","workspace.files/patch","apply_patch",vec![
+                "/properties/files/items/properties/path",
+                "/properties/files/items/properties/expected_source",
+                "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256",
+                "/properties/files/items/properties/hunks/items",
+            ]),
+        ] {
+            let capability = registration.metadata.manifest.payload.contributions.capabilities.iter()
+                .find(|capability|capability.id.as_ref()==capability_id).unwrap();
+            let reference = &capability.contributions.actions.iter().find(|action|action.action_id.as_ref()==action_id).unwrap().input_schema;
+            let canonical = nomifun_agent_domain_wave2::resolve_action_schema(capability_id,reference).unwrap();
+            let presentation = &presentations.iter().find(|tool|tool.definition.name==name).unwrap().definition.input_schema;
+            let projected = standard_presentation_schema(capability_id,canonical.clone(),presentation);
+            for pointer in pointers {
+                let expected = presentation.0.pointer(pointer).unwrap().get("description").unwrap();
+                assert_eq!(projected.0.pointer(pointer).unwrap().get("description"),Some(expected),"{name} {pointer}");
+            }
+            fn strip_descriptions(value:&mut serde_json::Value) {
+                match value {
+                    serde_json::Value::Object(object) => { object.remove("description"); for child in object.values_mut(){strip_descriptions(child);} }
+                    serde_json::Value::Array(array) => {for child in array{strip_descriptions(child);}}
+                    _ => {},
+                }
+            }
+            let mut before = canonical.0.clone();
+            let mut after = projected.0.clone();
+            strip_descriptions(&mut before); strip_descriptions(&mut after);
+            assert_eq!(before,after,"{name}: required/default/constraints/branches must stay exact");
+            assert_eq!(canonical,nomifun_agent_domain_wave2::resolve_action_schema(capability_id,reference).unwrap());
+        }
+    }
+
+    #[test]
     fn process_presentation_keeps_cursor_guidance_without_changing_canonical_contract() {
         let canonical = canonical_process_schema("workspace.process/poll");
         let original = canonical.clone();
@@ -478,7 +527,7 @@ mod tests {
             let mut structural = projected.0.clone();
             // Restore only whitelisted descriptions, then require exact
             // identity, including defaults, limits and required fields.
-            for property in ["input", "append_newline", "content"] {
+            for property in ["input", "append_newline", "content", "path"] {
                 if let Some(value) = structural["properties"].get_mut(property) {
                     if let Some(description) = original.0["properties"][property].get("description") {
                         value["description"] = description.clone();
@@ -489,6 +538,31 @@ mod tests {
             assert_eq!(nomifun_agent_domain_wave2::resolve_action_schema(capability_id, reference).unwrap(), original);
             assert_eq!(standard_presentation_schema("other.module", original.clone(), &presentation), original);
         }
+    }
+
+    #[test]
+    fn nested_presentation_copies_only_existing_descriptions_and_no_authority() {
+        let registration = nomifun_agent_domain_wave2::workspace_execution_registration().unwrap();
+        let capability = registration.metadata.manifest.payload.contributions.capabilities.iter()
+            .find(|capability|capability.id.as_ref()=="workspace.files").unwrap();
+        let reference = &capability.contributions.actions.iter()
+            .find(|action|action.action_id.as_ref()=="workspace.files/patch").unwrap().input_schema;
+        let canonical = nomifun_agent_domain_wave2::resolve_action_schema("workspace.files",reference).unwrap();
+        let original = canonical.clone();
+        let pointer = "/properties/files/items/properties/expected_source/oneOf/2/properties/sha256";
+        let mut presentation = canonical.clone();
+        presentation.0.pointer_mut(pointer).unwrap()["description"] = json!("Copy the observed full digest.");
+        presentation.0.pointer_mut(pointer).unwrap()["pattern"] = json!(".*");
+        presentation.0.pointer_mut(pointer).unwrap()["default"] = json!("invented");
+        presentation.0["properties"]["files"]["maxItems"] = json!(99999);
+        presentation.0["properties"]["files"]["items"]["required"] = json!([]);
+        presentation.0["properties"]["files"]["items"]["properties"]["authority"] = json!({"description":"invented permission"});
+        let projected = standard_presentation_schema("workspace.files",canonical.clone(),&presentation);
+        assert_eq!(projected.0.pointer(pointer).unwrap()["description"],"Copy the observed full digest.");
+        let mut restored = projected.clone();
+        *restored.0.pointer_mut(pointer).unwrap() = canonical.0.pointer(pointer).unwrap().clone();
+        assert_eq!(restored,original,"no defaults, patterns, required, limits or invented authority fields may cross");
+        assert_eq!(standard_presentation_schema("unrelated.module",canonical.clone(),&presentation),canonical);
     }
 
     #[test]
