@@ -1,6 +1,6 @@
 //! Prepare a NEW disposable main-app dataset and a loopback-only held model.
 //! Deterministic modes read no user dataset or real provider credential.
-//! Opt-in --live-frontend / --live-commands accept the live key only via stdin.
+//! Opt-in --live-frontend / --live-commands / --live-general-commands accept the live key only via stdin.
 //! Usage: cargo run -p nomifun-app --example browser_gui_fixture -- <new-data-dir> [--native-actions|--native-pause|--computer-denied|--computer-granted|--computer-a11y-denied|--computer-screen-denied|--computer-input|--computer-stale-focus|--computer-concurrent-user|--computer-pointer-input <target-app> <target-status>|--computer-click-variants <target-app> <target-status>|--computer-drag-cancel <target-app> <target-status>|--computer-input-crash <target-app> <target-status>|--computer-unicode-input <target-app> <target-status>|--computer-large-a11y <target-app> <target-status>|--computer-soak <target-app> <target-status>|--computer-launch-missing]
 //! Launch the real desktop EXE with NOMIFUN_DATA_DIR set to the printed path.
 use axum::{
@@ -114,9 +114,47 @@ fn stop_live_once(stopped: &AtomicUsize, status: axum::http::StatusCode) -> axum
     }
 }
 
+fn live_command_template(option: Option<&str>) -> Option<&'static str> {
+    match option {
+        Some("--live-commands") => Some("coding.codex"),
+        Some("--live-general-commands") => Some("assistant.general"),
+        _ => None,
+    }
+}
+
+fn command_scoped_general_document(mut document: Value) -> anyhow::Result<Value> {
+    let selections = document["enabled_capabilities"].as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("General template has no exact capability selections"))?;
+    selections.retain(|selection| !matches!(selection["capability"]["id"].as_str(),
+        Some("computer" | "automation.schedule")));
+    Ok(document)
+}
+
 #[cfg(test)]
 mod live_budget_tests {
     use super::*;
+    #[test]
+    fn command_mode_selects_only_the_exact_official_template() {
+        assert_eq!(live_command_template(Some("--live-commands")), Some("coding.codex"));
+        assert_eq!(live_command_template(Some("--live-general-commands")), Some("assistant.general"));
+        for option in [None, Some("--native-actions"), Some("--live-frontend"), Some("--unknown")] {
+            assert_eq!(live_command_template(option), None);
+        }
+    }
+
+    #[test]
+    fn general_command_scope_only_removes_unselected_host_resource_modules() {
+        let original = json!({"persona":"unchanged general persona", "instructions":"unchanged instructions",
+            "model_route_refs":{"chat":"exact-route"}, "enabled_capabilities":[
+                {"capability":{"id":"computer"},"action_allowlist":["computer/observe"]},
+                {"capability":{"id":"automation.schedule"},"action_allowlist":["automation.schedule/list"]},
+                {"capability":{"id":"workspace.process"},"action_allowlist":["workspace.process/exec"]}
+            ]});
+        let scoped = command_scoped_general_document(original.clone()).unwrap();
+        assert_eq!(scoped["enabled_capabilities"], json!([original["enabled_capabilities"][2]]));
+        for field in ["persona","instructions","model_route_refs"] { assert_eq!(scoped[field], original[field]); }
+    }
+
     #[test]
     fn explicit_budget_is_bounded_and_zero_or_widened_budgets_fail_closed() {
         let budget = LiveBudget::parse(Some("6"), Some("1024"), Some("180")).unwrap();
@@ -2648,8 +2686,11 @@ async fn main() -> anyhow::Result<()> {
         root.is_absolute() && !root.exists(),
         "refusing an existing or relative data directory"
     );
+    let command_template = live_command_template(std::env::args().nth(2).as_deref());
+    anyhow::ensure!(command_template != Some("assistant.general") || cfg!(feature = "computer-use"),
+        "general command fixture requires computer-use provider registration; build with browser-use,computer-use (no Computer resource grant)");
     std::fs::create_dir(&root)?;
-    let live_commands = std::env::args().nth(2).as_deref() == Some("--live-commands");
+    let live_commands = command_template.is_some();
     let live_mode = live_commands || std::env::args().nth(2).as_deref() == Some("--live-frontend");
     let live = if live_mode {
         use std::io::{IsTerminal, Read};
@@ -2950,12 +2991,19 @@ async fn main() -> anyhow::Result<()> {
         let provider = provider["provider_id"].as_str().ok_or_else(|| anyhow::anyhow!("provider missing"))?.to_owned();
         if live_commands {
             let model = json!({"provider_id":provider,"model":"step-3.7-flash"});
-            let editor = api(&app,"/api/agent-presets/from-template/coding.codex",json!({
-                "reuse_existing":false,"display_name":"MAC-A 编程命令验收","model":model
+            let template = command_template.expect("live command mode has an exact template");
+            let general = template == "assistant.general";
+            let editor = api(&app,&format!("/api/agent-presets/from-template/{template}"),json!({
+                "reuse_existing":false,"display_name":if general {"MAC-GEN 通用命令验收"}else{"MAC-A 编程命令验收"},"model":model
             })).await?;
-            let preset = editor["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("Coding preset missing"))?;
+            let selected = if general {
+                let document = command_scoped_general_document(editor["draft"]["document"].clone())?;
+                api(&app,"/api/agent-presets",json!({"display_name":"MAC-GEN 通用命令减权验收",
+                    "document":document})).await?
+            } else { editor };
+            let preset = selected["preset"]["preset_id"].as_str().ok_or_else(||anyhow::anyhow!("Official-derived command preset missing"))?;
             let session = api(&app,"/api/agent-sessions",json!({
-                "preset_id":preset,"title":"MAC-A 观察、只读、小测试","model":model,
+                "preset_id":preset,"title":if general {"MAC-GEN 目录观察"}else{"MAC-A 观察、只读、小测试"},"model":model,
                 "resource_selections":[
                     {"resource_kind":"workspace","resource_id":"default-workspace"},
                     {"resource_kind":"process_session","resource_id":"managed-process-session"},
@@ -2963,7 +3011,7 @@ async fn main() -> anyhow::Result<()> {
                 ]
             })).await?;
             return Ok::<_,anyhow::Error>(Value::String(session["agent_session_id"].as_str()
-                .ok_or_else(||anyhow::anyhow!("Coding Session missing"))?.to_owned()));
+                .ok_or_else(||anyhow::anyhow!("Official command Session missing"))?.to_owned()));
         }
         let display_name = if computer_denied {
             "Computer 权限拒绝验收"
