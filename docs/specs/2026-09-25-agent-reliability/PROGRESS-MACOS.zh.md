@@ -1466,3 +1466,23 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   backup 失败/空库保留；确认 writer/WAL 都无后另备份 **499 rows**、逐项相同、`ok`、cancelled。
   证据 `2026-10-01/macos/mac-b-newline-recheck/`；仅更新短进度，不提交新产品假设或重复测试。
   完整 B/GEN/N3/C、A cwd/公开语言与旧 MM spinner 均未关闭，Windows 验收未改写。
+
+- **MAC-C01-02 Seatbelt bare-program pre-spawn**（C01/C06；`PROC-001/004`、启动失败恢复子断言）：
+  从 MAC-B-02 两个 wrapper exit71 及随后正确 argv 的 needs_replan 拒绝定位；本批无模型/
+  Session/凭据读取，macOS 26.6.2 / native arm64 / APFS。最小真实 native 首败保留：缺失裸名
+  仍物理启动 wrapper，未满足零-authority preflight；先等待其 reaped 再使测试失败，未留孤儿。
+- 只补 macOS Seatbelt 原有启动准备：按请求实际 PATH（override 优先、否则继承）和 cwd 做
+  裸名字面 executable access 检查，缺失/不可执行在 watchdog/wrapper 前返回 spawn failure。
+  不拆参、不猜 shell、不从 stderr 判未启动；成功不替换 argv，真实 execvp 仍为最后依据。
+  PATH 未配置/访问 ELOOP 等不确定错误保留实际 execvp，不虚构缺失；绝对/相对/空 PATH、前项 EACCES 后项可执行及合法
+  空格程序名保持原语义，未改 Sandbox/写根、注册 Schema/贡献锁或 Windows/Linux 路径。
+- 原生 preflight **1/1**（含 TMPDIR/显式不可执行/裸名缺失和无执行权限，全部 watchdog/leader/
+  reap/cleanup 调用为0）、macOS process **6/6**；扩展 PATH 边界另复核 **1/1**，非统计 N3。
+  最终 Seatbelt 准备/不确定 access/原 profile 与 TMPDIR **4/4**，安全合同未降级。
+  App 既有同 scope 字面恢复 **1/1**：裸/显式整行均 `PROCESS_NOT_STARTED/user_code_started=false`，
+  正确 `/bin/ls` + args 后真实0/reaped，scope 可清理。Runtime 原非启动计数/控制 **1/1**，
+  仍记录 tool error1、command failure0，拒绝假最终完成；原 direct exec ABORT/精确 reap **1/1**。
+- 证据 `2026-10-01/macos/mac-c01-seatbelt-start/`。仅闭合该确定性准备/typed owner 子合同，
+  不能保证 StepFun 首次参数正确，裸名 precheck 后变化、PATH 未配置和其他 wrapper 自身故障
+  仍保守处理；真实 UI/live 修后、B 字节/完整链/GEN/N3/C、C05 退出和 MM spinner 均未关闭。
+  未做额外全仓 build/UI/平台矩阵，Windows 结果未改写。
