@@ -9,7 +9,7 @@
 | 场景 | 入口与候选证据 | 当前状态 |
 | --- | --- | --- |
 | A 观察、只读、小测试 | W188 COD五项；W189 GEN完成复核后无重做N1 | 报告的证据关联及业务失败语言仍待修；综合A N3未达 |
-| B 文件、进程、停止 | W194正式GEN中文stdin/EOF及真实UI停止；W195取消前回复标注；W105/process/File回归 | 原始字节、清理/取消提示已有N1；旧进程首发与游标重复、完整文件步骤与N3待验 |
+| B 文件、进程、停止 | W194输入/EOF；W195取消回复标注；W196新进程/正确游标等待及Stop5秒N1 | 其他首发/N3、等待重复播报、完整文件步骤；旧准入失败UI归因待修 |
 | C 连续、纠正、恢复 | 压缩/最新纠正/取消冷读；W95/W98/W182等 | 组件及取消冷读已有证据，真实连续/压缩接合待补 |
 
 关键bad-case/正向任务取N3，GEN/COD各有正式执行；不同角色不机械重复所有底层断言。
@@ -3292,3 +3292,19 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
 - 未覆盖：canonical提示补充后的正式等待、旧引用首发修复、完整B文件步骤/C/N3、timeout完成计划恢复、UI清理5秒及macOS。
 - 证据：仓库外2026-10-01/windows/w195-poll-cursor-cancelled-reply；首败/修后日志、源码/UI/binary身份、旧DB基线、
   新回合完整事件/调用/模型进度、DB、截图、独立CIM/心跳和12/15 oracle均保留；旧W194首败未覆盖。
+
+### W196 进程提示投影及旧合同恢复（2026-10-01；基线3ffffaaf6）
+
+- Case/子断言：C05/C07/C08，PROC-024/025/030/033/036、REAL-005/010及A01/A02/A03/A05/A08/A10/A13/A17/A19的相关断言。
+- 发现与修复：上一批修改canonical说明改变了注册贡献指纹；01-live正式旧Session在模型/工具前拒绝provenance drift，0模型步/0调用。
+  首败02-schema-current-first-result保留。现process_schema与43cd16bee逐文件完全相同；只把三个过程参数的description投影到App模型定义。
+  投影不复制default/范围/required/新字段，注册/Snapshot/贡献锁及owner校验照常，不通过扩权或忽略漂移恢复。
+- 验证：展示说明丢失断言04先红后绿，新App2/2、Runtime admission subset1/1，fmt/diff通过；正式Tauri构建通过。
+  02-live-presentation复用W194隔离data/work、新profile；同一旧Session通过正式“重试”回填/发送原要求恢复准入，旧失败Turn仍为failed，新Turn独立cancelled。
+  实际start一次，poll0读READY_PARENT/CHILD，后续都cursor25/wait30000且无重复READY；7模型步/一次压缩/6次poll，零工具结果错误。
+  最后一次poll未结算由用户Stop中断，未把缺结果补成成功。Stop前CIM确认父子存活/亲缘；点击起1,208.76ms内两PID消失，心跳随后不变。
+  canonical cancelled/host_cleanup_proven、无取消后新启动、原echo16 bytes、原件hash、旧事件digest及取消前回复标注均通过；独立oracle21/21，仅GEN N1。
+- 未覆盖：N3/COD及其他旧冻结合同、完整B文件步骤/C、timeout完成恢复；等待仍重复播报/暴露游标。
+  原准入失败UI写“上游Agent或模型服务商出错”，实际是本地合同漂移；此归因另修，不把业务非零或模型问题混记本地故障。
+- 证据：仓库外2026-10-01/windows/w196-owned-poll-context；01-live拒绝原始事件/截图、04断言首败、02-live-presentation修后模型轨迹/事件/调用/DB、
+  时间戳/独立CIM/心跳/磁盘/旧事件核对及构建/源码身份分别保存。03测试夹具编译错误另保留，不计产品反例。
