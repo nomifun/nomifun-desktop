@@ -334,6 +334,22 @@
   等guard继续断言。真实修后能否完整交付仍待正式验收，不再扩paid循环/关B/C/N3或另一平台。
   evidence `2026-10-01/macos/mac-b-file-results/`；仅必要源码/最小回归/短进度。
 
+### C06-09 完成报告层级与空路径提示（2026-10-01，macOS MAC-B-06；提示修后live待验）
+
+- W207/正式Tauri/StepFun原文件任务：12 requests/367 events/两压缩，真实32 bytes/正确SHA/
+  copy-move-delete及一次accepted报告，原件不变、四命令各0/reaped，报告纠正无副作用重放。
+  仍FAIL_RECOVERED：criteria套数组、root summary/count错层；后续过期path两次预检拒绝，
+  error2保留。10组raw参数/canonical精确相同，非解码/owner篡改；不以completed覆盖首败。
+- 现有criteria description明确flat object array及root sibling；path集合空时显式omit/[]，
+  只用匹配eligible call支持其作用范围。仅元说明，不放宽schema接受/资格/计数或补造证据。
+  最小首红保留，completion32/32；新说明未再付费复测，不能代判零失败或完整B/N3。
+- 本次没有missing_ok读取，C06-08正式缺失语义仍待补；rm后真实历史内容可以报告但不能证明
+  持续当前状态，path拒绝继续保留。最终原summary的字面反斜杠n不自动反转义成伪原文。
+- W207准入根数据回归的macOS `/var`→`/private/var`是原测试预期错误，既有准入正确；
+  改用exact receipt且canonical同目录、零模型/零effect断言保持，alias/nonalias/纯数据各通过。
+  本平台不改Windows验收；native退出CEF未确认/owned TERM等仍记失败，详见Mac进度。
+  全证据 `2026-10-01/macos/mac-b-file-delivery/`；无预算扩大、权限变化、正文重写或新模型循环。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，

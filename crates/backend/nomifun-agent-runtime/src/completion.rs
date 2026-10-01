@@ -226,7 +226,7 @@ pub(crate) fn definition() -> ChatToolDefinition {
                 "summary":{"type":"string","minLength":1,"maxLength":2048,"description":"The complete final answer delivered verbatim to the user; there is no later reply. Include every requested result in the user's language, including earlier actual tool results (head/tail text, line counts, found/zero matches, paths and exit codes) already known from the transcript. Loss of current evidence eligibility does not delete an earlier observation: say what was observed at that time, then separately state what later state was not rechecked. Do not replace requested historical results with internal evidence-status terminology. Never invent missing results or claim historical data proves current state. Do not claim there were no extra operations unless the actual recorded calls support that statement; disclose observed deviations from the accepted scope, including read-only probes and proposals refused before execution. Criteria track verification; unverified/blocked rationales may be appended as user-visible notices, so write them in plain user language too."},
                 "observed_tool_error_count":{"type":"integer","minimum":0,"maximum":4294967295_u64,"description":"Cumulative Runtime count of tool result errors in this turn, including calls rejected before dispatch. When required, copy the exact const value. Later successful calls do not reduce this count, and the summary must disclose it."},
                 "observed_command_failure_count":{"type":"integer","minimum":0,"maximum":4294967295_u64,"description":"Cumulative Runtime count of failed command observations in this turn, including nonzero exits, timeouts and lost terminals. When required, copy the exact const value. Later successful commands do not reduce this count, and the summary must disclose it."},
-                "criteria":{"type":"array","minItems":1,"maxItems":16,"description":"An actual JSON array value; never a JSON-encoded string.","items":{
+                "criteria":{"type":"array","minItems":1,"maxItems":16,"description":"A flat JSON array of criterion objects, never a JSON-encoded string. summary and the observed count fields are top-level siblings of criteria, not criteria entries. Never nest another array inside criteria.","items":{
                     "type":"object","additionalProperties":false,"required":["disposition","rationale"],
                     "allOf":[{
                         "if":{"properties":{"disposition":{"const":"supported"}},"required":["disposition"]},
@@ -352,6 +352,10 @@ impl CompletionTracker {
                 // Empty enum is invalid JSON Schema. Only omission or an
                 // empty array is permitted until a usable observation exists.
                 fields[name]["maxItems"] = serde_json::json!(0);
+                if name == "evidence_paths" {
+                    fields[name]["description"] = serde_json::json!(
+                        "No current file paths are available; omit this field or use []. If available_evidence lists a matching eligible call_id, use evidence_call_ids only for that observation's actual scope. A path remembered from an earlier read is not current-state evidence; do not repeat settled effects to repair a report.");
+                }
             } else {
                 fields[name]["items"]["enum"] = serde_json::json!(values);
             }
@@ -1617,6 +1621,10 @@ mod tests {
             ..Default::default()
         };
         let definition = tracker.definition_with_evidence(&plan, &work, false);
+        let criteria_description=definition.input_schema.0["properties"]["criteria"]["description"].as_str().unwrap();
+        assert!(criteria_description.contains("flat JSON array of criterion objects"));
+        assert!(criteria_description.contains("top-level siblings"));
+        assert!(criteria_description.contains("Never nest another array"));
         assert!(definition.description.contains("Each criterion allows at most eight evidence_call_ids"));
         assert!(definition.description.contains("separate criteria for different results or more than eight IDs"));
         assert!(definition.description.contains("never create an evidence-free supported criterion"));
@@ -1646,6 +1654,10 @@ mod tests {
         };
         assert!(validator.is_valid(&report("evidence_paths", "current.txt")));
         assert!(validator.is_valid(&report("evidence_call_ids", "current")));
+        assert!(!validator.is_valid(&serde_json::json!({"criteria":[
+            [{"disposition":"supported","rationale":"Observed work","evidence_call_ids":["current"]}],
+            {"summary":"Finished","observed_tool_error_count":0,"observed_command_failure_count":0}
+        ]})),"nested criteria and root fields remain invalid");
         let mut too_many_calls = report("evidence_call_ids", "current");
         too_many_calls["criteria"][0]["evidence_call_ids"] = serde_json::json!(vec!["current"; 9]);
         assert!(!validator.is_valid(&too_many_calls));
@@ -1671,6 +1683,9 @@ mod tests {
             ["properties"]
             .get("requirement_ids")
             .is_none());
+        assert!(empty_definition.input_schema.0["properties"]["criteria"]["items"]
+            ["properties"]["evidence_paths"]["description"].as_str().unwrap()
+            .contains("No current file paths are available; omit this field"));
         let empty = empty_definition.input_schema.0;
         let validator = jsonschema::options().build(&empty).unwrap();
         assert!(!validator.is_valid(&report("evidence_paths", "current.txt")));
