@@ -34,8 +34,8 @@
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
 M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
-锁屏已解除，MAC-A-03 已再次经正式 UI 运行，但新增 C07-02 压缩失败，C05 Keychain/退出仍待系统
-条件核对。每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
+MAC-A-03～05 已经正式 UI 运行；当前 Mac 再次锁屏，阻断 C06-02 正式修后及 C05 UI 退出重验。
+每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
 
 ## 收敛处置与本轮结束条件
 
@@ -1360,3 +1360,13 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   另以正常 readonly、包含已提交 WAL 的备份得到 **960 events**，与取消后事件逐项一致、`ok`。
   未编辑数据库状态，原失败制品保留。证据 `2026-10-01/macos/mac-a-report-repair/`；正常 UI
   退出、完整交付/N3、MAC-B/C 与 C05 原 Keychain 现场仍开放，Windows 结果未改。
+
+- **MAC-C06-01 terminal boundary guard**（C06-02 的反向边界，非新增业务走查）：当前只读 CUA
+  再次确认 Mac locked、无运行验收 App；未启动 live/构建/读取模型凭据，不尝试自动解锁。
+  仅补新门控直接影响的显式未完成计划回归：报告参数被拒后仍广告/执行原授权 write_file 修复，
+  修复 **1 次**，闭合计划后才接受报告，已记录非零和失败不抹去；无额外模型步。
+- 最初 fixture 在控制未展示前直接发 update_plan，首败保留；按实际展示顺序先诊断、再建立
+  计划后通过，不把夹具顺序错误归因新门控。新反向 **1/1**；复用 settled-terminal、live-process
+  controls、unresolved-patch evidence/process 保护各 **1/1**。未改产品逻辑或任何接受集合。
+- 证据 `2026-10-01/macos/c06-terminal-boundary/`；本批只补测试/短进度。完整正式交付/N3、A/B/C
+  与正常 UI 退出仍待人工解锁后验证，不以 guards PASS 收尾完整 Case，不改 Windows 结果。
