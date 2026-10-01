@@ -94,6 +94,36 @@ impl ToolArgumentValidators {
             if let Some(counters) = &correction_counters {
                 payload["correction_counters_after_rejected_batch"] = counters.clone();
             }
+            if calls.len() == 1 && call.name == crate::completion::TOOL_NAME && issues.is_some()
+                && let Some(definition) = exposed.iter().find(|tool| tool.name == call.name)
+                && let Some(criteria) = call.arguments.0["criteria"].as_array()
+            {
+                let references = &definition.input_schema.0["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"];
+                let allowed = references["items"]["enum"].as_array();
+                let none_allowed = references["maxItems"].as_u64() == Some(0);
+                let affected = criteria.iter().take(16).enumerate().filter_map(|(index, criterion)| {
+                    let ids = criterion["evidence_call_ids"].as_array()?;
+                    ids.iter().take(8).any(|id| none_allowed || allowed.is_some_and(|values| !values.contains(id)))
+                        .then_some(index)
+                }).collect::<Vec<_>>();
+                if !affected.is_empty() {
+                    // Enum membership does not prove a claim's scope. Reflect
+                    // bounded criterion positions, never raw argument values.
+                    // Other eligible IDs are not replacement suggestions.
+                    if let Some(items) = payload["issues"].as_array_mut() {
+                        for issue in items {
+                            if issue["schema_path"].as_str().is_some_and(|path|
+                                path.ends_with("/properties/evidence_call_ids/items/enum")) {
+                                issue.as_object_mut().expect("schema issue is an object").remove("expected");
+                            }
+                        }
+                    }
+                    payload["ineligible_evidence_criteria"] = json!(affected);
+                    payload["evidence_repair_notice"] = json!("These zero-based criterion positions contain IDs outside current evidence. Cite another ID only when its own scope actually supports the claim. Otherwise deliver known earlier results in summary, mark current verification unverified and omit evidence fields. Do not infer that missing verification means a tool never ran, invent missing results, or repeat work. Adapt this example to the user's language and actual uncertainty.");
+                    payload["unverified_criterion_example"] = json!({"disposition":"unverified",
+                        "rationale":"Earlier actual results are reported in the summary; later state was not rechecked."});
+                }
+            }
             let result = AgentToolResult::text(call.call_id.clone(), payload.to_string(), true);
             (call.call_id.clone(), Ok(result))
         }).collect()))
@@ -232,6 +262,45 @@ mod tests {
         assert!(validators.reject_invalid_batch(&[call("fixed", json!({
             "strategy":"parallel","tasks":[],"synthesize":false
         }))], &plan, &exposed).unwrap().is_none());
+    }
+
+    #[test]
+    fn completion_feedback_identifies_stale_criteria_without_offering_unrelated_ids() {
+        let mut definition=crate::completion::definition();
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["const"]=json!(1);
+        definition.input_schema.0["properties"]["observed_command_failure_count"]["const"]=json!(1);
+        definition.input_schema.0["properties"]["criteria"]["items"]["properties"]["evidence_call_ids"]["items"]["enum"]=
+            json!(["current-directory","current-test-zero","current-test-one"]);
+        let supported=|ids:Vec<&str>|json!({"disposition":"supported","evidence_call_ids":ids,"rationale":"PRIVATE_MODEL_INTERPRETATION"});
+        let mut report=call("report",json!({"summary":"PRIVATE_REPORT_SUMMARY","observed_tool_error_count":1,
+            "observed_command_failure_count":1,"criteria":[supported(vec!["current-directory"]),
+                supported(vec!["PRIVATE_STALE_READ"]),supported(vec!["PRIVATE_SEARCH_ONE","PRIVATE_SEARCH_TWO"]),
+                supported(vec!["PRIVATE_STATUS","PRIVATE_DIFF"]),supported(vec!["current-test-zero","current-test-one"])]}));
+        report.name=crate::completion::TOOL_NAME.into();
+        let before=report.arguments.clone();
+        let mut validators=ToolArgumentValidators::default();
+        let rejected=validators.reject_invalid_batch(std::slice::from_ref(&report),&AgentToolPlan::default(),std::slice::from_ref(&definition))
+            .unwrap().unwrap();
+        let text=rejected[0].1.as_ref().unwrap().output_text();
+        let payload:Value=serde_json::from_str(&text).unwrap();
+        assert_eq!(payload["ineligible_evidence_criteria"],json!([1,2,3]),"the model must be told which criteria failed");
+        assert_eq!(payload["status"],"not_executed");
+        assert_eq!(payload["correction_counters_after_rejected_batch"],json!({"observed_tool_error_count":2,"observed_command_failure_count":1}));
+        for issue in payload["issues"].as_array().unwrap() {
+            assert!(issue.get("expected").is_none(),"a list of other observations is not a scope-correct repair");
+            assert_eq!(issue["parameter_path_template"],"/criteria/*/evidence_call_ids/*");
+        }
+        assert!(!text.contains("PRIVATE_") && !text.contains("current-directory"));
+        assert_eq!(report.arguments,before,"feedback must not silently rewrite the rejected report");
+        let template=payload["unverified_criterion_example"].clone();
+        assert_eq!(template["disposition"],"unverified");
+        assert!(template.get("evidence_call_ids").is_none() && template.get("evidence_paths").is_none());
+        let mut corrected=report.clone();corrected.call_id="fresh-report".into();
+        corrected.arguments.0["summary"]=json!("Earlier file/search/Git results are reported; later state was not rechecked.");
+        corrected.arguments.0["observed_tool_error_count"]=json!(2);
+        for index in [1,2,3] {corrected.arguments.0["criteria"][index]=template.clone();}
+        definition.input_schema.0["properties"]["observed_tool_error_count"]["const"]=json!(2);
+        assert!(validators.reject_invalid_batch(&[corrected],&AgentToolPlan::default(),&[definition]).unwrap().is_none());
     }
 
     #[test]
