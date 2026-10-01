@@ -27,15 +27,15 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-01 修后 canonical completed，但 MAC-A-02 确认 cwd 未执行及交付遗漏；首发/交付/退出仍未达，不记整组 PASS |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-03 当前正式首发 pwd/ls 形态正确，但在测试前压缩失败、退出未确认；MAC-A-01/02 首败及交付遗漏保留，不记整组 PASS |
 | MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
 已知高频 bad-case 和核心正向任务按共享计划取 N3；无具体风险不新增 20 repeats/100 seed。
-M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后 MAC-A-01
-已恢复真实请求。当前锁屏只阻断正式 UI，C05 另待系统授权条件核对；每次 live 先冻结次数/输出/
-时限，不把已授权模型预算设为永久 0，也不由组件或模型回包代判正式场景通过。
+M04-27 的真实 StepFun 首次 transport failure 保留，无 HTTP 认证/额度证据；切网后真实请求已恢复。
+锁屏已解除，MAC-A-03 已再次经正式 UI 运行，但新增 C07-02 压缩失败，C05 Keychain/退出仍待系统
+条件核对。每次 live 先冻结次数/输出/时限，不把已授权模型预算设为永久 0，不由组件或回包代判通过。
 
 ## 收敛处置与本轮结束条件
 
@@ -1278,3 +1278,23 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 本批未修改产品；completion 现有合同本就区分合法引用和模型解释，不新增猜测式语义 veto。
   解锁后按原任务验证实际 pwd、头尾/列表交付与准确的缺证据披露，不重跑领域矩阵。当前 CUA
   再次明确锁屏；正式首发/N3、C05 系统条件/退出、MAC-B/C 仍开放，不改 Windows 或完整场景结果。
+
+- **MAC-A-03 current formal command/compaction run**（C01/C03/C05/C06/C07/C08）：Mac 解锁后正常
+  fast-forward 同步 `38c0a0df6` 的四项共享修复；正式 Tauri build、新 App `8bf5b41c1bc0…` 与
+  deep/strict ad-hoc 签名通过，CEF helper/framework 沿用已验证的相同 pinned bundle，不作 release
+  认证。本机 macOS 26.6.2 / arm64 / APFS；同一原 prompt、同一七文件隔离夹具，官方 COD 与
+  加密 StepFun Plan。先冻结 **1 Session / 16 requests（含摘要）/ 4096 output / 360 秒**，未追加重试。
+- 当前首发真实 `/bin/pwd` + `["-P"]`、`/bin/ls` + `["-la"]` 均成功，cwd 精确等于 Session
+  workspace，**0 not_started**。实际六个 process 均 exit 0/reaped，但 pwd/listing 被重复；两
+  指定测试 **0 次执行**、无 report_completion。**15 requests / 456 events / 六次应用压缩**后
+  因 `compaction cannot fit…` failed/head ready，fixture failure=null、cap 未触发；不是供应商限流。
+  新问题及前缀尺寸见共享 **C07-02**，不以首发子断言关闭 MAC-A/N3。
+- 新 completion 提示已允许八 ID 内分组，但旧回归仍要求单 criterion，首败 **28/29** 保留。
+  仅修该测试文案并增加九 ID 拒绝；中间 macro 编译错误也保留，最终 **29/29**。未改 admission/
+  freshness 或把压缩产品问题伪装为已修。fixture 空目录检查、首启缺 work-dir 的拒绝和观察器
+  guessed column 错误均保留/修正；没有重置 dataset、覆盖旧运行或把夹具错误归因模型。
+- 正式 UI 显示应用处理失败/实际错误；Cmd-Q 清理仍未确认，线程样本再现 Keychain decrypt RPC
+  等待，TERM 仍活。exact PID/path 核对后 KILL/exit **137**，owned App/Helper/fixture/listener
+  最终 **0**；这是强制清理，不是 C05 PASS。已请求人工查看是否有系统提示，未操作 SecurityAgent
+  或改授权/加密。独立闭库/备份 `ok`、456 events 相同、7/7 hash/Git/哨兵保护、凭据 exact match
+  **0**。证据 `2026-10-01/macos/mac-a-current/`；完整 A/B/C、交付/N3、压缩和正常退出仍开放。
