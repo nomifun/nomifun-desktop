@@ -363,6 +363,16 @@
   NOT PASS；只保留正常退出子观察。原cap/CEF/备份/时间首败在仓库外
   `2026-10-01/macos/mac-b-combined-recheck/`（跨午夜）；完整B/C/N3及报告说明live仍开放。
 
+### C05-08 原生观察的独立期限（2026-10-02，macOS MAC-C05-04）
+
+- 上次手动cold probe先准备95.9秒而未执行90秒runner边界，原NOT PASS保留；现独立监督
+  owned child，单调deadline及有界TERM/KILL，timeout后0也不当成功，三项定向回归通过。
+  只改validation runner/minimal tests，不改产品期限/安全或扩大模型预算。
+- 复用字节/签名核对的正式App及原隔离cancelled数据，真实UI cold/Cmd-Q0，56.88秒内无signal/
+  timeout/forced，529 canonical rows和原件/终版/helper回执全同、零新模型/Turn/残留。
+  仅有界冷读退出N1，不代判旧native失败/错误码分支/完整A/B/C/N3或另一平台。
+  原限制与完整证据在`2026-10-02/macos/native-cold-deadline/`，无付费重跑或历史改写。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，

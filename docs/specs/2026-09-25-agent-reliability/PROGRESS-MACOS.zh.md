@@ -1636,3 +1636,16 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
 - 普通closed readonly备份SQLite14/空输出另保留，writer/WAL/shm无后另作529-row全同/ok快照。
   证据`2026-10-01/macos/mac-b-combined-recheck/`（跨午夜），key audit0/399，App/helper/fixture均无。
   本批不追加模型循环/全矩阵，完整B/N3、A/C、报告说明live、原生条件/MM仍开放，Windows不代判。
+
+- **MAC-C05-04 独立限时冷读退出**（2026-10-02，runner子根因）：保留上一probe95.9秒/90秒首败，
+  新增小型owned-child supervisor，从spawn起单调计时90秒，超时只TERM自己的child、5秒后必要
+  KILL；超时/信号/observer失败即使exit0也不通过，无shell/任意PID清理或产品期限/权限变化。
+  正常0、忽略TERM、超时后0三项定向回归 **3/3**，非新增native矩阵/付费模型。
+- 复核当前Main与签名制品字节一致，复用正式App`cc19ba26e087…`/原隔离B07数据，零模型/新Turn；
+  正式UI冷读后Cmd-Q，PID33738 **exit0 /56.88秒 /未expired /零TERM/KILL**，无清理timeout/forced
+  告警。前后529 events全字节相同、唯一cancelled/ready、原件/32-byte终版/helper回执均不变，
+  App/helper/fixture/PID残留无。writer/WAL/shm无后final readonly完整快照同/ok，截图/原native日志在
+  `2026-10-02/macos/native-cold-deadline/`。仅本有界冷读退出 **N1子链通过**，旧首败不覆盖。
+- UI各调用先检查监督器live状态/剩余15秒且单调用5秒限制，结束后不访问closed绑定；可选
+  listWindows在本机不可用的准备限制另保留，使用已确认live的明确App路径，不重启默认profile。
+  不由此代验forced错误码分支、旧native RPC根因/授权项、完整A/B/C/N3或MM；Windows结果未改写。
