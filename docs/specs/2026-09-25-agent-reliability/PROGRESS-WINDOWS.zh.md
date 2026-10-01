@@ -3647,3 +3647,13 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   新三项及既有软余量/硬预算/observed usage/typed overflow/报告复核/协议纠正/未压缩签名共10项不同定向通过；fmt配置检查与diff通过。00诊断脚本缺省字段KeyError另记为夹具错误，不当产品首败。
 - 未覆盖：正式Tauri/StepFun修后/N3、W219全部重复和交付根因、真实签名供应商/媒体，完整A/B/C及共享门槛。只关闭确定性私有推理占用子根因，未把W219 FAIL改PASS；本批无新模型/命令/正式构建。
 - 证据：仓库外2026-10-02/windows/w220-context-footprint，原轨迹仅尺寸审计、首红、四类修后、32KiB文本/未见图片与原预算/协议保护分日志；Git仅源码、三项最小回归和短进度。
+
+### W221 私有后缀正式样本与Hidden位误判（2026-10-02；正式基线ab4678717，FAIL）
+
+- Case/子断言：综合A、C01/C02/C03/C06/C07/C08及A05/A08/A09/A15/A17/A19；正式Tauri、原五项任务、新workspace/profile、已有隔离data/work、StepFun/step-3.7-flash。
+- 新首败：目录脚本将Hidden位掩码与FileAttributes.Normal比较，Normal实际为128；9条目录记录全部报Hidden=true，和独立属性基线的7条非Hidden项冲突。真实enum/正确Boolean掩码另存05，不把exit0当结果正确。
+- 正式COD 10步/6压缩后产品Stop为cancelled：样本读/两搜索/Git status各一次；两Bun各一次依序exit0/1，最后以原生git diff -- tracked-note.txt首次完成指定只读diff，五命令均exited/reaped。该原生Git是已授权的首次观察，不误算为额外重做；无报告交付，整体A FAIL保留。
+- W220正式子证据：原输入六次各一次、保留原交换2/3/0/2/2/0，读搜未重做；仍两次零保留，不能关闭完整连续性/N3。独立磁盘/Git/字节/hash/搜索范围、测试顺序、五命令清理、旧事件及取消无假交付10/10；旧helper只认Hidden/System字段及git_diff工具，不将其形状限制代判本次效果。
+- 指引调整：已有正确Windows示例后补充枚举位必须转Boolean或比较零，Normal=128而非零；不改脚本/输出，不自动修正结果、限制任意脚本或改变canonical schema/权限。既有宿主shell、字面argv及canonical admission subset三项定向通过，fmt配置/diff通过；未给该提示新增同构测试。
+- 未覆盖：新提示的正式模型效果/修后N3；完整cwd/Hidden交付、报告、零保留剩余根因、完整A/B/C与共享门槛。提示晚于正式binary，本批不追加付费重跑或把FAIL改PASS。
+- 证据：仓库外2026-10-02/windows/w221-private-tail-live，01构建、02进行中首败、03取消DB/事件/轨迹/独立audit、04 UI、05位掩码及06～08合同检查；Git仅一处提示和短进度。
