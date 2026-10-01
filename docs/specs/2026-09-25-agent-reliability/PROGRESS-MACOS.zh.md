@@ -27,8 +27,8 @@
 
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
-| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-06 九次请求已接受报告、无重跑并正常退出；仍漏头尾/搜索历史结果，C06-03 交付缺口未闭，不记整组 PASS/N3 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | 待补正式组合；现有 start/poll/cancel 样本和 native fence 先复用 |
+| MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-07 历史头尾/搜索已交付、九次请求正常完成/退出；实际 cwd 路径与公开语言仍缺，不记整组 PASS/N3 |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-01 正式首败：文件漏末尾 LF、stdin 多一 LF；模型参数说明/投影已修，真实修后与长 helper/后代 stop 待补，不记整组 PASS |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
@@ -1403,3 +1403,43 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   没有在 context/scopes 复制原 Tool output，没有新增字段/工具/权限，没有降低 schema 或真假
   结果断言。证据 `2026-10-01/macos/c06-historical-delivery/`；真实修后是否完整交付仍待验，
   不把说明测试记作 full MAC-A/N3，不改 Windows 验收或关闭阶段二、三。
+
+- **MAC-A-07 historical results formal sample**（C01/C02/C03/C05/C06/C07/C08）：正式 App
+  `6a4cf62eebf0…` / 源 `abb4661ee`，macOS 26.6.2 / arm64 / APFS；顺序构建、deep/strict
+  ad-hoc 验签通过，原 prompt/七文件/COD/加密 StepFun Plan 不变，先冻结 **1 Session / 16
+  requests（含摘要）/ 4096 output / 360 秒**；实际 **9 requests / 420 events / 一轮压缩**。
+- 首个非法引用报告仍严格拒绝，后续原生 report-only 纠正接受，**completed/head ready**。
+  六 process 无重跑、exit **0/0/0/0/0/1**、reaped，两指定测试各一次；历史四行原文/行数 **4**/
+  NEEDLE-present **1** 与 MAC_A_NO_MATCH **0** 已进入正式 summary/UI，明确较早观察，旧 ID
+  未变 current supported，unverified/no evidence 仍保留。C06-03 历史内容交付有 **N1 子样本**。
+- **完整仍 INCOMPLETE_DELIVERY**：独立严格断言缺实际 cwd 路径，summary 仅“pwd 确认 cwd”；
+  request **06～09** 仍包含真实路径，排除路径被清空归因。eligible citation/unverified/earlier read
+  等内部术语及警告仍混入中文输出，未达到自然语言门槛。首败保留，不因头尾修后或 canonical
+  completed 将整组/N3 记 PASS，不追加新模型或降低路径/语言要求。
+- 正式 completed-session Cmd-Q 正常 **exit 0**，无 TERM/KILL、timeout/forced-exit 与 App/
+  Helper/fixture/listener 残留。7/7 hash/Git/哨兵保护，凭据 exact match **0**。普通 readonly
+  backup 再次 SQLite 14/空库，首败保留不当证据；确认无 writer/WAL 后 immutable 另备份
+  **420 events**、逐项一致、`ok`、completed/head ready，未编辑状态。
+- 证据 `2026-10-01/macos/mac-a-historical-results/`；本批仅更新短进度，不提交额外产品假设或
+  再叠加提示。完整 cwd/公开语言/N3、GEN 入口、MAC-B/C 与其他退出条件仍开放，Windows 未改。
+
+- **MAC-B-01 files / pipe EOF**（C04/C05/C06/C08；`CMD-140/141`、`PROC-027` 子断言）：正式
+  Tauri `51e6e806ccc7…` / 源 `7f6b7bb05`，macOS 26.6.2 / native arm64 / APFS；冻结
+  **1 Session / 16 requests（含摘要）/ 4096 output / 360 秒**，实际 **16 requests / 531 events /
+  一轮压缩**，completed/head ready，无加预算或第二模型任务。隔离 COD 从正式输入框发任务。
+- 原独立字节断言 **FAIL**：`write_file` 模型参数漏请求的末尾 LF，后续 patch/copy/move 如实
+  保留，终版 **31 而非 32 bytes**；`write_process_stdin` 同时传入末尾 LF 与
+  `append_newline=true`，实际得到 **两个 LF**。原 read/hash、helper receipt/ECHO 和参数逐项
+  一致，非 owner 吞/改字节。首败保留，未修工作区产物或把“调用成功”当用户任务正确。
+- helper **start/write/close 各一次**，最终 poll 为 exit **0** / reaped，无 cancel、信号升级或
+  timeout；原件 3/3 hash 不变、只删除指定临时文件、无额外生成物。自然语言/存在状态交付
+  仍不足，最后“均成功”未揭示字节不符，完整 B 未通过；长 helper/后代 stop 不在本小批。
+- 只修现有工具说明：content 明示不补 LF；stdin 用两个合法 JSON 例子区分一个 LF 与两个 LF。
+  App 仅给模型投影 content/input/append_newline 的 description，注册合同/贡献指纹、默认值、
+  限额、接受集合和 owner 原样字节语义不变，未复制原 output 或新建提示层。回归首红保留；
+  修后 Runtime **13/13**、App newline/精确字节/上限 **3/3**、既有游标/期限投影 **2/2**。
+- 终态 UI 截图/Cmd-Q 前 Mac 锁定，未绕过；精确本批 App TERM **exit 0**，非 UI 退出验收。
+  App/Helper/fixture/listener 无残留，真实凭据 exact match **0**。主文件-only 备份方法错误
+  保留不使用；另作 WAL-aware readonly 备份，**531 events** 逐项匹配、`ok`、completed。
+  证据 `2026-10-01/macos/mac-b-files-stdin/`；真实修后/GEN/N3、长 helper/完整 B/C 仍开放，
+  MAC-A cwd/语言和旧 MM spinner 未关闭，Windows 结果未改写。
