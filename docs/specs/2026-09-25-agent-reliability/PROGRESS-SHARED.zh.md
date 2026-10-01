@@ -261,6 +261,18 @@
 - 英文/重复状态/内部cursor叙述仍在，完整语言/过程体验未通过；无新修复假设或复制底层矩阵。
   证据 `2026-10-01/macos/mac-b-stop-descendants/`，原Windows/先前首败未改写。
 
+### C07-04 macOS cancelled 重启冷读与文字通道诊断（2026-10-01，N1 子链）
+
+- MAC-C-01 复用实际B04cancelled Session/正式App/原隔离data/work重启，0新模型/Turn。
+  UI展开原cancelled poll的输出/清理及旧回复提示；原228 events字节全集、cancelled/headready、
+  心跳和原件hash均不变，父子/forwarder不复活，Cmd-Q0/无残留。只记取消重启冷读N1。
+- 语言缺口只读raw定位：04～06英文原在reasoning，Runtime→thinking分流正确；07公开
+  content确也含自我规划。公开196/思考194 chars且trim不等，非UI串通道或可精确去重事实。
+  原文/事件/字段保留，不按关键词/翻译/模糊相似删消息；生成层语言/叙述仍待修/验。
+- 普通post-exit读取SQLite14首败后，writer/WAL无的immutable只读与live readonly/原完整
+  快照全同，未改DB状态。`2026-10-01/macos/mac-c-cancel-cold/`；未交新产品假设或重复矩阵，
+  未新增模型/凭据读取；完整连续纠正/压缩/C/N3/A/B/C05/MM等未因该子链关闭，Windows不代判。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
