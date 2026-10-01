@@ -1248,12 +1248,19 @@ pub(crate) async fn run_turn(
                 result.validate_for(&expected_call_id)?;
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
                     terminal_completion_requested |= call.name == crate::completion::TOOL_NAME && !result.is_error;
+                    let account_parameter_refusal = call.name == crate::completion::TOOL_NAME && result.is_error
+                        && serde_json::from_str::<serde_json::Value>(&result.output_text()).ok().is_some_and(|value|
+                            value["status"]=="not_executed" && value["code"]=="INVALID_TOOL_ARGUMENTS"
+                                && value["tool"]==crate::completion::TOOL_NAME);
+                    let healthy_settled_account = account_parameter_refusal
+                        && (state.work_status.successful_commands > 0 || state.work_status.successful_workspace_mutations > 0);
                     if single_call_batch && call.name == crate::completion::TOOL_NAME && result.is_error
-                        && state.execution_plan.revision == 0 && state.completion.settled_failure_gate()
+                        && state.execution_plan.revision == 0
+                        && (state.completion.settled_failure_gate() || healthy_settled_account)
                         && state.work_status.running_processes.is_empty()
                         && !patch_recovery.pending() && !patch_recovery.unresolved()
                     {
-                        // A proven settled failure already permits direct reporting.
+                        // A settled optional task already entered terminal accounting.
                         // Correct this terminal account in the existing review phase;
                         // argument repair cannot restart checks or reset an absent plan.
                         completion_review_used = true;
@@ -4686,6 +4693,48 @@ mod tests {
             [crate::completion::TOOL_NAME], "a rejected proposal must not reopen the completion review's action surface");
         assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 3"));
         assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn healthy_settled_command_report_argument_repair_cannot_replay_effects() {
+        #[derive(Default)]
+        struct HealthyTools { calls: std::sync::Mutex<Vec<String>> }
+        #[async_trait]
+        impl AgentToolInvoker for HealthyTools {
+            async fn invoke(&self,invocation:AgentToolInvocation,_:CancellationToken)->Result<AgentToolResult,AgentEngineError> {
+                if let Some(result)=instruction_result(&invocation){return Ok(result);}
+                self.calls.lock().unwrap().push(invocation.call.call_id.as_ref().to_owned());
+                if invocation.binding.action_id.as_ref()=="workspace.files/write" {return Ok(workspace_result(invocation));}
+                Ok(AgentToolResult::text(invocation.call.call_id,json!({"process_id":"healthy-process","state":"exited",
+                    "exit_code":0,"cleanup":{"reaped":true},"success":true}).to_string(),false))
+            }
+        }
+        let report=|count|json!({"summary":"The original command ended with exit 0; the repeated write was not executed.",
+            "observed_tool_error_count":count,"observed_command_failure_count":0,
+            "criteria":[{"disposition":"unverified","rationale":"Only the earlier recorded command result is disclosed."}]});
+        let model=Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("created","write_file",json!({"path":"a","content":"original"})),
+            control_step("original","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("bad-report","report_completion",report(1)),
+            control_step("recreated-file","write_file",json!({"path":"a","content":"replayed"})),
+            control_step("fixed-report","report_completion",report(2)),
+            text_step("must not replay completed work"),
+        ])});
+        let tools=Arc::new(HealthyTools::default());
+        let plan=AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result=open_session(model.clone(),tools.clone()).run_turn(AgentTurnRequest::new(request(),plan,principal(),0)).await;
+        let feedback = model.requests.lock().unwrap()[3].input.messages.iter().flat_map(|message|&message.content)
+            .find(|part|matches!(part,ChatContentPart::ToolResult{call_id,..} if call_id.as_ref()=="bad-report")).cloned();
+        assert_eq!(*tools.calls.lock().unwrap(),["created","original"],"a parameter refusal cannot authorize a new write after a healthy settled command; feedback={feedback:?}");
+        let result=result.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(model.requests.lock().unwrap()[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"));
+        assert!(!result.output_text.contains("Unsuccessful command attempts"));
     }
 
     #[tokio::test]
