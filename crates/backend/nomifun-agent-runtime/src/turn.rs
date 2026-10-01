@@ -1248,6 +1248,16 @@ pub(crate) async fn run_turn(
                 result.validate_for(&expected_call_id)?;
                 if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
                     terminal_completion_requested |= call.name == crate::completion::TOOL_NAME && !result.is_error;
+                    if single_call_batch && call.name == crate::completion::TOOL_NAME && result.is_error
+                        && state.execution_plan.revision == 0 && state.completion.settled_failure_gate()
+                        && state.work_status.running_processes.is_empty()
+                        && !patch_recovery.pending() && !patch_recovery.unresolved()
+                    {
+                        // A proven settled failure already permits direct reporting.
+                        // Correct this terminal account in the existing review phase;
+                        // argument repair cannot restart checks or reset an absent plan.
+                        completion_review_used = true;
+                    }
                     let made_progress = match call.name.as_str() {
                         crate::planning::TOOL_NAME => state.execution_plan.revision != plan_revision_before,
                         crate::completion::TOOL_NAME => !had_current_report,
@@ -1771,7 +1781,7 @@ fn synchronize_completion_review(
         // suffix. Keep this host-owned phase in mandatory instructions; the
         // original inputs, evidence and authority remain unchanged.
         upsert_instruction(&mut request.input.instructions, &mut slots.completion_review,
-            "Completion review is active for this same accepted task. The preceding assistant answer lacked a current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
+            "Completion review is active for this same accepted task. The closing answer or completion call lacks a valid current completion report. Submit report_completion using available_evidence and exact observed failure counts. The original user inputs retained after a summary are the same inputs, not new requests to repeat work. Do not restart the task or repeat settled checks solely because history was summarized. Missing evidence must be disclosed as unverified/blocked; a summary is not proof, permission or a successful receipt. Settle any running process and preserve unresolved recovery obligations before claiming completion.".into());
         if can_report && request.input.tools.iter().any(|tool| tool.name == crate::completion::TOOL_NAME) {
             // Select the already exposed control after a terminal answer.
             // Some compatible providers ignore tool_choice, so expose only
@@ -4695,6 +4705,68 @@ mod tests {
         assert_eq!(model.requests.lock().unwrap().len(), 3);
         assert_eq!(*tools.calls.lock().unwrap(), ["diagnostic"]);
         assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 1"));
+    }
+
+    #[tokio::test]
+    async fn rejected_terminal_account_cannot_reopen_a_settled_failure_plan() {
+        let report = |count| json!({"summary":"Diagnostic exit 1 was observed; no new work is claimed.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"Only the earlier diagnostic is disclosed."}]});
+        let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("bad-report","report_completion",report(0)),
+            control_step("reopen","update_plan",json!({"plan":[{"step":"Repeat the settled diagnostic","status":"in_progress"}]})),
+            control_step("fixed-report","report_completion",report(2)),
+            text_step("must not request more work"),
+        ])});
+        let tools = Arc::new(FailedProcessTool {is_error:true,..Default::default()});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result = open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(*tools.calls.lock().unwrap(),["diagnostic"]);
+        let requests=model.requests.lock().unwrap();
+        assert_eq!(requests[2].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),
+            [crate::completion::TOOL_NAME],"a rejected terminal account must not advertise a plan reset or repeat effect");
+        assert_eq!(requests[3].input.tools.iter().map(|tool|tool.name.as_str()).collect::<Vec<_>>(),[crate::completion::TOOL_NAME]);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+        assert!(result.output_text.contains("Unsuccessful tool attempts in this turn: 2"),
+            "the rejected plan reset remains a counted unsuccessful attempt");
+    }
+
+    #[tokio::test]
+    async fn rejected_account_with_an_explicit_open_plan_keeps_authorized_repair_available() {
+        let report = |count| json!({"summary":"Requested repair finished; broader quality was not checked.",
+            "observed_tool_error_count":count,"observed_command_failure_count":1,
+            "criteria":[{"disposition":"unverified","rationale":"No broader verification is claimed."}]});
+        let model = Arc::new(ObservingModel {requests:Default::default(),steps:std::sync::Mutex::new(vec![
+            control_step("diagnostic","exec_command",json!({"command":"bun","args":["test"]})),
+            control_step("plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"in_progress"}]})),
+            control_step("bad-report","report_completion",report(0)),
+            control_step("repair","write_file",json!({"path":"a","content":"after"})),
+            control_step("close-plan","update_plan",json!({"plan":[{"step":"Diagnose and repair","status":"completed"}]})),
+            control_step("report","report_completion",report(1)),
+            text_step("must not restart completed work"),
+        ])});
+        let tools = Arc::new(ProcessThenWriteTool {writes:AtomicUsize::new(0)});
+        let plan = AgentToolPlan::new([
+            tool_binding("read_file","workspace.files","workspace.files/read",AgentEffectClass::ReadOnly,true),
+            tool_binding("write_file","workspace.files","workspace.files/write",AgentEffectClass::ManagedEffect,false),
+            tool_binding("exec_command","workspace.process","workspace.process/exec",AgentEffectClass::ExternalUncertainEffect,false),
+        ]).unwrap();
+        let result=open_session(model.clone(),tools.clone()).run_turn(
+            AgentTurnRequest::new(request(),plan,principal(),0)).await.unwrap();
+        assert!(matches!(result.terminal,AgentTurnTerminal::Completed{..}));
+        assert_eq!(tools.writes.load(Ordering::SeqCst),1,"an explicit unfinished plan still permits its requested repair");
+        let requests=model.requests.lock().unwrap();
+        assert!(requests[3].input.tools.iter().any(|tool|tool.name=="write_file"));
+        assert_eq!(requests[3].input.tool_choice,ChatToolChoice::Auto);
+        assert_eq!(requests.len(),6);
+        assert_eq!(model.steps.lock().unwrap().len(),1);
+        assert!(result.output_text.contains("Unsuccessful command attempts in this turn: 1"));
     }
 
     #[tokio::test]
