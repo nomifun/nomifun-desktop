@@ -1,6 +1,6 @@
 # macOS 命令与会话可靠性进度
 
-更新：2026-10-01。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
+更新：2026-10-02。当前已由 macOS arm64 原生执行者接续；此前 Windows 结果仍只作共享历史引用。
 规则见 [实施计划](IMPLEMENTATION-PLAN.zh.md)，公共根因引用 [共享进度](PROGRESS-SHARED.zh.md)。
 按用户 2026-09-30 的明确目的，本轮收敛为简单系统命令、步骤衔接、过程状态和结果可信性，
 与共享计划的 C01～C08、A/B/C 三组正式会话一致。停止按 M01～M06 穷举全产品余项。
@@ -28,7 +28,7 @@
 | 场景 | 本机正式任务及独立断言 | 状态与执行顺序 |
 | --- | --- | --- |
 | MAC-A 观察、只读、小测试 | 小 repo、中文/空格文件；cwd/隐藏项、读搜、Git 只读、指定通过及预期非零测试；检查原件与无关哨兵未执行 | MAC-A-07 历史头尾/搜索已交付、九次请求正常完成/退出；实际 cwd 路径与公开语言仍缺，不记整组 PASS/N3 |
-| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-06 原文件任务正确交付但两次报告预检拒绝，FAIL_RECOVERED；03 输入/EOF、04 后代Stop各N1，完整链/零失败/N3及原生退出仍未关闭 |
+| MAC-B 文件、进程、停止 | 同一任务连续写改回读与字节/hash；交互 helper 的 stdin/close、长 helper/后代的 stop 与清理；保留已完成效果 | MAC-B-07 原联合任务达本地16-call cap后取消，文件32 bytes/输入13 bytes正确，未close/EOF/交付；03 EOF/04 Stop各N1，完整链/零失败/N3及原生条件仍开放 |
 | MAC-C 连续、纠正、恢复 | 连续命令、追加约束、一次实际压缩、取消冷读；要求/证据不丢、结果不串、已完成操作不重放、旧 Turn 不复活 | 待正式补全；在 A/B 关键链稳定后执行，不扩成长稳全矩阵 |
 
 GEN/COD 各保留实际入口样本，按实际用途分配 A/B/C，不机械执行三场景 × 五角色 × 两 OS。
@@ -1615,3 +1615,24 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   fixture shutdown200/0，App/Helper/三listener无；完整367-row WAL-aware backup与原events全同/ok，
   普通readonly image SQLite14首败保留；key audit0/283。证据`2026-10-01/macos/mac-b-file-delivery/`。
   完整B/N3、A/C、格式/效率、C05/MM仍开放，未追加paid循环或改写Windows结果。
+
+- **MAC-B-07 原文件＋stdin/EOF联合任务**：源`c4456fa41`，正式App`6522913fd1d1…`及重构UI；
+  原B01 task/三原件/字节断言不变，冻结1 task/16 requests含摘要/4096/360秒。实际16 requests/
+  14主steps/三压缩，528 events本地cap暂停，正式结束后529 events/cancelled/headready；
+  local429不是StepFun认证/服务限流证明。终版32 bytes/`6ab0c427…`、cp/mv各一次0/reaped、
+  临时/副本无、原件不变；helper一次/实际单LF13 bytes，结束后PID无/清理证明保留。
+- **仍FAIL_LOCAL_BUDGET_STOP**：未close/EOF/terminal poll/报告。首write漏LF，经后续write/patch
+  才修正；patch首发缺files项path，wire原schema明确必填，预检未执行。raw/canonical参数全同，
+  不归因owner改字节/解码丢字段、不自动补参或放宽接受。未达到report调用，不能关闭C06-09。
+- **MAC-C05-03 退出证明与失败码**：B07 Cmd-Q0却有CEF未确认/强制退出首败；Main的有界fallback
+  将may-exit当cleanup_verified且沿用0。现独立forced-handoff permission，不制造清理证明；
+  unverified普通0/未指定退出→1，已有非零/原intent/restart sentinel归属保留，fatal仍需真实清理。
+  首红保留，新增2/2、coordinator4/4、相关cleanup15/15；原期限/重试/系统保护未改变。
+- 用户报告授权后，修后正式App`cc19ba26e087…`（`c4456fa41`＋recorded Main delta）原隔离数据
+  零模型冷读：原529 events逐项全同/ready/cancelled、原件/终版/helper回执不变，无新Turn/模型，
+  Cmd-Q正常0且无timeout/forced/cleanup错误，旧PID/listener无。只记当前条件的正常退出观察，
+  未确定系统项或修复原native RPC。整个probe准备95.9秒已超预设90秒、runner未及时终止，
+  **不记probe PASS**，时间首败保留；失败码分支仍为确定性覆盖，不由正常退出代验。
+- 普通closed readonly备份SQLite14/空输出另保留，writer/WAL/shm无后另作529-row全同/ok快照。
+  证据`2026-10-01/macos/mac-b-combined-recheck/`（跨午夜），key audit0/399，App/helper/fixture均无。
+  本批不追加模型循环/全矩阵，完整B/N3、A/C、报告说明live、原生条件/MM仍开放，Windows不代判。
