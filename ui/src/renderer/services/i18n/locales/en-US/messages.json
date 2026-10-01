@@ -22,6 +22,7 @@
     "invalidArguments": "Arguments did not pass validation; {{target}} was not run",
     "notExecuted": "Did not run {{target}}",
     "commandExited": "{{target}} ended with exit code {{code}}",
+    "commandNotStarted": "{{target}} did not start; command was not run",
     "processReferenceInvalid": "Process not found in this execution; did not run {{target}}"
   },
   "processReceipt": {
@@ -59,6 +60,7 @@
     "failedOperations": "{{count}} operations did not complete",
     "recoveredOperations": "{{count}} earlier attempts did not succeed",
     "commandNonzero": "{{count}} commands ended with exit code {{code}}",
+    "commandNotStarted": "{{count}} commands did not start",
     "searchResultsLimited": "Search results limited; full reconciliation required",
     "recoveredAfterRetry": "{{target}} recovered · retried {{count}} times",
     "summarySeparator": ", ",
