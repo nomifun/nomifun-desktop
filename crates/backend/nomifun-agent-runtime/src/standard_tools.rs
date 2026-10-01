@@ -44,6 +44,10 @@ impl StandardTool {
         } else {
             self.description.to_owned()
         };
+        let description = if matches!(self.model_name,
+            "read_file" | "search_files" | "write_file" | "apply_patch" | "delete_path" | "exec_command" | "start_process") {
+            format!("{} The workspace root is already the selected project directory; the process default cwd is the same root. Do not prepend a project or conversation display name or create a directory to compensate for that prefix. Keep the exact workspace-relative paths supplied by the user. Discover instructions at '.', not a guessed project subfolder.",description)
+        } else { description };
         AgentToolExposure {
             definition: ChatToolDefinition {
                 name: self.model_name.to_owned(),
@@ -507,6 +511,16 @@ fn push_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_workspace_paths_do_not_invent_a_project_name_prefix() {
+        for name in ["read_file","search_files","write_file","apply_patch","delete_path","exec_command","start_process"] {
+            let definitions = super::standard_agent_tool_exposures();
+            let description = &definitions.iter().find(|tool|tool.definition.name==name).unwrap().definition.description;
+            assert!(description.contains("already the selected project directory"),"{name}: root identity missing");
+            assert!(description.contains("Do not prepend a project or conversation display name"),"{name}: invented path prefix not addressed");
+            assert!(description.contains("Keep the exact workspace-relative paths supplied by the user"),"{name}: accepted paths missing");
+        }
+    }
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
