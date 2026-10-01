@@ -1262,6 +1262,40 @@ async fn windows_shell_reports_full_cwd_and_explicit_hidden_flags() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn windows_utf8_file_read_and_literal_search_preserve_text_and_errors() {
+    let workspace = tempfile::Builder::new().prefix("UTF8 资料 ").tempdir().unwrap();
+    fs::create_dir(workspace.path().join("资料 空格")).unwrap();
+    let file = workspace.path().join("资料 空格/样本.txt");
+    let content = "alpha\r\nneedle-验收-42\r\n第三行\r\nomega\r\n";
+    fs::write(&file,content.as_bytes()).unwrap();
+    let scripts = [
+        "$ErrorActionPreference='Stop'; [Console]::Write((Get-Content -LiteralPath '资料 空格/样本.txt' -Encoding UTF8 -Raw))",
+        "$ErrorActionPreference='Stop'; Select-String -LiteralPath '资料 空格/样本.txt' -Pattern 'needle-验收-42' -SimpleMatch -Encoding UTF8 -ErrorAction Stop | ForEach-Object { [Console]::Write($_.Line) }",
+        "$ErrorActionPreference='Stop'; Select-String -LiteralPath '资料 空格/样本.txt' -Pattern 'MISSING_NEEDLE' -SimpleMatch -Encoding UTF8 -ErrorAction Stop",
+        "$ErrorActionPreference='Stop'; Select-String -LiteralPath '资料 空格/missing.txt' -Pattern 'MISSING_NEEDLE' -SimpleMatch -Encoding UTF8 -ErrorAction Stop",
+    ];
+    for (index,script) in scripts.into_iter().enumerate() {
+        let mut process = request(helper_binary(),Vec::<OsString>::new());
+        process.command=CommandSpec::Shell { shell:ShellKind::PowerShell,script:script.into() };
+        process.cwd=workspace.path().to_path_buf();
+        process.capability=CapabilityPolicy::local_owner(workspace.path().to_path_buf());
+        let supervisor=ProcessSupervisor::new(SupervisorConfig::default());
+        let handle=supervisor.start(process).await.unwrap();
+        let ProcessOutcome::Exited { code,output,.. } = wait_for_terminal(&supervisor,&handle).await else {
+            panic!("the scoped read/search must settle");
+        };
+        match index {
+            0 => { assert_eq!(code,Some(0)); assert_eq!(output.text().as_bytes(),content.as_bytes()); }
+            1 => { assert_eq!(code,Some(0)); assert_eq!(output.text(),"needle-验收-42"); }
+            2 => { assert_eq!(code,Some(0)); assert!(output.text().is_empty()); }
+            _ => { assert_ne!(code,Some(0),"a missing file is not a successful empty search"); assert!(!output.text().is_empty(),"the error must remain visible"); }
+        }
+        assert_eq!(fs::read(&file).unwrap(),content.as_bytes());
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_cmd_c_preserves_a_quoted_workspace_path() {
     let workspace = tempfile::Builder::new().prefix("命令 repo ").tempdir().unwrap();
     fs::create_dir(workspace.path().join("资料 空格")).unwrap();

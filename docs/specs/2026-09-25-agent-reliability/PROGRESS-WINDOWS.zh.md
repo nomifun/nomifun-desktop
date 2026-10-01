@@ -3203,3 +3203,17 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   Git仍标unverified、语言仍含内部术语；本批只记录引用范围子断言GEN N1，完整A/N3与B/C、UI体验继续开放。
 - 证据：仓库外2026-10-01/windows/w190-completion-operation-scopes，01-first独立data/work/profile及01-gen-terminal；
   编码与搜索首败、报告到原调用的映射、真实UI、原事件/模型轨迹、不可覆盖oracle及最终磁盘结果均保留，未将completed记整组PASS。
+
+### W191 中文原文、无匹配与错误（2026-10-01；基线38c0a0df6）
+
+- Case/子断言：C01/C02/C06/C08，CMD-135/136、FILE读搜，A05/A08/A15/A17/A19；原五项及仅文本收尾要求不缩减。
+- 调整：说明PowerShell 5.1默认解码不能证明UTF-8文本正确；明确已知UTF-8原生读法，优先产品read_file/search_files。
+  不吞stderr或把通配符范围当完整递归搜索；仍核对截断/未完整原因。W190真实首败继续保留。
+- 验证：native1含UTF-8/CRLF字节精确、中文literal匹配、0匹配与文件缺失非零/错误保留；工具合同3项、fmt及正式构建通过。
+  正式GEN8模型步/1压缩、1报告首次接受；原文43字节及SHA精确，搜索1/0匹配、truncated=false/incomplete_reasons=[]/files_skipped=0。
+  三exec为合并cwd/list、两个PowerShell形式Bun：结果0/0/1，各测试一次；9文件hash不变，无unrelated哨兵。
+  独立操作断言11/11通过；原oracle要求分开cwd/list及command/args仍失败，原结果不改，不把它当整组PASS。
+- 未闭合：最终未复述原文，且读搜/Git标unverified并暴露eligible/ineligible字段及英文失败计数；当前状态证据与历史操作说明需优化。
+  本批编码/完整搜索只记GEN正式N1，不代替COD/N3、A全体验、B/C、macOS或正式shutdown验收；共享门槛未达。
+- 证据：仓库外2026-10-01/windows/w191-utf8-read-search，01-first独立data/work/profile、01-gen-terminal及independent-observations.json，
+  原始DB/事件/模型轨迹/截图、构建身份、原oracle及补充操作核对分开保留；原生测试不改变文件，缺失错误未静默。
