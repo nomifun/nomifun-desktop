@@ -24,6 +24,35 @@ describe('normalizeToolCall', () => {
     expect(result?.nonFatalFailure).toBe(true);
     expect(result?.output).toBe(output);
   });
+  it('identifies a proven native launch refusal without erasing its error or diagnostic', () => {
+    const receipt = {
+      schema: 'nomifun.process-start-observation.v1', state: 'not_started',
+      code: 'PROCESS_NOT_STARTED', user_code_started: false, success: false,
+      message: 'The requested executable did not start.',
+    };
+    const normalize = (name: string, value: unknown, status = 'error') => normalizeToolCall({
+      type: 'tool_call', content: { call_id: 'not-started', name, status, output: JSON.stringify(value) },
+    } as any);
+    const result = normalize('exec_command', receipt);
+    expect(result?.commandNotStarted).toBe(true);
+    expect(result?.status).toBe('error');
+    expect(result?.notExecutedReason).toBeUndefined();
+    expect(result?.nonFatalFailure).toBeUndefined();
+    expect(result?.output).toBe(JSON.stringify(receipt));
+    for (const value of [
+      { ...receipt, user_code_started: true }, { ...receipt, success: true },
+      { ...receipt, state: 'lost' }, { ...receipt, schema: 'remote.result' },
+      { ...receipt, process_id: 'live' }, { ...receipt, exit_code: 1 },
+      { ...receipt, signal: null }, { ...receipt, message: '' },
+      { ...receipt, message: ' ' }, { ...receipt, message: 'x'.repeat(2049) },
+    ]) {
+      expect(normalize('exec_command', value)?.commandNotStarted).toBeUndefined();
+    }
+    expect(normalize('start_process', receipt)?.commandNotStarted).toBe(true);
+    expect(normalize('poll_process', receipt)?.commandNotStarted).toBeUndefined();
+    expect(normalize('remote_exec_command', receipt)?.commandNotStarted).toBeUndefined();
+    expect(normalize('exec_command', receipt, 'completed')?.commandNotStarted).toBeUndefined();
+  });
 
   it('shows a proven rejected process reference as unexecuted and preserves the diagnostic', () => {
     const receipt = { schema: 'nomifun.process-control-observation.v1', state: 'not_executed',

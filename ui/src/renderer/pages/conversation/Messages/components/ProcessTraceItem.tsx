@@ -191,6 +191,13 @@ const formatToolReceiptDetailLabel = (
     });
   }
 
+  if (row.commandNotStarted) {
+    return t('messages.toolSummary.commandNotStarted', {
+      target: displayTarget ?? row.title,
+      defaultValue: '{{target}} did not start; command was not run',
+    });
+  }
+
   if ((row.state === 'failed' || row.state === 'canceled') && displayTarget) {
     return t(`messages.toolSummary.${row.state}`, {
       target: displayTarget,

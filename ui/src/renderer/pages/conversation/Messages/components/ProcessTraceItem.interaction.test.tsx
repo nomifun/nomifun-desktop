@@ -14,6 +14,27 @@ const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000051
 afterEach(cleanup);
 
 describe('replayed process trace', () => {
+  test('a proven launch refusal explains that the command was not run and retains its diagnostic', () => {
+    const output = JSON.stringify({ schema: 'nomifun.process-start-observation.v1', state: 'not_started',
+      code: 'PROCESS_NOT_STARTED', user_code_started: false, success: false,
+      message: 'The requested executable did not start.' });
+    const item: IMessageToolCall = {
+      id: 'launch-refusal', type: 'tool_call', conversation_id: conversationId,
+      position: 'left', created_at: 1,
+      content: { call_id: 'no-start', name: 'exec_command', status: 'error',
+        args: { command: 'Copy-Item', args: ['-LiteralPath', '原件.txt'] }, output, artifacts: [] },
+    };
+    const { container, getByRole } = render(
+      <I18nextProvider i18n={i18n}><ProcessTraceItem item={item} variant='receipt' /></I18nextProvider>
+    );
+    expect(getByRole('button').textContent).toContain('Copy-Item');
+    expect(getByRole('button').textContent).toContain('did not start; command was not run');
+    expect(container.querySelector('.turn-process-trace__row--failed')).not.toBeNull();
+    expect(container.textContent).not.toContain('PROCESS_NOT_STARTED');
+    fireEvent.click(getByRole('button'));
+    expect(container.textContent).toContain(output);
+  });
+
   test('whitespace-only assistant fragments leave no blank process block', () => {
     const item: IMessageText = {
       id: 'empty-fragment', type: 'text', conversation_id: conversationId,
