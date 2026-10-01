@@ -460,6 +460,25 @@ afterEach(() => {
 });
 
 describe('useGuidSend HTTP behavior', () => {
+  test('a long first task uses a valid title and keeps the complete original instruction for its initial turn', async () => {
+    resetBrowserStorage();
+    const input = `  请检查中文项目 ${'验收🧪'.repeat(70)}\r\n最后一项的完整指令必须保留。\r\n`;
+    const calls = installFetchRecorder();
+    const hook = renderHook(() => useGuidSend(createDeps({
+      input, selection:{kind:'preset',presetId:PRESET_ID},selectedPreset:PRESET,
+    })));
+    await act(async () => { await hook.result.current.handleSend(); });
+    const create = calls.find(call => call.method==='POST' && call.url.endsWith('/api/agent-sessions'));
+    const title = (create?.body as {title:string}).title;
+    expect(title).toBe(title.trim());
+    expect(new TextEncoder().encode(title).length).toBeLessThanOrEqual(200);
+    expect(title).not.toContain('\n');
+    const pending = JSON.parse(sessionStorage.getItem(sessionStorageKey(
+      'initial-message-nomi',conversationTarget(PRESET_CONVERSATION_ID)))!);
+    expect(pending.input).toBe(input);
+    expect(calls.filter(call=>call.method==='POST' && call.url.endsWith('/api/agent-sessions'))).toHaveLength(1);
+  });
+
   test('does not expose a dedicated Browser-only AgentSession entry', () => {
     const hook = renderHook(() => useGuidSend(createDeps({
       input: '',
