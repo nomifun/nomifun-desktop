@@ -4295,6 +4295,91 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn latest_receipt_uses_the_hard_token_envelope_without_erasing_observed_margin() {
+        for extra_tokens in [0,1500] {
+            let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step(&"s".repeat(2000))]),requests:Default::default()});
+            let mut request=request();
+            request.input.instructions=vec!["x".repeat(76_000)];
+            request.input.max_output_tokens=Some(4096);
+            let original=request.input.messages[0].clone();
+            let budget=crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap();
+            let resource=AgentContextBudget {max_context_bytes:80*1024,max_history_messages:64};
+            let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+            lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+            assert!(model.requests.lock().unwrap().is_empty());
+            let bare_estimate=crate::media_context::estimate_tokens(&request.input,serde_json::to_vec(&request.input).unwrap().len());
+            if extra_tokens>0 {
+                lifecycle.observe_usage(&nomifun_chat_model_broker::ChatUsage {input_tokens:(bare_estimate+extra_tokens) as u64,..Default::default()});
+            }
+            request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLDER_HISTORY ".repeat(1200)));
+            let call=ChatContentPart::ToolCall {call_id:"latest-terminal".into(),name:"exec_command".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic"})),provider_metadata:None};
+            request.input.messages.push(ChatMessage {role:ChatRole::Assistant,content:vec![call.clone()],provider_round_id:None});
+            let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+                content:vec![ChatContentPart::ToolResult {call_id:"latest-terminal".into(),is_error:true,
+                    output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text {text:json!({"state":"exited","exit_code":1,
+                        "cleanup":{"reaped":true},"success":false,"output":{"text":"r".repeat(2100)}}).to_string()}]}]};
+            request.input.messages.push(receipt.clone());
+            let before=serde_json::to_vec(&request.input).unwrap().len();
+            lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+            let after=serde_json::to_vec(&request.input).unwrap().len();
+            let tokens=crate::media_context::estimate_tokens(&request.input,after);
+            assert!(after<before && after<=resource.max_context_bytes);
+            assert!(tokens+extra_tokens+4096+512<32768,"the real output reserve and observed margin remain binding");
+            assert_eq!(request.input.messages.iter().filter(|message|**message==original).count(),1);
+            assert_eq!(model.requests.lock().unwrap().len(),1);
+            if extra_tokens==0 {
+                assert!(request.input.messages.contains(&receipt),"a soft compaction threshold must not discard a latest receipt within the hard token/byte envelope");
+                assert!(request.input.messages.iter().flat_map(|message|&message.content).any(|part|*part==call));
+            } else {
+                assert!(!request.input.messages.contains(&receipt),"observed usage can make the same receipt exceed the real input envelope");
+            }
+            request.validate().unwrap();
+            println!("LATEST_HARD_TOKEN extra={} before={} after={} input_tokens={} output_reserve=4096 safety_reserve=512 byte_cap={}",extra_tokens,before,after,tokens,resource.max_context_bytes);
+        }
+    }
+
+    #[tokio::test]
+    async fn latest_receipt_cannot_cross_a_typed_rejection_recovery_ceiling() {
+        let model=Arc::new(ObservingModel {steps:std::sync::Mutex::new(vec![text_step(&"s".repeat(1000))]),requests:Default::default()});
+        let mut request=request();
+        request.input.instructions=vec!["x".repeat(58_000)];
+        request.input.max_output_tokens=Some(4096);
+        let original=request.input.messages[0].clone();
+        request.input.messages.push(crate::context_lifecycle::text_message(ChatRole::Assistant,"OLD ".repeat(3500)));
+        request.input.messages.push(ChatMessage {role:ChatRole::Assistant,provider_round_id:None,
+            content:vec![ChatContentPart::ToolCall {call_id:"terminal-under-rejection".into(),name:"exec_command".into(),
+                arguments:nomifun_agent_contracts::StrictJsonValue(json!({"command":"diagnostic"})),provider_metadata:None}]});
+        let receipt=ChatMessage {role:ChatRole::Tool,provider_round_id:None,
+            content:vec![ChatContentPart::ToolResult {call_id:"terminal-under-rejection".into(),is_error:true,
+                output:vec![nomifun_chat_model_broker::ChatToolResultPart::Text {text:"recorded exit 1; ".repeat(600)}]}]};
+        request.input.messages.push(receipt.clone());
+        let budget=crate::AgentModelBudget::from_limits(Some(32768),Some(4096)).unwrap().with_compaction_threshold_pct(80).unwrap();
+        let launch=request.input.messages[2].clone();
+        let resource=AgentContextBudget {max_context_bytes:80*1024,max_history_messages:64};
+        let bytes=serde_json::to_vec(&request.input).unwrap().len();
+        let rejected_estimate=crate::media_context::estimate_tokens(&request.input,bytes);
+        let recovery_limit=(rejected_estimate*3/4).min((32768-4096-512)*80/100);
+        let mut lifecycle=crate::context_lifecycle::ContextLifecycle::new(budget,resource).unwrap();
+        let rejection=ChatModelError::new(nomifun_chat_model_broker::ChatModelErrorCode::PromptTooLong,
+            "typed provider rejection",nomifun_chat_model_broker::ChatRetryDirective::Never);
+        assert!(lifecycle.request_overflow_recovery(&rejection,false,&request.input).unwrap());
+        lifecycle.prepare(&mut request,std::slice::from_ref(&original),&binding(),model.clone(),&NoopAgentEventSink,CancellationToken::new()).await.unwrap();
+        let after=serde_json::to_vec(&request.input).unwrap().len();
+        assert!(crate::media_context::estimate_tokens(&request.input,after)<recovery_limit);
+        assert!(!request.input.messages.contains(&receipt),"a normal hard ceiling cannot override an actual provider rejection");
+        let mut with_receipt=request.input.clone();
+        with_receipt.messages.push(launch);
+        with_receipt.messages.push(receipt);
+        let candidate=serde_json::to_vec(&with_receipt).unwrap().len();
+        assert!(candidate<=resource.max_context_bytes && candidate.div_ceil(3)+4096+512<32768,
+            "the receipt would fit ordinary hard budgets but is correctly excluded by recovery");
+        assert!(candidate.div_ceil(3)>=recovery_limit);
+        assert_eq!(model.requests.lock().unwrap().len(),1);
+        println!("TYPED_RECOVERY after={} candidate={} recovery_tokens={} ordinary_hard_tokens=28160",after,candidate,recovery_limit);
+    }
+
+    #[tokio::test]
     async fn typed_prompt_overflow_cap_cannot_be_raised_for_a_large_fixed_prefix() {
         let model = Arc::new(ObservingModel { steps: Default::default(), requests: Default::default() });
         let mut request = request();
