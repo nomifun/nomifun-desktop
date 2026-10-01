@@ -1573,3 +1573,23 @@ Git 只更新本页的批次结论与必要代码/测试，不提交完整日志
   与先前live readonly结果逐项一致，未编辑DB/WAL/原cancelled记录。证据
   `2026-10-01/macos/mac-c-cancel-cold/`；完整连续追加/纠正/实压缩/C/N3和A/B/旧C05/MM仍开放。
   本批仅短进度，不复制native/UI矩阵或发新模型，Windows结果未改写。
+
+- **MAC-B-05 isolated original file clauses / absent evidence**（C04/C06/C07/C08）：中断后的原
+  build/package handles 均确认exit0，再同步W205重构当前正式App `7be990c8a04a…` / frozen源
+  `42f63a358`。原B两条文件要求/三原件/32-byte及LF断言不变，只隔离文件簇；冻结
+  **1 task / 16 requests（含摘要）/ 4096 output / 360秒**，未加预算或原task重跑。
+- 实际 **16 requests / 436 events / 二轮压缩 /14主steps**，有界续写仍length，最终typed
+  NOMIFUN_TASK_INCOMPLETE / failed/headready，**整组FAIL**、无accepted报告。确切终版32bytes/
+  SHA `6ab0c427…`、复制移动/临时删除实际已发生，临时/副本不存在、三原件不变；独立snapshot
+  与磁盘核对相同。不用文件正确/后来修复或模型意向证明任务完成，原首败保留。
+- 定位到一项具体context缺口：真实read返回 `workspace_file_absent`，non-error表示正常确认
+  缺失；completion scope只剩read/path而丢kind，模型将成功read推作存在、纠结mv及资格后截断。
+  最小复现首红保留，补 **有界kind/file_exists=false**，只对已派发成功的scoped text/read/
+  missing_ok/原path匹配结果。没有复制content/env/stdin/output正文、增加预算或删历史失败。
+- 修后 completion **32/32**：当前缺失语义明确，过期后仍不可cite（历史说明保留），错误/
+  未派发/错path/假content-marker/无missing_ok/非text/非scoped均不取得absence元数据；原计数/
+  freshness/引用/schema接受集合/权限不变。仅闭合这项确定性数据元信息子根因，**真实修后待验**。
+- 实跑失败Session正式Cmd-Q正常0，无App/Helper/fixture/listener残留，key exact audit0；普通
+  readonly备份首败/空库保留，writer/WAL无后另作436-row全相同/ok/failed快照。证据
+  `2026-10-01/macos/mac-b-file-results/`，原产物未修/覆盖、Windows失败/结果未改写。
+  其他wrong命令/报告生成、完整B/N3/C、A交付、语言/效率、C05/MM等仍开放，未追加paid循环。

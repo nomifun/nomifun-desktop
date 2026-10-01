@@ -301,6 +301,21 @@
   快照全同，未改DB状态。`2026-10-01/macos/mac-c-cancel-cold/`；未交新产品假设或重复矩阵，
   未新增模型/凭据读取；完整连续纠正/压缩/C/N3/A/B/C05/MM等未因该子链关闭，Windows不代判。
 
+### C06-08 正常文件缺失的完成元数据（2026-10-01，确定性子根因已修，live修后待验）
+
+- MAC-B-05原文件要求/原件/独立字节断言，包含W205正式Tauri/StepFun，在原16-call预算内。
+  磁盘终版32-byte/正确hash及copy/move/delete真实，但报告未接受；436 events/两压缩/
+  14主steps因bounded length失败，typed task incomplete/headready，**整组FAIL**不被副作用通过。
+- 实际missing_ok read是 `workspace_file_absent`，非错误表示成功观察缺失，不能推作文件存在。
+  原completion scope丢掉kind，压缩后read/path“成功”与mv关系让模型误读/续写；不是文件owner
+  吞末LF或正常缺失被拒。原回执/请求/UI/首败及元信息缺失最小红测均保留。
+- 只保留bounded `{kind:workspace_file_absent,file_exists:false}`：已派发/non-error/scoped/
+  text read/missing_ok/原path精确匹配。内容/凭据/环境/stdin/输出正文不复制，权限/输出资格/
+  schema接受集合/epoch/计数不改。过期不复活当前资格；没有把“缺失观察”当文件内容/hash证明。
+- completion32/32（含原freshness/失败计数/正文排除）通过，其他路径/模式/假marker/失败/未派发
+  等guard继续断言。真实修后能否完整交付仍待正式验收，不再扩paid循环/关B/C/N3或另一平台。
+  evidence `2026-10-01/macos/mac-b-file-results/`；仅必要源码/最小回归/短进度。
+
 ### C07-02 动态前缀与压缩余量（2026-10-01，确定性子根因已修，正式重验待补）
 
 - macOS MAC-A-03 已在当前 `38c0a0df6` 正式 Tauri/StepFun 上复现：首发 literal pwd/ls 正确，
