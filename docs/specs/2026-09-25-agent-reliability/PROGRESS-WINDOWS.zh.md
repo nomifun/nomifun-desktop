@@ -3433,3 +3433,17 @@ W185同步复验：062fc9f2e＋正常合并8ffc71ba5；没有覆盖远端或改�
   仅关闭已证实的参数说明投影丢失；不声称它是W202所有失败的唯一根因，不用24项组件检查代替正式任务通过。
 - 证据：仓库外2026-10-01/windows/w203-model-parameter-guidance；01/02首败及03/04修后日志分开，W202两轮FAIL和原件不变。
 - 同步结算：源码ea8e85a99，正常合并远端1095a185e为3b1b06c3c；远端仅进度，参数投影源码未变，不重复构建或模型请求。
+
+### W204 参数投影后的正式文件效果（2026-10-01；基线1c901a175，整体仍FAIL）
+
+- Case/子断言：C01/C04/C06/C07/C08，CMD-140/141、REAL-001/002/006及A05/A08/A17/A19。
+- 正式tauri/custom-protocol构建、新目录/新profile、原样任务及已有加密StepFun/step-3.7-flash，Coding 14步/两次压缩后completed。
+  创建/完整读取/一次来源保护patch/复制移动/限定删除/最终读取实际正确：没有给效果路径添加项目名前缀，完整SHA逐字传递。
+  Copy-Item/Move-Item使用cmd脚本、LiteralPath、引号与ErrorAction Stop，合并一次exec，Remove-Item一次；三条已执行命令exit0/reaped/无清理错误。
+  最终正确路径18 bytes/3行/UTF-8无BOM/LF及末尾LF、全文SHA、源/副本消失、原件/相似名/AGENTS及旧事件保持，文件效果仅Coding N1。
+- 首次范围失败保留：先执行了未要求的Get-ChildItem；收尾又提议read_file/列目录，被当前完成复核表面拒绝，两项未dispatch结果都计入2/0。
+  完成报告首次接受，但summary宣称“未执行额外操作”与已执行listing不符；内部available_evidence警告仍出现，整体不能记PASS。
+  沿用原14个断言并增加禁止listing、操作次数、进程结算及无假报断言，严格15/18，FAIL；不覆盖W202两轮6/14与5/14。
+- 未覆盖：明确范围/禁止额外检查的遵守及交付真实性、完整B/N3/GEN、进程综合和C/macOS。
+  本批只新增W203提示后文件/命令效果首次正确的正式N1证据，不称所有模型行为根因已修复，不关闭共享阶段。
+- 证据：仓库外2026-10-01/windows/w204-parameter-guidance-live；03中途及04 completed完整events/tools/model/DB/UI、源码/binary身份和18断言分开保存。
