@@ -44,6 +44,7 @@ export interface CreativeCanvasAudioComposerProps {
   modelOptions: readonly CreativeModelOption[];
   task: CanvasAudioComposeTaskSummary;
   disabled?: boolean;
+  submitting?: boolean;
   error?: string | null;
   retrySubmission?: boolean;
   voiceSupported?: boolean;
@@ -131,7 +132,8 @@ const CreativeCanvasAudioComposer: React.FC<
   settings,
   modelOptions,
   task,
-  disabled = false,
+  disabled: disabledProp = false,
+  submitting = false,
   error,
   retrySubmission = false,
   voiceSupported = false,
@@ -148,6 +150,7 @@ const CreativeCanvasAudioComposer: React.FC<
   onConfirmSubmission,
 }) => {
   const { t } = useTranslation();
+  const disabled = disabledProp || submitting;
   const [prompt, setPrompt] = useState(initialPrompt);
   const eligibleModelOptions = modelOptions.filter(
     (option) => option.task === 'speech_synthesis'
@@ -171,7 +174,7 @@ const CreativeCanvasAudioComposer: React.FC<
     !voiceVisible || !voiceRequired || settings.voice.trim().length > 0;
   const promptLengthReady =
     Array.from(prompt).length <= normalizedMaxTextLength;
-  const busy = task.state === 'queued' || task.state === 'running';
+  const busy = task.pendingCount > 0 || task.state === 'queued' || task.state === 'running';
   const canSubmit = retrySubmission
     ? !disabled && onRetrySubmission !== undefined
     : !disabled &&
@@ -407,13 +410,8 @@ const CreativeCanvasAudioComposer: React.FC<
             disabled={!canSubmit}
             onClick={submit}
           >
-            {busy && !retrySubmission ? (
-              <Loading
-                className={composerStyles.spin}
-                theme='outline'
-                size={17}
-                fill='currentColor'
-              />
+            {submitting ? (
+              <Loading className={composerStyles.spin} theme='outline' size={17} fill='currentColor' />
             ) : retrySubmission ? (
               <>
                 <Refresh theme='outline' size={15} fill='currentColor' />
@@ -424,12 +422,7 @@ const CreativeCanvasAudioComposer: React.FC<
                 </span>
               </>
             ) : (
-              <ArrowUp
-                theme='outline'
-                size={17}
-                fill='currentColor'
-                strokeWidth={4}
-              />
+              <ArrowUp theme='outline' size={17} fill='currentColor' strokeWidth={4} />
             )}
           </button>
         </div>

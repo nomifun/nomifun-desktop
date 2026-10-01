@@ -50,6 +50,7 @@ export interface CreativeCanvasVideoComposerProps {
   modelOptions: readonly CreativeModelOption[];
   task: CanvasVideoComposeTaskSummary;
   disabled?: boolean;
+  submitting?: boolean;
   error?: string | null;
   retrySubmission?: boolean;
   onPromptChange?(change: CreativeCanvasReferencePromptChange): void;
@@ -138,7 +139,8 @@ const CreativeCanvasVideoComposer: React.FC<
   settings,
   modelOptions,
   task,
-  disabled = false,
+  disabled: disabledProp = false,
+  submitting = false,
   error,
   retrySubmission = false,
   onPromptChange,
@@ -152,6 +154,7 @@ const CreativeCanvasVideoComposer: React.FC<
   onConfirmSubmission,
 }) => {
   const { t } = useTranslation();
+  const disabled = disabledProp || submitting;
   const { prompt, mentions, labels, change, clear } = useCanvasReferencePromptDraft(
     nodeId, initialPrompt, initialMentions, references, onPromptChange
   );
@@ -161,7 +164,6 @@ const CreativeCanvasVideoComposer: React.FC<
   );
   const imageCount = references.filter((reference) => reference.kind !== 'text').length;
   const referenceBlocked = generateBlocked || references.some((reference) => reference.disabledReason);
-  const busy = task.state === 'queued' || task.state === 'running';
   const unsupported = mode === 'unsupported';
   const interactionDisabled = disabled || unsupported;
   const selectedModel = settings.model
@@ -175,6 +177,7 @@ const CreativeCanvasVideoComposer: React.FC<
       })
     : null;
   const keyframes = imageCount > 1 && selectedModel?.protocol === 'agnes.video_jobs';
+  const busy = task.pendingCount > 0 || task.state === 'queued' || task.state === 'running';
   const canSubmit = retrySubmission
     ? !interactionDisabled && onRetrySubmission !== undefined
     : !interactionDisabled &&
@@ -193,9 +196,9 @@ const CreativeCanvasVideoComposer: React.FC<
   const submit = (draft: CreativeCanvasReferencePromptChange = { value: prompt, mentions }): void => {
     const result = dispatchCanvasVideoComposerSubmission({
       mode,
+      busy,
       disabled: disabled || (!retrySubmission && (Boolean(referenceIssue) || referenceBlocked ||
         collectCreativeCanvasPromptMentionIssues(draft.value, draft.mentions, references).length > 0)),
-      busy,
       prompt: draft.value,
       mentions: draft.mentions,
       hasTextInput,
@@ -428,20 +431,10 @@ const CreativeCanvasVideoComposer: React.FC<
             disabled={!canSubmit}
             onClick={() => submit()}
           >
-            {busy && !retrySubmission ? (
-              <Loading
-                className={composerStyles.spin}
-                theme='outline'
-                size={17}
-                fill='currentColor'
-              />
+            {submitting ? (
+              <Loading className={composerStyles.spin} theme='outline' size={17} fill='currentColor' />
             ) : (
-              <ArrowUp
-                theme='outline'
-                size={17}
-                fill='currentColor'
-                strokeWidth={4}
-              />
+              <ArrowUp theme='outline' size={17} fill='currentColor' strokeWidth={4} />
             )}
           </button>
         </div>

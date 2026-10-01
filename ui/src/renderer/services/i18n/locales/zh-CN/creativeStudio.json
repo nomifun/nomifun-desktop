@@ -502,6 +502,7 @@
       "audio": {
         "cancelled": "音频创作已取消。",
         "connectConfigFailed": "无法保存音频创作任务关联：{{code}}。",
+        "connectResultFailed": "无法连接音频创作结果：{{code}}。",
         "emptyNodeOnly": "当前首批音频创作只支持空音频节点上的 TTS。",
         "failed": "音频创作失败。",
         "formatUnsupported": "当前音频创作只支持 mp3 或 wav 格式。",
@@ -512,6 +513,7 @@
         "missingConfig": "音频创作任务缺少必要任务记录。",
         "missingSourceNodeId": "音频创作配置缺少 sourceNodeId。",
         "nodeMissing": "音频节点已不存在。",
+        "nodeConstructionFailed": "音频创作结果未能构造成音频节点。",
         "nonTerminalRemovalRejected": "拒绝将非终态音频创作任务移出 pending 列表。",
         "referencesUnsupported": "当前 TTS 音频创作不接受参考素材。",
         "resultRequiresEmptyNode": "当前音频创作只允许空音频节点承接 TTS 结果。",
@@ -527,7 +529,7 @@
       "audioModelUnavailable": "所选语音合成模型已不可用，未发起生成。",
       "audioNodeRemovedBeforeTask": "音频节点已被删除，未创建音频创作任务。",
       "audioSourceChangedBeforeTask": "音频节点或其直接引用已变化，未创建音频创作任务。",
-      "audioTaskBusy": "已有音频任务正在处理，请等待完成。",
+      "audioTaskBusy": "当前音频节点的任务尚未完成，请等待完成后再生成。",
       "clipboardUnavailable": "当前运行环境不提供系统剪贴板读取能力。",
       "closedAfterUpload": "画布已经关闭，图片保留在资产库中。",
       "concurrentUpload": "另一个素材上传仍在进行，请等待完成后重试。",
@@ -570,7 +572,7 @@
       "imagePickerUnavailable": "图片文件选择器暂时不可用。",
       "imageReferenceUnavailable": "当前参考图无法安全提交。",
       "imageSourceChangedBeforeTask": "原图片节点已被删除或替换，未创建图片创作任务。",
-      "imageTaskBusy": "已有图片任务正在处理，请等待完成。",
+      "imageTaskBusy": "当前图片节点的任务尚未完成，请等待完成后再生成。",
       "mask": {
         "cancelled": "图片编辑已取消。",
         "configRemoved": "局部编辑任务记录在结果写入前丢失。",
@@ -640,7 +642,7 @@
       "videoNodeRemovedBeforeTask": "视频节点已被删除，未创建视频创作任务。",
       "videoReferenceResolutionFailed": "I2V 引用没有解析为真实图片素材。",
       "videoSourceChangedBeforeTask": "视频节点或其直接引用已变化，未创建视频创作任务。",
-      "videoTaskBusy": "已有视频任务正在处理，请等待完成。"
+      "videoTaskBusy": "当前视频节点的任务尚未完成，请等待完成后再生成。"
     },
     "image": {
       "aspectRatioLabel": "宽高比",
@@ -959,7 +961,7 @@
       "imageTaskSubmitted": "图片创作任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "imageToolBusyLeave": "图片工具仍在处理，请等待完成后再离开。",
       "maskReferenceRecovered": "上传响应中断后已找回标记参考图，并安全提交局部编辑任务。",
-      "maskTaskBusy": "已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。",
+      "maskTaskBusy": "当前图片节点有任务正在运行、恢复或等待确认，请先处理该任务。",
       "maskTaskSubmitted": "局部编辑任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "nodeCreatedAndConnected": "已创建节点并完成连接。",
       "nodeCreatedAtPosition": "已在指定位置创建节点。",
@@ -1066,7 +1068,7 @@
         "editorUnavailable": "画布尚未载入，无法同步音频任务。",
         "failed": "音频创作失败。",
         "orphaned": "服务器未找到遗留的音频创作任务，已只清理该任务的恢复标记。",
-        "succeeded": "音频创作已完成，真实结果已原位保存到画布。"
+        "succeeded": "音频创作已完成，真实结果已保存到画布。"
       },
       "image": {
         "composeCancelled": "图片创作已取消。",

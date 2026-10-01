@@ -167,6 +167,10 @@
         "title": "Conversation state is out of sync",
         "body": "The conversation state is out of sync. Restart this chat or reload the app before retrying."
       },
+      "NOMIFUN_SESSION_CONFIGURATION_CHANGED": {
+        "title": "Session configuration changed",
+        "body": "The app's current tool configuration differs from this session, so further execution was blocked. Start a new conversation to continue. Earlier completed results were kept."
+      },
       "NOMIFUN_AGENT_SESSION_INCONSISTENT": {
         "title": "Agent session could not be restored",
         "body": "The app rejected an unverified completion, but could not safely restore the saved Agent session. Start a new conversation before continuing."

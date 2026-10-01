@@ -608,6 +608,20 @@ const normalizePersistedWorkspaceRuntimeError = (
   };
 };
 
+const normalizePersistedSessionConfigurationError = (
+  parsed: Record<string, unknown>, message: string
+): AgentStreamErrorInfo | undefined => {
+  const error = isRecord(parsed.error) ? parsed.error : undefined;
+  const code = error?.code ?? parsed.code;
+  // Read-only compatibility for the exact old local admission diagnostic.
+  // Provider prose, quoted examples, and other Kernel refusals do not qualify.
+  if (code !== 'NOMIFUN_SESSION_CONFIGURATION_CHANGED' && (code !== 'UNKNOWN_UPSTREAM_ERROR'
+    || typeof error?.detail !== 'string'
+    || !/^(?:Conflict: )?Nomi Plugin Tool Kernel admission failed: (?:capability CapabilityId|skill SkillId)\("[A-Za-z0-9_.:-]{1,256}"\) exact provenance drifted: /.test(error.detail))) return undefined;
+  return { message, code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED', ownership:'nomifun', detail:typeof error?.detail==='string' ? error.detail : message,
+    retryable:false, feedback_recommended:false, resolution:{kind:'start_new_session',target:'new_conversation'} };
+};
+
 const normalizePersistedIncompleteTurnError = (
   parsed: Record<string, unknown>,
   message: string
@@ -725,6 +739,7 @@ const normalizeDbTipsMessage = (msg: TMessage): TMessage => {
   const structuredError =
     tipType === 'error'
       ? (normalizePersistedWorkspaceRuntimeError(parsed, parsed.content) ??
+        normalizePersistedSessionConfigurationError(parsed, parsed.content) ??
         normalizePersistedIncompleteTurnError(parsed, parsed.content) ??
         normalizeAgentStreamError(parsed.error) ??
         classifyPersistedSendFailure(parsed, parsed.content) ??

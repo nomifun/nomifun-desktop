@@ -72,6 +72,22 @@ function mount(message = error, context: Partial<ConversationContextValue> = {})
 afterEach(() => { cleanup(); mock.restore(); });
 
 describe('compact message errors', () => {
+  test('local session configuration changes offer a new conversation without a provider retry', () => {
+    const message: IMessageTips = { ...error, content:{type:'error',content:'Local guard refused the request',error:{
+      message:'The tool configuration no longer matches this session',code:'NOMIFUN_SESSION_CONFIGURATION_CHANGED',
+      ownership:'nomifun',detail:'Original provenance diagnostic',retryable:false,feedback_recommended:false,
+      resolution:{kind:'start_new_session',target:'new_conversation'},
+    }} };
+    const {page,container}=mount(message);
+    expect(page.getByText('Session configuration changed')).toBeDefined();
+    expect(container.querySelector('[data-testid="message-error-retry"]')).toBeNull();
+    fireEvent.click(page.getByRole('button',{name:'Show error details'}));
+    expect(page.getByText(/Start a new conversation to continue/)).toBeDefined();
+    expect(container.querySelector('.message-error-note__detail-body')?.textContent)
+      .toBe(`${testI18n.t('conversation.agentError.errorCode')}: NOMIFUN_SESSION_CONFIGURATION_CHANGED\nOriginal provenance diagnostic`);
+    expect(container.textContent).not.toContain('Agent or model provider');
+  });
+
   test('renders a canonical Agent transition as a localized non-conversation boundary', () => {
     const { page, container } = mount(transition);
     expect(page.getByText('Research Agent → Coding Agent · effective from the next message')).toBeDefined();

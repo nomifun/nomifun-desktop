@@ -164,6 +164,7 @@ fn caller_source(ctx: &CallerCtx) -> String {
 
 fn canvas_operation_error(error: AppError) -> String {
     match error {
+        AppError::SessionConfigurationChanged(_) => "Agent session configuration changed".to_owned(),
         AppError::NotFound(_) => "Creative Studio Canvas not found".to_owned(),
         AppError::BadRequest(_) => "Invalid Creative Studio Canvas request".to_owned(),
         AppError::Conflict(_) => {

@@ -1518,6 +1518,7 @@ impl NomiCoreSessionOwner {
         session_id: &AgentSessionId,
         operation_id: &OperationId,
         message: &str,
+        error: nomifun_api_types::AgentStreamErrorData,
     ) -> Result<(), AppError> {
         let receipt = self
             .canonical
@@ -1536,8 +1537,6 @@ impl NomiCoreSessionOwner {
             session_id.as_ref(),
             operation_id.as_ref(),
         );
-        let error = AgentSendError::from_app_error(AppError::Conflict(message.to_owned()))
-            .into_stream_error();
         let result = self.canonical
             .store()
             .append_turn_terminal(
@@ -1947,7 +1946,8 @@ impl NomiCoreSessionOwner {
         {
             Ok(runtime) => runtime,
             Err(error) => {
-                self.settle_dispatch_failure(session_id, &operation_id, &error.to_string())
+                self.settle_dispatch_failure(session_id, &operation_id, &error.to_string(),
+                    AgentSendError::from_app_error_ref(&error).into_stream_error())
                     .await?;
                 return Err(error);
             }
@@ -1983,7 +1983,7 @@ impl NomiCoreSessionOwner {
             // publish a successor Turn; otherwise a rejected dispatch may
             // misattribute that successor's frames to this failed root.
             relay_cancellation.cancel();
-            self.settle_dispatch_failure(session_id, &operation_id, &detail)
+            self.settle_dispatch_failure(session_id, &operation_id, &detail, error.stream_error().clone())
                     .await?;
             self.user_events.send_to_user(
                 owner_id,
@@ -2004,7 +2004,9 @@ impl NomiCoreSessionOwner {
                     "failed to release rejected canonical Runtime turn"
                 );
             }
-            return Err(AppError::BadGateway(detail));
+            return Err(if error.code() == Some(nomifun_api_types::AgentErrorCode::NomifunSessionConfigurationChanged) {
+                AppError::SessionConfigurationChanged(detail)
+            } else { AppError::BadGateway(detail) });
         }
         Ok(IdempotentMessageDelivery {
             message_id: root_message_id,
@@ -3165,7 +3167,11 @@ pub(super) fn compile_nomi_plugin_snapshot(
 }
 
 fn kernel_error_to_app(error: nomifun_agent_kernel::KernelError) -> AppError {
-    AppError::Conflict(format!("Nomi Plugin Tool Kernel admission failed: {error}"))
+    let message = format!("Nomi Plugin Tool Kernel admission failed: {error}");
+    if matches!(error, nomifun_agent_kernel::KernelError::CapabilityProvenanceDrift { .. }
+        | nomifun_agent_kernel::KernelError::SkillProvenanceDrift { .. }) {
+        AppError::SessionConfigurationChanged(message)
+    } else { AppError::Conflict(message) }
 }
 
 fn control_plane_error_to_app(
@@ -3410,6 +3416,9 @@ impl nomifun_cron::CronSessionPort for NomiCoreSessionOwner {
                     &request.agent_session_id,
                     &operation,
                     "Runtime owner was not recoverable after restart",
+                    AgentSendError::from_engine_turn_failure(
+                        "NATIVE_RECOVERY_RUNTIME_OWNER_NOT_RECOVERABLE: Runtime owner was not recoverable after restart"
+                    ).into_stream_error(),
                 )
                 .await?;
                 Ok(nomifun_cron::CronTurnReconciliation::ReconciledOrTerminalReRead)
@@ -5510,6 +5519,54 @@ mod session_boundary_tests {
 
     const SESSION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const OWNER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+
+    #[test]
+    fn kernel_configuration_refusals_keep_typed_local_attribution() {
+        for refusal in [
+            nomifun_agent_kernel::KernelError::CapabilityProvenanceDrift {
+                capability_id: nomifun_agent_contracts::CapabilityId::from("workspace.process"),
+                reason: "Revision contribution lock does not match; nested provider error 503".into(),
+            },
+            nomifun_agent_kernel::KernelError::SkillProvenanceDrift {
+                skill_id: nomifun_agent_contracts::SkillId::from("skill.one"), reason:"changed Skill content".into(),
+            },
+        ] {
+            let error = super::kernel_error_to_app(refusal);
+            assert!(matches!(&error, nomifun_common::AppError::SessionConfigurationChanged(_)));
+            assert_eq!(error.status_code(), StatusCode::CONFLICT);
+            assert_eq!(error.error_code(), "NOMIFUN_SESSION_CONFIGURATION_CHANGED");
+            let classified = nomifun_ai_agent::AgentSendError::from_app_error_ref(&error).into_stream_error();
+            assert_eq!(classified.code, Some(nomifun_api_types::AgentErrorCode::NomifunSessionConfigurationChanged));
+            assert_eq!(classified.ownership, Some(nomifun_api_types::AgentErrorOwnership::Nomifun));
+            assert_eq!(classified.retryable, Some(false));
+        }
+        let unrelated = super::kernel_error_to_app(nomifun_agent_kernel::KernelError::CapabilityNotActive {
+            capability_id: nomifun_agent_contracts::CapabilityId::from("workspace.process"),
+        });
+        assert!(matches!(unrelated, nomifun_common::AppError::Conflict(_)));
+    }
+
+    #[test]
+    fn configuration_error_rehydrates_with_original_ownership_and_recovery_advice() {
+        let session_id = AgentSessionId::from(SESSION_ID);
+        let root = "0190f5fe-7c00-7a00-8abc-012345678911";
+        let classified = nomifun_ai_agent::AgentSendError::session_configuration_changed(
+            "Original local provenance diagnostic").into_stream_error();
+        let error = serde_json::to_value(classified).unwrap();
+        let message = canonical_message_response(&session_id, 1_000, MessageProjection {
+            session_id:session_id.clone(),projection_id:"configuration-error".into(),first_seq:2,last_seq:3,
+            presentation_intent:"turn_summary".into(),message_type:Some("agent_status".into()),message_status:Some("finish".into()),
+            projection:json!({"correlation_id":"0190f5fe-7c00-7a00-8abc-012345678912","state":"failed",
+                "source_message_id":root,"started_at_ms":4_000_000,"finished_at_ms":4_002_000,"error":error}),
+            semantic_digest:"digest".into(),
+        }).unwrap().unwrap();
+        assert_eq!(message.r#type, MessageType::Tips);
+        assert_eq!(message.content["type"], "error");
+        assert_eq!(message.content["turn_id"], root);
+        assert_eq!(message.content["error"], error);
+        assert_eq!(message.content["error"]["retryable"], false);
+        assert_eq!(message.content["error"]["resolution"]["kind"], "start_new_session");
+    }
 
     #[test]
     fn autowork_execution_is_not_projected_as_collaboration_or_attempt_ui() {
